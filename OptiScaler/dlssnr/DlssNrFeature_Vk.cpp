@@ -16,6 +16,7 @@
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
+#include <dlssnr/DlssNrNative.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
@@ -1708,13 +1709,24 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
         const auto tuning = Profiles::PassTuning(cfg, pass);
+        void* const passFeature = pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass];
+        // Reuse bottleneck (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp): which feature this is, whether it
+        // starts over, how often each kernel set computes the bottleneck, and the frame (the same for every pass of a
+        // frame, so all passes compute on the same frame and all reuse on the next). No command list: the kernel
+        // profiler is D3D12's.
+        DlssNrNative::BeginEvaluate(passFeature, passReset, std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
+                                    std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
+                                    (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull), nullptr, false);
         evaluated = g_vk.evaluate(
-            (void*) cmdBuffer, pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass], g_vk.capabilityParams,
+            (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
             &input->ngx, depth, motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,
             guides.motion.width, guides.motion.height, guides.depth.x, guides.depth.y,
             guides.motion.x, guides.motion.y, depthInverted ? 1 : 0, passReset ? 1 : 0, tuning.intensity,
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
+        if (DlssNrNative::EndEvaluate(nullptr))
+            LOG_WARN("DLSS-NR Vulkan: the model's kernel launches were not in the expected order; Reuse bottleneck "
+                     "is off for this session");
         if (evaluated != 1)
             break;
         if (pass + 1 < runPasses)
@@ -1729,6 +1741,16 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     g_vk.reset = false;
     g_vk.frames++;
+
+    // Reuse bottleneck and the kernel set need the model's kernel launches to come through OptiScaler's Vulkan hook
+    // table (VulkanwDx12_Hooks.cpp). If the model reached them some other way, say so once instead of doing nothing.
+    static bool vitUnseenReported = false;
+    if (!vitUnseenReported && g_vk.frames >= 120 && strcmp(DlssNrNative::VitKernelSet(), "not seen yet") == 0)
+    {
+        vitUnseenReported = true;
+        LOG_WARN("DLSS-NR Vulkan: no ViT run of the model seen in 120 frames; the model's kernel launches do not come "
+                 "through OptiScaler's hooks here, so Reuse bottleneck and the kernel set are unavailable");
+    }
 
     if (evaluated != 1)
     {
@@ -1953,6 +1975,8 @@ void ShutdownVk(bool deviceAlive)
         g_vk.autoExposureRaw = OwnedImage {};
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
+        // The model's kernels went with the device without their destroy calls.
+        DlssNrNative::VkDeviceLost();
 
         for (int i = 0; i < 4; ++i)
         {

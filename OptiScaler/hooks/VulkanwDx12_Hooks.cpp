@@ -11,6 +11,7 @@
 
 #include <vulkan/vulkan_core.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNrNative.h>
 
 static PFN_vkQueueSubmit o_vkQueueSubmit = nullptr;
 static PFN_vkQueueSubmit2 o_vkQueueSubmit2 = nullptr;
@@ -173,6 +174,9 @@ static PFN_vkCmdBeginQueryIndexedEXT o_vkCmdBeginQueryIndexedEXT = nullptr;
 static PFN_vkCmdEndQueryIndexedEXT o_vkCmdEndQueryIndexedEXT = nullptr;
 static PFN_vkCmdDrawIndirectByteCountEXT o_vkCmdDrawIndirectByteCountEXT = nullptr;
 static PFN_vkCmdCuLaunchKernelNVX o_vkCmdCuLaunchKernelNVX = nullptr;
+static PFN_vkCreateCuFunctionNVX o_vkCreateCuFunctionNVX = nullptr;
+static PFN_vkDestroyCuFunctionNVX o_vkDestroyCuFunctionNVX = nullptr;
+static PFN_vkDestroyCuModuleNVX o_vkDestroyCuModuleNVX = nullptr;
 static PFN_vkCmdDrawIndirectCountAMD o_vkCmdDrawIndirectCountAMD = nullptr;
 static PFN_vkCmdDrawIndexedIndirectCountAMD o_vkCmdDrawIndexedIndirectCountAMD = nullptr;
 static PFN_vkCmdBeginConditionalRenderingEXT o_vkCmdBeginConditionalRenderingEXT = nullptr;
@@ -3319,6 +3323,33 @@ void Vulkan_wDx12::hk_vkCmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffe
                                     counterOffset, vertexStride);
 }
 
+// DLSS-NR's model creates and launches its CUDA kernels through these (DlssNrNative_Vk.cpp: Reuse bottleneck, kernel
+// set).
+VkResult Vulkan_wDx12::hk_vkCreateCuFunctionNVX(VkDevice device, const VkCuFunctionCreateInfoNVX* pCreateInfo,
+                                                const VkAllocationCallbacks* pAllocator, VkCuFunctionNVX* pFunction)
+{
+    const VkResult result = o_vkCreateCuFunctionNVX(device, pCreateInfo, pAllocator, pFunction);
+
+    if (result == VK_SUCCESS && pCreateInfo != nullptr && pFunction != nullptr)
+        DlssNrNative::VkFunctionCreated((uint64_t) *pFunction, pCreateInfo->pName);
+
+    return result;
+}
+
+void Vulkan_wDx12::hk_vkDestroyCuFunctionNVX(VkDevice device, VkCuFunctionNVX function,
+                                             const VkAllocationCallbacks* pAllocator)
+{
+    DlssNrNative::VkFunctionDestroyed((uint64_t) function);
+    o_vkDestroyCuFunctionNVX(device, function, pAllocator);
+}
+
+void Vulkan_wDx12::hk_vkDestroyCuModuleNVX(VkDevice device, VkCuModuleNVX module,
+                                           const VkAllocationCallbacks* pAllocator)
+{
+    DlssNrNative::VkModuleDestroyed();
+    o_vkDestroyCuModuleNVX(device, module, pAllocator);
+}
+
 void Vulkan_wDx12::hk_vkCmdCuLaunchKernelNVX(VkCommandBuffer commandBuffer, const VkCuLaunchInfoNVX* pLaunchInfo)
 {
     VkCommandBuffer cmdBuffer = commandBuffer;
@@ -3335,6 +3366,11 @@ void Vulkan_wDx12::hk_vkCmdCuLaunchKernelNVX(VkCommandBuffer commandBuffer, cons
 #ifdef LOG_ALL_RECORDS
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
+
+    // Reuse bottleneck drops the ViT run's launches of DLSS-NR's own evaluations (and records a barrier at the gap,
+    // into the buffer the launch goes to); every other launch goes out as before.
+    if (pLaunchInfo != nullptr && !DlssNrNative::VkLaunch(cmdBuffer, (uint64_t) pLaunchInfo->function))
+        return;
 
     o_vkCmdCuLaunchKernelNVX(cmdBuffer, pLaunchInfo);
 }
@@ -8032,6 +8068,27 @@ PFN_vkVoidFunction Vulkan_wDx12::GetAddress(const PFN_vkVoidFunction original, c
 
         return (PFN_vkVoidFunction) hk_vkCmdCuLaunchKernelNVX;
     }
+    if (procName == std::string("vkCreateCuFunctionNVX"))
+    {
+        if (o_vkCreateCuFunctionNVX == nullptr)
+            o_vkCreateCuFunctionNVX = (PFN_vkCreateCuFunctionNVX) original;
+
+        return (PFN_vkVoidFunction) hk_vkCreateCuFunctionNVX;
+    }
+    if (procName == std::string("vkDestroyCuFunctionNVX"))
+    {
+        if (o_vkDestroyCuFunctionNVX == nullptr)
+            o_vkDestroyCuFunctionNVX = (PFN_vkDestroyCuFunctionNVX) original;
+
+        return (PFN_vkVoidFunction) hk_vkDestroyCuFunctionNVX;
+    }
+    if (procName == std::string("vkDestroyCuModuleNVX"))
+    {
+        if (o_vkDestroyCuModuleNVX == nullptr)
+            o_vkDestroyCuModuleNVX = (PFN_vkDestroyCuModuleNVX) original;
+
+        return (PFN_vkVoidFunction) hk_vkDestroyCuModuleNVX;
+    }
     if (procName == std::string("vkCmdDrawIndirectCountAMD"))
     {
         // LOG_DEBUG("vkCmdDrawIndirectCountAMD");
@@ -9429,6 +9486,9 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
     o_vkCmdDrawIndirectByteCountEXT =
         (PFN_vkCmdDrawIndirectByteCountEXT) GetProcAddress(vulkanModule, "vkCmdDrawIndirectByteCountEXT");
     o_vkCmdCuLaunchKernelNVX = (PFN_vkCmdCuLaunchKernelNVX) GetProcAddress(vulkanModule, "vkCmdCuLaunchKernelNVX");
+    o_vkCreateCuFunctionNVX = (PFN_vkCreateCuFunctionNVX) GetProcAddress(vulkanModule, "vkCreateCuFunctionNVX");
+    o_vkDestroyCuFunctionNVX = (PFN_vkDestroyCuFunctionNVX) GetProcAddress(vulkanModule, "vkDestroyCuFunctionNVX");
+    o_vkDestroyCuModuleNVX = (PFN_vkDestroyCuModuleNVX) GetProcAddress(vulkanModule, "vkDestroyCuModuleNVX");
     o_vkCmdDrawIndirectCountAMD =
         (PFN_vkCmdDrawIndirectCountAMD) GetProcAddress(vulkanModule, "vkCmdDrawIndirectCountAMD");
     o_vkCmdDrawIndexedIndirectCountAMD =
@@ -10128,6 +10188,15 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
         if (o_vkCmdCuLaunchKernelNVX)
             DetourAttach(&(PVOID&) o_vkCmdCuLaunchKernelNVX, hk_vkCmdCuLaunchKernelNVX);
 
+        if (o_vkCreateCuFunctionNVX)
+            DetourAttach(&(PVOID&) o_vkCreateCuFunctionNVX, hk_vkCreateCuFunctionNVX);
+
+        if (o_vkDestroyCuFunctionNVX)
+            DetourAttach(&(PVOID&) o_vkDestroyCuFunctionNVX, hk_vkDestroyCuFunctionNVX);
+
+        if (o_vkDestroyCuModuleNVX)
+            DetourAttach(&(PVOID&) o_vkDestroyCuModuleNVX, hk_vkDestroyCuModuleNVX);
+
         if (o_vkCmdDrawIndirectCountAMD)
             DetourAttach(&(PVOID&) o_vkCmdDrawIndirectCountAMD, hk_vkCmdDrawIndirectCountAMD);
 
@@ -10666,6 +10735,9 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
             o_vkCmdEndQueryIndexedEXT = nullptr;
             o_vkCmdDrawIndirectByteCountEXT = nullptr;
             o_vkCmdCuLaunchKernelNVX = nullptr;
+            o_vkCreateCuFunctionNVX = nullptr;
+            o_vkDestroyCuFunctionNVX = nullptr;
+            o_vkDestroyCuModuleNVX = nullptr;
             o_vkCmdDrawIndirectCountAMD = nullptr;
             o_vkCmdDrawIndexedIndirectCountAMD = nullptr;
             o_vkCmdBeginConditionalRenderingEXT = nullptr;

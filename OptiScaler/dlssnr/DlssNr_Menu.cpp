@@ -1404,7 +1404,7 @@ void RenderMenu(Config* config, float menuResScale)
         const char* precisions[] = { "NVIDIA (FP8)", "Experimental (FP8+NVFP4 hybrid)" };
         if (ImGui::Combo("Model precision", &precisionChoice, precisions, IM_ARRAYSIZE(precisions)))
             config->DlssNrPrecision = precisionChoice == 1 ? 4u : 0u;
-        HelpMarker("NVIDIA: original FP8 model (default), with some sensitive operations kept at higher precision.\nExperimental: this fork's FP8+NVFP4 hybrid for RTX 50 GPUs; output may differ slightly.");
+        HelpMarker("NVIDIA: original FP8 model (default), with some sensitive operations kept at higher precision.\nExperimental: this fork's FP8+NVFP4 hybrid for RTX 50 GPUs; output may differ slightly. D3D12 only.");
         // One setting per kernel set: the fp8 kernels (NVIDIA's DLL and fp8-based builds) and the plain FP16 kernels (used by some modified DLSS-NR DLLs).
         // Only the one for the kernels actually running is used.
         const char* kernelSet = DlssNrNative::VitKernelSet();
@@ -1491,7 +1491,13 @@ void RenderMenu(Config* config, float menuResScale)
                 }
             }
         }
-        if (precisionChoice > 0)
+        if (precisionChoice > 0 && DlssNr::IsRunningVk())
+        {
+            // The hybrid rewrites the model's kernels through NvAPI's D3D12 entry points; on Vulkan the model runs
+            // unchanged.
+            ImGui::TextUnformatted("Hybrid: D3D12 only (not applied on Vulkan)");
+        }
+        else if (precisionChoice > 0)
         {
             ImGui::TextUnformatted(enabled && DlssNrNative::IsActive() ? "Hybrid: active" : "Hybrid: inactive");
             ImGui::TextWrapped("Loading may pause the game and look like a freeze. Please wait.");

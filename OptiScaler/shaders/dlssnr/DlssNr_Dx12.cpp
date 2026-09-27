@@ -3804,7 +3804,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, g_nr.guideMvScaleX * mvToWorkX,
             g_nr.guideMvScaleY * mvToWorkY);
-        DlssNrNative::EndEvaluate(cmdList);
+        if (DlssNrNative::EndEvaluate(cmdList))
+            LOG_WARN("DLSS-NR: the model's kernel launches were not in the expected order; Reuse bottleneck is off for "
+                     "this session");
 
         for (const std::string& report : DlssNrNative::TakeProfileReports())
             LOG_INFO("{}", report);

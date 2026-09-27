@@ -13,6 +13,7 @@
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
+#include <shaders/dlssnr/DlssNr_ExposureCalibrate.h>
 #include "DlssNr_GameDefaults.h"
 
 #include <string>
@@ -43,16 +44,14 @@ static void HelpMarker(const char* tip);
 
 // Trim multiplies the white point, so a larger Trim darkens the picture NR is shown. The menu shows it in stops
 // instead, the other way round (+ = brighter) and centred on each source's own default, which reads as 0 EV.
+// The conversions are Tune for this scene's own (DlssNrExposureCalibrate), so the slider and a tuned value can never
+// disagree; Tidy shows anything that rounds to zero as +0.0 (a tuned value lands exactly on 0 EV).
 static float TrimToEv(float trim, float neutral)
 {
-    // "+ 0.0f" turns the -0.0 that neutral gives into 0.0, so the slider reads "+0.0 EV", not "-0.0 EV".
-    return -std::log2(std::max(trim, DlssNrTrim::kMinTrim) / neutral) + 0.0f;
+    return DlssNrExposureCalibrate::Tidy(DlssNrExposureCalibrate::EvForTrim(trim, neutral));
 }
 
-static float EvToTrim(float ev, float neutral)
-{
-    return DlssNrTrim::ClampTrim(neutral * std::exp2(-ev));
-}
+static float EvToTrim(float ev, float neutral) { return DlssNrExposureCalibrate::TrimForEv(ev, neutral); }
 
 // The one "Model input brightness" slider (and its Reset) for an exposure source's Trim. `anchorCount` is how
 // many Trim anchors the ini holds for that source: they are ini-only now and take over from the slider, so
@@ -90,6 +89,127 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
     if (anchorCount > 0)
         ImGui::TextDisabled("%u brightness anchor point(s) from the ini are in use; the slider has no effect while they exist.",
                             (unsigned int) anchorCount);
+}
+
+// "Tune for this scene" (shaders/dlssnr/DlssNr_ExposureCalibrate.h), under a brightness slider: sweeps it over the scene
+// on screen and offers the step where the model's output had the most detail without flicker or clipping. Indented under
+// the slider it sets, a SmallButton like the other actions here. D3D12 only. `source` is the panel's white point source
+// (3 Automatic, 1 Game exposure), `trim` / `neutral` its slider. Named apart from Follow-game's "Re-learn", which is a
+// different calibration.
+static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral)
+{
+    if (DlssNr::IsRunningVk())
+        return;
+
+    const auto cal = DlssNr::ExposureCalibration();
+    // A result belongs to the panel it was tuned in: its EVs are in that slider's units.
+    const bool mine = cal.source == source;
+    ImGui::Indent();
+
+    if ((cal.running || cal.starting) && mine)
+    {
+        char text[96];
+
+        if (cal.starting)
+            snprintf(text, sizeof(text), "Starting...");
+        else if (cal.stepIndex < cal.stepCount)
+            snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u): hold the camera still", cal.stepEv,
+                     cal.stepIndex + 1, cal.stepCount);
+        else
+            snprintf(text, sizeof(text), "Reading the results...");
+
+        ImGui::ProgressBar(cal.progress, ImVec2(-FLT_MIN, 0.0f), text);
+
+        if (ImGui::SmallButton("Cancel##tune"))
+            DlssNr::CancelExposureCalibration();
+    }
+    else if (cal.finished && mine)
+    {
+        if (cal.unsure)
+        {
+            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                               "The scene was not still enough to tell. Nothing changed.");
+        }
+        else if (cal.atEdge)
+        {
+            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                               "Best was at the edge of the range (%+.1f EV), so it may lie beyond. Nothing changed.",
+                               cal.bestBandEv);
+        }
+        else if (cal.changed)
+        {
+            ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "Best here: %+.1f EV (now %+.1f EV)",
+                               cal.resultEv, cal.currentEv);
+            ImGui::SameLine();
+
+            if (ImGui::SmallButton("Apply##tune"))
+            {
+                trim = EvToTrim(cal.resultEv, neutral);
+                DlssNr::DismissExposureCalibration();
+            }
+        }
+        else
+        {
+            ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "Best here: %+.1f EV, as it is now.",
+                               cal.currentEv);
+        }
+
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton(cal.changed ? "Keep##tune" : "OK##tune"))
+            DlssNr::DismissExposureCalibration();
+
+        // The curves and the raw measure are for checking the tuning itself, not for choosing.
+        if (!cal.ev.empty() && ImGui::TreeNode("Details##tune"))
+        {
+            const int n = (int) cal.ev.size();
+            ImGui::PlotLines("Band-pass##tune", cal.scoreBand.data(), n, 0, nullptr, FLT_MAX, FLT_MAX,
+                             ImVec2(0.0f, 50.0f));
+            ImGui::PlotLines("Raw##tune", cal.scoreRaw.data(), n, 0, nullptr, FLT_MAX, FLT_MAX,
+                             ImVec2(0.0f, 50.0f));
+            ImGui::TextDisabled("Score from %+.1f EV (left) to %+.1f EV (right). Best: band-pass %+.1f, raw %+.1f.",
+                                cal.ev.front(), cal.ev.back(), cal.bestBandEv, cal.bestRawEv);
+
+            // Not when the run was unsure or its best sat at the edge: those keep the current value for either measure.
+            ImGui::BeginDisabled(cal.unsure || cal.atEdge);
+
+            if (ImGui::SmallButton("Apply raw instead##tune"))
+            {
+                trim = EvToTrim(cal.bestRawEv, neutral);
+                DlssNr::DismissExposureCalibration();
+            }
+
+            ImGui::EndDisabled();
+
+            ImGui::TreePop();
+        }
+    }
+    else
+    {
+        ImGui::BeginDisabled(!cal.available);
+
+        if (ImGui::SmallButton("Tune for this scene"))
+            DlssNr::StartExposureCalibration(source);
+
+        ImGui::EndDisabled();
+        HelpMarker("Finds the Model input brightness above that gives NR the most detail on the scene on screen."
+                   "\nTries the slider across its useful range, about 12 frames a step, and checks each step for"
+                   "\ndetail, flicker and clipping. Hold the camera still while it runs: the picture gets brighter"
+                   "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
+                   "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
+                   "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
+                   "\nholds for any number of passes.");
+
+        if (!cal.available && !cal.unavailable.empty())
+            ImGui::TextDisabled("Not available: %s", cal.unavailable.c_str());
+
+        if (mine && !cal.startError.empty())
+            ImGui::TextDisabled("Could not start: %s", cal.startError.c_str());
+        else if (mine && !cal.aborted.empty())
+            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f), "Stopped: %s", cal.aborted.c_str());
+    }
+
+    ImGui::Unindent();
 }
 
 // The "(?)" marker every control carries, matching the rest of the menu.
@@ -855,18 +975,19 @@ void RenderMenu(Config* config, float menuResScale)
             // Up to 50x under the hood: a game's reported exposure scale can sit well below what the picture wants
             // (Marvel's Spider-Man Remastered with XeSS swapped to DLSS is one), so 4x was too tight. Shown as
             // stops around 1x, which is why the slider runs further towards darker than towards brighter.
-            RenderTrimEvSlider(config->DlssNrWhitePointTrim, 1.0f,
+            RenderTrimEvSlider(config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
                                DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default()).size(),
                                "gameexposure",
                                "Brightness of the picture handed to NR, relative to the exposure the game reports."
                                "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
                                "\nToo bright clips highlights; too dark hides shadow detail.");
+            RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim);
         }
         else if (wpSource == 3)
         {
             // The scale stays centred on a 5x Trim (0 EV), the old default from the PR this came from. The default is
             // +1.5 EV for every game; see DlssNr_AutoTrimDefault.h for the measurements. It is independent of the Game exposure Trim.
-            RenderTrimEvSlider(config->DlssNrAutoExposureTrim, 5.0f,
+            RenderTrimEvSlider(config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim,
                                DlssNrTrim::Parse(config->DlssNrAutoExposureTrimAnchors.value_or_default()).size(),
                                "autoexposure",
                                "Brightness of the picture handed to NR. + is brighter, - is darker."
@@ -876,6 +997,8 @@ void RenderMenu(Config* config, float menuResScale)
                                "\nOptiScaler meters the linear HDR frame itself before NR runs."
                                "\nAutomatic exposure is available on D3D12 and Vulkan.",
                                DlssNrAutoTrim::kDefaultTrim);
+
+            RenderTuneForThisScene(3, config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim);
 
             // Following the game's own exposure (DlssNr_FollowGame.h): on by default for a known unexposed game
             // (DlssNr_GameDefaults.h). Vulkan follows from the host value, a few frames behind the game.
@@ -893,32 +1016,44 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nkeeps its meaning. Leave it off for games that expose their frame themselves (most games):"
                            "\nit would apply their exposure twice. On Vulkan it follows a few frames behind the game.");
 
-                const auto followStatus =
-                    followVk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus();
-                const auto& calibration = DlssNrFollowGame::Instance();
-
-                if (!follow)
-                    ImGui::TextDisabled("Off");
-                else if (!followStatus.gameExposureSeen)
-                    ImGui::TextDisabled("Not available yet: no exposure from the game");
-                else if (!calibration.Locked())
-                    ImGui::TextDisabled("Learning the calibration... (%u/%u)", calibration.Readings(),
-                                        DlssNrFollowGame::kWindow);
-                else
-                    ImGui::TextDisabled("Calibration %+.2f EV against the game's exposure%s", calibration.OffsetEv(),
-                                        followStatus.following ? "; following" : "; not following");
-
-                // The calibration is learned once per session; this learns it again.
-                if (ImGui::SmallButton("Re-calibrate##autoexposure"))
+                // Status and Re-learn only while following: off, the checkbox already says so, and a second
+                // "calibrate" button next to Tune for this scene read as the same thing.
+                if (follow)
                 {
-                    DlssNrFollowGame::Instance().Reset();
-                    LOG_INFO("DLSS-NR automatic exposure: re-calibration requested");
-                }
+                    const auto followStatus =
+                        followVk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus();
+                    const auto& calibration = DlssNrFollowGame::Instance();
+                    ImGui::Indent();
 
-                HelpMarker("Learns the calibration against the game's exposure again, for example when it was"
-                           "\nlearned during a cutscene or a loading screen. Plain Automatic is used meanwhile (about 2 s)."
-                           "\nRe-calibrate in an ordinary daylight scene, not snow, night or indoors: the brightness"
-                           "\nlearned there is kept for the whole game.");
+                    if (!followStatus.gameExposureSeen)
+                        ImGui::TextDisabled("Not available yet: no exposure from the game");
+                    else if (!calibration.Locked())
+                        ImGui::TextDisabled("Learning the calibration... (%u/%u)", calibration.Readings(),
+                                            DlssNrFollowGame::kWindow);
+                    else
+                        ImGui::TextDisabled("Calibration %+.2f EV against the game's exposure%s", calibration.OffsetEv(),
+                                            followStatus.following ? "; following" : "; not following");
+
+                    // A calibration learned in other conditions (a cutscene, a menu) can sit far from where Automatic
+                    // would put the picture; say so where the fix is, beside Re-learn.
+                    if (std::fabs(followStatus.disagreementEv) > DlssNrExposureCalibrate::kFollowDisagreementLimitEv)
+                        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                           "%+.1f EV off Automatic's own exposure: Re-learn in an ordinary scene.",
+                                           followStatus.disagreementEv);
+
+                    // The calibration is learned once per session; this learns it again.
+                    if (ImGui::SmallButton("Re-learn##autoexposure"))
+                    {
+                        DlssNrFollowGame::Instance().Reset();
+                        LOG_INFO("DLSS-NR automatic exposure: re-learning the calibration against the game's exposure");
+                    }
+
+                    HelpMarker("Learns the calibration against the game's exposure again, for example when it was"
+                               "\nlearned during a cutscene or a loading screen. Plain Automatic is used meanwhile (about 2 s)."
+                               "\nRe-learn in an ordinary daylight scene, not snow, night or indoors: the brightness"
+                               "\nlearned there is kept for the whole game.");
+                    ImGui::Unindent();
+                }
             }
 
             float protection = config->DlssNrAutoExposureShadowProtection.value_or_default();

@@ -64,6 +64,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // from the committed one). Null on backends/builds where the finished-colour shader is absent.
     ID3D12PipelineState* _finishedColorPipelineState = nullptr;
 
+    // "Tune for this scene"'s stats pass (dlssnr_detail_stats.hlsl), built on first use the same way. Only
+    // dispatched while a calibration runs.
+    ID3D12PipelineState* _detailStatsPipelineState = nullptr;
+
   public:
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
     ~DlssNr_Dx12();
@@ -100,4 +104,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                               ID3D12Resource* InSource, ID3D12Resource* InModel,
                               ID3D12Resource* InOriginal, ID3D12Resource* InMotion,
                               ID3D12Resource* OutTarget);
+
+    // One stats pass of "Tune for this scene" (dlssnr_detail_stats.hlsl): 64x64 thread groups, one per tile, into
+    // the 128x64 RGBA32F grid. Same descriptor table shape as DispatchPass. False (no-op) if the PSO cannot be built.
+    bool DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
+                             ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput, ID3D12Resource* InInput,
+                             ID3D12Resource* InPrevInput, ID3D12Resource* InProxy, ID3D12Resource* OutGrid);
 };

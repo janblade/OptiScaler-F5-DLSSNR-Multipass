@@ -22,6 +22,7 @@
 #include "DlssNr_TrimAnchors.h"
 #include "DlssNr_AutoTrimDefault.h"
 #include "DlssNr_FollowGame.h"
+#include "DlssNr_ExposureCalibrate.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
 
 #include <Config.h>
@@ -33,11 +34,13 @@
 #include <gpu_time/GpuTime_Dx12.h>
 #include "DlssNr_GpuTime.h"
 
+#include <atomic>
 #include <mutex>
 #include <algorithm>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
 #include "precompile/dlssnr_finished_color_Shader.h"
+#include "precompile/dlssnr_detail_stats_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 #include "../sgsr1/SGSR1_Dx12.h"
 
@@ -471,6 +474,30 @@ struct NrState
 };
 
 NrState g_nr;
+
+// Automatic's own base white point (PreExposure / its metered exposure, never the followed game's), from the CPU
+// readbacks a few frames behind the shader's live value. 0 when there is no reading yet.
+float AutoOwnBaseWhitePoint()
+{
+    return g_nr.autoExposureValue > 1e-8f ? g_nr.autoExposurePreExposure / g_nr.autoExposureValue : 0.0f;
+}
+
+// Automatic exposure's base white point, the value its Trim multiplies: the game's base white point times the
+// learned calibration while following the game (DlssNr_FollowGame.h), else Automatic's own.
+float AutoBaseWhitePoint()
+{
+    if (g_nr.followingGame && g_nr.autoPairGameExposure > 1e-8f)
+        return g_nr.autoPairPreExposure / g_nr.autoPairGameExposure * DlssNrFollowGame::Instance().Scale();
+
+    return AutoOwnBaseWhitePoint();
+}
+
+// While following the game: how far the followed base sits from Automatic's own, in EV; 0 otherwise.
+float FollowDisagreementEv()
+{
+    return g_nr.followingGame ? DlssNrExposureCalibrate::BaseDisagreementEv(AutoBaseWhitePoint(), AutoOwnBaseWhitePoint())
+                              : 0.0f;
+}
 std::unique_ptr<DlssNr_Dx12> g_compose;
 
 // What the pass costs on the GPU, for the breakdown in the overlay.
@@ -523,6 +550,8 @@ void ClearCaptureDirectory()
 }
 
 unsigned long long g_frames = 0;
+
+#include "DlssNr_ExposureCalibrate_Dx12.inl"
 
 // Logical frame identity for deferred pairing; feature readiness keeps the raw submission counter.
 DlssNrSeamClock g_nrSeamClock;
@@ -1569,10 +1598,7 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
     {
         // Following the game (DlssNr_FollowGame.h): the game's base white point times the learned calibration, which
         // is where Automatic's own would sit. The shader does the same from the game's live texture.
-        const float baseWhitePoint =
-            g_nr.followingGame && g_nr.autoPairGameExposure > 1e-8f
-                ? g_nr.autoPairPreExposure / g_nr.autoPairGameExposure * DlssNrFollowGame::Instance().Scale()
-                : g_nr.autoExposurePreExposure / g_nr.autoExposureValue;
+        const float baseWhitePoint = AutoBaseWhitePoint();
         const auto anchors = DlssNrTrim::Parse(cfg.DlssNrAutoExposureTrimAnchors.value_or_default());
         const float trim = DlssNrTrim::TrimForKey(baseWhitePoint, DlssNr::AutoTrimEffective(cfg),
                                                   anchors, cfg.DlssNrAutoExposureTrimPreview.value_or_default());
@@ -2071,6 +2097,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
 {
     if (_finishedColorPipelineState)
         _finishedColorPipelineState->Release();
+    if (_detailStatsPipelineState)
+        _detailStatsPipelineState->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -2079,6 +2107,53 @@ DlssNr_Dx12::~DlssNr_Dx12()
             buffer = nullptr;
         }
     }
+}
+
+bool DlssNr_Dx12::DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
+                                      ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput,
+                                      ID3D12Resource* InInput, ID3D12Resource* InPrevInput,
+                                      ID3D12Resource* InProxy, ID3D12Resource* OutGrid)
+{
+    if (!_detailStatsPipelineState && _init)
+        CreateComputePipeline(_device, &_detailStatsPipelineState, dlssnr_detail_stats_cso,
+                              sizeof(dlssnr_detail_stats_cso), nullptr);
+
+    if (!_init || _detailStatsPipelineState == nullptr || InCmdList == nullptr || _device == nullptr ||
+        InOutput == nullptr || InPrevOutput == nullptr || InInput == nullptr || InPrevInput == nullptr ||
+        InProxy == nullptr || OutGrid == nullptr)
+        return false;
+
+    const uint32_t slot = _heapIndex;
+    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+
+    FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
+
+    ID3D12Resource* const srvs[kSrvCount] = { InOutput, InPrevOutput, InInput, InPrevInput, InProxy };
+
+    for (uint32_t i = 0; i < kSrvCount; ++i)
+        CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
+
+    ID3D12Resource* const uavs[kUavCount] = { OutGrid, OutGrid };
+
+    for (uint32_t i = 0; i < kUavCount; ++i)
+        CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
+
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+    {
+        LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
+    InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+    InCmdList->SetComputeRootSignature(_rootSignature);
+    InCmdList->SetPipelineState(_detailStatsPipelineState);
+    InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
+
+    // One 8x8 group per tile of the 64x64 grid, whatever the frame size.
+    InCmdList->Dispatch(64, 64, 1);
+
+    return true;
 }
 
 bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList,
@@ -2967,6 +3042,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                          DlssNrFollowGame::Instance().Locked() && g_nr.autoPairGameExposure > 1e-8f;
     const float exposureBaseScale = g_nr.followingGame ? DlssNrFollowGame::Instance().Scale() : 1.0f;
 
+    // "Tune for this scene" (DlssNr_ExposureCalibrate_Dx12.inl): before the white point is resolved, so a run's
+    // pinned white point (CalibrationWhitePoint) reaches the encode and resolve below. While no run is on and the menu
+    // is not looking, only a timestamp.
+    if (CalibrationWanted())
+        CalibrationBeginFrame(cfg, device, width, height,
+                              CalibrationSituation(cfg, usingAutoExposure, isHdrBuffer, frame.FinishedPicture,
+                                                   frame.ExposureTexture != nullptr),
+                              CalibrationBase(cfg));
+    else
+        CalibrationIdleFrame();
+
     // Frame statistics diagnostic (ini [DlssNr] FrameStats). Every 120th frame: average every tile of the
     // frame NR was handed into the meter grid and queue it for readback, then courier the game's exposure
     // texture (when there is one) into tile 0 and queue that too. Runs whatever the white point source,
@@ -3019,6 +3105,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     float whitePoint = frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride : ResolveWhitePoint(cfg, isHdrBuffer);
 
+    // While Tune for this scene runs, the white point is pinned on the CPU (the base frozen at its start times the
+    // step's Trim) and the shader is not asked to recompute it from the live exposure, so the steps differ only by the
+    // Trim. The sweep aborts if the live base drifts.
+    const bool calibrationPinned = CalibrationWhitePoint() > 0.0f;
+
+    if (calibrationPinned)
+        whitePoint = CalibrationWhitePoint();
+
     if (g_nr.diagQueuedAt != 0 && g_frames >= g_nr.diagQueuedAt + 8)
         ReportFrameStats(whitePoint, whitePointSource);
 
@@ -3045,6 +3139,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // game's texture is bound in its place and ExposureBaseScale carries the calibration.
         exposureTex = g_nr.followingGame ? (ID3D12Resource*) frame.ExposureTexture : g_nr.autoExposure;
     }
+
+    // Tune for this scene pins the white point for Game exposure too: not recomputed from the game's live texture.
+    if (calibrationPinned)
+        useGameExposure = 0;
 
     // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This
     // is self-contained on purpose: it copies the output aside on hold-on and copies it BACK over the
@@ -3121,7 +3219,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.WhitePoint = whitePoint;
     encodeParams.UseGameExposure = useGameExposure;
     encodeParams.ExposurePreMul = exposurePreMul;
-    encodeParams.UseExposureWhitePoint = usingAutoExposure ? 1u : 0u;
+    encodeParams.UseExposureWhitePoint = usingAutoExposure && !calibrationPinned ? 1u : 0u;
     encodeParams.ExposureBaseScale = exposureBaseScale;
     FillExposureConstants(encodeParams, cfg, usingAutoExposure ? 3u : 1u, frame.PreExposure);
     encodeParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
@@ -3145,6 +3243,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    CalibrationCopyInput(cmdList, device, g_nr.hdrCopy);
 
     // Frame statistics diagnostic: on the frame it queued a sample, meter the proxy the encode just wrote (an
     // sRGB-encoded picture, so the tile means are of encoded luma) and queue that readback too. What the model
@@ -3301,6 +3400,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 break;
             ++effectivePasses;
         }
+    }
+
+    // A "Tune for this scene" run measures the first pass alone: it is the only one that sees the game's frame, the later
+    // ones refine the model's own answer and make up whatever detail it missed, which flattens the measure until only the
+    // shadow and highlight penalties decide (3 passes in NBA 2K27 picked +1 EV over a flat curve). The result then holds
+    // for any pass count. The later passes keep their features and sit the run out; they restart their history after it,
+    // as after any skipped frame.
+    if (calibrationPinned && effectivePasses > 1)
+    {
+        for (unsigned int skipped = 1; skipped < effectivePasses; ++skipped)
+            g_nr.passNeedsReset[skipped] = true;
+
+        effectivePasses = 1;
     }
 
     {
@@ -3564,7 +3676,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.WhitePoint = whitePoint;
         resolveParams.UseGameExposure = useGameExposure;
         resolveParams.ExposurePreMul = exposurePreMul;
-        resolveParams.UseExposureWhitePoint = usingAutoExposure ? 1u : 0u;
+        resolveParams.UseExposureWhitePoint = usingAutoExposure && !calibrationPinned ? 1u : 0u;
         resolveParams.ExposureBaseScale = exposureBaseScale;
         FillExposureConstants(resolveParams, cfg, usingAutoExposure ? 3u : 1u, frame.PreExposure);
         resolveParams.Width = width;
@@ -3775,6 +3887,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             TransitionTarget(priorTargetState);
             Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
+        if (CalibrationActive())
+        {
+            const D3D12_RESOURCE_STATES priorTargetState = targetState;
+            TransitionTarget(D3D12_RESOURCE_STATE_COPY_SOURCE);
+            CalibrationMeasure(this, cmdList, device, target, modelInput, width, height);
+            TransitionTarget(priorTargetState);
         }
 
         MakeModelWritable(g_nr.output);
@@ -4474,11 +4594,100 @@ ExposureStatus AutoExposureStatus()
     return s;
 }
 
+ExposureCalibrationStatus ExposureCalibration()
+{
+    namespace Cal = DlssNrExposureCalibrate;
+    std::lock_guard<std::mutex> lock(g_cal.mutex);
+    Cal::Sweep& sweep = g_cal.sweep;
+    const unsigned long long now = GetTickCount64();
+
+    // The menu is looking: availability is worked out on the next evaluations (CalibrationWanted).
+    g_cal.menuPolledMs.store(now, std::memory_order_relaxed);
+
+    // No evaluation for a while: NR is not running. Say so rather than show a button that would wait forever.
+    const unsigned long long last = g_cal.lastEvaluationMs.load(std::memory_order_relaxed);
+    const bool stalled = last == 0 || now - last > kCalStallMs;
+
+    if (stalled)
+    {
+        sweep.Abandon(Cal::Abort::NrOff);
+        g_cal.startRequested = false;
+    }
+
+    const Cal::Blocker blocker = stalled ? Cal::Blocker::NrStopped : g_cal.blocker;
+
+    ExposureCalibrationStatus s {};
+    s.available = blocker == Cal::Blocker::None;
+    s.unavailable = Cal::BlockerText(blocker);
+    s.starting = g_cal.startRequested;
+    s.startError = g_cal.startError;
+    s.running = sweep.Running();
+    s.finished = sweep.Finished();
+    s.progress = sweep.Progress();
+    s.stepEv = Cal::Tidy(sweep.StepEv());
+    s.stepIndex = (unsigned) sweep.StepIndex();
+    s.stepCount = (unsigned) sweep.StepCount();
+    s.aborted = CalibrationStopText(sweep);
+    s.currentEv = Cal::Tidy(sweep.CurrentEv());
+    s.source = g_cal.source;
+
+    if (s.finished)
+    {
+        s.changed = sweep.Changed();
+        s.unsure = sweep.Unsure();
+        s.atEdge = sweep.AtEdge();
+        s.resultEv = Cal::Tidy(sweep.ResultEv());
+        s.bestRawEv = Cal::Tidy(sweep.BestEv(Cal::Detail::Raw));
+        s.bestBandEv = Cal::Tidy(sweep.BestEv(Cal::Detail::BandPass));
+    }
+
+    const auto& steps = sweep.Steps();
+    for (size_t i = 0; i < steps.size(); ++i)
+    {
+        if (steps[i].samples == 0)
+            continue;
+        s.ev.push_back(steps[i].ev);
+        s.scoreRaw.push_back(sweep.Score(i, Cal::Detail::Raw));
+        s.scoreBand.push_back(sweep.Score(i, Cal::Detail::BandPass));
+    }
+
+    return s;
+}
+
+void StartExposureCalibration(uint32_t source)
+{
+    std::lock_guard<std::mutex> lock(g_cal.mutex);
+
+    if (g_cal.sweep.Running())
+        return;
+
+    g_cal.source = source;
+    g_cal.sweep.Clear();
+    g_cal.startError = "";
+    g_cal.startRequested = true;
+    g_cal.active.store(true, std::memory_order_release);
+}
+
+void CancelExposureCalibration()
+{
+    std::lock_guard<std::mutex> lock(g_cal.mutex);
+    g_cal.startRequested = false;
+    g_cal.sweep.Cancel();
+}
+
+void DismissExposureCalibration()
+{
+    std::lock_guard<std::mutex> lock(g_cal.mutex);
+    g_cal.sweep.Clear();
+    g_cal.startError = "";
+}
+
 FollowGameStatus FollowGameExposureStatus()
 {
     FollowGameStatus s {};
     s.gameExposureSeen = g_nr.autoPairGameExposure > 0.0f;
     s.following = g_nr.followingGame;
+    s.disagreementEv = FollowDisagreementEv();
     return s;
 }
 
@@ -4506,6 +4715,7 @@ void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     DeferredSr::Shutdown();
+    CalibrationShutdown();
 
     for (auto& r : g_nrRetired)
     {

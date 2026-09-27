@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <string>
+#include <vector>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
@@ -138,9 +139,45 @@ struct FollowGameStatus
 {
     bool gameExposureSeen = false; // the game supplied an exposure beside an Automatic reading
     bool following = false;        // the last frame followed the game's exposure
+    // While following: how far the followed base sits from Automatic's own, in EV (D3D12; 0 on Vulkan). Beyond
+    // DlssNrExposureCalibrate::kFollowDisagreementLimitEv the learned calibration is stale and wants a Re-learn.
+    float disagreementEv = 0.0f;
 };
 
 FollowGameStatus FollowGameExposureStatus();
+
+// "Tune for this scene" for Automatic exposure (shaders/dlssnr/DlssNr_ExposureCalibrate.h). D3D12 only. The menu
+// starts a run, shows its progress and curve, and on Apply writes the result into DlssNrAutoExposureTrim itself.
+struct ExposureCalibrationStatus
+{
+    bool available = false;  // a run can start on the current frames
+    uint32_t source = 3;     // the white point source of the last run: 3 Automatic, 1 Game exposure (its EVs are
+                             // in that source's slider units)
+    std::string unavailable; // why not, when it cannot
+    bool starting = false;   // asked for, not yet picked up by the render thread
+    std::string startError;  // why the last start did not happen
+    bool running = false;
+    bool finished = false;
+    float progress = 0.0f;
+    float stepEv = 0.0f;      // the step on screen while running
+    unsigned stepIndex = 0;   // 0-based
+    unsigned stepCount = 0;
+    std::string aborted; // why the last run stopped early, empty if it did not
+    float currentEv = 0.0f;
+    bool changed = false; // the chosen value differs from the current one (a flat curve keeps the current)
+    bool unsure = false;  // the scene was not still enough to tell: the current value is kept
+    bool atEdge = false;  // the best step was the first or last: the real best may lie beyond, the current is kept
+    float resultEv = 0.0f;
+    float bestRawEv = 0.0f;
+    float bestBandEv = 0.0f;
+    std::vector<float> ev, scoreRaw, scoreBand; // measured steps
+};
+
+ExposureCalibrationStatus ExposureCalibration();
+// `source` is the panel it was pressed in (3 Automatic, 1 Game exposure), so that panel shows the run and its result.
+void StartExposureCalibration(uint32_t source);
+void CancelExposureCalibration();
+void DismissExposureCalibration();
 
 // The model resolution actually applied last frame, as a percentage of the frame it processes --
 // the manual slider, or (post-SR + Auto) the derived render:output ratio. So the menu can show the

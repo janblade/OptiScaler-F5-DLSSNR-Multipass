@@ -25,7 +25,7 @@
 // The weighting is a heuristic, not a published metric; the numbers per step are logged so it can be refitted.
 //
 // Also here, so the host test covers them: ReduceGrid (the grid -> Stats) and Availability (when a run may start or go
-// on). Pure CPU, no D3D: the D3D12 path (DlssNr_ExposureCalibrate_Dx12.inl) drives it, the menu shows it,
+// on). Pure CPU, no D3D: DlssNr_ExposureCalibrate_Run.h drives it for both backends, the menu shows it,
 // tests/nr_exposure_calibrate_smoke.cpp checks it.
 
 #include "DlssNr_TrimAnchors.h"
@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace DlssNrExposureCalibrate
@@ -117,8 +118,6 @@ enum class Blocker : uint32_t
     FinishedPicture, // finished-picture mode keeps its own display white point
     NotHdr,          // an already tone-mapped frame has no scene exposure to tune
     AutoNotRunning,  // Automatic's meter has no reading this evaluation
-    FollowLearning,  // Follow the game's exposure has not locked yet: its base jumps when it does
-    FollowDisagrees, // Follow's learned calibration sits more than kFollowDisagreementLimitEv off Automatic
     NoGameExposure,  // Game exposure: the game supplied no exposure texture, or there is no reading yet
     Anchors,         // Trim anchors in the ini decide the brightness, not the slider
     NrStopped,       // NR has not run for a while
@@ -142,10 +141,6 @@ inline const char* BlockerText(Blocker b)
         return "the game's frame is not linear HDR";
     case Blocker::AutoNotRunning:
         return "Automatic exposure has no reading";
-    case Blocker::FollowLearning:
-        return "Follow the game's exposure is still learning; wait until it says following";
-    case Blocker::FollowDisagrees:
-        return "Follow the game's exposure is more than 1 EV off Automatic; Re-learn it first";
     case Blocker::NoGameExposure:
         return "the game supplies no exposure on this frame";
     case Blocker::Anchors:
@@ -157,7 +152,8 @@ inline const char* BlockerText(Blocker b)
 }
 
 // What availability depends on, gathered by the caller each evaluation. `anchors` is the tuned source's own
-// (Automatic's anchors for source 3, Game exposure's for source 1); the Follow fields matter to Automatic only.
+// (Automatic's anchors for source 3, Game exposure's for source 1); the Follow fields matter to Automatic only, and
+// only to RelearnFollowOnStart: Follow never blocks a run.
 struct Situation
 {
     uint32_t source = 0;
@@ -166,9 +162,8 @@ struct Situation
     bool finishedPicture = false;
     bool hdr = false;
     bool autoRunning = false;
-    bool followOn = false;
-    bool following = false;
-    float followDisagreementEv = 0.0f;
+    bool followLocked = false;         // Follow the game's exposure is on and has a learned calibration
+    float followDisagreementEv = 0.0f; // while following: its base against Automatic's own, in EV (for the log)
     bool gameExposureNow = false;
     bool gameExposureReading = false;
     bool anchors = false;
@@ -194,21 +189,25 @@ inline Blocker Availability(const Situation& s)
     }
     else
     {
+        // Follow the game's exposure does not block: a run tunes against Automatic's own exposure, whatever Follow is
+        // doing (see RelearnFollowOnStart).
         if (!s.autoRunning)
             return Blocker::AutoNotRunning;
-        // Following is fine once it really follows; the base is frozen for the run either way.
-        if (s.followOn && !s.following)
-            return Blocker::FollowLearning;
-        // A stale Follow calibration shifts every step by the same error (4.3 EV in NBA 2K27), and the tuning would
-        // chase it to the edge of its range.
-        if (s.following && std::fabs(s.followDisagreementEv) > kFollowDisagreementLimitEv)
-            return Blocker::FollowDisagrees;
     }
 
     if (s.anchors)
         return Blocker::Anchors;
     return Blocker::None;
 }
+
+// Whether starting a run on Automatic re-learns Follow the game's exposure. A run tunes the Trim against Automatic's
+// own base white point; once Follow is back in force the same Trim multiplies the followed base (the game's times
+// the learned calibration). The two agree only as well as the calibration holds, and any disagreement lands in the
+// picture after the run (4.3 EV in NBA 2K27, 3.2 EV in RDR2; even 0.9 EV is almost two steps), so a learned
+// calibration is always learned again, from Automatic as it is now, during the run -- whether it is following at that
+// moment or not (a frame without the game's exposure). Learning takes about two seconds, well inside a run. Still
+// learning (not locked yet) has nothing to re-learn.
+inline bool RelearnFollowOnStart(const Situation& s) { return s.source == 3 && s.followLocked; }
 
 struct Settings
 {
@@ -229,8 +228,8 @@ struct Settings
     float flatTolerance = 0.02f; // a best score this close to the current step's keeps the current value
     float baseToleranceEv = 0.25f; // how far the live base white point may drift from the frozen one
     float neutralTrim = kNeutralTrim; // the slider's 0 EV, and the scale detail is measured at
-    // Consecutive evaluations a run may be unavailable (the game dropping its exposure texture for a frame, Follow
-    // briefly not following) before it aborts; meanwhile it holds its step and measures nothing.
+    // Consecutive evaluations a run may be unavailable (the game dropping its exposure texture for a frame, Automatic's
+    // meter missing one) before it aborts; meanwhile it holds its step and measures nothing.
     unsigned unavailableTolerance = 30;
 };
 
@@ -253,9 +252,10 @@ struct Context
     uint32_t height = 0;
     uint32_t whitePointSource = 0;
     bool nrEnabled = false;
-    // The base white point the Trim multiplies (PreExposure / exposure, times Follow-game's calibration while it
-    // follows), 0 when unknown. Frozen at Start: every step is shown the frozen base times its own Trim, so the
-    // steps differ only by the Trim even if the game's exposure moves; a move beyond baseToleranceEv aborts.
+    // The base white point the Trim multiplies (PreExposure / exposure: the game's for Game exposure, Automatic's own
+    // metering for Automatic, following the game's exposure or not), 0 when unknown. Frozen at Start: every step is
+    // shown the frozen base times its own Trim, so the steps differ only by the Trim even if the exposure moves; a
+    // move beyond baseToleranceEv aborts.
     float baseWhitePoint = 0.0f;
     // Why the run could not go on this evaluation (None when it can). Tolerated briefly; see unavailableTolerance.
     Blocker blocker = Blocker::None;
@@ -626,7 +626,7 @@ class Sweep
                 (nearest < 0 || std::fabs(steps_[i].ev - currentEv_) < std::fabs(steps_[(size_t) nearest].ev - currentEv_)))
                 nearest = (int) i;
 
-        float detailLo = INFINITY, detailHi = -INFINITY;
+        float detailLo = std::numeric_limits<float>::infinity(), detailHi = -std::numeric_limits<float>::infinity();
         std::vector<float> flicker;
         for (const StepResult& r : steps_)
         {

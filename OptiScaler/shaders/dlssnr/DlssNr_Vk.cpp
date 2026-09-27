@@ -3,6 +3,8 @@
 #include "DlssNr_Vk.h"
 
 #include "precompile/DlssNr_Shader_Vk.h"
+#include "precompile/dlssnr_exposure_adapt_Shader_Vk.h"
+#include "precompile/dlssnr_detail_stats_Shader_Vk.h"
 
 #include <algorithm>
 #include <cstring>
@@ -103,6 +105,12 @@ DlssNr_Vk::~DlssNr_Vk()
 {
     if (_device == VK_NULL_HANDLE)
         return;
+
+    if (_adaptPipeline != VK_NULL_HANDLE)
+        vkDestroyPipeline(_device, _adaptPipeline, nullptr);
+
+    if (_statsPipeline != VK_NULL_HANDLE)
+        vkDestroyPipeline(_device, _statsPipeline, nullptr);
 
     if (_dummyView != VK_NULL_HANDLE)
         vkDestroyImageView(_device, _dummyView, nullptr);
@@ -238,6 +246,89 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
                          VkImageView InMotion, VkImageView InTarget, VkImageView InKeep,
                          VkImageLayout InSourceLayout, VkImageLayout InMotionLayout)
 {
+    // The shader's thread group is 8x8, the same as the D3D12 path. Automatic exposure's meter is the
+    // one exception: its shader spends a whole group on each 64x64 tile, so it dispatches one per tile.
+    const bool parallelExposureMeter =
+        InConstants.Mode == DlssNrMode_Meter && InConstants.MeterCopiesExposure == 0;
+    const uint32_t groupsX = parallelExposureMeter ? InConstants.Width : (InThreadsX + 7) / 8;
+    const uint32_t groupsY = parallelExposureMeter ? InConstants.Height : (InThreadsY + 7) / 8;
+
+    return Record(InCmdList, _pipeline, InConstants, groupsX, groupsY, InSource, InModel, InOriginal, InMotion,
+                  InTarget, InKeep, InSourceLayout, InMotionLayout);
+}
+
+bool DlssNr_Vk::EnsurePipeline(VkPipeline& pipeline, bool& failed, const unsigned char* code, size_t size,
+                               const char* what)
+{
+    if (pipeline == VK_NULL_HANDLE && !failed && _init)
+    {
+        std::vector<char> bytes(code, code + size);
+
+        if (!CreateComputePipeline(_device, _pipelineLayout, &pipeline, bytes) || pipeline == VK_NULL_HANDLE)
+        {
+            pipeline = VK_NULL_HANDLE;
+            failed = true;
+            LOG_WARN("DLSS-NR Vulkan: {} could not be built", what);
+        }
+    }
+
+    return _init && pipeline != VK_NULL_HANDLE;
+}
+
+bool DlssNr_Vk::ExposureAdaptReady()
+{
+    return EnsurePipeline(_adaptPipeline, _adaptFailed, dlssnr_exposure_adapt_spv, sizeof(dlssnr_exposure_adapt_spv),
+                          "the eye adaptation pass (Automatic follows every frame at once)");
+}
+
+bool DlssNr_Vk::DispatchDetailStats(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, VkImageView InOutput,
+                                    VkImageView InPrevOutput, VkImageView InInput, VkImageView InPrevInput,
+                                    VkImageView InProxy, VkImageView InGrid)
+{
+    if (!EnsurePipeline(_statsPipeline, _statsFailed, dlssnr_detail_stats_spv, sizeof(dlssnr_detail_stats_spv),
+                        "the Tune for this scene stats pass") ||
+        InOutput == VK_NULL_HANDLE || InPrevOutput == VK_NULL_HANDLE || InInput == VK_NULL_HANDLE ||
+        InPrevInput == VK_NULL_HANDLE || InProxy == VK_NULL_HANDLE || InGrid == VK_NULL_HANDLE)
+        return false;
+
+    // Bindings as dlssnr_detail_stats.hlsl declares them under VK_MODE: output, previous output, input, previous input
+    // in the four sampled slots, the grid in gTarget's, the proxy in gKeep's. One 8x8 group per tile of the 64x64 grid.
+    return Record(InCmdList, _statsPipeline, InConstants, 64, 64, InOutput, InPrevOutput, InInput, InPrevInput, InGrid,
+                  InProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+bool DlssNr_Vk::DispatchExposureAdapt(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants,
+                                      VkImageView InReading, VkImageView InEased)
+{
+    if (!ExposureAdaptReady() || InReading == VK_NULL_HANDLE || InEased == VK_NULL_HANDLE)
+        return false;
+
+    // The reading in gSource's binding, the eased value in gTarget's; every other binding gets the placeholder.
+    return Record(InCmdList, _adaptPipeline, InConstants, 1, 1, InReading, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                  VK_NULL_HANDLE, InEased, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+bool DlssNr_Vk::DispatchStatsCopy(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, VkImageView InSource,
+                                  VkImageLayout InSourceLayout, VkImageView InTarget, VkImageView InGrid)
+{
+    if (!EnsurePipeline(_statsPipeline, _statsFailed, dlssnr_detail_stats_spv, sizeof(dlssnr_detail_stats_spv),
+                        "the Tune for this scene stats pass") ||
+        InSource == VK_NULL_HANDLE || InTarget == VK_NULL_HANDLE || InGrid == VK_NULL_HANDLE)
+        return false;
+
+    // The source in gOutput's binding, the copy in gProxy's (the storage binding the stats read the proxy through);
+    // one 8x8 group per 8x8 texels.
+    return Record(InCmdList, _statsPipeline, InConstants, (InConstants.Width + 7) / 8, (InConstants.Height + 7) / 8,
+                  InSource, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, InGrid, InTarget, InSourceLayout,
+                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+bool DlssNr_Vk::Record(VkCommandBuffer InCmdList, VkPipeline pipeline, const DlssNrConstants& InConstants,
+                       uint32_t groupsX, uint32_t groupsY, VkImageView InSource, VkImageView InModel,
+                       VkImageView InOriginal, VkImageView InMotion, VkImageView InTarget, VkImageView InKeep,
+                       VkImageLayout InSourceLayout, VkImageLayout InMotionLayout)
+{
     if (!CanRender() || InCmdList == VK_NULL_HANDLE)
         return false;
 
@@ -259,16 +350,9 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
     WriteDescriptors(_descriptorSets[slot], offset, InSource, InModel, InOriginal, InMotion, InTarget, InKeep,
                      InSourceLayout, InMotionLayout);
 
-    vkCmdBindPipeline(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE, _pipeline);
+    vkCmdBindPipeline(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE, _pipelineLayout, 0, 1, &_descriptorSets[slot], 0,
                             nullptr);
-
-    // The shader's thread group is 8x8, the same as the D3D12 path. Automatic exposure's meter is the
-    // one exception: its shader spends a whole group on each 64x64 tile, so it dispatches one per tile.
-    const bool parallelExposureMeter =
-        InConstants.Mode == DlssNrMode_Meter && InConstants.MeterCopiesExposure == 0;
-    const uint32_t groupsX = parallelExposureMeter ? InConstants.Width : (InThreadsX + 7) / 8;
-    const uint32_t groupsY = parallelExposureMeter ? InConstants.Height : (InThreadsY + 7) / 8;
 
     vkCmdDispatch(InCmdList, groupsX, groupsY, 1);
 

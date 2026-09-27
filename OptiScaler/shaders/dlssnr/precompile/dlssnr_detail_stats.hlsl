@@ -1,8 +1,9 @@
 // "Tune for this scene" (DlssNr_ExposureCalibrate.h): one measured NR evaluation -> a 128x64 grid of tile
-// statistics, read back and averaged on the CPU. D3D12 only, and only while a calibration runs.
+// statistics, read back and averaged on the CPU. Only while a calibration runs.
 //
 // Separate from dlssnr.hlsl so the shared shader, its SPIR-V twin and the occupancy of every ordinary pass stay as
-// they are; it reuses that shader's root signature and descriptor table (DlssNr_Dx12::DispatchDetailStats).
+// they are; it reuses that shader's root signature and descriptor table on D3D12 (DlssNr_Dx12::DispatchDetailStats)
+// and its descriptor set layout on Vulkan (DlssNr_Vk::DispatchDetailStats, bindings under VK_MODE below).
 //
 // One 8x8 thread group per tile of a 64x64 grid over the frame. Every second pixel in each direction is measured:
 // the results are means, and a quarter of the pixels is plenty for a mean. Per tile:
@@ -18,6 +19,9 @@
 // Shoulder and floor are read off the picture the model was shown (already encoded) -- the proxy, or its shrink when the
 // model runs reduced: its peak channel above the shoulder threshold, or below the floor threshold.
 
+#ifdef VK_MODE
+[[vk::binding(0, 0)]]
+#endif
 cbuffer Params : register(b0)
 {
     // Overlays the first fields of DlssNrConstants: Mode, WhitePoint, Width, Height, TransferStrength, ColourStrength.
@@ -29,13 +33,37 @@ cbuffer Params : register(b0)
     float floorThreshold;
 };
 
+#ifdef VK_MODE
+[[vk::binding(1, 0)]]
+#endif
 Texture2D<float4> gOutput     : register(t0); // the edited frame, linear
+#ifdef VK_MODE
+[[vk::binding(2, 0)]]
+#endif
 Texture2D<float4> gPrevOutput : register(t1); // the edited frame of the previous evaluation
+#ifdef VK_MODE
+[[vk::binding(3, 0)]]
+#endif
 Texture2D<float4> gInput      : register(t2); // the frame before NR (the encode's untouched copy), linear
+#ifdef VK_MODE
+[[vk::binding(4, 0)]]
+#endif
 Texture2D<float4> gPrevInput  : register(t3);
-Texture2D<float4> gProxy      : register(t4); // what the model was shown, encoded: the proxy, or its shrink when
-                                              // the model runs reduced (read at the frame position scaled to its size)
+// What the model was shown, encoded: the proxy, or its shrink when the model runs reduced (read at the frame position
+// scaled to its size). Vulkan's layout has four sampled bindings, so there it comes in gKeep's storage binding (RGBA16F).
+#ifdef VK_MODE
+[[vk::binding(6, 0)]] [[vk::image_format("rgba16f")]]
+RWTexture2D<float4> gProxy;
+#else
+Texture2D<float4> gProxy      : register(t4);
+#endif
+#ifdef VK_MODE
+[[vk::binding(5, 0)]] [[vk::image_format("rgba32f")]]
+#endif
 RWTexture2D<float4> gGrid     : register(u0);
+#ifdef VK_MODE
+[[vk::binding(7, 0)]]
+#endif
 SamplerState gLinear          : register(s0);
 
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
@@ -101,6 +129,20 @@ groupshared float4 gSumB[64];
 [numthreads(8, 8, 1)]
 void CSMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
+#ifdef VK_MODE
+    // Vulkan's copies for a run (DlssNr_ExposureCalibrate_Vk.inl): width x height texels of gOutput, as they are, into
+    // gProxy's binding, one thread each. D3D12 copies with CopyResource and never sets mode 1.
+    if (mode == 1u)
+    {
+        const uint2 p = groupId.xy * 8u + groupThreadId.xy;
+
+        if (p.x < width && p.y < height)
+            gProxy[p] = gOutput.Load(int3(p, 0));
+
+        return;
+    }
+#endif
+
     if (groupId.x >= kGrid || groupId.y >= kGrid)
         return;
 
@@ -126,7 +168,7 @@ void CSMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
             gProxy.GetDimensions(proxyW, proxyH);
             const int2 q = min(int2((float2(p) + 0.5) * float2(proxyW, proxyH) / float2(max(width, 1u), max(height, 1u))),
                                int2(proxyW - 1, proxyH - 1));
-            const float3 proxy = gProxy.Load(int3(q, 0)).rgb;
+            const float3 proxy = gProxy[uint2(q)].rgb;
             const float peak = max(proxy.r, max(proxy.g, proxy.b));
 
             a += float4(lap, Band(gOutput, p), Band(gInput, p), abs(c - EncodedAt(gPrevOutput, p)));

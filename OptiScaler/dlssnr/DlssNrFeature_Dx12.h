@@ -146,8 +146,9 @@ struct FollowGameStatus
 
 FollowGameStatus FollowGameExposureStatus();
 
-// "Tune for this scene" for Automatic exposure (shaders/dlssnr/DlssNr_ExposureCalibrate.h). D3D12 only. The menu
-// starts a run, shows its progress and curve, and on Apply writes the result into DlssNrAutoExposureTrim itself.
+// "Tune for this scene" for Automatic exposure and Game exposure (shaders/dlssnr/DlssNr_ExposureCalibrate.h), on D3D12
+// and Vulkan; the API lives in shaders/dlssnr/DlssNr_ExposureCalibrate.cpp. The menu starts a run, shows its progress
+// and curve, and on Apply writes the result into the tuned slider's Trim itself.
 struct ExposureCalibrationStatus
 {
     bool available = false;  // a run can start on the current frames

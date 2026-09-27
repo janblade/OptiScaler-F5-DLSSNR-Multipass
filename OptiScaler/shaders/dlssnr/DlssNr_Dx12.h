@@ -29,9 +29,11 @@
 // there has to be enough for three passes times the deepest pipeline we might sit behind.
 // Descriptor and constant slots, consumed one per dispatch and reused round-robin with no fence.
 //
-// The shader still records at most meter + encode + downsample + resolve per frame. Extra model layers
-// are NGX evaluates and do not consume this ring; their A/B resources and feature histories are
-// persistent. Forty-eight slots leave twelve fully populated frames before descriptor/constant reuse.
+// A frame records the meter, its reduce, eye adaptation, the exposure courier, encode, downsample, one clamp per
+// extra model pass, resolve and, during a Tune run, the stats pass: about ten with the default passes. The model
+// layers themselves are NGX evaluates and do not consume this ring; their A/B resources and feature histories are
+// persistent. Forty-eight slots leave four or more such frames before descriptor/constant reuse; many more passes
+// leave fewer.
 #define DLSSNR_NUM_OF_HEAPS 48
 
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
@@ -67,6 +69,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // "Tune for this scene"'s stats pass (dlssnr_detail_stats.hlsl), built on first use the same way. Only
     // dispatched while a calibration runs.
     ID3D12PipelineState* _detailStatsPipelineState = nullptr;
+
+    // Automatic exposure's eye adaptation pass (dlssnr_exposure_adapt.hlsl), built on first use the same way. Not
+    // retried once it failed to build: the meter then writes the exposure directly, as before.
+    ID3D12PipelineState* _exposureAdaptPipelineState = nullptr;
+    bool _exposureAdaptPipelineFailed = false;
 
   public:
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
@@ -110,4 +117,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     bool DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
                              ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput, ID3D12Resource* InInput,
                              ID3D12Resource* InPrevInput, ID3D12Resource* InProxy, ID3D12Resource* OutGrid);
+
+    // Automatic exposure's eye adaptation (dlssnr_exposure_adapt.hlsl, DlssNr_ExposureAdapt.h): one thread eases the
+    // 1x1 OutEased toward the 1x1 InReading. ExposureAdaptReady builds the PSO on first use and says whether there is
+    // one; DispatchExposureAdapt is false (no-op) without it. Same descriptor table shape as DispatchPass.
+    bool ExposureAdaptReady();
+    bool DispatchExposureAdapt(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
+                               ID3D12Resource* InReading, ID3D12Resource* OutEased);
 };

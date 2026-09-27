@@ -14,11 +14,14 @@
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
+#include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -162,6 +165,19 @@ struct VkState
     float autoExposureValue = 0.0f;
     float autoExposurePreExposure = 1.0f;
     unsigned long long autoExposureFrames = 0;
+
+    // Eye adaptation (shaders/dlssnr/DlssNr_ExposureAdapt.h): the meter's own reading lands in autoExposureRaw and a
+    // one-texel pass eases autoExposure toward it, so autoExposure above is the eased value and everything downstream
+    // reads that. The reading rides home in a slot's third float (`meterHasRaw`), for the log.
+    // A "Tune for this scene" run evaluates the first pass alone (DlssNr_ExposureCalibrate_Vk.inl); the later passes
+    // skipped frames meanwhile, so their history starts over when they come back.
+    bool laterPassesNeedReset = false;
+
+    OwnedImage autoExposureRaw;
+    float autoExposureRawValue = 0.0f;
+    bool autoExposureAdapting = false;
+    bool meterHasRaw[4] = {};
+    DlssNrExposureAdapt::Adapter autoExposureAdapter;
 
     // Which source last fed the ring, so one source's numbers are never read as another's, and what
     // each slot holds: 0 nothing believable, 1 the game's exposure, 2 the automatic one.
@@ -545,6 +561,8 @@ std::optional<std::filesystem::path> FindSnippet()
     return snippet;
 }
 
+#include "DlssNr_ExposureCalibrate_Vk.inl"
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -682,6 +700,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             std::memcpy(&measured, mapped, sizeof(float));
             float pairedGame = 0.0f;
             std::memcpy(&pairedGame, (const char*) mapped + sizeof(float), sizeof(float));
+            float rawReading = 0.0f;
+            std::memcpy(&rawReading, (const char*) mapped + 2 * sizeof(float), sizeof(float));
 
             // Believed only if it could be an exposure. A texel read through a layout the game did
             // not leave it in, or a slot the game stopped filling, fails here and the last good
@@ -696,6 +716,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                 {
                     g_vk.autoExposureValue = measured;
                     g_vk.autoExposurePreExposure = g_vk.meterExposurePreExposure[readSlot];
+                    g_vk.autoExposureRawValue =
+                        g_vk.meterHasRaw[readSlot] && std::isfinite(rawReading) ? rawReading : measured;
 
                     DlssNr::ReportAutoExposureDefaults();
 
@@ -713,8 +735,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                             g_vk.pairPreExposure = g_vk.meterExposurePreExposure[readSlot];
                             g_vk.pairValidAt = g_vk.meterFrames;
 
+                            // Against the meter's own reading of that frame, not eye adaptation's eased value.
+                            const float autoReading =
+                                g_vk.meterHasRaw[readSlot] && std::isfinite(rawReading) && rawReading > 0.0f
+                                    ? rawReading
+                                    : g_vk.autoExposureValue;
+
                             if (DlssNr::FollowGameOn(*Config::Instance()) &&
-                                DlssNrFollowGame::Instance().Feed(g_vk.autoExposurePreExposure / g_vk.autoExposureValue,
+                                DlssNrFollowGame::Instance().Feed(g_vk.autoExposurePreExposure / autoReading,
                                                                   g_vk.pairPreExposure / g_vk.pairGameExposure))
                                 LOG_INFO("DLSS-NR automatic exposure: calibrated against the game's own exposure: "
                                          "{:+.2f} EV (Automatic's base white point is {:.3g}x the game's); follows the "
@@ -741,10 +769,18 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                         const float autoBase = g_vk.autoExposurePreExposure / g_vk.autoExposureValue;
                         const bool paired = g_vk.meterPairHasGame[readSlot] && g_vk.pairGameExposure > 0.0f;
                         const float gameBase = paired ? g_vk.pairPreExposure / g_vk.pairGameExposure : 0.0f;
-                        LOG_INFO("DLSS-NR frame stats (Vulkan): Automatic base white point {:.4g}; game exposure {} "
+                        LOG_INFO("DLSS-NR frame stats (Vulkan): Automatic base white point {:.4g}{}; game exposure {} "
                                  "(base white point {:.4g}, Automatic/game {:.3g}{}); known unexposed game: {}, "
                                  "following the game's exposure: {}",
-                                 autoBase, paired ? g_vk.pairGameExposure : 0.0f, gameBase,
+                                 autoBase,
+                                 g_vk.meterHasRaw[readSlot]
+                                     ? std::format(" (exposure {:.5g}, eye adaptation {:.1f} s, meter reading {:.5g})",
+                                                   g_vk.autoExposureValue,
+                                                   DlssNrExposureAdapt::Seconds(
+                                                       cfg.DlssNrAutoExposureAdaptSeconds.value_or_default()),
+                                                   g_vk.autoExposureRawValue)
+                                     : std::string(),
+                                 paired ? g_vk.pairGameExposure : 0.0f, gameBase,
                                  paired && gameBase > 0.0f ? autoBase / gameBase : 0.0f,
                                  paired ? "" : "; read only while following", DlssNr::KnownUnexposedGame() ? "yes" : "no",
                                  DlssNr::FollowGameOn(cfg) ? "on" : "off");
@@ -1015,6 +1051,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             LOG_WARN("DLSS-NR Vulkan: no exposure meter; the white point stays on the slider and "
                      "automatic exposure is unavailable");
 
+        // Eye adaptation's reading. Without it the meter writes autoExposure itself, as before.
+        if (meterReady && !g_vk.autoExposureRaw.Valid() &&
+            !CreateImage(g_vk.autoExposureRaw, 1, 1, VK_FORMAT_R32_SFLOAT, true))
+            LOG_WARN("DLSS-NR Vulkan: could not allocate the eye adaptation image; Automatic follows every frame at "
+                     "once");
+
+        g_vk.autoExposureAdapter.Invalidate();
+
         DestroyImage(g_vk.proxySmall);
         DestroyImage(g_vk.outputNative);
 
@@ -1149,6 +1193,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         g_vk.gameExposure = 0.0f;
         g_vk.autoExposureValue = 0.0f;
         g_vk.autoExposurePreExposure = 1.0f;
+        g_vk.autoExposureRawValue = 0.0f;
+        g_vk.autoExposureAdapter.Invalidate();
         for (uint32_t& kind : g_vk.meterExposureKind)
             kind = 0u;
         for (bool& pair : g_vk.meterPairHasGame)
@@ -1276,6 +1322,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // this frame's exposure. Only on linear HDR: an already tone-mapped frame has no scene to meter.
     // The image read is the upscaler's fresh output, before anything of ours has written to it.
     g_vk.autoExposureActive = false;
+    g_vk.autoExposureAdapting = false;
 
     if (requestedWhitePointSource == 3 && linearHdr && g_vk.meter.Valid() && g_vk.autoExposure.Valid())
     {
@@ -1307,10 +1354,47 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             reduce.AutoExposureShadowProtection =
                 std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
 
+            // Eye adaptation (DlssNr_ExposureAdapt.h): the reading goes to autoExposureRaw and a one-texel pass eases
+            // autoExposure toward it. Without that image or the pass, the reduce writes autoExposure itself, as
+            // before; the frames it does so leave a gap the adapter snaps across.
+            const float adaptSeconds =
+                DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptSeconds.value_or_default());
+            const bool adapting =
+                adaptSeconds > 0.0f && g_vk.autoExposureRaw.Valid() && g_vk.pass->ExposureAdaptReady();
+
+            if (adapting)
+                Transition(cmdBuffer, g_vk.autoExposureRaw, VK_IMAGE_LAYOUT_GENERAL);
+
             if (g_vk.pass->Dispatch(cmdBuffer, reduce, 1, 1, g_vk.meter.view, VK_NULL_HANDLE, VK_NULL_HANDLE,
-                                    VK_NULL_HANDLE, g_vk.autoExposure.view, VK_NULL_HANDLE,
-                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+                                    VK_NULL_HANDLE, adapting ? g_vk.autoExposureRaw.view : g_vk.autoExposure.view,
+                                    VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
             {
+                if (adapting)
+                {
+                    Transition(cmdBuffer, g_vk.autoExposureRaw, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+                    // g_vk.frames counts NR frames, so one Automatic skipped is a gap; g_vk.reset is the game's cut
+                    // (and a rebuilt feature).
+                    const double now =
+                        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                    const DlssNrExposureAdapt::Step step =
+                        g_vk.autoExposureAdapter.Next(g_vk.frames, now, adaptSeconds, g_vk.reset);
+
+                    // Overlays the first fields (dlssnr_exposure_adapt.hlsl): WhitePoint carries the blend, Width the
+                    // snap.
+                    DlssNrConstants adaptParams {};
+                    adaptParams.Mode = DlssNrMode_AutoExposure;
+                    adaptParams.WhitePoint = step.blend;
+                    adaptParams.Width = step.snap ? 1u : 0u;
+                    adaptParams.Height = 0u;
+
+                    if (g_vk.pass->DispatchExposureAdapt(cmdBuffer, adaptParams, g_vk.autoExposureRaw.view,
+                                                         g_vk.autoExposure.view))
+                        g_vk.autoExposureAdapting = true;
+                    else
+                        g_vk.autoExposureAdapter.Invalidate();
+                }
+
                 Transition(cmdBuffer, g_vk.autoExposure, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 g_vk.autoExposureActive = true;
                 encode.UseExposureWhitePoint = g_vk.followingGame ? 0u : 1u;
@@ -1348,6 +1432,26 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
                     // Back to the layout the encode and resolve bind it in.
                     Transition(cmdBuffer, g_vk.autoExposure, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+                    // The reading before eye adaptation, in the slot's third float, for the log.
+                    g_vk.meterHasRaw[slot] = g_vk.autoExposureAdapting;
+
+                    if (g_vk.autoExposureAdapting)
+                    {
+                        Transition(cmdBuffer, g_vk.autoExposureRaw, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+                        VkBufferImageCopy rawRegion = region;
+                        rawRegion.bufferOffset = 2 * sizeof(float);
+                        vkCmdCopyImageToBuffer(cmdBuffer, g_vk.autoExposureRaw.image,
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_vk.meterReadback[slot], 1,
+                                               &rawRegion);
+
+                        VkBufferMemoryBarrier rawToHost = toHost;
+                        rawToHost.offset = 2 * sizeof(float);
+                        rawToHost.size = sizeof(float);
+                        vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                                             0, nullptr, 1, &rawToHost, 0, nullptr);
+                    }
 
                     // The game's exposure beside Automatic's, for following it (DlssNr_FollowGame.h). The game's image
                     // is read through the same layout guess Game exposure's courier uses, so it is only touched where
@@ -1398,6 +1502,23 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         }
     }
 
+    // "Tune for this scene" (DlssNr_ExposureCalibrate_Vk.inl), after Automatic's meter so its availability is this
+    // frame's: a run's step pins the white point of the encode and resolve (the resolve and the downsample copy the
+    // encode's constants), and the live exposure is not recomputed in the shader, so every source holds still for
+    // the run. While no run is on and the menu is not looking, only a timestamp.
+    const bool calibrationGameExposure = exposure != nullptr &&
+                                         exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW &&
+                                         exposure->Resource.ImageViewInfo.ImageView != VK_NULL_HANDLE;
+    const float calibrationWhitePoint = CalibrationVkBeginFrame(cfg, width, height, linearHdr,
+                                                                g_vk.autoExposureActive, calibrationGameExposure);
+    const bool calibrationPinned = calibrationWhitePoint > 0.0f;
+
+    if (calibrationPinned)
+    {
+        encode.WhitePoint = calibrationWhitePoint;
+        encode.UseExposureWhitePoint = 0u;
+    }
+
     // Read in GENERAL, which is the layout it is actually in.
     //
     // This slot used to take the default and declare SHADER_READ_ONLY_OPTIMAL, which disagreed with
@@ -1414,6 +1535,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Fail("the encode dispatch failed");
         return;
     }
+
+    CalibrationVkCopyInput(cmdBuffer, width, height);
 
     // The model's input: the full proxy, or a downsampled copy of it when the working scale is below
     // the frame. Mirrors the D3D12 path -- the encode always writes a full proxy, and a separate
@@ -1572,8 +1695,16 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     OwnedImage* answer = &g_vk.output;
     OwnedImage* input = modelInput;
     int evaluated = 1;
-    for (unsigned int pass = 0; pass < passes; ++pass)
+
+    // A Tune run measures the first pass alone (see the D3D12 side for why); the later passes sit it out.
+    const unsigned int runPasses = calibrationPinned ? 1u : passes;
+
+    if (runPasses < passes)
+        g_vk.laterPassesNeedReset = true;
+
+    for (unsigned int pass = 0; pass < runPasses; ++pass)
     {
+        const bool passReset = g_vk.reset || (pass > 0 && g_vk.laterPassesNeedReset);
         Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
         const auto tuning = Profiles::PassTuning(cfg, pass);
@@ -1581,17 +1712,20 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             (void*) cmdBuffer, pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass], g_vk.capabilityParams,
             &input->ngx, depth, motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,
             guides.motion.width, guides.motion.height, guides.depth.x, guides.depth.y,
-            guides.motion.x, guides.motion.y, depthInverted ? 1 : 0, g_vk.reset ? 1 : 0, tuning.intensity,
+            guides.motion.x, guides.motion.y, depthInverted ? 1 : 0, passReset ? 1 : 0, tuning.intensity,
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
         if (evaluated != 1)
             break;
-        if (pass + 1 < passes)
+        if (pass + 1 < runPasses)
         {
             input = answer;
             answer = answer == &g_vk.output ? &g_vk.scratch : &g_vk.output;
         }
     }
+
+    if (evaluated == 1 && runPasses > 1)
+        g_vk.laterPassesNeedReset = false;
 
     g_vk.reset = false;
     g_vk.frames++;
@@ -1719,6 +1853,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     if (beforeSr)
         Transition(cmdBuffer, g_vk.preColor, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    CalibrationVkMeasure(cmdBuffer, beforeSr ? g_vk.preColor.view : colour->Resource.ImageViewInfo.ImageView,
+                         beforeSr ? g_vk.preColor.layout : VK_IMAGE_LAYOUT_GENERAL, *modelInput, width, height);
     applied = true;
 
     // Close it, and read the pair from three frames ago -- retired by now, so the read does not wait.
@@ -1812,6 +1949,10 @@ void ShutdownVk(bool deviceAlive)
         g_vk.keep = OwnedImage {};
         g_vk.preColor = OwnedImage {};
         g_vk.meter = OwnedImage {};
+        g_vk.autoExposure = OwnedImage {};
+        g_vk.autoExposureRaw = OwnedImage {};
+        g_vk.autoExposureAdapter.Invalidate();
+        CalibrationVkShutdown(false);
 
         for (int i = 0; i < 4; ++i)
         {
@@ -1837,6 +1978,8 @@ void ShutdownVk(bool deviceAlive)
     // destroyed under it, the same rule as the resize path.
     if (g_vk.device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(g_vk.device);
+
+    CalibrationVkShutdown(true);
 
     if (g_vk.feature != nullptr && g_vk.release != nullptr)
         g_vk.release(g_vk.feature);
@@ -1864,6 +2007,8 @@ void ShutdownVk(bool deviceAlive)
     DestroyImage(g_vk.preColor);
     DestroyImage(g_vk.meter);
     DestroyImage(g_vk.autoExposure);
+    DestroyImage(g_vk.autoExposureRaw);
+    g_vk.autoExposureAdapter.Invalidate();
     DestroyMeterReadback();
 
     g_vk.pass.reset();

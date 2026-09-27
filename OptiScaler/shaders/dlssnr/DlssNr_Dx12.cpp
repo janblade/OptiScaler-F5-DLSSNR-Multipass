@@ -23,6 +23,8 @@
 #include "DlssNr_AutoTrimDefault.h"
 #include "DlssNr_FollowGame.h"
 #include "DlssNr_ExposureCalibrate.h"
+#include "DlssNr_ExposureCalibrate_Run.h"
+#include "DlssNr_ExposureAdapt.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
 
 #include <Config.h>
@@ -35,12 +37,14 @@
 #include "DlssNr_GpuTime.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <algorithm>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
 #include "precompile/dlssnr_finished_color_Shader.h"
 #include "precompile/dlssnr_detail_stats_Shader.h"
+#include "precompile/dlssnr_exposure_adapt_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 #include "../sgsr1/SGSR1_Dx12.h"
 
@@ -339,6 +343,15 @@ struct NrState
     ID3D12Resource* autoExposure = nullptr;
     bool autoExposureReadable = false;
     float autoExposureValue = 0.0f;
+
+    // Eye adaptation (DlssNr_ExposureAdapt.h): the meter's own reading lands in autoExposureRaw (kept in the UAV state
+    // between evaluations) and a one-texel pass eases autoExposure toward it, so autoExposure above is the eased value
+    // and everything downstream reads that. autoExposureRawValue is the reading's readback, for the log.
+    ID3D12Resource* autoExposureRaw = nullptr;
+    float autoExposureRawValue = 0.0f;
+    bool autoExposureAdapting = false;
+    bool autoExposureRawFailed = false;
+    DlssNrExposureAdapt::Adapter autoExposureAdapter;
     float autoExposurePreExposure = 1.0f;
     unsigned long long autoExposureFrames = 0;
 
@@ -387,6 +400,7 @@ struct NrState
     uint32_t meterExposureKind[4] = {};
     float meterExposurePreExposure[4] = {};
     bool meterPairHasGame[4] = {}; // the slot also carries the game's exposure in texel 1
+    bool meterHasRaw[4] = {};      // ... and Automatic's reading before eye adaptation in texel 2
     unsigned int meterSlot = 0;
     unsigned long long meterFrames = 0;
 
@@ -1029,7 +1043,10 @@ void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devic
 //
 // With `withGameExposure`, the courier has just put the game's exposure in the meter's tile (0,0), and it rides in texel 1
 // of the same slot: a pair from one frame, for the follow-game calibration.
-void CopyAutoExposureToReadback(ID3D12GraphicsCommandList* cmdList, float preExposure, bool withGameExposure)
+//
+// With `raw` (in the copy-source state), Automatic's reading before eye adaptation rides in texel 2, for the log.
+void CopyAutoExposureToReadback(ID3D12GraphicsCommandList* cmdList, float preExposure, bool withGameExposure,
+                                ID3D12Resource* raw)
 {
     if (g_nr.autoExposure == nullptr)
         return;
@@ -1065,6 +1082,16 @@ void CopyAutoExposureToReadback(ID3D12GraphicsCommandList* cmdList, float preExp
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     g_nr.meterPairHasGame[slot] = false;
+    g_nr.meterHasRaw[slot] = raw != nullptr;
+
+    if (raw != nullptr)
+    {
+        D3D12_TEXTURE_COPY_LOCATION rawSrc = src;
+        rawSrc.pResource = raw;
+        D3D12_TEXTURE_COPY_LOCATION rawDst = dst;
+        rawDst.PlacedFootprint.Footprint.Width = kDlssNrMeterGrid;
+        cmdList->CopyTextureRegion(&rawDst, 2, 0, 0, &rawSrc, nullptr);
+    }
 
     if (withGameExposure && g_nr.meter != nullptr)
     {
@@ -1280,8 +1307,14 @@ void ReportFrameStats(float whitePoint, uint32_t source)
     std::string autoText = "n/a";
 
     if (source == 3 && g_nr.autoExposureValue > 1e-8f)
-        autoText = std::format("{:.5g} (white point it gives: {:.4g}){}", g_nr.autoExposureValue,
+        autoText = std::format("{:.5g} (white point it gives: {:.4g}){}{}", g_nr.autoExposureValue,
                                g_nr.autoExposurePreExposure / g_nr.autoExposureValue,
+                               g_nr.autoExposureAdapting
+                                   ? std::format(", eye adaptation {:.1f} s, meter reading {:.5g}",
+                                                 DlssNrExposureAdapt::Seconds(
+                                                     Config::Instance()->DlssNrAutoExposureAdaptSeconds.value_or_default()),
+                                                 g_nr.autoExposureRawValue)
+                                   : std::string(),
                                g_nr.followingGame
                                    ? std::format(", following the game's exposure (calibration {:+.2f} EV)",
                                                  DlssNrFollowGame::Instance().OffsetEv())
@@ -1424,7 +1457,7 @@ void ConsumeMeterReadback()
         return;
 
     void* mapped = nullptr;
-    D3D12_RANGE range { 0, 2 * sizeof(float) };
+    D3D12_RANGE range { 0, 3 * sizeof(float) };
 
     if (FAILED(buffer->Map(0, &range, &mapped)) || mapped == nullptr)
         return;
@@ -1446,6 +1479,7 @@ void ConsumeMeterReadback()
     {
         g_nr.autoExposureValue = src[0];
         g_nr.autoExposurePreExposure = g_nr.meterExposurePreExposure[slot];
+        g_nr.autoExposureRawValue = g_nr.meterHasRaw[slot] && std::isfinite(src[2]) ? src[2] : src[0];
 
         DlssNr::ReportAutoExposureDefaults();
 
@@ -1456,8 +1490,13 @@ void ConsumeMeterReadback()
             g_nr.autoPairGameExposure = src[1];
             g_nr.autoPairPreExposure = g_nr.meterExposurePreExposure[slot];
 
+            // Against the meter's own reading of that frame, not eye adaptation's eased value: the pair is one frame.
+            const float autoReading = g_nr.meterHasRaw[slot] && std::isfinite(src[2]) && src[2] > 0.0f
+                                          ? src[2]
+                                          : g_nr.autoExposureValue;
+
             if (DlssNr::FollowGameOn(*Config::Instance()) &&
-                DlssNrFollowGame::Instance().Feed(g_nr.autoExposurePreExposure / g_nr.autoExposureValue,
+                DlssNrFollowGame::Instance().Feed(g_nr.autoExposurePreExposure / autoReading,
                                                   g_nr.autoPairPreExposure / g_nr.autoPairGameExposure))
                 LOG_INFO("DLSS-NR automatic exposure: calibrated against the game's own exposure: {:+.2f} EV "
                          "(Automatic's base white point is {:.3g}x the game's); follows the game's exposure from here "
@@ -1492,6 +1531,8 @@ void InvalidateExposureMeter()
     g_nr.gameExposure = 0.0f;
     g_nr.autoExposureValue = 0.0f;
     g_nr.autoExposurePreExposure = 1.0f;
+    g_nr.autoExposureRawValue = 0.0f;
+    g_nr.autoExposureAdapter.Invalidate();
     g_nr.autoPairGameExposure = 0.0f;
     g_nr.autoPairPreExposure = 1.0f;
 
@@ -2099,6 +2140,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _finishedColorPipelineState->Release();
     if (_detailStatsPipelineState)
         _detailStatsPipelineState->Release();
+    if (_exposureAdaptPipelineState)
+        _exposureAdaptPipelineState->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -2152,6 +2195,58 @@ bool DlssNr_Dx12::DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, cons
 
     // One 8x8 group per tile of the 64x64 grid, whatever the frame size.
     InCmdList->Dispatch(64, 64, 1);
+
+    return true;
+}
+
+bool DlssNr_Dx12::ExposureAdaptReady()
+{
+    if (!_exposureAdaptPipelineState && !_exposureAdaptPipelineFailed && _init)
+    {
+        CreateComputePipeline(_device, &_exposureAdaptPipelineState, dlssnr_exposure_adapt_cso,
+                              sizeof(dlssnr_exposure_adapt_cso), nullptr);
+
+        if (_exposureAdaptPipelineState == nullptr)
+        {
+            _exposureAdaptPipelineFailed = true;
+            LOG_WARN("DLSS-NR: the eye adaptation pass could not be built; Automatic follows every frame at once");
+        }
+    }
+
+    return _init && _exposureAdaptPipelineState != nullptr;
+}
+
+bool DlssNr_Dx12::DispatchExposureAdapt(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
+                                        ID3D12Resource* InReading, ID3D12Resource* OutEased)
+{
+    if (!ExposureAdaptReady() || InCmdList == nullptr || _device == nullptr || InReading == nullptr ||
+        OutEased == nullptr)
+        return false;
+
+    const uint32_t slot = _heapIndex;
+    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+
+    FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
+
+    // The shader reads t0 and writes u0; the rest of the table gets the same resources so nothing is left unbound.
+    for (uint32_t i = 0; i < kSrvCount; ++i)
+        CreateShaderResourceView(_device, InReading, currentHeap.GetSrvCPU(i));
+
+    for (uint32_t i = 0; i < kUavCount; ++i)
+        CreateUnorderedAccessView(_device, OutEased, currentHeap.GetUavCPU(i), 0);
+
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+    {
+        LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
+    InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+    InCmdList->SetComputeRootSignature(_rootSignature);
+    InCmdList->SetPipelineState(_exposureAdaptPipelineState);
+    InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
+    InCmdList->Dispatch(1, 1, 1);
 
     return true;
 }
@@ -2600,6 +2695,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_INFO("DLSS-NR: GPU automatic exposure is available");
         else
             LOG_WARN("DLSS-NR: could not allocate the automatic exposure texture");
+
+        // A new texture holds nothing to ease from.
+        g_nr.autoExposureAdapter.Invalidate();
+    }
+
+    // Tried once per device: a failure is not retried (and logged) every frame.
+    if (g_nr.autoExposureRaw == nullptr && !g_nr.autoExposureRawFailed)
+    {
+        g_nr.autoExposureRaw = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, 1, 1);
+        g_nr.autoExposureRawFailed = g_nr.autoExposureRaw == nullptr;
+
+        if (g_nr.autoExposureRawFailed)
+            LOG_WARN("DLSS-NR: could not allocate the eye adaptation texture; Automatic follows every frame at once");
     }
 
     if (g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr &&
@@ -3001,8 +3109,42 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         autoParams.AutoExposureShadowProtection =
             std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
 
-        DispatchPass(cmdList, autoParams, g_nr.meter, nullptr, nullptr, nullptr, nullptr, g_nr.autoExposure,
-                     nullptr);
+        // Eye adaptation (DlssNr_ExposureAdapt.h): the reading goes to autoExposureRaw and a one-texel pass eases
+        // autoExposure toward it. Without that texture or the pass, the meter writes autoExposure itself, as before;
+        // the evaluations it does so leave a gap the adapter snaps across.
+        const float adaptSeconds =
+            DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptSeconds.value_or_default());
+        const bool adapting = adaptSeconds > 0.0f && g_nr.autoExposureRaw != nullptr && ExposureAdaptReady();
+        g_nr.autoExposureAdapting = adapting;
+
+        DispatchPass(cmdList, autoParams, g_nr.meter, nullptr, nullptr, nullptr, nullptr,
+                     adapting ? g_nr.autoExposureRaw : g_nr.autoExposure, nullptr);
+
+        if (adapting)
+        {
+            Barrier(cmdList, g_nr.autoExposureRaw, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+            // g_frames counts NR evaluations, so one Automatic skipped (another source, finished picture) is a gap;
+            // g_nr.reset is the game's cut (and a new feature). NR off counts none: the elapsed time does it.
+            const double now =
+                std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            const DlssNrExposureAdapt::Step step =
+                g_nr.autoExposureAdapter.Next(g_frames, now, adaptSeconds, g_nr.reset);
+
+            // Overlays the first fields (dlssnr_exposure_adapt.hlsl): WhitePoint carries the blend, Width the snap.
+            DlssNrConstants adaptParams {};
+            adaptParams.Mode = DlssNrMode_AutoExposure;
+            adaptParams.WhitePoint = step.blend;
+            adaptParams.Width = step.snap ? 1u : 0u;
+            adaptParams.Height = 0u;
+
+            if (!DispatchExposureAdapt(cmdList, adaptParams, g_nr.autoExposureRaw, g_nr.autoExposure))
+            {
+                g_nr.autoExposureAdapter.Invalidate();
+                g_nr.autoExposureAdapting = false;
+            }
+        }
 
         Barrier(cmdList, g_nr.meter, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -3031,7 +3173,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             TransitionTarget(priorTargetState);
         }
 
-        CopyAutoExposureToReadback(cmdList, frame.PreExposure, pairGameExposure);
+        // The reading rides home beside the eased value, and autoExposureRaw goes back to the UAV state the meter
+        // writes it in.
+        if (adapting)
+            Barrier(cmdList, g_nr.autoExposureRaw, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        CopyAutoExposureToReadback(cmdList, frame.PreExposure, pairGameExposure,
+                                   adapting ? g_nr.autoExposureRaw : nullptr);
+
+        if (adapting)
+            Barrier(cmdList, g_nr.autoExposureRaw, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         ConsumeMeterReadback();
     }
 
@@ -4594,94 +4747,6 @@ ExposureStatus AutoExposureStatus()
     return s;
 }
 
-ExposureCalibrationStatus ExposureCalibration()
-{
-    namespace Cal = DlssNrExposureCalibrate;
-    std::lock_guard<std::mutex> lock(g_cal.mutex);
-    Cal::Sweep& sweep = g_cal.sweep;
-    const unsigned long long now = GetTickCount64();
-
-    // The menu is looking: availability is worked out on the next evaluations (CalibrationWanted).
-    g_cal.menuPolledMs.store(now, std::memory_order_relaxed);
-
-    // No evaluation for a while: NR is not running. Say so rather than show a button that would wait forever.
-    const unsigned long long last = g_cal.lastEvaluationMs.load(std::memory_order_relaxed);
-    const bool stalled = last == 0 || now - last > kCalStallMs;
-
-    if (stalled)
-    {
-        sweep.Abandon(Cal::Abort::NrOff);
-        g_cal.startRequested = false;
-    }
-
-    const Cal::Blocker blocker = stalled ? Cal::Blocker::NrStopped : g_cal.blocker;
-
-    ExposureCalibrationStatus s {};
-    s.available = blocker == Cal::Blocker::None;
-    s.unavailable = Cal::BlockerText(blocker);
-    s.starting = g_cal.startRequested;
-    s.startError = g_cal.startError;
-    s.running = sweep.Running();
-    s.finished = sweep.Finished();
-    s.progress = sweep.Progress();
-    s.stepEv = Cal::Tidy(sweep.StepEv());
-    s.stepIndex = (unsigned) sweep.StepIndex();
-    s.stepCount = (unsigned) sweep.StepCount();
-    s.aborted = CalibrationStopText(sweep);
-    s.currentEv = Cal::Tidy(sweep.CurrentEv());
-    s.source = g_cal.source;
-
-    if (s.finished)
-    {
-        s.changed = sweep.Changed();
-        s.unsure = sweep.Unsure();
-        s.atEdge = sweep.AtEdge();
-        s.resultEv = Cal::Tidy(sweep.ResultEv());
-        s.bestRawEv = Cal::Tidy(sweep.BestEv(Cal::Detail::Raw));
-        s.bestBandEv = Cal::Tidy(sweep.BestEv(Cal::Detail::BandPass));
-    }
-
-    const auto& steps = sweep.Steps();
-    for (size_t i = 0; i < steps.size(); ++i)
-    {
-        if (steps[i].samples == 0)
-            continue;
-        s.ev.push_back(steps[i].ev);
-        s.scoreRaw.push_back(sweep.Score(i, Cal::Detail::Raw));
-        s.scoreBand.push_back(sweep.Score(i, Cal::Detail::BandPass));
-    }
-
-    return s;
-}
-
-void StartExposureCalibration(uint32_t source)
-{
-    std::lock_guard<std::mutex> lock(g_cal.mutex);
-
-    if (g_cal.sweep.Running())
-        return;
-
-    g_cal.source = source;
-    g_cal.sweep.Clear();
-    g_cal.startError = "";
-    g_cal.startRequested = true;
-    g_cal.active.store(true, std::memory_order_release);
-}
-
-void CancelExposureCalibration()
-{
-    std::lock_guard<std::mutex> lock(g_cal.mutex);
-    g_cal.startRequested = false;
-    g_cal.sweep.Cancel();
-}
-
-void DismissExposureCalibration()
-{
-    std::lock_guard<std::mutex> lock(g_cal.mutex);
-    g_cal.sweep.Clear();
-    g_cal.startError = "";
-}
-
 FollowGameStatus FollowGameExposureStatus()
 {
     FollowGameStatus s {};
@@ -4838,6 +4903,17 @@ void Shutdown()
         g_nr.autoExposure->Release();
         g_nr.autoExposure = nullptr;
     }
+
+    if (g_nr.autoExposureRaw != nullptr)
+    {
+        g_nr.autoExposureRaw->Release();
+        g_nr.autoExposureRaw = nullptr;
+    }
+
+    g_nr.autoExposureRawValue = 0.0f;
+    g_nr.autoExposureAdapting = false;
+    g_nr.autoExposureRawFailed = false;
+    g_nr.autoExposureAdapter.Invalidate();
 
     g_nr.autoExposureReadable = false;
     g_nr.autoExposureValue = 0.0f;

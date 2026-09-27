@@ -2,6 +2,7 @@
 // and no game needed.
 // cl /std:c++20 /EHsc /W4 tests/nr_exposure_calibrate_smoke.cpp
 #include "../OptiScaler/shaders/dlssnr/DlssNr_ExposureCalibrate.h"
+#include "../OptiScaler/shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h"
 
 #include <cmath>
 #include <cstdio>
@@ -705,13 +706,22 @@ int main()
         t = autoOk;
         t.autoRunning = false;
         CHECK(Availability(t) == Blocker::AutoNotRunning);
+        // Follow never blocks: a run tunes against Automatic's own exposure whether Follow is learning, following or
+        // off the mark (RDR2: 3.2 EV).
         t = autoOk;
-        t.followOn = true;
-        CHECK(Availability(t) == Blocker::FollowLearning);
-        t.following = true;
-        CHECK(Availability(t) == Blocker::None);
+        CHECK(!RelearnFollowOnStart(t)); // Follow off, or still learning: nothing to re-learn
+        t.followLocked = true;
         t.followDisagreementEv = -4.3f;
-        CHECK(Availability(t) == Blocker::FollowDisagrees);
+        CHECK(Availability(t) == Blocker::None);
+        // ... and a learned calibration is always learned again, however close it looks (0.9 EV is almost two steps
+        // in the picture after the run), so the tuned Trim holds once Follow is back in force.
+        CHECK(RelearnFollowOnStart(t));
+        t.followDisagreementEv = 0.0f;
+        CHECK(RelearnFollowOnStart(t));
+        t = gameOk; // Game exposure never touches Follow
+        t.followLocked = true;
+        CHECK(Availability(t) == Blocker::None);
+        CHECK(!RelearnFollowOnStart(t));
         t = autoOk;
         t.anchors = true;
         CHECK(Availability(t) == Blocker::Anchors);
@@ -725,10 +735,211 @@ int main()
         t.anchors = true;
         CHECK(Availability(t) == Blocker::Anchors);
         t = gameOk;
-        t.followOn = true; // Follow belongs to Automatic; it does not block Game exposure
+        t.followLocked = true; // Follow belongs to Automatic; it does not block Game exposure
         CHECK(Availability(t) == Blocker::None);
         for (int b = 1; b <= (int) Blocker::NrStopped; ++b)
             CHECK(BlockerText((Blocker) b)[0] != '\0');
+    }
+
+    // The run controller (DlssNr_ExposureCalibrate_Run.h) with a fake GPU: a still scene, every measured evaluation
+    // submitted, readbacks read back only once due, the resources given back only when nothing is in flight.
+    {
+        struct FakeGpu final : Backend
+        {
+            const RunState* run = nullptr;
+            const unsigned long long* now = nullptr; // the evaluation being run
+            unsigned long long submittedAt[kRing] = {};
+            bool held = false;
+            int creates = 0, releases = 0, reduces = 0, early = 0, releasedInFlight = 0;
+
+            bool Held() const override { return held; }
+            bool Create() override
+            {
+                ++creates;
+                held = true;
+                return true;
+            }
+            void Release() override
+            {
+                ++releases;
+                for (bool busy : run->slotBusy)
+                    releasedInFlight += busy ? 1 : 0;
+                held = false;
+            }
+            Stats Reduce(unsigned int slot) override
+            {
+                ++reduces;
+                early += (*now - submittedAt[slot] < kReadDelay) ? 1 : 0;
+                Stats st {};
+                st.detailRaw = st.detailBand = 0.1f;
+                st.inputBand = 0.05f;
+                return st;
+            }
+        };
+
+        Situation ok {};
+        ok.source = 3;
+        ok.hdr = true;
+        ok.autoRunning = true;
+        const StartPoints start { 0.0f, 0.0f };
+        const float base = 1.0f;
+
+        // Drives `evaluations` NR evaluations from `evaluation`, 16 ms apart; `submit` submits every measured one.
+        const auto drive = [&](RunState& run, FakeGpu& gpu, unsigned long long& evaluation, unsigned long long& ms,
+                               int evaluations, bool submit, int& started, int& finished, int& relearns,
+                               const Situation& s) {
+            for (int i = 0; i < evaluations; ++i, ++evaluation, ms += 16)
+            {
+                if (!Wanted(run, ms))
+                {
+                    IdleFrame(run, ms);
+                    continue;
+                }
+                const FrameEvents ev = BeginFrame(run, gpu, start, 2560, 1440, s, base, evaluation, ms);
+                started += ev.started ? 1 : 0;
+                finished += ev.finished ? 1 : 0;
+                relearns += ev.relearnFollow ? 1 : 0;
+                if (ev.started)
+                    CHECK(run.measureWhitePoint > 0.0f);
+                if (Active(run, gpu))
+                    CHECK(run.frameWhitePoint > 0.0f);
+                if (submit && Active(run, gpu) && run.measurePending)
+                {
+                    const unsigned int slot = FreeSlot(run);
+                    CHECK(slot < kRing);
+                    if (slot < kRing)
+                    {
+                        gpu.submittedAt[slot] = evaluation;
+                        Submitted(run, slot, evaluation);
+                    }
+                }
+            }
+        };
+
+        // A whole run, submitted: it starts once, finishes once with a result, reads nothing early, releases once and
+        // only with nothing in flight, then goes quiet (no pin, not wanted).
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+
+            CHECK(!Wanted(run, ms));
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            CHECK(Wanted(run, ms));
+            drive(run, gpu, evaluation, ms, 400, true, started, finished, relearns, ok);
+            CHECK(started == 1 && finished == 1 && relearns == 0);
+            CHECK(run.sweep.Finished() && run.sweep.AbortReason() == Abort::None);
+            CHECK(gpu.creates == 1 && gpu.releases == 1);
+            CHECK(gpu.early == 0 && gpu.reduces > 0);
+            CHECK(gpu.releasedInFlight == 0);
+            CHECK(!gpu.held && !run.active.load());
+            CHECK(run.frameWhitePoint == 0.0f && !Active(run, gpu));
+            CHECK(!ResultLines(run.sweep).empty());
+            CHECK(!Wanted(run, ms + kMenuMs)); // the menu stopped looking a while ago
+        }
+
+        // Nothing ever submitted (another NR path ran): every ticket comes back empty, the run ends as NothingMeasured
+        // rather than waiting forever, and the resources are given back.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 400, false, started, finished, relearns, ok);
+            CHECK(finished == 1 && run.sweep.AbortReason() == Abort::NothingMeasured);
+            CHECK(gpu.reduces == 0 && !gpu.held && !run.active.load());
+        }
+
+        // A start that cannot happen: the reason for the menu, no resources, not active.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            Situation blocked = ok;
+            blocked.anchors = true;
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 3, true, started, finished, relearns, blocked);
+            CHECK(started == 0 && gpu.creates == 0 && std::string(run.startError).size() > 0);
+            CHECK(!run.active.load());
+        }
+
+        // Follow locked on Automatic: the start asks for it to be learned again, once.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            Situation follow = ok;
+            follow.followLocked = true;
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 20, true, started, finished, relearns, follow);
+            CHECK(started == 1 && relearns == 1);
+        }
+
+        // NR stops mid-run (no evaluation for longer than kStallMs): abandoned on the next evaluation, and the menu
+        // meanwhile says NR is not running.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 40, true, started, finished, relearns, ok);
+            CHECK(run.sweep.Running());
+            ms += kStallMs + 1;
+            {
+                std::lock_guard<std::mutex> lock(run.mutex);
+                CHECK(PollLocked(run, ms) == Blocker::NrStopped);
+            }
+            CHECK(!run.sweep.Running() && run.sweep.AbortReason() == Abort::NrOff);
+            drive(run, gpu, evaluation, ms, 40, true, started, finished, relearns, ok);
+            CHECK(gpu.releasedInFlight == 0 && !gpu.held);
+            {
+                std::lock_guard<std::mutex> lock(run.mutex);
+                CHECK(PollLocked(run, ms) == Blocker::None); // running again, nothing in the way
+            }
+        }
+
+        // Cancel mid-run, and Shutdown: slots cleared, resources given back, no pin.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 60, true, started, finished, relearns, ok);
+            RequestCancel(run);
+            drive(run, gpu, evaluation, ms, 40, true, started, finished, relearns, ok);
+            CHECK(run.sweep.AbortReason() == Abort::Cancelled && finished == 1);
+            CHECK(gpu.releasedInFlight == 0 && !gpu.held && !run.active.load());
+
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 60, true, started, finished, relearns, ok);
+            CHECK(gpu.held);
+            Shutdown(run, gpu);
+            CHECK(!gpu.held && !run.active.load() && run.frameWhitePoint == 0.0f && FreeSlot(run) == 0);
+        }
     }
 
     // Abandoned from outside, then cleared; Clear does nothing to a running sweep.

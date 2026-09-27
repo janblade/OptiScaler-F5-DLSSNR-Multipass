@@ -14,6 +14,7 @@
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate.h>
+#include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
 #include "DlssNr_GameDefaults.h"
 
 #include <string>
@@ -93,14 +94,11 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
 
 // "Tune for this scene" (shaders/dlssnr/DlssNr_ExposureCalibrate.h), under a brightness slider: sweeps it over the scene
 // on screen and offers the step where the model's output had the most detail without flicker or clipping. Indented under
-// the slider it sets, a SmallButton like the other actions here. D3D12 only. `source` is the panel's white point source
+// the slider it sets, a SmallButton like the other actions here. D3D12 and Vulkan. `source` is the panel's white point source
 // (3 Automatic, 1 Game exposure), `trim` / `neutral` its slider. Named apart from Follow-game's "Re-learn", which is a
 // different calibration.
 static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral)
 {
-    if (DlssNr::IsRunningVk())
-        return;
-
     const auto cal = DlssNr::ExposureCalibration();
     // A result belongs to the panel it was tuned in: its EVs are in that slider's units.
     const bool mine = cal.source == source;
@@ -198,7 +196,8 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                    "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
                    "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
                    "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
-                   "\nholds for any number of passes.");
+                   "\nholds for any number of passes. With Follow the game's exposure on, it tunes against Automatic's"
+                   "\nown exposure and learns Follow again during the run, so the result holds once Follow takes over.");
 
         if (!cal.available && !cal.unavailable.empty())
             ImGui::TextDisabled("Not available: %s", cal.unavailable.c_str());
@@ -1063,6 +1062,19 @@ void RenderMenu(Config* config, float menuResScale)
             HelpMarker("Stops the sky, lamps and reflections from darkening the rest of the picture."
                        "\n0% averages the whole frame as it is; 100% counts bright areas the least."
                        "\nBlack bars and black borders are always left out.");
+
+            // DlssNr_ExposureAdapt.h: a pass of its own on D3D12 and Vulkan.
+            float adapt = DlssNrExposureAdapt::Seconds(config->DlssNrAutoExposureAdaptSeconds.value_or_default());
+
+            if (ImGui::SliderFloat("Eye adaptation", &adapt, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
+                                   adapt > 0.0f ? "%.2f s" : "off"))
+                config->DlssNrAutoExposureAdaptSeconds = DlssNrExposureAdapt::Seconds(adapt);
+
+            HelpMarker("How quickly Automatic follows a change in the scene's brightness, like an eye adapting."
+                       "\nStops a camera zoom or a brief shot of a dark crowd or a bright floor from pumping"
+                       "\nthe brightness and tone of the picture. A cut the game announces is followed at once."
+                       "\nAbout two thirds of a change is followed after this long. Off follows every frame at once."
+                       "\nNot used while following the game's exposure: the game's own adapts.");
         }
         else
         {

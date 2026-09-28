@@ -193,6 +193,21 @@ void CurrentModelSize(unsigned int& width, unsigned int& height);
 // The white point the exposure meter has settled on, or 0 if it has not taken a reading yet. For the
 // overlay, so the number in use is visible rather than inferred.
 
+// Reuse detail between frames (DlssNrDetailReuse.h): frames that ran the model, frames that reused the last one's detail, and frames
+// that would have reused but had to run the model (reset, settings change, gap). `why` is empty while it is available
+// on this route, else the reason it is not. lightMs / heavyMs: the cheapest and dearest NR GPU time over the last 16
+// measured frames (0 before any), which shows how unevenly full and reused frames cost -- what frame pacing sees.
+// averageMs: their mean, the real per-frame cost while full and reused frames alternate (a single reading is one or
+// the other). active: reuse ran on the last NR frame (and the bottleneck reuse was then off).
+struct DetailReuseInfo
+{
+    unsigned long long full = 0, reused = 0, fallback = 0;
+    std::string why;
+    double lightMs = 0.0, heavyMs = 0.0, averageMs = 0.0;
+    bool active = false;
+};
+DetailReuseInfo DetailReuseStatus();
+
 // What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
 std::optional<double> LastGpuTime();
 

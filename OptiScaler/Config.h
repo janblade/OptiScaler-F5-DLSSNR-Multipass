@@ -270,6 +270,19 @@ class Config
     CustomOptional<uint32_t> DlssNrPrecision { 0 }; // 0 NVIDIA FP8 (default), 4 Experimental NVFP4 hybrid
     CustomOptional<uint32_t> DlssNrVitEvery { 2 };  // NVIDIA model: compute the ViT bottleneck every N-th frame (1 = always; 2 = every other frame, default), reuse it in between
     CustomOptional<uint32_t> DlssNrVitEveryPlain { 2 }; // the same for the plain fp16 kernel set (used by some modified DLSS-NR DLLs); VitEvery is the fp8 set
+    // Reuse detail between frames (dlssnr/DlssNrDetailReuse.h, shaders/dlssnr/DlssNr_DetailReuse.inl): run the model
+    // every other frame and move the last frame's detail onto the new input in between. D3D12, NR after SR only, and
+    // off while frame generation is on. Experimental, off by default.
+    CustomOptional<bool> DlssNrDetailReuse { false };
+    CustomOptional<bool> DlssNrDetailReuseDebug { false }; // paint where the moved detail was dropped (magenta)
+    // Full frames: how far the model's new detail is pulled toward the moved previous detail (0..1), so full and
+    // reused frames differ less. 0 = off.
+    CustomOptional<float> DlssNrDetailReuseSteady { 0.0f };
+    // Reused frames: where the moved detail was dropped, how much of the trusted detail of neighbours on the same
+    // surface goes in instead (0..1). Stops dropped areas flashing to the un-NR'd image with several passes.
+    CustomOptional<float> DlssNrDetailReuseFill { 1.0f };
+    // Keep reusing detail while frame generation is on, for A/B testing. Off by default: it can flicker there.
+    CustomOptional<bool> DlssNrDetailReuseWithFg { false };
     CustomOptional<bool> DlssNrResidualFgApproxCamera { false };
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.

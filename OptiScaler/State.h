@@ -266,6 +266,12 @@ class State
     bool dlssgGameDMFGSupported = false;
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
+    // Present counter (frameCount) at the last DLSS-G evaluate seen through NGX, so a count left over after the game
+    // released its frame generation can be told from a live one.
+    uint64_t dlssgLastEvaluateFrame = 0;
+    // That evaluate generated frames: its DLSSG.MultiFrameCount was above zero, or it had none (builds without multi
+    // frame generation leave it out).
+    bool dlssgLastEvaluateGenerates = false;
 
     // DLSS
     bool dlssPresetsOverriddenExternally = false;

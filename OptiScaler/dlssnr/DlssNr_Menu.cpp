@@ -592,7 +592,16 @@ void RenderMenu(Config* config, float menuResScale)
             const char* runSuffix =
                 !config->DlssNrApplyModel.value_or_default() ? "  (model running, edit hidden)" : "";
 
-            if (ms.has_value())
+            // With Reuse detail between frames, full and reused frames alternate, so one reading is either the heavy or
+            // the light one; the average over the recent frames is the real per-frame cost.
+            const auto detailReuse = vulkan || !config->DlssNrDetailReuse.value_or_default()
+                                           ? DlssNr::DetailReuseInfo {}
+                                           : DlssNr::DetailReuseStatus();
+            if (detailReuse.active && detailReuse.averageMs > 0.0)
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                   "Running - %.2f ms elapsed per frame on average (%.2f to %.2f)%s",
+                                   detailReuse.averageMs, detailReuse.lightMs, detailReuse.heavyMs, runSuffix);
+            else if (ms.has_value())
                 ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running%s - %.2f ms elapsed%s",
                                    vulkan ? " natively on Vulkan" : "", ms.value(), runSuffix);
             else if (vulkan)
@@ -1412,8 +1421,63 @@ void RenderMenu(Config* config, float menuResScale)
             config->DlssNrVitEveryPlain = vitReusePlain ? 2u : 1u;
         HelpMarker("The same as above, used when the model runs the plain FP16 kernels (used by some modified DLSS-NR DLLs).\nOn by default.");
         ImGui::Text("Kernel set in use: %s", kernelSet);
-        if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
+        bool detailReuse = config->DlssNrDetailReuse.value_or_default();
+        const bool detailReuseRunning = detailReuse && !DlssNr::IsRunningVk() && DlssNr::DetailReuseStatus().active;
+        if (detailReuseRunning)
+            ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
+        else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
             ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
+        if (ImGui::Checkbox("Reuse detail between frames (experimental)", &detailReuse))
+            config->DlssNrDetailReuse = detailReuse;
+        HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
+                   "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
+                   "any pass count. Detail can pop where objects move and reveal new areas.\n"
+                   "D3D12 with NR after SR only. Reuse bottleneck is off while this runs.\n"
+                   "Turns itself off while frame generation is on (unless Keep on with frame generation is set): "
+                   "generated frames are built from real ones, and alternating full and reused frames can flicker "
+                   "under it.");
+        if (detailReuse)
+        {
+            bool detailReuseDebug = config->DlssNrDetailReuseDebug.value_or_default();
+            if (ImGui::Checkbox("Show dropped detail", &detailReuseDebug))
+                config->DlssNrDetailReuseDebug = detailReuseDebug;
+            HelpMarker("On reused frames, paints magenta where the moved detail was dropped and cyan where Fill "
+                       "replaced it.\nFor testing.");
+            float fill = config->DlssNrDetailReuseFill.value_or_default();
+            if (ImGui::SliderFloat("Fill dropped detail", &fill, 0.0f, 1.0f, "%.2f"))
+                config->DlssNrDetailReuseFill = std::clamp(fill, 0.0f, 1.0f);
+            HelpMarker("Where the moved detail had to be dropped (a body uncovered the background), fills in the NR "
+                       "detail of nearby pixels on the same surface instead of showing the frame without NR there.\n"
+                       "Matters most with several passes. With Show dropped detail on, filled areas are cyan.");
+            float steady = config->DlssNrDetailReuseSteady.value_or_default();
+            if (ImGui::SliderFloat("Steady full frames", &steady, 0.0f, 1.0f, "%.2f"))
+                config->DlssNrDetailReuseSteady = std::clamp(steady, 0.0f, 1.0f);
+            HelpMarker("Pulls the model's new detail on full frames toward the detail moved from the frame before, where "
+                       "that is trusted, so full and reused frames differ less and detail pumps less.\n"
+                       "Adds a little lag to detail on motion. 0 = off.");
+            bool withFg = config->DlssNrDetailReuseWithFg.value_or_default();
+            if (ImGui::Checkbox("Keep on with frame generation", &withFg))
+                config->DlssNrDetailReuseWithFg = withFg;
+            HelpMarker("Keeps reusing detail while frame generation is on, to compare with it off.\n"
+                       "Can flicker: generated frames are built from pairs of full and reused frames.");
+            const auto status = DlssNr::DetailReuseStatus();
+            if (DlssNr::IsRunningVk())
+                ImGui::TextDisabled("Reuse detail: D3D12 only");
+            else if (!status.why.empty())
+                ImGui::TextDisabled("Reuse detail: %s", status.why.c_str());
+            else
+            {
+                ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu", status.full, status.reused,
+                            status.fallback);
+                if (status.heavyMs > 0.0)
+                {
+                    ImGui::Text("NR GPU time per frame: %.2f ms on average, %.2f to %.2f ms", status.averageMs,
+                                status.lightMs, status.heavyMs);
+                    HelpMarker("Full and reused frames cost differently, so the game's frame times alternate. If "
+                               "motion judders, a frame limiter just below the average frame rate evens them out.");
+                }
+            }
+        }
         if (precisionChoice > 0)
         {
             ImGui::TextUnformatted(enabled && DlssNrNative::IsActive() ? "Hybrid: active" : "Hybrid: inactive");

@@ -25,6 +25,7 @@
 #include "DlssNr_ExposureCalibrate.h"
 #include "DlssNr_ExposureCalibrate_Run.h"
 #include "DlssNr_ExposureAdapt.h"
+#include "DlssNr_FinishedReady.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
 
 #include <Config.h>

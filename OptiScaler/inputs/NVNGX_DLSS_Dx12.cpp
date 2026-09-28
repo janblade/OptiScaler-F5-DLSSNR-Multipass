@@ -1174,6 +1174,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         int frameCount = 0;
         InParameters->Get("DLSSG.MultiFrameCount", &frameCount);
         State::Instance().dlssgDetectedInterpolationCount = frameCount;
+        State::Instance().dlssgLastEvaluateFrame = State::Instance().frameCount;
         ReflexHooks::setDlssgFrameCount(frameCount);
 
         float dlssgCameraNear = 0.0f;

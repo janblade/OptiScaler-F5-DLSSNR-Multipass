@@ -52,9 +52,9 @@ bool PausedForGameFrameGeneration()
     auto& state = State::Instance();
     auto* fg = state.currentFG;
     return GameFrameGenerationOn(fg && fg->IsActive() && !fg->IsPaused(),
-                                 state.activeFgOutput == FGOutput::DLSSG && state.activeFgInput != FGInput::DLSSG,
+                                 state.activeFgInput == FGInput::DLSSG, state.activeFgOutput == FGOutput::DLSSG,
                                  state.dlssgLastSetMode != sl::DLSSGMode::eOff,
-                                 state.dlssgDetectedInterpolationCount);
+                                 PresentsSince(state.frameCount, state.dlssgLastEvaluateFrame));
 }
 
 void Cancel()
@@ -107,6 +107,7 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
         if (!slot.pending && Finished(slot)) { next = &slot; break; }
     if (!next)
     {
+        Cancel(); // this frame gets no capture: an older pending one must not be composed onto its picture
         Say("Waiting for the previous picture to finish.");
         return nullptr;
     }
@@ -234,9 +235,8 @@ bool WaitForFinishedPicture()
     Late::Cancel();
     for (auto& slot : Late::slots)
     {
-        // Only a composed slot (done == ready + 1, signalled on the present queue) touched the back buffer.
         // A capture-only slot signals on the producer queue, which may itself wait on a present.
-        if (!slot.submitted || slot.done == slot.ready || Late::Finished(slot)) continue;
+        if (!slot.submitted || !TouchedBackBuffer(slot.ready, slot.done) || Late::Finished(slot)) continue;
         HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event) return false;
         const auto hr = slot.fence->SetEventOnCompletion(slot.done, event);
@@ -297,6 +297,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     if (Late::PausedForGameFrameGeneration())
     {
         Late::Cancel();
+        Late::stillRendering = 0;
         Late::Say(Late::pausedForGameFg);
         return;
     }

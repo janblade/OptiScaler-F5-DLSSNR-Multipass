@@ -72,14 +72,27 @@ int main() try
     FinishedInput removed[1] { { true, 6, true, UINT64_MAX, 6 } };
     Expect(DlssNr::PickFinishedInput(removed, 1, index) == FinishedPick::NotReady, "Composed after device removal");
 
-    // Finished picture pauses only for the game's own DLSS-G.
-    Expect(DlssNr::GameFrameGenerationOn(false, false, true, 0), "Missed the game's DLSS-G mode");
-    Expect(DlssNr::GameFrameGenerationOn(false, false, false, 5), "Missed DLSS-G evaluates without a mode call");
-    Expect(!DlssNr::GameFrameGenerationOn(false, false, false, 0), "Paused with DLSS-G off");
-    Expect(!DlssNr::GameFrameGenerationOn(true, false, true, 5), "Paused OptiScaler's own FG path");
-    Expect(!DlssNr::GameFrameGenerationOn(false, true, true, 0), "Paused while OptiScaler keeps the game's DLSS-G off");
+    // Finished picture pauses only for the game's own DLSS-G, and only while it is running.
+    const uint64_t never = UINT64_MAX;
+    Expect(DlssNr::GameFrameGenerationOn(false, false, false, true, never), "Missed the game's DLSS-G mode");
+    Expect(DlssNr::GameFrameGenerationOn(false, false, false, false, 3), "Missed recent DLSS-G evaluates without a mode call");
+    Expect(!DlssNr::GameFrameGenerationOn(false, false, false, false, never), "Paused with DLSS-G off");
+    Expect(!DlssNr::GameFrameGenerationOn(false, false, false, false, DlssNr::DlssgEvaluateWindow + 1),
+           "Stayed paused on a DLSS-G evaluate long gone");
+    Expect(!DlssNr::GameFrameGenerationOn(true, false, false, true, 0), "Paused OptiScaler's own FG path");
+    // OptiScaler FG off or paused, but it owns DLSS-G's inputs or output: the game's DLSS-G never loaded.
+    Expect(!DlssNr::GameFrameGenerationOn(false, true, false, true, 0), "Paused with OptiScaler FG on DLSS-G inputs");
+    Expect(!DlssNr::GameFrameGenerationOn(false, false, true, true, 0), "Paused with OptiScaler FG outputting DLSS-G");
+    Expect(DlssNr::PresentsSince(10, never) == never && DlssNr::PresentsSince(10, 12) == never &&
+               DlssNr::PresentsSince(10, 7) == 3,
+           "Presents-since arithmetic");
+
+    // ResizeBuffers waits only for work that touched the back buffer (a compose), never for a guide copy.
+    Expect(!DlssNr::TouchedBackBuffer(5, 5), "Waited for a capture-only slot");
+    Expect(DlssNr::TouchedBackBuffer(5, 6), "Skipped a composed slot");
+    Expect(!DlssNr::TouchedBackBuffer(5, 4), "Waited for a discarded recording");
     puts("PASS finished-picture queue readiness: presentation dependency, same-queue order, completed input, device "
-         "removal, newest-slot pick, game DLSS-G pause");
+         "removal, newest-slot pick, game DLSS-G pause, resize wait");
     return 0;
 }
 catch (const std::exception& e) { puts(e.what()); return 1; }

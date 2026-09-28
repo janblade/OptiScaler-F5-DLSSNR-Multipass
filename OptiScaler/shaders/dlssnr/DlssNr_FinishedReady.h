@@ -45,13 +45,29 @@ inline FinishedPick PickFinishedInput(const FinishedInput* inputs, size_t count,
                                                                                        : FinishedPick::NotReady;
 }
 
+// Presents from `then` to `now`; UINT64_MAX when `then` never happened (UINT64_MAX) or lies ahead.
+inline uint64_t PresentsSince(uint64_t now, uint64_t then)
+{
+    return then == UINT64_MAX || then > now ? UINT64_MAX : now - then;
+}
+
+// A DLSS-G evaluate this many presents ago still counts as running: each real frame is followed by at most
+// a handful of generated presents.
+inline constexpr uint64_t DlssgEvaluateWindow = 16;
+
 // The game's own Streamline DLSS-G. The swapchain NR composes on sits below Streamline, so its presents
 // arrive after interpolation and most are generated frames: there is no single finished picture.
-// `optiReplacesGameDlssg`: OptiScaler outputs DLSS-G itself and keeps the game's DLSS-G off.
-// `gameModeOn`: the last slDLSSGSetOptions left DLSS-G on. `interpolations`: DLSS-G evaluates seen.
-inline bool GameFrameGenerationOn(bool optiFgActive, bool optiReplacesGameDlssg, bool gameModeOn,
-                                  int interpolations)
+// `fgInputDlssg` / `fgOutputDlssg`: OptiScaler's FG takes DLSS-G's inputs / outputs DLSS-G itself; either
+// keeps the game's DLSS-G from loading (hkslInit). `gameModeOn`: the last slDLSSGSetOptions left DLSS-G on.
+// `presentsSinceEvaluate`: presents since the last DLSS-G evaluate seen (a stale count must not pause NR).
+inline bool GameFrameGenerationOn(bool optiFgActive, bool fgInputDlssg, bool fgOutputDlssg, bool gameModeOn,
+                                  uint64_t presentsSinceEvaluate)
 {
-    return !optiFgActive && !optiReplacesGameDlssg && (gameModeOn || interpolations > 0);
+    return !optiFgActive && !fgInputDlssg && !fgOutputDlssg &&
+           (gameModeOn || presentsSinceEvaluate <= DlssgEvaluateWindow);
 }
+
+// Whether a slot's last GPU work touched the back buffer. Arm leaves done == ready (guide copy, signalled
+// on the producer queue); a compose signals ready + 1 on the present queue; a discarded recording ready - 1.
+inline bool TouchedBackBuffer(uint64_t ready, uint64_t done) { return done > ready; }
 } // namespace DlssNr

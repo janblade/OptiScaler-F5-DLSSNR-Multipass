@@ -266,6 +266,7 @@ class State
     bool dlssgGameDMFGSupported = false;
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
+    UINT64 dlssgLastEvaluateFrame = UINT64_MAX; // frameCount at the last DLSS-G evaluate passed through
 
     // DLSS
     bool dlssPresetsOverriddenExternally = false;

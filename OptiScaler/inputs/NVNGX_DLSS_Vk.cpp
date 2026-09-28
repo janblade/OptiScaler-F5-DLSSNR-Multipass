@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <dlssnr/DlssNrFeature_Vk.h>
 #include <dlssnr/DlssNr_VkExtensions.h>
+#include "NgxFeatureRegistry.h"
 #include "Util.h"
 #include "Config.h"
 #include "resource.h"
@@ -26,6 +27,8 @@ PFN_vkGetInstanceProcAddr vkGIPA;
 PFN_vkGetDeviceProcAddr vkGDPA;
 
 static ankerl::unordered_dense::map<unsigned int, ContextData<IFeature_Vk>> VkContexts;
+// Feature id per forwarded handle, so the game's DLSS-G evaluate is known for what it is (as HandleToFeature on D3D12).
+static NgxFeatureRegistry VkHandleToFeature;
 static int evalCounter = 0;
 static bool shutdown = false;
 static bool _skipInit = false;
@@ -834,6 +837,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_CreateFeature1(VkDevice InDevice
             auto result =
                 NVNGXProxy::VULKAN_CreateFeature1()(InDevice, InCmdList, InFeatureID, InParameters, OutHandle);
             LOG_INFO("VULKAN_CreateFeature1 result for ({0}): {1:X}", (int) InFeatureID, (UINT) result);
+            if (result == NVSDK_NGX_Result_Success && OutHandle != nullptr && *OutHandle != nullptr)
+                VkHandleToFeature.Record((*OutHandle)->Id, InFeatureID);
             return result;
         }
         else
@@ -928,6 +933,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_CreateFeature(VkCommandBuffer In
         {
             auto result = NVNGXProxy::VULKAN_CreateFeature()(InCmdBuffer, InFeatureID, InParameters, OutHandle);
             LOG_INFO("VULKAN_CreateFeature result for ({0}): {1:X}", (int) InFeatureID, (UINT) result);
+            if (result == NVSDK_NGX_Result_Success && OutHandle != nullptr && *OutHandle != nullptr)
+                VkHandleToFeature.Record((*OutHandle)->Id, InFeatureID);
             return result;
         }
     }
@@ -943,6 +950,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_ReleaseFeature(NVSDK_NGX_Handle*
     auto handleId = InHandle->Id;
     if (handleId < DLSS_MOD_ID_OFFSET)
     {
+        VkHandleToFeature.Forget(handleId);
+
         if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
         {
             auto result = NVNGXProxy::VULKAN_ReleaseFeature()(InHandle);
@@ -1019,6 +1028,20 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
         state.currentInputApiName = targetApiName;
 
     state.setInputApiName.reset();
+
+    // The game's DLSS-G, for detail reuse's frame generation gate (dlssnr/DlssNrDetailReuseHost.h): a forwarded handle
+    // created as frame generation, or OptiScaler's own DLSS-G provider. Stamped on the Vulkan clock, apart from the
+    // D3D12 stamp.
+    if (handleId >= NVNGX_PROVIDER_ID_OFFSET ||
+        (handleId < DLSS_MOD_ID_OFFSET &&
+         VkHandleToFeature.Read(handleId).feature == NVSDK_NGX_Feature_FrameGeneration))
+    {
+        int frameCount = 0;
+        const bool countGiven = InParameters != nullptr &&
+                                InParameters->Get("DLSSG.MultiFrameCount", &frameCount) == NVSDK_NGX_Result_Success;
+        state.dlssgLastEvaluateGeneratesVk = !countGiven || frameCount > 0;
+        state.dlssgLastEvaluateFrameVk = DlssNr::VkFrameClock();
+    }
 
     if (handleId < DLSS_MOD_ID_OFFSET)
     {

@@ -9,6 +9,7 @@
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/ResidualFg.h>
 #include <dlssnr/DlssNrDetailReuse.h>
+#include <dlssnr/DlssNrDetailReuseHost.h>
 #include <DirectXMath.h>
 
 

@@ -197,6 +197,9 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     // The game's own feature flag switched on for the create call, put back once it returns: the chain is the game's
     // memory and it may read it later as its own choice.
     VkBool32* nrBorrowedFlag = nullptr;
+    VkBool32* nrBorrowedWriteFlag = nullptr; // the same for shaderStorageImageWriteWithoutFormat
+    VkPhysicalDeviceFeatures nrCoreFeatures {};
+    bool nrWritesWithoutFormat = false;
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
     {
@@ -387,6 +390,63 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
                 LOG_INFO("DLSS-NR Vulkan: bufferDeviceAddress feature {}", what);
             }
+
+            // Detail reuse's shader writes storage images declared without a format (DlssNrDetailReuse_Vk.h), which
+            // needs shaderStorageImageWriteWithoutFormat. The core features come either as pEnabledFeatures (a copy
+            // of the game's is handed on instead) or as a VkPhysicalDeviceFeatures2 in the chain (the flag is set
+            // for the call and put back after), never both.
+            {
+                VkPhysicalDeviceFeatures2 query {};
+                query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+
+                if (o_vkGetPhysicalDeviceFeatures2)
+                    o_vkGetPhysicalDeviceFeatures2(physicalDevice, &query);
+
+                const char* what = "not offered by the device";
+
+                if (query.features.shaderStorageImageWriteWithoutFormat)
+                {
+                    VkBool32* chained = nullptr;
+
+                    for (auto* node = (VkBaseOutStructure*) localCreteInfo.pNext; node != nullptr; node = node->pNext)
+                    {
+                        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
+                        {
+                            chained = &((VkPhysicalDeviceFeatures2*) node)->features.shaderStorageImageWriteWithoutFormat;
+                            break;
+                        }
+                    }
+
+                    if (chained != nullptr)
+                    {
+                        if (*chained)
+                            what = "already on (the game's own)";
+                        else if (!DlssNr::VkExt::IsWritable(chained))
+                            what = "left off: the game's feature struct is read-only";
+                        else
+                        {
+                            *chained = VK_TRUE;
+                            nrBorrowedWriteFlag = chained;
+                            what = "switched on in the game's feature struct for the create call";
+                        }
+
+                        nrWritesWithoutFormat = *chained != VK_FALSE;
+                    }
+                    else
+                    {
+                        if (localCreteInfo.pEnabledFeatures != nullptr)
+                            nrCoreFeatures = *localCreteInfo.pEnabledFeatures;
+
+                        what = nrCoreFeatures.shaderStorageImageWriteWithoutFormat ? "already on (the game's own)"
+                                                                                    : "switched on here";
+                        nrCoreFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+                        localCreteInfo.pEnabledFeatures = &nrCoreFeatures;
+                        nrWritesWithoutFormat = true;
+                    }
+                }
+
+                LOG_INFO("DLSS-NR Vulkan: shaderStorageImageWriteWithoutFormat {}", what);
+            }
         }
     }
 
@@ -394,6 +454,12 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     if (nrBorrowedFlag != nullptr)
         *nrBorrowedFlag = VK_FALSE;
+
+    if (nrBorrowedWriteFlag != nullptr)
+        *nrBorrowedWriteFlag = VK_FALSE;
+
+    if (result == VK_SUCCESS && pDevice != nullptr)
+        DlssNr::VkExt::NoteDevice(*pDevice, nrWritesWithoutFormat);
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
         LOG_INFO("DLSS-NR Vulkan: vkCreateDevice returned {} with {} extensions requested", (int) result,
@@ -461,6 +527,8 @@ VALIDATE_HOOK(hkvkQueuePresentKHR, PFN_vkQueuePresentKHR)
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
     LOG_FUNC();
+
+    State::Instance().vulkanPresentCount.fetch_add(1, std::memory_order_relaxed);
 
     // get upscaler time
     UpscalerTimeVk::ReadUpscalingTime(_device);
@@ -585,6 +653,9 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
     // compare when NR never ran on it.
     if (device != VK_NULL_HANDLE)
         DlssNr::ShutdownVkForDevice(device, "the game is destroying the device NR runs on");
+
+    if (device != VK_NULL_HANDLE)
+        DlssNr::VkExt::ForgetDevice(device);
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);

@@ -341,6 +341,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="hooks\DxgiSwapchainSizing.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_DeferredSr.inl" />
     <ClInclude Include="shaders\dlssnr\DlssNr_DetailReuse.inl" />
+    <ClInclude Include="dlssnr\DlssNrDetailReuseHost.h" />
+    <ClInclude Include="dlssnr\DlssNr_DetailReuse_Vk.inl" />
     <ClInclude Include="dlssnr\ResidualFg.h" />
     <ClInclude Include="hooks\DxgiFactory_WrappedCalls.h" />
     <ClInclude Include="hooks\Dxgi_Hooks.h" />
@@ -434,6 +436,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\output_scaling\precompile\bcus_Shader_Vk.h" />
     <ClInclude Include="shaders\rcas\RCAS_Vk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_Vk.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNrDetailReuse_Vk.h" />
+    <ClInclude Include="shaders\dlssnr\precompile\dlssnr_detail_reuse_Shader_Vk.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
@@ -852,6 +856,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_ExposureCalibrate.cpp" />
     <ClInclude Include="shaders\dlssnr\DlssNr_ActiveColor.h" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
+    <ClCompile Include="shaders\dlssnr\DlssNrDetailReuse_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />

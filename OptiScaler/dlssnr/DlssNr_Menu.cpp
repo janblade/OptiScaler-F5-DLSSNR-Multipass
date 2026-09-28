@@ -594,9 +594,9 @@ void RenderMenu(Config* config, float menuResScale)
 
             // With Reuse detail between frames, full and reused frames alternate, so one reading is either the heavy or
             // the light one; the average over the recent frames is the real per-frame cost.
-            const auto detailReuse = vulkan || !config->DlssNrDetailReuse.value_or_default()
-                                           ? DlssNr::DetailReuseInfo {}
-                                           : DlssNr::DetailReuseStatus();
+            const auto detailReuse = !config->DlssNrDetailReuse.value_or_default() ? DlssNr::DetailReuseInfo {}
+                                     : vulkan                                     ? DlssNr::DetailReuseStatusVk()
+                                                                                  : DlssNr::DetailReuseStatus();
             if (detailReuse.active && detailReuse.averageMs > 0.0)
                 ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
                                    "Running - %.2f ms elapsed per frame on average (%.2f to %.2f)%s",
@@ -1426,7 +1426,10 @@ void RenderMenu(Config* config, float menuResScale)
         ImGui::EndDisabled();
         ImGui::Text("Kernel set in use: %s", kernelSet);
         bool detailReuse = config->DlssNrDetailReuse.value_or_default();
-        const bool detailReuseRunning = detailReuse && !DlssNr::IsRunningVk() && DlssNr::DetailReuseStatus().active;
+        const auto detailReuseStatus = !detailReuse            ? DlssNr::DetailReuseInfo {}
+                                       : DlssNr::IsRunningVk() ? DlssNr::DetailReuseStatusVk()
+                                                               : DlssNr::DetailReuseStatus();
+        const bool detailReuseRunning = detailReuse && detailReuseStatus.active;
         if (vitReuseVk)
             ImGui::TextWrapped("Reuse bottleneck: D3D12 only for now (on Vulkan the reused result can flash in dark "
                                "scenes)");
@@ -1439,7 +1442,7 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
                    "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
                    "any pass count. Detail can pop where objects move and reveal new areas.\n"
-                   "D3D12 with NR after SR only. Reuse bottleneck is off while this runs.\n"
+                   "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
                    "Turns itself off while frame generation is on (unless Debug > Keep on with frame generation): "
                    "generated frames are built from real ones, and alternating full and reused frames can flicker "
                    "under it.");
@@ -1480,10 +1483,8 @@ void RenderMenu(Config* config, float menuResScale)
                            "minimum. 0 = no minimum. Default 25.");
                 ImGui::TreePop();
             }
-            const auto status = DlssNr::DetailReuseStatus();
-            if (DlssNr::IsRunningVk())
-                ImGui::TextDisabled("Reuse detail: D3D12 only");
-            else if (!status.why.empty())
+            const auto& status = detailReuseStatus;
+            if (!status.why.empty())
                 ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
             else
             {

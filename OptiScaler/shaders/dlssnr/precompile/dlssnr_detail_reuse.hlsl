@@ -13,7 +13,10 @@
 //
 // Separate from dlssnr.hlsl so the shared shader and every ordinary pass stay as they are. It reuses that shader's
 // root signature and descriptor table (t0..t4, u0..u1, b0, s0 = linear clamp) through
-// DlssNr_Dx12::DispatchDetailReuse. D3D12 only. Modes and bindings: DlssNr_DetailReuseConstants.h.
+// DlssNr_Dx12::DispatchDetailReuse. On Vulkan (VK_MODE) it has its own pass and descriptor set layout,
+// DlssNrDetailReuse_Vk, one binding per register: 0 b0, 1-5 t0-t4, 6-7 u0-u1, 8 s0. The storage images carry no
+// fixed format (what they write varies by mode), which needs shaderStorageImageWriteWithoutFormat; they are never read.
+// Modes and bindings: DlssNr_DetailReuseConstants.h.
 //
 // Raw vectors times MvScale are pixels of the motion texture's own subrect (render resolution with low-resolution
 // vectors), so they are divided by its size into a uv displacement of the image; the saved vectors are kept in that
@@ -22,7 +25,12 @@
 // conventions (reversed Z as is, standard Z as 1 - d): with reversed Z, |a - b| / max(a, b) is the relative
 // difference of linear view depth, and sky compares equal to sky.
 
+#ifdef VK_MODE
+[[vk::binding(0, 0)]]
+cbuffer Params : register(b0, space0)
+#else
 cbuffer Params : register(b0)
+#endif
 {
     uint mode;
     uint workWidth;
@@ -48,14 +56,22 @@ cbuffer Params : register(b0)
     float fillRadius;
 };
 
-Texture2D<float4> t0 : register(t0);
-Texture2D<float4> t1 : register(t1);
-Texture2D<float4> t2 : register(t2);
-Texture2D<float4> t3 : register(t3);
-Texture2D<float4> t4 : register(t4);
-RWTexture2D<float4> u0 : register(u0);
-RWTexture2D<float4> u1 : register(u1);
-SamplerState gLinear : register(s0);
+#ifdef VK_MODE
+#define DR_BINDING(n) [[vk::binding(n, 0)]]
+// Without it dxc declares float4 storage images as rgba32f, which must then match the image's own format.
+#define DR_ANY_FORMAT [[vk::image_format("unknown")]]
+#else
+#define DR_BINDING(n)
+#define DR_ANY_FORMAT
+#endif
+DR_BINDING(1) Texture2D<float4> t0 : register(t0);
+DR_BINDING(2) Texture2D<float4> t1 : register(t1);
+DR_BINDING(3) Texture2D<float4> t2 : register(t2);
+DR_BINDING(4) Texture2D<float4> t3 : register(t3);
+DR_BINDING(5) Texture2D<float4> t4 : register(t4);
+DR_BINDING(6) DR_ANY_FORMAT RWTexture2D<float4> u0 : register(u0);
+DR_BINDING(7) DR_ANY_FORMAT RWTexture2D<float4> u1 : register(u1);
+DR_BINDING(8) SamplerState gLinear : register(s0);
 
 bool Finite3(float3 v) { return all(isfinite(v)); }
 

@@ -64,6 +64,14 @@ unsigned long long FramesVk();
 // A timestamp pair either side of the whole pass, read three frames later so the query is retired.
 std::optional<double> LastGpuTimeVk();
 
+// The Vulkan frame clock: Vulkan presents where the present hook counts them (it comes with the overlay), else NR's own
+// frames. What the frame generation gate and the cadence count in on Vulkan; one clock for stamp and reading.
+unsigned long long VkFrameClock();
+
+// Reuse detail between frames on this path (DlssNr_DetailReuse_Vk.inl), in the shape the D3D12 accessor returns.
+struct DetailReuseInfo;
+DetailReuseInfo DetailReuseStatusVk();
+
 // Whether the game offers an exposure texture on this path. Observed only: it is not read, because
 // binding the game's image means naming a layout this side cannot know. For the menu, and to settle
 // whether reading it is worth the risk on any real Vulkan game.

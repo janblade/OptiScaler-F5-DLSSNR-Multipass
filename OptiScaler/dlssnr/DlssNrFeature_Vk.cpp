@@ -19,6 +19,8 @@
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 #include <dlssnr/DlssNr_VkExtensions.h>
+#include <dlssnr/DlssNrDetailReuseHost.h>
+#include <shaders/dlssnr/DlssNrDetailReuse_Vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
 
@@ -631,6 +633,7 @@ std::optional<std::filesystem::path> FindSnippet()
 }
 
 #include "DlssNr_ExposureCalibrate_Vk.inl"
+#include "DlssNr_DetailReuse_Vk.inl"
 
 } // namespace
 
@@ -675,6 +678,14 @@ ExposureStatus GameExposureStatusVk()
 }
 
 std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
+
+DetailReuseInfo DetailReuseStatusVk() { return DetailReuseVk::Published(); }
+
+unsigned long long VkFrameClock()
+{
+    const unsigned long long presents = State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
+    return presents != 0 ? presents : g_vk.frames;
+}
 
 static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
                              VkPhysicalDevice physicalDevice, VkDevice device, bool beforeSr, bool rayReconstruction,
@@ -1767,6 +1778,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     float mvX = 1.0f, mvY = 1.0f;
     params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvX);
     params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvY);
+    const float gameMvX = mvX, gameMvY = mvY;
     // Match D3D12: preserve the game's vector encoding, then adjust only for the NR working scale.
     mvX *= (float) workWidth / width;
     mvY *= (float) workHeight / height;
@@ -1774,10 +1786,59 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     OwnedImage* input = modelInput;
     int evaluated = 1;
 
-    // A Tune run measures the first pass alone (see the D3D12 side for why); the later passes sit it out.
-    const unsigned int runPasses = calibrationPinned ? 1u : passes;
+    // Reuse detail between frames (DlssNr_DetailReuse_Vk.inl): every other frame skips the model and moves the previous
+    // frame's detail onto this frame's input instead. On such a frame the answer is in g_vk.output, in GENERAL.
+    DetailReuseVk::Frame reuseFrame;
+    reuseFrame.cfg = &cfg;
+    reuseFrame.beforeUpscale = beforeSr;
+    reuseFrame.workWidth = workWidth;
+    reuseFrame.workHeight = workHeight;
+    reuseFrame.motionWidth = guides.motion.width;
+    reuseFrame.motionHeight = guides.motion.height;
+    reuseFrame.motionBaseX = guides.motion.x;
+    reuseFrame.motionBaseY = guides.motion.y;
+    reuseFrame.motionAllocWidth = motion->Resource.ImageViewInfo.Width;
+    reuseFrame.motionAllocHeight = motion->Resource.ImageViewInfo.Height;
+    reuseFrame.depthWidth = guideWidth;
+    reuseFrame.depthHeight = guideHeight;
+    reuseFrame.depthBaseX = guides.depth.x;
+    reuseFrame.depthBaseY = guides.depth.y;
+    reuseFrame.depthInverted = depthInverted;
+    reuseFrame.mvScaleX = gameMvX;
+    reuseFrame.mvScaleY = gameMvY;
+    reuseFrame.modelReset = g_vk.reset;
+    reuseFrame.blocked = calibrationPinned || Cal::Active(Cal::TheRun(), g_calVk);
+    reuseFrame.vulkan = true;
+    reuseFrame.present = VkFrameClock();
+    // NR's own frames, which step exactly once per evaluate: the present count is read on this thread while presents
+    // happen on the game's, so two NR frames can see it move by 0 or 2 and the cadence would take that for a gap.
+    reuseFrame.frameNumber = g_vk.frames;
+    {
+        unsigned long long revision = (unsigned long long) (uintptr_t) g_vk.feature;
+        for (const unsigned long long part : { (unsigned long long) passes, (unsigned long long) workWidth,
+                                               (unsigned long long) workHeight })
+            revision = revision * 1000003ull ^ part;
+        reuseFrame.revision = revision;
+    }
+    reuseFrame.cmd = cmdBuffer;
+    reuseFrame.device = device;
+    reuseFrame.physicalDevice = physicalDevice;
+    reuseFrame.answerFormat = g_vk.output.format;
+    reuseFrame.modelInput = modelInput;
+    reuseFrame.output = &g_vk.output;
+    reuseFrame.motion = motion;
+    reuseFrame.depth = depth;
+    const DetailReuseVk::Plan reusePlan = DetailReuseVk::BeforeModel(reuseFrame);
 
-    if (runPasses < passes)
+    if (reusePlan.resetModel)
+        g_vk.reset = true;
+
+    // A Tune run measures the first pass alone (see the D3D12 side for why); the later passes sit it out. A reused
+    // frame runs none.
+    const unsigned int runPasses = reusePlan.reused ? 0u : calibrationPinned ? 1u : passes;
+
+    // Not on a reused frame: every pass skips it alike, and the next full frame gives them all composed vectors.
+    if (!reusePlan.reused && runPasses < passes)
         g_vk.laterPassesNeedReset = true;
 
     for (unsigned int pass = 0; pass < runPasses; ++pass)
@@ -1796,9 +1857,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                     nullptr, false);
         evaluated = g_vk.evaluate(
             (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
-            &input->ngx, depth, motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,
+            &input->ngx, depth, reusePlan.motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,
             guides.motion.width, guides.motion.height, guides.depth.x, guides.depth.y,
-            guides.motion.x, guides.motion.y, depthInverted ? 1 : 0, passReset ? 1 : 0, tuning.intensity,
+            reusePlan.motionBaseX, reusePlan.motionBaseY, depthInverted ? 1 : 0, passReset ? 1 : 0, tuning.intensity,
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
         if (DlssNrNative::EndEvaluate(nullptr))
@@ -1831,6 +1892,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     if (evaluated == 1 && runPasses > 1)
         g_vk.laterPassesNeedReset = false;
+
+    // Steady a full frame's answer and save this frame's history (DlssNr_DetailReuse_Vk.inl).
+    DetailReuseVk::AfterModel(reuseFrame, reusePlan, evaluated == 1, answer);
 
     g_vk.reset = false;
     g_vk.frames++;
@@ -1995,7 +2059,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                 // A pass that appears to have taken over a second did not; the queue was reset under
                 // it or the pair straddled a device change.
                 if (ms > 0.0 && ms < 1000.0)
+                {
                     g_vk.lastGpuTime = ms;
+                    // Each frame's pair is read once, so full and reused frames both land here.
+                    DetailReuseVk::RecordGpuTime(ms);
+                }
             }
         }
     }
@@ -2068,6 +2136,7 @@ void ShutdownVk(bool deviceAlive)
         g_vk.autoExposureRaw = OwnedImage {};
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
+        DetailReuseVk::Release(false);
         // The model's kernels went with the device without their destroy calls.
         DlssNrNative::VkDeviceLost();
 
@@ -2104,6 +2173,7 @@ void ShutdownVk(bool deviceAlive)
         vkDeviceWaitIdle(g_vk.device);
 
     CalibrationVkShutdown(true);
+    DetailReuseVk::Release(true);
 
     if (g_vk.feature != nullptr && g_vk.release != nullptr)
         g_vk.release(g_vk.feature);

@@ -18,6 +18,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -110,6 +112,30 @@ inline bool IsWritable(const void* p)
 
     const DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (info.Protect & writable) != 0;
+}
+
+// Devices created with shaderStorageImageWriteWithoutFormat switched on (the create hook, Vulkan_Hooks.cpp), which
+// detail reuse's shader needs. Forgotten when the device is destroyed, so a new device with the same handle value is not
+// mistaken for it.
+inline std::mutex g_writeWithoutFormatMutex;
+inline std::vector<VkDevice> g_writeWithoutFormatDevices;
+
+inline void NoteDevice(VkDevice device, bool writesWithoutFormat)
+{
+    std::lock_guard<std::mutex> lock(g_writeWithoutFormatMutex);
+    auto& list = g_writeWithoutFormatDevices;
+    list.erase(std::remove(list.begin(), list.end(), device), list.end());
+    if (writesWithoutFormat)
+        list.push_back(device);
+}
+
+inline void ForgetDevice(VkDevice device) { NoteDevice(device, false); }
+
+inline bool WritesWithoutFormat(VkDevice device)
+{
+    std::lock_guard<std::mutex> lock(g_writeWithoutFormatMutex);
+    const auto& list = g_writeWithoutFormatDevices;
+    return std::find(list.begin(), list.end(), device) != list.end();
 }
 
 inline bool ListHas(const char* const* list, uint32_t count, const char* needle)

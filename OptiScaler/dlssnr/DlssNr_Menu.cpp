@@ -1433,42 +1433,55 @@ void RenderMenu(Config* config, float menuResScale)
                    "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
                    "any pass count. Detail can pop where objects move and reveal new areas.\n"
                    "D3D12 with NR after SR only. Reuse bottleneck is off while this runs.\n"
-                   "Turns itself off while frame generation is on (unless Keep on with frame generation is set): "
+                   "Turns itself off while frame generation is on (unless Debug > Keep on with frame generation): "
                    "generated frames are built from real ones, and alternating full and reused frames can flicker "
                    "under it.");
         if (detailReuse)
         {
-            bool detailReuseDebug = config->DlssNrDetailReuseDebug.value_or_default();
-            if (ImGui::Checkbox("Show dropped detail", &detailReuseDebug))
-                config->DlssNrDetailReuseDebug = detailReuseDebug;
-            HelpMarker("On reused frames, paints magenta where the moved detail was dropped and cyan where Fill "
-                       "replaced it.\nFor testing.");
-            float fill = config->DlssNrDetailReuseFill.value_or_default();
-            if (ImGui::SliderFloat("Fill dropped detail", &fill, 0.0f, 1.0f, "%.2f"))
-                config->DlssNrDetailReuseFill = std::clamp(fill, 0.0f, 1.0f);
-            HelpMarker("Where the moved detail had to be dropped (a body uncovered the background), fills in the NR "
-                       "detail of nearby pixels on the same surface instead of showing the frame without NR there.\n"
-                       "Matters most with several passes. With Show dropped detail on, filled areas are cyan.");
-            float steady = config->DlssNrDetailReuseSteady.value_or_default();
-            if (ImGui::SliderFloat("Steady full frames", &steady, 0.0f, 1.0f, "%.2f"))
-                config->DlssNrDetailReuseSteady = std::clamp(steady, 0.0f, 1.0f);
-            HelpMarker("Pulls the model's new detail on full frames toward the detail moved from the frame before, where "
-                       "that is trusted, so full and reused frames differ less and detail pumps less.\n"
-                       "Adds a little lag to detail on motion. 0 = off.");
-            bool withFg = config->DlssNrDetailReuseWithFg.value_or_default();
-            if (ImGui::Checkbox("Keep on with frame generation", &withFg))
-                config->DlssNrDetailReuseWithFg = withFg;
-            HelpMarker("Keeps reusing detail while frame generation is on, to compare with it off.\n"
-                       "Can flicker: generated frames are built from pairs of full and reused frames.");
+            // Debugging and A/B testing only; the defaults are the tuned values.
+            if (ImGui::TreeNode("Debug##detailReuse"))
+            {
+                bool detailReuseDebug = config->DlssNrDetailReuseDebug.value_or_default();
+                if (ImGui::Checkbox("Show dropped detail", &detailReuseDebug))
+                    config->DlssNrDetailReuseDebug = detailReuseDebug;
+                HelpMarker("On reused frames, paints magenta where the moved detail was dropped and cyan where Fill "
+                           "replaced it.\nFor testing.");
+                float fill = config->DlssNrDetailReuseFill.value_or_default();
+                if (ImGui::SliderFloat("Fill dropped detail", &fill, 0.0f, 1.0f, "%.2f"))
+                    config->DlssNrDetailReuseFill = std::clamp(fill, 0.0f, 1.0f);
+                HelpMarker("Where the moved detail had to be dropped (a body uncovered the background), fills in the "
+                           "NR detail of nearby pixels on the same surface instead of showing the frame without NR "
+                           "there.\nMatters most with several passes. With Show dropped detail on, filled areas are "
+                           "cyan. Default 1.");
+                float steady = config->DlssNrDetailReuseSteady.value_or_default();
+                if (ImGui::SliderFloat("Steady full frames", &steady, 0.0f, 1.0f, "%.2f"))
+                    config->DlssNrDetailReuseSteady = std::clamp(steady, 0.0f, 1.0f);
+                HelpMarker("Pulls the model's new detail on full frames toward the detail moved from the frame before, "
+                           "where that is trusted, so full and reused frames differ less and detail pumps less.\n"
+                           "Adds a little lag to detail on motion. 0 = off (default).");
+                bool withFg = config->DlssNrDetailReuseWithFg.value_or_default();
+                if (ImGui::Checkbox("Keep on with frame generation", &withFg))
+                    config->DlssNrDetailReuseWithFg = withFg;
+                HelpMarker("Keeps reusing detail while frame generation is on, to compare with it off.\n"
+                           "Can flicker: generated frames are built from pairs of full and reused frames.");
+                float minFps = config->DlssNrDetailReuseMinFps.value_or_default();
+                if (ImGui::SliderFloat("Minimum frame rate", &minFps, 0.0f, 120.0f, "%.0f fps"))
+                    config->DlssNrDetailReuseMinFps = std::clamp(minFps, 0.0f, 240.0f);
+                HelpMarker("Reuse runs only while the rendered frame rate (before frame generation) is at least this; "
+                           "below it every frame runs the model. At low frame rates things move farther between "
+                           "frames and the moved detail trails around moving bodies.\nComes back 15% above the "
+                           "minimum. 0 = no minimum. Default 25.");
+                ImGui::TreePop();
+            }
             const auto status = DlssNr::DetailReuseStatus();
             if (DlssNr::IsRunningVk())
                 ImGui::TextDisabled("Reuse detail: D3D12 only");
             else if (!status.why.empty())
-                ImGui::TextDisabled("Reuse detail: %s", status.why.c_str());
+                ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
             else
             {
-                ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu", status.full, status.reused,
-                            status.fallback);
+                ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu   Rendered: %.0f fps", status.full,
+                            status.reused, status.fallback, status.baseFps);
                 if (status.heavyMs > 0.0)
                 {
                     ImGui::Text("NR GPU time per frame: %.2f ms on average, %.2f to %.2f ms", status.averageMs,

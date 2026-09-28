@@ -66,7 +66,10 @@ bool allocFailed = false, extrasFailed = false;
 unsigned int failedWidth = 0, failedHeight = 0; // the working size an allocation failed at (retried at another)
 bool modelSkipped = false; // the model was skipped on the last NR frame
 bool activeLast = false;
-unsigned int gatedFrames = 0; // NR frames in a row with reuse held off by frame generation, textures kept
+unsigned int gatedFrames = 0; // NR frames in a row with reuse held off for now (frame generation, low frame rate)
+DlssNrDetailReuse::FrameRateGate rateGate;
+std::chrono::steady_clock::time_point lastNrFrame {};
+constexpr const char* kBelowMinimumFps = "off below the minimum frame rate";
 bool composedReadable = false, steadiedReadable = false; // this frame, between the calls
 std::string why;
 double gpuRecent[16] = {}; // the last 16 whole-pass GPU times: full and reused frames cost differently
@@ -283,6 +286,14 @@ Plan BeforeModel(const Frame& f)
     // Under frame generation it runs only when asked to (A/B testing).
     const char* fg = FrameGenerationInUse();
     const bool withFg = fg != nullptr && cfg.DlssNrDetailReuseWithFg.value_or_default();
+    // NR runs once per rendered frame, so the time between two calls is the rendered frame rate, frame generation
+    // or not. Measured whether or not reuse runs, so the gate knows when to let it back.
+    const auto now = std::chrono::steady_clock::now();
+    const double sinceLast = lastNrFrame.time_since_epoch().count() != 0
+                                 ? std::chrono::duration<double>(now - lastNrFrame).count()
+                                 : 0.0;
+    lastNrFrame = now;
+    const bool fastEnough = rateGate.Update(sinceLast, cfg.DlssNrDetailReuseMinFps.value_or_default());
     const char* whyNot = nullptr;
     if (f.info->BeforeUpscale)
         whyNot = "unavailable while NR runs before SR";
@@ -290,6 +301,8 @@ Plan BeforeModel(const Frame& f)
         whyNot = "unavailable in Finished Picture";
     else if (fg != nullptr && !withFg)
         whyNot = fg;
+    else if (!fastEnough)
+        whyNot = kBelowMinimumFps;
     else if (allocFailed)
         whyNot = "its history textures could not be allocated";
     else if (on && !f.pass->DetailReuseReady())
@@ -302,17 +315,17 @@ Plan BeforeModel(const Frame& f)
                                                  : "available";
         if (state != loggedWhy)
         {
-            LOG_INFO("DLSS-NR detail reuse: {}", state);
+            LOG_INFO("DLSS-NR detail reuse: {} (rendered frame rate {:.0f} fps)", state, rateGate.Fps());
             loggedWhy = state;
         }
     }
 
     const float steady = std::clamp(cfg.DlssNrDetailReuseSteady.value_or_default(), 0.0f, 1.0f);
     const float fill = std::clamp(cfg.DlssNrDetailReuseFill.value_or_default(), 0.0f, 1.0f);
-    // Held off by frame generation only: the textures stay for a while, as it often pauses and resumes.
-    const bool gatedByFg = on && whyNot != nullptr && whyNot == fg;
-    gatedFrames = gatedByFg ? gatedFrames + 1 : 0;
-    plan.active = Prepare(f, on && whyNot == nullptr, gatedByFg && gatedFrames <= kKeepGatedFrames, steady, fill);
+    // Held off for now (frame generation, which often pauses and resumes, or the frame rate): the textures stay a while.
+    const bool heldOff = on && whyNot != nullptr && (whyNot == fg || whyNot == kBelowMinimumFps);
+    gatedFrames = heldOff ? gatedFrames + 1 : 0;
+    plan.active = Prepare(f, on && whyNot == nullptr, heldOff && gatedFrames <= kKeepGatedFrames, steady, fill);
 
     DlssNrDetailReuse::FrameFacts facts;
     facts.enabled = plan.active;
@@ -490,6 +503,7 @@ DlssNr::DetailReuseInfo Status()
         status.averageMs += gpuRecent[i] / count;
     }
     status.active = activeLast;
+    status.baseFps = rateGate.Fps();
     return status;
 }
 

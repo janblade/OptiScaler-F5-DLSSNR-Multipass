@@ -211,6 +211,35 @@ static void StepTolerance()
     CHECK(c.Next(f).kind == Kind::Full && c.Fallback() == 2);
 }
 
+// Reuse stops below the minimum frame rate and comes back 15% above it; pauses do not count; 0 = no minimum.
+static void FrameRate()
+{
+    const auto run = [](FrameRateGate& g, double fps, double minimum, int frames)
+    {
+        bool allowed = true;
+        for (int i = 0; i < frames; ++i)
+            allowed = g.Update(1.0 / fps, minimum);
+        return allowed;
+    };
+
+    FrameRateGate g;
+    CHECK(g.Update(0.0, 25.0));          // no reading yet
+    CHECK(run(g, 60.0, 25.0, 60));       // well above
+    CHECK(std::abs(g.Fps() - 60.0) < 0.5);
+    CHECK(!run(g, 20.0, 25.0, 40));      // below: off
+    CHECK(!run(g, 27.0, 25.0, 60));      // above the minimum but within 15%: stays off
+    CHECK(run(g, 30.0, 25.0, 60));       // 15% above: back on
+    CHECK(run(g, 26.0, 25.0, 60));       // above the minimum: stays on
+    CHECK(g.Update(5.0, 25.0));          // a pause (loading) is not a frame rate
+    CHECK(std::abs(g.Fps() - 26.0) < 0.5);
+    CHECK(run(g, 10.0, 0.0, 30));        // no minimum
+
+    // One slow frame in a fast stream does not stop it.
+    FrameRateGate h;
+    run(h, 60.0, 25.0, 60);
+    CHECK(h.Update(1.0 / 15.0, 25.0));
+}
+
 int main()
 {
     Alternates();
@@ -222,6 +251,7 @@ int main()
     ReuseFailedCounts();
     Disabled();
     StepTolerance();
+    FrameRate();
 
     if (fails == 0)
         printf("nr_detail_reuse_smoke: all passed\n");

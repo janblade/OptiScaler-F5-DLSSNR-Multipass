@@ -198,12 +198,14 @@ void CurrentModelSize(unsigned int& width, unsigned int& height);
 // on this route, else the reason it is not. lightMs / heavyMs: the cheapest and dearest NR GPU time over the last 16
 // measured frames (0 before any), which shows how unevenly full and reused frames cost -- what frame pacing sees.
 // averageMs: their mean, the real per-frame cost while full and reused frames alternate (a single reading is one or
-// the other). active: reuse ran on the last NR frame (and the bottleneck reuse was then off).
+// the other). active: reuse ran on the last NR frame (and the bottleneck reuse was then off). baseFps: the rendered
+// frame rate the minimum is checked against (0 before a reading).
 struct DetailReuseInfo
 {
     unsigned long long full = 0, reused = 0, fallback = 0;
     std::string why;
     double lightMs = 0.0, heavyMs = 0.0, averageMs = 0.0;
+    double baseFps = 0.0;
     bool active = false;
 };
 DetailReuseInfo DetailReuseStatus();

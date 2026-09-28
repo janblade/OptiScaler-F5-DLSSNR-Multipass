@@ -283,6 +283,9 @@ class Config
     CustomOptional<float> DlssNrDetailReuseFill { 1.0f };
     // Keep reusing detail while frame generation is on, for A/B testing. Off by default: it can flicker there.
     CustomOptional<bool> DlssNrDetailReuseWithFg { false };
+    // Reuse runs only while the rendered frame rate is at least this (0 = no minimum): at low frame rates things move
+    // farther between frames and the moved detail trails.
+    CustomOptional<float> DlssNrDetailReuseMinFps { 25.0f };
     CustomOptional<bool> DlssNrResidualFgApproxCamera { false };
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.

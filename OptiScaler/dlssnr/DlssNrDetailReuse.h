@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 // Reuse detail between frames: run the model on one frame, and on the next add the saved detail of that frame
 // (model answer minus model input), moved with the motion vectors, to the new input instead of running
 // the model again. The method is reverse reprojection caching (Nehab et al. 2007) with TAA-style history
@@ -151,5 +153,37 @@ public:
     unsigned long long Full() const { return full; }
     unsigned long long Reused() const { return reused; }
     unsigned long long Fallback() const { return fallback; }
+};
+
+// Whether the real frame rate is high enough for reuse. Moved detail errs by how far things move between two real
+// frames, so at a low frame rate the trails around moving bodies grow. Fed the time between two NR frames (one per
+// rendered frame, so frame generation's frames do not count). The rate is smoothed over about half a second; reuse
+// stops below the minimum and comes back only 15% above it, since stopping it lowers the frame rate further.
+class FrameRateGate
+{
+    double interval = 0.0; // smoothed seconds per rendered frame; 0 = no reading yet
+    bool allowed = true;
+
+public:
+    static constexpr double kResumeFactor = 1.15;
+
+    // minimumFps <= 0: no minimum. Returns whether reuse may run.
+    bool Update(double seconds, double minimumFps)
+    {
+        if (seconds > 0.0 && seconds < 1.0) // longer is a pause (loading, a menu), not a frame rate
+        {
+            const double alpha = interval > 0.0 ? 1.0 - std::exp(-seconds / 0.5) : 1.0;
+            interval += (seconds - interval) * alpha;
+        }
+        if (!(minimumFps > 0.0) || interval <= 0.0)
+            allowed = true;
+        else if (allowed && Fps() < minimumFps)
+            allowed = false;
+        else if (!allowed && Fps() >= minimumFps * kResumeFactor)
+            allowed = true;
+        return allowed;
+    }
+
+    double Fps() const { return interval > 0.0 ? 1.0 / interval : 0.0; }
 };
 } // namespace DlssNrDetailReuse

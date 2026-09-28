@@ -371,6 +371,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrDetailReuseSteady.set_from_config(readFloat("DlssNr", "DetailReuseSteady"));
             DlssNrDetailReuseFill.set_from_config(readFloat("DlssNr", "DetailReuseFill"));
             DlssNrDetailReuseWithFg.set_from_config(readBool("DlssNr", "DetailReuseWithFG"));
+            DlssNrDetailReuseMinFps.set_from_config(readFloat("DlssNr", "DetailReuseMinFps"));
+            if (DlssNrDetailReuseMinFps.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseMinFps.value()) || DlssNrDetailReuseMinFps.value() < 0.0f ||
+                 DlssNrDetailReuseMinFps.value() > 240.0f))
+                DlssNrDetailReuseMinFps = std::isfinite(DlssNrDetailReuseMinFps.value())
+                                              ? std::clamp(DlssNrDetailReuseMinFps.value(), 0.0f, 240.0f)
+                                              : 25.0f;
             if (DlssNrDetailReuseFill.has_value() &&
                 (!std::isfinite(DlssNrDetailReuseFill.value()) || DlssNrDetailReuseFill.value() < 0.0f ||
                  DlssNrDetailReuseFill.value() > 1.0f))
@@ -1343,6 +1350,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "DetailReuseSteady", GetFloatValue(Instance()->DlssNrDetailReuseSteady.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(Instance()->DlssNrDetailReuseFill.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ResidualFGApproxCamera", GetBoolValue(Instance()->DlssNrResidualFgApproxCamera.value_for_config()).c_str());
     {
         auto toggle = Instance()->DlssNrToggleKey.value_for_config();

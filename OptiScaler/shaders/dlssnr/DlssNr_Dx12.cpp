@@ -8,6 +8,7 @@
 #include <dlssnr/DlssNr.h>
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/ResidualFg.h>
+#include <dlssnr/DlssNrDetailReuse.h>
 #include <DirectXMath.h>
 
 
@@ -45,6 +46,7 @@
 #include "precompile/DlssNr_Shader.h"
 #include "precompile/dlssnr_finished_color_Shader.h"
 #include "precompile/dlssnr_detail_stats_Shader.h"
+#include "precompile/dlssnr_detail_reuse_Shader.h"
 #include "precompile/dlssnr_exposure_adapt_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 #include "../sgsr1/SGSR1_Dx12.h"
@@ -314,6 +316,7 @@ struct NrState
     unsigned int heldHeight = 0;
     DXGI_FORMAT heldFormat = DXGI_FORMAT_UNKNOWN;
     float heldWhitePoint = 1.0f;
+
 
     unsigned int workWidth = 0;
     unsigned int workHeight = 0;
@@ -2009,6 +2012,8 @@ void ReportSkipOnce(const char* reason)
         LOG_INFO("DLSS-NR did not run: {}", reason);
 }
 
+#include "DlssNr_DetailReuse.inl"
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -2143,6 +2148,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _detailStatsPipelineState->Release();
     if (_exposureAdaptPipelineState)
         _exposureAdaptPipelineState->Release();
+    if (_detailReusePipelineState)
+        _detailReusePipelineState->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -2248,6 +2255,70 @@ bool DlssNr_Dx12::DispatchExposureAdapt(ID3D12GraphicsCommandList* InCmdList, co
     InCmdList->SetPipelineState(_exposureAdaptPipelineState);
     InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
     InCmdList->Dispatch(1, 1, 1);
+
+    return true;
+}
+
+bool DlssNr_Dx12::DetailReuseReady()
+{
+    if (!_detailReusePipelineState && !_detailReusePipelineFailed && _init)
+    {
+        CreateComputePipeline(_device, &_detailReusePipelineState, dlssnr_detail_reuse_cso,
+                              sizeof(dlssnr_detail_reuse_cso), nullptr);
+
+        if (_detailReusePipelineState == nullptr)
+        {
+            _detailReusePipelineFailed = true;
+            LOG_WARN("DLSS-NR: the detail reuse pass could not be built; every frame runs the model");
+        }
+    }
+
+    return _init && _detailReusePipelineState != nullptr;
+}
+
+bool DlssNr_Dx12::DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList,
+                                      const DlssNrDetailReuseConstants& InConstants, unsigned int Width,
+                                      unsigned int Height, ID3D12Resource* In0, ID3D12Resource* In1,
+                                      ID3D12Resource* In2, ID3D12Resource* In3, ID3D12Resource* In4,
+                                      ID3D12Resource* OutTarget, ID3D12Resource* OutSecond)
+{
+    if (!DetailReuseReady() || InCmdList == nullptr || _device == nullptr || In0 == nullptr ||
+        OutTarget == nullptr || Width == 0 || Height == 0)
+        return false;
+
+    const uint32_t slot = _heapIndex;
+    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+
+    FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
+
+    ID3D12Resource* const srvs[kSrvCount] = {
+        In0,
+        In1 != nullptr ? In1 : In0,
+        In2 != nullptr ? In2 : In0,
+        In3 != nullptr ? In3 : In0,
+        In4 != nullptr ? In4 : In0,
+    };
+
+    for (uint32_t i = 0; i < kSrvCount; ++i)
+        CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
+
+    ID3D12Resource* const uavs[kUavCount] = { OutTarget, OutSecond != nullptr ? OutSecond : OutTarget };
+
+    for (uint32_t i = 0; i < kUavCount; ++i)
+        CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
+
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+    {
+        LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
+    InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+    InCmdList->SetComputeRootSignature(_rootSignature);
+    InCmdList->SetPipelineState(_detailReusePipelineState);
+    InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
+    InCmdList->Dispatch((Width + _numThreadsX - 1) / _numThreadsX, (Height + _numThreadsY - 1) / _numThreadsY, 1);
 
     return true;
 }
@@ -3509,6 +3580,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float mvToWorkX = width != 0 ? (float) workWidth / (float) width : 1.0f;
     const float mvToWorkY = height != 0 ? (float) workHeight / (float) height : 1.0f;
 
+
     SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
 
     // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
@@ -3538,9 +3610,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         device->Release();
         return;
     }
-
-    if (g_ngxTime != nullptr)
-        g_ngxTime->Start(cmdList);
 
     // Count only a contiguous set of ready, separate feature histories. A failed extra creation never
     // falls back to reusing the main feature: that tells one temporal model several frames elapsed in
@@ -3652,7 +3721,63 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     int result = NVSDK_NGX_Result_Success;
 
-    for (unsigned int pass = 0; pass < effectivePasses && result == NVSDK_NGX_Result_Success;
+    // Reuse detail between frames (DlssNr_DetailReuse.inl): every other frame skips the model and moves the previous
+    // frame's detail onto this frame's input instead. On such a frame the answer lands in g_nr.output (at rest, UAV).
+    DetailReuse::Frame reuseFrame;
+    reuseFrame.pass = this;
+    reuseFrame.cmdList = cmdList;
+    reuseFrame.device = device;
+    reuseFrame.cfg = &cfg;
+    reuseFrame.info = &frame;
+    reuseFrame.answerFormat = desc.Format;
+    reuseFrame.workWidth = workWidth;
+    reuseFrame.workHeight = workHeight;
+    reuseFrame.motionWidth = motionWidth;
+    reuseFrame.motionHeight = motionHeight;
+    reuseFrame.motionBaseX = motionBaseX;
+    reuseFrame.motionBaseY = motionBaseY;
+    reuseFrame.motionAllocWidth = (unsigned int) motionDesc.Width;
+    reuseFrame.motionAllocHeight = motionDesc.Height;
+    reuseFrame.depthWidth = guideWidth;
+    reuseFrame.depthHeight = guideHeight;
+    reuseFrame.depthBaseX = depthBaseX;
+    reuseFrame.depthBaseY = depthBaseY;
+    reuseFrame.depthInverted = g_nr.guideDepthInverted;
+    reuseFrame.mvScaleX = g_nr.guideMvScaleX;
+    reuseFrame.mvScaleY = g_nr.guideMvScaleY;
+    reuseFrame.modelInput = modelInput;
+    reuseFrame.motion = motionIn;
+    reuseFrame.depth = depthIn;
+    reuseFrame.output = g_nr.output;
+    reuseFrame.modelReset = g_nr.reset;
+    reuseFrame.blocked = calibrationPinned || CalibrationActive() || g_nr.heldActive;
+    reuseFrame.frameNumber = frame.SubmissionEpoch != 0 ? frame.SubmissionEpoch : g_frames;
+    {
+        // The motion size is left out on purpose: saved vectors are uv displacements, so a render-size change does not
+        // invalidate them.
+        unsigned long long revision = (unsigned long long) (uintptr_t) g_nr.feature;
+        for (const unsigned long long part :
+             { g_nr.featureCreateEpoch, (unsigned long long) effectivePasses, (unsigned long long) workWidth,
+               (unsigned long long) workHeight })
+            revision = revision * 1000003ull ^ part;
+        reuseFrame.revision = revision;
+    }
+    const DetailReuse::Plan reusePlan = DetailReuse::BeforeModel(reuseFrame);
+    const bool reused = reusePlan.reused;
+    if (reused)
+    {
+        finalAnswer = g_nr.output;
+        MakeModelReadable(finalAnswer);
+    }
+    if (reusePlan.resetModel)
+        g_nr.reset = true;
+
+    // The model's own time: the passes alone, so the detail reuse work above counts as surrounding work (and a reused
+    // frame's model time is about zero).
+    if (g_ngxTime != nullptr)
+        g_ngxTime->Start(cmdList);
+
+    for (unsigned int pass = 0; !reused && pass < effectivePasses && result == NVSDK_NGX_Result_Success;
          ++pass)
     {
         void* const passFeature = pass == 0 ? g_nr.feature : g_nr.passFeature[pass];
@@ -3663,14 +3788,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // ViT reuse of the NVIDIA model: tell the NvAPI wrapper which feature this is, whether it starts over, how often to compute the bottleneck,
         // and the frame slot (successfulDispatches counts NR frames and is constant across one frame's passes, so all passes compute on the
         // same frame and all reuse on the next; see DlssNrVitReuse.h for why the passes must not be offset)
-        DlssNrNative::BeginEvaluate(passFeature, passReset, std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
-                                    std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
+        // While detail reuse runs, full frames are every other frame: a ViT slot keyed to them would compute only
+        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time.
+        DlssNrNative::BeginEvaluate(passFeature, passReset,
+                                    reusePlan.active ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
+                                    reusePlan.active ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
                                     cfg.DlssNrKernelProfile.value_or_default());
         result = g_nr.evaluate(
-            cmdList, passFeature, g_nr.capabilityParams, passInput, depthIn, motionIn, passOutput,
+            cmdList, passFeature, g_nr.capabilityParams, passInput, depthIn, reusePlan.motion, passOutput,
             workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight,
-            depthBaseX, depthBaseY, motionBaseX, motionBaseY, g_nr.guideDepthInverted ? 1 : 0,
+            depthBaseX, depthBaseY, reusePlan.motionBaseX, reusePlan.motionBaseY, g_nr.guideDepthInverted ? 1 : 0,
             passReset ? 1 : 0, tuning.intensity,
             (int) PassStyle(cfg, pass), tuning.structure,
             tuning.tone, tuning.skin,
@@ -3757,6 +3885,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
+
+    // Steady a full frame's answer and save this frame's history (DlssNr_DetailReuse.inl).
+    DetailReuse::AfterModel(reuseFrame, reusePlan, result == NVSDK_NGX_Result_Success, finalAnswer);
 
     g_nr.reset = false;
 
@@ -4100,6 +4231,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_nr.passClampScratch2 != nullptr)
         MakeModelWritable(g_nr.passClampScratch2);
 
+    DetailReuse::AfterResolve(cmdList);
+
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -4125,6 +4258,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
                 g_lastGpuTime = ms;
+            // Every completed frame, not only the newest: full and reused frames alternate, and two can complete
+            // between reads.
+            for (const double sample : g_gpuTime->TakeFresh())
+                DetailReuse::RecordGpuTime(sample);
 
             if (g_ngxTime != nullptr)
             {
@@ -4143,6 +4280,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 const double ngx = g_lastNgxTime.value();
                 LOG_INFO("DLSS-NR elapsed: {:.2f} ms total, {:.2f} ms model, {:.2f} ms surrounding work ({:.0f}%; intervals may include other GPU work)",
                          total, ngx, total - ngx, total > 0.0 ? 100.0 * (total - ngx) / total : 0.0);
+                if (reusePlan.active)
+                {
+                    const auto status = DetailReuse::Status();
+                    LOG_INFO("DLSS-NR detail reuse: {:.2f} ms per frame on average ({:.2f} to {:.2f}) over the last 16; "
+                             "full {}, reused {}, fallback {}", status.averageMs, status.lightMs, status.heavyMs,
+                             status.full, status.reused, status.fallback);
+                }
             }
         }
     }
@@ -4764,6 +4908,10 @@ FollowGameStatus FollowGameExposureStatus()
     return s;
 }
 
+// Read every menu frame, so it does not take g_nrMutex (held through NR's whole recording): the status is published
+// at the end of each BeforeModel.
+DetailReuseInfo DetailReuseStatus() { return DetailReuse::Published(); }
+
 int CurrentModelResolutionPercent() { return (int) lroundf(g_nr.appliedWorkScale * 100.0f); }
 
 void CurrentModelSize(unsigned int& width, unsigned int& height)
@@ -4823,6 +4971,8 @@ void Shutdown()
         g_nr.output->Release();
         g_nr.output = nullptr;
     }
+
+    DetailReuse::Release();
 
     if (g_nr.passScratch != nullptr)
     {

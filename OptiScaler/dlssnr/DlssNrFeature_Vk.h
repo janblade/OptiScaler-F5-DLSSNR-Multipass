@@ -81,4 +81,10 @@ FollowGameStatus FollowGameExposureStatusVk();
 
 void ShutdownVk(bool deviceAlive = true);
 
+// The game is about to destroy `device` (the vkDestroyDevice hook, Vulkan_Hooks.cpp) or shut its NGX down
+// (NVNGX_DLSS_Vk.cpp; VK_NULL_HANDLE there means whichever device NR runs on). If NR runs on it, everything is
+// released while the device and the game's NGX still live -- the model's features, the parameter block, NGX itself
+// (Shutdown1) -- as NGX asks for, instead of being abandoned with them. `why` is for the log.
+void ShutdownVkForDevice(VkDevice device, const char* why);
+
 } // namespace DlssNr

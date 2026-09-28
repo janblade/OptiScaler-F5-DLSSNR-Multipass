@@ -158,10 +158,15 @@ __declspec(dllexport) const char* dlssnr_call_error() { return g_modelError.c_st
 // parameter setter the D3D12 path uses for ID3D12Resource*.
 // ---------------------------------------------------------------------------------------------
 
-using PFN_NrVkInitExt = int(__cdecl *)(unsigned long long, const wchar_t *, void *, void *, void *,
-                                       const void *, int);
+// nvsdk_ngx_vk.h: NVSDK_NGX_VULKAN_Init_Ext(ApplicationId, ApplicationDataPath, VkInstance, VkPhysicalDevice,
+// VkDevice, NVSDK_NGX_Version InSDKVersion, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo) -- the version comes
+// before the feature info. (It was declared the other way round here once, which handed NGX version 0 and a
+// "pointer" of 0x15.)
+using PFN_NrVkInitExt = int(__cdecl *)(unsigned long long, const wchar_t *, void *, void *, void *, int,
+                                       const void *);
 using PFN_NrVkCreate = int(__cdecl *)(void *, int, const void *, void **);
 using PFN_NrVkEvaluate = int(__cdecl *)(void *, const void *, const void *, void *);
+using PFN_NrVkShutdown1 = int(__cdecl *)(void *);
 
 struct VkSnippet {
     HMODULE module = nullptr;
@@ -169,7 +174,9 @@ struct VkSnippet {
     PFN_NrVkCreate create = nullptr;
     PFN_NrVkEvaluate evaluate = nullptr;
     PFN_NrRelease release = nullptr;
-    bool initialised = false;
+    PFN_NrVkShutdown1 shutdown = nullptr;
+    // The device NGX is initialised on. A new device needs its own init; a dead one is forgotten, not shut down.
+    void *initialisedDevice = nullptr;
 };
 
 VkSnippet g_vk;
@@ -189,6 +196,7 @@ bool loadVkSnippet(const wchar_t *path) {
     g_vk.create = (PFN_NrVkCreate) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_CreateFeature");
     g_vk.evaluate = (PFN_NrVkEvaluate) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_EvaluateFeature");
     g_vk.release = (PFN_NrRelease) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_ReleaseFeature");
+    g_vk.shutdown = (PFN_NrVkShutdown1) GetProcAddress(g_vk.module, "NVSDK_NGX_VULKAN_Shutdown1");
 
     return g_vk.create != nullptr && g_vk.evaluate != nullptr;
 }
@@ -627,20 +635,47 @@ __declspec(dllexport) int dlssnr_vk_init(const wchar_t *snippetPath, const wchar
         return -1;
     }
 
-    if (g_vk.initialised) {
+    if (device != nullptr && device == g_vk.initialisedDevice) {
         return 1;
     }
 
     // Assigned rather than returned directly. A tail call becomes a jmp, and the snippet resolves its
     // caller from the return address -- so tail calling hands it whoever called this instead of this
     // module, and the caller gate rejects it before a single argument is read.
-    volatile int result = g_vk.init(0x0, dataPath, instance, physicalDevice, device, nullptr, sdkVersion);
+    volatile int result = g_vk.init(0x0, dataPath, instance, physicalDevice, device, sdkVersion, nullptr);
 
     dlssnr_vk_last_init = (int) result;
-    g_vk.initialised = result == 1;
+
+    // Only a success changes what is tracked: a failed init on another device must not lose the one that is live.
+    if (result == 1) {
+        g_vk.initialisedDevice = device;
+    }
 
     return (int) result;
 }
+
+// Real teardown on a live device: NGX frees what it holds for it. The host releases the features and the parameter
+// block first. Returns NGX's result, or 0 if the model has no Shutdown1 or this device was never initialised here.
+__declspec(dllexport) int dlssnr_vk_shutdown(void *device) {
+    if (device == nullptr || device != g_vk.initialisedDevice) {
+        return 0;
+    }
+
+    // The device is going either way, so it stops being tracked even when there is nothing to call.
+    if (g_vk.shutdown == nullptr) {
+        g_vk.initialisedDevice = nullptr;
+        return 0;
+    }
+
+    volatile int result = g_vk.shutdown(device);
+    g_vk.initialisedDevice = nullptr;
+
+    return (int) result;
+}
+
+// The device is gone (the game destroyed it): nothing may be called on it, but the next device -- which can come
+// back with the same handle value -- needs its own init.
+__declspec(dllexport) void dlssnr_vk_forget() { g_vk.initialisedDevice = nullptr; }
 
 // Creates the feature on a Vulkan command buffer. Same contract as the D3D12 one: initialisation work
 // is recorded into the buffer, so the handle has to outlive its execution.

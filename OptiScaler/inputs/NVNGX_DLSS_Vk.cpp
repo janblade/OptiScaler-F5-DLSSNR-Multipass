@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <dlssnr/DlssNrFeature_Vk.h>
+#include <dlssnr/DlssNr_VkExtensions.h>
 #include "Util.h"
 #include "Config.h"
 #include "resource.h"
@@ -1121,6 +1122,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown(void)
 {
+    // Neural Rendering's parameter block may be the core's; it goes before the core does.
+    DlssNr::ShutdownVkForDevice(VK_NULL_HANDLE, "the game is shutting its NGX down");
+
     shutdown = true;
 
     // for (auto const& [key, val] : VkContexts) {
@@ -1157,6 +1161,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown(void)
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown1(VkDevice InDevice)
 {
+    // Neural Rendering's parameter block may be the core's; it goes before the core does.
+    DlssNr::ShutdownVkForDevice(InDevice, "the game is shutting its NGX down on the device NR runs on");
+
     shutdown = true;
 
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsVulkanInited() &&
@@ -1172,3 +1179,56 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown1(VkDevice InDevice)
 
     return NVSDK_NGX_VULKAN_Shutdown();
 }
+
+// Neural Rendering's device requirements (dlssnr/DlssNr_VkExtensions.h). Defined here, beside the rest of the NGX
+// proxy, so NVNGX_Proxy.h is not pulled into another translation unit.
+namespace DlssNr::VkExt
+{
+
+bool NgxCoreUp() { return NVNGXProxy::IsVulkanInited(); }
+
+std::vector<std::string> NgxDeviceExtensions(VkInstance instance, VkPhysicalDevice physicalDevice, int& result)
+{
+    std::vector<std::string> out;
+    result = 0;
+
+    if (instance == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE ||
+        !Config::Instance()->DLSSEnabled.value_or_default())
+        return out;
+
+    // The same load the game's own GetFeatureRequirements call triggers.
+    if (NVNGXProxy::NVNGXModule() == nullptr)
+        NVNGXProxy::InitNVNGX();
+
+    const auto query = NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements();
+
+    if (query == nullptr)
+        return out;
+
+    std::wstring dataPath = State::Instance().NVNGX_ApplicationDataPath;
+
+    if (dataPath.empty())
+        dataPath = Util::ExePath().remove_filename().wstring();
+
+    NVSDK_NGX_FeatureDiscoveryInfo info {};
+    info.SDKVersion = NVSDK_NGX_Version_API;
+    info.FeatureID = (NVSDK_NGX_Feature) 18; // Neural Rendering
+    info.Identifier.IdentifierType = NVSDK_NGX_Application_Identifier_Type_Application_Id;
+    info.Identifier.v.ApplicationId = 0; // what the model is initialised with (dlssnr_forwarder.cpp)
+    info.ApplicationDataPath = dataPath.c_str();
+
+    uint32_t count = 0;
+    VkExtensionProperties* props = nullptr; // NGX's own storage
+
+    result = (int) query(instance, physicalDevice, &info, &count, &props);
+
+    if (result != NVSDK_NGX_Result_Success || props == nullptr)
+        return out;
+
+    for (uint32_t i = 0; i < count; ++i)
+        out.emplace_back(props[i].extensionName);
+
+    return out;
+}
+
+} // namespace DlssNr::VkExt

@@ -45,10 +45,11 @@ inline FinishedPick PickFinishedInput(const FinishedInput* inputs, size_t count,
                                                                                        : FinishedPick::NotReady;
 }
 
-// Presents from `then` to `now`; UINT64_MAX when `then` never happened (UINT64_MAX) or lies ahead.
+// Presents from `then` to `now`; UINT64_MAX when `then` never happened (UINT64_MAX). A `then` ahead of `now`
+// (the two are read without a common lock) counts as just now, so a race errs towards pausing.
 inline uint64_t PresentsSince(uint64_t now, uint64_t then)
 {
-    return then == UINT64_MAX || then > now ? UINT64_MAX : now - then;
+    return then == UINT64_MAX ? UINT64_MAX : then > now ? 0 : now - then;
 }
 
 // A DLSS-G evaluate this many presents ago still counts as running: each real frame is followed by at most

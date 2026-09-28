@@ -83,9 +83,11 @@ int main() try
     // OptiScaler FG off or paused, but it owns DLSS-G's inputs or output: the game's DLSS-G never loaded.
     Expect(!DlssNr::GameFrameGenerationOn(false, true, false, true, 0), "Paused with OptiScaler FG on DLSS-G inputs");
     Expect(!DlssNr::GameFrameGenerationOn(false, false, true, true, 0), "Paused with OptiScaler FG outputting DLSS-G");
-    Expect(DlssNr::PresentsSince(10, never) == never && DlssNr::PresentsSince(10, 12) == never &&
+    Expect(DlssNr::GameFrameGenerationOn(false, false, false, false, DlssNr::DlssgEvaluateWindow),
+           "Resumed inside the DLSS-G evaluate window");
+    Expect(DlssNr::PresentsSince(10, never) == never && DlssNr::PresentsSince(10, 12) == 0 &&
                DlssNr::PresentsSince(10, 7) == 3,
-           "Presents-since arithmetic");
+           "Presents-since arithmetic (a stamp read ahead of the present count counts as just now)");
 
     // ResizeBuffers waits only for work that touched the back buffer (a compose), never for a guide copy.
     Expect(!DlssNr::TouchedBackBuffer(5, 5), "Waited for a capture-only slot");

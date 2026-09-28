@@ -4229,7 +4229,11 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         { DeferredSr::Cancel(); Late::Cancel(); Late::Say("This option needs a native DirectX 12 game."); return; }
         // Before the pre-SR model and private DLSS run, so nothing is computed that cannot be composed.
         if (Late::PausedForGameFrameGeneration())
-        { DeferredSr::Cancel(); Late::Cancel(); Late::Say(Late::pausedForGameFg); return; }
+        {
+            DeferredSr::Cancel(); Late::Cancel(); Late::Say(Late::pausedForGameFg);
+            if (finishedMode == 2) DeferredSr::Say("paused: the game's own frame generation is on");
+            return;
+        }
         if (finishedMode == 2)
         {
             if (rayReconstruction)

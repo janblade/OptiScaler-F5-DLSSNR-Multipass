@@ -107,7 +107,11 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
         if (!slot.pending && Finished(slot)) { next = &slot; break; }
     if (!next)
     {
-        Cancel(); // this frame gets no capture: an older pending one must not be composed onto its picture
+        // This frame gets no capture: an older frame's pending one must not be composed onto its picture.
+        // Captures of this frame (a game may evaluate more than once) stay.
+        const auto now = State::Instance().frameCount;
+        for (auto& slot : slots)
+            if (slot.submitted && slot.pending && slot.frame.SubmissionEpoch < now) { slot.pending = false; reset = true; }
         Say("Waiting for the previous picture to finish.");
         return nullptr;
     }

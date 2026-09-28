@@ -126,7 +126,8 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         if (cal.unsure)
         {
             ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                               "The scene was not still enough to tell. Nothing changed.");
+                               "The picture kept changing between steps (moving effects or noise), so no value "
+                               "stood out. Nothing changed.");
         }
         else if (cal.atEdge)
         {

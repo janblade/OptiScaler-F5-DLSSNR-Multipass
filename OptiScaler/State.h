@@ -267,6 +267,9 @@ class State
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
     UINT64 dlssgLastEvaluateFrame = UINT64_MAX; // frameCount at the last DLSS-G evaluate passed through
+    // That evaluate generated frames: its DLSSG.MultiFrameCount was above zero, or it had none (builds without multi
+    // frame generation leave it out).
+    bool dlssgLastEvaluateGenerates = false;
 
     // DLSS
     bool dlssPresetsOverriddenExternally = false;

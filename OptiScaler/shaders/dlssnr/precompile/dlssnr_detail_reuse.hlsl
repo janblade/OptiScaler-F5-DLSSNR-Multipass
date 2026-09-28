@@ -1,0 +1,381 @@
+// Reuse detail between frames (dlssnr/DlssNrDetailReuse.h): the model runs on one frame, and on the next the saved detail
+// (answer minus input, in the proxy domain at the model's working size) is moved with the motion vectors and added to
+// the new input instead of running the model. The method is reverse reprojection caching (Nehab et al. 2007) with the
+// history rejection TAA uses:
+//   - two motion candidates per pixel: its own, and the closest surface's in the 3x3 neighbourhood so edges can move
+//     with the foreground (Karis 2014); each is tested with the depth of its own surface, the better one is kept;
+//   - a depth test against the saved 2x2 footprint the reprojected sample is read from;
+//   - a colour test against the current 3x3 neighbourhood's variance box (Salvi 2016), measured in standard
+//     deviations, so noise does not reject and a real change does;
+//   - Catmull-Rom for the moved detail, clamped to its 2x2 footprint (sharp, no ringing).
+// Trust fades smoothly rather than switching, and full frames can be pulled toward the moved detail (Steady), so
+// frames next to each other differ less.
+//
+// Separate from dlssnr.hlsl so the shared shader and every ordinary pass stay as they are. It reuses that shader's
+// root signature and descriptor table (t0..t4, u0..u1, b0, s0 = linear clamp) through
+// DlssNr_Dx12::DispatchDetailReuse. D3D12 only. Modes and bindings: DlssNr_DetailReuseConstants.h.
+//
+// Raw vectors times MvScale are pixels of the motion texture's own subrect (render resolution with low-resolution
+// vectors), so they are divided by its size into a uv displacement of the image; the saved vectors are kept in that
+// form too, so a render-size change between two frames cannot misread them.
+// Vectors point from the current pixel to where it was: previous = current + mv. Depth is kept far-is-zero on both
+// conventions (reversed Z as is, standard Z as 1 - d): with reversed Z, |a - b| / max(a, b) is the relative
+// difference of linear view depth, and sky compares equal to sky.
+
+cbuffer Params : register(b0)
+{
+    uint mode;
+    uint workWidth;
+    uint workHeight;
+    uint motionWidth;
+    uint motionHeight;
+    uint motionBaseX;
+    uint motionBaseY;
+    uint depthWidth;
+    uint depthHeight;
+    uint depthBaseX;
+    uint depthBaseY;
+    uint depthInverted;
+    float mvScaleX;
+    float mvScaleY;
+    float depthTolerance;
+    float clipGamma;
+    float clipFalloff;
+    float sigmaFloor;
+    float steady;
+    uint debugView;
+    float fillStrength;
+    float fillRadius;
+};
+
+Texture2D<float4> t0 : register(t0);
+Texture2D<float4> t1 : register(t1);
+Texture2D<float4> t2 : register(t2);
+Texture2D<float4> t3 : register(t3);
+Texture2D<float4> t4 : register(t4);
+RWTexture2D<float4> u0 : register(u0);
+RWTexture2D<float4> u1 : register(u1);
+SamplerState gLinear : register(s0);
+
+bool Finite3(float3 v) { return all(isfinite(v)); }
+
+float2 WorkSize() { return float2(workWidth, workHeight); }
+float2 WorkUv(uint2 p) { return (float2(p) + 0.5) / WorkSize(); }
+
+float FarIsZero(float d) { return depthInverted != 0 ? d : 1.0 - d; }
+
+int2 GuideTexel(float2 uv, uint2 size)
+{
+    return int2(min(uint2(saturate(uv) * float2(size)), size - 1));
+}
+
+float GuideDepth(Texture2D<float4> depth, int2 texel)
+{
+    return FarIsZero(depth.Load(int3(uint2(texel) + uint2(depthBaseX, depthBaseY), 0)).r);
+}
+
+float3 ToYCoCg(float3 c)
+{
+    return float3(dot(c, float3(0.25, 0.5, 0.25)), dot(c, float3(0.5, 0.0, -0.5)), dot(c, float3(-0.25, 0.5, -0.25)));
+}
+
+// Catmull-Rom from five bilinear taps (the four corners of the 4x4 are dropped).
+float4 SampleCatmullRom(Texture2D<float4> tex, float2 uv, float2 size)
+{
+    const float2 position = uv * size;
+    const float2 centre = floor(position - 0.5) + 0.5;
+    const float2 f = position - centre;
+    const float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    const float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    const float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    const float2 w3 = f * f * (-0.5 + 0.5 * f);
+    const float2 w12 = w1 + w2;
+    const float2 texel = 1.0 / size;
+    const float2 uv0 = (centre - 1.0) * texel;
+    const float2 uv3 = (centre + 2.0) * texel;
+    const float2 uv12 = (centre + w2 / w12) * texel;
+
+    float4 result = tex.SampleLevel(gLinear, float2(uv12.x, uv0.y), 0) * (w12.x * w0.y);
+    result += tex.SampleLevel(gLinear, float2(uv0.x, uv12.y), 0) * (w0.x * w12.y);
+    result += tex.SampleLevel(gLinear, uv12, 0) * (w12.x * w12.y);
+    result += tex.SampleLevel(gLinear, float2(uv3.x, uv12.y), 0) * (w3.x * w12.y);
+    result += tex.SampleLevel(gLinear, float2(uv12.x, uv3.y), 0) * (w12.x * w3.y);
+    const float weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    return result / max(weight, 1e-4);
+}
+
+float2 MotionSize() { return float2(motionWidth, motionHeight); }
+
+// Raw vector at image position uv, read from the motion subrect.
+float2 RawMotion(float2 uv)
+{
+    return t3.Load(int3(uint2(motionBaseX, motionBaseY) + uint2(GuideTexel(uv, uint2(motionWidth, motionHeight))),
+                        0)).rg;
+}
+
+// Raw vector -> displacement in image uv.
+float2 UvDisplacement(float2 raw)
+{
+    return raw * float2(mvScaleX, mvScaleY) / MotionSize();
+}
+
+// The 3x3 colour neighbourhood of the current input, in YCoCg: mean and standard deviation (floored).
+void ColourBox(uint2 p, out float3 mean, out float3 sigma)
+{
+    const int2 last = int2(WorkSize()) - 1;
+    float3 sum = 0.0, sumSquares = 0.0;
+    [unroll] for (int cy = -1; cy <= 1; ++cy)
+    {
+        [unroll] for (int cx = -1; cx <= 1; ++cx)
+        {
+            const float3 c = ToYCoCg(t0.Load(int3(clamp(int2(p) + int2(cx, cy), int2(0, 0), last), 0)).rgb);
+            sum += c;
+            sumSquares += c * c;
+        }
+    }
+    mean = sum / 9.0;
+    sigma = max(sqrt(max(sumSquares / 9.0 - mean * mean, 0.0)), max(sigmaFloor, 1e-5));
+}
+
+// The saved detail moved from previousUv (rgb) and how far it is trusted (a, 0..1), for a pixel whose surface has
+// far-is-zero depth depthNow. Reads t1 saved detail, t2 saved colour + depth.
+float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma)
+{
+    const float2 work = WorkSize();
+    if (!all(isfinite(previousUv)) || any(previousUv < 0.0) || any(previousUv > 1.0) || !isfinite(depthNow))
+        return 0.0;
+
+    // The 2x2 footprint the moved sample is built from: detail range, validity, depth range. Only texels with a
+    // bilinear weight count: on a texel centre that is one texel, and its zero-weight neighbour (maybe another
+    // surface) must not widen the depth range.
+    const float2 position = previousUv * work - 0.5;
+    const int2 base = int2(floor(position));
+    const float2 f = position - float2(base);
+    float3 detailLo = 65504.0, detailHi = -65504.0;
+    float valid = 1.0, depthLo = 65504.0, depthHi = -65504.0;
+    [unroll] for (int i = 0; i < 4; ++i)
+    {
+        const int2 corner = int2(i & 1, i >> 1);
+        const float2 axis = float2(corner.x != 0 ? f.x : 1.0 - f.x, corner.y != 0 ? f.y : 1.0 - f.y);
+        if (axis.x * axis.y < 1e-3)
+            continue;
+        const int2 texel = clamp(base + corner, int2(0, 0), int2(work) - 1);
+        const float4 d = t1.Load(int3(texel, 0));
+        const float savedDepth = t2.Load(int3(texel, 0)).a;
+        const bool ok = Finite3(d.rgb) && isfinite(d.a) && isfinite(savedDepth);
+        valid = ok ? min(valid, d.a) : 0.0;
+        detailLo = ok ? min(detailLo, d.rgb) : detailLo;
+        detailHi = ok ? max(detailHi, d.rgb) : detailHi;
+        depthLo = ok ? min(depthLo, savedDepth) : depthLo;
+        depthHi = ok ? max(depthHi, savedDepth) : depthHi;
+    }
+    if (valid < 0.999)
+        return 0.0;
+
+    const float3 moved = clamp(SampleCatmullRom(t1, previousUv, work).rgb, detailLo, detailHi);
+
+    // Depth: how far this surface lies outside the saved range, relative to the nearer of the two.
+    const float outside = max(max(depthLo - depthNow, depthNow - depthHi), 0.0);
+    const float relativeDepth = outside / max(max(depthNow, depthHi), 1e-6);
+    const float depthTrust = 1.0 - smoothstep(depthTolerance, 2.0 * depthTolerance, relativeDepth);
+
+    // Colour: the saved input colour against the current input's variance box, in standard deviations.
+    const float3 saved = ToYCoCg(t2.SampleLevel(gLinear, previousUv, 0).rgb);
+    const float3 excess = max(abs(saved - mean) - clipGamma * sigma, 0.0) / sigma;
+    const float colourTrust = 1.0 - saturate(max(excess.x, max(excess.y, excess.z)) / max(clipFalloff, 1e-3));
+
+    if (!Finite3(moved) || !Finite3(saved))
+        return 0.0;
+    return float4(moved, saturate(depthTrust * colourTrust));
+}
+
+// The moved detail for work pixel p (rgb) and how far it is trusted (a, 0..1). Reads t0 input, t1 saved detail,
+// t2 saved colour + depth, t3 motion guide, t4 depth guide.
+float4 MovedDetail(uint2 p)
+{
+    const float2 uv = WorkUv(p);
+    const uint2 depthSize = uint2(depthWidth, depthHeight);
+    const int2 centre = GuideTexel(uv, depthSize);
+
+    // The pixel's own surface, and the closest surface in its 3x3.
+    const float ownDepth = GuideDepth(t4, centre);
+    float closestDepth = isfinite(ownDepth) ? ownDepth : -1.0;
+    int2 closest = centre;
+    [unroll] for (int dy = -1; dy <= 1; ++dy)
+    {
+        [unroll] for (int dx = -1; dx <= 1; ++dx)
+        {
+            const int2 texel = clamp(centre + int2(dx, dy), int2(0, 0), int2(depthSize) - 1);
+            const float z = GuideDepth(t4, texel);
+            if (isfinite(z) && z > closestDepth)
+            {
+                closestDepth = z;
+                closest = texel;
+            }
+        }
+    }
+
+    float3 mean, sigma;
+    ColourBox(p, mean, sigma);
+
+    // Own motion with own depth. The closest surface's motion is read at this pixel's position shifted by the
+    // depth-texel offset (motion may be finer than depth), and tested with that surface's depth.
+    const float4 own = MovedFrom(uv + UvDisplacement(RawMotion(uv)), ownDepth, mean, sigma);
+    if (all(closest == centre))
+        return own;
+    const float2 closestUv = uv + float2(closest - centre) / float2(depthSize);
+    const float4 near = MovedFrom(uv + UvDisplacement(RawMotion(closestUv)), closestDepth, mean, sigma);
+    // On a tie the closer surface's motion wins, so edges move with the foreground.
+    return near.a >= own.a ? near : own;
+}
+
+void Capture(uint2 p)
+{
+    const float4 input = t0.Load(int3(p, 0));
+    const float3 answer = t1.Load(int3(p, 0)).rgb;
+    const float3 detail = answer - input.rgb;
+    const bool valid = Finite3(detail) && Finite3(input.rgb) && all(abs(detail) <= 65504.0);
+    const float depth = GuideDepth(t2, GuideTexel(WorkUv(p), uint2(depthWidth, depthHeight)));
+    u0[p] = float4(valid ? detail : 0.0, valid ? 1.0 : 0.0);
+    u1[p] = float4(Finite3(input.rgb) ? input.rgb : 0.0, isfinite(depth) ? depth : 0.0);
+}
+
+void Reproject(uint2 p)
+{
+    const float4 input = t0.Load(int3(p, 0));
+    const float4 moved = MovedDetail(p);
+    float4 result = input;
+    const float3 reconstructed = input.rgb + moved.rgb * moved.a;
+    if (Finite3(reconstructed) && all(abs(reconstructed) <= 65504.0))
+        result.rgb = reconstructed;
+
+    if (debugView != 0)
+        result.rgb = lerp(float3(1.0, 0.0, 1.0), result.rgb, moved.a);
+
+    u0[p] = result;
+}
+
+void Steady(uint2 p)
+{
+    const float4 input = t0.Load(int3(p, 0));
+    const float4 answer = t1.Load(int3(p, 0));
+    const float4 estimate = t2.Load(int3(p, 0));
+    const float amount = saturate(steady) * saturate(estimate.a);
+    const float3 steadied = input.rgb + lerp(answer.rgb - input.rgb, estimate.rgb, amount);
+    u0[p] = float4(Finite3(steadied) ? steadied : answer.rgb, answer.a);
+}
+
+// Where the moved detail was dropped (another surface was there, or it came from off-screen), take the trusted moved
+// detail of nearby pixels on the same surface instead of none. Uncovered background gets the background's detail from
+// around it, not the body that uncovered it. The average is smooth -- mostly NR's tone rather than its fine detail --
+// which is what stops the dropped areas flashing to the un-NR'd image with several passes. 16 taps on a golden-angle
+// spiral out to fillRadius, each weighted by its trust and by depth agreement (within three times the reuse tolerance).
+void Fill(uint2 p)
+{
+    const float4 input = t0.Load(int3(p, 0));
+    const float4 estimate = t1.Load(int3(p, 0));
+    const bool estimateOk = Finite3(estimate.rgb) && isfinite(estimate.a);
+    const float trust = estimateOk ? saturate(estimate.a) : 0.0;
+    const float3 own = estimateOk ? estimate.rgb * trust : 0.0;
+
+    float filled = 0.0;
+    float3 fillDetail = 0.0;
+    if (trust < 0.999 && fillStrength > 0.0)
+    {
+        const uint2 depthSize = uint2(depthWidth, depthHeight);
+        const float2 work = WorkSize();
+        const float depthHere = GuideDepth(t4, GuideTexel(WorkUv(p), depthSize));
+        const float tolerance = 3.0 * depthTolerance;
+        float3 sum = 0.0;
+        float weightSum = 0.0;
+        [unroll] for (int k = 0; k < 16; ++k)
+        {
+            const float radius = lerp(2.0, max(fillRadius, 2.0), sqrt((k + 0.5) / 16.0));
+            const float angle = 2.39996323 * k;
+            const int2 texel = clamp(int2(p) + int2(round(radius * float2(cos(angle), sin(angle)))), int2(0, 0),
+                                     int2(work) - 1);
+            const float4 tap = t1.Load(int3(texel, 0));
+            if (!Finite3(tap.rgb) || !isfinite(tap.a) || tap.a <= 0.0)
+                continue;
+            const float depthThere = GuideDepth(t4, GuideTexel((float2(texel) + 0.5) / work, depthSize));
+            const float relative = abs(depthHere - depthThere) / max(max(depthHere, depthThere), 1e-6);
+            const float weight = saturate(tap.a) * (1.0 - smoothstep(tolerance, 2.0 * tolerance, relative));
+            sum += tap.rgb * weight;
+            weightSum += weight;
+        }
+        if (isfinite(depthHere) && weightSum > 1e-3)
+        {
+            fillDetail = sum / weightSum;
+            // Full once two trusted neighbours agree; fewer fade it in.
+            filled = (1.0 - trust) * saturate(fillStrength) * saturate(weightSum / 2.0);
+        }
+    }
+
+    float3 result = input.rgb + own + fillDetail * filled;
+    if (!Finite3(result))
+        result = input.rgb;
+
+    // Debug: cyan where detail was filled, magenta where it is still missing.
+    if (debugView != 0)
+        result = result * trust + float3(0.0, 1.0, 1.0) * filled + float3(1.0, 0.0, 1.0) * max(1.0 - trust - filled, 0.0);
+
+    u0[p] = float4(result, input.a);
+}
+
+// Work size: this frame's vectors as a uv displacement, so the next frame reads them right after a render-size change.
+void SaveMotion(uint2 p)
+{
+    const float2 displacement = UvDisplacement(RawMotion(WorkUv(p)));
+    u0[p] = float4(all(isfinite(displacement)) ? displacement : 0.0, 0.0, 0.0);
+}
+
+// Motion size: this frame's raw vector plus the saved displacement at the moved position, back in this frame's raw
+// units. Vectors are point-sampled: blending two surfaces' vectors across an edge gives one that belongs to neither.
+void Compose(uint2 q)
+{
+    const float2 raw = t3.Load(int3(uint2(motionBaseX, motionBaseY) + q, 0)).rg;
+    const float2 scale = float2(mvScaleX, mvScaleY);
+    float2 composed = all(isfinite(raw)) ? raw : 0.0;
+
+    const float2 delta = UvDisplacement(composed);
+    const float2 previousUv = (float2(q) + 0.5) / MotionSize() + delta;
+    // The saved displacement exists only on screen; where the point came from off-screen, the model gets the one frame
+    // of motion we know instead.
+    if (all(abs(scale) > 1e-20) && all(isfinite(delta)) && all(previousUv >= 0.0) && all(previousUv <= 1.0))
+    {
+        const float2 prior = t4.Load(int3(GuideTexel(previousUv, uint2(workWidth, workHeight)), 0)).rg;
+        const float2 sum = delta + prior;
+        // A sanity bound, not an on-screen test: two frames of motion across more than the whole screen is not motion.
+        if (all(isfinite(sum)) && all(abs(sum) <= 1.0))
+            composed = sum * MotionSize() / scale;
+    }
+
+    u0[q] = float4(composed, 0.0, 0.0);
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    const uint2 p = id.xy;
+    if (mode == 3)
+    {
+        if (p.x < motionWidth && p.y < motionHeight)
+            Compose(p);
+        return;
+    }
+
+    if (p.x >= workWidth || p.y >= workHeight)
+        return;
+    if (mode == 0)
+        Capture(p);
+    else if (mode == 2)
+        SaveMotion(p);
+    else if (mode == 1)
+        Reproject(p);
+    else if (mode == 4)
+        Steady(p);
+    else if (mode == 6)
+        Fill(p);
+    else
+        u0[p] = MovedDetail(p);
+}

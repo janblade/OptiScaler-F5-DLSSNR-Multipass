@@ -366,6 +366,30 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrVitEveryPlain.set_from_config(readUInt("DlssNr", "VitEveryPlain"));
             if (DlssNrVitEveryPlain.value_or_default() < 1u || DlssNrVitEveryPlain.value_or_default() > 2u)
                 DlssNrVitEveryPlain = std::clamp<uint32_t>(DlssNrVitEveryPlain.value_or_default(), 1u, 2u);
+            DlssNrDetailReuse.set_from_config(readBool("DlssNr", "DetailReuse"));
+            DlssNrDetailReuseDebug.set_from_config(readBool("DlssNr", "DetailReuseDebug"));
+            DlssNrDetailReuseSteady.set_from_config(readFloat("DlssNr", "DetailReuseSteady"));
+            DlssNrDetailReuseFill.set_from_config(readFloat("DlssNr", "DetailReuseFill"));
+            DlssNrDetailReuseWithFg.set_from_config(readBool("DlssNr", "DetailReuseWithFG"));
+            DlssNrDetailReuseMinFps.set_from_config(readFloat("DlssNr", "DetailReuseMinFps"));
+            if (DlssNrDetailReuseMinFps.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseMinFps.value()) || DlssNrDetailReuseMinFps.value() < 0.0f ||
+                 DlssNrDetailReuseMinFps.value() > 240.0f))
+                DlssNrDetailReuseMinFps = std::isfinite(DlssNrDetailReuseMinFps.value())
+                                              ? std::clamp(DlssNrDetailReuseMinFps.value(), 0.0f, 240.0f)
+                                              : 25.0f;
+            if (DlssNrDetailReuseFill.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseFill.value()) || DlssNrDetailReuseFill.value() < 0.0f ||
+                 DlssNrDetailReuseFill.value() > 1.0f))
+                DlssNrDetailReuseFill = std::isfinite(DlssNrDetailReuseFill.value())
+                                            ? std::clamp(DlssNrDetailReuseFill.value(), 0.0f, 1.0f)
+                                            : 1.0f;
+            if (DlssNrDetailReuseSteady.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseSteady.value()) || DlssNrDetailReuseSteady.value() < 0.0f ||
+                 DlssNrDetailReuseSteady.value() > 1.0f))
+                DlssNrDetailReuseSteady = std::isfinite(DlssNrDetailReuseSteady.value())
+                                              ? std::clamp(DlssNrDetailReuseSteady.value(), 0.0f, 1.0f)
+                                              : 0.0f;
             DlssNrResidualFgApproxCamera.set_from_config(readBool("DlssNr", "ResidualFGApproxCamera"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
@@ -1321,6 +1345,12 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "Precision", GetIntValue(Instance()->DlssNrPrecision.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEveryPlain", GetIntValue(Instance()->DlssNrVitEveryPlain.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuse", GetBoolValue(Instance()->DlssNrDetailReuse.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseDebug", GetBoolValue(Instance()->DlssNrDetailReuseDebug.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseSteady", GetFloatValue(Instance()->DlssNrDetailReuseSteady.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(Instance()->DlssNrDetailReuseFill.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ResidualFGApproxCamera", GetBoolValue(Instance()->DlssNrResidualFgApproxCamera.value_for_config()).c_str());
     {
         auto toggle = Instance()->DlssNrToggleKey.value_for_config();

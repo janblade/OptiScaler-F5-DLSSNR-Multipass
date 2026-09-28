@@ -8,6 +8,9 @@
 // OptiScaler already answers from its Vulkan hook table (VulkanwDx12_Hooks.cpp); those hooks call in here. Only
 // launches inside our own evaluate bracket (DlssNrNative::BeginEvaluate / EndEvaluate around each pass, on the
 // evaluating thread) are filtered; everything else on those functions -- the game's own DLSS SR -- goes out untouched.
+//
+// Reuse itself is off on Vulkan for now: DlssNrFeature_Vk.cpp asks for every = 1, so nothing is dropped and this only
+// tells the kernel set. With the run skipped, its kept result was overwritten between frames there (see that call).
 
 #include "DlssNrNative.h"
 #include "DlssNrVitReuse.h"

@@ -1408,6 +1408,9 @@ void RenderMenu(Config* config, float menuResScale)
         // One setting per kernel set: the fp8 kernels (NVIDIA's DLL and fp8-based builds) and the plain FP16 kernels (used by some modified DLSS-NR DLLs).
         // Only the one for the kernels actually running is used.
         const char* kernelSet = DlssNrNative::VitKernelSet();
+        // Off on Vulkan (DlssNrFeature_Vk.cpp): the settings stay as they are for D3D12 games.
+        const bool vitReuseVk = DlssNr::IsRunningVk();
+        ImGui::BeginDisabled(vitReuseVk);
         bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
         if (ImGui::Checkbox("Reuse bottleneck: FP8 kernels", &vitReuse))
             config->DlssNrVitEvery = vitReuse ? 2u : 1u;
@@ -1420,10 +1423,14 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Checkbox("Reuse bottleneck: plain FP16 kernels", &vitReusePlain))
             config->DlssNrVitEveryPlain = vitReusePlain ? 2u : 1u;
         HelpMarker("The same as above, used when the model runs the plain FP16 kernels (used by some modified DLSS-NR DLLs).\nOn by default.");
+        ImGui::EndDisabled();
         ImGui::Text("Kernel set in use: %s", kernelSet);
         bool detailReuse = config->DlssNrDetailReuse.value_or_default();
         const bool detailReuseRunning = detailReuse && !DlssNr::IsRunningVk() && DlssNr::DetailReuseStatus().active;
-        if (detailReuseRunning)
+        if (vitReuseVk)
+            ImGui::TextWrapped("Reuse bottleneck: D3D12 only for now (on Vulkan the reused result can flash in dark "
+                               "scenes)");
+        else if (detailReuseRunning)
             ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
         else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
             ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());

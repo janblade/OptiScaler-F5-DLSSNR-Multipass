@@ -1710,13 +1710,13 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
         const auto tuning = Profiles::PassTuning(cfg, pass);
         void* const passFeature = pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass];
-        // Reuse bottleneck (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp): which feature this is, whether it
-        // starts over, how often each kernel set computes the bottleneck, and the frame (the same for every pass of a
-        // frame, so all passes compute on the same frame and all reuse on the next). No command list: the kernel
+        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp), so the kernel set shows. Reuse
+        // bottleneck stays off on Vulkan (every = 1 on both kernel sets): with the ViT run skipped, its kept result was
+        // overwritten between frames there (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel
+        // was kept), by something outside the model's own launches. D3D12 keeps it. No command list: the kernel
         // profiler is D3D12's.
-        DlssNrNative::BeginEvaluate(passFeature, passReset, std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
-                                    std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
-                                    (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull), nullptr, false);
+        DlssNrNative::BeginEvaluate(passFeature, passReset, 1u, 1u, (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull),
+                                    nullptr, false);
         evaluated = g_vk.evaluate(
             (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
             &input->ngx, depth, motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,

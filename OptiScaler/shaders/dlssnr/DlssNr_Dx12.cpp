@@ -25,6 +25,7 @@
 #include "DlssNr_ExposureCalibrate.h"
 #include "DlssNr_ExposureCalibrate_Run.h"
 #include "DlssNr_ExposureAdapt.h"
+#include "DlssNr_FinishedReady.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
 
 #include <Config.h>
@@ -4226,6 +4227,13 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         { DeferredSr::Cancel(); Late::Cancel(); return; }
         if (timingQueue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         { DeferredSr::Cancel(); Late::Cancel(); Late::Say("This option needs a native DirectX 12 game."); return; }
+        // Before the pre-SR model and private DLSS run, so nothing is computed that cannot be composed.
+        if (Late::PausedForGameFrameGeneration())
+        {
+            DeferredSr::Cancel(); Late::Cancel(); Late::Say(Late::pausedForGameFg);
+            if (finishedMode == 2) DeferredSr::Say("paused: the game's own frame generation is on");
+            return;
+        }
         if (finishedMode == 2)
         {
             if (rayReconstruction)

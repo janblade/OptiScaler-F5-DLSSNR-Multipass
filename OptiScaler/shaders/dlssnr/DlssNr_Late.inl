@@ -8,6 +8,7 @@ struct Slot
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> commands;
+    ComPtr<ID3D12CommandQueue> producerQueue; // real queue that signals `ready`; held so its identity stays valid
     ID3D12CommandList* producer = nullptr; // identity only; never dereferenced
     DlssNrFrameInfo frame {};
     uint64_t ready = 0, done = 0, serial = 0;
@@ -15,7 +16,9 @@ struct Slot
 };
 std::array<Slot, 4> slots;
 ComPtr<ID3D12Device> device;
-uint64_t serial = 0, successes = 0;
+uint64_t serial = 0, successes = 0, stillRendering = 0;
+bool loggedCrossQueue = false;
+inline constexpr const char* pausedForGameFg = "Paused while the game's own frame generation is on.";
 std::string status = "Waiting for a finished picture.";
 bool reset = true;
 std::atomic<bool> tracking { false };
@@ -34,6 +37,24 @@ bool Finished(const Slot& slot)
 {
     return !slot.fence || (slot.fence->GetCompletedValue() != UINT64_MAX &&
                           slot.fence->GetCompletedValue() >= slot.done);
+}
+
+ID3D12CommandQueue* RealQueue(ID3D12CommandQueue* queue)
+{
+    ID3D12CommandQueue* real = nullptr;
+    return Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &real) ? real : queue;
+}
+
+// Both callers already split on OptiScaler's FG (the swapchain Present when it is off, FG_Hooks when it
+// runs); the check is repeated so capture, which has no such caller, decides the same way.
+bool PausedForGameFrameGeneration()
+{
+    auto& state = State::Instance();
+    auto* fg = state.currentFG;
+    return GameFrameGenerationOn(fg && fg->IsActive() && !fg->IsPaused(),
+                                 state.activeFgInput == FGInput::DLSSG, state.activeFgOutput == FGOutput::DLSSG,
+                                 state.dlssgLastSetMode != sl::DLSSGMode::eOff,
+                                 PresentsSince(state.frameCount, state.dlssgLastEvaluateFrame));
 }
 
 void Cancel()
@@ -67,6 +88,8 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
 {
     if (!cmd || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
     { Say("This option needs a native DirectX 12 game."); return nullptr; }
+    if (PausedForGameFrameGeneration())
+    { Say(pausedForGameFg); return nullptr; } // no guide copies nothing will compose
     ComPtr<ID3D12Device> currentDevice;
     if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&currentDevice))))
         return nullptr;
@@ -84,6 +107,11 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
         if (!slot.pending && Finished(slot)) { next = &slot; break; }
     if (!next)
     {
+        // This frame gets no capture: an older frame's pending one must not be composed onto its picture.
+        // Captures of this frame (a game may evaluate more than once) stay.
+        const auto now = State::Instance().frameCount;
+        for (auto& slot : slots)
+            if (slot.submitted && slot.pending && slot.frame.SubmissionEpoch < now) { slot.pending = false; reset = true; }
         Say("Waiting for the previous picture to finish.");
         return nullptr;
     }
@@ -211,7 +239,8 @@ bool WaitForFinishedPicture()
     Late::Cancel();
     for (auto& slot : Late::slots)
     {
-        if (!slot.submitted || Late::Finished(slot)) continue;
+        // A capture-only slot signals on the producer queue, which may itself wait on a present.
+        if (!slot.submitted || !TouchedBackBuffer(slot.ready, slot.done) || Late::Finished(slot)) continue;
         HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event) return false;
         const auto hr = slot.fence->SetEventOnCompletion(slot.done, event);
@@ -241,6 +270,7 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
                 {
                     // Signal after ExecuteCommandLists, never when merely recording the copy.
                     slot.submitted = true;
+                    slot.producerQueue = Late::RealQueue(queue);
                     if (FAILED(queue->Signal(slot.fence.Get(), slot.ready)))
                     {
                         // The copy already executed. Keep its unsignalled fence protecting
@@ -268,6 +298,13 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     }
     if (!swapchain || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         return;
+    if (Late::PausedForGameFrameGeneration())
+    {
+        Late::Cancel();
+        Late::stillRendering = 0;
+        Late::Say(Late::pausedForGameFg);
+        return;
+    }
     Late::ComPtr<IDXGISwapChain3> sc;
     Late::ComPtr<ID3D12Resource> color;
     Late::ComPtr<ID3D12Device> currentDevice;
@@ -291,12 +328,14 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         Late::Say("This screen colour format is not supported.");
         return;
     }
-    Late::Slot* latest = nullptr;
     const auto epoch = State::Instance().frameCount;
     const bool residualOnly = Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
                               Config::Instance()->DlssNrDeferredDlss.value_or_default();
-    for (auto& slot : Late::slots)
+    auto* presentQueue = Late::RealQueue(queue);
+    std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>> inputs {};
+    for (size_t i = 0; i < Late::slots.size(); ++i)
     {
+        auto& slot = Late::slots[i];
         if (!slot.pending || !slot.submitted)
             continue;
         if (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1)
@@ -305,17 +344,39 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
             Late::reset = true;
             continue;
         }
-        if (slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width && slot.frame.OutputHeight == desc.Height &&
-            (!latest || slot.serial > latest->serial))
-            latest = &slot;
+        inputs[i] = { slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width &&
+                          slot.frame.OutputHeight == desc.Height,
+                      slot.serial, slot.producerQueue.Get() == presentQueue, slot.fence->GetCompletedValue(),
+                      slot.ready };
     }
-    if (!latest)
+    // Never queue a cross-queue wait here: the producer's signal can depend on this present.
+    size_t index = 0;
+    const auto pick = PickFinishedInput(inputs.data(), inputs.size(), index);
+    if (pick == FinishedPick::None)
         return; // loading screen, another swapchain, or this real frame was already consumed
-    auto& slot = *latest;
+    if (pick == FinishedPick::NotReady)
+    {
+        // Stays pending in case another present of this frame follows; history skips a frame.
+        Late::reset = true;
+        const auto& input = inputs[index];
+        if (!input.sameQueue && input.completed != UINT64_MAX && !Late::loggedCrossQueue)
+        {
+            Late::loggedCrossQueue = true;
+            LOG_INFO("DLSS-NR finished picture: the game renders on a different queue than it presents on; "
+                     "frames still rendering at present are skipped instead of waited for");
+        }
+        // Say changes are logged: only after a sustained run, not on every alternation.
+        if (++Late::stillRendering == 120)
+            Late::Say("Skipping frames: the game's picture is still rendering when it is presented.");
+        return;
+    }
+    Late::stillRendering = 0;
+    auto& slot = Late::slots[index];
     // Drop other submitted evaluates from this picture, not their in-flight resources.
     for (auto& other : Late::slots)
         if (other.submitted && other.serial <= slot.serial)
             other.pending = false;
+    // Same queue: orders after the producer's signal. Another queue: already complete, so this never blocks.
     if (FAILED(queue->Wait(slot.fence.Get(), slot.ready)) || FAILED(slot.allocator->Reset()) ||
         FAILED(slot.commands->Reset(slot.allocator.Get(), nullptr)))
     {

@@ -926,8 +926,12 @@ float3 CubeScaleResidual(float3 P, float3 T)
 //   * the chroma difference in a and in b, added as is.
 //
 // The three are interpolated bilinearly between the four nearest texels of the model's own grid (edges
-// clamped) and applied to the frame's full-resolution proxy: L' = saturate(max(L, 0.1) * exp(ratio)),
-// a' = a + da, b' = b + db, back to RGB and saturated. Luminance is multiplicative and chroma additive,
+// clamped) and applied to the frame's full-resolution proxy: L' = saturate(L * exp(ratio)),
+// a' = a + da, b' = b + db, back to RGB and saturated. The 0.1 floor belongs to the ratio only. NVIDIA's
+// kernel has it on the pixel too (max(L, 0.1) * exp(ratio)), which lifts everything below L 0.1 to 0.1 with
+// an unchanged answer, a grey veil over near-black (and 1% of white on the linear curve); left out here
+// on purpose. NvOkLab's own floor sits at 1e-12 of LMS (L 1e-4) for the same
+// reason, so black comes back black. Luminance is multiplicative and chroma additive,
 // which is the opposite split from CubeScaleResidual's single additive RGB edit that is scaled to fit
 // the cube. Both are fed to the same composition below, so this only changes how the reduced-size edit
 // is enlarged.
@@ -939,7 +943,7 @@ float3 NvOkLab(float3 rgb)
     const float3x3 lms_to_lab = { 0.2104542553, 0.7936177850, -0.0040720468,
                                   1.9779984951, -2.4285922050, 0.4505937099,
                                   0.0259040371, 0.7827717662, -0.8086757660 };
-    return mul(lms_to_lab, pow(max(mul(rgb_to_lms, saturate(rgb)), 1e-4), 1.0 / 3.0));
+    return mul(lms_to_lab, pow(max(mul(rgb_to_lms, saturate(rgb)), 1e-12), 1.0 / 3.0));
 }
 
 float3 NvidiaResidualModel(float3 fullProxy, float2 uv)
@@ -968,7 +972,7 @@ float3 NvidiaResidualModel(float3 fullProxy, float2 uv)
     }
 
     const float3 lab = NvOkLab(fullProxy);
-    const float L = saturate(exp(log(max(lab.x, 0.1)) + residual.x));
+    const float L = saturate(lab.x * exp(residual.x));
     return saturate(FromOkLab(float3(L, lab.y + residual.y, lab.z + residual.z)));
 }
 

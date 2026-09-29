@@ -12,9 +12,10 @@
 //   4. Composed carries the model's edit whole on the signal curves: a model that answers 10% brighter lifts the
 //      frame 10% (they compose in scene light). Modes 0-4 stay bit-identical to the reference with that model.
 //   5. Matched residual (the model below the frame's size, transfer 1 and 2): modes 0-4 bit-identical to the
-//      reference; the signal curves rebuild the frame's own proxy exactly, so an unchanged answer gives the frame back.
+//      reference (transfer 2 to rounding, see 7); the signal curves rebuild the frame's own proxy exactly, so an unchanged answer gives the frame back.
 //   6. SGSR1 (sgsr1.hlsl): modes 0-4 bit-identical to its reference; the signal curves are enlarged on the stored
 //      value as it is, exactly like the soft knee.
+//   7. The OkLab residual (transfer 2) keeps the shadows: an unchanged answer gives near-black back on every curve.
 //
 // Build: cl /nologo /std:c++20 /EHsc /W3 tests\nr_proxy_curves_shader_smoke.cpp /link d3d11.lib d3dcompiler.lib
 // Reference: git show 7d518d74:OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl > precompile\dlssnr_ref.hlsl
@@ -431,17 +432,25 @@ int wmain(int argc, wchar_t** argv) try
                 {
                     const Encoded r = Encode(gpu, reference.Get(), input, passthrough, mode);
                     const Row want = Resolve(gpu, reference.Get(), r.half.Get(), r.half.Get(), r.keep.Get(), n, settings);
-                    expect(SameBits(got, want), "resolve differs from the reference shader" + what);
+                    if (transfer == 1)
+                    {
+                        expect(SameBits(got, want), "resolve differs from the reference shader" + what);
+                        continue;
+                    }
+                    // The OkLab residual applies its ratio as L * exp(r) now, not exp(log(max(L, 0.1)) + r) (section 7),
+                    // which rounds differently; none of these pixels sits below L 0.1, so the two agree to rounding.
+                    float drift = 0.0f;
+                    for (UINT i = 0; i < n; ++i)
+                        drift = std::max({drift, std::abs(got[i].r - want[i].r) / std::max(Peak(want[i]), 1e-3f),
+                                          std::abs(got[i].g - want[i].g) / std::max(Peak(want[i]), 1e-3f),
+                                          std::abs(got[i].b - want[i].b) / std::max(Peak(want[i]), 1e-3f)});
+                    std::printf("matched residual 2, curve %u, passthrough %u: drift from the reference %.2e\n", mode, passthrough, drift);
+                    expect(drift < 1e-5f, "resolve differs from the reference shader beyond rounding" + what);
                     continue;
                 }
                 float worst = 0.0f;
                 for (UINT i = 0; i < n; ++i)
                 {
-                    // The OkLab residual (transfer 2) lifts anything below OkLab L 0.1 -- 0.1% of light -- to 0.1 even
-                    // when the answer is unchanged (NvidiaResidualModel's max(lab.x, 0.1); older than these curves and
-                    // on every curve). Linear puts 1% of white there, so those pixels are left out for it.
-                    if (transfer == 2 && mode == 7 && Peak(input[i]) < 0.02f)
-                        continue;
                     const float scale = std::max(Peak(input[i]), 1e-3f);
                     worst = std::max({worst, std::abs(got[i].r - input[i].r) / scale, std::abs(got[i].g - input[i].g) / scale,
                                       std::abs(got[i].b - input[i].b) / scale});
@@ -469,13 +478,65 @@ int wmain(int argc, wchar_t** argv) try
         expect(!SameBits(Sgsr1(gpu, sgsr1.Get(), stored, 1), knee), "SGSR1 test cannot tell the domains apart");
     }
 
+    // 7. Shadows under the OkLab residual (transfer 2, the model at half size): an unchanged answer gives the dark
+    //    pixels back on every curve, and a 10% brighter one moves them by about that -- the residual's 0.1 floor is
+    //    for the ratio, not for the pixel it is applied to. Before the fix: 1.25 (knee), 0.5 (HLG), 12.9 (linear).
+    {
+        Row dark, darkBrighter;
+        for (float v : {0.0f, 1e-5f, 1e-4f, 3e-4f, 1e-3f, 3e-3f, 0.01f, 0.03f})
+            for (int k = 0; k < 2; ++k)
+            {
+                dark.push_back({v, v, v, 1});
+                darkBrighter.push_back({v * 1.1f, v * 1.1f, v * 1.1f, 1});
+            }
+        for (const Pixel& p : {Pixel {2e-3f, 5e-4f, 1e-4f, 1}, Pixel {1e-4f, 3e-4f, 8e-4f, 1}})
+            for (int k = 0; k < 2; ++k)
+            {
+                dark.push_back(p);
+                darkBrighter.push_back({p.r * 1.1f, p.g * 1.1f, p.b * 1.1f, 1});
+            }
+        const UINT n = (UINT) dark.size();
+        for (uint32_t mode = 0; mode <= 7; ++mode)
+            for (uint32_t passthrough : {0u, 1u})
+            {
+                if (passthrough && mode > 4)
+                    continue;
+                const Settings settings {passthrough, mode, 2, 0.5f};
+                const std::string what = " (OkLab residual, curve " + std::to_string(mode) + ", passthrough " +
+                                         std::to_string(passthrough) + ")";
+                const Encoded frame = Encode(gpu, shader.Get(), dark, passthrough, mode);
+                const Encoded answer = Encode(gpu, shader.Get(), darkBrighter, passthrough, mode);
+                const Row same = Resolve(gpu, shader.Get(), frame.half.Get(), frame.half.Get(), frame.keep.Get(), n, settings);
+                const Row lifted = Resolve(gpu, shader.Get(), frame.half.Get(), answer.half.Get(), frame.keep.Get(), n, settings);
+                // Errors against 1e-3 of white or the pixel, whichever is larger: what shows on screen.
+                float worstSame = 0.0f, worstLift = 0.0f;
+                for (UINT i = 0; i < n; ++i)
+                {
+                    const float scale = std::max(Peak(dark[i]), 1e-3f);
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const float in = (&dark[i].r)[c];
+                        worstSame = std::max(worstSame, std::abs((&same[i].r)[c] - in) / scale);
+                        // Moved by more than the answer's 10%, either way. The residual carries an edit within about
+                        // a point of the full-size model's on HLG and PQ, so 2% of the pixel is allowed.
+                        worstLift = std::max(worstLift, std::abs((&lifted[i].r)[c] - in) / scale - 0.1f * in / scale);
+                    }
+                }
+                std::printf("OkLab residual shadows, curve %u, passthrough %u: unchanged answer %.2e, brighter answer overshoot %.2e\n",
+                            mode, passthrough, worstSame, worstLift);
+                expect(Finite(same) && Finite(lifted), "not finite" + what);
+                expect(worstSame < 1e-3f, "an unchanged answer does not give the shadows back" + what);
+                expect(worstLift < 0.02f, "a 10% brighter answer moves the shadows by more than 12%" + what);
+            }
+    }
+
     if (fails)
     {
         std::printf("%d check(s) failed\n", fails);
         return 1;
     }
     std::puts("PASS: modes 0-4 unchanged (encode, downsample, resolve, matched residual, SGSR1); HLG, PQ and linear\n"
-              "      proxies correct, reversible, composed in scene light (WARP HLSL)");
+              "      proxies correct, reversible, composed in scene light; the OkLab residual keeps the shadows (WARP HLSL)");
     return 0;
 }
 catch (const std::exception& e)

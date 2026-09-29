@@ -585,6 +585,64 @@ int main()
         CHECK(!s.Changed());
     }
 
+    // Cyberpunk 2077 with ray reconstruction, a still camera (OptiScaler.log, 2026-09-28): the output flickers about 10x
+    // more at the bright end than at the dark end, so the median flicker hid the detail and every run came back unsure
+    // (issue #71). Run 1 is sure: detail and flicker both point darker.
+    static const Row kCyberpunk[] = {
+        { -3.0f, .03249f, .01422f, .01044f, .0021f, .00035f, 0, .0538f },
+        { -2.5f, .03245f, .01422f, .01045f, .00218f, .0003f, .0001f, .0258f },
+        { -2.0f, .03209f, .01411f, .01045f, .00197f, .00026f, .0001f, .0114f },
+        { -1.5f, .03155f, .0139f, .01044f, .00182f, .00026f, .0002f, .0055f },
+        { -1.0f, .03072f, .01359f, .01043f, .00235f, .0003f, .0006f, .0027f },
+        { -0.5f, .02941f, .01313f, .01043f, .00301f, .00079f, .0014f, .0009f },
+        { 0.0f, .02784f, .01246f, .01034f, .00399f, .00067f, .0021f, .0001f },
+        { 0.5f, .02659f, .01189f, .0104f, .00602f, .00071f, .0029f, 0 },
+        { 1.0f, .02551f, .01142f, .01052f, .009f, .00074f, .0045f, 0 },
+        { 1.5f, .02463f, .01102f, .01061f, .01198f, .00075f, .0064f, 0 },
+        { 2.0f, .024f, .01076f, .01064f, .01458f, .00069f, .0108f, 0 },
+        { 2.5f, .02382f, .01073f, .01065f, .01494f, .00068f, .0168f, 0 },
+        { 3.0f, .02395f, .01082f, .01063f, .01301f, .00054f, .0309f, 0 },
+        { 3.5f, .02424f, .01091f, .01061f, .00897f, .0003f, .0613f, 0 },
+        { 4.0f, .0243f, .01096f, .0106f, .00488f, .00027f, .1184f, 0 },
+    };
+    {
+        Sweep s;
+        s.Start(1.5f, Settings {}, kCtx);
+        Run(s, replay(kCyberpunk));
+        CHECK(s.Finished());
+        CHECK(!s.Unsure());
+        CHECK(!s.AtEdge());
+        CHECK(Near(s.ResultEv(), -2.0f));
+        CHECK(s.Changed());
+    }
+
+    // Its run 3 stays unsure: a flicker spike at -2.5 EV next to a near-flat bottom, too little detail spread to call.
+    static const Row kCyberpunkNoisy[] = {
+        { -3.0f, .00987f, .00614f, .00436f, .00151f, .00018f, 0, .0024f },
+        { -2.5f, .00995f, .00617f, .00435f, .00282f, .0002f, 0, 0 },
+        { -2.0f, .00957f, .00607f, .00427f, .00206f, .00034f, 0, 0 },
+        { -1.5f, .00935f, .00592f, .00418f, .00229f, .00028f, 0, 0 },
+        { -1.0f, .00893f, .00568f, .0041f, .00269f, .00024f, 0, 0 },
+        { -0.5f, .00829f, .00537f, .00404f, .00363f, .00015f, 0, 0 },
+        { 0.0f, .00767f, .00507f, .00404f, .0039f, .0002f, 0, 0 },
+        { 0.5f, .00714f, .00483f, .00411f, .00498f, .00031f, 0, 0 },
+        { 1.0f, .00659f, .00453f, .0042f, .00619f, .00025f, 0, 0 },
+        { 1.5f, .00626f, .00427f, .00427f, .00798f, .00022f, 0, 0 },
+        { 2.0f, .00607f, .00409f, .00431f, .01049f, .00016f, 0, 0 },
+        { 2.5f, .00603f, .00398f, .0043f, .01173f, .00018f, 0, 0 },
+        { 3.0f, .00599f, .00392f, .00423f, .01155f, .00033f, 0, 0 },
+        { 3.5f, .00595f, .00387f, .00414f, .00798f, .00026f, .0012f, 0 },
+        { 4.0f, .00602f, .0039f, .00406f, .00526f, .00022f, .017f, 0 },
+    };
+    {
+        Sweep s;
+        s.Start(1.5f, Settings {}, kCtx);
+        Run(s, replay(kCyberpunkNoisy));
+        CHECK(s.Finished());
+        CHECK(s.Unsure());
+        CHECK(!s.Changed());
+    }
+
     // The step on screen, for the menu's progress text.
     {
         Sweep s;

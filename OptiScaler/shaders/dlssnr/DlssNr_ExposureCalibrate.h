@@ -637,9 +637,15 @@ class Sweep
             flicker.push_back(r.Flicker());
         }
 
-        std::nth_element(flicker.begin(), flicker.begin() + (std::ptrdiff_t) (flicker.size() / 2), flicker.end());
+        // Unsure when detail varies no more than the flicker of the sweep's quieter quarter. Not the median: in some games
+        // the output flickers far more at a brighter input (Cyberpunk 2077 with ray reconstruction, about 10x from -3 to
+        // +2.5 EV on a still camera), so the median came from the bright end and called every run unsure while the
+        // scores all pointed the same way. A scene that flickers at every step (a moving one) still flickers more in its
+        // quiet quarter than its detail varies.
+        const size_t quiet = flicker.size() / 4;
+        std::nth_element(flicker.begin(), flicker.begin() + (std::ptrdiff_t) quiet, flicker.end());
 
-        if (detailHi - detailLo <= flicker[flicker.size() / 2])
+        if (detailHi - detailLo <= flicker[quiet])
         {
             unsure_ = true;
             return;

@@ -12,11 +12,14 @@
 // mutable copy of the create info, so appending to that list is what the hook is shaped for. This
 // header is the list and the appending, kept in the module so it leaves with it.
 //
-// The names come from the model binary itself rather than from documentation: scanning
-// nvngx_dlssnr.dll for VK_*_* yields exactly these.
+// The names below come from the model binary itself: scanning nvngx_dlssnr.dll 310.8 for VK_*_* yields exactly
+// these. They are the floor. NGX's own answer for the feature (NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements,
+// feature 18) is asked as well and merged in, so a model version that needs more is not missed.
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -89,6 +92,50 @@ inline bool Contains(const std::vector<std::string>& haystack, const char* needl
     }
 
     return false;
+}
+
+// What NGX says Neural Rendering (feature 18) needs on this device, or nothing when it cannot say (no instance, the
+// core is not loaded, DLSS is off in OptiScaler, or it does not know the feature). `result` is NGX's answer, 0 if
+// never asked (NGX itself never answers 0). Defined in NVNGX_DLSS_Vk.cpp, with the rest of the NGX proxy.
+std::vector<std::string> NgxDeviceExtensions(VkInstance instance, VkPhysicalDevice physicalDevice, int& result);
+
+// Whether the game's NGX core is up on Vulkan, so a parameter block it allocated may still be handed back to it.
+bool NgxCoreUp();
+
+// Whether `p` may be written. A create info's chain is the game's memory and may sit in a read-only section.
+inline bool IsWritable(const void* p)
+{
+    MEMORY_BASIC_INFORMATION info {};
+
+    if (VirtualQuery(p, &info, sizeof(info)) == 0 || info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD) != 0)
+        return false;
+
+    const DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (info.Protect & writable) != 0;
+}
+
+// Devices created with shaderStorageImageWriteWithoutFormat switched on (the create hook, Vulkan_Hooks.cpp), which
+// detail reuse's shader needs. Forgotten when the device is destroyed, so a new device with the same handle value is not
+// mistaken for it.
+inline std::mutex g_writeWithoutFormatMutex;
+inline std::vector<VkDevice> g_writeWithoutFormatDevices;
+
+inline void NoteDevice(VkDevice device, bool writesWithoutFormat)
+{
+    std::lock_guard<std::mutex> lock(g_writeWithoutFormatMutex);
+    auto& list = g_writeWithoutFormatDevices;
+    list.erase(std::remove(list.begin(), list.end(), device), list.end());
+    if (writesWithoutFormat)
+        list.push_back(device);
+}
+
+inline void ForgetDevice(VkDevice device) { NoteDevice(device, false); }
+
+inline bool WritesWithoutFormat(VkDevice device)
+{
+    std::lock_guard<std::mutex> lock(g_writeWithoutFormatMutex);
+    const auto& list = g_writeWithoutFormatDevices;
+    return std::find(list.begin(), list.end(), device) != list.end();
 }
 
 inline bool ListHas(const char* const* list, uint32_t count, const char* needle)

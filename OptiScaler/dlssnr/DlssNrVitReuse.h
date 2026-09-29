@@ -2,10 +2,12 @@
 
 // Reuse of the ViT bottleneck of NVIDIA's own DLSS-NR model.
 //
-// One NR evaluation launches its kernels on the game's command list through NvAPI. The ViT bottleneck (blocks 31-38, the
-// coarsest and most stable level of the network) is one contiguous run of those launches, from cc_vit_1d_repack_2d_to_1d
-// through cc_vit_1d_repack_1d_to_2d, and about a fifth of the evaluation. Leaving that run out on some frames leaves the
-// previous frame's result in its output buffer, which the next kernel reads (on the plain set: in its 1-D result, see below).
+// One NR evaluation launches its kernels on the game's command list: through NvAPI on D3D12, through
+// VK_NVX_binary_import's vkCmdCuLaunchKernelNVX on Vulkan (one launch per call, see Filter::One). The ViT bottleneck
+// (blocks 31-38, the coarsest and most stable level of the network) is one contiguous run of those launches, from
+// cc_vit_1d_repack_2d_to_1d through cc_vit_1d_repack_1d_to_2d, and about a fifth of the evaluation. Leaving that run
+// out on some frames leaves the previous frame's result in its output buffer, which the next kernel reads (on the plain
+// set: in its 1-D result, see below).
 //
 // Why dropping the run is safe (checked on a real capture, fp8 kernels): the run's sync counters are referenced by no kernel outside
 // it, so nothing that is kept can wait on something that was dropped; and its output buffer is written only by its last kernel.
@@ -83,6 +85,47 @@ inline KernelSet SetOf(const char* name)
     const size_t len = strlen(name);
     return len >= suffixLen && strcmp(name + len - suffixLen, suffix) == 0 ? KernelSet::Fp8 : KernelSet::Plain;
 }
+
+// The ViT run's kernels by handle, from their names at creation (Vulkan: vkCreateCuFunctionNVX). A handle can come back
+// for another kernel after a destroy that was never seen (a lost device abandons its kernels), so a create always
+// replaces what the handle meant before, and a kernel outside the run is simply absent.
+template <class Handle> class Kernels
+{
+  public:
+    void Created(Handle handle, const char* name)
+    {
+        const Role role = RoleOf(name);
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (role == Role::None)
+            roles_.erase(handle);
+        else
+            roles_[handle] = { role, SetOf(name) };
+    }
+
+    void Destroyed(Handle handle)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        roles_.erase(handle);
+    }
+
+    void Clear()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        roles_.clear();
+    }
+
+    std::pair<Role, KernelSet> Find(Handle handle) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = roles_.find(handle);
+        return it != roles_.end() ? it->second : std::pair { Role::None, KernelSet::Unknown };
+    }
+
+  private:
+    mutable std::mutex mutex_;
+    std::unordered_map<Handle, std::pair<Role, KernelSet>> roles_;
+};
 
 // Feed it the launches of one model evaluation, in order, between Begin and End. One Filter serves every feature (every
 // pass); the evaluation in progress belongs to the calling thread, so launches from any other thread pass untouched.
@@ -225,6 +268,23 @@ class Filter
         }
 
         return any;
+    }
+
+    // One launch per call, as Vulkan's vkCmdCuLaunchKernelNVX does: whether to record the barrier before it (or, when
+    // it is dropped, where it would have been) and whether it goes out. The same decisions as Split over the same
+    // launches.
+    struct Single
+    {
+        bool barrier = false;
+        bool launch = true;
+    };
+
+    Single One(Role role, KernelSet set)
+    {
+        Single s;
+        s.launch = !Drop(role, set);
+        s.barrier = TakeGap();
+        return s;
     }
 
     // End of the evaluation. False when what was launched did not look like the expected order; the feature is then off

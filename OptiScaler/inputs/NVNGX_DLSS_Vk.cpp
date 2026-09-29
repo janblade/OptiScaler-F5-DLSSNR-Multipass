@@ -1,5 +1,7 @@
 #include "pch.h"
 #include <dlssnr/DlssNrFeature_Vk.h>
+#include <dlssnr/DlssNr_VkExtensions.h>
+#include "NgxFeatureRegistry.h"
 #include "Util.h"
 #include "Config.h"
 #include "resource.h"
@@ -25,6 +27,8 @@ PFN_vkGetInstanceProcAddr vkGIPA;
 PFN_vkGetDeviceProcAddr vkGDPA;
 
 static ankerl::unordered_dense::map<unsigned int, ContextData<IFeature_Vk>> VkContexts;
+// Feature id per forwarded handle, so the game's DLSS-G evaluate is known for what it is (as HandleToFeature on D3D12).
+static NgxFeatureRegistry VkHandleToFeature;
 static int evalCounter = 0;
 static bool shutdown = false;
 static bool _skipInit = false;
@@ -833,6 +837,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_CreateFeature1(VkDevice InDevice
             auto result =
                 NVNGXProxy::VULKAN_CreateFeature1()(InDevice, InCmdList, InFeatureID, InParameters, OutHandle);
             LOG_INFO("VULKAN_CreateFeature1 result for ({0}): {1:X}", (int) InFeatureID, (UINT) result);
+            if (result == NVSDK_NGX_Result_Success && OutHandle != nullptr && *OutHandle != nullptr)
+                VkHandleToFeature.Record((*OutHandle)->Id, InFeatureID);
             return result;
         }
         else
@@ -927,6 +933,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_CreateFeature(VkCommandBuffer In
         {
             auto result = NVNGXProxy::VULKAN_CreateFeature()(InCmdBuffer, InFeatureID, InParameters, OutHandle);
             LOG_INFO("VULKAN_CreateFeature result for ({0}): {1:X}", (int) InFeatureID, (UINT) result);
+            if (result == NVSDK_NGX_Result_Success && OutHandle != nullptr && *OutHandle != nullptr)
+                VkHandleToFeature.Record((*OutHandle)->Id, InFeatureID);
             return result;
         }
     }
@@ -942,6 +950,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_ReleaseFeature(NVSDK_NGX_Handle*
     auto handleId = InHandle->Id;
     if (handleId < DLSS_MOD_ID_OFFSET)
     {
+        VkHandleToFeature.Forget(handleId);
+
         if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
         {
             auto result = NVNGXProxy::VULKAN_ReleaseFeature()(InHandle);
@@ -1018,6 +1028,20 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
         state.currentInputApiName = targetApiName;
 
     state.setInputApiName.reset();
+
+    // The game's DLSS-G, for detail reuse's frame generation gate (dlssnr/DlssNrDetailReuseHost.h): a forwarded handle
+    // created as frame generation, or OptiScaler's own DLSS-G provider. Stamped on the Vulkan clock, apart from the
+    // D3D12 stamp.
+    if (handleId >= NVNGX_PROVIDER_ID_OFFSET ||
+        (handleId < DLSS_MOD_ID_OFFSET &&
+         VkHandleToFeature.Read(handleId).feature == NVSDK_NGX_Feature_FrameGeneration))
+    {
+        int frameCount = 0;
+        const bool countGiven = InParameters != nullptr &&
+                                InParameters->Get("DLSSG.MultiFrameCount", &frameCount) == NVSDK_NGX_Result_Success;
+        state.dlssgLastEvaluateGeneratesVk = !countGiven || frameCount > 0;
+        state.dlssgLastEvaluateFrameVk = DlssNr::VkFrameClock();
+    }
 
     if (handleId < DLSS_MOD_ID_OFFSET)
     {
@@ -1121,6 +1145,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown(void)
 {
+    // Neural Rendering's parameter block may be the core's; it goes before the core does.
+    DlssNr::ShutdownVkForDevice(VK_NULL_HANDLE, "the game is shutting its NGX down");
+
     shutdown = true;
 
     // for (auto const& [key, val] : VkContexts) {
@@ -1157,6 +1184,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown(void)
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown1(VkDevice InDevice)
 {
+    // Neural Rendering's parameter block may be the core's; it goes before the core does.
+    DlssNr::ShutdownVkForDevice(InDevice, "the game is shutting its NGX down on the device NR runs on");
+
     shutdown = true;
 
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsVulkanInited() &&
@@ -1172,3 +1202,56 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown1(VkDevice InDevice)
 
     return NVSDK_NGX_VULKAN_Shutdown();
 }
+
+// Neural Rendering's device requirements (dlssnr/DlssNr_VkExtensions.h). Defined here, beside the rest of the NGX
+// proxy, so NVNGX_Proxy.h is not pulled into another translation unit.
+namespace DlssNr::VkExt
+{
+
+bool NgxCoreUp() { return NVNGXProxy::IsVulkanInited(); }
+
+std::vector<std::string> NgxDeviceExtensions(VkInstance instance, VkPhysicalDevice physicalDevice, int& result)
+{
+    std::vector<std::string> out;
+    result = 0;
+
+    if (instance == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE ||
+        !Config::Instance()->DLSSEnabled.value_or_default())
+        return out;
+
+    // The same load the game's own GetFeatureRequirements call triggers.
+    if (NVNGXProxy::NVNGXModule() == nullptr)
+        NVNGXProxy::InitNVNGX();
+
+    const auto query = NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements();
+
+    if (query == nullptr)
+        return out;
+
+    std::wstring dataPath = State::Instance().NVNGX_ApplicationDataPath;
+
+    if (dataPath.empty())
+        dataPath = Util::ExePath().remove_filename().wstring();
+
+    NVSDK_NGX_FeatureDiscoveryInfo info {};
+    info.SDKVersion = NVSDK_NGX_Version_API;
+    info.FeatureID = (NVSDK_NGX_Feature) 18; // Neural Rendering
+    info.Identifier.IdentifierType = NVSDK_NGX_Application_Identifier_Type_Application_Id;
+    info.Identifier.v.ApplicationId = 0; // what the model is initialised with (dlssnr_forwarder.cpp)
+    info.ApplicationDataPath = dataPath.c_str();
+
+    uint32_t count = 0;
+    VkExtensionProperties* props = nullptr; // NGX's own storage
+
+    result = (int) query(instance, physicalDevice, &info, &count, &props);
+
+    if (result != NVSDK_NGX_Result_Success || props == nullptr)
+        return out;
+
+    for (uint32_t i = 0; i < count; ++i)
+        out.emplace_back(props[i].extensionName);
+
+    return out;
+}
+
+} // namespace DlssNr::VkExt

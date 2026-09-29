@@ -330,6 +330,11 @@ class Vulkan_wDx12
                                                  VkDeviceSize counterBufferOffset, uint32_t counterOffset,
                                                  uint32_t vertexStride);
     static void hk_vkCmdCuLaunchKernelNVX(VkCommandBuffer commandBuffer, const VkCuLaunchInfoNVX* pLaunchInfo);
+    static VkResult hk_vkCreateCuFunctionNVX(VkDevice device, const VkCuFunctionCreateInfoNVX* pCreateInfo,
+                                             const VkAllocationCallbacks* pAllocator, VkCuFunctionNVX* pFunction);
+    static void hk_vkDestroyCuFunctionNVX(VkDevice device, VkCuFunctionNVX function,
+                                          const VkAllocationCallbacks* pAllocator);
+    static void hk_vkDestroyCuModuleNVX(VkDevice device, VkCuModuleNVX module, const VkAllocationCallbacks* pAllocator);
     static void hk_vkCmdDrawIndirectCountAMD(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
                                              VkBuffer countBuffer, VkDeviceSize countBufferOffset,
                                              uint32_t maxDrawCount, uint32_t stride);
@@ -749,6 +754,9 @@ class Vulkan_wDx12
     VALIDATE_MEMBER_HOOK(hk_vkCmdEndQueryIndexedEXT, PFN_vkCmdEndQueryIndexedEXT)
     VALIDATE_MEMBER_HOOK(hk_vkCmdDrawIndirectByteCountEXT, PFN_vkCmdDrawIndirectByteCountEXT)
     VALIDATE_MEMBER_HOOK(hk_vkCmdCuLaunchKernelNVX, PFN_vkCmdCuLaunchKernelNVX)
+    VALIDATE_MEMBER_HOOK(hk_vkCreateCuFunctionNVX, PFN_vkCreateCuFunctionNVX)
+    VALIDATE_MEMBER_HOOK(hk_vkDestroyCuFunctionNVX, PFN_vkDestroyCuFunctionNVX)
+    VALIDATE_MEMBER_HOOK(hk_vkDestroyCuModuleNVX, PFN_vkDestroyCuModuleNVX)
     VALIDATE_MEMBER_HOOK(hk_vkCmdDrawIndirectCountAMD, PFN_vkCmdDrawIndirectCountAMD)
     VALIDATE_MEMBER_HOOK(hk_vkCmdDrawIndexedIndirectCountAMD, PFN_vkCmdDrawIndexedIndirectCountAMD)
     VALIDATE_MEMBER_HOOK(hk_vkCmdBeginConditionalRenderingEXT, PFN_vkCmdBeginConditionalRenderingEXT)

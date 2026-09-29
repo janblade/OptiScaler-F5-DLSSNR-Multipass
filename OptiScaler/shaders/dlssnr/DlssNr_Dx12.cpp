@@ -9,6 +9,7 @@
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/ResidualFg.h>
 #include <dlssnr/DlssNrDetailReuse.h>
+#include <dlssnr/DlssNrDetailReuseHost.h>
 #include <DirectXMath.h>
 
 
@@ -3789,10 +3790,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // and the frame slot (successfulDispatches counts NR frames and is constant across one frame's passes, so all passes compute on the
         // same frame and all reuse on the next; see DlssNrVitReuse.h for why the passes must not be offset)
         // While detail reuse runs, full frames are every other frame: a ViT slot keyed to them would compute only
-        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time.
+        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time. Also in a
+        // Vulkan game reaching this through the D3D12 bridge (IFeature_VkwDx12): Reuse bottleneck is off for Vulkan
+        // games, as on the native Vulkan path (the reused result flashed in dark scenes there).
+        const bool vitEveryFrame = reusePlan.active || State::Instance().api == Vulkan;
         DlssNrNative::BeginEvaluate(passFeature, passReset,
-                                    reusePlan.active ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
-                                    reusePlan.active ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
                                     cfg.DlssNrKernelProfile.value_or_default());
         result = g_nr.evaluate(
@@ -3804,7 +3808,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, g_nr.guideMvScaleX * mvToWorkX,
             g_nr.guideMvScaleY * mvToWorkY);
-        DlssNrNative::EndEvaluate(cmdList);
+        if (DlssNrNative::EndEvaluate(cmdList))
+            LOG_WARN("DLSS-NR: the model's kernel launches were not in the expected order; Reuse bottleneck is off for "
+                     "this session");
 
         for (const std::string& report : DlssNrNative::TakeProfileReports())
             LOG_INFO("{}", report);

@@ -2,7 +2,8 @@
 //
 // Every other frame skips the model -- all passes -- and moves the previous frame's detail (model answer minus model
 // input, in the proxy domain at the working size) onto this frame's input instead; the resolve then composes it like
-// any model answer. The cadence is dlssnr/DlssNrDetailReuse.h, the GPU work precompile/dlssnr_detail_reuse.hlsl.
+// any model answer. The cadence is dlssnr/DlssNrDetailReuse.h, the GPU work precompile/dlssnr_detail_reuse.hlsl, and
+// what does not depend on the API (when it may run, the constants, the status) dlssnr/DlssNrDetailReuseHost.h.
 // NR after SR only; frames that must see the real model (reset, settings change, Tune, frame hold) run it, and none of
 // it runs while frame generation makes frames unless asked to (A/B testing): generated frames are built from real
 // ones, and alternating full and reused frames can flicker under it.
@@ -12,29 +13,18 @@
 // state lives here; the textures exist only while it is on.
 namespace DetailReuse
 {
-// What Dispatch knows about this frame.
-struct Frame
+// What Dispatch knows about this frame: the shared facts, and the D3D12 objects.
+struct Frame : DlssNrDetailReuse::HostFrame
 {
     DlssNr_Dx12* pass = nullptr;
     ID3D12GraphicsCommandList* cmdList = nullptr;
     ID3D12Device* device = nullptr;
-    const Config* cfg = nullptr;
     const DlssNrFrameInfo* info = nullptr;
     DXGI_FORMAT answerFormat = DXGI_FORMAT_UNKNOWN; // the model answers' format
-    unsigned int workWidth = 0, workHeight = 0;
-    unsigned int motionWidth = 0, motionHeight = 0, motionBaseX = 0, motionBaseY = 0;
-    unsigned int motionAllocWidth = 0, motionAllocHeight = 0; // the motion texture itself
-    unsigned int depthWidth = 0, depthHeight = 0, depthBaseX = 0, depthBaseY = 0;
-    bool depthInverted = false;
-    float mvScaleX = 1.0f, mvScaleY = 1.0f; // the game's own scale
-    ID3D12Resource* modelInput = nullptr;   // readable
-    ID3D12Resource* motion = nullptr;       // readable
-    ID3D12Resource* depth = nullptr;        // readable
-    ID3D12Resource* output = nullptr;       // the first model answer's texture, at rest (UAV)
-    bool modelReset = false;                // the model starts over this frame
-    bool blocked = false;                   // Tune or frame hold: the real model must run
-    unsigned long long frameNumber = 0;     // the present counter, or NR's own frame count
-    unsigned long long revision = 0;        // changes when anything that changes the model's answer changes
+    ID3D12Resource* modelInput = nullptr;           // readable
+    ID3D12Resource* motion = nullptr;               // readable
+    ID3D12Resource* depth = nullptr;                // readable
+    ID3D12Resource* output = nullptr;               // the first model answer's texture, at rest (UAV)
 };
 
 // What BeforeModel decided.
@@ -47,9 +37,10 @@ struct Plan
     unsigned int motionBaseX = 0, motionBaseY = 0;
 };
 
-DlssNrDetailReuse::Cadence cadence;
-DlssNrDetailReuse::Decision decision;
-DlssNrDetailReuseConstants params {};
+DlssNrDetailReuse::Host host { "DLSS-NR detail reuse" };
+DlssNrDetailReuse::Cadence& cadence = host.cadence;
+DlssNrDetailReuse::Decision& decision = host.decision;
+DlssNrDetailReuseConstants& params = host.params;
 
 // Every processed frame saves its detail; two sets alternate, one read this frame (cur), the other written.
 ID3D12Resource* detail[2] = {};      // work size, RGBA16F: answer - input, a = valid
@@ -62,49 +53,7 @@ ID3D12Resource* estimate = nullptr;   // work size: moved detail with its trust 
 ID3D12Resource* steadied = nullptr;   // work size, the answers' format: the steadied answer (Steady)
 DXGI_FORMAT steadiedFormat = DXGI_FORMAT_UNKNOWN;
 unsigned int workWidth = 0, workHeight = 0, composedWidth = 0, composedHeight = 0;
-bool allocFailed = false, extrasFailed = false;
-unsigned int failedWidth = 0, failedHeight = 0; // the working size an allocation failed at (retried at another)
-bool modelSkipped = false; // the model was skipped on the last NR frame
-bool activeLast = false;
-unsigned int gatedFrames = 0; // NR frames in a row with reuse held off for now (frame generation, low frame rate)
-DlssNrDetailReuse::FrameRateGate rateGate;
-std::chrono::steady_clock::time_point lastNrFrame {};
-constexpr const char* kBelowMinimumFps = "off below the minimum frame rate";
 bool composedReadable = false, steadiedReadable = false; // this frame, between the calls
-std::string why;
-double gpuRecent[16] = {}; // the last 16 whole-pass GPU times: full and reused frames cost differently
-unsigned int gpuRecentCount = 0;
-
-// What the menu reads, published at the end of each BeforeModel under a lock of its own: g_nrMutex is held through
-// the whole of NR's recording, and the menu must not wait on it every frame.
-std::mutex publishedMutex;
-DlssNr::DetailReuseInfo published;
-unsigned long long publishedPresent = 0; // State::frameCount when it was published
-// When NR stops reaching BeforeModel (NR turned off, the proxy path, the game stops upscaling), the status reads as not
-// active after this many presents.
-constexpr unsigned long long kStalePresents = 30;
-// Frame generation pauses briefly and often (menu, loading, some games toggle it): the textures stay through this many
-// NR frames of it before they are released.
-constexpr unsigned int kKeepGatedFrames = 300;
-
-// Frame generation is built from two real frames; reused frames next to full ones flicker under it (NBA 2K27 with
-// OptiFG, 2026-09-28), and frame generation fills in frames better than moved NR detail does. Returns the reason, or
-// null when none is seen: OptiScaler's own (active, not paused), the game's DLSS-G seen through NGX, or one owned by
-// an external module.
-const char* FrameGenerationInUse()
-{
-    auto& state = State::Instance();
-    if (state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused())
-        return "off while frame generation is on";
-    // A DLSS-G evaluate within the last 30 presents that generates frames (or does not say how many: DLSS-G builds
-    // without multi frame generation leave the count out). PresentsSince reads "never" as endlessly long ago.
-    if (state.dlssgLastEvaluateGenerates &&
-        DlssNr::PresentsSince(state.frameCount, state.dlssgLastEvaluateFrame) <= 30)
-        return "off while the game's frame generation is on";
-    if (state.externalFrameGeneration)
-        return "off while an external frame generation owns the frames";
-    return nullptr;
-}
 
 void ParkExtras()
 {
@@ -133,16 +82,8 @@ void ParkAll()
     cadence.Drop();
 }
 
-// An allocation failed at this working size: not retried until the size changes or the option is switched off and on.
-void AllocationFailed(const Frame& f, bool& latch)
-{
-    latch = true;
-    failedWidth = f.workWidth;
-    failedHeight = f.workHeight;
-}
-
 // Allocates or parks the textures for this frame. Returns whether reuse can run. keep: reuse is held off for now
-// (frame generation), so the textures stay.
+// (frame generation, the frame rate), so the textures stay.
 bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
 {
     // Everything that follows the working size, rebuilt only when that changes.
@@ -161,14 +102,14 @@ bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
         if (!allocated)
         {
             ParkAll();
-            AllocationFailed(f, allocFailed);
+            host.AllocationFailed(f, false);
             LOG_ERROR("DLSS-NR detail reuse: could not allocate its history textures; every frame runs the model");
             return false;
         }
         workWidth = f.workWidth;
         workHeight = f.workHeight;
         cur = 0;
-        gpuRecentCount = 0;
+        host.TexturesRebuilt();
         LOG_INFO("DLSS-NR detail reuse: on, model {}x{}", f.workWidth, f.workHeight);
     }
     else if (!wanted)
@@ -189,7 +130,7 @@ bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
         if (composed == nullptr)
         {
             ParkAll();
-            AllocationFailed(f, allocFailed);
+            host.AllocationFailed(f, false);
             LOG_ERROR("DLSS-NR detail reuse: could not allocate its motion texture; every frame runs the model");
             return false;
         }
@@ -200,12 +141,12 @@ bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
     // The moved detail with its trust, for Fill on reused frames and Steady on full ones; the steadied answer for
     // Steady only.
     const bool needEstimate = steady > 0.0f || fill > 0.0f;
-    if (needEstimate && estimate == nullptr && !extrasFailed)
+    if (needEstimate && estimate == nullptr && !host.ExtrasFailed())
     {
         estimate = CreateScratch(f.device, DXGI_FORMAT_R16G16B16A16_FLOAT, f.workWidth, f.workHeight);
         if (estimate == nullptr)
         {
-            AllocationFailed(f, extrasFailed);
+            host.AllocationFailed(f, true);
             LOG_WARN("DLSS-NR detail reuse: could not allocate the estimate texture; no fill and no steadiness");
         }
     }
@@ -213,7 +154,7 @@ bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
     {
         ParkNrResource(estimate);
     }
-    if (steady > 0.0f && estimate != nullptr && !extrasFailed &&
+    if (steady > 0.0f && estimate != nullptr && !host.ExtrasFailed() &&
         (steadied == nullptr || steadiedFormat != f.answerFormat))
     {
         ParkNrResource(steadied);
@@ -221,7 +162,7 @@ bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
         steadiedFormat = steadied != nullptr ? f.answerFormat : DXGI_FORMAT_UNKNOWN;
         if (steadied == nullptr)
         {
-            AllocationFailed(f, extrasFailed);
+            host.AllocationFailed(f, true);
             LOG_WARN("DLSS-NR detail reuse: could not allocate the steadiness texture; full frames stay as the model made them");
         }
     }
@@ -259,115 +200,26 @@ bool EstimateThen(const Frame& f, DlssNrDetailReuseMode mode, ID3D12Resource* se
     return ok;
 }
 
-DlssNr::DetailReuseInfo Status();
-
-// The status the menu reads, under its own lock (see publishedMutex).
-void Publish()
-{
-    auto status = Status();
-    std::lock_guard<std::mutex> lock(publishedMutex);
-    published = std::move(status);
-    publishedPresent = State::Instance().frameCount;
-}
-
 Plan BeforeModel(const Frame& f)
 {
-    const Config& cfg = *f.cfg;
     Plan plan;
     plan.motion = f.motion;
     plan.motionBaseX = f.motionBaseX;
     plan.motionBaseY = f.motionBaseY;
     composedReadable = steadiedReadable = false;
 
-    const bool on = cfg.DlssNrDetailReuse.value_or_default();
-    // A failed allocation is retried once the option is switched off and on, or at another working size.
-    if ((allocFailed || extrasFailed) && (!on || f.workWidth != failedWidth || f.workHeight != failedHeight))
-        allocFailed = extrasFailed = false;
-    // Under frame generation it runs only when asked to (A/B testing).
-    const char* fg = FrameGenerationInUse();
-    const bool withFg = fg != nullptr && cfg.DlssNrDetailReuseWithFg.value_or_default();
-    // NR runs once per rendered frame, so the time between two calls is the rendered frame rate, frame generation
-    // or not. Measured whether or not reuse runs, so the gate knows when to let it back.
-    const auto now = std::chrono::steady_clock::now();
-    const double sinceLast = lastNrFrame.time_since_epoch().count() != 0
-                                 ? std::chrono::duration<double>(now - lastNrFrame).count()
-                                 : 0.0;
-    lastNrFrame = now;
-    const bool fastEnough = rateGate.Update(sinceLast, cfg.DlssNrDetailReuseMinFps.value_or_default());
-    const char* whyNot = nullptr;
-    if (f.info->BeforeUpscale)
-        whyNot = "unavailable while NR runs before SR";
-    else if (f.info->FinishedPicture)
-        whyNot = "unavailable in Finished Picture";
-    else if (fg != nullptr && !withFg)
-        whyNot = fg;
-    else if (!fastEnough)
-        whyNot = kBelowMinimumFps;
-    else if (allocFailed)
-        whyNot = "its history textures could not be allocated";
-    else if (on && !f.pass->DetailReuseReady())
-        whyNot = "its shader could not be built";
-    why = on && whyNot != nullptr ? whyNot : "";
-    {
-        static std::string loggedWhy;
-        const std::string state = !why.empty() ? why
-                                  : on && withFg ? "available, kept on with frame generation"
-                                                 : "available";
-        if (state != loggedWhy)
-        {
-            LOG_INFO("DLSS-NR detail reuse: {} (rendered frame rate {:.0f} fps)", state, rateGate.Fps());
-            loggedWhy = state;
-        }
-    }
-
-    const float steady = std::clamp(cfg.DlssNrDetailReuseSteady.value_or_default(), 0.0f, 1.0f);
-    const float fill = std::clamp(cfg.DlssNrDetailReuseFill.value_or_default(), 0.0f, 1.0f);
-    // Held off for now (frame generation, which often pauses and resumes, or the frame rate): the textures stay a while.
-    const bool heldOff = on && whyNot != nullptr && (whyNot == fg || whyNot == kBelowMinimumFps);
-    gatedFrames = heldOff ? gatedFrames + 1 : 0;
-    plan.active = Prepare(f, on && whyNot == nullptr, heldOff && gatedFrames <= kKeepGatedFrames, steady, fill);
-
-    DlssNrDetailReuse::FrameFacts facts;
-    facts.enabled = plan.active;
-    facts.reset = f.modelReset;
-    facts.blocked = f.blocked;
-    // Without frame generation NR runs on every present, so any skipped present is a gap. With it, the present counter
-    // can also count generated frames (up to 3 per real one with multi frame generation).
-    facts.frame = f.frameNumber;
-    facts.maxStep = withFg ? 4 : 1;
-    facts.revision = f.revision;
-    decision = cadence.Next(facts);
-
-    params = {};
-    params.WorkWidth = f.workWidth;
-    params.WorkHeight = f.workHeight;
-    params.MotionWidth = f.motionWidth;
-    params.MotionHeight = f.motionHeight;
-    params.MotionBaseX = f.motionBaseX;
-    params.MotionBaseY = f.motionBaseY;
-    params.DepthWidth = f.depthWidth;
-    params.DepthHeight = f.depthHeight;
-    params.DepthBaseX = f.depthBaseX;
-    params.DepthBaseY = f.depthBaseY;
-    params.DepthInverted = f.depthInverted ? 1u : 0u;
-    // The game's own scale: raw times it is pixels of the motion subrect, which the shader divides by its size.
-    params.MvScaleX = f.mvScaleX;
-    params.MvScaleY = f.mvScaleY;
-    params.DepthTolerance = kDlssNrDetailReuseDepthTolerance;
-    params.ClipGamma = kDlssNrDetailReuseClipGamma;
-    params.ClipFalloff = kDlssNrDetailReuseClipFalloff;
-    params.SigmaFloor = kDlssNrDetailReuseSigmaFloor;
-    params.Steady = steady;
-    params.FillStrength = fill;
-    // Scaled with the working size, like the colour box: the same reach on screen at any model resolution.
-    params.FillRadius = kDlssNrDetailReuseFillRadius1080p *
-                        std::clamp(std::sqrt((float) f.workWidth * (float) f.workHeight / (1920.0f * 1080.0f)), 0.5f,
-                                   2.0f);
-    params.DebugView = cfg.DlssNrDetailReuseDebug.value_or_default() ? 1u : 0u;
+    DlssNrDetailReuse::HostFrame facts = f;
+    facts.beforeUpscale = f.info->BeforeUpscale;
+    facts.finishedPicture = f.info->FinishedPicture;
+    facts.present = State::Instance().frameCount;
+    const DlssNrDetailReuse::Wanted want = host.Gate(
+        facts, [&]() -> const char* { return f.pass->DetailReuseReady() ? nullptr : "its shader could not be built"; });
+    plan.active = Prepare(f, want.wanted, want.keep, want.steady, want.fill);
+    host.Decide(facts, plan.active, want);
 
     if (decision.kind == DlssNrDetailReuse::Kind::Reuse)
     {
-        if (fill > 0.0f && estimate != nullptr)
+        if (want.fill > 0.0f && estimate != nullptr)
         {
             // Moved detail with its trust first; Fill composes it and fills where it was dropped.
             plan.reused = EstimateThen(f, DlssNrDetailReuse_Fill, estimate, f.output);
@@ -424,21 +276,7 @@ Plan BeforeModel(const Frame& f)
         }
     }
 
-    // The model last ran two frames ago but gets no composed vectors now: reuse was switched off, frame generation
-    // came on, the size changed, or composing failed. Its history would be moved by one frame of motion; start it over.
-    if (!plan.reused && modelSkipped && !composedReadable && !f.modelReset)
-    {
-        plan.resetModel = true;
-        static bool loggedRealign = false;
-        if (!loggedRealign)
-        {
-            loggedRealign = true;
-            LOG_INFO("DLSS-NR detail reuse: model history reset after a reused frame (no composed vectors)");
-        }
-    }
-    modelSkipped = plan.reused;
-    activeLast = plan.active;
-    Publish();
+    plan.resetModel = host.Finish(facts, plan.active, plan.reused, composedReadable);
     return plan;
 }
 
@@ -490,33 +328,12 @@ void AfterResolve(ID3D12GraphicsCommandList* cmdList)
     steadiedReadable = false;
 }
 
-void RecordGpuTime(double ms) { gpuRecent[gpuRecentCount++ % 16] = ms; }
+void RecordGpuTime(double ms) { host.RecordGpuTime(ms); }
 
-DlssNr::DetailReuseInfo Status()
-{
-    DlssNr::DetailReuseInfo status { cadence.Full(), cadence.Reused(), cadence.Fallback(), why };
-    const unsigned int count = std::min(gpuRecentCount, 16u);
-    for (unsigned int i = 0; i < count; ++i)
-    {
-        status.lightMs = i == 0 ? gpuRecent[i] : std::min(status.lightMs, gpuRecent[i]);
-        status.heavyMs = i == 0 ? gpuRecent[i] : std::max(status.heavyMs, gpuRecent[i]);
-        status.averageMs += gpuRecent[i] / count;
-    }
-    status.active = activeLast;
-    status.baseFps = rateGate.Fps();
-    return status;
-}
+DlssNr::DetailReuseInfo Status() { return host.Status(); }
 
 // For the menu, without g_nrMutex.
-DlssNr::DetailReuseInfo Published()
-{
-    std::lock_guard<std::mutex> lock(publishedMutex);
-    DlssNr::DetailReuseInfo status = published;
-    const unsigned long long present = State::Instance().frameCount;
-    if (present > publishedPresent && present - publishedPresent > kStalePresents)
-        status.active = false;
-    return status;
-}
+DlssNr::DetailReuseInfo Published() { return host.Published(State::Instance().frameCount); }
 
 // Shutdown: the GPU is idle, so everything is released outright.
 void Release()
@@ -532,11 +349,8 @@ void Release()
     }
     workWidth = workHeight = composedWidth = composedHeight = 0;
     steadiedFormat = DXGI_FORMAT_UNKNOWN;
-    allocFailed = extrasFailed = modelSkipped = activeLast = composedReadable = steadiedReadable = false;
-    failedWidth = failedHeight = gatedFrames = 0;
+    composedReadable = steadiedReadable = false;
     cur = 0;
-    cadence.Drop();
-    std::lock_guard<std::mutex> lock(publishedMutex);
-    published = {};
+    host.Reset();
 }
 } // namespace DetailReuse

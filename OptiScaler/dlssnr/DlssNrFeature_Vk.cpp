@@ -16,7 +16,11 @@
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
+#include <dlssnr/DlssNrNative.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
+#include <dlssnr/DlssNr_VkExtensions.h>
+#include <dlssnr/DlssNrDetailReuseHost.h>
+#include <shaders/dlssnr/DlssNrDetailReuse_Vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
 
@@ -45,6 +49,11 @@ using PFN_VkEvaluate = int(__cdecl*)(void*, void*, void*, void*, void*, void*, v
                                      unsigned int, unsigned int, int, int, float, int, float, float, float, int, float,
                                      float);
 using PFN_VkRelease = void(__cdecl*)(void*);
+using PFN_VkShutdown = int(__cdecl*)(void*);
+using PFN_VkForget = void(__cdecl*)();
+// The parameter block's float setter: the same probe the D3D12 path runs (DlssNr_Dx12.cpp, DiscoverFloatSlot).
+using PFN_VkSetFloatSlot = void(__cdecl*)(int);
+using PFN_VkProbeFloat = void(__cdecl*)(void*, const char*, float, int);
 
 // One image this pass owns: the storage, the view, and the NGX wrapper that describes it. Kept
 // together because they are created, resized and destroyed as one thing.
@@ -73,12 +82,22 @@ struct VkState
     PFN_VkCreate create = nullptr;
     PFN_VkEvaluate evaluate = nullptr;
     PFN_VkRelease release = nullptr;
+    PFN_VkShutdown shutdown = nullptr; // optional: forwarders before the Vulkan init fix lack these two
+    PFN_VkForget forget = nullptr;
+    PFN_VkSetFloatSlot setFloatSlot = nullptr;
+    PFN_VkProbeFloat probeFloat = nullptr;
+    bool floatSlotKnown = false;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
 
     bool ngxInitialised = false;
+    // The parameter block came from the game's NGX core (not OptiScaler's own table), so destroying it needs the
+    // core to still be up.
+    bool paramsFromCore = false;
+    // Devices lost under NR this session. A re-init after one is the case nothing has tested yet.
+    unsigned deviceLosses = 0;
     void* feature = nullptr;
     void* laterFeatures[DlssNr::MaxPassCount] {};
     Profiles::NrPassTuning builtTuning[DlssNr::MaxPassCount] {};
@@ -215,6 +234,16 @@ constexpr uint32_t kTimingSlots = 4;
 
 VkState g_vk;
 std::mutex g_vkMutex;
+
+// Set while this thread holds g_vkMutex in the evaluate path. A device or NGX shutdown reached from inside it (the
+// model, the NGX core) must not take the lock again.
+thread_local bool t_vkLockHeld = false;
+
+struct VkLockMark
+{
+    VkLockMark() { t_vkLockHeld = true; }
+    ~VkLockMark() { t_vkLockHeld = false; }
+};
 
 void Fail(const char* why)
 {
@@ -509,6 +538,10 @@ bool LoadForwarder()
     g_vk.create = (PFN_VkCreate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_create");
     g_vk.evaluate = (PFN_VkEvaluate) GetProcAddress(g_vk.forwarder, "dlssnr_vk_evaluate_v2");
     g_vk.release = (PFN_VkRelease) GetProcAddress(g_vk.forwarder, "dlssnr_vk_release");
+    g_vk.shutdown = (PFN_VkShutdown) GetProcAddress(g_vk.forwarder, "dlssnr_vk_shutdown");
+    g_vk.forget = (PFN_VkForget) GetProcAddress(g_vk.forwarder, "dlssnr_vk_forget");
+    g_vk.setFloatSlot = (PFN_VkSetFloatSlot) GetProcAddress(g_vk.forwarder, "dlssnr_call_set_float_slot");
+    g_vk.probeFloat = (PFN_VkProbeFloat) GetProcAddress(g_vk.forwarder, "dlssnr_call_probe_float");
 
     if (g_vk.init == nullptr || g_vk.create == nullptr || g_vk.evaluate == nullptr)
     {
@@ -516,7 +549,45 @@ bool LoadForwarder()
         return false;
     }
 
+    // Forwarders from before the Vulkan init fix hand NGX a wrong SDK version (0) and a bogus feature-info pointer,
+    // and never initialise NGX again on a recreated device. They still run; say so once.
+    if (g_vk.shutdown == nullptr || g_vk.forget == nullptr)
+        LOG_WARN("DLSS-NR Vulkan: this nvngx.dll_dlssnr.dll predates the Vulkan init fix; update it from the release "
+                 "(NGX is initialised with a wrong SDK version and not again after a device change)");
+
     return true;
+}
+
+// Which vtable slot this parameter block keeps floats in, as on D3D12 (DlssNr_Dx12.cpp, DiscoverFloatSlot): the
+// driver's own block does not keep them at the header's slot 1, where every float reads back as
+// FAIL_UnsupportedParameter -- which on Vulkan dropped the motion vector scale, intensity and the local/skin
+// strengths. Run before anything is written to the block.
+void DiscoverFloatSlotVk(NVSDK_NGX_Parameter* params)
+{
+    if (g_vk.floatSlotKnown || params == nullptr || g_vk.probeFloat == nullptr || g_vk.setFloatSlot == nullptr)
+        return;
+
+    g_vk.floatSlotKnown = true;
+
+    static const char* kProbeKey = "DLSSNR.OptiScalerFloatProbe";
+    static const int kCandidates[] = { 1, 2, 5, 6, 7, 4, 3, 0 };
+    const float expected = 0.375f; // exact in binary, so the round trip is exact or it is wrong
+
+    for (int slot : kCandidates)
+    {
+        float readBack = 0.0f;
+        g_vk.probeFloat(params, kProbeKey, expected, slot);
+
+        if (params->Get(kProbeKey, &readBack) == NVSDK_NGX_Result_Success && readBack == expected)
+        {
+            g_vk.setFloatSlot(slot);
+            LOG_INFO("DLSS-NR Vulkan: float parameters go through vtable slot {}", slot);
+            return;
+        }
+    }
+
+    LOG_ERROR("DLSS-NR Vulkan: could not find the float setter: the motion vector scale, intensity, local structure, "
+              "local tone and skin structure will have no effect. The uint parameters still apply.");
 }
 
 // Whether a format can hold linear, open-ended light. A frame the game already tone mapped has white
@@ -562,6 +633,7 @@ std::optional<std::filesystem::path> FindSnippet()
 }
 
 #include "DlssNr_ExposureCalibrate_Vk.inl"
+#include "DlssNr_DetailReuse_Vk.inl"
 
 } // namespace
 
@@ -607,6 +679,14 @@ ExposureStatus GameExposureStatusVk()
 
 std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
 
+DetailReuseInfo DetailReuseStatusVk() { return DetailReuseVk::Published(); }
+
+unsigned long long VkFrameClock()
+{
+    const unsigned long long presents = State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
+    return presents != 0 ? presents : g_vk.frames;
+}
+
 static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
                              VkPhysicalDevice physicalDevice, VkDevice device, bool beforeSr, bool rayReconstruction,
                              bool& applied, bool* handled = nullptr)
@@ -637,6 +717,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         return;
 
     std::lock_guard<std::mutex> lock(g_vkMutex);
+    VkLockMark lockMark;
 
     if (g_vk.failed)
         return;
@@ -947,7 +1028,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
         if (result != 1)
         {
-            LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}", result);
+            LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}{}", result,
+                      g_vk.deviceLosses > 0 ? " (a re-init after the previous device was lost)" : "");
             Fail("the model would not initialise on this Vulkan device");
             return;
         }
@@ -964,6 +1046,13 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             Fail("a parameter block could not be allocated");
             return;
         }
+
+        uint32_t allocType = NGX_AllocTypes::Unknown;
+        g_vk.capabilityParams->Get(NGX_AllocTypes::AllocKey.data(), &allocType);
+        g_vk.paramsFromCore = allocType == NGX_AllocTypes::NVDynamic;
+
+        // Before anything else is written to it, work out where this block keeps floats.
+        DiscoverFloatSlotVk(g_vk.capabilityParams);
     }
 
     if (g_vk.queryPool == VK_NULL_HANDLE)
@@ -1689,6 +1778,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     float mvX = 1.0f, mvY = 1.0f;
     params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvX);
     params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvY);
+    const float gameMvX = mvX, gameMvY = mvY;
     // Match D3D12: preserve the game's vector encoding, then adjust only for the NR working scale.
     mvX *= (float) workWidth / width;
     mvY *= (float) workHeight / height;
@@ -1696,10 +1786,59 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     OwnedImage* input = modelInput;
     int evaluated = 1;
 
-    // A Tune run measures the first pass alone (see the D3D12 side for why); the later passes sit it out.
-    const unsigned int runPasses = calibrationPinned ? 1u : passes;
+    // Reuse detail between frames (DlssNr_DetailReuse_Vk.inl): every other frame skips the model and moves the previous
+    // frame's detail onto this frame's input instead. On such a frame the answer is in g_vk.output, in GENERAL.
+    DetailReuseVk::Frame reuseFrame;
+    reuseFrame.cfg = &cfg;
+    reuseFrame.beforeUpscale = beforeSr;
+    reuseFrame.workWidth = workWidth;
+    reuseFrame.workHeight = workHeight;
+    reuseFrame.motionWidth = guides.motion.width;
+    reuseFrame.motionHeight = guides.motion.height;
+    reuseFrame.motionBaseX = guides.motion.x;
+    reuseFrame.motionBaseY = guides.motion.y;
+    reuseFrame.motionAllocWidth = motion->Resource.ImageViewInfo.Width;
+    reuseFrame.motionAllocHeight = motion->Resource.ImageViewInfo.Height;
+    reuseFrame.depthWidth = guideWidth;
+    reuseFrame.depthHeight = guideHeight;
+    reuseFrame.depthBaseX = guides.depth.x;
+    reuseFrame.depthBaseY = guides.depth.y;
+    reuseFrame.depthInverted = depthInverted;
+    reuseFrame.mvScaleX = gameMvX;
+    reuseFrame.mvScaleY = gameMvY;
+    reuseFrame.modelReset = g_vk.reset;
+    reuseFrame.blocked = calibrationPinned || Cal::Active(Cal::TheRun(), g_calVk);
+    reuseFrame.vulkan = true;
+    reuseFrame.present = VkFrameClock();
+    // NR's own frames, which step exactly once per evaluate: the present count is read on this thread while presents
+    // happen on the game's, so two NR frames can see it move by 0 or 2 and the cadence would take that for a gap.
+    reuseFrame.frameNumber = g_vk.frames;
+    {
+        unsigned long long revision = (unsigned long long) (uintptr_t) g_vk.feature;
+        for (const unsigned long long part : { (unsigned long long) passes, (unsigned long long) workWidth,
+                                               (unsigned long long) workHeight })
+            revision = revision * 1000003ull ^ part;
+        reuseFrame.revision = revision;
+    }
+    reuseFrame.cmd = cmdBuffer;
+    reuseFrame.device = device;
+    reuseFrame.physicalDevice = physicalDevice;
+    reuseFrame.answerFormat = g_vk.output.format;
+    reuseFrame.modelInput = modelInput;
+    reuseFrame.output = &g_vk.output;
+    reuseFrame.motion = motion;
+    reuseFrame.depth = depth;
+    const DetailReuseVk::Plan reusePlan = DetailReuseVk::BeforeModel(reuseFrame);
 
-    if (runPasses < passes)
+    if (reusePlan.resetModel)
+        g_vk.reset = true;
+
+    // A Tune run measures the first pass alone (see the D3D12 side for why); the later passes sit it out. A reused
+    // frame runs none.
+    const unsigned int runPasses = reusePlan.reused ? 0u : calibrationPinned ? 1u : passes;
+
+    // Not on a reused frame: every pass skips it alike, and the next full frame gives them all composed vectors.
+    if (!reusePlan.reused && runPasses < passes)
         g_vk.laterPassesNeedReset = true;
 
     for (unsigned int pass = 0; pass < runPasses; ++pass)
@@ -1708,13 +1847,24 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
         const auto tuning = Profiles::PassTuning(cfg, pass);
+        void* const passFeature = pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass];
+        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp), so the kernel set shows. Reuse
+        // bottleneck is forced off on Vulkan (every = 1 on both kernel sets, whatever the ini says): with the ViT run skipped, its kept result was
+        // overwritten between frames there (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel
+        // was kept), by something outside the model's own launches. D3D12 keeps it. No command list: the kernel
+        // profiler is D3D12's.
+        DlssNrNative::BeginEvaluate(passFeature, passReset, 1u, 1u, (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull),
+                                    nullptr, false);
         evaluated = g_vk.evaluate(
-            (void*) cmdBuffer, pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass], g_vk.capabilityParams,
-            &input->ngx, depth, motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,
+            (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
+            &input->ngx, depth, reusePlan.motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,
             guides.motion.width, guides.motion.height, guides.depth.x, guides.depth.y,
-            guides.motion.x, guides.motion.y, depthInverted ? 1 : 0, passReset ? 1 : 0, tuning.intensity,
+            reusePlan.motionBaseX, reusePlan.motionBaseY, depthInverted ? 1 : 0, passReset ? 1 : 0, tuning.intensity,
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
+        if (DlssNrNative::EndEvaluate(nullptr))
+            LOG_WARN("DLSS-NR Vulkan: the model's kernel launches were not in the expected order; Reuse bottleneck "
+                     "is off for this session");
         if (evaluated != 1)
             break;
         if (pass + 1 < runPasses)
@@ -1724,11 +1874,40 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         }
     }
 
+    // Once: did the floats reach the block? Before the float-slot probe ran on Vulkan they did not, and the model ran
+    // with its default motion vector scale.
+    static bool floatsChecked = false;
+    if (!floatsChecked && evaluated == 1)
+    {
+        floatsChecked = true;
+        float readX = 0.0f, readY = 0.0f;
+        const bool okX = g_vk.capabilityParams->Get("DLSSNR.MVecScaleX", &readX) == NVSDK_NGX_Result_Success;
+        const bool okY = g_vk.capabilityParams->Get("DLSSNR.MVecScaleY", &readY) == NVSDK_NGX_Result_Success;
+        if (okX && okY && readX == mvX && readY == mvY)
+            LOG_INFO("DLSS-NR Vulkan: the model got its motion vector scale ({:.4f}, {:.4f})", readX, readY);
+        else
+            LOG_WARN("DLSS-NR Vulkan: the motion vector scale did not reach the model (set {:.4f}, {:.4f}; read {} "
+                     "{:.4f}, {:.4f})", mvX, mvY, okX && okY ? "back" : "nothing", readX, readY);
+    }
+
     if (evaluated == 1 && runPasses > 1)
         g_vk.laterPassesNeedReset = false;
 
+    // Steady a full frame's answer and save this frame's history (DlssNr_DetailReuse_Vk.inl).
+    DetailReuseVk::AfterModel(reuseFrame, reusePlan, evaluated == 1, answer);
+
     g_vk.reset = false;
     g_vk.frames++;
+
+    // Reuse bottleneck and the kernel set need the model's kernel launches to come through OptiScaler's Vulkan hook
+    // table (VulkanwDx12_Hooks.cpp). If the model reached them some other way, say so once instead of doing nothing.
+    static bool vitUnseenReported = false;
+    if (!vitUnseenReported && g_vk.frames >= 120 && strcmp(DlssNrNative::VitKernelSet(), "not seen yet") == 0)
+    {
+        vitUnseenReported = true;
+        LOG_WARN("DLSS-NR Vulkan: no ViT run of the model seen in 120 frames; the model's kernel launches do not come "
+                 "through OptiScaler's hooks here, so Reuse bottleneck and the kernel set are unavailable");
+    }
 
     if (evaluated != 1)
     {
@@ -1880,7 +2059,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                 // A pass that appears to have taken over a second did not; the queue was reset under
                 // it or the pair straddled a device change.
                 if (ms > 0.0 && ms < 1000.0)
+                {
                     g_vk.lastGpuTime = ms;
+                    // Each frame's pair is read once, so full and reused frames both land here.
+                    DetailReuseVk::RecordGpuTime(ms);
+                }
             }
         }
     }
@@ -1953,6 +2136,9 @@ void ShutdownVk(bool deviceAlive)
         g_vk.autoExposureRaw = OwnedImage {};
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
+        DetailReuseVk::Release(false);
+        // The model's kernels went with the device without their destroy calls.
+        DlssNrNative::VkDeviceLost();
 
         for (int i = 0; i < 4; ++i)
         {
@@ -1970,6 +2156,13 @@ void ShutdownVk(bool deviceAlive)
         g_vk.meterFrames = 0;
         g_vk.lastGpuTime.reset();
         g_vk.ngxInitialised = false;
+        g_vk.floatSlotKnown = false; // the next block is a new one
+        g_vk.paramsFromCore = false;
+        ++g_vk.deviceLosses;
+        // NGX was initialised on the dead device: the forwarder forgets it (no call on it) so the new one is
+        // initialised, even if it comes back with the same handle value.
+        if (g_vk.forget != nullptr)
+            g_vk.forget();
         g_vk.reset = true;
         return;
     }
@@ -1980,6 +2173,7 @@ void ShutdownVk(bool deviceAlive)
         vkDeviceWaitIdle(g_vk.device);
 
     CalibrationVkShutdown(true);
+    DetailReuseVk::Release(true);
 
     if (g_vk.feature != nullptr && g_vk.release != nullptr)
         g_vk.release(g_vk.feature);
@@ -2019,8 +2213,15 @@ void ShutdownVk(bool deviceAlive)
 
     if (g_vk.capabilityParams != nullptr)
     {
-        NVSDK_NGX_VULKAN_DestroyParameters(g_vk.capabilityParams);
+        // A block from the game's core is the core's to free: once the game has shut its NGX down, calling into it
+        // is a use after free, so the block is left behind instead.
+        if (!g_vk.paramsFromCore || VkExt::NgxCoreUp())
+            NVSDK_NGX_VULKAN_DestroyParameters(g_vk.capabilityParams);
+        else
+            LOG_INFO("DLSS-NR Vulkan: the game's NGX is already shut down; its parameter block is left to it");
+
         g_vk.capabilityParams = nullptr;
+        g_vk.paramsFromCore = false;
     }
 
     if (g_vk.queryPool != VK_NULL_HANDLE && g_vk.device != VK_NULL_HANDLE)
@@ -2032,11 +2233,49 @@ void ShutdownVk(bool deviceAlive)
     g_vk.timedFrames = 0;
     g_vk.lastGpuTime.reset();
 
+    // Features and the parameter block are gone: NGX lets go of this device (NVSDK_NGX_VULKAN_Shutdown1).
+    if (g_vk.device != VK_NULL_HANDLE && g_vk.ngxInitialised && g_vk.shutdown != nullptr)
+    {
+        // 0: not called (the model has no Shutdown1, or NGX was not initialised on this device by the forwarder).
+        const int result = g_vk.shutdown((void*) g_vk.device);
+        if (result != 1 && result != 0)
+            LOG_WARN("DLSS-NR Vulkan: NGX shutdown on this device returned {}", result);
+    }
+
+    // Whatever Shutdown1 did, the forwarder stops tracking this device; the next one is initialised.
+    if (g_vk.forget != nullptr)
+        g_vk.forget();
+
     g_vk.device = VK_NULL_HANDLE;
     g_vk.width = 0;
     g_vk.height = 0;
     g_vk.ngxInitialised = false;
+    g_vk.floatSlotKnown = false;
     g_vk.reset = true;
+}
+
+void ShutdownVkForDevice(VkDevice device, const char* why)
+{
+    // At process exit other threads are gone (one may have held the lock) and the loader lock is held; the process
+    // takes everything with it.
+    if (State::Instance().isShuttingDown)
+        return;
+
+    if (t_vkLockHeld)
+    {
+        LOG_WARN("DLSS-NR Vulkan: {} from inside the NR pass; left for the pass to notice", why);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_vkMutex);
+
+    if (g_vk.device == VK_NULL_HANDLE || (device != VK_NULL_HANDLE && g_vk.device != device))
+        return;
+
+    LOG_INFO("DLSS-NR Vulkan: {}; releasing the model and NGX first", why);
+    ShutdownVk(true);
+    // The model's kernels go with the device.
+    DlssNrNative::VkDeviceLost();
 }
 
 } // namespace DlssNr

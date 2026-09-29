@@ -7,6 +7,7 @@
 
 
 #include <Config.h>
+#include <State.h>
 #include <menu/menu_common.h>
 
 #include <imgui/imgui.h>
@@ -595,9 +596,9 @@ void RenderMenu(Config* config, float menuResScale)
 
             // With Reuse detail between frames, full and reused frames alternate, so one reading is either the heavy or
             // the light one; the average over the recent frames is the real per-frame cost.
-            const auto detailReuse = vulkan || !config->DlssNrDetailReuse.value_or_default()
-                                           ? DlssNr::DetailReuseInfo {}
-                                           : DlssNr::DetailReuseStatus();
+            const auto detailReuse = !config->DlssNrDetailReuse.value_or_default() ? DlssNr::DetailReuseInfo {}
+                                     : vulkan                                     ? DlssNr::DetailReuseStatusVk()
+                                                                                  : DlssNr::DetailReuseStatus();
             if (detailReuse.active && detailReuse.averageMs > 0.0)
                 ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
                                    "Running - %.2f ms elapsed per frame on average (%.2f to %.2f)%s",
@@ -1405,11 +1406,15 @@ void RenderMenu(Config* config, float menuResScale)
         const char* precisions[] = { "NVIDIA (FP8)", "Experimental (FP8+NVFP4 hybrid)" };
         if (ImGui::Combo("Model precision", &precisionChoice, precisions, IM_ARRAYSIZE(precisions)))
             config->DlssNrPrecision = precisionChoice == 1 ? 4u : 0u;
-        HelpMarker("NVIDIA: original FP8 model (default), with some sensitive operations kept at higher precision.\nExperimental: this fork's FP8+NVFP4 hybrid for RTX 50 GPUs; output may differ slightly.");
+        HelpMarker("NVIDIA: original FP8 model (default), with some sensitive operations kept at higher precision.\nExperimental: this fork's FP8+NVFP4 hybrid for RTX 50 GPUs; output may differ slightly. D3D12 only.");
         // One setting per kernel set: the fp8 kernels (NVIDIA's DLL and fp8-based builds) and the plain FP16 kernels (used by some modified DLSS-NR DLLs).
         // Only the one for the kernels actually running is used.
         const char* kernelSet = DlssNrNative::VitKernelSet();
-        bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
+        // Forced off for Vulkan games, natively and through the D3D12 bridge (DlssNrFeature_Vk.cpp, DlssNr_Dx12.cpp): shown
+        // off and greyed out; the settings stay as they are for D3D12 games.
+        const bool vitReuseVk = DlssNr::IsRunningVk() || State::Instance().api == Vulkan;
+        ImGui::BeginDisabled(vitReuseVk);
+        bool vitReuse = !vitReuseVk && config->DlssNrVitEvery.value_or_default() > 1;
         if (ImGui::Checkbox("Reuse bottleneck: FP8 kernels", &vitReuse))
             config->DlssNrVitEvery = vitReuse ? 2u : 1u;
         HelpMarker("Recomputes the model's coarsest stage (its 32x18 bottleneck) only every other frame and reuses the last result in between, "
@@ -1417,14 +1422,20 @@ void RenderMenu(Config* config, float menuResScale)
                    "but fast camera motion can look slightly softer. Scene cuts always recompute. With several passes, all passes compute on the same frame "
                    "and all reuse on the next.\nOn by default. Applies immediately, NVIDIA's own model only.\n"
                    "Used when the model runs NVIDIA's FP8 kernels (NVIDIA's DLL and FP8-based builds).");
-        bool vitReusePlain = config->DlssNrVitEveryPlain.value_or_default() > 1;
+        bool vitReusePlain = !vitReuseVk && config->DlssNrVitEveryPlain.value_or_default() > 1;
         if (ImGui::Checkbox("Reuse bottleneck: plain FP16 kernels", &vitReusePlain))
             config->DlssNrVitEveryPlain = vitReusePlain ? 2u : 1u;
         HelpMarker("The same as above, used when the model runs the plain FP16 kernels (used by some modified DLSS-NR DLLs).\nOn by default.");
+        ImGui::EndDisabled();
         ImGui::Text("Kernel set in use: %s", kernelSet);
         bool detailReuse = config->DlssNrDetailReuse.value_or_default();
-        const bool detailReuseRunning = detailReuse && !DlssNr::IsRunningVk() && DlssNr::DetailReuseStatus().active;
-        if (detailReuseRunning)
+        const auto detailReuseStatus = !detailReuse            ? DlssNr::DetailReuseInfo {}
+                                       : DlssNr::IsRunningVk() ? DlssNr::DetailReuseStatusVk()
+                                                               : DlssNr::DetailReuseStatus();
+        const bool detailReuseRunning = detailReuse && detailReuseStatus.active;
+        if (vitReuseVk)
+            ImGui::TextWrapped("Reuse bottleneck: off in Vulkan games (the reused result can flash in dark scenes)");
+        else if (detailReuseRunning)
             ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
         else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
             ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
@@ -1433,7 +1444,7 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
                    "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
                    "any pass count. Detail can pop where objects move and reveal new areas.\n"
-                   "D3D12 with NR after SR only. Reuse bottleneck is off while this runs.\n"
+                   "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
                    "Turns itself off while frame generation is on (unless Debug > Keep on with frame generation): "
                    "generated frames are built from real ones, and alternating full and reused frames can flicker "
                    "under it.");
@@ -1474,10 +1485,8 @@ void RenderMenu(Config* config, float menuResScale)
                            "minimum. 0 = no minimum. Default 25.");
                 ImGui::TreePop();
             }
-            const auto status = DlssNr::DetailReuseStatus();
-            if (DlssNr::IsRunningVk())
-                ImGui::TextDisabled("Reuse detail: D3D12 only");
-            else if (!status.why.empty())
+            const auto& status = detailReuseStatus;
+            if (!status.why.empty())
                 ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
             else
             {
@@ -1492,7 +1501,13 @@ void RenderMenu(Config* config, float menuResScale)
                 }
             }
         }
-        if (precisionChoice > 0)
+        if (precisionChoice > 0 && DlssNr::IsRunningVk())
+        {
+            // The hybrid rewrites the model's kernels through NvAPI's D3D12 entry points; on Vulkan the model runs
+            // unchanged.
+            ImGui::TextUnformatted("Hybrid: D3D12 only (not applied on Vulkan)");
+        }
+        else if (precisionChoice > 0)
         {
             ImGui::TextUnformatted(enabled && DlssNrNative::IsActive() ? "Hybrid: active" : "Hybrid: inactive");
             ImGui::TextWrapped("Loading may pause the game and look like a freeze. Please wait.");
@@ -1519,17 +1534,6 @@ void RenderMenu(Config* config, float menuResScale)
                                    "controls NR placement.");
             else if (deferredDlss)
                 ImGui::TextWrapped("Residual DLSS: %s", DlssNr::DeferredDlssStatus().c_str());
-            ImGui::BeginDisabled(finishedPicture || !deferredDlss || rayReconstruction);
-            bool residualFg = config->DlssNrResidualFg.value_or_default();
-            if (ImGui::Checkbox("NR every second frame (NVIDIA Frame Generation, experimental)", &residualFg))
-                config->DlssNrResidualFg = residualFg;
-            HelpMarker("Run NR every other rendered frame and use NVIDIA Frame Generation (FG) to interpolate its changes.\nRequires the option above. Adds one rendered frame of latency and may misalign effects or UI.\nIf motion vectors are unavailable, each NR result is reused for two frames.");
-            bool approxCamera = config->DlssNrResidualFgApproxCamera.value_or_default();
-            if (ImGui::Checkbox("Allow approximate FG camera guides (experimental)", &approxCamera))
-                config->DlssNrResidualFgApproxCamera = approxCamera;
-            HelpMarker("Use estimated camera data when the game does not provide it. May cause artifacts during camera movement.");
-            ImGui::EndDisabled();
-
         }
         else if (beforeSr)
             ImGui::TextWrapped("Pre-SR changes: %s", DlssNr::DeferredDlssStatus().c_str());

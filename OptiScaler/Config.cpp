@@ -357,7 +357,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
             DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
             DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
-            DlssNrResidualFg.set_from_config(readBool("DlssNr", "ResidualFG"));
+            // ResidualFG and ResidualFGApproxCamera are no longer read: NR every second frame through NVIDIA Frame
+            // Generation is off for good, whatever an old ini says.
             DlssNrPrecision.set_from_config(readUInt("DlssNr", "Precision"));
             if (DlssNrPrecision.value_or_default() != 4) DlssNrPrecision = 0u;
             DlssNrVitEvery.set_from_config(readUInt("DlssNr", "VitEvery"));
@@ -390,7 +391,6 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DlssNrDetailReuseSteady = std::isfinite(DlssNrDetailReuseSteady.value())
                                               ? std::clamp(DlssNrDetailReuseSteady.value(), 0.0f, 1.0f)
                                               : 0.0f;
-            DlssNrResidualFgApproxCamera.set_from_config(readBool("DlssNr", "ResidualFGApproxCamera"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
@@ -1341,7 +1341,6 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DeferredDLSS",
                  GetBoolValue(Instance()->DlssNrDeferredDlss.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ResidualFG", GetBoolValue(Instance()->DlssNrResidualFg.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Precision", GetIntValue(Instance()->DlssNrPrecision.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEveryPlain", GetIntValue(Instance()->DlssNrVitEveryPlain.value_for_config()).c_str());
@@ -1351,7 +1350,6 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(Instance()->DlssNrDetailReuseFill.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ResidualFGApproxCamera", GetBoolValue(Instance()->DlssNrResidualFgApproxCamera.value_for_config()).c_str());
     {
         auto toggle = Instance()->DlssNrToggleKey.value_for_config();
         ini.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());

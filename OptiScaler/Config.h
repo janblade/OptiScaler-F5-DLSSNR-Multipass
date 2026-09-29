@@ -266,7 +266,7 @@ class Config
     // Generate NR before SR, upscale its signed contribution with a private DLSS feature,
     // and apply it after the game's upscaler. Takes precedence over RunBeforeSR; opt-in.
     CustomOptional<bool> DlssNrDeferredDlss { false };
-    CustomOptional<bool> DlssNrResidualFg { false };
+    CustomOptional<bool> DlssNrResidualFg { false }; // forced off: not read from the ini, not in the menu
     CustomOptional<uint32_t> DlssNrPrecision { 0 }; // 0 NVIDIA FP8 (default), 4 Experimental NVFP4 hybrid
     CustomOptional<uint32_t> DlssNrVitEvery { 2 };  // NVIDIA model: compute the ViT bottleneck every N-th frame (1 = always; 2 = every other frame, default), reuse it in between
     CustomOptional<uint32_t> DlssNrVitEveryPlain { 2 }; // the same for the plain fp16 kernel set (used by some modified DLSS-NR DLLs); VitEvery is the fp8 set
@@ -286,7 +286,7 @@ class Config
     // Reuse runs only while the rendered frame rate is at least this (0 = no minimum): at low frame rates things move
     // farther between frames and the moved detail trails.
     CustomOptional<float> DlssNrDetailReuseMinFps { 25.0f };
-    CustomOptional<bool> DlssNrResidualFgApproxCamera { false };
+    CustomOptional<bool> DlssNrResidualFgApproxCamera { false }; // forced off, as DlssNrResidualFg
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };

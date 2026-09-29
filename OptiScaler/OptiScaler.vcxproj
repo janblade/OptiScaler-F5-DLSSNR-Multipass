@@ -440,6 +440,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\precompile\dlssnr_detail_reuse_Shader_Vk.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
+    <ClInclude Include="dlssnr\DlssNr_ColourEncodingStatus.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNr_ColourEncoding.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_VShader.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_PShader.h" />
@@ -859,6 +861,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNrDetailReuse_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Menu.cpp" />
     <ClCompile Include="dlssnr\DlssNrNative.cpp">

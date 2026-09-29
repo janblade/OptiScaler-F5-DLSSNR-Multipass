@@ -23,6 +23,8 @@
 #include "DlssNr_SeamClock.h"
 #include "DlssNr_TrimAnchors.h"
 #include "DlssNr_AutoTrimDefault.h"
+#include "DlssNr_ColourEncoding.h"
+#include <dlssnr/DlssNr_ColourEncodingStatus.h>
 #include "DlssNr_FollowGame.h"
 #include "DlssNr_ExposureCalibrate.h"
 #include "DlssNr_ExposureCalibrate_Run.h"
@@ -1851,6 +1853,24 @@ bool FormatCanHoldLinearHdr(DXGI_FORMAT format)
     }
 }
 
+// The frame's colour encoding, from [DlssNr] ColourEncoding (DlssNr_ColourEncoding.h), for the evaluate and deferred-SR
+// paths; Finished Picture decides from the screen instead. format is the colour authority's (the output's), the same
+// buffer Auto has always judged. report is false where another path owns the menu line.
+void ApplyColourEncoding(DlssNrFrameInfo& frame, uint32_t setting, bool gameSaysHdr, DXGI_FORMAT format, bool report)
+{
+    const auto choice = DlssNrColourEncoding::Resolve(setting, gameSaysHdr, FormatCanHoldLinearHdr(format));
+    frame.ColourIsLinearHdr = choice.LinearHdr();
+    frame.InputEncoding = DlssNrColourEncoding::ShaderConversion(choice.encoding);
+    frame.ColourEncoding = (uint32_t) choice.encoding;
+    frame.ColourEncodingForced = !choice.automatic;
+    // Forced PQ is display light: the decode put its reference white at 1.0, and that is the white point, not the
+    // game's exposure (which describes the scene) or Automatic's meter.
+    if (choice.encoding == DlssNrColourEncoding::Encoding::Pq)
+        frame.WhitePointOverride = 1.0f;
+    if (report)
+        DlssNr::ReportColourEncoding(choice, DiagFormatName(format), "");
+}
+
 ID3D12Resource* GetResource(NVSDK_NGX_Parameter* params, const char* a, const char* b)
 {
     ID3D12Resource* res = nullptr;
@@ -2637,14 +2657,28 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    // The kept copy holds the frame the pass works on, which the resolve reads back as its original when the colour
+    // takes a UAV. While the Colour encoding override converts (gamma 2.2, PQ) that frame is no longer in the game's
+    // encoding -- PQ decoded to linear runs past 1.0 -- so it needs a float copy. Without a UAV the copy is the resolve's
+    // target instead, copied back over the colour, so it has to keep the colour's format (and the resolve reads the
+    // game's own texture, OriginalIsGameColour).
+    const DXGI_FORMAT keepFormat = targetSupportsUav && DlssNrColourEncoding::ShaderConverts(frame.InputEncoding)
+                                       ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                                       : desc.Format;
+
+    if (g_nr.hdrCopy != nullptr && g_nr.hdrCopy->GetDesc().Format != keepFormat)
+        ParkNrResource(g_nr.hdrCopy);
+
     if (g_nr.output == nullptr)
     {
         g_nr.output = CreateScratch(device, desc.Format, workWidth, workHeight);
         g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
-        g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
         g_nr.workWidth = workWidth;
         g_nr.workHeight = workHeight;
     }
+
+    if (g_nr.hdrCopy == nullptr)
+        g_nr.hdrCopy = CreateScratch(device, keepFormat, width, height);
 
     if (cropColor && g_nr.activeColor == nullptr)
         g_nr.activeColor = CreateScratch(device, desc.Format, width, height);
@@ -2988,16 +3022,27 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     static bool reportedHdr = false;
     static bool reportedHdrValue = false;
     static bool reportedBefore = false;
+    static uint32_t reportedEncoding = 0;
+    static bool reportedForced = false;
 
-    if (!reportedHdr || reportedHdrValue != isHdrBuffer || reportedBefore != frame.BeforeUpscale)
+    if (!reportedHdr || reportedHdrValue != isHdrBuffer || reportedBefore != frame.BeforeUpscale ||
+        reportedEncoding != frame.ColourEncoding || reportedForced != frame.ColourEncodingForced)
     {
         reportedHdr = true;
         reportedHdrValue = isHdrBuffer;
         reportedBefore = frame.BeforeUpscale;
-        LOG_INFO("DLSS-NR {} SR: the game's DLSS colour space is {} so the colour transform is {}",
-                 frame.BeforeUpscale ? "before" : "after",
-                 isHdrBuffer ? "linear HDR" : "already tone-mapped",
-                 isHdrBuffer ? "on" : "off");
+        reportedEncoding = frame.ColourEncoding;
+        reportedForced = frame.ColourEncodingForced;
+        if (!frame.ColourEncodingForced)
+            LOG_INFO("DLSS-NR {} SR: the game's DLSS colour space is {} so the colour transform is {}",
+                     frame.BeforeUpscale ? "before" : "after",
+                     isHdrBuffer ? "linear HDR" : "already tone-mapped",
+                     isHdrBuffer ? "on" : "off");
+        else
+            LOG_INFO("DLSS-NR {} SR: colour encoding forced to {}, so the colour transform is {}",
+                     frame.BeforeUpscale ? "before" : "after",
+                     DlssNrColourEncoding::Name((DlssNrColourEncoding::Encoding) frame.ColourEncoding),
+                     isHdrBuffer ? "on" : "off");
     }
 
     const bool haveCodec = IsInit();
@@ -3152,14 +3197,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // wrong.
     bool usingAutoExposure = false;
 
-    if (whitePointSource == 3 && !frame.FinishedPicture && isHdrBuffer && g_nr.meter != nullptr &&
-        g_nr.autoExposure != nullptr)
+    // Nor on display light with a pinned white point (forced PQ: its reference white, see ApplyColourEncoding).
+    if (whitePointSource == 3 && !frame.FinishedPicture && isHdrBuffer && frame.WhitePointOverride <= 0.0f &&
+        g_nr.meter != nullptr && g_nr.autoExposure != nullptr)
     {
         DlssNrConstants meterParams {};
         meterParams.Mode = DlssNrMode_Meter;
         meterParams.Width = kDlssNrMeterGrid;
         meterParams.Height = kDlssNrMeterGrid;
         meterParams.MeterCopiesExposure = 0;
+        meterParams.InputEncoding = frame.InputEncoding; // reads the game's frame
 
         const D3D12_RESOURCE_STATES priorTargetState = targetState;
         TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3274,7 +3321,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (CalibrationWanted())
         CalibrationBeginFrame(cfg, device, width, height,
                               CalibrationSituation(cfg, usingAutoExposure, isHdrBuffer, frame.FinishedPicture,
-                                                   frame.ExposureTexture != nullptr),
+                                                   frame.ExposureTexture != nullptr,
+                                                   DlssNrColourEncoding::ShaderConverts(frame.InputEncoding)),
                               CalibrationBase(cfg));
     else
         CalibrationIdleFrame();
@@ -3296,6 +3344,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         gridParams.Width = kDlssNrMeterGrid;
         gridParams.Height = kDlssNrMeterGrid;
         gridParams.MeterCopiesExposure = 0;
+        gridParams.InputEncoding = frame.InputEncoding; // reads the game's frame
 
         TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         DispatchPass(cmdList, gridParams, target, nullptr, nullptr, nullptr, nullptr, g_nr.meter, nullptr);
@@ -3350,7 +3399,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     uint32_t useGameExposure = 0;
     float exposurePreMul = 0.0f;
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr)
+    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr &&
+        frame.WhitePointOverride <= 0.0f)
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
@@ -3442,6 +3492,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // A frame that is already display-referred is handed over untouched: the encode becomes a copy and
     // the resolve adds the model's edit back at full scale.
     encodeParams.Passthrough = isHdrBuffer ? 0u : 1u;
+    encodeParams.InputEncoding = frame.InputEncoding;
     encodeParams.WhitePoint = whitePoint;
     encodeParams.UseGameExposure = useGameExposure;
     encodeParams.ExposurePreMul = exposurePreMul;
@@ -3961,7 +4012,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         // Resolve takes the difference between what the model returned and what it was shown, and adds
         // that back to the frame. At strength zero the result is what the upscaler produced, exactly, and
-        // anything the model left alone is untouched rather than round-tripped through the curve.
+        // anything the model left alone is untouched rather than round-tripped through the curve. (A forced gamma 2.2
+        // or PQ Colour encoding is the exception: the frame is converted on the way in and back on the way out.)
         DlssNrConstants resolveParams {};
         resolveParams.Mode = DlssNrMode_Resolve;
         resolveParams.WhitePoint = whitePoint;
@@ -3991,6 +4043,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // dlssnr.hlsl, which prefers the base white point (before the Trim) whenever the exposure texture is bound.
         resolveParams.DebugScale = isHdrBuffer ? whitePoint : cfg.DlssNrWhitePointScale.value_or_default();
         resolveParams.Passthrough = isHdrBuffer ? 0u : 1u;
+        resolveParams.InputEncoding = frame.InputEncoding;
         resolveParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
         resolveParams.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
         resolveParams.CompareMode = cfg.DlssNrCompare.value_or_default();
@@ -4153,6 +4206,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Pre-SR Color is not guaranteed to have UAV support. Write directly when legal; otherwise
         // resolve into hdrCopy while the original Color remains readable, then copy the result back.
         ID3D12Resource* resolveOriginal = targetSupportsUav ? g_nr.hdrCopy : target;
+        resolveParams.OriginalIsGameColour = targetSupportsUav ? 0u : 1u;
         ID3D12Resource* resolveTarget = targetSupportsUav ? target : g_nr.hdrCopy;
 
         if (targetSupportsUav)
@@ -4564,9 +4618,11 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // space. Output is the stable authority across injection points; target is only a fallback for a
     // malformed parameter block.
     ID3D12Resource* colourAuthority = output != nullptr ? output : target;
-    frame.ColourIsLinearHdr =
-        (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0 &&
-        colourAuthority != nullptr && FormatCanHoldLinearHdr(colourAuthority->GetDesc().Format);
+    // Finished Picture decodes the screen, not this evaluate, and reports its own choice.
+    ApplyColourEncoding(frame, Config::Instance()->DlssNrColourEncoding.value_or_default(),
+                        (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0,
+                        colourAuthority != nullptr ? colourAuthority->GetDesc().Format : DXGI_FORMAT_UNKNOWN,
+                        !Config::Instance()->DlssNrFinishedPicture.value_or_default());
 
     // The game telling the upscaler to forget everything it has accumulated: a cut, a teleport, a
     // load. Every upscaler in this tree reads it and this pass did not, so the model's history was

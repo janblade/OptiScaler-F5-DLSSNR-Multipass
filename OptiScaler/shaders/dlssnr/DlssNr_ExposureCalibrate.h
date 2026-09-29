@@ -121,6 +121,7 @@ enum class Blocker : uint32_t
     NoGameExposure,  // Game exposure: the game supplied no exposure texture, or there is no reading yet
     Anchors,         // Trim anchors in the ini decide the brightness, not the slider
     NrStopped,       // NR has not run for a while
+    ColourConverted, // Colour encoding converts the frame (gamma 2.2, PQ): the measurement would mix encodings
 };
 
 inline const char* BlockerText(Blocker b)
@@ -147,6 +148,8 @@ inline const char* BlockerText(Blocker b)
         return "Trim anchors in the ini decide the brightness";
     case Blocker::NrStopped:
         return "NR is not running";
+    case Blocker::ColourConverted:
+        return "not while Colour Encoding converts the game's colour (gamma 2.2 or PQ)";
     }
     return "";
 }
@@ -167,6 +170,7 @@ struct Situation
     bool gameExposureNow = false;
     bool gameExposureReading = false;
     bool anchors = false;
+    bool colourConverted = false; // DlssNrColourEncoding::ShaderConverts for this frame
 };
 
 inline Blocker Availability(const Situation& s)
@@ -179,6 +183,8 @@ inline Blocker Availability(const Situation& s)
         return Blocker::HoldFrame;
     if (s.finishedPicture)
         return Blocker::FinishedPicture;
+    if (s.colourConverted)
+        return Blocker::ColourConverted;
     if (!s.hdr)
         return Blocker::NotHdr;
 

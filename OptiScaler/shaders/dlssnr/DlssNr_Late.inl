@@ -317,17 +317,26 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     UINT colorSpaceSize = sizeof(colorSpace);
     swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
-    const bool pq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-    const bool scrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
-    const bool sdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-    if ((!sdr && !pq && !scrgb) ||
-        (scrgb && desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) ||
-        (!scrgb && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_R10G10B10A2_UNORM))
+    const bool screenPq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    const bool screenScrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+    const bool screenSdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    // [DlssNr] ColourEncoding: Auto keeps the colour-space rule; a forced choice picks the path, which is what lets
+    // an FP16 buffer that holds gamma values through as SDR (DlssNr_ColourEncoding.h).
+    using DlssNrColourEncoding::Screen;
+    const auto screenChoice = DlssNrColourEncoding::ResolveFinished(
+        Config::Instance()->DlssNrColourEncoding.value_or_default(), screenPq || screenScrgb || screenSdr,
+        screenPq ? Screen::Pq : screenScrgb ? Screen::Scrgb : Screen::Sdr,
+        desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
+        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+    DlssNr::ReportColourEncoding(screenChoice.choice, DiagFormatName(desc.Format), "finished picture");
+    if (!screenChoice.supported)
     {
         Late::Cancel();
         Late::Say("This screen colour format is not supported.");
         return;
     }
+    const bool pq = screenChoice.screen == Screen::Pq;
+    const bool scrgb = screenChoice.screen == Screen::Scrgb;
     const auto epoch = State::Instance().frameCount;
     const bool residualOnly = Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
                               Config::Instance()->DlssNrDeferredDlss.value_or_default();
@@ -424,6 +433,9 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     {
         auto frame = slot.frame;
         frame.ColourIsLinearHdr = pq || scrgb;
+        frame.InputEncoding = screenChoice.shaderConversion; // gamma 2.2 re-encoded as sRGB by the shared pass
+        frame.ColourEncoding = (uint32_t) screenChoice.choice.encoding;
+        frame.ColourEncodingForced = !screenChoice.choice.automatic;
         // Absolute display encodings: 203-nit reference white, in 80-nit scRGB units.
         frame.WhitePointOverride = (pq || scrgb) ? 203.0f / 80.0f : 0.0f;
         frame.Reset |= Late::reset;

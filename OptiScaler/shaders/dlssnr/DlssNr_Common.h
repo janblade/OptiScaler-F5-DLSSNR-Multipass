@@ -90,6 +90,14 @@ struct DlssNrFrameInfo
     // washed out and banded.
     bool ColourIsLinearHdr = true;
 
+    // The Colour encoding override (DlssNr_ColourEncoding.h) for this frame. InputEncoding is what the shared pass
+    // converts at its edges (DlssNrConstants::InputEncoding: 3 gamma 2.2, 4 PQ, else nothing); ColourEncoding is the
+    // encoding that was chosen, for the log, and differs from it where another pass does the conversion (Finished
+    // Picture's PQ). ColourIsLinearHdr is already the choice's LinearHdr(). Zero for every path that does not set it.
+    uint32_t InputEncoding = 0;
+    uint32_t ColourEncoding = 0;
+    bool ColourEncodingForced = false;
+
     // The SR colour input arrives readable, whereas a completed upscaler output normally arrives as
     // a UAV. The DX12 pass uses this to preserve the caller's state and to fall back through a copy
     // when a pre-SR colour resource was not created with UAV support.
@@ -301,6 +309,17 @@ struct alignas(256) DlssNrConstants
     // exposure (DlssNr_FollowGame.h) the game's texture is bound and this carries the learned calibration. 0 -- what a
     // zero-initialised struct holds -- and 1 both leave the white point as it was. Trailing scalar, mirrored in the shader.
     float ExposureBaseScale;
+
+    // The Colour encoding override (DlssNr_ColourEncoding.h) at the two edges where the game's own frame is read and
+    // written back: 3 tone-mapped gamma 2.2 (re-encoded as sRGB for the pass), 4 PQ (decoded to linear, 1.0 = 203
+    // nits). Every other value -- 0, what a zero-initialised struct holds -- converts nothing: Auto, linear HDR and
+    // sRGB are already what the pass works in. Set only on dispatches that read the game's frame (the encode, the
+    // meters over it) or write it (the resolve). Trailing scalar, mirrored in the shader.
+    uint32_t InputEncoding;
+
+    // Resolve only: 1 when gOriginal is the game's own texture rather than the encode's kept copy (the colour cannot
+    // take a UAV, so the resolve writes into the copy instead), and so still carries InputEncoding's encoding.
+    uint32_t OriginalIsGameColour;
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 

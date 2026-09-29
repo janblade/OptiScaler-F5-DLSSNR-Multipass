@@ -488,6 +488,9 @@ bool Config::Reload(std::filesystem::path iniPath)
                 pass.autoMask.set_from_config(readBool("DlssNr", std::format("Pass{}AutoMask", i + 4).c_str()));
             }
             DlssNrReversibleMode.set_from_config(readUInt("DlssNr", "ReversibleMode"));
+            DlssNrColourEncoding.set_from_config(readUInt("DlssNr", "ColourEncoding"));
+            if (DlssNrColourEncoding.value_or_default() > 4u) // not a Colour encoding: back to Auto, saved as auto
+                DlssNrColourEncoding.reset();
             DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
             DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1467,6 +1470,7 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", std::format("Pass{}AutoMask", i + 4).c_str(), GetBoolValue(pass.autoMask.value_for_config()).c_str());
     }
     ini.SetValue("DlssNr", "ReversibleMode", GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "ColourEncoding", GetIntValue(Instance()->DlssNrColourEncoding.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
     ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",

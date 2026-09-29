@@ -758,6 +758,11 @@ int main()
         t = autoOk;
         t.finishedPicture = true;
         CHECK(Availability(t) == Blocker::FinishedPicture);
+        // A Colour encoding the shader converts (gamma 2.2, PQ) would measure linear input against encoded output.
+        t = autoOk;
+        t.colourConverted = true;
+        CHECK(Availability(t) == Blocker::ColourConverted);
+        CHECK(BlockerText(Blocker::ColourConverted)[0] != '\0');
         t = autoOk;
         t.hdr = false;
         CHECK(Availability(t) == Blocker::NotHdr);

@@ -71,6 +71,11 @@ cbuffer Params : register(b0)
     // Multiplies the base white point read from the live exposure sample. Automatic following the game's exposure binds
     // the game's texture and puts the learned calibration here (DlssNr_FollowGame.h). 0 (unset) and 1 are the identity.
     float gExposureBaseScale;
+    // Colour encoding override where the game's frame is read and written: 3 gamma 2.2, 4 PQ, anything else none.
+    // See DlssNrConstants::InputEncoding.
+    uint  gInputEncoding;
+    // Resolve only: gOriginal is the game's own texture (still in gInputEncoding), not the encode's kept copy.
+    uint  gOriginalIsGameColour;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -444,6 +449,80 @@ float3 SrgbToLinear(float3 v)
 {
     v = saturate(v);
     return lerp(v / 12.92, pow((v + 0.055) / 1.055, 2.4), step(0.04045, v));
+}
+
+// The Colour encoding override, at the edges where the game's own frame is read (encode, meters) and written back
+// (resolve). Everything between works in the two domains the pass always had -- tone-mapped sRGB (passthrough) and
+// linear light -- so a gamma 2.2 frame is re-encoded as sRGB of the same light, and a PQ frame is decoded to linear
+// BT.709 light, and both are turned back on the way out. gInputEncoding 0 (and 1, 2) converts nothing.
+//
+// The sRGB curve here is not clipped at 1: a tone-mapped frame in a float buffer can carry values above white, and
+// they must come back as they went in. It selects per channel rather than blending, so +inf stays +inf. PQ is read
+// exactly as Finished Picture reads it (dlssnr_pq.hlsli: ST 2084, BT.2020 -> BT.709), then put on the pass's scale
+// with the ITU-R BT.2408 reference white (203 nits) at 1.0. Colours outside BT.709 are clipped by the pass, as they
+// are on Finished Picture.
+#include "dlssnr_pq.hlsli"
+
+static const uint kInputGamma22 = 3u;
+static const uint kInputPq = 4u;
+static const float kScrgbPerReferenceWhite = 203.0 / 80.0; // scRGB units (80 nits) in one reference white
+
+// Per channel with a scalar ?: -- fxc has no select() and dxc (HLSL 2021) refuses a vector ?:.
+float SrgbEncodeUnclipped1(float v)
+{
+    v = max(v, 0.0);
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+float SrgbDecodeUnclipped1(float v)
+{
+    v = max(v, 0.0);
+    return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
+}
+
+float3 SrgbEncodeUnclipped(float3 v)
+{
+    return float3(SrgbEncodeUnclipped1(v.r), SrgbEncodeUnclipped1(v.g), SrgbEncodeUnclipped1(v.b));
+}
+
+float3 SrgbDecodeUnclipped(float3 v)
+{
+    return float3(SrgbDecodeUnclipped1(v.r), SrgbDecodeUnclipped1(v.g), SrgbDecodeUnclipped1(v.b));
+}
+
+// ST 2084 signal (BT.2020) -> linear BT.709 light, 1.0 = the reference white.
+float3 PqToReferenceLinear(float3 e)
+{
+    return mul(kBt2020To709, DecodePQ(e)) / kScrgbPerReferenceWhite;
+}
+
+float3 ReferenceLinearToPq(float3 l)
+{
+    return EncodePQ(mul(kBt709To2020, l * kScrgbPerReferenceWhite));
+}
+
+float3 DecodeGameColour(float3 c)
+{
+    if (gInputEncoding == kInputGamma22)
+        return SrgbEncodeUnclipped(pow(max(c, 0.0), 2.2));
+    if (gInputEncoding == kInputPq)
+        return PqToReferenceLinear(c);
+    return c;
+}
+
+float3 EncodeGameColour(float3 c)
+{
+    if (gInputEncoding == kInputGamma22)
+        return pow(SrgbDecodeUnclipped(c), 1.0 / 2.2);
+    if (gInputEncoding == kInputPq)
+        return ReferenceLinearToPq(c);
+    return c;
+}
+
+// gOriginal in the pass's working domain, whichever texture is bound as it.
+float4 OriginalInPassDomain(float4 original)
+{
+    return gOriginalIsGameColour != 0 ? float4(DecodeGameColour(original.rgb), original.a) : original;
 }
 
 // The edit at an arbitrary position, exactly as the resolve computes its own.
@@ -822,7 +901,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         {
             [loop] for (uint tx = tx0 + groupThreadId.x; tx < endX; tx += 8u)
             {
-                const float3 c = max(gSource.Load(int3(min(tx, fullW - 1u), min(ty, fullH - 1u), 0)).rgb, 0.0);
+                const float3 c = max(DecodeGameColour(gSource.Load(int3(min(tx, fullW - 1u), min(ty, fullH - 1u), 0)).rgb), 0.0);
                 const float luma = dot(c, kLuma);
                 localSum += isfinite(luma) ? max(luma, 0.0) : 0.0;
             }
@@ -1287,7 +1366,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     if (gMode == 0)
     {
         float4 source = gSource.Load(int3(id.xy, 0));
-        float3 frame = max(source.rgb, float3(0.0, 0.0, 0.0));
+        // Into the pass's working domain first (the Colour encoding override; nothing for Auto).
+        float3 frame = max(DecodeGameColour(source.rgb), float3(0.0, 0.0, 0.0));
 
         // Kept so the resolve has the frame as it was, rather than having to reconstruct it.
         gKeep[id.xy] = float4(frame, source.a);
@@ -1382,8 +1462,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // The model's own answer, kept before the matched-residual block below can rewrite `model`, so the
     // replace decode uses what the model returned rather than the residual reconstruction.
     float3 modelDirect = model;
-    float4 originalSample = gCompareMode == 1 ? gOriginal.SampleLevel(gLinear, cmpUv, 0)
-                                              : gOriginal.Load(int3(id.xy, 0));
+    float4 originalSample = OriginalInPassDomain(gCompareMode == 1 ? gOriginal.SampleLevel(gLinear, cmpUv, 0)
+                                                                   : gOriginal.Load(int3(id.xy, 0)));
 
     // All three pictures have to share a scale before their luminances can be compared. The proxy and
     // the model come back from an sRGB decode, so they sit in 0..1 where 1 is the white point; the
@@ -1407,19 +1487,19 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // with and without Neural Rendering. In passthrough the frame is already display-referred.
     if (gApplyModel == 0)
     {
-        gTarget[id.xy] = float4(max(originalSample.rgb, 0.0), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(max(originalSample.rgb, 0.0)), originalSample.a);
         return;
     }
 
     if (gDebugView == 1)
     {
-        gTarget[id.xy] = float4(proxy * DebugViewScale(), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(proxy * DebugViewScale()), originalSample.a);
         return;
     }
 
     if (gDebugView == 2)
     {
-        gTarget[id.xy] = float4(model * DebugViewScale(), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(model * DebugViewScale()), originalSample.a);
         return;
     }
 
@@ -1432,7 +1512,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     {
         // Amplified and centred on grey, so both directions of the edit are visible at once.
         float3 shown = saturate(0.5 + edit * 20.0);
-        gTarget[id.xy] = float4(SrgbToLinear(shown) * DebugViewScale(), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(SrgbToLinear(shown) * DebugViewScale()), originalSample.a);
         return;
     }
 
@@ -1665,10 +1745,10 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     if ((gReversibleMode == 2 || gReversibleMode == 4) && gModelWorkScale < 0.999 && gReplaceDetailStrength > 0.0)
     {
         int radius = clamp((int) round(1.0 / gModelWorkScale), 1, 4);
-        float3 nLeft  = gOriginal.Load(int3(id.xy + int2(-radius,       0), 0)).rgb / normScale;
-        float3 nRight = gOriginal.Load(int3(id.xy + int2( radius,       0), 0)).rgb / normScale;
-        float3 nUp    = gOriginal.Load(int3(id.xy + int2(      0, -radius), 0)).rgb / normScale;
-        float3 nDown  = gOriginal.Load(int3(id.xy + int2(      0,  radius), 0)).rgb / normScale;
+        float3 nLeft  = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2(-radius,       0), 0))).rgb / normScale;
+        float3 nRight = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2( radius,       0), 0))).rgb / normScale;
+        float3 nUp    = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2(      0, -radius), 0))).rgb / normScale;
+        float3 nDown  = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2(      0,  radius), 0))).rgb / normScale;
         float blurLuma = dot((original + nLeft + nRight + nUp + nDown) / 5.0, kLuma);
         float highFreq = originalLuma - blurLuma;
 
@@ -1742,5 +1822,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     if (onDivider)
         result = float3(resolvedWhitePoint, resolvedWhitePoint, resolvedWhitePoint);
 
-    gTarget[id.xy] = float4(max(result, float3(0.0, 0.0, 0.0)), originalSample.a);
+    // Back into the game's own encoding (the Colour encoding override; nothing for Auto).
+    gTarget[id.xy] = float4(EncodeGameColour(max(result, float3(0.0, 0.0, 0.0))), originalSample.a);
 }

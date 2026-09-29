@@ -349,6 +349,10 @@ class Config
     // replace. An in-game A/B and a way back. Default 0 = byte-identical to before.
     CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
 
+    // How the NR pass decodes the game's colour. 0 Auto (the game's DLSS HDR flag + the output format, as before),
+    // 1 linear HDR, 2 tone-mapped sRGB, 3 tone-mapped gamma 2.2, 4 PQ. Values are DlssNr_ColourEncoding.h's.
+    CustomOptional<uint32_t> DlssNrColourEncoding { 0 };
+
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
     // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.
     CustomOptional<bool> DlssNrApplyModel { true };

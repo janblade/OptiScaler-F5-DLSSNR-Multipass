@@ -16,6 +16,8 @@
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ColourEncoding.h>
+#include "DlssNr_ColourEncodingStatus.h"
 #include "DlssNr_GameDefaults.h"
 
 #include <string>
@@ -1672,6 +1674,38 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::EndDisabled();
 
             HelpMarker("Below 100% model resolution: filter used to enlarge the model's answer back to native before it's applied.\nBilinear is the cheapest, softest, pre-SGSR1 default. SGSR1 does an edge-directed upscale of the answer instead. No effect at 100% or above.");
+        }
+
+        // How the game's colour is decoded (DlssNr_ColourEncoding.h). Auto trusts the game; a forced choice is applied
+        // even when the format looks wrong for it, and the line under the combo says so.
+        {
+            static const char* encodingNames[] = { "Auto", "Linear HDR", "Tone-mapped sRGB", "Tone-mapped gamma 2.2",
+                                                   "PQ (HDR10)" };
+            static_assert(IM_ARRAYSIZE(encodingNames) == DlssNrColourEncoding::kSettingCount);
+            int encoding = (int) config->DlssNrColourEncoding.value_or_default();
+            if (encoding < 0 || encoding >= (int) DlssNrColourEncoding::kSettingCount)
+                encoding = 0;
+            if (ImGui::Combo("Colour Encoding", &encoding, encodingNames, IM_ARRAYSIZE(encodingNames)))
+            {
+                config->DlssNrColourEncoding = (uint32_t) encoding;
+                LOG_INFO("DLSS-NR colour encoding set to {}", encodingNames[encoding]);
+            }
+            HelpMarker("How NR reads the game's colour.\nAuto trusts the game: its DLSS HDR flag and the buffer format "
+                       "(on Finished Picture, the screen's colour space).\nChoose another only when the picture looks "
+                       "washed out, too dark or banded because the game reports its colour wrongly. Tone-mapped gamma "
+                       "2.2 and PQ are converted for the model and back.");
+
+            const auto status = DlssNr::ReadColourEncodingStatus();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", status.line.c_str());
+            ImGui::PopStyleColor();
+            if (!status.warning.empty())
+            {
+                // Wrapped: the sentence is longer than the menu is wide.
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                ImGui::TextWrapped("%s", status.warning.c_str());
+                ImGui::PopStyleColor();
+            }
         }
 
         // Experimental. 0 off (soft knee), 1 Reversible curve + our composition, 2 Reversible curve +

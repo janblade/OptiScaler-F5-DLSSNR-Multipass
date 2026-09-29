@@ -133,7 +133,7 @@ void CalibrationIdleFrame() { Cal::IdleNow(); }
 
 // Everything availability depends on, from this evaluation. Only called while wanted (it parses the Trim anchors).
 Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, bool isHdrBuffer, bool finishedPicture,
-                                    bool gameExposureNow)
+                                    bool gameExposureNow, bool colourConverted)
 {
     Cal::Situation s;
     s.source = cfg.DlssNrWhitePointSource.value_or_default();
@@ -141,6 +141,7 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
     s.holdFrame = cfg.DlssNrHoldFrame.value_or_default();
     s.finishedPicture = finishedPicture;
     s.hdr = isHdrBuffer;
+    s.colourConverted = colourConverted;
     s.autoRunning = usingAutoExposure;
     s.followLocked = DlssNr::FollowGameOn(cfg) && DlssNrFollowGame::Instance().Locked();
     s.followDisagreementEv = FollowDisagreementEv();

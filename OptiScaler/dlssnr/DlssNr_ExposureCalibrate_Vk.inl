@@ -235,11 +235,13 @@ float CalibrationVkBase(const Config& cfg)
 
 // Everything availability depends on, from this evaluation. This backend has no proxy backend, frame hold or
 // finished-picture mode (it does not run NR in the last), so those never block here.
-Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool autoRunning, bool gameExposureNow)
+Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool autoRunning, bool gameExposureNow,
+                                      bool colourConverted)
 {
     Cal::Situation s;
     s.source = cfg.DlssNrWhitePointSource.value_or_default();
     s.hdr = linearHdr;
+    s.colourConverted = colourConverted;
     s.autoRunning = autoRunning;
     s.followLocked = DlssNr::FollowGameOn(cfg) && DlssNrFollowGame::Instance().Locked();
     s.followDisagreementEv =
@@ -259,7 +261,7 @@ Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool au
 
 // Each evaluation, before the white point is used: the pinned white point of this evaluation, 0 when no run is on.
 float CalibrationVkBeginFrame(const Config& cfg, uint32_t width, uint32_t height, bool linearHdr, bool autoRunning,
-                              bool gameExposureNow)
+                              bool gameExposureNow, bool colourConverted)
 {
     g_calVk.Tick();
 
@@ -269,7 +271,7 @@ float CalibrationVkBeginFrame(const Config& cfg, uint32_t width, uint32_t height
         return 0.0f;
     }
 
-    Cal::BeginFrameNow(g_calVk, cfg, width, height, CalibrationVkSituation(cfg, linearHdr, autoRunning, gameExposureNow),
+    Cal::BeginFrameNow(g_calVk, cfg, width, height, CalibrationVkSituation(cfg, linearHdr, autoRunning, gameExposureNow, colourConverted),
                        CalibrationVkBase(cfg), g_vk.frames);
     return Cal::TheRun().frameWhitePoint;
 }

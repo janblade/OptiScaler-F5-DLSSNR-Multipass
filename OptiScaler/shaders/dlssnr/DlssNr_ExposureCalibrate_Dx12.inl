@@ -264,8 +264,10 @@ void CalibrationMeasure(DlssNr_Dx12* pass, ID3D12GraphicsCommandList* cmdList, I
     params.WhitePoint = g_cal.measureWhitePoint;
     params.Width = width;
     params.Height = height;
-    params.TransferStrength = Cal::kShoulder;
-    params.ColourStrength = Cal::kFloor;
+    const DlssNrProxyCurve::TuneThresholds damage =
+        DlssNrProxyCurve::Thresholds(Config::Instance()->DlssNrReversibleMode.value_or_default());
+    params.TransferStrength = damage.shoulder;
+    params.ColourStrength = damage.floor;
 
     if (!pass->DispatchDetailStats(cmdList, params, g_calDx.output[i], g_calDx.output[prev], g_calDx.input[i],
                                    g_calDx.input[prev], modelInput, g_calDx.grid))

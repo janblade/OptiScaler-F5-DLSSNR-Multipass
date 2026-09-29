@@ -32,6 +32,7 @@
 #include <mutex>
 #include <string>
 #include "../shaders/dlssnr/DlssNr_ColourEncoding.h"
+#include "../shaders/dlssnr/DlssNr_ProxyCurve.h"
 #include "DlssNr_ColourEncodingStatus.h"
 
 namespace DlssNr

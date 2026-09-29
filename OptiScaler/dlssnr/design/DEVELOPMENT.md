@@ -36,6 +36,9 @@ review for its change type below, against the specs here.**
    shader logic silently. Check the recipe first: the committed source must rebuild byte-identically.
    `dlssnr_finished_color_Shader.h` is dxc `cs_6_0 -O3` DXIL (`-Fh`, `-Vn dlssnr_finished_color_cso`),
    committed from dxc 1.8; the tree's dxc 1.9 differs only in version metadata and hash.
+   `sgsr1_Shader.h` (array `sgsr1_Shader_cso`) is dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL, which
+   reproduces the committed binary byte-identically; its SPIR-V (`sgsr1_spv`) uses the dlssnr recipe. SGSR1 mirrors
+   `ReversibleMode`, so a new proxy curve means rebuilding it too.
 7. **Passthrough is sacred.** Any encode/decode/proxy change must leave already-tone-mapped
    (`gPassthrough != 0`) frames untouched. Both the encode AND every place that reproduces the encode
    (e.g. the matched-residual `fullProxy`) must carry the same passthrough gate. (This is exactly the

@@ -7,6 +7,7 @@
 #include "nvapi/fakenvapi.h"
 #include <hooks/Streamline_Hooks.h>
 #include <misc/IdentifyGpu.h>
+#include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 
 #include <SimpleIni.h>
 
@@ -488,6 +489,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                 pass.autoMask.set_from_config(readBool("DlssNr", std::format("Pass{}AutoMask", i + 4).c_str()));
             }
             DlssNrReversibleMode.set_from_config(readUInt("DlssNr", "ReversibleMode"));
+            if (!DlssNrProxyCurve::Valid(DlssNrReversibleMode.value_or_default())) // not a curve: soft knee, saved as auto
+                DlssNrReversibleMode.reset();
             DlssNrColourEncoding.set_from_config(readUInt("DlssNr", "ColourEncoding"));
             if (DlssNrColourEncoding.value_or_default() > 4u) // not a Colour encoding: back to Auto, saved as auto
                 DlssNrColourEncoding.reset();

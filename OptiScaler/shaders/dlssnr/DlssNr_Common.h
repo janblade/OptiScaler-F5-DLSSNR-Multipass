@@ -224,10 +224,11 @@ struct alignas(256) DlssNrConstants
     // is the user's own multiplier, which holds still while the meter works.
     float DebugScale;
 
-    // The reversible-proxy mode. 0 soft knee + our composition (default), 1 unclipped Neutwo proxy +
-    // our composition, 2 Neutwo proxy + pure-inverse replace (model's answer straight back, no
-    // composition). Trailing field, mirroring the shader's cbuffer, so the layout stays a flat run of
-    // 4-byte scalars that C++ and HLSL agree on.
+    // The proxy curve (DlssNr_ProxyCurve.h; dlssnr.hlsl's ProxyCurve / IsReplace). 0 soft knee +
+    // our composition (default), 1/2 Neutwo + composition / pure-inverse replace (model's answer
+    // straight back, no composition), 3/4 the hybrid the same two ways, 5 HLG, 6 PQ, 7 linear (all three
+    // composed, in scene light). Trailing field, mirroring the shader's cbuffer, so the layout stays a
+    // flat run of 4-byte scalars that C++ and HLSL agree on.
     uint32_t ReversibleMode;
 
     // 0 = output the clean upscaler frame (the pass still runs, so Hold frame keeps a frozen frame

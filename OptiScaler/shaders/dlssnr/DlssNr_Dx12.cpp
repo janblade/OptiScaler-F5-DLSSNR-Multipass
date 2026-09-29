@@ -28,6 +28,7 @@
 #include "DlssNr_FollowGame.h"
 #include "DlssNr_ExposureCalibrate.h"
 #include "DlssNr_ExposureCalibrate_Run.h"
+#include "DlssNr_ProxyCurve.h"
 #include "DlssNr_ExposureAdapt.h"
 #include "DlssNr_FinishedReady.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
@@ -3500,6 +3501,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.ExposureBaseScale = exposureBaseScale;
     FillExposureConstants(encodeParams, cfg, usingAutoExposure ? 3u : 1u, frame.PreExposure);
     encodeParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+    // Linear stores the light as it is, and the proxy takes the colour's own format: in 8 or 10 bits that leaves too
+    // few codes in the shadows, so they band (DlssNr_ProxyCurve.h). Said once per format per session; the curve runs.
+    if (encodeParams.ReversibleMode == DlssNrProxyCurve::kLinear && isHdrBuffer)
+    {
+        static std::set<DXGI_FORMAT> warnedLinearFormats; // render thread only
+        const DXGI_FORMAT proxyFormat = g_nr.colorCopy->GetDesc().Format;
+        if (DlssNrProxyCurve::LinearBandsIn(proxyFormat) && warnedLinearFormats.insert(proxyFormat).second)
+            LOG_WARN("DLSS-NR Linear curve on a {}-bit buffer ({}): shadows will band",
+                     proxyFormat == DXGI_FORMAT_R10G10B10A2_UNORM || proxyFormat == DXGI_FORMAT_R10G10B10A2_TYPELESS ? 10 : 8,
+                     (int) proxyFormat);
+    }
     // Match only takes effect once a fit exists; until then the table is empty and the shader would
     // read a curve of zeros, so it falls back to the plain proxy.
     encodeParams.Width = width;

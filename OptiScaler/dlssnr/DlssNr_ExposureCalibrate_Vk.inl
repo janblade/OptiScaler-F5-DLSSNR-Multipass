@@ -350,8 +350,10 @@ void CalibrationVkMeasure(VkCommandBuffer cmd, VkImageView edited, VkImageLayout
     params.WhitePoint = run.measureWhitePoint;
     params.Width = width;
     params.Height = height;
-    params.TransferStrength = Cal::kShoulder;
-    params.ColourStrength = Cal::kFloor;
+    const DlssNrProxyCurve::TuneThresholds damage =
+        DlssNrProxyCurve::Thresholds(Config::Instance()->DlssNrReversibleMode.value_or_default());
+    params.TransferStrength = damage.shoulder;
+    params.ColourStrength = damage.floor;
 
     // The model's input is read as a storage image (the layout has four sampled bindings, the stats pass reads five).
     Transition(cmd, modelInput, VK_IMAGE_LAYOUT_GENERAL);

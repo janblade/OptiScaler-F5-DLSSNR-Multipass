@@ -47,9 +47,8 @@ constexpr unsigned int kRing = 12;
 constexpr unsigned long long kStallMs = 2000;
 // The menu counts as looking for this long after it last polled; availability is only worked out meanwhile.
 constexpr unsigned long long kMenuMs = 1000;
-// Thresholds for damage, on the picture the model was shown: its peak channel above the shoulder, or below the floor.
-constexpr float kShoulder = 0.95f;
-constexpr float kFloor = 0.02f;
+// Thresholds for damage, on the picture the model was shown (its peak channel above the shoulder, or below the floor),
+// depend on the proxy curve: DlssNrProxyCurve::Thresholds, taken when the stats pass is dispatched.
 
 // A backend's GPU side of a run: the grid, the readback ring and the copies.
 class Backend

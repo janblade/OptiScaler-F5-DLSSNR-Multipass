@@ -1849,7 +1849,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         const auto tuning = Profiles::PassTuning(cfg, pass);
         void* const passFeature = pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass];
         // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp), so the kernel set shows. Reuse
-        // bottleneck stays off on Vulkan (every = 1 on both kernel sets): with the ViT run skipped, its kept result was
+        // bottleneck is forced off on Vulkan (every = 1 on both kernel sets, whatever the ini says): with the ViT run skipped, its kept result was
         // overwritten between frames there (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel
         // was kept), by something outside the model's own launches. D3D12 keeps it. No command list: the kernel
         // profiler is D3D12's.

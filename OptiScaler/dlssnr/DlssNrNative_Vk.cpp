@@ -57,7 +57,7 @@ bool VkLaunch(void* commandBuffer, uint64_t function)
     const auto [role, set] = Kernels().Find(function);
 
     if (role == DlssNrVitReuse::Role::Start && !g_runSeen.exchange(true))
-        LOG_INFO("DLSS-NR Vulkan: the model's ViT run seen ({} kernels); Reuse bottleneck can act on it",
+        LOG_INFO("DLSS-NR Vulkan: the model's ViT run seen ({} kernels); Reuse bottleneck stays off on Vulkan",
                  set == DlssNrVitReuse::KernelSet::Plain ? "plain FP16" : "FP8");
 
     const DlssNrVitReuse::Filter::Single one = filter.One(role, set);

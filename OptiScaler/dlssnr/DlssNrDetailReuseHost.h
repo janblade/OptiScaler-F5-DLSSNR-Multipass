@@ -14,12 +14,14 @@
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <shaders/dlssnr/DlssNr_DetailReuseConstants.h>
 #include <shaders/dlssnr/DlssNr_FinishedReady.h>
+#include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace DlssNrDetailReuse
 {
@@ -42,7 +44,31 @@ struct HostFrame
     unsigned long long present = 0;         // the API's frame clock (DXGI presents, DlssNr::VkFrameClock on Vulkan)
     bool vulkan = false;                    // which DLSS-G stamp goes with that clock
     unsigned long long revision = 0;        // changes when anything that changes the model's answer changes
+    bool passthrough = false;               // the frame is already tone-mapped: no proxy curve, nothing to decode
+    uint32_t reversibleMode = 0;            // the proxy curve this frame's input was encoded with (DlssNr_ProxyCurve.h)
 };
+
+// The curve the resolve decodes a Replace answer through, for a proxy curve on a frame that is (passthrough) or is not
+// already tone-mapped. Every Replace curve needs one here, or reuse would land its moved changes as differences.
+constexpr DlssNrReplaceCurve ReplaceCurveFor(uint32_t reversibleMode, bool passthrough)
+{
+    if (passthrough || !DlssNrProxyCurve::IsReplace(reversibleMode))
+        return DlssNrReplaceCurve_None;
+    return reversibleMode == DlssNrProxyCurve::kNeutwoReplace ? DlssNrReplaceCurve_Neutwo : DlssNrReplaceCurve_Hybrid;
+}
+
+constexpr bool ReplaceCurvesMatch()
+{
+    for (uint32_t mode = 0; mode < DlssNrProxyCurve::kCount; ++mode)
+    {
+        if ((ReplaceCurveFor(mode, false) != DlssNrReplaceCurve_None) != DlssNrProxyCurve::IsReplace(mode) ||
+            ReplaceCurveFor(mode, true) != DlssNrReplaceCurve_None)
+            return false;
+    }
+    return ReplaceCurveFor(DlssNrProxyCurve::kNeutwoReplace, false) == DlssNrReplaceCurve_Neutwo &&
+           ReplaceCurveFor(DlssNrProxyCurve::kBalancedReplace, false) == DlssNrReplaceCurve_Hybrid;
+}
+static_assert(ReplaceCurvesMatch(), "a Replace proxy curve with no reuse curve (or the reverse)");
 
 // What Gate decided: whether reuse's textures are wanted this frame, whether they may stay while it is held off, and
 // the settings they follow.
@@ -50,14 +76,17 @@ struct Wanted
 {
     bool wanted = false;
     bool keep = false;
-    bool withFg = false; // kept on under frame generation (A/B testing)
+    bool withFg = false;  // kept on under frame generation (A/B testing)
+    bool measure = false; // measure how much of the frame had no detail to move (MotionGuard is on)
+    bool hold = false;    // that measurement says the picture is moving too fast: run the model this frame
     float steady = 0.0f;
     float fill = 0.0f;
 };
 
-// Frame generation is built from two real frames; reused frames next to full ones flicker under it (NBA 2K27 with
-// OptiFG, 2026-09-28), and frame generation fills in frames better than moved NR detail does. Returns the reason, or
-// null when none is seen: OptiScaler's own (active, not paused), the game's DLSS-G seen through NGX, or one owned by
+// Frame generation is built from two real frames, so reused frames next to full ones show under it: the edges of the
+// screen flickered in fast motion (NBA 2K27 with OptiFG 2026-09-28, The Witcher 3 2026-09-30) until MotionGuard stopped
+// reuse from running through motion it cannot carry detail across. DetailReuseWithFG (on by default) keeps reuse running
+// here; turned off, any of these reasons stands reuse down. Returns the reason, or null when none is seen: OptiScaler's own (active, not paused), the game's DLSS-G seen through NGX, or one owned by
 // an external module.
 inline const char* FrameGenerationInUse(unsigned long long present, bool vulkan)
 {
@@ -95,7 +124,7 @@ class Host
         // A failed allocation is retried once the option is switched off and on, or at another working size.
         if ((_allocFailed || _extrasFailed) && (!on || f.workWidth != _failedWidth || f.workHeight != _failedHeight))
             _allocFailed = _extrasFailed = false;
-        // Under frame generation it runs only when asked to (A/B testing).
+        // Under frame generation it runs unless asked not to (DetailReuseWithFG, on by default).
         const char* fg = FrameGenerationInUse(f.present, f.vulkan);
         Wanted w;
         w.withFg = fg != nullptr && cfg.DlssNrDetailReuseWithFg.value_or_default();
@@ -107,6 +136,13 @@ class Host
                                      : 0.0;
         _lastNrFrame = now;
         const bool fastEnough = _rateGate.Update(sinceLast, cfg.DlssNrDetailReuseMinFps.value_or_default());
+        // How much of the picture arrived with no detail to move, from the GPU a few frames ago (RecordDropped). Read
+        // once: a frame with no new reading keeps the guard's state.
+        const float maxDropped = std::clamp(cfg.DlssNrDetailReuseMaxDropped.value_or_default(), 0.0f, 100.0f) / 100.0f;
+        w.measure = maxDropped > 0.0f;
+        w.hold = _motionGuard.Update(std::exchange(_dropped, -1.0f), maxDropped, sinceLast);
+        if (!w.measure)
+            _droppedLast = -1.0f; // nothing is being measured: the menu must not show an old reading
         const char* whyNot = nullptr;
         if (f.beforeUpscale)
             whyNot = "unavailable while NR runs before SR";
@@ -131,6 +167,8 @@ class Host
             _loggedWhy = state;
         }
 
+        // Held off while the picture moves too fast: not logged as a state, it comes and goes with the motion (the
+        // menu shows it, and the frame counts carry it).
         w.steady = std::clamp(cfg.DlssNrDetailReuseSteady.value_or_default(), 0.0f, 1.0f);
         w.fill = std::clamp(cfg.DlssNrDetailReuseFill.value_or_default(), 0.0f, 1.0f);
         // Held off for now (frame generation, which often pauses and resumes, or the frame rate): the textures stay a
@@ -163,11 +201,17 @@ class Host
         facts.enabled = active;
         facts.reset = f.modelReset;
         facts.blocked = f.blocked;
+        facts.hold = w.hold;
         // Without frame generation NR runs on every present, so any skipped present is a gap. With it, the present
         // counter can also count generated frames (up to 3 per real one with multi frame generation).
         facts.frame = f.frameNumber;
         facts.maxStep = w.withFg ? 4 : 1;
+        // The saved change is in the values of the proxy curve it was made in, so another curve (or a frame that turns
+        // passthrough, or back) starts over like any other change to the model's answer.
+        const DlssNrReplaceCurve replaceCurve = ReplaceCurveFor(f.reversibleMode, f.passthrough);
         facts.revision = f.revision;
+        for (const unsigned long long part : { (unsigned long long) f.reversibleMode, f.passthrough ? 1ull : 0ull })
+            facts.revision = facts.revision * 1000003ull ^ part;
         decision = cadence.Next(facts);
 
         params = {};
@@ -196,6 +240,7 @@ class Host
                             std::clamp(std::sqrt((float) f.workWidth * (float) f.workHeight / (1920.0f * 1080.0f)),
                                        0.5f, 2.0f);
         params.DebugView = f.cfg->DlssNrDetailReuseDebug.value_or_default() ? 1u : 0u;
+        params.ReplaceCurve = replaceCurve;
     }
 
     // The end of the frame's decision. Returns whether the model's history must start over: it last ran two frames ago
@@ -221,9 +266,43 @@ class Host
 
     void RecordGpuTime(double ms) { _gpuRecent[_gpuRecentCount++ % 16] = ms; }
 
+    // The share of a measured frame (0..1) that had no detail to move, read back from the GPU. Several may arrive
+    // between two frames: the largest is kept, since one flickering frame is seen. Summed up for the log, which speaks
+    // every kDroppedLogSeconds and only about that window, so a threshold can be chosen from real play without the
+    // line becoming spam (the reuse status line next to it is every ~10 s too).
+    void RecordDropped(float share)
+    {
+        if (!(share >= 0.0f) || !(share <= 1.0f))
+            return;
+        _dropped = std::max(_dropped, share);
+        _droppedLast = share;
+        _droppedLow = _droppedSeen ? std::min(_droppedLow, share) : share;
+        _droppedHigh = _droppedSeen ? std::max(_droppedHigh, share) : share;
+        _droppedSum += share;
+        ++_droppedSeen;
+        const unsigned long long held = cadence.Held();
+        const auto now = std::chrono::steady_clock::now();
+        if (_droppedLogged.time_since_epoch().count() == 0)
+        {
+            _droppedLogged = now;
+            _droppedHeld = held;
+        }
+        else if (std::chrono::duration<double>(now - _droppedLogged).count() >= kDroppedLogSeconds)
+        {
+            LOG_INFO("{}: over the last {:.0f}s, {:.1f}% of the picture had no detail to move on average of {} measured "
+                     "frames ({:.1f}% to {:.1f}%); reuse paused on {} of them",
+                     _logName, kDroppedLogSeconds, 100.0 * _droppedSum / _droppedSeen, _droppedSeen,
+                     100.0 * _droppedLow, 100.0 * _droppedHigh, held - _droppedHeld);
+            _droppedLogged = now;
+            _droppedHeld = held;
+            _droppedSeen = 0;
+            _droppedSum = 0.0;
+        }
+    }
+
     DlssNr::DetailReuseInfo Status() const
     {
-        DlssNr::DetailReuseInfo status { cadence.Full(), cadence.Reused(), cadence.Fallback(), _why };
+        DlssNr::DetailReuseInfo status { cadence.Full(), cadence.Reused(), cadence.Fallback(), cadence.Held(), _why };
         const unsigned int count = std::min(_gpuRecentCount, 16u);
         for (unsigned int i = 0; i < count; ++i)
         {
@@ -233,6 +312,8 @@ class Host
         }
         status.active = _activeLast;
         status.baseFps = _rateGate.Fps();
+        status.holding = _motionGuard.Holding();
+        status.dropped = _droppedLast;
         return status;
     }
 
@@ -253,6 +334,13 @@ class Host
     {
         _allocFailed = _extrasFailed = _modelSkipped = _activeLast = false;
         _failedWidth = _failedHeight = _gatedFrames = 0;
+        _dropped = _droppedLast = -1.0f;
+        _droppedSeen = 0;
+        _droppedHeld = 0;
+        _droppedSum = 0.0;
+        _droppedLogged = {};
+        _lastNrFrame = {}; // the next frame measures no interval, rather than the whole time NR was away
+        _motionGuard = {};
         cadence.Drop();
         std::lock_guard<std::mutex> lock(_publishedMutex);
         _published = {};
@@ -282,6 +370,15 @@ class Host
     bool _activeLast = false;
     unsigned int _gatedFrames = 0; // NR frames in a row with reuse held off for now (frame generation, low frame rate)
     FrameRateGate _rateGate;
+    MotionGuard _motionGuard;
+    float _dropped = -1.0f;     // this frame's reading for the guard, taken once (negative: none)
+    float _droppedLast = -1.0f; // the newest reading, for the menu
+    float _droppedLow = 0.0f, _droppedHigh = 0.0f;
+    double _droppedSum = 0.0;
+    unsigned int _droppedSeen = 0;
+    unsigned long long _droppedHeld = 0; // Held() when the window started, so the line counts that window only
+    std::chrono::steady_clock::time_point _droppedLogged {};
+    static constexpr double kDroppedLogSeconds = 10.0;
     std::chrono::steady_clock::time_point _lastNrFrame {};
     std::string _why;
     std::string _loggedWhy;

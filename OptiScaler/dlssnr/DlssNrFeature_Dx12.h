@@ -232,10 +232,13 @@ void CurrentModelSize(unsigned int& width, unsigned int& height);
 struct DetailReuseInfo
 {
     unsigned long long full = 0, reused = 0, fallback = 0;
+    unsigned long long held = 0; // reuses given up because the picture moved too fast (MotionGuard)
     std::string why;
     double lightMs = 0.0, heavyMs = 0.0, averageMs = 0.0;
     double baseFps = 0.0;
     bool active = false;
+    bool holding = false;   // reuse is paused right now: the picture is moving too fast
+    float dropped = -1.0f;  // share of the last measured frame that had no detail to move, or negative if unmeasured
 };
 DetailReuseInfo DetailReuseStatus();
 

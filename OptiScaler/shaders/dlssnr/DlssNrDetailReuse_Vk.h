@@ -22,10 +22,10 @@
 
 class DlssNrDetailReuse_Vk : public Shader_Vk
 {
-    // A frame records at most four dispatches (reused: Estimate, Fill, SaveMotion, Capture; full: Compose, Estimate,
-    // Steady, Capture), so the 24 slots cover six frames: twice the three that can be in flight, with no fence, on the
-    // assumption of one NR evaluate per rendered frame.
-    static constexpr uint32_t kSlotsPerFrame = 8;
+    // A frame records at most six dispatches (reused: Estimate, Coverage, Fill, SaveMotion, Capture; a paused full
+    // frame with steadiness: Compose, Estimate, Coverage, Steady, Capture), so the 36 slots cover six frames: twice the
+    // three that can be in flight, with no fence, on the assumption of one NR evaluate per rendered frame.
+    static constexpr uint32_t kSlotsPerFrame = 12;
     static constexpr uint32_t kFramesInFlight = 3;
     static constexpr uint32_t kSlots = kSlotsPerFrame * kFramesInFlight;
 

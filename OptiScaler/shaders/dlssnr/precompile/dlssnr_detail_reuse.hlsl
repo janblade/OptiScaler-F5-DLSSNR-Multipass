@@ -18,6 +18,19 @@
 // fixed format (what they write varies by mode), which needs shaderStorageImageWriteWithoutFormat; they are never read.
 // Modes and bindings: DlssNr_DetailReuseConstants.h.
 //
+// Replace modes (replaceCurve != 0): there the answer IS the picture, decoded through the curve's inverse (Neutwo or the
+// hybrid, dlssnr_replace_curve.hlsli), whose slope runs away near white. A saved change -- a difference of proxy values,
+// as in every mode -- moved a pixel off at an edge, so that a mid grey's change landed on a highlight, decoded to over a
+// hundred times the pixel, and the resolve's guard showed it at 2x: a white flash on every reused frame. So where a
+// moved change lands in these modes it is landed two ways, as that difference and as the ratio of decoded light it made
+// where it came from, and the one that changes the pixel less is kept: measured in stops of whichever channel moves
+// most (the ratio is per channel, so a colour must not shift while its brightest channel holds still), at the trust the
+// change is applied at. The difference is right except on a highlight
+// (the pole); the ratio is right except where a dark pixel's change lands on something bright (grey patches on a lit
+// floor); on the surface a change came from the two agree. Single forms were tried in game first (2026-09-30), and each
+// broke one way: the ratio (grey patches), a difference of open-ended sRGB light (white patches beside reflections), and
+// a logarithm above white (the same, milder). The Composed modes and passthrough frames land the difference, bit for bit.
+//
 // Raw vectors times MvScale are pixels of the motion texture's own subrect (render resolution with low-resolution
 // vectors), so they are divided by its size into a uv displacement of the image; the saved vectors are kept in that
 // form too, so a render-size change between two frames cannot misread them.
@@ -54,6 +67,7 @@ cbuffer Params : register(b0)
     uint debugView;
     float fillStrength;
     float fillRadius;
+    uint replaceCurve; // DlssNrReplaceCurve: 0 none, 1 Neutwo, 2 hybrid (see the header)
 };
 
 #ifdef VK_MODE
@@ -74,6 +88,46 @@ DR_BINDING(7) DR_ANY_FORMAT RWTexture2D<float4> u1 : register(u1);
 DR_BINDING(8) SamplerState gLinear : register(s0);
 
 bool Finite3(float3 v) { return all(isfinite(v)); }
+
+#include "dlssnr_replace_curve.hlsli"
+
+// A proxy value -> the light the resolve decodes it to, and back (Replace modes only).
+float3 ReplaceDecode(float3 proxy)
+{
+    const float3 y = SrgbToLinear(proxy);
+    return replaceCurve == 1u ? NeutwoDecode(y) : HybridDecode(y);
+}
+
+float3 ReplaceEncode(float3 light) { return LinearToSrgb(replaceCurve == 1u ? NeutwoEncode(light) : HybridEncode(light)); }
+
+// How far a candidate moves the pixel whose decoded light is `from`: in stops of whichever channel moves most.
+float StopsFrom(float3 from, float3 candidate)
+{
+    const float3 stops = abs(log2((ReplaceDecode(candidate) + kRatioFloor) / (from + kRatioFloor)));
+    return max(stops.r, max(stops.g, stops.b));
+}
+
+// Of two ways to land a change on `input` (decoded: `light`), as the values they take it to, the one that moves it less
+// when added at `strength` (the trust it is applied at). Returned as the difference to add to input.
+float3 SmallerLanding(float3 input, float3 light, float3 asRatio, float3 asDifference, float strength)
+{
+    const float3 byRatio = asRatio - input, byDifference = asDifference - input;
+    const bool ratioMovesLess =
+        StopsFrom(light, input + byRatio * strength) < StopsFrom(light, input + byDifference * strength);
+    return ratioMovesLess ? byRatio : byDifference;
+}
+
+// Replace modes: a change `detail` saved where the picture was `source`, landing on `input` at `strength` (see the
+// header). Returns the difference to add to input: the moved one, or the ratio it made at its source applied here.
+float3 LandReplaceDetail(float3 input, float3 detail, float3 source, float strength)
+{
+    if (all(detail == 0.0))
+        return 0.0;
+    const float3 light = ReplaceDecode(input);
+    const float3 ratio = (ReplaceDecode(source + detail) + kRatioFloor) / (ReplaceDecode(source) + kRatioFloor);
+    const float3 asRatio = ReplaceEncode(max((light + kRatioFloor) * ratio - kRatioFloor, 0.0));
+    return SmallerLanding(input, light, asRatio, input + detail, strength);
+}
 
 float2 WorkSize() { return float2(workWidth, workHeight); }
 float2 WorkUv(uint2 p) { return (float2(p) + 0.5) / WorkSize(); }
@@ -155,8 +209,9 @@ void ColourBox(uint2 p, out float3 mean, out float3 sigma)
 
 // The saved detail moved from previousUv (rgb) and how far it is trusted (a, 0..1), for a pixel whose surface has
 // far-is-zero depth depthNow. Reads t1 saved detail, t2 saved colour + depth.
-float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma)
+float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma, out float3 source)
 {
+    source = 0.0;
     const float2 work = WorkSize();
     if (!all(isfinite(previousUv)) || any(previousUv < 0.0) || any(previousUv > 1.0) || !isfinite(depthNow))
         return 0.0;
@@ -196,7 +251,8 @@ float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma)
     const float depthTrust = 1.0 - smoothstep(depthTolerance, 2.0 * depthTolerance, relativeDepth);
 
     // Colour: the saved input colour against the current input's variance box, in standard deviations.
-    const float3 saved = ToYCoCg(t2.SampleLevel(gLinear, previousUv, 0).rgb);
+    source = t2.SampleLevel(gLinear, previousUv, 0).rgb;
+    const float3 saved = ToYCoCg(source);
     const float3 excess = max(abs(saved - mean) - clipGamma * sigma, 0.0) / sigma;
     const float colourTrust = 1.0 - saturate(max(excess.x, max(excess.y, excess.z)) / max(clipFalloff, 1e-3));
 
@@ -205,9 +261,9 @@ float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma)
     return float4(moved, saturate(depthTrust * colourTrust));
 }
 
-// The moved detail for work pixel p (rgb) and how far it is trusted (a, 0..1). Reads t0 input, t1 saved detail,
-// t2 saved colour + depth, t3 motion guide, t4 depth guide.
-float4 MovedDetail(uint2 p)
+// The moved detail for work pixel p (rgb), how far it is trusted (a, 0..1), and the saved picture it came from. Reads
+// t0 input, t1 saved detail, t2 saved colour + depth, t3 motion guide, t4 depth guide.
+float4 MovedDetailFrom(uint2 p, out float3 source)
 {
     const float2 uv = WorkUv(p);
     const uint2 depthSize = uint2(depthWidth, depthHeight);
@@ -236,13 +292,34 @@ float4 MovedDetail(uint2 p)
 
     // Own motion with own depth. The closest surface's motion is read at this pixel's position shifted by the
     // depth-texel offset (motion may be finer than depth), and tested with that surface's depth.
-    const float4 own = MovedFrom(uv + UvDisplacement(RawMotion(uv)), ownDepth, mean, sigma);
+    float3 ownSource, nearSource;
+    const float4 own = MovedFrom(uv + UvDisplacement(RawMotion(uv)), ownDepth, mean, sigma, ownSource);
+    source = ownSource;
     if (all(closest == centre))
         return own;
     const float2 closestUv = uv + float2(closest - centre) / float2(depthSize);
-    const float4 near = MovedFrom(uv + UvDisplacement(RawMotion(closestUv)), closestDepth, mean, sigma);
+    const float4 near = MovedFrom(uv + UvDisplacement(RawMotion(closestUv)), closestDepth, mean, sigma, nearSource);
     // On a tie the closer surface's motion wins, so edges move with the foreground.
-    return near.a >= own.a ? near : own;
+    if (near.a >= own.a)
+    {
+        source = nearSource;
+        return near;
+    }
+    return own;
+}
+
+// MovedDetailFrom, landed on this pixel's input in Replace modes (see the header), so everything that adds it --
+// Reproject, Steady, Fill -- adds a change that is safe here.
+float4 MovedDetail(uint2 p)
+{
+    float3 source;
+    float4 moved = MovedDetailFrom(p, source);
+    if (replaceCurve != 0u && moved.a > 0.0)
+    {
+        const float3 landed = LandReplaceDetail(t0.Load(int3(p, 0)).rgb, moved.rgb, source, moved.a);
+        moved.rgb = Finite3(landed) ? landed : 0.0;
+    }
+    return moved;
 }
 
 void Capture(uint2 p)
@@ -302,7 +379,7 @@ void Fill(uint2 p)
         const float2 work = WorkSize();
         const float depthHere = GuideDepth(t4, GuideTexel(WorkUv(p), depthSize));
         const float tolerance = 3.0 * depthTolerance;
-        float3 sum = 0.0;
+        float3 sum = 0.0, sumLogRatio = 0.0;
         float weightSum = 0.0;
         [unroll] for (int k = 0; k < 16; ++k)
         {
@@ -318,12 +395,31 @@ void Fill(uint2 p)
             const float weight = saturate(tap.a) * (1.0 - smoothstep(tolerance, 2.0 * tolerance, relative));
             sum += tap.rgb * weight;
             weightSum += weight;
+            if (replaceCurve != 0u)
+            {
+                // The ratio the tap's (already landed) change makes on the tap's own input.
+                const float3 tapInput = t0.Load(int3(texel, 0)).rgb;
+                const float3 tapRatio =
+                    (ReplaceDecode(tapInput + tap.rgb) + kRatioFloor) / (ReplaceDecode(tapInput) + kRatioFloor);
+                sumLogRatio += log(tapRatio) * weight;
+            }
         }
         if (isfinite(depthHere) && weightSum > 1e-3)
         {
             fillDetail = sum / weightSum;
             // Full once two trusted neighbours agree; fewer fade it in.
             filled = (1.0 - trust) * saturate(fillStrength) * saturate(weightSum / 2.0);
+            if (replaceCurve != 0u)
+            {
+                // Landed like a moved change, on the pixel as its own change left it and at the strength it is filled
+                // at: the average difference, or the average ratio, whichever changes the pixel less.
+                const float3 base = input.rgb + own;
+                const float3 light = ReplaceDecode(base);
+                const float3 asRatio = ReplaceEncode(
+                    max((light + kRatioFloor) * exp(sumLogRatio / weightSum) - kRatioFloor, 0.0));
+                const float3 landed = SmallerLanding(base, light, asRatio, base + fillDetail, filled);
+                fillDetail = Finite3(landed) ? landed : 0.0;
+            }
         }
     }
 
@@ -339,6 +435,50 @@ void Fill(uint2 p)
 }
 
 // Work size: this frame's vectors as a uv displacement, so the next frame reads them right after a render-size change.
+// How much of this frame arrived with no detail to move (DlssNrDetailReuse::MotionGuard, dlssnr/DlssNrDetailReuse.h):
+// the moved detail's trust summed over a tile of the frame, one 8x8 thread group per tile. Every second pixel in each
+// direction is measured, which is ample for a share. Written as sums rather than means, so the host can add tiles of
+// unequal size exactly. Reads the estimate the same way Fill does: anything not finite is no detail at all.
+static const uint kCoverageTiles = 32; // = kDlssNrDetailReuseCoverageTiles (DlssNr_DetailReuseConstants.h)
+
+groupshared float2 gCoverage[64];
+
+void Coverage(uint2 tile, uint2 lanePos)
+{
+    // The tiles partition the frame exactly: no pixel is measured twice and none is missed. A frame narrower than the
+    // grid leaves the last tiles empty (x0 == x1) rather than letting neighbours overlap, which would weight some
+    // columns double and bias the share.
+    const uint lane = lanePos.y * 8u + lanePos.x;
+    const uint x0 = min((tile.x * workWidth) / kCoverageTiles, workWidth);
+    const uint x1 = min(((tile.x + 1u) * workWidth) / kCoverageTiles, workWidth);
+    const uint y0 = min((tile.y * workHeight) / kCoverageTiles, workHeight);
+    const uint y1 = min(((tile.y + 1u) * workHeight) / kCoverageTiles, workHeight);
+
+    float2 sum = 0.0; // dropped (1 - trust), pixels measured
+    [loop] for (uint y = y0 + lanePos.y * 2u; y < y1; y += 16u)
+    {
+        [loop] for (uint x = x0 + lanePos.x * 2u; x < x1; x += 16u)
+        {
+            const float4 estimate = t1.Load(int3(x, y, 0));
+            const float trust = Finite3(estimate.rgb) && isfinite(estimate.a) ? saturate(estimate.a) : 0.0;
+            sum += float2(1.0 - trust, 1.0);
+        }
+    }
+
+    gCoverage[lane] = sum;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll] for (uint stride = 32u; stride > 0u; stride >>= 1u)
+    {
+        if (lane < stride)
+            gCoverage[lane] += gCoverage[lane + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (lane == 0u)
+        u0[tile] = float4(gCoverage[0].x, gCoverage[0].y, 0.0, 0.0);
+}
+
 void SaveMotion(uint2 p)
 {
     const float2 displacement = UvDisplacement(RawMotion(WorkUv(p)));
@@ -370,9 +510,18 @@ void Compose(uint2 q)
 }
 
 [numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
     const uint2 p = id.xy;
+    // Before the bounds test below: a whole group reduces one tile together, so every one of its threads has to reach
+    // the barriers in Coverage.
+    if (mode == 7)
+    {
+        if (groupId.x < kCoverageTiles && groupId.y < kCoverageTiles)
+            Coverage(groupId.xy, groupThreadId.xy);
+        return;
+    }
+
     if (mode == 3)
     {
         if (p.x < motionWidth && p.y < motionHeight)

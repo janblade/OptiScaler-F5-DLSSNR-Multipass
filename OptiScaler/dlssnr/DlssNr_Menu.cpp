@@ -7,12 +7,18 @@
 
 
 #include <Config.h>
+#include <State.h>
 #include <menu/menu_common.h>
 
 #include <imgui/imgui.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
+#include <shaders/dlssnr/DlssNr_ExposureCalibrate.h>
+#include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ColourEncoding.h>
+#include <shaders/dlssnr/DlssNr_ProxyCurve.h>
+#include "DlssNr_ColourEncodingStatus.h"
 #include "DlssNr_GameDefaults.h"
 
 #include <string>
@@ -43,16 +49,14 @@ static void HelpMarker(const char* tip);
 
 // Trim multiplies the white point, so a larger Trim darkens the picture NR is shown. The menu shows it in stops
 // instead, the other way round (+ = brighter) and centred on each source's own default, which reads as 0 EV.
+// The conversions are Tune for this scene's own (DlssNrExposureCalibrate), so the slider and a tuned value can never
+// disagree; Tidy shows anything that rounds to zero as +0.0 (a tuned value lands exactly on 0 EV).
 static float TrimToEv(float trim, float neutral)
 {
-    // "+ 0.0f" turns the -0.0 that neutral gives into 0.0, so the slider reads "+0.0 EV", not "-0.0 EV".
-    return -std::log2(std::max(trim, DlssNrTrim::kMinTrim) / neutral) + 0.0f;
+    return DlssNrExposureCalibrate::Tidy(DlssNrExposureCalibrate::EvForTrim(trim, neutral));
 }
 
-static float EvToTrim(float ev, float neutral)
-{
-    return DlssNrTrim::ClampTrim(neutral * std::exp2(-ev));
-}
+static float EvToTrim(float ev, float neutral) { return DlssNrExposureCalibrate::TrimForEv(ev, neutral); }
 
 // The one "Model input brightness" slider (and its Reset) for an exposure source's Trim. `anchorCount` is how
 // many Trim anchors the ini holds for that source: they are ini-only now and take over from the slider, so
@@ -90,6 +94,224 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
     if (anchorCount > 0)
         ImGui::TextDisabled("%u brightness anchor point(s) from the ini are in use; the slider has no effect while they exist.",
                             (unsigned int) anchorCount);
+}
+
+// "Tune for this scene" (shaders/dlssnr/DlssNr_ExposureCalibrate.h), under a brightness slider: sweeps it over the scene
+// on screen and offers the step where the model's output had the most detail without flicker or clipping. Indented under
+// the slider it sets, a SmallButton like the other actions here. D3D12 and Vulkan. `source` is the panel's white point source
+// (3 Automatic, 1 Game exposure), `trim` / `neutral` its slider. Named apart from Follow-game's "Re-learn", which is a
+// different calibration.
+static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral)
+{
+    const auto cal = DlssNr::ExposureCalibration();
+    // A result belongs to the panel it was tuned in: its EVs are in that slider's units. A Measure detail run is shown
+    // under Compare instead.
+    const bool mine = cal.source == source && !cal.measure;
+    ImGui::Indent();
+
+    if ((cal.running || cal.starting) && mine)
+    {
+        char text[96];
+
+        if (cal.starting)
+            snprintf(text, sizeof(text), "Starting...");
+        else if (cal.stepIndex < cal.stepCount)
+            snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u): hold the camera still", cal.stepEv,
+                     cal.stepIndex + 1, cal.stepCount);
+        else
+            snprintf(text, sizeof(text), "Reading the results...");
+
+        ImGui::ProgressBar(cal.progress, ImVec2(-FLT_MIN, 0.0f), text);
+
+        if (ImGui::SmallButton("Cancel##tune"))
+            DlssNr::CancelExposureCalibration();
+    }
+    else if (cal.finished && mine)
+    {
+        // The long results wrap, and their buttons go on the next line: on one unwrapped line OK ran off the panel's
+        // right edge, and without it the result could not be dismissed, so Tune could not be run again.
+        const auto warning = [](const char* text)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+            ImGui::TextWrapped("%s", text);
+            ImGui::PopStyleColor();
+        };
+        bool ownLine = false;
+
+        if (cal.unsure)
+        {
+            warning("The brightness steps changed NR's detail no more than the measurement varies on its own, so no "
+                    "step was clearly better. Your current value is kept.");
+            ownLine = true;
+        }
+        else if (cal.atEdge)
+        {
+            char text[128];
+            snprintf(text, sizeof(text), "Best was at the edge of the range (%+.1f EV), so it may lie beyond. "
+                                         "Your current value is kept.", cal.bestBandEv);
+            warning(text);
+            ownLine = true;
+        }
+        else if (cal.changed)
+        {
+            ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "Best here: %+.1f EV (now %+.1f EV)",
+                               cal.resultEv, cal.currentEv);
+            ImGui::SameLine();
+
+            if (ImGui::SmallButton("Apply##tune"))
+            {
+                trim = EvToTrim(cal.resultEv, neutral);
+                DlssNr::DismissExposureCalibration();
+            }
+        }
+        else
+        {
+            ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "Best here: %+.1f EV, as it is now.",
+                               cal.currentEv);
+        }
+
+        if (!ownLine)
+            ImGui::SameLine();
+
+        if (ImGui::SmallButton(cal.changed ? "Keep##tune" : "OK##tune"))
+            DlssNr::DismissExposureCalibration();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!cal.available);
+
+        if (ImGui::SmallButton("Tune again##tune"))
+            DlssNr::StartExposureCalibration(source); // clears this result itself
+
+        ImGui::EndDisabled();
+
+        // The curves and the raw measure are for checking the tuning itself, not for choosing.
+        if (!cal.ev.empty() && ImGui::TreeNode("Details##tune"))
+        {
+            const int n = (int) cal.ev.size();
+            ImGui::PlotLines("Band-pass##tune", cal.scoreBand.data(), n, 0, nullptr, FLT_MAX, FLT_MAX,
+                             ImVec2(0.0f, 50.0f));
+            ImGui::PlotLines("Raw##tune", cal.scoreRaw.data(), n, 0, nullptr, FLT_MAX, FLT_MAX,
+                             ImVec2(0.0f, 50.0f));
+            ImGui::TextDisabled("Score from %+.1f EV (left) to %+.1f EV (right). Best: band-pass %+.1f, raw %+.1f.",
+                                cal.ev.front(), cal.ev.back(), cal.bestBandEv, cal.bestRawEv);
+
+            // Not when the run was unsure or its best sat at the edge: those keep the current value for either measure.
+            ImGui::BeginDisabled(cal.unsure || cal.atEdge);
+
+            if (ImGui::SmallButton("Apply raw instead##tune"))
+            {
+                trim = EvToTrim(cal.bestRawEv, neutral);
+                DlssNr::DismissExposureCalibration();
+            }
+
+            ImGui::EndDisabled();
+
+            ImGui::TreePop();
+        }
+    }
+    else
+    {
+        ImGui::BeginDisabled(!cal.available);
+
+        if (ImGui::SmallButton("Tune for this scene"))
+            DlssNr::StartExposureCalibration(source);
+
+        ImGui::EndDisabled();
+        HelpMarker("Finds the Model input brightness above that gives NR the most detail on the scene on screen."
+                   "\nTries the slider across its useful range, about 12 frames a step, and checks each step for"
+                   "\ndetail, flicker and clipping. Hold the camera still while it runs: the picture gets brighter"
+                   "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
+                   "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
+                   "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
+                   "\nholds for any number of passes. With Follow the game's exposure on, it tunes against Automatic's"
+                   "\nown exposure and learns Follow again during the run, so the result holds once Follow takes over."
+                   "\nWith NR before Super Resolution, the run itself happens after SR (the picture changes for a"
+                   "\nmoment) and NR goes back before SR when it ends; the setting is not changed.");
+
+        if (!cal.available && !cal.unavailable.empty())
+            ImGui::TextDisabled("Not available: %s", cal.unavailable.c_str());
+
+        if (mine && !cal.startError.empty())
+            ImGui::TextDisabled("Could not start: %s", cal.startError.c_str());
+        else if (mine && !cal.aborted.empty())
+        {
+            // Wrapped: a stop now says what it measured, and an unwrapped line runs off the panel.
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+            ImGui::TextWrapped("Stopped: %s", cal.aborted.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+
+    ImGui::Unindent();
+}
+
+// "Measure detail" (Story 1 of the input canvas epic): measures NR's output on the scene on screen at the current
+// settings -- detail added over the game's frame, and flicker beyond the input's -- for about a second, and shows it
+// beside the previous measurement, so any setting can be A/B'd by number. Shares Tune's run (DlssNr_ExposureCalibrate.h,
+// MeasureSettings); nothing is dispatched until the button is pressed.
+static void RenderMeasureDetail()
+{
+    const auto cal = DlssNr::ExposureCalibration();
+
+    if (cal.measure && (cal.running || cal.starting))
+    {
+        ImGui::ProgressBar(cal.progress, ImVec2(-FLT_MIN, 0.0f),
+                           cal.starting ? "Starting..." : "Measuring: hold the camera still");
+
+        if (ImGui::SmallButton("Cancel##measure"))
+            DlssNr::CancelExposureCalibration();
+
+        return;
+    }
+
+    ImGui::BeginDisabled(!cal.measureAvailable);
+
+    if (ImGui::Button("Measure detail"))
+        DlssNr::StartMeasureDetail();
+
+    ImGui::EndDisabled();
+    HelpMarker("Measures NR's output on the scene on screen at the current settings, for about a second: the detail it"
+               "\nadds over the game's frame, and how much it flickers beyond the game's own frame-to-frame change."
+               "\nPress it on a still scene (a paused replay, photo mode), change one setting, press it again: the"
+               "\nchange against the previous measurement shows what the setting did. Two runs in a row show the noise."
+               "\nNothing else changes; the numbers also go to OptiScaler.log.");
+
+    if (!cal.measureAvailable && !cal.measureUnavailable.empty())
+        ImGui::TextDisabled("Not available: %s", cal.measureUnavailable.c_str());
+
+    if (cal.measure && !cal.startError.empty())
+        ImGui::TextDisabled("Could not start: %s", cal.startError.c_str());
+    else if (cal.measure && !cal.aborted.empty())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+        ImGui::TextWrapped("Stopped: %s", cal.aborted.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    if (cal.measurements == 0)
+        return;
+
+    const auto& m = cal.latest;
+    ImGui::Text("#%u  Detail added %.5f  Flicker %.5f", cal.measurements, m.detail, m.flicker);
+    ImGui::TextDisabled("detail out %.5f in %.5f, raw %.5f | change out %.5f in %.5f | %u frames", m.detailOut,
+                        m.detailIn, m.raw, m.flickerOut, m.flickerIn, m.frames);
+
+    if (cal.hasPrevious && !cal.comparable)
+    {
+        ImGui::TextDisabled("vs #%u: not comparable (measured at another exposure: let it settle, or the white point "
+                            "source changed)", cal.measurements - 1);
+    }
+    else if (cal.hasPrevious)
+    {
+        // Relative to the previous measurement; a value near zero has no meaningful percentage.
+        const auto change = [](float now, float before)
+        {
+            return std::fabs(before) > 1e-7f ? 100.0f * (now - before) / std::fabs(before) : 0.0f;
+        };
+        const auto& p = cal.previous;
+        ImGui::Text("vs #%u: detail %+.1f%%, flicker %+.1f%%, raw %+.1f%%", cal.measurements - 1,
+                    change(m.detail, p.detail), change(m.flicker, p.flicker), change(m.raw, p.raw));
+    }
 }
 
 // The "(?)" marker every control carries, matching the rest of the menu.
@@ -473,7 +695,16 @@ void RenderMenu(Config* config, float menuResScale)
             const char* runSuffix =
                 !config->DlssNrApplyModel.value_or_default() ? "  (model running, edit hidden)" : "";
 
-            if (ms.has_value())
+            // With Reuse detail between frames, full and reused frames alternate, so one reading is either the heavy or
+            // the light one; the average over the recent frames is the real per-frame cost.
+            const auto detailReuse = !config->DlssNrDetailReuse.value_or_default() ? DlssNr::DetailReuseInfo {}
+                                     : vulkan                                     ? DlssNr::DetailReuseStatusVk()
+                                                                                  : DlssNr::DetailReuseStatus();
+            if (detailReuse.active && detailReuse.averageMs > 0.0)
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                   "Running - %.2f ms elapsed per frame on average (%.2f to %.2f)%s",
+                                   detailReuse.averageMs, detailReuse.lightMs, detailReuse.heavyMs, runSuffix);
+            else if (ms.has_value())
                 ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running%s - %.2f ms elapsed%s",
                                    vulkan ? " natively on Vulkan" : "", ms.value(), runSuffix);
             else if (vulkan)
@@ -855,18 +1086,19 @@ void RenderMenu(Config* config, float menuResScale)
             // Up to 50x under the hood: a game's reported exposure scale can sit well below what the picture wants
             // (Marvel's Spider-Man Remastered with XeSS swapped to DLSS is one), so 4x was too tight. Shown as
             // stops around 1x, which is why the slider runs further towards darker than towards brighter.
-            RenderTrimEvSlider(config->DlssNrWhitePointTrim, 1.0f,
+            RenderTrimEvSlider(config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
                                DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default()).size(),
                                "gameexposure",
                                "Brightness of the picture handed to NR, relative to the exposure the game reports."
                                "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
                                "\nToo bright clips highlights; too dark hides shadow detail.");
+            RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim);
         }
         else if (wpSource == 3)
         {
             // The scale stays centred on a 5x Trim (0 EV), the old default from the PR this came from. The default is
             // +1.5 EV for every game; see DlssNr_AutoTrimDefault.h for the measurements. It is independent of the Game exposure Trim.
-            RenderTrimEvSlider(config->DlssNrAutoExposureTrim, 5.0f,
+            RenderTrimEvSlider(config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim,
                                DlssNrTrim::Parse(config->DlssNrAutoExposureTrimAnchors.value_or_default()).size(),
                                "autoexposure",
                                "Brightness of the picture handed to NR. + is brighter, - is darker."
@@ -876,6 +1108,8 @@ void RenderMenu(Config* config, float menuResScale)
                                "\nOptiScaler meters the linear HDR frame itself before NR runs."
                                "\nAutomatic exposure is available on D3D12 and Vulkan.",
                                DlssNrAutoTrim::kDefaultTrim);
+
+            RenderTuneForThisScene(3, config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim);
 
             // Following the game's own exposure (DlssNr_FollowGame.h): on by default for a known unexposed game
             // (DlssNr_GameDefaults.h). Vulkan follows from the host value, a few frames behind the game.
@@ -889,36 +1123,68 @@ void RenderMenu(Config* config, float menuResScale)
                 HelpMarker("For games that hand over their frame before applying their own exposure: on by default"
                            "\nfor those known to (RDR2), off for every other game. Automatic learns how its own metering"
                            "\nrelates to the game's exposure in the first seconds of play, then follows the game's exposure,"
-                           "\nso brightness moves exactly with the game: cutscenes, menus, fades. The brightness slider"
-                           "\nkeeps its meaning. Leave it off for games that expose their frame themselves (most games):"
-                           "\nit would apply their exposure twice. On Vulkan it follows a few frames behind the game.");
+                           "\nso brightness moves exactly with the game: cutscenes, menus, fades. In a game whose own"
+                           "\nexposure never moves, if the two stay more than 0.75 EV apart for a moment, the calibration"
+                           "\neases toward Automatic (0.25 EV a second at most)."
+                           "\nThe brightness slider keeps its meaning. Leave it off for games that expose their frame"
+                           "\nthemselves (most games): it would apply their exposure twice. On Vulkan it follows a few"
+                           "\nframes behind the game.");
 
-                const auto followStatus =
-                    followVk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus();
-                const auto& calibration = DlssNrFollowGame::Instance();
-
-                if (!follow)
-                    ImGui::TextDisabled("Off");
-                else if (!followStatus.gameExposureSeen)
-                    ImGui::TextDisabled("Not available yet: no exposure from the game");
-                else if (!calibration.Locked())
-                    ImGui::TextDisabled("Learning the calibration... (%u/%u)", calibration.Readings(),
-                                        DlssNrFollowGame::kWindow);
-                else
-                    ImGui::TextDisabled("Calibration %+.2f EV against the game's exposure%s", calibration.OffsetEv(),
-                                        followStatus.following ? "; following" : "; not following");
-
-                // The calibration is learned once per session; this learns it again.
-                if (ImGui::SmallButton("Re-calibrate##autoexposure"))
+                // Status and Re-learn only while following: off, the checkbox already says so, and a second
+                // "calibrate" button next to Tune for this scene read as the same thing.
+                if (follow)
                 {
-                    DlssNrFollowGame::Instance().Reset();
-                    LOG_INFO("DLSS-NR automatic exposure: re-calibration requested");
-                }
+                    const auto followStatus =
+                        followVk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus();
+                    const auto& calibration = DlssNrFollowGame::Instance();
+                    ImGui::Indent();
 
-                HelpMarker("Learns the calibration against the game's exposure again, for example when it was"
-                           "\nlearned during a cutscene or a loading screen. Plain Automatic is used meanwhile (about 2 s)."
-                           "\nRe-calibrate in an ordinary daylight scene, not snow, night or indoors: the brightness"
-                           "\nlearned there is kept for the whole game.");
+                    if (!followStatus.gameExposureSeen)
+                        ImGui::TextDisabled("Not available yet: no exposure from the game");
+                    else if (!calibration.Locked())
+                        ImGui::TextDisabled("Learning the calibration... (%u/%u)", calibration.Readings(),
+                                            DlssNrFollowGame::kWindow);
+                    else
+                        ImGui::TextDisabled("Calibration %+.2f EV against the game's exposure%s", calibration.OffsetEv(),
+                                            followStatus.following ? "; following" : "; not following");
+
+                    // The calibration eases toward Automatic when the two stay apart (DlssNr_FollowGame.h Track), so a
+                    // large disagreement is usually on its way out; say which, wrapped (it ran off the panel before).
+                    if (followStatus.following && calibration.Locked() && calibration.Easing())
+                    {
+                        ImGui::PushTextWrapPos(0.0f);
+                        ImGui::TextDisabled("Easing the calibration toward Automatic's own exposure (%+.1f EV apart).",
+                                            followStatus.disagreementEv);
+                        ImGui::PopTextWrapPos();
+                    }
+                    else if (std::fabs(followStatus.disagreementEv) > DlssNrExposureCalibrate::kFollowDisagreementLimitEv)
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+                        // Easing is off in a game whose own exposure moves (DlssNr_FollowGame.h): then only Re-learn.
+                        if (calibration.GameMoves())
+                            ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. Re-learn in an ordinary scene if "
+                                               "the picture looks too bright or too dark.",
+                                               followStatus.disagreementEv);
+                        else
+                            ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. It eases back by itself if this "
+                                               "lasts; Re-learn to start over in an ordinary scene.",
+                                               followStatus.disagreementEv);
+                        ImGui::PopStyleColor();
+                    }
+
+                    // Learns the calibration again from scratch.
+                    if (ImGui::SmallButton("Re-learn##autoexposure"))
+                    {
+                        DlssNrFollowGame::Instance().Reset();
+                        LOG_INFO("DLSS-NR automatic exposure: re-learning the calibration against the game's exposure");
+                    }
+
+                    HelpMarker("Learns the calibration against the game's exposure again, for example when it was"
+                               "\nlearned during a cutscene or a loading screen. Plain Automatic is used meanwhile (about 2 s)."
+                               "\nRe-learn in an ordinary daylight scene, not snow, night or indoors. Afterwards the"
+                               "\ncalibration eases toward Automatic by itself whenever the two stay more than 0.75 EV apart.");
+                    ImGui::Unindent();
+                }
             }
 
             float protection = config->DlssNrAutoExposureShadowProtection.value_or_default();
@@ -928,6 +1194,19 @@ void RenderMenu(Config* config, float menuResScale)
             HelpMarker("Stops the sky, lamps and reflections from darkening the rest of the picture."
                        "\n0% averages the whole frame as it is; 100% counts bright areas the least."
                        "\nBlack bars and black borders are always left out.");
+
+            // DlssNr_ExposureAdapt.h: a pass of its own on D3D12 and Vulkan.
+            float adapt = DlssNrExposureAdapt::Seconds(config->DlssNrAutoExposureAdaptSeconds.value_or_default());
+
+            if (ImGui::SliderFloat("Eye adaptation", &adapt, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
+                                   adapt > 0.0f ? "%.2f s" : "off"))
+                config->DlssNrAutoExposureAdaptSeconds = DlssNrExposureAdapt::Seconds(adapt);
+
+            HelpMarker("How quickly Automatic follows a change in the scene's brightness, like an eye adapting."
+                       "\nStops a camera zoom or a brief shot of a dark crowd or a bright floor from pumping"
+                       "\nthe brightness and tone of the picture. A cut the game announces is followed at once."
+                       "\nAbout two thirds of a change is followed after this long. Off follows every frame at once."
+                       "\nNot used while following the game's exposure: the game's own adapts.");
         }
         else
         {
@@ -1248,11 +1527,15 @@ void RenderMenu(Config* config, float menuResScale)
         const char* precisions[] = { "NVIDIA (FP8)", "Experimental (FP8+NVFP4 hybrid)" };
         if (ImGui::Combo("Model precision", &precisionChoice, precisions, IM_ARRAYSIZE(precisions)))
             config->DlssNrPrecision = precisionChoice == 1 ? 4u : 0u;
-        HelpMarker("NVIDIA: original FP8 model (default), with some sensitive operations kept at higher precision.\nExperimental: this fork's FP8+NVFP4 hybrid for RTX 50 GPUs; output may differ slightly.");
+        HelpMarker("NVIDIA: original FP8 model (default), with some sensitive operations kept at higher precision.\nExperimental: this fork's FP8+NVFP4 hybrid for RTX 50 GPUs; output may differ slightly. D3D12 only.");
         // One setting per kernel set: the fp8 kernels (NVIDIA's DLL and fp8-based builds) and the plain FP16 kernels (used by some modified DLSS-NR DLLs).
         // Only the one for the kernels actually running is used.
         const char* kernelSet = DlssNrNative::VitKernelSet();
-        bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
+        // Forced off for Vulkan games, natively and through the D3D12 bridge (DlssNrFeature_Vk.cpp, DlssNr_Dx12.cpp): shown
+        // off and greyed out; the settings stay as they are for D3D12 games.
+        const bool vitReuseVk = DlssNr::IsRunningVk() || State::Instance().api == Vulkan;
+        ImGui::BeginDisabled(vitReuseVk);
+        bool vitReuse = !vitReuseVk && config->DlssNrVitEvery.value_or_default() > 1;
         if (ImGui::Checkbox("Reuse bottleneck: FP8 kernels", &vitReuse))
             config->DlssNrVitEvery = vitReuse ? 2u : 1u;
         HelpMarker("Recomputes the model's coarsest stage (its 32x18 bottleneck) only every other frame and reuses the last result in between, "
@@ -1260,14 +1543,92 @@ void RenderMenu(Config* config, float menuResScale)
                    "but fast camera motion can look slightly softer. Scene cuts always recompute. With several passes, all passes compute on the same frame "
                    "and all reuse on the next.\nOn by default. Applies immediately, NVIDIA's own model only.\n"
                    "Used when the model runs NVIDIA's FP8 kernels (NVIDIA's DLL and FP8-based builds).");
-        bool vitReusePlain = config->DlssNrVitEveryPlain.value_or_default() > 1;
+        bool vitReusePlain = !vitReuseVk && config->DlssNrVitEveryPlain.value_or_default() > 1;
         if (ImGui::Checkbox("Reuse bottleneck: plain FP16 kernels", &vitReusePlain))
             config->DlssNrVitEveryPlain = vitReusePlain ? 2u : 1u;
         HelpMarker("The same as above, used when the model runs the plain FP16 kernels (used by some modified DLSS-NR DLLs).\nOn by default.");
+        ImGui::EndDisabled();
         ImGui::Text("Kernel set in use: %s", kernelSet);
-        if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
+        bool detailReuse = config->DlssNrDetailReuse.value_or_default();
+        const auto detailReuseStatus = !detailReuse            ? DlssNr::DetailReuseInfo {}
+                                       : DlssNr::IsRunningVk() ? DlssNr::DetailReuseStatusVk()
+                                                               : DlssNr::DetailReuseStatus();
+        const bool detailReuseRunning = detailReuse && detailReuseStatus.active;
+        if (vitReuseVk)
+            ImGui::TextWrapped("Reuse bottleneck: off in Vulkan games (the reused result can flash in dark scenes)");
+        else if (detailReuseRunning)
+            ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
+        else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
             ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
-        if (precisionChoice > 0)
+        if (ImGui::Checkbox("Reuse detail between frames (experimental)", &detailReuse))
+            config->DlssNrDetailReuse = detailReuse;
+        HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
+                   "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
+                   "any pass count. Detail can pop where objects move and reveal new areas.\n"
+                   "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
+                   "Turns itself off while frame generation is on (unless Debug > Keep on with frame generation): "
+                   "generated frames are built from real ones, and alternating full and reused frames can flicker "
+                   "under it.");
+        if (detailReuse)
+        {
+            // Debugging and A/B testing only; the defaults are the tuned values.
+            if (ImGui::TreeNode("Debug##detailReuse"))
+            {
+                bool detailReuseDebug = config->DlssNrDetailReuseDebug.value_or_default();
+                if (ImGui::Checkbox("Show dropped detail", &detailReuseDebug))
+                    config->DlssNrDetailReuseDebug = detailReuseDebug;
+                HelpMarker("On reused frames, paints magenta where the moved detail was dropped and cyan where Fill "
+                           "replaced it.\nFor testing.");
+                float fill = config->DlssNrDetailReuseFill.value_or_default();
+                if (ImGui::SliderFloat("Fill dropped detail", &fill, 0.0f, 1.0f, "%.2f"))
+                    config->DlssNrDetailReuseFill = std::clamp(fill, 0.0f, 1.0f);
+                HelpMarker("Where the moved detail had to be dropped (a body uncovered the background), fills in the "
+                           "NR detail of nearby pixels on the same surface instead of showing the frame without NR "
+                           "there.\nMatters most with several passes. With Show dropped detail on, filled areas are "
+                           "cyan. Default 1.");
+                float steady = config->DlssNrDetailReuseSteady.value_or_default();
+                if (ImGui::SliderFloat("Steady full frames", &steady, 0.0f, 1.0f, "%.2f"))
+                    config->DlssNrDetailReuseSteady = std::clamp(steady, 0.0f, 1.0f);
+                HelpMarker("Pulls the model's new detail on full frames toward the detail moved from the frame before, "
+                           "where that is trusted, so full and reused frames differ less and detail pumps less.\n"
+                           "Adds a little lag to detail on motion. 0 = off (default).");
+                bool withFg = config->DlssNrDetailReuseWithFg.value_or_default();
+                if (ImGui::Checkbox("Keep on with frame generation", &withFg))
+                    config->DlssNrDetailReuseWithFg = withFg;
+                HelpMarker("Keeps reusing detail while frame generation is on, to compare with it off.\n"
+                           "Can flicker: generated frames are built from pairs of full and reused frames.");
+                float minFps = config->DlssNrDetailReuseMinFps.value_or_default();
+                if (ImGui::SliderFloat("Minimum frame rate", &minFps, 0.0f, 120.0f, "%.0f fps"))
+                    config->DlssNrDetailReuseMinFps = std::clamp(minFps, 0.0f, 240.0f);
+                HelpMarker("Reuse runs only while the rendered frame rate (before frame generation) is at least this; "
+                           "below it every frame runs the model. At low frame rates things move farther between "
+                           "frames and the moved detail trails around moving bodies.\nComes back 15% above the "
+                           "minimum. 0 = no minimum. Default 25.");
+                ImGui::TreePop();
+            }
+            const auto& status = detailReuseStatus;
+            if (!status.why.empty())
+                ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
+            else
+            {
+                ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu   Rendered: %.0f fps", status.full,
+                            status.reused, status.fallback, status.baseFps);
+                if (status.heavyMs > 0.0)
+                {
+                    ImGui::Text("NR GPU time per frame: %.2f ms on average, %.2f to %.2f ms", status.averageMs,
+                                status.lightMs, status.heavyMs);
+                    HelpMarker("Full and reused frames cost differently, so the game's frame times alternate. If "
+                               "motion judders, a frame limiter just below the average frame rate evens them out.");
+                }
+            }
+        }
+        if (precisionChoice > 0 && DlssNr::IsRunningVk())
+        {
+            // The hybrid rewrites the model's kernels through NvAPI's D3D12 entry points; on Vulkan the model runs
+            // unchanged.
+            ImGui::TextUnformatted("Hybrid: D3D12 only (not applied on Vulkan)");
+        }
+        else if (precisionChoice > 0)
         {
             ImGui::TextUnformatted(enabled && DlssNrNative::IsActive() ? "Hybrid: active" : "Hybrid: inactive");
             ImGui::TextWrapped("Loading may pause the game and look like a freeze. Please wait.");
@@ -1294,17 +1655,6 @@ void RenderMenu(Config* config, float menuResScale)
                                    "controls NR placement.");
             else if (deferredDlss)
                 ImGui::TextWrapped("Residual DLSS: %s", DlssNr::DeferredDlssStatus().c_str());
-            ImGui::BeginDisabled(finishedPicture || !deferredDlss || rayReconstruction);
-            bool residualFg = config->DlssNrResidualFg.value_or_default();
-            if (ImGui::Checkbox("NR every second frame (NVIDIA Frame Generation, experimental)", &residualFg))
-                config->DlssNrResidualFg = residualFg;
-            HelpMarker("Run NR every other rendered frame and use NVIDIA Frame Generation (FG) to interpolate its changes.\nRequires the option above. Adds one rendered frame of latency and may misalign effects or UI.\nIf motion vectors are unavailable, each NR result is reused for two frames.");
-            bool approxCamera = config->DlssNrResidualFgApproxCamera.value_or_default();
-            if (ImGui::Checkbox("Allow approximate FG camera guides (experimental)", &approxCamera))
-                config->DlssNrResidualFgApproxCamera = approxCamera;
-            HelpMarker("Use estimated camera data when the game does not provide it. May cause artifacts during camera movement.");
-            ImGui::EndDisabled();
-
         }
         else if (beforeSr)
             ImGui::TextWrapped("Pre-SR changes: %s", DlssNr::DeferredDlssStatus().c_str());
@@ -1445,22 +1795,65 @@ void RenderMenu(Config* config, float menuResScale)
             HelpMarker("Below 100% model resolution: filter used to enlarge the model's answer back to native before it's applied.\nBilinear is the cheapest, softest, pre-SGSR1 default. SGSR1 does an edge-directed upscale of the answer instead. No effect at 100% or above.");
         }
 
+        // How the game's colour is decoded (DlssNr_ColourEncoding.h). Auto trusts the game; a forced choice is applied
+        // even when the format looks wrong for it, and the line under the combo says so.
+        {
+            static const char* encodingNames[] = { "Auto", "Linear HDR", "Tone-mapped sRGB", "Tone-mapped gamma 2.2",
+                                                   "PQ (HDR10)" };
+            static_assert(IM_ARRAYSIZE(encodingNames) == DlssNrColourEncoding::kSettingCount);
+            int encoding = (int) config->DlssNrColourEncoding.value_or_default();
+            if (encoding < 0 || encoding >= (int) DlssNrColourEncoding::kSettingCount)
+                encoding = 0;
+            if (ImGui::Combo("Colour Encoding", &encoding, encodingNames, IM_ARRAYSIZE(encodingNames)))
+            {
+                config->DlssNrColourEncoding = (uint32_t) encoding;
+                LOG_INFO("DLSS-NR colour encoding set to {}", encodingNames[encoding]);
+            }
+            HelpMarker("How NR reads the game's colour.\nAuto trusts the game: its DLSS HDR flag and the buffer format "
+                       "(on Finished Picture, the screen's colour space).\nChoose another only when the picture looks "
+                       "washed out, too dark or banded because the game reports its colour wrongly. Tone-mapped gamma "
+                       "2.2 and PQ are converted for the model and back.");
+
+            const auto status = DlssNr::ReadColourEncodingStatus();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", status.line.c_str());
+            ImGui::PopStyleColor();
+            if (!status.warning.empty())
+            {
+                // Wrapped: the sentence is longer than the menu is wide.
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                ImGui::TextWrapped("%s", status.warning.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+
         // Experimental. 0 off (soft knee), 1 Reversible curve + our composition, 2 Reversible curve +
         // pure-inverse replace, 3 Balanced+composed, 4 Balanced+replace (identity midtones + unclipped
-        // highlights). Always shown.
-        static const char* reversibleNames[] = { "Off (soft knee)", "Reversible curve + composed",
+        // highlights), 5 HLG+composed, 6 PQ+composed (BT.2100 / ST 2084, white per BT.2408). 7 Linear+composed
+        // is a diagnostic set in the ini only: shown when set, never offered. Always shown.
+        static const char* reversibleNames[] = { "Off (soft knee)",          "Reversible curve + composed",
                                                  "Reversible curve + replace", "Balanced curve + composed",
-                                                 "Balanced curve + replace" };
-        int reversible = (int) config->DlssNrReversibleMode.value_or_default();
-        if (reversible < 0 || reversible > 4)
-            reversible = 0;
-        if (ImGui::Combo("Final Image Composition (experimental)", &reversible, reversibleNames,
-                         IM_ARRAYSIZE(reversibleNames)))
-            config->DlssNrReversibleMode = (uint32_t) reversible;
+                                                 "Balanced curve + replace",   "HLG curve + composed",
+                                                 "PQ curve + composed",        "Linear + composed (ini only)" };
+        static_assert(IM_ARRAYSIZE(reversibleNames) == DlssNrProxyCurve::kCount, "one name per proxy curve");
+        const uint32_t reversibleValue = config->DlssNrReversibleMode.value_or_default();
+        const int reversible = DlssNrProxyCurve::Valid(reversibleValue) ? (int) reversibleValue : 0;
+        if (ImGui::BeginCombo("Final Image Composition (experimental)", reversibleNames[reversible]))
+        {
+            for (int i = 0; i < (int) DlssNrProxyCurve::kPickable; ++i)
+            {
+                const bool selected = i == reversible;
+                if (ImGui::Selectable(reversibleNames[i], selected))
+                    config->DlssNrReversibleMode = (uint32_t) i;
+                if (selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
 
-        HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Reversible curve uses a reversible mapping. Balanced preserves midtones and compresses highlights.\nComposed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.");
+        HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Reversible curve uses a reversible mapping. Balanced preserves midtones and compresses highlights.\nHLG and PQ are the broadcast HDR curves: white sits at 75% (HLG) or 58% (PQ), leaving more room for highlights (HLG up to about 4x white, PQ about 50x), but the model sees midtones differently. If you used Tune, run it again after changing the curve.\nComposed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.");
 
-        if (reversible == 2 || reversible == 4)
+        if (DlssNrProxyCurve::IsReplace((uint32_t) reversible))
         {
             float replaceDetail = config->DlssNrReplaceDetailStrength.value_or_default();
             if (ImGui::SliderFloat("Restore Sharpness", &replaceDetail, 0.0f, 2.0f, "%.2f"))
@@ -1638,6 +2031,8 @@ void RenderMenu(Config* config, float menuResScale)
             config->DlssNrFrameStats = frameStats;
 
         HelpMarker("Diagnostic. Every 2 seconds or so, writes a line to OptiScaler.log describing the frame NR is given: format, luminance percentiles, the game's exposure value and the white point in use.");
+
+        RenderMeasureDetail();
 
         bool kernelProfile = config->DlssNrKernelProfile.value_or_default();
         if (ImGui::Checkbox("Log NR kernel profile", &kernelProfile))

@@ -249,6 +249,8 @@ class State
     bool fakenvapiReloadLowLatency = false;
     UINT64 reflexFrameId = 0;
     UINT64 frameCount = 0;
+    // Vulkan presents (the vkQueuePresentKHR hook, installed with the overlay). frameCount counts DXGI presents only.
+    std::atomic<UINT64> vulkanPresentCount { 0 };
     bool vkAntiLagSupported = false;
 
     // for realtime changes
@@ -266,6 +268,14 @@ class State
     bool dlssgGameDMFGSupported = false;
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
+    UINT64 dlssgLastEvaluateFrame = UINT64_MAX; // frameCount at the last DLSS-G evaluate passed through
+    // That evaluate generated frames: its DLSSG.MultiFrameCount was above zero, or it had none (builds without multi
+    // frame generation leave it out).
+    bool dlssgLastEvaluateGenerates = false;
+    // The same for a DLSS-G evaluate through Vulkan NGX, on the Vulkan clock (DlssNr::VkFrameClock). Kept apart: a
+    // Vulkan game can run NR through the D3D12 bridge, where the DXGI counter never moves.
+    std::atomic<UINT64> dlssgLastEvaluateFrameVk { UINT64_MAX };
+    std::atomic<bool> dlssgLastEvaluateGeneratesVk { false };
 
     // DLSS
     bool dlssPresetsOverriddenExternally = false;

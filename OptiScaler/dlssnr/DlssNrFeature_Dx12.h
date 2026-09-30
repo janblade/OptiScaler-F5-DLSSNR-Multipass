@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <string>
+#include <vector>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
@@ -138,9 +139,65 @@ struct FollowGameStatus
 {
     bool gameExposureSeen = false; // the game supplied an exposure beside an Automatic reading
     bool following = false;        // the last frame followed the game's exposure
+    // While following: how far the followed base sits from Automatic's own, in EV (D3D12; 0 on Vulkan). Beyond
+    // DlssNrExposureCalibrate::kFollowDisagreementLimitEv the learned calibration is stale and wants a Re-learn.
+    float disagreementEv = 0.0f;
 };
 
 FollowGameStatus FollowGameExposureStatus();
+
+// "Tune for this scene" for Automatic exposure and Game exposure (shaders/dlssnr/DlssNr_ExposureCalibrate.h), on D3D12
+// and Vulkan; the API lives in shaders/dlssnr/DlssNr_ExposureCalibrate.cpp. The menu starts a run, shows its progress
+// and curve, and on Apply writes the result into the tuned slider's Trim itself.
+struct ExposureCalibrationStatus
+{
+    bool available = false;  // a run can start on the current frames
+    uint32_t source = 3;     // the white point source of the last run: 3 Automatic, 1 Game exposure (its EVs are
+                             // in that source's slider units)
+    std::string unavailable; // why not, when it cannot
+    bool starting = false;   // asked for, not yet picked up by the render thread
+    std::string startError;  // why the last start did not happen
+    bool running = false;
+    bool finished = false;
+    float progress = 0.0f;
+    float stepEv = 0.0f;      // the step on screen while running
+    unsigned stepIndex = 0;   // 0-based
+    unsigned stepCount = 0;
+    std::string aborted; // why the last run stopped early, empty if it did not
+    float currentEv = 0.0f;
+    bool changed = false; // the chosen value differs from the current one (a flat curve keeps the current)
+    bool unsure = false;  // detail varied no more than the measurement's own noise: the current value is kept
+    bool atEdge = false;  // the best step was the first or last: the real best may lie beyond, the current is kept
+    float resultEv = 0.0f;
+    float bestRawEv = 0.0f;
+    float bestBandEv = 0.0f;
+    std::vector<float> ev, scoreRaw, scoreBand; // measured steps
+    bool measure = false; // the run above (running, finished or stopped) is a Measure detail, not a Tune
+
+    // "Measure detail" (the Compare section): a still scene's detail and flicker at the current settings, for A/B.
+    bool measureAvailable = false;
+    std::string measureUnavailable;
+    unsigned measurements = 0; // taken this session
+    // The latest measurement and the one before it (hasPrevious false when there is none): detail is the output's
+    // band-pass detail minus the input's, raw the output's Laplacian, flicker the output's frame-to-frame change beyond
+    // the input's; all display-encoded luma, frames the evaluations measured.
+    struct Measurement
+    {
+        float detail = 0.0f, detailOut = 0.0f, detailIn = 0.0f, raw = 0.0f;
+        float flicker = 0.0f, flickerOut = 0.0f, flickerIn = 0.0f;
+        unsigned frames = 0;
+    };
+    Measurement latest, previous;
+    bool hasPrevious = false;
+    bool comparable = false; // latest and previous were measured at the same scale (source and white point)
+};
+
+ExposureCalibrationStatus ExposureCalibration();
+// `source` is the panel it was pressed in (3 Automatic, 1 Game exposure), so that panel shows the run and its result.
+void StartExposureCalibration(uint32_t source);
+void StartMeasureDetail(); // cancelled and dismissed like a Tune run
+void CancelExposureCalibration();
+void DismissExposureCalibration();
 
 // The model resolution actually applied last frame, as a percentage of the frame it processes --
 // the manual slider, or (post-SR + Auto) the derived render:output ratio. So the menu can show the
@@ -154,6 +211,23 @@ void CurrentModelSize(unsigned int& width, unsigned int& height);
 
 // The white point the exposure meter has settled on, or 0 if it has not taken a reading yet. For the
 // overlay, so the number in use is visible rather than inferred.
+
+// Reuse detail between frames (DlssNrDetailReuse.h): frames that ran the model, frames that reused the last one's detail, and frames
+// that would have reused but had to run the model (reset, settings change, gap). `why` is empty while it is available
+// on this route, else the reason it is not. lightMs / heavyMs: the cheapest and dearest NR GPU time over the last 16
+// measured frames (0 before any), which shows how unevenly full and reused frames cost -- what frame pacing sees.
+// averageMs: their mean, the real per-frame cost while full and reused frames alternate (a single reading is one or
+// the other). active: reuse ran on the last NR frame (and the bottleneck reuse was then off). baseFps: the rendered
+// frame rate the minimum is checked against (0 before a reading).
+struct DetailReuseInfo
+{
+    unsigned long long full = 0, reused = 0, fallback = 0;
+    std::string why;
+    double lightMs = 0.0, heavyMs = 0.0, averageMs = 0.0;
+    double baseFps = 0.0;
+    bool active = false;
+};
+DetailReuseInfo DetailReuseStatus();
 
 // What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
 std::optional<double> LastGpuTime();

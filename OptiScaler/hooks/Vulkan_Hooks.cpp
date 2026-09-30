@@ -18,6 +18,7 @@
 #include <vulkan/vulkan.hpp>
 
 #include <dlssnr/DlssNr_VkExtensions.h>
+#include <dlssnr/DlssNrFeature_Vk.h>
 
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
@@ -33,6 +34,7 @@ static HWND _hwnd = nullptr;
 static std::mutex _vkPresentMutex;
 
 PFN_vkCreateDevice o_vkCreateDevice = nullptr;
+static PFN_vkDestroyDevice o_vkDestroyDevice = nullptr;
 PFN_vkCreateInstance o_vkCreateInstance = nullptr;
 PFN_vkCreateWin32SurfaceKHR o_vkCreateWin32SurfaceKHR = nullptr;
 PFN_vkQueuePresentKHR o_QueuePresentKHR = nullptr;
@@ -191,50 +193,273 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     // offers -- asking for an extension a driver does not have makes vkCreateDevice fail and the game
     // not start.
     DlssNr::VkExt::Merged nrExtensions;
+    VkPhysicalDeviceBufferDeviceAddressFeatures nrAddressFeature {};
+    // The game's own feature flag switched on for the create call, put back once it returns: the chain is the game's
+    // memory and it may read it later as its own choice.
+    VkBool32* nrBorrowedFlag = nullptr;
+    VkBool32* nrBorrowedWriteFlag = nullptr; // the same for shaderStorageImageWriteWithoutFormat
+    VkPhysicalDeviceFeatures nrCoreFeatures {};
+    bool nrWritesWithoutFormat = false;
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
     {
-        const auto supported = DlssNr::VkExt::SupportedDeviceExtensions(
-            o_vkGetInstanceProcAddr, State::Instance().VulkanInstance, physicalDevice);
+        std::vector<std::string> supported;
 
-        nrExtensions.names.assign(localCreteInfo.ppEnabledExtensionNames,
-                                  localCreteInfo.ppEnabledExtensionNames + localCreteInfo.enabledExtensionCount);
-
-        std::string present, added, missing;
-
-        for (const char* want : DlssNr::VkExt::kDevice)
         {
-            const bool already = DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames,
-                                                        localCreteInfo.enabledExtensionCount, want);
-
-            if (already)
-                present += std::string(present.empty() ? "" : ", ") + want;
-            else if (!DlssNr::VkExt::Contains(supported, want))
-                missing += std::string(missing.empty() ? "" : ", ") + want;
-            else
-            {
-                nrExtensions.names.push_back(want);
-                added += std::string(added.empty() ? "" : ", ") + want;
-            }
+            // The device's real list. With extension spoofing on, the enumerate hook also reports the NVIDIA vendor
+            // pair on devices that lack it, and asking for those would fail the create.
+            ScopedSkipSpoofingThread skipSpoofing {};
+            supported = DlssNr::VkExt::SupportedDeviceExtensions(o_vkGetInstanceProcAddr,
+                                                                 State::Instance().VulkanInstance, physicalDevice);
         }
 
-        LOG_INFO("DLSS-NR Vulkan: device offers {} extensions. game already enabled: [{}]. added here: "
-                 "[{}]. NOT AVAILABLE: [{}]",
-                 supported.size(), present.empty() ? "none" : present, added.empty() ? "none" : added,
-                 missing.empty() ? "none" : missing);
-
-        if (!missing.empty())
-            LOG_WARN("DLSS-NR Vulkan: the native path is not possible on this device -- the model's kernels "
-                     "cannot be loaded without the extensions listed as NOT AVAILABLE");
-
-        if (!added.empty())
+        // Without the vendor pair the model cannot load its kernels, so nothing about the game's device is changed
+        // (another vendor, an integrated GPU, dxvk's helper devices, a driver without them).
+        if (!DlssNr::VkExt::Contains(supported, "VK_NVX_binary_import") ||
+            !DlssNr::VkExt::Contains(supported, "VK_NVX_image_view_handle"))
         {
-            localCreteInfo.ppEnabledExtensionNames = nrExtensions.names.data();
-            localCreteInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
+            LOG_INFO("DLSS-NR Vulkan: this device does not offer VK_NVX_binary_import and VK_NVX_image_view_handle "
+                     "({} extensions offered); the native path is not possible on it and the device is left as the "
+                     "game made it",
+                     supported.size());
+        }
+        else
+        {
+            const char* const* gameNames = pCreateInfo->ppEnabledExtensionNames;
+            const uint32_t gameCount = pCreateInfo->enabledExtensionCount;
+            // The EXT and KHR forms of buffer_device_address may not both be enabled. A game that asked for the EXT
+            // one keeps it, and the KHR one is not added.
+            const bool gameWantsExtAddress =
+                DlssNr::VkExt::ListHas(gameNames, gameCount, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) &&
+                !DlssNr::VkExt::ListHas(gameNames, gameCount, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+
+            // The scanned list, plus whatever NGX itself says the feature needs. `owned` keeps the strings alive
+            // through the create call; it is filled completely before any pointer into it is taken.
+            int ngxResult = 0;
+            const auto ngxWants =
+                DlssNr::VkExt::NgxDeviceExtensions(State::Instance().VulkanInstance, physicalDevice, ngxResult);
+            std::string fromNgx;
+
+            for (const char* want : DlssNr::VkExt::kDevice)
+                nrExtensions.owned.emplace_back(want);
+
+            const size_t floorCount = nrExtensions.owned.size();
+
+            for (const auto& want : ngxWants)
+            {
+                if (!DlssNr::VkExt::Contains(nrExtensions.owned, want.c_str()))
+                {
+                    nrExtensions.owned.push_back(want);
+                    fromNgx += std::string(fromNgx.empty() ? "" : ", ") + want;
+                }
+            }
+
+            LOG_INFO("DLSS-NR Vulkan: NGX's own requirement list for the model: {} ({} extensions{}{})",
+                     ngxResult == 0                         ? std::string("not asked (DLSS off or no NGX core)")
+                     : ngxResult == NVSDK_NGX_Result_Success ? std::string("answered")
+                                                             : std::format("refused, {:#x}", (uint32_t) ngxResult),
+                     ngxWants.size(), fromNgx.empty() ? "" : "; not in the scanned list: ", fromNgx);
+
+            std::string present, added, missing, missingNgx, dropped;
+
+            // The list as spoofing left it, less an EXT buffer_device_address the game did not ask for itself (the
+            // spoofing path adds it; the KHR one goes in below).
+            for (uint32_t i = 0; i < localCreteInfo.enabledExtensionCount; ++i)
+            {
+                const char* name = localCreteInfo.ppEnabledExtensionNames[i];
+
+                if (!gameWantsExtAddress && name != nullptr &&
+                    std::string(name) == VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
+                {
+                    dropped = name;
+                    continue;
+                }
+
+                nrExtensions.names.push_back(name);
+            }
+
+            for (size_t i = 0; i < nrExtensions.owned.size(); ++i)
+            {
+                const char* want = nrExtensions.owned[i].c_str();
+                const bool already = DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames,
+                                                            localCreteInfo.enabledExtensionCount, want);
+
+                if (already)
+                    present += std::string(present.empty() ? "" : ", ") + want;
+                else if (gameWantsExtAddress && std::string(want) == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
+                    continue; // the game's EXT form stands in for it
+                else if (!DlssNr::VkExt::Contains(supported, want))
+                {
+                    auto& list = i < floorCount ? missing : missingNgx;
+                    list += std::string(list.empty() ? "" : ", ") + want;
+                }
+                else
+                {
+                    nrExtensions.names.push_back(want);
+                    added += std::string(added.empty() ? "" : ", ") + want;
+                }
+            }
+
+            // Without the KHR form in the end there is nothing for the dropped EXT one to clash with.
+            if (!dropped.empty() &&
+                !DlssNr::VkExt::ListHas(nrExtensions.names.data(), (uint32_t) nrExtensions.names.size(),
+                                        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME))
+            {
+                nrExtensions.names.push_back(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+                dropped.clear();
+            }
+
+            LOG_INFO("DLSS-NR Vulkan: device offers {} extensions. game already enabled: [{}]. added here: "
+                     "[{}]. NOT AVAILABLE: [{}]{}{}{}",
+                     supported.size(), present.empty() ? "none" : present, added.empty() ? "none" : added,
+                     missing.empty() ? "none" : missing,
+                     missingNgx.empty() ? "" : ". asked for by NGX but not offered: ", missingNgx,
+                     dropped.empty() ? "" : ". VK_EXT_buffer_device_address removed (the KHR form replaces it)");
+
+            if (gameWantsExtAddress)
+                LOG_INFO("DLSS-NR Vulkan: the game enabled VK_EXT_buffer_device_address itself; the KHR form is not "
+                         "added");
+
+            if (!missing.empty())
+                LOG_WARN("DLSS-NR Vulkan: the native path is not possible on this device -- the model's kernels "
+                         "cannot be loaded without the extensions listed as NOT AVAILABLE");
+
+            if (!added.empty() || !dropped.empty())
+            {
+                localCreteInfo.ppEnabledExtensionNames = nrExtensions.names.data();
+                localCreteInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
+            }
+
+            // VK_KHR_buffer_device_address does nothing until its feature is switched on too. Where the game already
+            // lists the feature struct (its own, or the Vulkan 1.2 one -- both may not be chained), the flag is set
+            // in it for the call and put back after; otherwise ours goes at the head of the chain. Only when the
+            // device supports it.
+            if (DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
+                                       VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME))
+            {
+                VkPhysicalDeviceBufferDeviceAddressFeatures offered {};
+                offered.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+                VkPhysicalDeviceFeatures2 query {};
+                query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                query.pNext = &offered;
+
+                if (o_vkGetPhysicalDeviceFeatures2)
+                    o_vkGetPhysicalDeviceFeatures2(physicalDevice, &query);
+
+                const char* what = "not offered by the device";
+
+                if (offered.bufferDeviceAddress)
+                {
+                    what = nullptr;
+
+                    for (auto* node = (VkBaseOutStructure*) localCreteInfo.pNext; node != nullptr && what == nullptr;
+                         node = node->pNext)
+                    {
+                        VkBool32* flag = nullptr;
+
+                        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+                            flag = &((VkPhysicalDeviceVulkan12Features*) node)->bufferDeviceAddress;
+                        else if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES ||
+                                 node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT)
+                            flag = &((VkPhysicalDeviceBufferDeviceAddressFeatures*) node)->bufferDeviceAddress;
+
+                        if (flag == nullptr)
+                            continue;
+
+                        if (*flag)
+                            what = "already on (the game's own)";
+                        else if (!DlssNr::VkExt::IsWritable(flag))
+                            what = "left off: the game's feature struct is read-only";
+                        else
+                        {
+                            *flag = VK_TRUE;
+                            nrBorrowedFlag = flag;
+                            what = "switched on in the game's feature struct for the create call";
+                        }
+                    }
+
+                    if (what == nullptr)
+                    {
+                        nrAddressFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+                        nrAddressFeature.bufferDeviceAddress = VK_TRUE;
+                        nrAddressFeature.pNext = (void*) localCreteInfo.pNext;
+                        localCreteInfo.pNext = &nrAddressFeature;
+                        what = "switched on here";
+                    }
+                }
+
+                LOG_INFO("DLSS-NR Vulkan: bufferDeviceAddress feature {}", what);
+            }
+
+            // Detail reuse's shader writes storage images declared without a format (DlssNrDetailReuse_Vk.h), which
+            // needs shaderStorageImageWriteWithoutFormat. The core features come either as pEnabledFeatures (a copy
+            // of the game's is handed on instead) or as a VkPhysicalDeviceFeatures2 in the chain (the flag is set
+            // for the call and put back after), never both.
+            {
+                VkPhysicalDeviceFeatures2 query {};
+                query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+
+                if (o_vkGetPhysicalDeviceFeatures2)
+                    o_vkGetPhysicalDeviceFeatures2(physicalDevice, &query);
+
+                const char* what = "not offered by the device";
+
+                if (query.features.shaderStorageImageWriteWithoutFormat)
+                {
+                    VkBool32* chained = nullptr;
+
+                    for (auto* node = (VkBaseOutStructure*) localCreteInfo.pNext; node != nullptr; node = node->pNext)
+                    {
+                        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
+                        {
+                            chained = &((VkPhysicalDeviceFeatures2*) node)->features.shaderStorageImageWriteWithoutFormat;
+                            break;
+                        }
+                    }
+
+                    if (chained != nullptr)
+                    {
+                        if (*chained)
+                            what = "already on (the game's own)";
+                        else if (!DlssNr::VkExt::IsWritable(chained))
+                            what = "left off: the game's feature struct is read-only";
+                        else
+                        {
+                            *chained = VK_TRUE;
+                            nrBorrowedWriteFlag = chained;
+                            what = "switched on in the game's feature struct for the create call";
+                        }
+
+                        nrWritesWithoutFormat = *chained != VK_FALSE;
+                    }
+                    else
+                    {
+                        if (localCreteInfo.pEnabledFeatures != nullptr)
+                            nrCoreFeatures = *localCreteInfo.pEnabledFeatures;
+
+                        what = nrCoreFeatures.shaderStorageImageWriteWithoutFormat ? "already on (the game's own)"
+                                                                                    : "switched on here";
+                        nrCoreFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+                        localCreteInfo.pEnabledFeatures = &nrCoreFeatures;
+                        nrWritesWithoutFormat = true;
+                    }
+                }
+
+                LOG_INFO("DLSS-NR Vulkan: shaderStorageImageWriteWithoutFormat {}", what);
+            }
         }
     }
 
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
+
+    if (nrBorrowedFlag != nullptr)
+        *nrBorrowedFlag = VK_FALSE;
+
+    if (nrBorrowedWriteFlag != nullptr)
+        *nrBorrowedWriteFlag = VK_FALSE;
+
+    if (result == VK_SUCCESS && pDevice != nullptr)
+        DlssNr::VkExt::NoteDevice(*pDevice, nrWritesWithoutFormat);
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
         LOG_INFO("DLSS-NR Vulkan: vkCreateDevice returned {} with {} extensions requested", (int) result,
@@ -302,6 +527,8 @@ VALIDATE_HOOK(hkvkQueuePresentKHR, PFN_vkQueuePresentKHR)
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
     LOG_FUNC();
+
+    State::Instance().vulkanPresentCount.fetch_add(1, std::memory_order_relaxed);
 
     // get upscaler time
     UpscalerTimeVk::ReadUpscalingTime(_device);
@@ -417,6 +644,23 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     return result;
 }
 
+// Neural Rendering's model, its parameter block and NGX itself are released while the device still lives -- NGX's
+// order (release features, destroy parameters, Shutdown1, then the device) -- rather than abandoned with it.
+VALIDATE_HOOK(hkvkDestroyDevice, PFN_vkDestroyDevice)
+static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator)
+{
+    // Not gated on the NR setting: switched off after running, NR still holds this device's handles. A lock and a
+    // compare when NR never ran on it.
+    if (device != VK_NULL_HANDLE)
+        DlssNr::ShutdownVkForDevice(device, "the game is destroying the device NR runs on");
+
+    if (device != VK_NULL_HANDLE)
+        DlssNr::VkExt::ForgetDevice(device);
+
+    if (o_vkDestroyDevice != nullptr)
+        o_vkDestroyDevice(device, pAllocator);
+}
+
 VALIDATE_HOOK(hkvkGetInstanceProcAddr, PFN_vkGetInstanceProcAddr)
 PFN_vkVoidFunction hkvkGetInstanceProcAddr(VkInstance instance, const char* pName)
 {
@@ -442,6 +686,14 @@ PFN_vkVoidFunction hkvkGetInstanceProcAddr(VkInstance instance, const char* pNam
 
         LOG_DEBUG("vkCreateDevice");
         return (PFN_vkVoidFunction) hkvkCreateDevice;
+    }
+    else if (procName == std::string("vkDestroyDevice"))
+    {
+        // Hook() sets the trampoline first; the loader's own export is the detoured one and would call back here.
+        if (o_vkDestroyDevice == nullptr && orgFunc != (PFN_vkVoidFunction) hkvkDestroyDevice)
+            o_vkDestroyDevice = (PFN_vkDestroyDevice) orgFunc;
+
+        return (PFN_vkVoidFunction) hkvkDestroyDevice;
     }
 
     auto result = VulkanSpoofing::hkvkGetInstanceProcAddr(orgFunc, pName);
@@ -477,6 +729,14 @@ PFN_vkVoidFunction hkvkGetDeviceProcAddr(VkDevice device, const char* pName)
         LOG_DEBUG("vkCreateDevice");
         return (PFN_vkVoidFunction) hkvkCreateDevice;
     }
+    else if (procName == std::string("vkDestroyDevice"))
+    {
+        // Hook() sets the trampoline first; the loader's own export is the detoured one and would call back here.
+        if (o_vkDestroyDevice == nullptr && orgFunc != (PFN_vkVoidFunction) hkvkDestroyDevice)
+            o_vkDestroyDevice = (PFN_vkDestroyDevice) orgFunc;
+
+        return (PFN_vkVoidFunction) hkvkDestroyDevice;
+    }
 
     auto result = VulkanSpoofing::hkvkGetDeviceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
@@ -501,6 +761,7 @@ void VulkanHooks::Hook(HMODULE vulkan1)
 
     o_vkCreateDevice = (PFN_vkCreateDevice) KernelBaseProxy::GetProcAddress_()(vulkan1, "vkCreateDevice");
     o_vkCreateInstance = (PFN_vkCreateInstance) KernelBaseProxy::GetProcAddress_()(vulkan1, "vkCreateInstance");
+    o_vkDestroyDevice = (PFN_vkDestroyDevice) KernelBaseProxy::GetProcAddress_()(vulkan1, "vkDestroyDevice");
 
     address = KernelBaseProxy::GetProcAddress_()(vulkan1, "vkGetInstanceProcAddr");
     o_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr) address;
@@ -529,6 +790,9 @@ void VulkanHooks::Hook(HMODULE vulkan1)
     if (o_vkCreateDevice != nullptr)
         DetourAttach(&(PVOID&) o_vkCreateDevice, hkvkCreateDevice);
 
+    if (o_vkDestroyDevice != nullptr)
+        DetourAttach(&(PVOID&) o_vkDestroyDevice, hkvkDestroyDevice);
+
     if (o_vkGetInstanceProcAddr != nullptr)
         DetourAttach(&(PVOID&) o_vkGetInstanceProcAddr, hkvkGetInstanceProcAddr);
 
@@ -549,6 +813,7 @@ void VulkanHooks::Hook(HMODULE vulkan1)
     {
         LOG_ERROR("Failed to hook Vulkan, error code: {:X}", detourResult);
         o_vkCreateDevice = nullptr;
+        o_vkDestroyDevice = nullptr;
         o_vkCreateInstance = nullptr;
         o_vkGetInstanceProcAddr = nullptr;
         o_vkGetDeviceProcAddr = nullptr;
@@ -571,6 +836,9 @@ void VulkanHooks::Unhook()
     if (o_vkCreateDevice != nullptr)
         DetourDetach(&(PVOID&) o_vkCreateDevice, hkvkCreateDevice);
 
+    if (o_vkDestroyDevice != nullptr)
+        DetourDetach(&(PVOID&) o_vkDestroyDevice, hkvkDestroyDevice);
+
     if (o_vkCreateInstance != nullptr)
         DetourDetach(&(PVOID&) o_vkCreateInstance, hkvkCreateInstance);
 
@@ -590,6 +858,7 @@ void VulkanHooks::Unhook()
         o_QueuePresentKHR = nullptr;
         o_CreateSwapchainKHR = nullptr;
         o_vkCreateDevice = nullptr;
+        o_vkDestroyDevice = nullptr;
         o_vkCreateInstance = nullptr;
         o_vkGetInstanceProcAddr = nullptr;
         o_vkGetDeviceProcAddr = nullptr;

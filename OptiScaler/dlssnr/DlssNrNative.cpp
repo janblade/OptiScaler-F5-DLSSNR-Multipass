@@ -216,10 +216,12 @@ void SetPrecision(unsigned precision){auto&s=S();std::lock_guard<std::recursive_
 void SetEnabled(bool on){SetPrecision(on?4u:0u);}
 bool IsActive(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.enabled&&s.active&&!s.restartRequired;}
 void BeginEvaluate(const void*feature,bool reset,unsigned every,unsigned everyPlain,long long slot,ID3D12GraphicsCommandList*cmd,bool profile){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.vit.Begin(feature,reset,every,slot,everyPlain);s.prof.Begin(cmd,profile);}
-void EndEvaluate(ID3D12GraphicsCommandList*cmd){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.prof.End(cmd);const bool wasOff=s.vit.Disabled();if(!s.vit.End()&&!wasOff)fprintf(stderr,"DLSS-NR ViT reuse: unexpected launch order, reuse is off for this session\n");}
+bool EndEvaluate(ID3D12GraphicsCommandList*cmd){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.prof.End(cmd);const bool wasOff=s.vit.Disabled();return !s.vit.End()&&!wasOff;}
 std::vector<std::string> TakeProfileReports(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.prof.TakeReports();}
 std::string VitStatus(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.vit.Status();}
 bool VitPlainKernels(){return S().vit.LastSet()==DlssNrVitReuse::KernelSet::Plain;}
+// Not in DlssNrNative.h: only DlssNrNative_Vk.cpp drives the filter directly (one launch per call there).
+DlssNrVitReuse::Filter& VitFilter(){return S().vit;}
 const char* VitKernelSet(){switch(S().vit.LastSet()){case DlssNrVitReuse::KernelSet::Fp8:return "FP8";case DlssNrVitReuse::KernelSet::Plain:return "plain FP16";default:return "not seen yet";}}
 std::string Status(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.status+" | rewritten original launches: "+std::to_string(s.launches)+" | candidate split contractions: "+std::to_string(s.splitLaunches);}
 }

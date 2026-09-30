@@ -18,6 +18,7 @@
 //   Resolve  proxy + model answer + untouched copy -> the frame, edited
 
 #include "DlssNr_Common.h"
+#include "DlssNr_DetailReuseConstants.h"
 
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
@@ -29,10 +30,16 @@
 // there has to be enough for three passes times the deepest pipeline we might sit behind.
 // Descriptor and constant slots, consumed one per dispatch and reused round-robin with no fence.
 //
-// The shader still records at most meter + encode + downsample + resolve per frame. Extra model layers
-// are NGX evaluates and do not consume this ring; their A/B resources and feature histories are
-// persistent. Forty-eight slots leave twelve fully populated frames before descriptor/constant reuse.
-#define DLSSNR_NUM_OF_HEAPS 48
+// A frame records the meter, its reduce, eye adaptation, the exposure courier, encode, downsample, one clamp per
+// extra model pass, resolve and, during a Tune run, the stats pass: about ten with the default passes. The model
+// layers themselves are NGX evaluates and do not consume this ring; their A/B resources and feature histories are
+// persistent. Reuse detail between frames (DlssNr_DetailReuse.inl) adds up to four more on a full frame (compose,
+// estimate, steady, capture) and four on a reused one (estimate, fill, save motion, capture), which skips the clamps.
+// Sixty-four slots leave four or more such frames before descriptor/constant reuse; many more passes leave fewer.
+#define DLSSNR_NUM_OF_HEAPS 64
+
+// Goes through the same constant-buffer ring as DlssNrConstants.
+static_assert(sizeof(DlssNrDetailReuseConstants) == sizeof(DlssNrConstants));
 
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 {
@@ -63,6 +70,20 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // dlssnr.hlsl blob is never regenerated (a current dxc produces materially different DXIL
     // from the committed one). Null on backends/builds where the finished-colour shader is absent.
     ID3D12PipelineState* _finishedColorPipelineState = nullptr;
+
+    // "Tune for this scene"'s stats pass (dlssnr_detail_stats.hlsl), built on first use the same way. Only
+    // dispatched while a calibration runs.
+    ID3D12PipelineState* _detailStatsPipelineState = nullptr;
+
+    // Automatic exposure's eye adaptation pass (dlssnr_exposure_adapt.hlsl), built on first use the same way. Not
+    // retried once it failed to build: the meter then writes the exposure directly, as before.
+    ID3D12PipelineState* _exposureAdaptPipelineState = nullptr;
+    bool _exposureAdaptPipelineFailed = false;
+
+    // Reuse detail between frames (dlssnr_detail_reuse.hlsl), built on first use the same way. Not retried once it
+    // failed to build.
+    ID3D12PipelineState* _detailReusePipelineState = nullptr;
+    bool _detailReusePipelineFailed = false;
 
   public:
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
@@ -100,4 +121,26 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                               ID3D12Resource* InSource, ID3D12Resource* InModel,
                               ID3D12Resource* InOriginal, ID3D12Resource* InMotion,
                               ID3D12Resource* OutTarget);
+
+    // One stats pass of "Tune for this scene" (dlssnr_detail_stats.hlsl): 64x64 thread groups, one per tile, into
+    // the 128x64 RGBA32F grid. Same descriptor table shape as DispatchPass. False (no-op) if the PSO cannot be built.
+    bool DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
+                             ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput, ID3D12Resource* InInput,
+                             ID3D12Resource* InPrevInput, ID3D12Resource* InProxy, ID3D12Resource* OutGrid);
+
+    // Automatic exposure's eye adaptation (dlssnr_exposure_adapt.hlsl, DlssNr_ExposureAdapt.h): one thread eases the
+    // 1x1 OutEased toward the 1x1 InReading. ExposureAdaptReady builds the PSO on first use and says whether there is
+    // one; DispatchExposureAdapt is false (no-op) without it. Same descriptor table shape as DispatchPass.
+    bool ExposureAdaptReady();
+    bool DispatchExposureAdapt(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
+                               ID3D12Resource* InReading, ID3D12Resource* OutEased);
+
+    // Reuse detail between frames (dlssnr_detail_reuse.hlsl, DlssNr_DetailReuse.inl). DetailReuseReady builds the PSO
+    // on first use and says whether there is one; DispatchDetailReuse is false (no-op) without it. Same descriptor table shape as
+    // DispatchPass; null inputs get t0 as a stand-in, a null OutSecond gets OutTarget. Dispatches Width x Height threads.
+    bool DetailReuseReady();
+    bool DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList, const DlssNrDetailReuseConstants& InConstants,
+                             unsigned int Width, unsigned int Height, ID3D12Resource* In0, ID3D12Resource* In1,
+                             ID3D12Resource* In2, ID3D12Resource* In3, ID3D12Resource* In4, ID3D12Resource* OutTarget,
+                             ID3D12Resource* OutSecond);
 };

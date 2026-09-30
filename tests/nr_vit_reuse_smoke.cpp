@@ -187,6 +187,62 @@ int main()
         CHECK(o[0].any && o[0].kept == V({ 0, 3 }) && o[0].gap == 1);
     }
 
+    { // One: one launch per call, as Vulkan's vkCmdCuLaunchKernelNVX does. The same decisions as a chain: over a
+      // computed and a skipped evaluation, the launches that go out and where the barrier goes match Split on the whole
+      // evaluation in one call.
+        const auto roleOfInt = [](int l, KernelSet set)
+        {
+            const Role r = l == 1 ? Role::Start : l == 2 ? Role::Inner : l == 3 ? Role::End : Role::None;
+            return std::pair { r, r == Role::None ? KernelSet::Unknown : set };
+        };
+        for (const KernelSet set : { KernelSet::Fp8, KernelSet::Plain })
+        {
+            const std::vector<int> evaluation { 0, 0, 1, 2, 2, 2, 3, 0, 0 };
+            Filter single, chain;
+            for (int round = 0; round < 2; ++round)
+            {
+                // one call per launch: "B" marks a barrier recorded before the next launch (or where a dropped one was)
+                single.Begin(&a, false, 2);
+                std::vector<int> out;
+                for (int l : evaluation)
+                {
+                    const auto rs = roleOfInt(l, set);
+                    const Filter::Single one = single.One(rs.first, rs.second);
+                    if (one.barrier)
+                        out.push_back(-1);
+                    if (one.launch)
+                        out.push_back(l);
+                }
+                CHECK(single.End());
+
+                chain.Begin(&a, false, 2);
+                std::vector<int> kept;
+                std::ptrdiff_t gap = -1;
+                chain.Split(
+                    evaluation.data(), evaluation.size(), [&](const int& l) { return roleOfInt(l, set); }, kept, gap);
+                CHECK(chain.End());
+                std::vector<int> expected = kept;
+                if (gap >= 0)
+                    expected.insert(expected.begin() + gap, -1);
+
+                CHECK(out == expected);
+                if (round == 0) // computed: everything goes out, no barrier
+                    CHECK(out == evaluation);
+                else if (set == KernelSet::Fp8) // skipped: the run is gone, the barrier where it was
+                    CHECK(out == std::vector<int>({ 0, 0, -1, 0, 0 }));
+                else // plain: the run's last kernel stays, the barrier right before it
+                    CHECK(out == std::vector<int>({ 0, 0, -1, 3, 0, 0 }));
+            }
+            CHECK(single.LastSet() == set);
+        }
+
+        // outside an evaluation (the game's own DLSS SR on the same functions): every launch goes out, no barrier. The
+        // evaluation context is per thread, not per Filter, so this also relies on the End above having closed it.
+        Filter idle;
+        const Filter::Single one = idle.One(Role::Start, KernelSet::Fp8);
+        CHECK(one.launch && !one.barrier);
+    }
+
     { // plain set, another kernel inside a skipped run: the end still runs and the barrier is still asked for, the feature goes off
         Filter f;
         CHECK(Kept(Eval(f, &a, false, 2, kEval, -1, KernelSet::Plain)));
@@ -353,6 +409,32 @@ int main()
         std::thread([&] { other = f.Evaluating() || f.Drop(Role::Start); }).join();
         CHECK(!other);
         f.End();
+    }
+
+    { // Kernels: which kernel handles are the ViT run's, from their names at creation (Vulkan)
+        Kernels<uint64_t> k;
+        const auto none = std::pair { Role::None, KernelSet::Unknown };
+        k.Created(1, "cc_vit_1d_repack_2d_to_1d_fp8");
+        k.Created(2, "cc_vit_1d_qkv_chained");
+        k.Created(3, "cc_dec_input_upsample_1024_512_tilesync_fp8");
+        CHECK((k.Find(1) == std::pair { Role::Start, KernelSet::Fp8 }));
+        CHECK((k.Find(2) == std::pair { Role::Inner, KernelSet::Plain }));
+        CHECK(k.Find(3) == none);
+        CHECK(k.Find(99) == none);
+
+        // a handle reused by another kernel (after a destroy that was never seen, such as a lost device): the new
+        // kernel wins
+        k.Created(1, "cc_split_swin_16h_qkv_512_chained_fp8");
+        CHECK(k.Find(1) == none);
+        k.Created(3, "cc_vit_1d_repack_1d_to_2d_fp8");
+        CHECK((k.Find(3) == std::pair { Role::End, KernelSet::Fp8 }));
+
+        k.Destroyed(2);
+        CHECK(k.Find(2) == none);
+        k.Created(4, nullptr);
+        CHECK(k.Find(4) == none);
+        k.Clear();
+        CHECK(k.Find(3) == none);
     }
 
     printf(fails ? "nr_vit_reuse_smoke: %d FAILED\n" : "nr_vit_reuse_smoke: all passed\n", fails);

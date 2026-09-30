@@ -17,8 +17,11 @@ class DlssNrGpuTime
     Resource readback;
     std::array<Sample, Count> samples;
     int recording = -1;
-    UINT64 sequence = 0, lastSequence = 0;
+    UINT64 sequence = 0, lastSequence = 0, clearedSequence = 0;
     std::optional<double> last;
+    // Every completed sample since the last TakeFresh, oldest first: several can complete between two reads, and
+    // `last` keeps only the newest (with frames of alternating cost it can lock onto one kind).
+    std::vector<std::pair<UINT64, double>> fresh;
 
     void Collect()
     {
@@ -33,10 +36,20 @@ class DlssNrGpuTime
             if (SUCCEEDED(readback->Map(0, &range, (void**) &data)))
             {
                 const auto begin = data[i * 2], end = data[i * 2 + 1];
-                if (s.sequence > lastSequence && s.frequency && begin && end >= begin)
+                if (s.frequency && begin && end >= begin)
                 {
-                    last = double(end - begin) * 1000.0 / double(s.frequency);
-                    lastSequence = s.sequence;
+                    const double ms = double(end - begin) * 1000.0 / double(s.frequency);
+                    if (s.sequence > lastSequence)
+                    {
+                        last = ms;
+                        lastSequence = s.sequence;
+                    }
+                    if (s.sequence > clearedSequence)
+                    {
+                        if (fresh.size() >= 2 * Count) // nobody takes them: keep the newest
+                            fresh.erase(fresh.begin());
+                        fresh.emplace_back(s.sequence, ms);
+                    }
                 }
                 D3D12_RANGE written { 0, 0 };
                 readback->Unmap(0, &written);
@@ -120,11 +133,25 @@ class DlssNrGpuTime
     {
         last.reset();
         lastSequence = sequence; // older, in-flight samples must not repopulate the display
+        clearedSequence = sequence;
+        fresh.clear();
     }
 
     std::optional<double> ReadGpuTime([[maybe_unused]] ID3D12CommandQueue* queue)
     {
         Collect();
         return last;
+    }
+
+    // The samples completed since the last call, oldest first. Call after ReadGpuTime.
+    std::vector<double> TakeFresh()
+    {
+        std::sort(fresh.begin(), fresh.end());
+        std::vector<double> out;
+        out.reserve(fresh.size());
+        for (const auto& sample : fresh)
+            out.push_back(sample.second);
+        fresh.clear();
+        return out;
     }
 };

@@ -7,6 +7,7 @@
 #include "nvapi/fakenvapi.h"
 #include <hooks/Streamline_Hooks.h>
 #include <misc/IdentifyGpu.h>
+#include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 
 #include <SimpleIni.h>
 
@@ -357,7 +358,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
             DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
             DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
-            DlssNrResidualFg.set_from_config(readBool("DlssNr", "ResidualFG"));
+            // ResidualFG and ResidualFGApproxCamera are no longer read: NR every second frame through NVIDIA Frame
+            // Generation is off for good, whatever an old ini says.
             DlssNrPrecision.set_from_config(readUInt("DlssNr", "Precision"));
             if (DlssNrPrecision.value_or_default() != 4) DlssNrPrecision = 0u;
             DlssNrVitEvery.set_from_config(readUInt("DlssNr", "VitEvery"));
@@ -366,7 +368,30 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrVitEveryPlain.set_from_config(readUInt("DlssNr", "VitEveryPlain"));
             if (DlssNrVitEveryPlain.value_or_default() < 1u || DlssNrVitEveryPlain.value_or_default() > 2u)
                 DlssNrVitEveryPlain = std::clamp<uint32_t>(DlssNrVitEveryPlain.value_or_default(), 1u, 2u);
-            DlssNrResidualFgApproxCamera.set_from_config(readBool("DlssNr", "ResidualFGApproxCamera"));
+            DlssNrDetailReuse.set_from_config(readBool("DlssNr", "DetailReuse"));
+            DlssNrDetailReuseDebug.set_from_config(readBool("DlssNr", "DetailReuseDebug"));
+            DlssNrDetailReuseSteady.set_from_config(readFloat("DlssNr", "DetailReuseSteady"));
+            DlssNrDetailReuseFill.set_from_config(readFloat("DlssNr", "DetailReuseFill"));
+            DlssNrDetailReuseWithFg.set_from_config(readBool("DlssNr", "DetailReuseWithFG"));
+            DlssNrDetailReuseMinFps.set_from_config(readFloat("DlssNr", "DetailReuseMinFps"));
+            if (DlssNrDetailReuseMinFps.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseMinFps.value()) || DlssNrDetailReuseMinFps.value() < 0.0f ||
+                 DlssNrDetailReuseMinFps.value() > 240.0f))
+                DlssNrDetailReuseMinFps = std::isfinite(DlssNrDetailReuseMinFps.value())
+                                              ? std::clamp(DlssNrDetailReuseMinFps.value(), 0.0f, 240.0f)
+                                              : 25.0f;
+            if (DlssNrDetailReuseFill.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseFill.value()) || DlssNrDetailReuseFill.value() < 0.0f ||
+                 DlssNrDetailReuseFill.value() > 1.0f))
+                DlssNrDetailReuseFill = std::isfinite(DlssNrDetailReuseFill.value())
+                                            ? std::clamp(DlssNrDetailReuseFill.value(), 0.0f, 1.0f)
+                                            : 1.0f;
+            if (DlssNrDetailReuseSteady.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseSteady.value()) || DlssNrDetailReuseSteady.value() < 0.0f ||
+                 DlssNrDetailReuseSteady.value() > 1.0f))
+                DlssNrDetailReuseSteady = std::isfinite(DlssNrDetailReuseSteady.value())
+                                              ? std::clamp(DlssNrDetailReuseSteady.value(), 0.0f, 1.0f)
+                                              : 0.0f;
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
@@ -403,6 +428,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
             DlssNrAutoExposureTrim.set_from_config(readFloat("DlssNr", "AutoExposureTrim"));
             DlssNrAutoExposureShadowProtection.set_from_config(readFloat("DlssNr", "AutoExposureShadowProtection"));
+            DlssNrAutoExposureAdaptSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptSeconds"));
             DlssNrAutoExposureFollowGame.set_from_config(readBool("DlssNr", "AutoExposureFollowGame"));
             DlssNrGameExposureTrimAnchors.set_from_config(readString("DlssNr", "GameExposureTrimAnchors"));
             DlssNrAutoExposureTrimAnchors.set_from_config(readString("DlssNr", "AutoExposureTrimAnchors"));
@@ -463,6 +489,11 @@ bool Config::Reload(std::filesystem::path iniPath)
                 pass.autoMask.set_from_config(readBool("DlssNr", std::format("Pass{}AutoMask", i + 4).c_str()));
             }
             DlssNrReversibleMode.set_from_config(readUInt("DlssNr", "ReversibleMode"));
+            if (!DlssNrProxyCurve::Valid(DlssNrReversibleMode.value_or_default())) // not a curve: soft knee, saved as auto
+                DlssNrReversibleMode.reset();
+            DlssNrColourEncoding.set_from_config(readUInt("DlssNr", "ColourEncoding"));
+            if (DlssNrColourEncoding.value_or_default() > 4u) // not a Colour encoding: back to Auto, saved as auto
+                DlssNrColourEncoding.reset();
             DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
             DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1316,11 +1347,15 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DeferredDLSS",
                  GetBoolValue(Instance()->DlssNrDeferredDlss.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ResidualFG", GetBoolValue(Instance()->DlssNrResidualFg.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Precision", GetIntValue(Instance()->DlssNrPrecision.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEveryPlain", GetIntValue(Instance()->DlssNrVitEveryPlain.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ResidualFGApproxCamera", GetBoolValue(Instance()->DlssNrResidualFgApproxCamera.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuse", GetBoolValue(Instance()->DlssNrDetailReuse.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseDebug", GetBoolValue(Instance()->DlssNrDetailReuseDebug.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseSteady", GetFloatValue(Instance()->DlssNrDetailReuseSteady.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(Instance()->DlssNrDetailReuseFill.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
     {
         auto toggle = Instance()->DlssNrToggleKey.value_for_config();
         ini.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());
@@ -1370,6 +1405,8 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureShadowProtection",
                  GetFloatValue(Instance()->DlssNrAutoExposureShadowProtection.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoExposureAdaptSeconds",
+                 GetFloatValue(Instance()->DlssNrAutoExposureAdaptSeconds.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureFollowGame",
                  GetBoolValue(Instance()->DlssNrAutoExposureFollowGame.value_for_config()).c_str());
     ini.SetValue("DlssNr", "GameExposureTrimAnchors",
@@ -1436,6 +1473,7 @@ bool Config::SaveIni()
         ini.SetValue("DlssNr", std::format("Pass{}AutoMask", i + 4).c_str(), GetBoolValue(pass.autoMask.value_for_config()).c_str());
     }
     ini.SetValue("DlssNr", "ReversibleMode", GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "ColourEncoding", GetIntValue(Instance()->DlssNrColourEncoding.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
     ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",

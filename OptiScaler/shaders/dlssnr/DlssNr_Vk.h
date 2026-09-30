@@ -28,9 +28,11 @@
 
 class DlssNr_Vk : public Shader_Vk
 {
-    // Enough slots for several dispatches per frame across the frames that can be in flight. Encode
-    // and resolve are two; the debug views and the exposure fetch are the others.
-    static constexpr uint32_t kSlotsPerFrame = 6;
+    // Enough slots for several dispatches per frame across the frames that can be in flight: a slot's
+    // constants and descriptor set must not be rewritten while a frame still in flight reads them. Encode
+    // and resolve are two; the meter, its reduce, eye adaptation, the exposure courier, the downsample and,
+    // during a Tune run, two copies and the stats pass are the others -- about ten, so sixteen.
+    static constexpr uint32_t kSlotsPerFrame = 16;
     static constexpr uint32_t kFramesInFlight = 3;
     static constexpr uint32_t kSlots = kSlotsPerFrame * kFramesInFlight;
 
@@ -49,6 +51,23 @@ class DlssNr_Vk : public Shader_Vk
     void WriteDescriptors(VkDescriptorSet set, VkDeviceSize constantOffset, VkImageView source, VkImageView model,
                           VkImageView original, VkImageView motion, VkImageView target, VkImageView keep,
                           VkImageLayout sourceLayout, VkImageLayout motionLayout);
+
+    // Takes a constant slot and its descriptor set, binds `pipeline`, dispatches and puts the barrier after it.
+    bool Record(VkCommandBuffer cmdList, VkPipeline pipeline, const DlssNrConstants& constants, uint32_t groupsX,
+                uint32_t groupsY, VkImageView source, VkImageView model, VkImageView original, VkImageView motion,
+                VkImageView target, VkImageView keep, VkImageLayout sourceLayout, VkImageLayout motionLayout);
+
+    // Automatic exposure's eye adaptation (dlssnr_exposure_adapt.hlsl, SPIR-V), on this pass's pipeline layout. Built on
+    // first use; not retried once it failed, and the meter then writes the exposure directly, as before.
+    VkPipeline _adaptPipeline = VK_NULL_HANDLE;
+    bool _adaptFailed = false;
+
+    // "Tune for this scene"'s stats pass (dlssnr_detail_stats.hlsl, SPIR-V), the same way.
+    VkPipeline _statsPipeline = VK_NULL_HANDLE;
+    bool _statsFailed = false;
+
+    // Builds `pipeline` from `code` on this pass's layout on first use; false, and not tried again, if it fails.
+    bool EnsurePipeline(VkPipeline& pipeline, bool& failed, const unsigned char* code, size_t size, const char* what);
 
   public:
     DlssNr_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InPhysicalDevice);
@@ -72,4 +91,24 @@ class DlssNr_Vk : public Shader_Vk
                   VkImageView InMotion, VkImageView InTarget, VkImageView InKeep,
                   VkImageLayout InSourceLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                   VkImageLayout InMotionLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // Automatic exposure's eye adaptation (DlssNr_ExposureAdapt.h): one thread eases the 1x1 InEased (GENERAL) toward
+    // the 1x1 InReading (SHADER_READ_ONLY_OPTIMAL). ExposureAdaptReady builds the pipeline on first use and says
+    // whether there is one; DispatchExposureAdapt is false (no-op) without it.
+    bool ExposureAdaptReady();
+    bool DispatchExposureAdapt(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, VkImageView InReading,
+                               VkImageView InEased);
+
+    // One stats pass of "Tune for this scene" (dlssnr_detail_stats.hlsl): 64x64 groups, one per tile, into the
+    // 128x64 RGBA32F InGrid (GENERAL). The four copies are read sampled (SHADER_READ_ONLY_OPTIMAL); InProxy, the
+    // RGBA16F picture the model was shown, is read as a storage image (GENERAL) in gKeep's binding, the layout having
+    // only four sampled ones. False (no-op) if the pipeline cannot be built.
+    bool DispatchDetailStats(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, VkImageView InOutput,
+                             VkImageView InPrevOutput, VkImageView InInput, VkImageView InPrevInput,
+                             VkImageView InProxy, VkImageView InGrid);
+
+    // The same shader's copy mode (Mode 1): InConstants.Width x Height texels of InSource (in InSourceLayout) into the
+    // RGBA16F InTarget (GENERAL), as they are. InGrid (GENERAL) is bound, not touched.
+    bool DispatchStatsCopy(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, VkImageView InSource,
+                           VkImageLayout InSourceLayout, VkImageView InTarget, VkImageView InGrid);
 };

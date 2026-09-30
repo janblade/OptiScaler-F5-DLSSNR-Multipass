@@ -25,7 +25,8 @@ cbuffer Params : register(b0)
     uint  gCompareSwap;  // put the edited frame on the other side
     uint  gTransfer;     // 0 classic, 1 matched residual -- how a below-size model comes back
     float gDebugScale;   // what the debug views are scaled by, held still while the meter moves
-    uint  gReversibleMode; // 0 knee, 1 Neutwo+composed, 2 Neutwo+replace, 3 hybrid+composed, 4 hybrid+replace
+    uint  gReversibleMode; // 0 knee, 1 Neutwo+composed, 2 Neutwo+replace, 3 hybrid+composed, 4 hybrid+replace,
+                           // 5 HLG+composed, 6 PQ+composed, 7 linear+composed (ini only) -- see ProxyCurve
     uint  gApplyModel;     // 0 output the clean frame (pass still runs), 1 apply the model's edit
     uint  gUseGameExposure;// D3D12 source-1 only: 1 = read the game's live exposure in-shader (t4)
     float gExposurePreMul; // the residual modes' fixed scale; game exposure now uses gPreExposure and the Trim fields below
@@ -71,6 +72,11 @@ cbuffer Params : register(b0)
     // Multiplies the base white point read from the live exposure sample. Automatic following the game's exposure binds
     // the game's texture and puts the learned calibration here (DlssNr_FollowGame.h). 0 (unset) and 1 are the identity.
     float gExposureBaseScale;
+    // Colour encoding override where the game's frame is read and written: 3 gamma 2.2, 4 PQ, anything else none.
+    // See DlssNrConstants::InputEncoding.
+    uint  gInputEncoding;
+    // Resolve only: gOriginal is the game's own texture (still in gInputEncoding), not the encode's kept copy.
+    uint  gOriginalIsGameColour;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -446,6 +452,80 @@ float3 SrgbToLinear(float3 v)
     return lerp(v / 12.92, pow((v + 0.055) / 1.055, 2.4), step(0.04045, v));
 }
 
+// The Colour encoding override, at the edges where the game's own frame is read (encode, meters) and written back
+// (resolve). Everything between works in the two domains the pass always had -- tone-mapped sRGB (passthrough) and
+// linear light -- so a gamma 2.2 frame is re-encoded as sRGB of the same light, and a PQ frame is decoded to linear
+// BT.709 light, and both are turned back on the way out. gInputEncoding 0 (and 1, 2) converts nothing.
+//
+// The sRGB curve here is not clipped at 1: a tone-mapped frame in a float buffer can carry values above white, and
+// they must come back as they went in. It selects per channel rather than blending, so +inf stays +inf. PQ is read
+// exactly as Finished Picture reads it (dlssnr_pq.hlsli: ST 2084, BT.2020 -> BT.709), then put on the pass's scale
+// with the ITU-R BT.2408 reference white (203 nits) at 1.0. Colours outside BT.709 are clipped by the pass, as they
+// are on Finished Picture.
+#include "dlssnr_pq.hlsli"
+
+static const uint kInputGamma22 = 3u;
+static const uint kInputPq = 4u;
+static const float kScrgbPerReferenceWhite = 203.0 / 80.0; // scRGB units (80 nits) in one reference white
+
+// Per channel with a scalar ?: -- fxc has no select() and dxc (HLSL 2021) refuses a vector ?:.
+float SrgbEncodeUnclipped1(float v)
+{
+    v = max(v, 0.0);
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+float SrgbDecodeUnclipped1(float v)
+{
+    v = max(v, 0.0);
+    return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
+}
+
+float3 SrgbEncodeUnclipped(float3 v)
+{
+    return float3(SrgbEncodeUnclipped1(v.r), SrgbEncodeUnclipped1(v.g), SrgbEncodeUnclipped1(v.b));
+}
+
+float3 SrgbDecodeUnclipped(float3 v)
+{
+    return float3(SrgbDecodeUnclipped1(v.r), SrgbDecodeUnclipped1(v.g), SrgbDecodeUnclipped1(v.b));
+}
+
+// ST 2084 signal (BT.2020) -> linear BT.709 light, 1.0 = the reference white.
+float3 PqToReferenceLinear(float3 e)
+{
+    return mul(kBt2020To709, DecodePQ(e)) / kScrgbPerReferenceWhite;
+}
+
+float3 ReferenceLinearToPq(float3 l)
+{
+    return EncodePQ(mul(kBt709To2020, l * kScrgbPerReferenceWhite));
+}
+
+float3 DecodeGameColour(float3 c)
+{
+    if (gInputEncoding == kInputGamma22)
+        return SrgbEncodeUnclipped(pow(max(c, 0.0), 2.2));
+    if (gInputEncoding == kInputPq)
+        return PqToReferenceLinear(c);
+    return c;
+}
+
+float3 EncodeGameColour(float3 c)
+{
+    if (gInputEncoding == kInputGamma22)
+        return pow(SrgbDecodeUnclipped(c), 1.0 / 2.2);
+    if (gInputEncoding == kInputPq)
+        return ReferenceLinearToPq(c);
+    return c;
+}
+
+// gOriginal in the pass's working domain, whichever texture is bound as it.
+float4 OriginalInPassDomain(float4 original)
+{
+    return gOriginalIsGameColour != 0 ? float4(DecodeGameColour(original.rgb), original.a) : original;
+}
+
 // The edit at an arbitrary position, exactly as the resolve computes its own.
 float3 EditAt(float2 uvq)
 {
@@ -640,6 +720,141 @@ float3 HybridDecode(float3 y)
     return y * (HybridCurveInv(m) / m);
 }
 
+// The standard signal curves (modes 5-7): HLG (ITU-R BT.2100), PQ (SMPTE ST 2084) and plain linear, with the
+// white point placed as ITU-R BT.2408 places the 203-nit reference white -- 75% of the HLG signal, 58% of PQ.
+// Where the other curves are shaped in light and then sRGB-encoded, these ARE the value the model reads: the
+// peak channel's proxy value is exactly the curve's signal. They are applied like Neutwo and the hybrid, as one
+// scalar on the peak channel so hue cannot bend; that scalar is taken in the light the model reads the proxy as
+// (sRGB-decoded), which keeps the same storage as the other curves for the downsample and the matched residual,
+// and leaves the stored peak equal to the signal. Two consumers treat them differently from Neutwo and the hybrid:
+// SGSR1 enlarges the stored signal as it is (sgsr1.hlsl, StripsOuterGamma), and the Composed resolve decodes proxy
+// and answer back to scene light before composing (see the resolve).
+//
+// Headroom is the standards' own: HLG's signal reaches 1 at 3.77x white, PQ at 49x (10000 nits), linear at 1x.
+// Above that the peak is held at 1 (the hue survives, the gradation does not), and the decode returns the ceiling.
+// Composed only: their inverses are not used as a Replace decode.
+static const float kHlgA = 0.17883277;
+static const float kHlgB = 0.28466892;
+static const float kHlgC = 0.55991073;
+static const float kHlgWhite = 0.26496256; // scene light E at which the HLG signal is 0.75
+static const float kPqWhite = 203.0 / 10000.0;
+
+float HlgSignal(float n)
+{
+    const float e = max(n, 0.0) * kHlgWhite;
+    const float signal = e <= 1.0 / 12.0 ? sqrt(3.0 * e) : kHlgA * log(12.0 * e - kHlgB) + kHlgC;
+    return min(signal, 1.0);
+}
+
+float HlgSignalInv(float signal)
+{
+    signal = saturate(signal);
+    const float e = signal <= 0.5 ? signal * signal / 3.0 : (exp((signal - kHlgC) / kHlgA) + kHlgB) / 12.0;
+    return e / kHlgWhite;
+}
+
+float PqSignal(float n)
+{
+    const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0;
+    const float c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
+    const float y = pow(saturate(max(n, 0.0) * kPqWhite), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
+float PqSignalInv(float signal)
+{
+    const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0;
+    const float c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
+    const float p = pow(saturate(signal), 1.0 / m2);
+    return pow(max(p - c1, 0.0) / max(c2 - c3 * p, 1e-6), 1.0 / m1) / kPqWhite;
+}
+
+// Which curve a gReversibleMode uses, and whether its answer replaces the frame. Every curve test goes through
+// these two, so a new mode is added here and nowhere else.
+static const uint kCurveKnee = 0u;
+static const uint kCurveNeutwo = 1u;
+static const uint kCurveHybrid = 2u;
+static const uint kCurveHlg = 3u;
+static const uint kCurvePq = 4u;
+static const uint kCurveLinear = 5u;
+
+uint ProxyCurve(uint mode)
+{
+    if (mode == 1u || mode == 2u)
+        return kCurveNeutwo;
+    if (mode == 3u || mode == 4u)
+        return kCurveHybrid;
+    if (mode == 5u)
+        return kCurveHlg;
+    if (mode == 6u)
+        return kCurvePq;
+    if (mode == 7u)
+        return kCurveLinear;
+    return kCurveKnee;
+}
+
+bool IsReplace(uint mode) { return mode == 2u || mode == 4u; }
+
+bool IsSignalCurve(uint curve) { return curve == kCurveHlg || curve == kCurvePq || curve == kCurveLinear; }
+
+float SignalCurve(float n, uint curve)
+{
+    if (curve == kCurveHlg)
+        return HlgSignal(n);
+    if (curve == kCurvePq)
+        return PqSignal(n);
+    return saturate(n);
+}
+
+float SignalCurveInv(float signal, uint curve)
+{
+    if (curve == kCurveHlg)
+        return HlgSignalInv(signal);
+    if (curve == kCurvePq)
+        return PqSignalInv(signal);
+    return saturate(signal);
+}
+
+// normalized light -> the light the model reads the proxy as, for the signal curves.
+float3 SignalEncode(float3 v, uint curve)
+{
+    v = max(v, 0.0);
+    const float m = max(v.r, max(v.g, v.b));
+
+    // Below a millionth of white the value is kept as it is (as Neutwo and the hybrid do). The curve steps up just
+    // above it -- to under one 8-bit code -- and still rises, and the decode below undoes the same split.
+    if (m <= 1e-6)
+        return v;
+
+    return v * (SrgbDecodeUnclipped1(SignalCurve(m, curve)) / m);
+}
+
+float3 SignalDecode(float3 y, uint curve)
+{
+    y = max(y, 0.0);
+    const float m = min(max(y.r, max(y.g, y.b)), 1.0);
+
+    if (m <= 1e-6)
+        return y;
+
+    return y * (SignalCurveInv(SrgbEncodeUnclipped1(m), curve) / m);
+}
+
+// The encode's curve for the current mode, in the light the proxy is read as (before LinearToSrgb). The knee is
+// returned as SoftKnee gives it; callers that need it inside the cube saturate it as before.
+float3 ProxyEncode(float3 n)
+{
+    const uint curve = ProxyCurve(gReversibleMode);
+
+    if (curve == kCurveKnee)
+        return SoftKnee(n);
+    if (curve == kCurveNeutwo)
+        return NeutwoEncode(n);
+    if (curve == kCurveHybrid)
+        return HybridEncode(n);
+    return SignalEncode(n, curve);
+}
+
 // Undoes the full proxy encode (LinearToSrgb, then whichever reversible curve) back to true
 // scene-linear `normalized`, for DlssNrMode_Downsample: averaging several taps in the curve's own
 // domain is not energy-correct (the curve is concave, so a box-average of a bright window against
@@ -652,12 +867,15 @@ float3 DecodeProxyToLinear(float3 c)
         return c; // already display-ready; nothing here is a curve to undo
 
     float3 y = SrgbToLinear(c);
+    const uint curve = ProxyCurve(gReversibleMode);
 
-    if (gReversibleMode == 0)
+    if (curve == kCurveKnee)
         return SoftKneeDecode(y);
-    if (gReversibleMode >= 3)
+    if (curve == kCurveNeutwo)
+        return NeutwoDecode(y);
+    if (curve == kCurveHybrid)
         return HybridDecode(y);
-    return NeutwoDecode(y);
+    return SignalDecode(y, curve);
 }
 
 // Exact inverse of DecodeProxyToLinear -- reproduces the encode pass's own chain
@@ -668,10 +886,7 @@ float3 EncodeLinearToProxy(float3 n)
     if (gPassthrough != 0)
         return n;
 
-    const float3 display = gReversibleMode == 0   ? SoftKnee(n)
-                           : gReversibleMode >= 3 ? HybridEncode(n)
-                                                  : NeutwoEncode(n);
-    return LinearToSrgb(display);
+    return LinearToSrgb(ProxyEncode(n));
 }
 
 // Scale a residual so the result cannot leave the unit cube, without changing its direction.
@@ -711,8 +926,12 @@ float3 CubeScaleResidual(float3 P, float3 T)
 //   * the chroma difference in a and in b, added as is.
 //
 // The three are interpolated bilinearly between the four nearest texels of the model's own grid (edges
-// clamped) and applied to the frame's full-resolution proxy: L' = saturate(max(L, 0.1) * exp(ratio)),
-// a' = a + da, b' = b + db, back to RGB and saturated. Luminance is multiplicative and chroma additive,
+// clamped) and applied to the frame's full-resolution proxy: L' = saturate(L * exp(ratio)),
+// a' = a + da, b' = b + db, back to RGB and saturated. The 0.1 floor belongs to the ratio only. NVIDIA's
+// kernel has it on the pixel too (max(L, 0.1) * exp(ratio)), which lifts everything below L 0.1 to 0.1 with
+// an unchanged answer, a grey veil over near-black (and 1% of white on the linear curve); left out here
+// on purpose. NvOkLab's own floor sits at 1e-12 of LMS (L 1e-4) for the same
+// reason, so black comes back black. Luminance is multiplicative and chroma additive,
 // which is the opposite split from CubeScaleResidual's single additive RGB edit that is scaled to fit
 // the cube. Both are fed to the same composition below, so this only changes how the reduced-size edit
 // is enlarged.
@@ -724,7 +943,7 @@ float3 NvOkLab(float3 rgb)
     const float3x3 lms_to_lab = { 0.2104542553, 0.7936177850, -0.0040720468,
                                   1.9779984951, -2.4285922050, 0.4505937099,
                                   0.0259040371, 0.7827717662, -0.8086757660 };
-    return mul(lms_to_lab, pow(max(mul(rgb_to_lms, saturate(rgb)), 1e-4), 1.0 / 3.0));
+    return mul(lms_to_lab, pow(max(mul(rgb_to_lms, saturate(rgb)), 1e-12), 1.0 / 3.0));
 }
 
 float3 NvidiaResidualModel(float3 fullProxy, float2 uv)
@@ -753,7 +972,7 @@ float3 NvidiaResidualModel(float3 fullProxy, float2 uv)
     }
 
     const float3 lab = NvOkLab(fullProxy);
-    const float L = saturate(exp(log(max(lab.x, 0.1)) + residual.x));
+    const float L = saturate(lab.x * exp(residual.x));
     return saturate(FromOkLab(float3(L, lab.y + residual.y, lab.z + residual.z)));
 }
 
@@ -822,7 +1041,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         {
             [loop] for (uint tx = tx0 + groupThreadId.x; tx < endX; tx += 8u)
             {
-                const float3 c = max(gSource.Load(int3(min(tx, fullW - 1u), min(ty, fullH - 1u), 0)).rgb, 0.0);
+                const float3 c = max(DecodeGameColour(gSource.Load(int3(min(tx, fullW - 1u), min(ty, fullH - 1u), 0)).rgb), 0.0);
                 const float luma = dot(c, kLuma);
                 localSum += isfinite(luma) ? max(luma, 0.0) : 0.0;
             }
@@ -1287,7 +1506,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     if (gMode == 0)
     {
         float4 source = gSource.Load(int3(id.xy, 0));
-        float3 frame = max(source.rgb, float3(0.0, 0.0, 0.0));
+        // Into the pass's working domain first (the Colour encoding override; nothing for Auto).
+        float3 frame = max(DecodeGameColour(source.rgb), float3(0.0, 0.0, 0.0));
 
         // Kept so the resolve has the frame as it was, rather than having to reconstruct it.
         gKeep[id.xy] = float4(frame, source.a);
@@ -1317,18 +1537,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         // is not passthrough (handled and returned above), so NeutwoEncode never sees a tone-mapped
         // frame. Both are undone by the resolve: the knee approximately, Neutwo exactly.
         float3 normalized = frame / WhitePoint();
-        float3 display;
-        if (gReversibleMode == 0)
-            display = SoftKnee(normalized);        // soft knee
-        else if (gReversibleMode >= 3)
-            display = HybridEncode(normalized);    // 3 hybrid composed, 4 hybrid replace -- same curve
-        else
-            display = NeutwoEncode(normalized);    // 1 composed, 2 replace -- both the full Neutwo proxy
+        // Composed and Replace share a curve (1/2 Neutwo, 3/4 hybrid); 5-7 are the signal curves.
+        const float3 display = ProxyEncode(normalized);
 
         // The reversible proxy forces opaque alpha -- feature 18 expects an opaque colour input, and
         // the frame's own alpha is not part of what the model reads. The knee path keeps the frame's
         // alpha, so the default stays byte-identical.
-        float alpha = gReversibleMode != 0 ? 1.0 : source.a;
+        float alpha = ProxyCurve(gReversibleMode) != kCurveKnee ? 1.0 : source.a;
 
         gTarget[id.xy] = float4(LinearToSrgb(display), alpha);
         return;
@@ -1382,8 +1597,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // The model's own answer, kept before the matched-residual block below can rewrite `model`, so the
     // replace decode uses what the model returned rather than the residual reconstruction.
     float3 modelDirect = model;
-    float4 originalSample = gCompareMode == 1 ? gOriginal.SampleLevel(gLinear, cmpUv, 0)
-                                              : gOriginal.Load(int3(id.xy, 0));
+    float4 originalSample = OriginalInPassDomain(gCompareMode == 1 ? gOriginal.SampleLevel(gLinear, cmpUv, 0)
+                                                                   : gOriginal.Load(int3(id.xy, 0)));
 
     // All three pictures have to share a scale before their luminances can be compared. The proxy and
     // the model come back from an sRGB decode, so they sit in 0..1 where 1 is the white point; the
@@ -1407,19 +1622,19 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // with and without Neural Rendering. In passthrough the frame is already display-referred.
     if (gApplyModel == 0)
     {
-        gTarget[id.xy] = float4(max(originalSample.rgb, 0.0), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(max(originalSample.rgb, 0.0)), originalSample.a);
         return;
     }
 
     if (gDebugView == 1)
     {
-        gTarget[id.xy] = float4(proxy * DebugViewScale(), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(proxy * DebugViewScale()), originalSample.a);
         return;
     }
 
     if (gDebugView == 2)
     {
-        gTarget[id.xy] = float4(model * DebugViewScale(), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(model * DebugViewScale()), originalSample.a);
         return;
     }
 
@@ -1432,7 +1647,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     {
         // Amplified and centred on grey, so both directions of the edit are visible at once.
         float3 shown = saturate(0.5 + edit * 20.0);
-        gTarget[id.xy] = float4(SrgbToLinear(shown) * DebugViewScale(), originalSample.a);
+        gTarget[id.xy] = float4(EncodeGameColour(SrgbToLinear(shown) * DebugViewScale()), originalSample.a);
         return;
     }
 
@@ -1498,13 +1713,12 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         // Passthrough must reproduce the encode's passthrough branch, which writes the frame raw --
         // SoftKnee returns it unchanged there, so both non-passthrough branches are gated behind the
         // same passthrough check the encode has. Without this, a reversible + matched-residual +
-        // already-tone-mapped frame would Neutwo-compress a frame the encode left raw. Neutwo already
-        // lands in [0,1), so it needs no saturate.
+        // already-tone-mapped frame would Neutwo-compress a frame the encode left raw. Neutwo, the
+        // hybrid and the signal curves already land in [0,1], so they need no saturate.
         float3 fullProxy = gPassthrough != 0
                                ? saturate(original)
-                               : (gReversibleMode == 0   ? saturate(SoftKnee(original))
-                                  : gReversibleMode >= 3 ? HybridEncode(original)
-                                                         : NeutwoEncode(original));
+                               : (ProxyCurve(gReversibleMode) == kCurveKnee ? saturate(SoftKnee(original))
+                                                                            : ProxyEncode(original));
         proxy = fullProxy;
         proxyLuma = dot(proxy, kLuma);
 
@@ -1512,6 +1726,22 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         // frame's resolution, and P + (m - p) collapses to m exactly.
         // 1 is the cube-scaled additive edit, 2 is the OkLab residual (see NvidiaResidualModel).
         model = gTransfer == 2 ? NvidiaResidualModel(fullProxy, cmpUv) : CubeScaleResidual(fullProxy, fullProxy + edit);
+    }
+
+    // The signal curves (HLG, PQ, linear) compose in scene light.
+    //
+    // They put white well below the top of the model's range -- PQ at 0.58, which the proxy reads as 0.30 of light
+    // -- so the frame's own light sits several times above the proxy's, and the branch below that hands the
+    // difference back on top of the model's answer carries the model's edit at the proxy's scale: about 3.4x weaker
+    // than the model made it at white for PQ, 1.9x for HLG. Decoded through the curve first, proxy and answer share
+    // the frame's scale, the proxy matches the frame up to the curve's ceiling, and the model's edit arrives whole.
+    // Only above the ceiling is there headroom left to hand back. The knee, Neutwo and the hybrid compose as always.
+    const uint composeCurve = ProxyCurve(gReversibleMode);
+    if (gPassthrough == 0 && IsSignalCurve(composeCurve))
+    {
+        proxy = SignalDecode(proxy, composeCurve);
+        model = SignalDecode(model, composeCurve);
+        proxyLuma = dot(proxy, kLuma);
     }
 
     // The composition. The model's answer is not treated as a difference to add onto the frame -- it
@@ -1636,14 +1866,15 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     if (gColourStrength > 1.0)
         result = ClampAp1(FromOkLab(float3(1.0, gColourStrength, gColourStrength) * ToOkLab(max(result, 0.0))));
 
-    // Replace mode: the model's answer IS the picture, decoded through Neutwo's exact inverse, with
+    // Replace mode: the model's answer IS the picture, decoded through its curve's exact inverse (Neutwo or the
+    // hybrid; the signal curves are Composed only), with
     // NONE of the composition above -- no ratio, no highlight guard, no palette blend. This is the
     // RenoDX reversible-bridge behaviour and the second half of the A/B: composed vs pure model. On a
     // passthrough frame the model already worked in the frame's own space, so it is taken directly.
-    if (gReversibleMode == 2)
-        result = gPassthrough != 0 ? modelDirect : NeutwoDecode(modelDirect);
-    else if (gReversibleMode == 4)
-        result = gPassthrough != 0 ? modelDirect : HybridDecode(modelDirect);
+    if (IsReplace(gReversibleMode))
+        result = gPassthrough != 0                            ? modelDirect
+                 : ProxyCurve(gReversibleMode) == kCurveNeutwo ? NeutwoDecode(modelDirect)
+                                                               : HybridDecode(modelDirect);
 
     // Replace-only detail injection. Below the frame's own resolution the model computed its
     // answer at a reduced working size -- SGSR1's enlarge can sharpen that answer but cannot
@@ -1662,13 +1893,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // texels as the downscale factor. `gModelWorkScale` gives that factor directly (unlike
     // `proxyW`/`proxyH`, which read native once SGSR1's enlarge has already run -- see the
     // cbuffer comment), so the tap distance scales with it instead of staying fixed.
-    if ((gReversibleMode == 2 || gReversibleMode == 4) && gModelWorkScale < 0.999 && gReplaceDetailStrength > 0.0)
+    if (IsReplace(gReversibleMode) && gModelWorkScale < 0.999 && gReplaceDetailStrength > 0.0)
     {
         int radius = clamp((int) round(1.0 / gModelWorkScale), 1, 4);
-        float3 nLeft  = gOriginal.Load(int3(id.xy + int2(-radius,       0), 0)).rgb / normScale;
-        float3 nRight = gOriginal.Load(int3(id.xy + int2( radius,       0), 0)).rgb / normScale;
-        float3 nUp    = gOriginal.Load(int3(id.xy + int2(      0, -radius), 0)).rgb / normScale;
-        float3 nDown  = gOriginal.Load(int3(id.xy + int2(      0,  radius), 0)).rgb / normScale;
+        float3 nLeft  = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2(-radius,       0), 0))).rgb / normScale;
+        float3 nRight = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2( radius,       0), 0))).rgb / normScale;
+        float3 nUp    = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2(      0, -radius), 0))).rgb / normScale;
+        float3 nDown  = OriginalInPassDomain(gOriginal.Load(int3(id.xy + int2(      0,  radius), 0))).rgb / normScale;
         float blurLuma = dot((original + nLeft + nRight + nUp + nDown) / 5.0, kLuma);
         float highFreq = originalLuma - blurLuma;
 
@@ -1701,7 +1932,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // actually reaches the screen rather than an intermediate value detail injection (whose own
     // `detailRatio` is not itself guard-clamped, and can run up to roughly `1 + gReplaceDetailStrength`,
     // ~3x at the slider's own maximum) could still widen back past it.
-    if ((gReversibleMode == 2 || gReversibleMode == 4) && gPassthrough == 0)
+    if (IsReplace(gReversibleMode) && gPassthrough == 0)
         result = ApplyReplaceGuard(result, original, originalLuma, guard);
 
     // Back out of the normalised space the composition worked in.
@@ -1742,5 +1973,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     if (onDivider)
         result = float3(resolvedWhitePoint, resolvedWhitePoint, resolvedWhitePoint);
 
-    gTarget[id.xy] = float4(max(result, float3(0.0, 0.0, 0.0)), originalSample.a);
+    // Back into the game's own encoding (the Colour encoding override; nothing for Auto).
+    gTarget[id.xy] = float4(EncodeGameColour(max(result, float3(0.0, 0.0, 0.0))), originalSample.a);
 }

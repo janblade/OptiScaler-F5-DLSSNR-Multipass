@@ -266,11 +266,27 @@ class Config
     // Generate NR before SR, upscale its signed contribution with a private DLSS feature,
     // and apply it after the game's upscaler. Takes precedence over RunBeforeSR; opt-in.
     CustomOptional<bool> DlssNrDeferredDlss { false };
-    CustomOptional<bool> DlssNrResidualFg { false };
+    CustomOptional<bool> DlssNrResidualFg { false }; // forced off: not read from the ini, not in the menu
     CustomOptional<uint32_t> DlssNrPrecision { 0 }; // 0 NVIDIA FP8 (default), 4 Experimental NVFP4 hybrid
     CustomOptional<uint32_t> DlssNrVitEvery { 2 };  // NVIDIA model: compute the ViT bottleneck every N-th frame (1 = always; 2 = every other frame, default), reuse it in between
     CustomOptional<uint32_t> DlssNrVitEveryPlain { 2 }; // the same for the plain fp16 kernel set (used by some modified DLSS-NR DLLs); VitEvery is the fp8 set
-    CustomOptional<bool> DlssNrResidualFgApproxCamera { false };
+    // Reuse detail between frames (dlssnr/DlssNrDetailReuse.h, shaders/dlssnr/DlssNr_DetailReuse.inl): run the model
+    // every other frame and move the last frame's detail onto the new input in between. D3D12, NR after SR only, and
+    // off while frame generation is on. Experimental, off by default.
+    CustomOptional<bool> DlssNrDetailReuse { false };
+    CustomOptional<bool> DlssNrDetailReuseDebug { false }; // paint where the moved detail was dropped (magenta)
+    // Full frames: how far the model's new detail is pulled toward the moved previous detail (0..1), so full and
+    // reused frames differ less. 0 = off.
+    CustomOptional<float> DlssNrDetailReuseSteady { 0.0f };
+    // Reused frames: where the moved detail was dropped, how much of the trusted detail of neighbours on the same
+    // surface goes in instead (0..1). Stops dropped areas flashing to the un-NR'd image with several passes.
+    CustomOptional<float> DlssNrDetailReuseFill { 1.0f };
+    // Keep reusing detail while frame generation is on, for A/B testing. Off by default: it can flicker there.
+    CustomOptional<bool> DlssNrDetailReuseWithFg { false };
+    // Reuse runs only while the rendered frame rate is at least this (0 = no minimum): at low frame rates things move
+    // farther between frames and the moved detail trails.
+    CustomOptional<float> DlssNrDetailReuseMinFps { 25.0f };
+    CustomOptional<bool> DlssNrResidualFgApproxCamera { false }; // forced off, as DlssNrResidualFg
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
@@ -328,10 +344,15 @@ class Config
     // way the composed modes do. 0 = today's behaviour, unchanged.
     CustomOptional<float> DlssNrReplaceDetailStrength { 0.5f };
 
-    // The RenoDX reversible proxy mode. 0 = today's soft-knee encode + our composition (default,
-    // byte-identical); 1 = unclipped Neutwo proxy + our composition; 2 = Neutwo proxy + pure-inverse
-    // replace. An in-game A/B and a way back. Default 0 = byte-identical to before.
+    // The proxy curve (Final Image Composition), values in shaders/dlssnr/DlssNr_ProxyCurve.h. 0 = soft
+    // knee + our composition (default); 1/2 = unclipped Neutwo proxy + composition / pure-inverse replace;
+    // 3/4 = the balanced (hybrid) curve, the same two ways; 5 HLG and 6 PQ + composition; 7 linear +
+    // composition, a diagnostic set in the ini only. Out-of-range values fall back to 0.
     CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
+
+    // How the NR pass decodes the game's colour. 0 Auto (the game's DLSS HDR flag + the output format, as before),
+    // 1 linear HDR, 2 tone-mapped sRGB, 3 tone-mapped gamma 2.2, 4 PQ. Values are DlssNr_ColourEncoding.h's.
+    CustomOptional<uint32_t> DlssNrColourEncoding { 0 };
 
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
     // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.
@@ -520,6 +541,9 @@ class Config
     // AutoExposureShadowProtection is the menu's "Ignore bright highlights" (percent).
     CustomOptional<float> DlssNrAutoExposureTrim { 5.0f };
     CustomOptional<float> DlssNrAutoExposureShadowProtection { 100.0f };
+    // AutoExposureAdaptSeconds is the menu's "Eye adaptation": how long Automatic takes to follow a change of the scene's
+    // brightness, as a time constant in seconds; 0 = at once. See shaders/dlssnr/DlssNr_ExposureAdapt.h.
+    CustomOptional<float> DlssNrAutoExposureAdaptSeconds { 1.0f };
     // Automatic follows the game's own exposure times a calibration learned against Automatic's meter (Vulkan: a few
     // frames behind). See DlssNr_FollowGame.h. Unset (auto) = on for a known unexposed game (DlssNr_AutoTrimDefault.h
     // kUnexposedGames), off otherwise; a saved true or false is kept as it is.

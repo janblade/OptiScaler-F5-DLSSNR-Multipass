@@ -13,9 +13,12 @@
 // `measure` of them. The GPU reduces every measured evaluation to a grid of tile statistics (its own D3D12 pass,
 // precompile/dlssnr_detail_stats.hlsl), which comes back through a readback ring some evaluations later, tagged with the
 // Ticket it was issued under, and ReduceGrid turns it into one Stats. Score per step:
-//   detail / (the largest detail of any step) - flickerWeight * flicker / (that same largest detail) - damageWeight * damage
+//   detail / (the largest detail of any step) - flickerWeight * flicker / (that same largest detail)
+//     - damageWeight * shoulder - floorWeight * floor - colourWeight * |saturation change|
+//     - shadowWeight * shadows darkened - crushWeight * crushed
 // flicker = how much the output changed between evaluations beyond what the input did (the still-camera case of a
-// warping error), damage = the share of the encoded model input on the shoulder or in the floor.
+// warping error); shoulder and floor = the share of the encoded model input on the shoulder or in the floor; saturation,
+// shadows darkened (only darker counts) and crushed compare the output with the game's frame (Settings has the weights).
 // A run is unsure when detail varies across the steps no more than the measurement's own noise: then the pick would
 // follow the noise, not the picture, and the current value is kept. The noise is the larger of two, both in the units
 // the detail is compared in (Finish has the rule): the input's -- every step measures the band detail of the same,
@@ -247,7 +250,29 @@ struct Settings
     unsigned measure = 4; // even, so Reuse bottleneck's computed/reused alternation is covered equally
     Detail detail = Detail::BandPass;
     float flickerWeight = 1.0f;
-    float damageWeight = 2.0f;
+    float damageWeight = 2.0f; // the shoulder share (highlights the model was shown compressed)
+    // The floor share (the model was shown near black). Half the shoulder's: in The Witcher 3 and Cyberpunk 2077
+    // (2026-09-30) the steps with a floor had their shadows lifted in the output (up to 23%), and crushing grew toward the
+    // bright steps, where the floor is empty -- the output's own shadow terms below catch what this was meant to.
+    float floorWeight = 1.0f;
+    // A step whose output is more or less saturated than the game's input loses this times the fraction (0.5: 10% more or
+    // less chroma costs 0.05). NBA 2K27, The Witcher 3 and Cyberpunk 2077 desaturated at every step, 3-35%, least at the
+    // darker steps; Cyberpunk's colour read 14% apart between the passes at its darkest step (the scene's own lights), so
+    // the weight stays low enough that noise cannot turn a pass. A rail against a model that recolours, not a steer.
+    //
+    // Tried at 1.0 and put back (2026-09-30): the picture was read as warm, but warmth is not a property of the exposure.
+    // Two Witcher 3 scenes disagreed in sign -- a dark one peaked warm (+0.0073) near 0 EV with saturation +20% at
+    // -1.5 EV, while another read cool at every step (-0.0010 to -0.0043), cooler the brighter it went. Raising this
+    // moves the result toward whichever step recolours least, which lines up with warmth differently in every scene, and
+    // at 1.0 it changed the second scene's outcome not at all (the colour term spans 0.18 of a 1.7 score range there;
+    // shoulder and crushing decide it). Warmth would need a term of its own to be steered, and this weight cannot stand
+    // in for one.
+    float colourWeight = 0.5f;
+    // The output's shadows (the input below ~2% of white): darkened loses this times the fraction (lifting is free), and
+    // crushed -- the share of the picture the model took to under half its level -- loses crushWeight times the share
+    // (10: 1% of the picture crushed costs 0.1). The Witcher 3's dark scene crushed 0.02% at -3 EV and 4.3% at +4 EV.
+    float shadowWeight = 1.0f;
+    float crushWeight = 10.0f;
     // Mean absolute input change between evaluations, display-encoded. A still NBA 2K27 scene measured 0.0002, a
     // moving one 0.003-0.012 (which chose nonsense at the old 0.05).
     float motionLimit = 0.001f;
@@ -260,6 +285,11 @@ struct Settings
     // How many times a changed view starts the sweep over before movement stops the run.
     unsigned sceneRestarts = 1;
     float flatTolerance = 0.02f; // a best score this close to the current step's keeps the current value
+    // A run is this many passes over the same steps, and it offers a change only when they agree (within one step):
+    // one pass is not evidence enough. Single runs in the same place have jumped -- NBA 2K27 +3.5 EV, then 0.0 EV;
+    // RDR2 +0.5 EV (flat), then +2.5 EV 30 seconds later (2026-09-30 logs) -- and a far pick that "popped" in one
+    // scene crushed blacks and oversaturated others (user report). Measure detail is always one pass.
+    unsigned passes = 2;
     // Unsure when detail varies across the steps no more than unsureNoise times the input band's own spread across
     // them (at least noiseFloor, the stats' last printed digit): the input is the same frame at every step.
     float unsureNoise = 4.0f;
@@ -293,6 +323,7 @@ inline Settings MeasureSettings(uint32_t source)
 {
     Settings s = source == 1 ? GameExposureSettings() : Settings {};
     s.measureOnly = true;
+    s.passes = 1;
     s.firstSettle = s.settle;
     s.measure = kMeasureEvaluations;
     return s;
@@ -324,20 +355,35 @@ struct Stats
     float inputChange = 0.0f;  // mean |input - previous input|
     float shoulder = 0.0f;     // share of the encoded model input above the shoulder
     float floor = 0.0f;        // share of the encoded model input in the floor
+    // Colour, output against input at the frozen white point (dlssnr_detail_stats.hlsl): OkLab chroma of each, their
+    // distance in OkLab's a-b plane, and the output's b minus the input's (+ warmer).
+    float chromaIn = 0.0f;
+    float chromaOut = 0.0f;
+    float colourShift = 0.0f;
+    float warmth = 0.0f;
+    // Shadows (the input's display-encoded luma below the stats pass's kShadowLevel, ~2% of white), each divided by the
+    // pixels measured: the share in the shadows, their input and output levels summed, the share crushed (a pixel not
+    // black on input brought to under half its level).
+    float shadowShare = 0.0f;
+    float shadowIn = 0.0f;
+    float shadowOut = 0.0f;
+    float crushed = 0.0f;
 };
 
 inline float AddedBand(const Stats& s) { return s.detailBand - s.inputBand; }
 
-// The stats pass's grid: 64x64 tiles, each two RGBA32F texels side by side -- (x, y) raw detail, band out, band in,
-// output change; (x + 64, y) input change, shoulder share, floor share, pixels measured. A row is 128 * 4 floats.
+// The stats pass's grid: 64x64 tiles, each four RGBA32F texels side by side -- (x, y) raw detail, band out, band in,
+// output change; (x + 64, y) input change, shoulder share, floor share, pixels measured; (x + 128, y) chroma in, chroma
+// out, colour shift, warmth; (x + 192, y) shadow share, shadow level in, out, crushed share. A row is 256 * 4 floats.
 constexpr unsigned kGridTiles = 64;
-constexpr unsigned kGridRowFloats = kGridTiles * 2 * 4;
+constexpr unsigned kGridColumns = 4; // texels per tile
+constexpr unsigned kGridRowFloats = kGridTiles * kGridColumns * 4;
 
 // The grid -> one Stats: tile means weighted by the pixels each measured, empty tiles left out. A grid with nothing in
 // it is an empty sample (detailBand NaN), which AddStats drops, not a zero.
 inline Stats ReduceGrid(const float* grid)
 {
-    double sum[7] = {};
+    double sum[15] = {};
     double pixels = 0.0;
 
     for (unsigned y = 0; y < kGridTiles; ++y)
@@ -348,6 +394,8 @@ inline Stats ReduceGrid(const float* grid)
         {
             const float* a = row + x * 4;
             const float* b = row + (x + kGridTiles) * 4;
+            const float* c = row + (x + 2 * kGridTiles) * 4;
+            const float* d = row + (x + 3 * kGridTiles) * 4;
             const double n = b[3];
 
             if (!(n > 0.0) || !std::isfinite(n))
@@ -360,6 +408,11 @@ inline Stats ReduceGrid(const float* grid)
             sum[4] += b[0] * n;
             sum[5] += b[1] * n;
             sum[6] += b[2] * n;
+            for (int i = 0; i < 4; ++i)
+            {
+                sum[7 + i] += c[i] * n;
+                sum[11 + i] += d[i] * n;
+            }
             pixels += n;
         }
     }
@@ -379,6 +432,14 @@ inline Stats ReduceGrid(const float* grid)
     s.inputChange = (float) (sum[4] / pixels);
     s.shoulder = (float) (sum[5] / pixels);
     s.floor = (float) (sum[6] / pixels);
+    s.chromaIn = (float) (sum[7] / pixels);
+    s.chromaOut = (float) (sum[8] / pixels);
+    s.colourShift = (float) (sum[9] / pixels);
+    s.warmth = (float) (sum[10] / pixels);
+    s.shadowShare = (float) (sum[11] / pixels);
+    s.shadowIn = (float) (sum[12] / pixels);
+    s.shadowOut = (float) (sum[13] / pixels);
+    s.crushed = (float) (sum[14] / pixels);
     return s;
 }
 
@@ -386,7 +447,9 @@ inline bool Finite(const Stats& s)
 {
     return std::isfinite(s.detailRaw) && std::isfinite(s.detailBand) && std::isfinite(s.inputBand) &&
            std::isfinite(s.outputChange) && std::isfinite(s.inputChange) && std::isfinite(s.shoulder) &&
-           std::isfinite(s.floor);
+           std::isfinite(s.floor) && std::isfinite(s.chromaIn) && std::isfinite(s.chromaOut) &&
+           std::isfinite(s.colourShift) && std::isfinite(s.warmth) && std::isfinite(s.shadowShare) &&
+           std::isfinite(s.shadowIn) && std::isfinite(s.shadowOut) && std::isfinite(s.crushed);
 }
 
 struct Ticket
@@ -433,12 +496,23 @@ struct StepResult
     float inputChange = 0.0f;
     float shoulder = 0.0f;
     float floor = 0.0f;
+    float chromaIn = 0.0f;
+    float chromaOut = 0.0f;
+    float colourShift = 0.0f;
+    float warmth = 0.0f;
+    float shadowShare = 0.0f;
+    float shadowIn = 0.0f;
+    float shadowOut = 0.0f;
+    float crushed = 0.0f;
     // Sums of squared deviations of the step's samples (Welford), for each detail measure: how much they spread.
     float spreadRaw = 0.0f;
     float spreadBand = 0.0f;
 
     float Flicker() const { return std::max(outputChange - inputChange, 0.0f); }
-    float Damage() const { return shoulder + floor; }
+    // How much more saturated the output is than the input (0.1 = 10% more chroma; negative is less).
+    float Saturation() const { return chromaIn > 1e-6f ? chromaOut / chromaIn - 1.0f : 0.0f; }
+    // How much darker the model left the shadows than it found them (0.2 = 20% darker; negative is lifted).
+    float ShadowDarkening() const { return shadowIn > 1e-6f ? 1.0f - shadowOut / shadowIn : 0.0f; }
     float DetailOf(Detail d) const { return d == Detail::Raw ? detailRaw : detailBand - inputBand; }
 
     // The standard error of the step's mean detail, from its samples' spread (0 with fewer than two). Its samples are
@@ -450,6 +524,19 @@ struct StepResult
         const float spread = d == Detail::Raw ? spreadRaw : spreadBand;
         return std::sqrt(std::max(spread, 0.0f) / (float) (samples - 1) / (float) samples);
     }
+};
+
+// What one pass over the steps concluded (the result is the current value unless a step clearly won).
+struct PassVerdict
+{
+    float result = 0.0f;
+    bool unsure = false;
+    bool atEdge = false;
+    float bestRaw = 0.0f;
+    float bestBand = 0.0f;
+    // The flat top around the best step: the run of measured steps on either side scoring within flatTolerance of it.
+    float topLo = 0.0f;
+    float topHi = 0.0f;
 };
 
 class Sweep
@@ -465,6 +552,10 @@ class Sweep
         finished_ = false;
         unsure_ = false;
         atEdge_ = false;
+        unrepeated_ = false;
+        pass_ = 0;
+        firstSteps_.clear();
+        first_ = second_ = PassVerdict {};
         stopBlocker_ = Blocker::None;
         unavailable_ = 0;
         step_ = 0;
@@ -517,6 +608,9 @@ class Sweep
         finished_ = false;
         unsure_ = false;
         atEdge_ = false;
+        unrepeated_ = false;
+        pass_ = 0;
+        firstSteps_.clear();
         abort_ = Abort::None;
         steps_.clear();
     }
@@ -614,6 +708,14 @@ class Sweep
             mean(r.inputChange, s.inputChange);
             mean(r.shoulder, s.shoulder);
             mean(r.floor, s.floor);
+            mean(r.chromaIn, s.chromaIn);
+            mean(r.chromaOut, s.chromaOut);
+            mean(r.colourShift, s.colourShift);
+            mean(r.warmth, s.warmth);
+            mean(r.shadowShare, s.shadowShare);
+            mean(r.shadowIn, s.shadowIn);
+            mean(r.shadowOut, s.shadowOut);
+            mean(r.crushed, s.crushed);
             ++r.samples;
 
             // Welford: the means above moved from `before` to the step's DetailOf now.
@@ -676,39 +778,59 @@ class Sweep
     // current value.
     bool Unsure() const { return unsure_; }
 
-    // Finished, but the best step was the first or the last measured one: the real best may lie beyond the range, so
-    // the result is the current value.
+    // Finished, but the best step was the first or the last measured one (in every pass): the real best may lie beyond
+    // the range, so the result is the current value.
     bool AtEdge() const { return atEdge_; }
 
-    // Progress 0..1 for the menu.
+    // Finished, but the passes came to results more than a step apart: none is offered, the result is the current
+    // value (Settings::passes).
+    bool Unrepeated() const { return unrepeated_; }
+
+    // The passes: how many a run makes, which one is on (0-based), and what each concluded -- the first once it is
+    // done (its steps kept for the log; the sweep's own Steps() are the pass on now, or the last), the last once the run
+    // has finished.
+    unsigned Passes() const { return settings_.measureOnly ? 1u : std::max(settings_.passes, 1u); }
+    unsigned Pass() const { return pass_; }
+    const std::vector<StepResult>& FirstPassSteps() const { return firstSteps_; }
+    const PassVerdict& FirstPass() const { return first_; }
+    const PassVerdict& LastPass() const { return second_; }
+
+    // Progress 0..1 for the menu, over every pass.
     float Progress() const
     {
         if (steps_.empty())
             return 0.0f;
         const float per = (float) (settings_.settle + settings_.measure);
         const float first = (float) (SettleOf(0) - settings_.settle);
-        const float done = step_ == 0 ? frameInStep_ : first + step_ * per + frameInStep_;
-        return std::min(1.0f, done / (first + steps_.size() * per));
+        const float perPass = first + steps_.size() * per;
+        const float done = pass_ * perPass + (step_ == 0 ? frameInStep_ : first + step_ * per + frameInStep_);
+        return std::min(1.0f, done / (Passes() * perPass));
     }
 
-    float Score(size_t i, Detail d) const
+    float Score(size_t i, Detail d) const { return ScoreIn(steps_, i, d); }
+
+    // A step's score among `steps` (a pass): its detail against the pass's best, less flicker and damage.
+    float ScoreIn(const std::vector<StepResult>& steps, size_t i, Detail d) const
     {
         float top = 0.0f;
-        for (const StepResult& r : steps_)
+        for (const StepResult& r : steps)
             if (r.samples > 0)
                 top = std::max(top, r.DetailOf(d));
 
-        const StepResult& r = steps_[i];
+        const StepResult& r = steps[i];
         const float scale = top > 1e-9f ? top : 1.0f;
         return std::max(r.DetailOf(d), 0.0f) / scale - settings_.flickerWeight * r.Flicker() / scale -
-               settings_.damageWeight * r.Damage();
+               settings_.damageWeight * r.shoulder - settings_.floorWeight * r.floor -
+               settings_.colourWeight * std::fabs(r.Saturation()) -
+               settings_.shadowWeight * std::max(r.ShadowDarkening(), 0.0f) - settings_.crushWeight * r.crushed;
     }
 
     // The best step's EV under a measure, or the current value when nothing was measured.
-    float BestEv(Detail d) const
+    float BestEv(Detail d) const { return BestEvIn(steps_, d); }
+    float BestEvIn(const std::vector<StepResult>& steps, Detail d) const
     {
-        const int best = BestIndex(d);
-        return best < 0 ? currentEv_ : steps_[(size_t) best].ev;
+        const int best = BestIn(steps, d);
+        return best < 0 ? currentEv_ : steps[(size_t) best].ev;
     }
 
     // The chosen value: the best step under the selected measure, unless the curve is flat around the current value.
@@ -724,11 +846,13 @@ class Sweep
                                                            : settings_.settle;
     }
 
-    int BestIndex(Detail d) const
+    int BestIndex(Detail d) const { return BestIn(steps_, d); }
+
+    int BestIn(const std::vector<StepResult>& steps, Detail d) const
     {
         int best = -1;
-        for (size_t i = 0; i < steps_.size(); ++i)
-            if (steps_[i].samples > 0 && (best < 0 || Score(i, d) > Score((size_t) best, d)))
+        for (size_t i = 0; i < steps.size(); ++i)
+            if (steps[i].samples > 0 && (best < 0 || ScoreIn(steps, i, d) > ScoreIn(steps, (size_t) best, d)))
                 best = (int) i;
         return best;
     }
@@ -785,6 +909,10 @@ class Sweep
         notes_.push_back({ Note::Kind::Restart, steps_[step].ev, band, sceneBand_, restarts_ });
         sceneBand_ = -1.0f;
         std::fill(retries_.begin(), retries_.end(), 0u);
+        // Every pass starts over: the earlier ones measured the other view.
+        pass_ = 0;
+        firstSteps_.clear();
+        first_ = PassVerdict {};
         Rewind(0);
     }
 
@@ -808,6 +936,18 @@ class Sweep
             return;
         }
 
+        // Another pass to go: keep this one's steps and verdict, and sweep the same steps again from the first. Its
+        // measurements come back under a new generation; the view is still checked against the run's first step.
+        if (pass_ + 1 < Passes())
+        {
+            first_ = Judge(steps_);
+            firstSteps_ = steps_;
+            ++pass_;
+            std::fill(retries_.begin(), retries_.end(), 0u);
+            Rewind(0);
+            return;
+        }
+
         running_ = false;
         finished_ = true;
 
@@ -815,17 +955,83 @@ class Sweep
         if (settings_.measureOnly)
             return;
 
+        second_ = Judge(steps_);
+
+        if (pass_ == 0)
+        {
+            first_ = second_;
+            result_ = second_.result;
+            unsure_ = second_.unsure;
+            atEdge_ = second_.atEdge;
+            return;
+        }
+
+        // Every pass must say the same: unsure if either was; a change only if both land within a step of each
+        // other, and then the one nearer the current value (the smaller move).
+        if (first_.unsure || second_.unsure)
+        {
+            unsure_ = true;
+            return;
+        }
+
+        // Or both moved and their flat tops overlap: on a plateau the best step is whichever end the noise favours (The
+        // Witcher 3, 2026-09-30: -2.0, -1.5 and -1.0 EV scored within 0.002, and the passes took -1.0 and -2.0). Then
+        // the result is the point of the overlap nearest the current value. A pass that kept the current value (flat
+        // everywhere) does not agree with one that found a peak: its top is the whole curve and would overlap anything.
+        const float step = settings_.stepEv > 0.01f ? settings_.stepEv : 0.5f;
+        const float lo = std::max(first_.topLo, second_.topLo), hi = std::min(first_.topHi, second_.topHi);
+        const bool close = std::fabs(first_.result - second_.result) <= step + 1e-3f;
+        const bool bothMoved =
+            std::fabs(first_.result - currentEv_) > 1e-4f && std::fabs(second_.result - currentEv_) > 1e-4f;
+        if (!close && (!bothMoved || lo > hi + 1e-3f))
+        {
+            unrepeated_ = true;
+            return;
+        }
+
+        atEdge_ = first_.atEdge && second_.atEdge;
+        if (close)
+            result_ = std::fabs(first_.result - currentEv_) <= std::fabs(second_.result - currentEv_) ? first_.result
+                                                                                                    : second_.result;
+        else
+            result_ = std::clamp(currentEv_, lo, hi);
+    }
+
+    // What one pass's steps say: the best step under the selected measure, unless detail varied no more than the
+    // measurement does on its own (unsure), the best is at the edge, or the curve is flat around the current value.
+    PassVerdict Judge(const std::vector<StepResult>& steps) const
+    {
+        PassVerdict v;
+        v.result = currentEv_;
+        v.bestRaw = BestEvIn(steps, Detail::Raw);
+        v.bestBand = BestEvIn(steps, Detail::BandPass);
+
+        const int best = BestIn(steps, settings_.detail);
+        if (best < 0)
+            return v;
+
+        const float topScore = ScoreIn(steps, (size_t) best, settings_.detail);
+        const auto onTop = [&](size_t i)
+        { return steps[i].samples > 0 && ScoreIn(steps, i, settings_.detail) >= topScore - settings_.flatTolerance; };
+        size_t lo = (size_t) best, hi = (size_t) best;
+        while (lo > 0 && onTop(lo - 1))
+            --lo;
+        while (hi + 1 < steps.size() && onTop(hi + 1))
+            ++hi;
+        v.topLo = steps[lo].ev;
+        v.topHi = steps[hi].ev;
+
         // The step nearest the current value stands for it.
         int nearest = -1;
-        for (size_t i = 0; i < steps_.size(); ++i)
-            if (steps_[i].samples > 0 &&
-                (nearest < 0 || std::fabs(steps_[i].ev - currentEv_) < std::fabs(steps_[(size_t) nearest].ev - currentEv_)))
+        for (size_t i = 0; i < steps.size(); ++i)
+            if (steps[i].samples > 0 &&
+                (nearest < 0 || std::fabs(steps[i].ev - currentEv_) < std::fabs(steps[(size_t) nearest].ev - currentEv_)))
                 nearest = (int) i;
 
         float detailLo = std::numeric_limits<float>::infinity(), detailHi = -std::numeric_limits<float>::infinity();
         float inputLo = std::numeric_limits<float>::infinity(), inputHi = -std::numeric_limits<float>::infinity();
         float meanError = 0.0f;
-        for (const StepResult& r : steps_)
+        for (const StepResult& r : steps)
         {
             if (r.samples == 0)
                 continue;
@@ -835,7 +1041,6 @@ class Sweep
             inputHi = std::max(inputHi, r.inputBand);
             meanError = std::max(meanError, r.MeanError(settings_.detail));
         }
-
         // Unsure when detail varies no more than the measurement does on its own. Two sources, the larger counts: the
         // input's band detail -- the same frame at every step -- spread across the steps; and the least certain step
         // mean, from the spread of its own samples (NR's output can wobble while the game's frame is bit-identical:
@@ -847,14 +1052,14 @@ class Sweep
         const float noise = std::max({ inputHi - inputLo, meanError, settings_.noiseFloor });
         if (detailHi - detailLo <= settings_.unsureNoise * noise)
         {
-            unsure_ = true;
-            return;
+            v.unsure = true;
+            return v;
         }
 
         int firstMeasured = -1, lastMeasured = -1;
-        for (size_t i = 0; i < steps_.size(); ++i)
+        for (size_t i = 0; i < steps.size(); ++i)
         {
-            if (steps_[i].samples == 0)
+            if (steps[i].samples == 0)
                 continue;
             if (firstMeasured < 0)
                 firstMeasured = (int) i;
@@ -863,15 +1068,16 @@ class Sweep
 
         if (best == firstMeasured || best == lastMeasured)
         {
-            atEdge_ = true;
-            return;
+            v.atEdge = true;
+            return v;
         }
 
-        const float bestScore = Score((size_t) best, settings_.detail);
-        const float nearestScore = Score((size_t) nearest, settings_.detail);
+        const float bestScore = ScoreIn(steps, (size_t) best, settings_.detail);
+        const float nearestScore = ScoreIn(steps, (size_t) nearest, settings_.detail);
 
         if (bestScore - nearestScore > settings_.flatTolerance)
-            result_ = steps_[(size_t) best].ev;
+            v.result = steps[(size_t) best].ev;
+        return v;
     }
 
     Settings settings_ {};
@@ -896,6 +1102,10 @@ class Sweep
     bool finished_ = false;
     bool unsure_ = false;
     bool atEdge_ = false;
+    bool unrepeated_ = false;
+    unsigned pass_ = 0;                  // the pass on now, 0-based
+    std::vector<StepResult> firstSteps_; // the first pass's steps, once it is done
+    PassVerdict first_ {}, second_ {};
     Blocker stopBlocker_ = Blocker::None;
     unsigned unavailable_ = 0;
     Abort abort_ = Abort::None;

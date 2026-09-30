@@ -28,6 +28,15 @@ static bool Near(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) 
 
 static const Context kCtx { 2560, 1440, 3, true };
 
+// One pass over the steps: what most checks here are about (the sweep, its scoring, its stops). A shipped run makes
+// Settings::passes of them and must agree with itself; that is checked on its own below.
+static Settings OnePass()
+{
+    Settings s;
+    s.passes = 1;
+    return s;
+}
+
 // A still scene whose detail peaks at `peakEv`: detail falls off with the distance from the peak, no flicker, no damage.
 static Stats Peaked(float ev, float peakEv)
 {
@@ -85,7 +94,7 @@ int main()
     // The steps: -3 .. +4 EV in 0.5 EV steps, 8 settle + 4 measured evaluations each, in ascending order.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         CHECK(s.Running());
         CHECK(s.StepCount() == 15);
 
@@ -93,7 +102,7 @@ int main()
         std::vector<int> measured;
         int n = 0;
 
-        const int total = 15 * 12 + (int) (Settings {}.firstSettle - Settings {}.settle);
+        const int total = 15 * 12 + (int) (OnePass().firstSettle - OnePass().settle);
         while (n < total)
         {
             const Frame f = s.NextFrame(kCtx);
@@ -116,8 +125,8 @@ int main()
             CHECK(m == 4);
         // The measured evaluations of a later step are its last four, after eight to settle.
         Sweep t;
-        t.Start(0.0f, Settings {}, kCtx);
-        for (unsigned i = 0; i < Settings {}.firstSettle + Settings {}.measure; ++i)
+        t.Start(0.0f, OnePass(), kCtx);
+        for (unsigned i = 0; i < OnePass().firstSettle + OnePass().measure; ++i)
             t.NextFrame(kCtx);
         for (int i = 0; i < 8; ++i)
             CHECK(!t.NextFrame(kCtx).measure);
@@ -125,12 +134,12 @@ int main()
     }
 
     // The measured count is even, so Reuse bottleneck's computed/reused alternation is covered equally.
-    CHECK(Settings {}.measure % 2 == 0);
+    CHECK(OnePass().measure % 2 == 0);
 
     // Picks the highest score, with results arriving four evaluations late.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         Run(s, [](float ev) { return Peaked(ev, 2.5f); });
         CHECK(s.Finished());
         CHECK(Near(s.ResultEv(), 2.5f));
@@ -143,7 +152,7 @@ int main()
     for (int lag : { 0, 1, 7 })
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Run(s, [](float ev) { return Peaked(ev, -1.0f); }, lag);
         CHECK(s.Finished());
         CHECK(Near(s.ResultEv(), -1.0f));
@@ -152,7 +161,7 @@ int main()
     // A step with more detail that flickers loses to a stable one.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Run(s, [](float ev) {
             Stats st = Peaked(ev, 1.0f);
             if (Near(ev, 3.0f))
@@ -168,7 +177,7 @@ int main()
 
     // Output change the input explains (animation in the scene) is not flicker. (Below the motion check's reach here.)
     {
-        Settings loose;
+        Settings loose = OnePass();
         loose.motionLimit = 1.0f;
         Sweep s;
         s.Start(0.0f, loose, kCtx);
@@ -189,7 +198,7 @@ int main()
     // Damage (highlights on the shoulder, shadows in the floor) pulls the choice away from the peak.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Run(s, [](float ev) {
             Stats st = Peaked(ev, 4.0f);
             st.shoulder = ev > 2.0f ? 0.5f : 0.0f;
@@ -207,9 +216,9 @@ int main()
             st.detailBand = 1.0f / (1.0f + (ev - 2.0f) * (ev - 2.0f)); // band-pass peaks at +2
             return st;
         };
-        Settings raw;
+        Settings raw = OnePass();
         raw.detail = Detail::Raw;
-        Settings band;
+        Settings band = OnePass();
         band.detail = Detail::BandPass;
         Sweep a, b;
         a.Start(0.0f, raw, kCtx);
@@ -236,7 +245,7 @@ int main()
     {
         // A still scene: the result every retry case below must reproduce.
         Sweep still;
-        still.Start(0.0f, Settings {}, kCtx);
+        still.Start(0.0f, OnePass(), kCtx);
         Run(still, [](float ev) { return Peaked(ev, 1.5f); });
         CHECK(still.Finished() && Near(still.ResultEv(), 1.5f));
 
@@ -245,7 +254,7 @@ int main()
         for (int lag : { 0, 4, 7 })
         {
             Sweep s;
-            s.Start(0.0f, Settings {}, kCtx);
+            s.Start(0.0f, OnePass(), kCtx);
             int moved = 0;
             Run(s, [&moved](float ev) {
                 Stats st = Peaked(ev, 1.5f);
@@ -266,7 +275,7 @@ int main()
         // A step that keeps moving stops the run after motionRetries more tries, and the stop says what it measured.
         {
             Sweep s;
-            s.Start(0.0f, Settings {}, kCtx);
+            s.Start(0.0f, OnePass(), kCtx);
             Run(s, [](float ev) {
                 Stats st = Peaked(ev, 1.5f);
                 if (Near(ev, 1.0f))
@@ -275,7 +284,7 @@ int main()
             });
             CHECK(!s.Finished() && s.AbortReason() == Abort::Motion);
             CHECK(Near(s.LastInputChange(), 0.003f) && s.LastSceneBand() < 0.0f);
-            CHECK(s.TakeNotes().size() == Settings {}.motionRetries);
+            CHECK(s.TakeNotes().size() == OnePass().motionRetries);
             const std::string text = StopText(s);
             CHECK(text.find("0.00300") != std::string::npos && text.find("0.00100") != std::string::npos);
         }
@@ -284,7 +293,7 @@ int main()
         // new view and finds that view's best.
         {
             Sweep s;
-            s.Start(0.0f, Settings {}, kCtx);
+            s.Start(0.0f, OnePass(), kCtx);
             int evaluations = 0;
             Run(s, [&evaluations](float ev) {
                 const bool after = evaluations++ >= 20; // the camera settles elsewhere during the sweep's sixth step
@@ -307,7 +316,7 @@ int main()
         // A view that keeps changing stops the run after sceneRestarts restarts.
         {
             Sweep s;
-            s.Start(0.0f, Settings {}, kCtx);
+            s.Start(0.0f, OnePass(), kCtx);
             int evaluations = 0;
             Run(s, [&evaluations](float ev) {
                 Stats st = Peaked(ev, 1.5f);
@@ -323,7 +332,7 @@ int main()
     // Camera motion aborts.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Run(s, [](float ev) {
             Stats st = Peaked(ev, 1.0f);
             if (ev > 0.0f)
@@ -339,24 +348,24 @@ int main()
         Context c = kCtx;
         c.width = 1920;
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         s.NextFrame(kCtx);
         s.NextFrame(c);
         CHECK(s.AbortReason() == Abort::Resolution);
 
         c = kCtx;
         c.nrEnabled = false;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         s.NextFrame(c);
         CHECK(s.AbortReason() == Abort::NrOff);
 
         c = kCtx;
         c.whitePointSource = 1;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         s.NextFrame(c);
         CHECK(s.AbortReason() == Abort::SourceChanged);
 
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         s.Cancel();
         CHECK(!s.Running() && s.AbortReason() == Abort::Cancelled);
     }
@@ -367,7 +376,7 @@ int main()
         Context c = kCtx;
         c.baseWhitePoint = 2.0f;
         Sweep s;
-        s.Start(0.0f, Settings {}, c);
+        s.Start(0.0f, OnePass(), c);
         CHECK(Near(s.FrozenBase(), 2.0f));
         Context drift = c;
         drift.baseWhitePoint = 2.0f * std::exp2(0.2f);
@@ -380,7 +389,7 @@ int main()
         Sweep u;
         Context unknown = kCtx;
         unknown.baseWhitePoint = 0.0f;
-        u.Start(0.0f, Settings {}, c);
+        u.Start(0.0f, OnePass(), c);
         u.NextFrame(unknown);
         CHECK(u.Running());
     }
@@ -392,8 +401,8 @@ int main()
         Context c = kCtx;
         c.baseWhitePoint = 0.39f;
         Sweep left, right;
-        left.Start(-3.3f, Settings {}, c);
-        right.Start(4.3f, Settings {}, c);
+        left.Start(-3.3f, OnePass(), c);
+        right.Start(4.3f, OnePass(), c);
         CHECK(Near(left.MeasureWhitePoint(), right.MeasureWhitePoint()));
         CHECK(Near(left.MeasureWhitePoint(), 0.39f * TrimForEv(0.0f)));
     }
@@ -401,7 +410,9 @@ int main()
     // Game exposure has its own slider: 0 EV is Trim 1 (the game's exposure as is), and the sweep runs -5.5 .. +2 EV,
     // inside that slider's range, measured at the game's own exposure.
     {
-        const Settings g = GameExposureSettings();
+        Settings g = GameExposureSettings();
+        CHECK(g.passes == 2);
+        g.passes = 1;
         CHECK(Near(g.neutralTrim, 1.0f));
         CHECK(Near(TrimForEv(1.0f, 1.0f), 0.5f) && Near(EvForTrim(0.5f, 1.0f), 1.0f));
         Context c = kCtx;
@@ -416,7 +427,7 @@ int main()
         CHECK(Near(s.MeasureWhitePoint(), 0.7579f));
         CHECK(Near(s.Steps().back().ev, 2.0f));
         // Automatic's defaults are unchanged.
-        CHECK(Near(Settings {}.neutralTrim, 5.0f) && Near(TrimForEv(0.0f), 5.0f));
+        CHECK(Near(OnePass().neutralTrim, 5.0f) && Near(TrimForEv(0.0f), 5.0f));
     }
 
     // The white point of a step: the frozen base times that step's Trim, within the pass's clamp.
@@ -424,26 +435,26 @@ int main()
         Context c = kCtx;
         c.baseWhitePoint = 2.0f;
         Sweep s;
-        s.Start(0.0f, Settings {}, c);
+        s.Start(0.0f, OnePass(), c);
         const Frame f = s.NextFrame(c);
         CHECK(Near(f.ev, -3.0f));
         CHECK(Near(s.WhitePointFor(f.ev), 2.0f * TrimForEv(-3.0f)));
         Context huge = kCtx;
         huge.baseWhitePoint = 1e6f;
         Sweep h;
-        h.Start(0.0f, Settings {}, huge);
+        h.Start(0.0f, OnePass(), huge);
         CHECK(Near(h.WhitePointFor(-3.0f), 4096.0f));
     }
 
     // Stats that arrive after an abort, or with a ticket from an earlier run, are ignored.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Frame f {};
-        for (unsigned i = 0; i <= Settings {}.firstSettle; ++i)
+        for (unsigned i = 0; i <= OnePass().firstSettle; ++i)
             f = s.NextFrame(kCtx);
         CHECK(f.measure);
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         s.AddStats(f.ticket, Peaked(-3.0f, -3.0f));
         CHECK(s.Steps()[0].samples == 0);
     }
@@ -451,7 +462,7 @@ int main()
     // A flat curve keeps the current value: the best is within the tolerance of the step nearest to it.
     {
         Sweep s;
-        s.Start(2.3f, Settings {}, kCtx);
+        s.Start(2.3f, OnePass(), kCtx);
         Run(s, [](float ev) {
             Stats st {};
             st.detailRaw = st.detailBand = 1.0f + (Near(ev, 0.0f) ? 0.01f : 0.0f);
@@ -465,7 +476,7 @@ int main()
     // A clear winner is a change.
     {
         Sweep s;
-        s.Start(2.3f, Settings {}, kCtx);
+        s.Start(2.3f, OnePass(), kCtx);
         Run(s, [](float ev) { return Peaked(ev, -1.0f); });
         CHECK(s.Changed());
     }
@@ -479,7 +490,7 @@ int main()
         CHECK(Near(TrimForEv(-10.0f), DlssNrTrim::kMaxTrim));
         CHECK(Near(EvForTrim(TrimForEv(1.5f)), 1.5f));
 
-        Settings wide;
+        Settings wide = OnePass();
         wide.minEv = -8.0f;
         wide.maxEv = 8.0f;
         Sweep s;
@@ -577,7 +588,7 @@ int main()
     // The paused run is sure: band-pass lands in its flat top (-1.0 .. 0.0 EV), raw at 0.0 EV.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         Run(s, replay(kPaused));
         CHECK(s.Finished());
         CHECK(!s.Unsure());
@@ -607,7 +618,7 @@ int main()
     };
     {
         Sweep s;
-        s.Start(-1.2f, Settings {}, kCtx);
+        s.Start(-1.2f, OnePass(), kCtx);
         Run(s, replay(kEdge));
         CHECK(s.Finished());
         CHECK(s.AtEdge());
@@ -618,11 +629,11 @@ int main()
     // Not at the edge: the still, paused and synthetic peaks inside the range.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         Run(s, replay(kStill));
         CHECK(!s.AtEdge());
         Sweep p;
-        p.Start(2.0f, Settings {}, kCtx);
+        p.Start(2.0f, OnePass(), kCtx);
         Run(p, [](float ev) { return Peaked(ev, 4.0f); });
         CHECK(p.AtEdge()); // the top step is the edge too
     }
@@ -636,8 +647,8 @@ int main()
     // The first step settles longer: it is the one big jump, from the current value to the bottom of the sweep.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
-        for (unsigned i = 0; i < Settings {}.firstSettle; ++i)
+        s.Start(1.5f, OnePass(), kCtx);
+        for (unsigned i = 0; i < OnePass().firstSettle; ++i)
             CHECK(!s.NextFrame(kCtx).measure);
         CHECK(s.NextFrame(kCtx).measure);
     }
@@ -645,7 +656,7 @@ int main()
     // The still run: band-pass +0.0 EV, raw +0.5 EV, confidently, from the +1.5 EV default.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         Run(s, replay(kStill));
         CHECK(s.Finished());
         CHECK(!s.Unsure());
@@ -657,7 +668,7 @@ int main()
     // The moving run aborts on motion with the default limit...
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Run(s, replay(kMoving));
         CHECK(!s.Finished() && s.AbortReason() == Abort::Motion);
     }
@@ -666,7 +677,7 @@ int main()
     // so the real best may lie beyond. (Before, the unsure rule caught it; that rule no longer reads movement --
     // the movement checks are what stop a moving run.)
     {
-        Settings loose;
+        Settings loose = OnePass();
         loose.motionLimit = 1.0f;
         loose.sceneTolerance = 1e9f;
         Sweep s;
@@ -697,7 +708,7 @@ int main()
     };
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         Run(s, replay(kCyberpunk));
         CHECK(s.Finished());
         CHECK(!s.Unsure());
@@ -728,7 +739,7 @@ int main()
     };
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         Run(s, replay(kCyberpunkNoisy));
         CHECK(s.Finished() && s.AtEdge() && Near(s.BestEv(Detail::BandPass), -3.0f) && !s.Changed());
     }
@@ -809,7 +820,7 @@ int main()
                                Case { kPq, 0.5f, 1.0f, "PQ" }, Case { kNeutwo, 0.5f, -0.5f, "Neutwo" } })
         {
             Sweep s;
-            s.Start(c.start, Settings {}, kCtx);
+            s.Start(c.start, OnePass(), kCtx);
             Run(s, replay(c.rows));
             CHECK(s.Finished() && !s.Unsure() && !s.AtEdge());
             CHECK(Near(s.ResultEv(), c.expect));
@@ -820,7 +831,7 @@ int main()
     // same frame measuring differently -- noise, or a scene that is not quite still) keeps the current value.
     {
         Sweep s;
-        s.Start(1.0f, Settings {}, kCtx);
+        s.Start(1.0f, OnePass(), kCtx);
         Run(s, [](float ev) {
             Stats st = Peaked(ev, 2.0f);
             const int step = (int) std::lround((ev + 3.0f) * 2.0f);
@@ -831,7 +842,7 @@ int main()
         CHECK(s.Finished() && s.Unsure() && Near(s.ResultEv(), 1.0f) && !s.Changed());
         // ...and a genuinely flat curve on a perfectly steady input is unsure too (range 0 is within the floor).
         Sweep f;
-        f.Start(1.0f, Settings {}, kCtx);
+        f.Start(1.0f, OnePass(), kCtx);
         Run(f, [](float) {
             Stats st {};
             st.detailRaw = 0.02f;
@@ -845,9 +856,9 @@ int main()
     // The step on screen, for the menu's progress text.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         CHECK(s.StepIndex() == 0 && Near(s.StepEv(), -3.0f));
-        for (unsigned i = 0; i < Settings {}.firstSettle + Settings {}.measure; ++i)
+        for (unsigned i = 0; i < OnePass().firstSettle + OnePass().measure; ++i)
             s.NextFrame(kCtx);
         CHECK(s.StepIndex() == 1 && Near(s.StepEv(), -2.5f));
     }
@@ -862,7 +873,7 @@ int main()
     // A run in which nothing could be measured (every ticket came back empty) is not a result: it aborts.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         Run(s, [](float) {
             Stats none {};
             none.detailBand = NAN;
@@ -875,7 +886,7 @@ int main()
     // The edge is judged over the measured steps: with the first step lost, a best at the second is still the edge.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Run(s, [](float ev) {
             Stats st = Peaked(ev, -2.5f);
             if (Near(ev, -3.0f))
@@ -892,11 +903,11 @@ int main()
         Context c = kCtx;
         c.baseWhitePoint = 2.0f;
         Sweep s;
-        s.Start(0.0f, Settings {}, c);
+        s.Start(0.0f, OnePass(), c);
         Context gone = c;
         gone.blocker = Blocker::NoGameExposure;
         gone.baseWhitePoint = 8.0f; // the fallback base jumps meanwhile
-        for (unsigned i = 0; i < Settings {}.unavailableTolerance; ++i)
+        for (unsigned i = 0; i < OnePass().unavailableTolerance; ++i)
         {
             const Frame f = s.NextFrame(gone);
             CHECK(s.Running());
@@ -904,7 +915,7 @@ int main()
         }
         CHECK(s.StepIndex() == 0);
         CHECK(s.NextFrame(c).override && s.Running()); // back: carries on
-        for (unsigned i = 0; i <= Settings {}.unavailableTolerance; ++i)
+        for (unsigned i = 0; i <= OnePass().unavailableTolerance; ++i)
             s.NextFrame(gone);
         CHECK(!s.Running() && s.AbortReason() == Abort::Unavailable);
         CHECK(s.StopBlocker() == Blocker::NoGameExposure);
@@ -1094,7 +1105,7 @@ int main()
             IdleFrame(run, ms);
             RequestStart(run, 3);
             CHECK(Wanted(run, ms));
-            drive(run, gpu, evaluation, ms, 400, true, started, finished, relearns, ok);
+            drive(run, gpu, evaluation, ms, 800, true, started, finished, relearns, ok);
             CHECK(started == 1 && finished == 1 && relearns == 0);
             CHECK(run.sweep.Finished() && run.sweep.AbortReason() == Abort::None);
             CHECK(gpu.creates == 1 && gpu.releases == 1);
@@ -1105,7 +1116,7 @@ int main()
             CHECK(!ResultLines(run.sweep).empty());
             bool stepLine = false;
             for (const std::string& line : ResultLines(run.sweep))
-                stepLine = stepLine || (line.find("DLSS-NR calibrate: -3.0 EV (trim ") == 0 &&
+                stepLine = stepLine || (line.find("DLSS-NR calibrate: pass 1: -3.0 EV (trim ") == 0 &&
                                         line.find(") n 4 | raw 0.10000 band 0.05000 (out 0.10000 in 0.05000) | flicker ") !=
                                             std::string::npos &&
                                         line.find(" | score raw ") != std::string::npos);
@@ -1248,7 +1259,7 @@ int main()
             RequestStart(run, 3);
             drive(run, gpu, evaluation, ms, 20, true, started, finished, relearns, ok);
             CHECK(HoldsFollow(run, ms)); // a Tune holds Follow's easing
-            drive(run, gpu, evaluation, ms, 400, true, started, finished, relearns, ok);
+            drive(run, gpu, evaluation, ms, 800, true, started, finished, relearns, ok);
             CHECK(run.sweep.Finished() && TuneResultWaiting(run));
             const size_t steps = run.sweep.Steps().size();
             RequestMeasure(run);
@@ -1278,7 +1289,7 @@ int main()
             CHECK(started == 0 && run.startRequested && TuneRunsAfterSr(run, ms));
             drive(run, gpu, evaluation, ms, 1, true, started, finished, relearns, before);
             CHECK(started == 1 && run.sweep.Running() && TuneRunsAfterSr(run, ms));
-            drive(run, gpu, evaluation, ms, 400, true, started, finished, relearns, before);
+            drive(run, gpu, evaluation, ms, 800, true, started, finished, relearns, before);
             CHECK(finished == 1 && run.sweep.Finished() && !run.active.load() && !TuneRunsAfterSr(run, ms));
 
             // Tune again: waits again.
@@ -1472,7 +1483,7 @@ int main()
             uint32_t state = seed * 2654435761u;
             auto noise = [&state]() { state = state * 1664525u + 1013904223u; return ((state >> 8) & 0xFFFF) / 32767.5f - 1.0f; };
             Sweep s;
-            s.Start(1.0f, Settings {}, kCtx);
+            s.Start(1.0f, OnePass(), kCtx);
             Run(s, [&noise](float) {
                 Stats st {};
                 st.inputBand = 0.01f;
@@ -1493,7 +1504,7 @@ int main()
     // than a step: that step settles long (firstSettle), as the first one does.
     {
         Sweep s;
-        s.Start(1.5f, Settings {}, kCtx);
+        s.Start(1.5f, OnePass(), kCtx);
         std::vector<std::pair<int, Ticket>> pending; // due evaluation, ticket
         int n = 0, settleAfterRewind = -1, counting = -1;
         bool rewound = false;
@@ -1526,13 +1537,13 @@ int main()
                     ++i;
             }
         }
-        CHECK(rewound && settleAfterRewind == (int) Settings {}.firstSettle);
+        CHECK(rewound && settleAfterRewind == (int) OnePass().firstSettle);
     }
 
     // Abandoned from outside, then cleared; Clear does nothing to a running sweep.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         s.Clear();
         CHECK(s.Running());
         s.Abandon(Abort::NrOff);
@@ -1553,7 +1564,7 @@ int main()
     // Non-finite stats are dropped, not averaged in.
     {
         Sweep s;
-        s.Start(0.0f, Settings {}, kCtx);
+        s.Start(0.0f, OnePass(), kCtx);
         Run(s, [](float ev) {
             Stats st = Peaked(ev, 0.5f);
             if (Near(ev, -3.0f))
@@ -1563,6 +1574,224 @@ int main()
         CHECK(s.Finished());
         CHECK(Near(s.ResultEv(), 0.5f));
         CHECK(s.Steps()[0].samples == 0);
+    }
+
+    // Colour: of two steps with the same detail, the one whose output keeps the game's saturation wins; 10% more or less
+    // chroma costs 0.05 at the default weight, either way.
+    {
+        Sweep s;
+        s.Start(1.5f, OnePass(), kCtx);
+        Run(s, [](float ev) {
+            Stats st = Peaked(ev, -1.0f);
+            st.chromaIn = 0.05f;
+            // Flat detail from -1.5 to -0.5; -1.0 recolours by 30%, its neighbours by 2%.
+            if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
+                st.detailRaw = st.detailBand = 1.0f;
+            st.chromaOut = 0.05f * (Near(ev, -1.0f) ? 1.3f : 1.02f);
+            return st;
+        });
+        CHECK(s.Finished() && !Near(s.ResultEv(), -1.0f) && Near(std::fabs(s.ResultEv() + 1.0f), 0.5f));
+        StepResult r;
+        r.chromaIn = 0.05f;
+        r.chromaOut = 0.045f;
+        CHECK(Near(r.Saturation(), -0.1f));
+        r.shadowIn = 0.02f;
+        r.shadowOut = 0.015f;
+        CHECK(Near(r.ShadowDarkening(), 0.25f));
+    }
+
+    // Shadows: of steps with the same detail, one that crushes 2% of the picture or darkens its shadows by 30% loses;
+    // lifting them is free.
+    {
+        const auto flatWith = [](auto mark) {
+            Sweep s;
+            s.Start(1.5f, OnePass(), kCtx);
+            Run(s, [&](float ev) {
+                Stats st = Peaked(ev, -1.0f);
+                if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
+                    st.detailRaw = st.detailBand = 1.0f;
+                st.shadowIn = 0.02f;
+                st.shadowOut = 0.02f;
+                mark(ev, st);
+                return st;
+            });
+            return s;
+        };
+        const Sweep crushed = flatWith([](float ev, Stats& st) {
+            if (Near(ev, -1.5f))
+                st.crushed = 0.02f;
+        });
+        CHECK(crushed.Finished() && Near(crushed.ResultEv(), -1.0f));
+        const Sweep darkened = flatWith([](float ev, Stats& st) {
+            if (Near(ev, -1.5f))
+                st.shadowOut = 0.014f;
+        });
+        CHECK(darkened.Finished() && Near(darkened.ResultEv(), -1.0f));
+        const Sweep lifted = flatWith([](float ev, Stats& st) {
+            if (Near(ev, -1.5f))
+                st.shadowOut = 0.03f;
+        });
+        CHECK(lifted.Finished() && Near(lifted.ResultEv(), -1.5f)); // the first of the equal steps, as with nothing
+    }
+
+    // Measure detail in words.
+    {
+        StepResult r;
+        r.detailBand = 0.015f;
+        r.inputBand = 0.010f;
+        r.outputChange = 0.0006f;
+        r.inputChange = 0.0002f;
+        r.chromaIn = 0.05f;
+        r.chromaOut = 0.044f;
+        r.warmth = -0.004f;
+        r.shadowShare = 0.3f;
+        r.shadowIn = 0.02f;
+        r.shadowOut = 0.024f;
+        r.crushed = 0.0f;
+        CHECK(DetailWords(r) == "Detail: 50% more than the game's own");
+        CHECK(FlickerWords(r) == "Flicker: the output moves 3.0x as much as the game's frame between frames (1x = none added)");
+        CHECK(ColourWords(r) == "Colour: 12% less saturated than the game's, slightly cooler");
+        CHECK(ShadowWords(r) == "Shadows (30% of the picture): 20% lifted, nothing crushed");
+        StepResult before = r;
+        before.detailBand = 0.014f;   // added 0.004 -> 0.005: +25%
+        before.outputChange = 0.0006f; // the same flicker
+        before.crushed = 0.004f;
+        CHECK(CompareWords(r, before) == "more detail (+25%), flicker about the same, less crushed (-0.4 points)");
+        StepResult smooth = r;
+        smooth.detailBand = 0.008f;
+        smooth.inputChange = 0.0f;
+        CHECK(DetailWords(smooth) == "Detail: 20% less than the game's own (NR smooths here)");
+        CHECK(FlickerWords(smooth).find("held perfectly still") != std::string::npos);
+    }
+
+    // Two passes by default (Measure detail one): a run offers a change only when they agree.
+    CHECK(Settings {}.passes == 2 && MeasureSettings(3).passes == 1 && MeasureSettings(1).passes == 1);
+
+    // Both passes find -1.0 EV: offered. Twice the evaluations of one pass, and progress reaches 1 only at the end.
+    {
+        Sweep one, two;
+        one.Start(1.5f, OnePass(), kCtx);
+        two.Start(1.5f, Settings {}, kCtx);
+        CHECK(two.Passes() == 2 && two.Pass() == 0);
+        const int oneEvaluations = Run(one, [](float ev) { return Peaked(ev, -1.0f); });
+        float lastProgress = 0.0f;
+        bool monotonic = true, halfway = false;
+        const int twoEvaluations = Run(two, [&](float ev) {
+            monotonic = monotonic && two.Progress() + 1e-4f >= lastProgress;
+            lastProgress = two.Progress();
+            halfway = halfway || (two.Pass() == 1 && two.Progress() > 0.45f && two.Progress() < 0.6f);
+            return Peaked(ev, -1.0f);
+        });
+        CHECK(two.Finished() && !two.Unrepeated() && Near(two.ResultEv(), -1.0f) && two.Changed());
+        CHECK(Near(two.FirstPass().result, -1.0f) && Near(two.LastPass().result, -1.0f));
+        CHECK(two.FirstPassSteps().size() == two.StepCount());
+        CHECK(twoEvaluations > 2 * oneEvaluations - 20 && twoEvaluations < 2 * oneEvaluations + 20);
+        CHECK(monotonic && halfway);
+        CHECK(Near(two.Progress(), 1.0f) || two.Progress() > 0.99f);
+
+        // The log names each pass and what it concluded.
+        bool pass1 = false, pass2 = false, verdict1 = false;
+        for (const std::string& line : ResultLines(two))
+        {
+            pass1 = pass1 || line.find("DLSS-NR calibrate: pass 1: -3.0 EV (trim ") == 0;
+            pass2 = pass2 || line.find("DLSS-NR calibrate: pass 2: -3.0 EV (trim ") == 0;
+            verdict1 = verdict1 || line.find("DLSS-NR calibrate: pass 1: best raw -1.0 EV, best band -1.0 EV, result "
+                                             "-1.00 EV") == 0;
+        }
+        CHECK(pass1 && pass2 && verdict1);
+    }
+
+    // The passes disagree (+2.0 EV, then -1.0 EV -- a run that jumped, as NBA 2K27 and RDR2 did): nothing is offered.
+    {
+        Sweep s;
+        s.Start(0.5f, Settings {}, kCtx);
+        Run(s, [&](float ev) { return Peaked(ev, s.Pass() == 0 ? 2.0f : -1.0f); });
+        CHECK(s.Finished() && s.Unrepeated() && !s.Unsure() && !s.Changed() && Near(s.ResultEv(), 0.5f));
+        CHECK(Near(s.FirstPass().result, 2.0f) && Near(s.LastPass().result, -1.0f));
+        bool said = false;
+        for (const std::string& line : ResultLines(s))
+            said = said || line.find("(did not repeat: pass 1 gave +2.0 EV, pass 2 -1.0 EV, keeps the current value)") !=
+                               std::string::npos;
+        CHECK(said);
+    }
+
+    // One step apart: they agree, and the smaller move is offered (the one nearer the current value).
+    {
+        Sweep s;
+        s.Start(1.5f, Settings {}, kCtx);
+        Run(s, [&](float ev) { return Peaked(ev, s.Pass() == 0 ? -1.0f : -0.5f); });
+        CHECK(s.Finished() && !s.Unrepeated() && Near(s.ResultEv(), -0.5f) && s.Changed());
+    }
+
+    // A pass that keeps the current value (flat) against one that moves: that is disagreement too.
+    {
+        Sweep s;
+        s.Start(2.3f, Settings {}, kCtx);
+        Run(s, [&](float ev) {
+            if (s.Pass() == 0)
+            {
+                Stats st {};
+                st.detailRaw = st.detailBand = 1.0f + (Near(ev, 0.0f) ? 0.01f : 0.0f);
+                st.inputBand = 0.1f;
+                return st;
+            }
+            return Peaked(ev, -1.0f);
+        });
+        CHECK(s.Finished() && s.Unrepeated() && Near(s.ResultEv(), 2.3f) && !s.Changed());
+    }
+
+    // A flat top: -2.0 .. -1.0 EV score alike, and the passes take its two ends (as The Witcher 3 did). They agree; the
+    // result is the end nearer the current value. From on the top, each pass keeps the current value, and so does the run.
+    {
+        const auto plateau = [](float start) {
+            Sweep s;
+            s.Start(start, Settings {}, kCtx);
+            Run(s, [&](float ev) {
+                Stats st = Peaked(ev, -1.5f);
+                if (ev >= -2.0f - 1e-4f && ev <= -1.0f + 1e-4f)
+                    st.detailRaw = st.detailBand = 1.0f + (s.Pass() == 0 ? 0.005f : -0.005f) * (ev + 1.5f);
+                return st;
+            });
+            return s;
+        };
+        const Sweep below = plateau(-2.5f), inside = plateau(-1.5f), above = plateau(1.5f);
+        CHECK(Near(below.FirstPass().result, -1.0f) && Near(below.LastPass().result, -2.0f));
+        CHECK(below.Finished() && !below.Unrepeated() && Near(below.ResultEv(), -2.0f) && below.Changed());
+        CHECK(inside.Finished() && !inside.Unrepeated() && !inside.Changed());
+        CHECK(above.Finished() && !above.Unrepeated() && Near(above.ResultEv(), -1.0f));
+    }
+
+    // An unsure pass makes the run unsure.
+    {
+        Sweep s;
+        s.Start(1.5f, Settings {}, kCtx);
+        Run(s, [&](float ev) {
+            if (s.Pass() == 0)
+                return Peaked(ev, -1.0f);
+            Stats st {};
+            st.detailRaw = st.detailBand = 0.5f;
+            st.inputBand = 0.1f;
+            return st;
+        });
+        CHECK(s.Finished() && s.Unsure() && !s.Unrepeated() && !s.Changed());
+    }
+
+    // The view changes during the second pass: both passes start over (the first measured the other view).
+    {
+        Sweep s;
+        s.Start(1.5f, Settings {}, kCtx);
+        bool sawPass2 = false, backToPass1 = false;
+        int evaluations = 0;
+        Run(s, [&](float ev) {
+            sawPass2 = sawPass2 || s.Pass() == 1;
+            backToPass1 = backToPass1 || (sawPass2 && s.Pass() == 0);
+            Stats st = Peaked(ev, -1.0f);
+            // From the middle of pass 2 on the camera rests elsewhere.
+            st.inputBand = sawPass2 && ++evaluations > 20 ? 0.2f : 0.1f;
+            return st;
+        });
+        CHECK(sawPass2 && backToPass1);
+        CHECK(s.Finished() && Near(s.ResultEv(), -1.0f));
     }
 
     if (fails == 0)

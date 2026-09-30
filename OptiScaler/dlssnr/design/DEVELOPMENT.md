@@ -39,6 +39,9 @@ review for its change type below, against the specs here.**
    `sgsr1_Shader.h` (array `sgsr1_Shader_cso`) is dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL, which
    reproduces the committed binary byte-identically; its SPIR-V (`sgsr1_spv`) uses the dlssnr recipe. SGSR1 mirrors
    `ReversibleMode`, so a new proxy curve means rebuilding it too.
+   `dlssnr_detail_stats_Shader.cso` / `.h` (Tune's statistics) are dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL (the
+   header with `-Fh -Vn dlssnr_detail_stats_cso`), which reproduces the committed binary byte-identically; its SPIR-V
+   uses the dlssnr recipe (`dlssnr_detail_stats_spv`).
 7. **Passthrough is sacred.** Any encode/decode/proxy change must leave already-tone-mapped
    (`gPassthrough != 0`) frames untouched. Both the encode AND every place that reproduces the encode
    (e.g. the matched-residual `fullProxy`) must carry the same passthrough gate. (This is exactly the

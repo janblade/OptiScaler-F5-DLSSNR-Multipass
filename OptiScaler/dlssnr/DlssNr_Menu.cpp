@@ -156,14 +156,6 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
             warning(text);
             ownLine = true;
         }
-        else if (cal.atEdge)
-        {
-            char text[128];
-            snprintf(text, sizeof(text), "Best was at the edge of the range (%+.1f EV), so it may lie beyond. "
-                                         "Your current value is kept.", cal.bestBandEv);
-            warning(text);
-            ownLine = true;
-        }
         else if (cal.changed)
         {
             ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "Best here: %+.1f EV (now %+.1f EV)",
@@ -211,9 +203,9 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                                 cal.resultStepEv, 100.0f * cal.resultSaturation, cal.resultWarmth,
                                 100.0f * cal.resultShadowDarkening, 100.0f * cal.resultCrushed);
 
-            // Not when the run was unsure, its best sat at the edge, or its passes disagreed: those keep the current value
+            // Not when the run was unsure or its passes disagreed: those keep the current value
             // for either measure.
-            ImGui::BeginDisabled(cal.unsure || cal.atEdge || cal.unrepeated);
+            ImGui::BeginDisabled(cal.unsure || cal.unrepeated);
 
             if (ImGui::SmallButton("Apply raw instead##tune"))
             {

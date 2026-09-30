@@ -621,21 +621,66 @@ int main()
         s.Start(-1.2f, OnePass(), kCtx);
         Run(s, replay(kEdge));
         CHECK(s.Finished());
-        CHECK(s.AtEdge());
-        CHECK(Near(s.ResultEv(), -1.2f));
-        CHECK(!s.Changed());
+        // Its best sits at an end of the range; it is offered now rather than discarded.
+        CHECK(s.Changed() && Near(s.ResultEv(), s.BestEv(Detail::BandPass)));
     }
 
-    // Not at the edge: the still, paused and synthetic peaks inside the range.
+    // A peak the sweep brackets, and one that sits on the top step: both are offered.
     {
         Sweep s;
         s.Start(1.5f, OnePass(), kCtx);
         Run(s, replay(kStill));
-        CHECK(!s.AtEdge());
+        CHECK(s.Finished());
         Sweep p;
         p.Start(2.0f, OnePass(), kCtx);
         Run(p, [](float ev) { return Peaked(ev, 4.0f); });
-        CHECK(p.AtEdge()); // the top step is the edge too
+        CHECK(p.Finished() && p.Changed() && Near(p.ResultEv(), 4.0f));
+    }
+
+    // The best step at the end of the range is offered, not thrown away: the range is a limit, not a search window, so
+    // the best step inside it is the best value there is (2026-09-30). It still has to clear what any other result does.
+    {
+        // A score that climbs all the way to the darkest step: the best is the bottom of the range.
+        const auto darkest = [](float ev)
+        {
+            Stats st {};
+            st.detailRaw = st.detailBand = 1.0f - 0.1f * (ev + 3.0f); // 1.0 at -3 EV, falling with brightness
+            st.inputBand = 0.1f;
+            return st;
+        };
+        Sweep s;
+        s.Start(0.0f, OnePass(), kCtx);
+        Run(s, darkest);
+        CHECK(s.Finished() && Near(s.BestEv(Detail::BandPass), -3.0f));
+        CHECK(s.Changed() && Near(s.ResultEv(), -3.0f));
+
+        // The same shape, but so shallow that the bottom step beats the current one by less than flatTolerance: the
+        // current value is kept, as anywhere else on a flat curve.
+        const auto shallow = [](float ev)
+        {
+            Stats st {};
+            st.detailRaw = st.detailBand = 1.0f - 0.0005f * (ev + 3.0f);
+            st.inputBand = 0.1f;
+            return st;
+        };
+        Sweep f;
+        f.Start(0.0f, OnePass(), kCtx);
+        Run(f, shallow);
+        CHECK(f.Finished() && !f.Changed() && Near(f.ResultEv(), 0.0f));
+
+        // Two passes that disagree still keep the current value, edge or not: the first climbs to the bottom step, the
+        // second to the top one.
+        Sweep d;
+        d.Start(0.0f, Settings(), kCtx); // two passes
+        Run(d, [&](float ev)
+            {
+                Stats st {};
+                const float slope = d.Pass() == 0 ? -0.1f : 0.1f; // pass 1 climbs to the bottom step, pass 2 to the top
+                st.detailRaw = st.detailBand = 1.0f + slope * (ev + 3.0f);
+                st.inputBand = 0.1f;
+                return st;
+            });
+        CHECK(d.Finished() && !d.Changed() && Near(d.ResultEv(), 0.0f));
     }
 
     // Follow-game's base against Automatic's own, in EV; unknown (0) never disagrees.
@@ -683,7 +728,7 @@ int main()
         Sweep s;
         s.Start(0.0f, loose, kCtx);
         Run(s, replay(kMoving));
-        CHECK(s.Finished() && s.AtEdge() && !s.Changed());
+        CHECK(s.Finished() && s.Changed() && Near(s.ResultEv(), s.BestEv(Detail::BandPass)));
     }
 
     // Cyberpunk 2077 with ray reconstruction, a still camera (OptiScaler.log, 2026-09-28): the output flickers about 10x
@@ -712,7 +757,7 @@ int main()
         Run(s, replay(kCyberpunk));
         CHECK(s.Finished());
         CHECK(!s.Unsure());
-        CHECK(!s.AtEdge());
+        CHECK(!s.AtLimit()); // its best is bracketed, not at an end
         CHECK(Near(s.ResultEv(), -2.0f));
         CHECK(s.Changed());
     }
@@ -741,7 +786,7 @@ int main()
         Sweep s;
         s.Start(1.5f, OnePass(), kCtx);
         Run(s, replay(kCyberpunkNoisy));
-        CHECK(s.Finished() && s.AtEdge() && Near(s.BestEv(Detail::BandPass), -3.0f) && !s.Changed());
+        CHECK(s.Finished() && Near(s.BestEv(Detail::BandPass), -3.0f) && s.Changed() && Near(s.ResultEv(), -3.0f));
     }
 
     // NBA 2K27 on the HLG and PQ curves and on Neutwo (OptiScaler.log, 2026-09-29 and -30): the flicker rule called the
@@ -822,7 +867,7 @@ int main()
             Sweep s;
             s.Start(c.start, OnePass(), kCtx);
             Run(s, replay(c.rows));
-            CHECK(s.Finished() && !s.Unsure() && !s.AtEdge());
+            CHECK(s.Finished() && !s.Unsure());
             CHECK(Near(s.ResultEv(), c.expect));
         }
     }
@@ -883,7 +928,8 @@ int main()
         CHECK(s.AbortReason() == Abort::NothingMeasured);
     }
 
-    // The edge is judged over the measured steps: with the first step lost, a best at the second is still the edge.
+    // The end of the range is judged over the measured steps: with the first step lost, a best at the second counts as
+    // the end -- and is offered, like any other best.
     {
         Sweep s;
         s.Start(0.0f, OnePass(), kCtx);
@@ -893,8 +939,8 @@ int main()
                 st.detailBand = NAN;
             return st;
         });
-        CHECK(s.Finished() && s.AtEdge());
-        CHECK(Near(s.ResultEv(), 0.0f));
+        CHECK(s.Finished());
+        CHECK(s.AtLimit() && s.Changed() && Near(s.ResultEv(), -2.5f));
     }
 
     // A brief spell of unavailability (the game dropping its exposure texture for a frame) holds the run on the same
@@ -1423,7 +1469,7 @@ int main()
                 ++settled;
             ++n;
         }
-        CHECK(s.Finished() && !s.Changed() && !s.Unsure() && !s.AtEdge());
+        CHECK(s.Finished() && !s.Changed() && !s.Unsure());
         CHECK(settled == 8 && measured == (int) kMeasureEvaluations);
         const StepResult& r = s.Steps()[0];
         CHECK(r.samples == kMeasureEvaluations && Near(r.detailBand, 0.105f) && Near(r.DetailOf(Detail::BandPass), 0.055f));

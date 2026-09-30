@@ -151,7 +151,6 @@ ExposureCalibrationStatus ExposureCalibration()
     {
         s.changed = sweep.Changed();
         s.unsure = sweep.Unsure();
-        s.atEdge = sweep.AtEdge();
         s.unrepeated = sweep.Unrepeated();
         s.firstPassEv = Cal::Tidy(sweep.FirstPass().result);
         s.lastPassEv = Cal::Tidy(sweep.LastPass().result);

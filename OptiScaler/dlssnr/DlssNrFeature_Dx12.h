@@ -169,7 +169,6 @@ struct ExposureCalibrationStatus
     float currentEv = 0.0f;
     bool changed = false; // the chosen value differs from the current one (a flat curve keeps the current)
     bool unsure = false;  // detail varied no more than the measurement's own noise: the current value is kept
-    bool atEdge = false;  // the best step was the first or last: the real best may lie beyond, the current is kept
     bool unrepeated = false; // the passes disagreed (firstPassEv, lastPassEv): the current is kept
     float firstPassEv = 0.0f, lastPassEv = 0.0f;
     float resultEv = 0.0f;

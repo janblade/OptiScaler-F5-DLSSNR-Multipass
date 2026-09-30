@@ -531,7 +531,7 @@ struct PassVerdict
 {
     float result = 0.0f;
     bool unsure = false;
-    bool atEdge = false;
+    bool atLimit = false; // the best step was the first or last measured: for the log, not a reason to refuse
     float bestRaw = 0.0f;
     float bestBand = 0.0f;
     // The flat top around the best step: the run of measured steps on either side scoring within flatTolerance of it.
@@ -551,7 +551,7 @@ class Sweep
         abort_ = Abort::None;
         finished_ = false;
         unsure_ = false;
-        atEdge_ = false;
+        atLimit_ = false;
         unrepeated_ = false;
         pass_ = 0;
         firstSteps_.clear();
@@ -607,7 +607,7 @@ class Sweep
             return;
         finished_ = false;
         unsure_ = false;
-        atEdge_ = false;
+        atLimit_ = false;
         unrepeated_ = false;
         pass_ = 0;
         firstSteps_.clear();
@@ -780,7 +780,8 @@ class Sweep
 
     // Finished, but the best step was the first or the last measured one (in every pass): the real best may lie beyond
     // the range, so the result is the current value.
-    bool AtEdge() const { return atEdge_; }
+    // Whether the result sat at an end of the range. Logged, never a reason to keep the current value.
+    bool AtLimit() const { return atLimit_; }
 
     // Finished, but the passes came to results more than a step apart: none is offered, the result is the current
     // value (Settings::passes).
@@ -962,7 +963,7 @@ class Sweep
             first_ = second_;
             result_ = second_.result;
             unsure_ = second_.unsure;
-            atEdge_ = second_.atEdge;
+            atLimit_ = second_.atLimit;
             return;
         }
 
@@ -989,7 +990,7 @@ class Sweep
             return;
         }
 
-        atEdge_ = first_.atEdge && second_.atEdge;
+        atLimit_ = first_.atLimit && second_.atLimit;
         if (close)
             result_ = std::fabs(first_.result - currentEv_) <= std::fabs(second_.result - currentEv_) ? first_.result
                                                                                                     : second_.result;
@@ -998,7 +999,7 @@ class Sweep
     }
 
     // What one pass's steps say: the best step under the selected measure, unless detail varied no more than the
-    // measurement does on its own (unsure), the best is at the edge, or the curve is flat around the current value.
+    // measurement does on its own (unsure), or the curve is flat around the current value.
     PassVerdict Judge(const std::vector<StepResult>& steps) const
     {
         PassVerdict v;
@@ -1056,6 +1057,12 @@ class Sweep
             return v;
         }
 
+        // A best on the first or last measured step used to be thrown away, on the grounds that the real best might lie
+        // beyond the range. It is taken now (2026-09-30, user): the range is a limit, not a search window, so the best
+        // step inside it is the best value there is to offer, and refusing left Tune silent in any scene whose score
+        // runs all one way -- a Witcher 3 run scored -3.0 EV at 0.322 against the current -0.5 EV at 0.107, repeated in
+        // both passes, and applied nothing. It clears the same bars as any other result: both passes agreeing, and
+        // beating the step nearest the current value by more than flatTolerance. The log still notes where it sat.
         int firstMeasured = -1, lastMeasured = -1;
         for (size_t i = 0; i < steps.size(); ++i)
         {
@@ -1065,12 +1072,7 @@ class Sweep
                 firstMeasured = (int) i;
             lastMeasured = (int) i;
         }
-
-        if (best == firstMeasured || best == lastMeasured)
-        {
-            v.atEdge = true;
-            return v;
-        }
+        v.atLimit = best == firstMeasured || best == lastMeasured;
 
         const float bestScore = ScoreIn(steps, (size_t) best, settings_.detail);
         const float nearestScore = ScoreIn(steps, (size_t) nearest, settings_.detail);
@@ -1101,7 +1103,7 @@ class Sweep
     bool running_ = false;
     bool finished_ = false;
     bool unsure_ = false;
-    bool atEdge_ = false;
+    bool atLimit_ = false;
     bool unrepeated_ = false;
     unsigned pass_ = 0;                  // the pass on now, 0-based
     std::vector<StepResult> firstSteps_; // the first pass's steps, once it is done

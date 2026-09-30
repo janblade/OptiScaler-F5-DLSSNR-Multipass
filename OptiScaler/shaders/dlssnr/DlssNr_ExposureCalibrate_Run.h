@@ -322,7 +322,7 @@ inline std::vector<std::string> ResultLines(const Sweep& s)
     {
         return std::format("best raw {:+.1f} EV, best band {:+.1f} EV, result {:+.2f} EV{}", Tidy(v.bestRaw),
                            Tidy(v.bestBand), Tidy(v.result),
-                           v.unsure ? " (unsure)" : v.atEdge ? " (at the edge)" : "");
+                           v.unsure ? " (unsure)" : v.atLimit ? " (at the end of the range)" : "");
     };
 
     // The passes before the last, then the last (or the one a stop cut short).
@@ -345,8 +345,7 @@ inline std::vector<std::string> ResultLines(const Sweep& s)
             : s.Unrepeated() ? std::format(" (did not repeat: pass 1 gave {:+.1f} EV, pass 2 {:+.1f} EV, keeps the "
                                            "current value)",
                                            Tidy(s.FirstPass().result), Tidy(s.LastPass().result))
-            : s.AtEdge()     ? " (at the edge of the range: the real best may lie beyond, keeps the current value)"
-            : s.Changed()    ? ""
+            : s.Changed()    ? (s.AtLimit() ? " (the best step is the end of the range; offered anyway)" : "")
                              : " (flat: keeps the current value)"));
 
     return lines;

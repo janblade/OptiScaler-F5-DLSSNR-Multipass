@@ -83,9 +83,10 @@ struct Wanted
     float fill = 0.0f;
 };
 
-// Frame generation is built from two real frames; reused frames next to full ones flicker under it (NBA 2K27 with
-// OptiFG, 2026-09-28), and frame generation fills in frames better than moved NR detail does. Returns the reason, or
-// null when none is seen: OptiScaler's own (active, not paused), the game's DLSS-G seen through NGX, or one owned by
+// Frame generation is built from two real frames, so reused frames next to full ones show under it: the edges of the
+// screen flickered in fast motion (NBA 2K27 with OptiFG 2026-09-28, The Witcher 3 2026-09-30) until MotionGuard stopped
+// reuse from running through motion it cannot carry detail across. DetailReuseWithFG (on by default) keeps reuse running
+// here; turned off, any of these reasons stands reuse down. Returns the reason, or null when none is seen: OptiScaler's own (active, not paused), the game's DLSS-G seen through NGX, or one owned by
 // an external module.
 inline const char* FrameGenerationInUse(unsigned long long present, bool vulkan)
 {
@@ -123,7 +124,7 @@ class Host
         // A failed allocation is retried once the option is switched off and on, or at another working size.
         if ((_allocFailed || _extrasFailed) && (!on || f.workWidth != _failedWidth || f.workHeight != _failedHeight))
             _allocFailed = _extrasFailed = false;
-        // Under frame generation it runs only when asked to (A/B testing).
+        // Under frame generation it runs unless asked not to (DetailReuseWithFG, on by default).
         const char* fg = FrameGenerationInUse(f.present, f.vulkan);
         Wanted w;
         w.withFg = fg != nullptr && cfg.DlssNrDetailReuseWithFg.value_or_default();

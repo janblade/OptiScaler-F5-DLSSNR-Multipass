@@ -1570,9 +1570,9 @@ void RenderMenu(Config* config, float menuResScale)
                    "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
                    "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
                    "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
-                   "Turns itself off while frame generation is on (unless Debug > Keep on with frame generation): "
-                   "generated frames are built from real ones, and alternating full and reused frames can flicker "
-                   "under it.");
+                   "It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and "
+                   "reused frames cost differently, so the game's frame times alternate: a limiter just below the "
+                   "average rate evens them out.");
         if (detailReuse)
         {
             // Debugging and A/B testing only; the defaults are the tuned values.
@@ -1599,8 +1599,10 @@ void RenderMenu(Config* config, float menuResScale)
                 bool withFg = config->DlssNrDetailReuseWithFg.value_or_default();
                 if (ImGui::Checkbox("Keep on with frame generation", &withFg))
                     config->DlssNrDetailReuseWithFg = withFg;
-                HelpMarker("Keeps reusing detail while frame generation is on, to compare with it off.\n"
-                           "Can flicker: generated frames are built from pairs of full and reused frames.");
+                HelpMarker("Keeps reusing detail while frame generation is on. On by default: generated frames are "
+                           "built from pairs of full and reused frames, which used to flicker at the edges of the "
+                           "screen in fast motion, and Pause while moving fast is what stopped that.\nTurn it off to "
+                           "have reuse stand aside whenever frame generation is running.");
                 float minFps = config->DlssNrDetailReuseMinFps.value_or_default();
                 if (ImGui::SliderFloat("Minimum frame rate", &minFps, 0.0f, 120.0f, "%.0f fps"))
                     config->DlssNrDetailReuseMinFps = std::clamp(minFps, 0.0f, 240.0f);

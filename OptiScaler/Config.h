@@ -281,8 +281,11 @@ class Config
     // Reused frames: where the moved detail was dropped, how much of the trusted detail of neighbours on the same
     // surface goes in instead (0..1). Stops dropped areas flashing to the un-NR'd image with several passes.
     CustomOptional<float> DlssNrDetailReuseFill { 1.0f };
-    // Keep reusing detail while frame generation is on, for A/B testing. Off by default: it can flicker there.
-    CustomOptional<bool> DlssNrDetailReuseWithFg { false };
+    // Keep reusing detail while frame generation is on. On by default since the edges of the screen stopped flickering
+    // in fast motion (DlssNrDetailReuseMaxDropped): before that, reuse turned itself off here, which also meant its
+    // saving quietly disappeared for anyone using frame generation. Full and reused frames still cost differently, so
+    // the frame times alternate; a limiter just below the average rate evens them out.
+    CustomOptional<bool> DlssNrDetailReuseWithFg { true };
     // Reuse runs only while the rendered frame rate is at least this (0 = no minimum): at low frame rates things move
     // farther between frames and the moved detail trails.
     CustomOptional<float> DlssNrDetailReuseMinFps { 25.0f };

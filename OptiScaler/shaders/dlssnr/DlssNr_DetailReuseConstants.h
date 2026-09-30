@@ -17,6 +17,10 @@ enum DlssNrDetailReuseMode : uint32_t
     DlssNrDetailReuse_Estimate = 5,   // [work]   as Reproject -> u0 moved detail (rgb) and its trust (a)
     DlssNrDetailReuse_Fill = 6,       // [work]   t0 input, t1 estimate, t4 depth guide -> u0 answer, where dropped
                                       //          detail is filled from trusted neighbours on the same surface
+    DlssNrDetailReuse_Coverage = 7,   // [grid]   t1 estimate -> u0 a kCoverage x kCoverage grid, one texel per tile:
+                                      //          (sum of 1 - trust, pixels measured, 0, 0). Dispatched over
+                                      //          kDlssNrDetailReuseCoverageTiles * 8 in each direction, so there is one
+                                      //          8x8 thread group per tile.
 };
 
 // The curve a Replace answer is decoded through (dlssnr.hlsl: Neutwo + replace, balanced + replace). None for the
@@ -66,3 +70,8 @@ constexpr float kDlssNrDetailReuseClipGamma = 1.25f;
 constexpr float kDlssNrDetailReuseClipFalloff = 1.0f;
 constexpr float kDlssNrDetailReuseSigmaFloor = 0.01f;
 constexpr float kDlssNrDetailReuseFillRadius1080p = 24.0f; // scaled with the working size
+
+// The Coverage grid: one texel per tile, kept small because it is read back to the CPU every measured frame. 32x32
+// tiles are enough for a share of the frame, and let the host see where the picture was dropped if that is ever wanted.
+// The shader has the same number (kCoverageTiles in dlssnr_detail_reuse.hlsl); the WARP test checks the two agree.
+constexpr unsigned int kDlssNrDetailReuseCoverageTiles = 32;

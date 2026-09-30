@@ -435,6 +435,50 @@ void Fill(uint2 p)
 }
 
 // Work size: this frame's vectors as a uv displacement, so the next frame reads them right after a render-size change.
+// How much of this frame arrived with no detail to move (DlssNrDetailReuse::MotionGuard, dlssnr/DlssNrDetailReuse.h):
+// the moved detail's trust summed over a tile of the frame, one 8x8 thread group per tile. Every second pixel in each
+// direction is measured, which is ample for a share. Written as sums rather than means, so the host can add tiles of
+// unequal size exactly. Reads the estimate the same way Fill does: anything not finite is no detail at all.
+static const uint kCoverageTiles = 32; // = kDlssNrDetailReuseCoverageTiles (DlssNr_DetailReuseConstants.h)
+
+groupshared float2 gCoverage[64];
+
+void Coverage(uint2 tile, uint2 lanePos)
+{
+    // The tiles partition the frame exactly: no pixel is measured twice and none is missed. A frame narrower than the
+    // grid leaves the last tiles empty (x0 == x1) rather than letting neighbours overlap, which would weight some
+    // columns double and bias the share.
+    const uint lane = lanePos.y * 8u + lanePos.x;
+    const uint x0 = min((tile.x * workWidth) / kCoverageTiles, workWidth);
+    const uint x1 = min(((tile.x + 1u) * workWidth) / kCoverageTiles, workWidth);
+    const uint y0 = min((tile.y * workHeight) / kCoverageTiles, workHeight);
+    const uint y1 = min(((tile.y + 1u) * workHeight) / kCoverageTiles, workHeight);
+
+    float2 sum = 0.0; // dropped (1 - trust), pixels measured
+    [loop] for (uint y = y0 + lanePos.y * 2u; y < y1; y += 16u)
+    {
+        [loop] for (uint x = x0 + lanePos.x * 2u; x < x1; x += 16u)
+        {
+            const float4 estimate = t1.Load(int3(x, y, 0));
+            const float trust = Finite3(estimate.rgb) && isfinite(estimate.a) ? saturate(estimate.a) : 0.0;
+            sum += float2(1.0 - trust, 1.0);
+        }
+    }
+
+    gCoverage[lane] = sum;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll] for (uint stride = 32u; stride > 0u; stride >>= 1u)
+    {
+        if (lane < stride)
+            gCoverage[lane] += gCoverage[lane + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (lane == 0u)
+        u0[tile] = float4(gCoverage[0].x, gCoverage[0].y, 0.0, 0.0);
+}
+
 void SaveMotion(uint2 p)
 {
     const float2 displacement = UvDisplacement(RawMotion(WorkUv(p)));
@@ -466,9 +510,18 @@ void Compose(uint2 q)
 }
 
 [numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
     const uint2 p = id.xy;
+    // Before the bounds test below: a whole group reduces one tile together, so every one of its threads has to reach
+    // the barriers in Coverage.
+    if (mode == 7)
+    {
+        if (groupId.x < kCoverageTiles && groupId.y < kCoverageTiles)
+            Coverage(groupId.xy, groupThreadId.xy);
+        return;
+    }
+
     if (mode == 3)
     {
         if (p.x < motionWidth && p.y < motionHeight)

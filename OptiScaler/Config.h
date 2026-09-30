@@ -286,6 +286,12 @@ class Config
     // Reuse runs only while the rendered frame rate is at least this (0 = no minimum): at low frame rates things move
     // farther between frames and the moved detail trails.
     CustomOptional<float> DlssNrDetailReuseMinFps { 25.0f };
+    // Reuse pauses while more than this much of the picture (percent) arrives with no detail to move -- running or
+    // turning fast brings in more from off-screen than Fill reaches into, and those frames flicker at the edges. It
+    // comes back once the share has stayed at or under this for 0.3 s. 0 = never paused. Above 50 nothing would ever
+    // pause, so that is the top of the range. (DlssNrDetailReuse::MotionGuard; the default is from in-game
+    // measurements: a Witcher 3 run measured 3% while calm and 21% while running.)
+    CustomOptional<float> DlssNrDetailReuseMaxDropped { 10.0f };
     CustomOptional<bool> DlssNrResidualFgApproxCamera { false }; // forced off, as DlssNrResidualFg
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.

@@ -21,6 +21,7 @@
 #include <cmath>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace DlssNrDetailReuse
 {
@@ -75,7 +76,9 @@ struct Wanted
 {
     bool wanted = false;
     bool keep = false;
-    bool withFg = false; // kept on under frame generation (A/B testing)
+    bool withFg = false;  // kept on under frame generation (A/B testing)
+    bool measure = false; // measure how much of the frame had no detail to move (MotionGuard is on)
+    bool hold = false;    // that measurement says the picture is moving too fast: run the model this frame
     float steady = 0.0f;
     float fill = 0.0f;
 };
@@ -132,6 +135,13 @@ class Host
                                      : 0.0;
         _lastNrFrame = now;
         const bool fastEnough = _rateGate.Update(sinceLast, cfg.DlssNrDetailReuseMinFps.value_or_default());
+        // How much of the picture arrived with no detail to move, from the GPU a few frames ago (RecordDropped). Read
+        // once: a frame with no new reading keeps the guard's state.
+        const float maxDropped = std::clamp(cfg.DlssNrDetailReuseMaxDropped.value_or_default(), 0.0f, 100.0f) / 100.0f;
+        w.measure = maxDropped > 0.0f;
+        w.hold = _motionGuard.Update(std::exchange(_dropped, -1.0f), maxDropped, sinceLast);
+        if (!w.measure)
+            _droppedLast = -1.0f; // nothing is being measured: the menu must not show an old reading
         const char* whyNot = nullptr;
         if (f.beforeUpscale)
             whyNot = "unavailable while NR runs before SR";
@@ -156,6 +166,8 @@ class Host
             _loggedWhy = state;
         }
 
+        // Held off while the picture moves too fast: not logged as a state, it comes and goes with the motion (the
+        // menu shows it, and the frame counts carry it).
         w.steady = std::clamp(cfg.DlssNrDetailReuseSteady.value_or_default(), 0.0f, 1.0f);
         w.fill = std::clamp(cfg.DlssNrDetailReuseFill.value_or_default(), 0.0f, 1.0f);
         // Held off for now (frame generation, which often pauses and resumes, or the frame rate): the textures stay a
@@ -188,6 +200,7 @@ class Host
         facts.enabled = active;
         facts.reset = f.modelReset;
         facts.blocked = f.blocked;
+        facts.hold = w.hold;
         // Without frame generation NR runs on every present, so any skipped present is a gap. With it, the present
         // counter can also count generated frames (up to 3 per real one with multi frame generation).
         facts.frame = f.frameNumber;
@@ -252,9 +265,43 @@ class Host
 
     void RecordGpuTime(double ms) { _gpuRecent[_gpuRecentCount++ % 16] = ms; }
 
+    // The share of a measured frame (0..1) that had no detail to move, read back from the GPU. Several may arrive
+    // between two frames: the largest is kept, since one flickering frame is seen. Summed up for the log, which speaks
+    // every kDroppedLogSeconds and only about that window, so a threshold can be chosen from real play without the
+    // line becoming spam (the reuse status line next to it is every ~10 s too).
+    void RecordDropped(float share)
+    {
+        if (!(share >= 0.0f) || !(share <= 1.0f))
+            return;
+        _dropped = std::max(_dropped, share);
+        _droppedLast = share;
+        _droppedLow = _droppedSeen ? std::min(_droppedLow, share) : share;
+        _droppedHigh = _droppedSeen ? std::max(_droppedHigh, share) : share;
+        _droppedSum += share;
+        ++_droppedSeen;
+        const unsigned long long held = cadence.Held();
+        const auto now = std::chrono::steady_clock::now();
+        if (_droppedLogged.time_since_epoch().count() == 0)
+        {
+            _droppedLogged = now;
+            _droppedHeld = held;
+        }
+        else if (std::chrono::duration<double>(now - _droppedLogged).count() >= kDroppedLogSeconds)
+        {
+            LOG_INFO("{}: over the last {:.0f}s, {:.1f}% of the picture had no detail to move on average of {} measured "
+                     "frames ({:.1f}% to {:.1f}%); reuse paused on {} of them",
+                     _logName, kDroppedLogSeconds, 100.0 * _droppedSum / _droppedSeen, _droppedSeen,
+                     100.0 * _droppedLow, 100.0 * _droppedHigh, held - _droppedHeld);
+            _droppedLogged = now;
+            _droppedHeld = held;
+            _droppedSeen = 0;
+            _droppedSum = 0.0;
+        }
+    }
+
     DlssNr::DetailReuseInfo Status() const
     {
-        DlssNr::DetailReuseInfo status { cadence.Full(), cadence.Reused(), cadence.Fallback(), _why };
+        DlssNr::DetailReuseInfo status { cadence.Full(), cadence.Reused(), cadence.Fallback(), cadence.Held(), _why };
         const unsigned int count = std::min(_gpuRecentCount, 16u);
         for (unsigned int i = 0; i < count; ++i)
         {
@@ -264,6 +311,8 @@ class Host
         }
         status.active = _activeLast;
         status.baseFps = _rateGate.Fps();
+        status.holding = _motionGuard.Holding();
+        status.dropped = _droppedLast;
         return status;
     }
 
@@ -284,6 +333,13 @@ class Host
     {
         _allocFailed = _extrasFailed = _modelSkipped = _activeLast = false;
         _failedWidth = _failedHeight = _gatedFrames = 0;
+        _dropped = _droppedLast = -1.0f;
+        _droppedSeen = 0;
+        _droppedHeld = 0;
+        _droppedSum = 0.0;
+        _droppedLogged = {};
+        _lastNrFrame = {}; // the next frame measures no interval, rather than the whole time NR was away
+        _motionGuard = {};
         cadence.Drop();
         std::lock_guard<std::mutex> lock(_publishedMutex);
         _published = {};
@@ -313,6 +369,15 @@ class Host
     bool _activeLast = false;
     unsigned int _gatedFrames = 0; // NR frames in a row with reuse held off for now (frame generation, low frame rate)
     FrameRateGate _rateGate;
+    MotionGuard _motionGuard;
+    float _dropped = -1.0f;     // this frame's reading for the guard, taken once (negative: none)
+    float _droppedLast = -1.0f; // the newest reading, for the menu
+    float _droppedLow = 0.0f, _droppedHigh = 0.0f;
+    double _droppedSum = 0.0;
+    unsigned int _droppedSeen = 0;
+    unsigned long long _droppedHeld = 0; // Held() when the window started, so the line counts that window only
+    std::chrono::steady_clock::time_point _droppedLogged {};
+    static constexpr double kDroppedLogSeconds = 10.0;
     std::chrono::steady_clock::time_point _lastNrFrame {};
     std::string _why;
     std::string _loggedWhy;

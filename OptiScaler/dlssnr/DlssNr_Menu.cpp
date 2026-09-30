@@ -1565,6 +1565,10 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
                    "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
                    "any pass count. Detail can pop where objects move and reveal new areas.\n"
+                   "Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to "
+                   "move times how much the model changes the picture, and passes build on each other, so with two or "
+                   "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
+                   "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
                    "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
                    "Turns itself off while frame generation is on (unless Debug > Keep on with frame generation): "
                    "generated frames are built from real ones, and alternating full and reused frames can flicker "
@@ -1604,6 +1608,17 @@ void RenderMenu(Config* config, float menuResScale)
                            "below it every frame runs the model. At low frame rates things move farther between "
                            "frames and the moved detail trails around moving bodies.\nComes back 15% above the "
                            "minimum. 0 = no minimum. Default 25.");
+                float maxDropped = config->DlssNrDetailReuseMaxDropped.value_or_default();
+                if (ImGui::SliderFloat("Pause while moving fast", &maxDropped, 0.0f, 50.0f, "%.0f%% dropped"))
+                    config->DlssNrDetailReuseMaxDropped = std::clamp(maxDropped, 0.0f, 50.0f);
+                HelpMarker("Detail can only be moved to where the picture already was: what comes in from off-screen, "
+                           "and what a moving body uncovers, has none, and Fill reaches only a few dozen pixels into "
+                           "it.\nRunning or turning fast brings in more than that every frame, so the edges of the "
+                           "screen flicker between the model's picture and the game's own. Above this share of the "
+                           "picture, every frame runs the model, until the share has stayed at or under it for a third "
+                           "of a second.\nThe frames it gives up are the ones reuse looked wrong on. The share is "
+                           "measured on the GPU, so the pause starts two or three frames into a fast turn (more on "
+                           "Vulkan): the first frames of it still flicker.\n0 = never paused. Default 10%.");
                 ImGui::TreePop();
             }
             const auto& status = detailReuseStatus;
@@ -1613,6 +1628,17 @@ void RenderMenu(Config* config, float menuResScale)
             {
                 ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu   Rendered: %.0f fps", status.full,
                             status.reused, status.fallback, status.baseFps);
+                if (status.held > 0 || status.holding)
+                {
+                    if (status.holding)
+                        ImGui::TextUnformatted("Reuse: paused while moving fast");
+                    if (status.dropped >= 0.0f)
+                        ImGui::TextDisabled("%.0f%% of the last measured frame had no detail to move; paused on %llu "
+                                            "frames so far",
+                                            100.0f * status.dropped, status.held);
+                    else
+                        ImGui::TextDisabled("paused on %llu frames so far", status.held);
+                }
                 if (status.heavyMs > 0.0)
                 {
                     ImGui::Text("NR GPU time per frame: %.2f ms on average, %.2f to %.2f ms", status.averageMs,

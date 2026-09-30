@@ -374,6 +374,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrDetailReuseFill.set_from_config(readFloat("DlssNr", "DetailReuseFill"));
             DlssNrDetailReuseWithFg.set_from_config(readBool("DlssNr", "DetailReuseWithFG"));
             DlssNrDetailReuseMinFps.set_from_config(readFloat("DlssNr", "DetailReuseMinFps"));
+            DlssNrDetailReuseMaxDropped.set_from_config(readFloat("DlssNr", "DetailReuseMaxDropped"));
+            if (DlssNrDetailReuseMaxDropped.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseMaxDropped.value()) || DlssNrDetailReuseMaxDropped.value() < 0.0f ||
+                 DlssNrDetailReuseMaxDropped.value() > 50.0f))
+                DlssNrDetailReuseMaxDropped = std::isfinite(DlssNrDetailReuseMaxDropped.value())
+                                                  ? std::clamp(DlssNrDetailReuseMaxDropped.value(), 0.0f, 50.0f)
+                                                  : 10.0f;
             if (DlssNrDetailReuseMinFps.has_value() &&
                 (!std::isfinite(DlssNrDetailReuseMinFps.value()) || DlssNrDetailReuseMinFps.value() < 0.0f ||
                  DlssNrDetailReuseMinFps.value() > 240.0f))
@@ -1356,6 +1363,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(Instance()->DlssNrDetailReuseFill.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseMaxDropped", GetFloatValue(Instance()->DlssNrDetailReuseMaxDropped.value_for_config()).c_str());
     {
         auto toggle = Instance()->DlssNrToggleKey.value_for_config();
         ini.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());

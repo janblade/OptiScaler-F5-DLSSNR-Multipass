@@ -57,6 +57,34 @@ OwnedImage estimate;   // work size, RGBA16F: moved detail with its trust (Fill 
 OwnedImage steadied;   // work size, the answers' format: the steadied answer (Steady)
 unsigned int workWidth = 0, workHeight = 0;
 
+// How much of a frame arrived with no detail to move, for DlssNrDetailReuse::MotionGuard: the Coverage pass sums the
+// trust over a small grid, copied into one of a ring of host-visible buffers and read kRetireFrames NR frames later --
+// the same wait this file already uses for anything a frame in flight may still be reading. There is no submission of
+// ours to hang a fence on here, so this is both simpler and slower to react than D3D12's fence: the pause starts about
+// kRetireFrames rendered frames (a quarter of a second at 30 fps) after the motion does, where D3D12 takes two or
+// three. One slot per frame of that wait, so every frame still gets a reading and the guard's resume wait is the 0.3 s
+// it is documented as; fewer slots would halve the rate of readings and double the wait.
+constexpr unsigned int kCoverageTiles = kDlssNrDetailReuseCoverageTiles;
+constexpr unsigned int kCoverageBytes = kCoverageTiles * kCoverageTiles * 2 * sizeof(float);
+constexpr unsigned int kCoverageSlots = 9; // one per frame of the wait; kRetireFrames is declared below, so the two
+                                           // are tied together by a static_assert there
+
+OwnedImage coverage;            // kCoverageTiles^2, RG32F: (sum of 1 - trust, pixels measured) per tile
+bool measureWithSteady = false; // a held frame whose steadiness pass carries the coverage measurement
+
+struct CoverageSlot
+{
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void* mapped = nullptr;
+    unsigned long long due = 0; // the NR frame from which it may be read
+    bool pending = false;
+};
+
+CoverageSlot coverageSlots[kCoverageSlots];
+unsigned int coverageNext = 0;
+bool coverageFailed = false; // the grid or its buffers could not be made: measure no more, but leave Fill alone
+
 // A depth-only view of the game's depth image, when the view the game gave NGX covers stencil too: a view with both
 // aspects cannot be sampled (RDR2: D32_SFLOAT_S8_UINT, depth and stencil -- read as it was, the depth test saw garbage
 // and dropped nearly every pixel). Only the view is ours (image and memory stay null, so DestroyImage frees just it).
@@ -68,6 +96,8 @@ bool depthLogged = false, depthWarned = false;
 
 // Images a frame still in flight may read, destroyed once that many NR frames have gone by.
 constexpr unsigned long long kRetireFrames = 8;
+static_assert(kCoverageSlots == kRetireFrames + 1, "one coverage readback slot per frame of the wait, so every frame "
+                                                  "still gets a reading");
 struct Retired
 {
     OwnedImage image;
@@ -102,6 +132,117 @@ void RetireExtras()
     Retire(steadied);
 }
 
+// A copy into a coverage buffer may be in flight, so the buffers go the way the images do: put aside now, unmapped and
+// destroyed once kRetireFrames NR frames have gone by (as DlssNr_ExposureCalibrate_Vk.inl retires its own readbacks).
+struct RetiredBuffer
+{
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    bool mapped = false;
+    unsigned long long at = 0;
+};
+std::vector<RetiredBuffer> retiredBuffers;
+
+void DestroyRetiredBuffers(bool all)
+{
+    for (auto it = retiredBuffers.begin(); it != retiredBuffers.end();)
+    {
+        if (all || g_vk.frames >= it->at)
+        {
+            if (it->mapped && it->memory != VK_NULL_HANDLE)
+                vkUnmapMemory(g_vk.device, it->memory);
+            if (it->buffer != VK_NULL_HANDLE)
+                vkDestroyBuffer(g_vk.device, it->buffer, nullptr);
+            if (it->memory != VK_NULL_HANDLE)
+                vkFreeMemory(g_vk.device, it->memory, nullptr);
+            it = retiredBuffers.erase(it);
+        }
+        else
+            ++it;
+    }
+}
+
+void RetireCoverageBuffers()
+{
+    for (CoverageSlot& slot : coverageSlots)
+    {
+        if (slot.buffer != VK_NULL_HANDLE || slot.memory != VK_NULL_HANDLE)
+            retiredBuffers.push_back({ slot.buffer, slot.memory, slot.mapped != nullptr, g_vk.frames + kRetireFrames });
+        slot = CoverageSlot {};
+    }
+    coverageNext = 0;
+}
+
+// Built the first frame the measurement is wanted; without it reuse simply never pauses. Any slots from before are put
+// aside first: overwriting their handles would leak them, and a slot still marked pending would be read as if the new,
+// unwritten buffer held a measurement.
+bool MakeCoverage(const Frame& f)
+{
+    RetireCoverageBuffers();
+    if (!CreateImage(coverage, kCoverageTiles, kCoverageTiles, VK_FORMAT_R32G32_SFLOAT, true))
+        return false;
+
+    for (CoverageSlot& slot : coverageSlots)
+    {
+        VkBufferCreateInfo info {};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        info.size = kCoverageBytes;
+        info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(f.device, &info, nullptr, &slot.buffer) != VK_SUCCESS)
+        {
+            slot.buffer = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkMemoryRequirements req {};
+        vkGetBufferMemoryRequirements(f.device, slot.buffer, &req);
+
+        VkMemoryAllocateInfo alloc {};
+        alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc.allocationSize = req.size;
+        alloc.memoryTypeIndex = FindMemoryTypeIndex(
+            req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (alloc.memoryTypeIndex == UINT32_MAX ||
+            vkAllocateMemory(f.device, &alloc, nullptr, &slot.memory) != VK_SUCCESS)
+        {
+            slot.memory = VK_NULL_HANDLE;
+            return false;
+        }
+        if (vkBindBufferMemory(f.device, slot.buffer, slot.memory, 0) != VK_SUCCESS ||
+            vkMapMemory(f.device, slot.memory, 0, kCoverageBytes, 0, &slot.mapped) != VK_SUCCESS)
+        {
+            slot.mapped = nullptr;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Every slot whose copy is certainly done: the share of that frame with no detail to move, to the guard.
+void CollectCoverage()
+{
+    for (CoverageSlot& slot : coverageSlots)
+    {
+        if (!slot.pending || slot.mapped == nullptr || g_vk.frames < slot.due)
+            continue;
+        const auto* tiles = static_cast<const float*>(slot.mapped);
+        double dropped = 0.0, pixels = 0.0;
+        for (unsigned int i = 0; i < kCoverageTiles * kCoverageTiles; ++i)
+        {
+            // A tile whose numbers are not finite is left out rather than poisoning the frame's share.
+            if (std::isfinite(tiles[2 * i]) && std::isfinite(tiles[2 * i + 1]))
+            {
+                dropped += tiles[2 * i];
+                pixels += tiles[2 * i + 1];
+            }
+        }
+        if (pixels > 0.0)
+            host.RecordDropped((float) std::clamp(dropped / pixels, 0.0, 1.0));
+        slot.pending = false;
+    }
+}
+
 void RetireAll()
 {
     for (unsigned int i = 0; i < 2; ++i)
@@ -112,6 +253,8 @@ void RetireAll()
     Retire(prevMotion);
     Retire(composed);
     RetireExtras();
+    Retire(coverage);
+    RetireCoverageBuffers();
     workWidth = workHeight = 0;
     host.cadence.Drop();
 }
@@ -146,7 +289,7 @@ const char* ShaderReady(const Frame& f)
 
 // Allocates or retires the images for this frame. Returns whether reuse can run. keep: reuse is held off for now
 // (frame generation, the frame rate), so the images stay.
-bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
+bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill, bool measure)
 {
     if (wanted && (!detail[0].Valid() || workWidth != f.workWidth || workHeight != f.workHeight))
     {
@@ -193,7 +336,23 @@ bool Prepare(const Frame& f, bool wanted, bool keep, float steady, float fill)
         }
     }
 
-    const bool needEstimate = steady > 0.0f || fill > 0.0f;
+    // The coverage grid and its readback ring, only while the pause on fast motion is on.
+    // A failure here disables the measurement alone: host.AllocationFailed would also turn off Fill and steadiness,
+    // which share the estimate image, and losing fill is a visible loss for a measurement nobody asked for.
+    if (measure && !coverage.Valid() && !coverageFailed && !MakeCoverage(f))
+    {
+        Retire(coverage);
+        RetireCoverageBuffers();
+        coverageFailed = true;
+        LOG_WARN("DLSS-NR Vulkan detail reuse: could not allocate the coverage grid; it will not pause on fast motion");
+    }
+    else if (!measure && coverage.Valid())
+    {
+        Retire(coverage);
+        RetireCoverageBuffers();
+    }
+
+    const bool needEstimate = steady > 0.0f || fill > 0.0f || (measure && coverage.Valid());
     if (needEstimate && !estimate.Valid() && !host.ExtrasFailed())
     {
         if (!CreateImage(estimate, f.workWidth, f.workHeight, VK_FORMAT_R16G16B16A16_SFLOAT, false))
@@ -306,8 +465,58 @@ bool Run(const Frame& f, DlssNrDetailReuseMode mode, unsigned int width, unsigne
     return u0 != VK_NULL_HANDLE && pass->Dispatch(f.cmd, host.params, width, height, reads, u0, u1);
 }
 
-// The moved detail with its trust into `estimate`, then `mode` (Fill or Steady) from it into `target`.
-bool EstimateThen(const Frame& f, DlssNrDetailReuseMode mode, OwnedImage* second, OwnedImage* target)
+// How much of the frame the estimate has no detail for, into the grid and on to a readback slot. The estimate must be
+// readable.
+void MeasureCoverage(const Frame& f)
+{
+    if (!coverage.Valid())
+        return;
+    const DlssNrDetailReuse_Vk::Read reads[5] = { {}, Own(f, &estimate), {}, {}, {} };
+    // One 8x8 thread group per tile of the grid, whatever the working size.
+    const unsigned int threads = kCoverageTiles * 8;
+    if (!Run(f, DlssNrDetailReuse_Coverage, threads, threads, reads, &coverage, nullptr))
+        return;
+
+    CoverageSlot* slot = nullptr;
+    for (unsigned int i = 0; i < kCoverageSlots; ++i)
+    {
+        CoverageSlot& candidate = coverageSlots[(coverageNext + i) % kCoverageSlots];
+        if (!candidate.pending && candidate.mapped != nullptr)
+        {
+            slot = &candidate;
+            coverageNext = (coverageNext + i + 1) % kCoverageSlots;
+            break;
+        }
+    }
+    if (slot == nullptr) // every slot waiting: this frame is not measured, which the guard reads as no reading
+        return;
+
+    Transition(f.cmd, coverage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    VkBufferImageCopy region {};
+    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageExtent = { kCoverageTiles, kCoverageTiles, 1 };
+    vkCmdCopyImageToBuffer(f.cmd, coverage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot->buffer, 1, &region);
+
+    VkBufferMemoryBarrier toHost {};
+    toHost.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.buffer = slot->buffer;
+    toHost.offset = 0;
+    toHost.size = kCoverageBytes;
+    vkCmdPipelineBarrier(f.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &toHost, 0,
+                         nullptr);
+
+    slot->due = g_vk.frames + kRetireFrames;
+    slot->pending = true;
+}
+
+// The moved detail with its trust into `estimate`, then `mode` (Fill or Steady) from it into `target`. measure: also
+// read off how much of the frame had no detail to move, while the estimate is readable anyway.
+bool EstimateThen(const Frame& f, DlssNrDetailReuseMode mode, OwnedImage* second, OwnedImage* target, bool measure)
 {
     {
         const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, &detail[cur]),
@@ -315,9 +524,23 @@ bool EstimateThen(const Frame& f, DlssNrDetailReuseMode mode, OwnedImage* second
         if (!Run(f, DlssNrDetailReuse_Estimate, f.workWidth, f.workHeight, reads, &estimate, nullptr))
             return false;
     }
+    if (measure)
+        MeasureCoverage(f);
     const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, second), Own(f, &estimate), {},
                                                   GameDepth(f) };
     return Run(f, mode, f.workWidth, f.workHeight, reads, target, nullptr);
+}
+
+// A full frame while reuse is paused: nothing is reused, but the measurement carries on so the guard sees the picture
+// calm down.
+void MeasureOnly(const Frame& f)
+{
+    if (!coverage.Valid() || !estimate.Valid())
+        return;
+    const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, &detail[cur]),
+                                                  Own(f, &colourDepth[cur]), Game(f.motion), GameDepth(f) };
+    if (Run(f, DlssNrDetailReuse_Estimate, f.workWidth, f.workHeight, reads, &estimate, nullptr))
+        MeasureCoverage(f);
 }
 
 Plan BeforeModel(const Frame& f)
@@ -328,7 +551,10 @@ Plan BeforeModel(const Frame& f)
     plan.motionBaseY = f.motionBaseY;
 
     DestroyRetired(false);
+    DestroyRetiredBuffers(false);
     depthRead = {};
+    // Anything the GPU has finished measuring, before this frame records more: the guard reads it in Gate.
+    CollectCoverage();
 
     // Asked only while reuse is on and nothing else holds it off: the shader, then this frame's depth.
     const DlssNrDetailReuse::Wanted want = host.Gate(f, [&]() -> const char* {
@@ -336,7 +562,7 @@ Plan BeforeModel(const Frame& f)
             return why;
         return PrepareDepth(f) ? nullptr : "the game's depth cannot be read";
     });
-    plan.active = Prepare(f, want.wanted, want.keep, want.steady, want.fill);
+    plan.active = Prepare(f, want.wanted, want.keep, want.steady, want.fill, want.measure);
 
     // Once: what the game's depth and motion are, since they are read here as sampled images in a layout nobody states.
     // A depth view that includes the stencil aspect cannot be sampled.
@@ -361,10 +587,15 @@ Plan BeforeModel(const Frame& f)
         if (want.fill > 0.0f && estimate.Valid())
         {
             // Moved detail with its trust first; Fill composes it and fills where it was dropped.
-            plan.reused = EstimateThen(f, DlssNrDetailReuse_Fill, &estimate, f.output);
+            plan.reused = EstimateThen(f, DlssNrDetailReuse_Fill, &estimate, f.output, want.measure);
         }
         else
         {
+            // Fill is off. The frame is still measured when asked for, in a pass of its own, so the reuse below stays
+            // exactly what it was.
+            if (want.measure)
+                MeasureOnly(f);
+
             const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, &detail[cur]),
                                                           Own(f, &colourDepth[cur]), Game(f.motion), GameDepth(f) };
             plan.reused = Run(f, DlssNrDetailReuse_Reproject, f.workWidth, f.workHeight, reads, f.output, nullptr);
@@ -389,6 +620,17 @@ Plan BeforeModel(const Frame& f)
                 LOG_WARN("DLSS-NR Vulkan detail reuse: the reuse pass could not be recorded; running the model");
             }
         }
+    }
+
+    // A full frame while reuse is paused: keep measuring, so the guard knows when the picture has calmed down. With
+    // steadiness on, AfterModel's own Estimate carries the measurement instead of running a second identical one.
+    measureWithSteady = false;
+    if (!plan.reused && plan.active && want.measure && want.hold && decision.historyUsable)
+    {
+        if (host.params.Steady > 0.0f && estimate.Valid() && steadied.Valid())
+            measureWithSteady = true;
+        else
+            MeasureOnly(f);
     }
 
     // A full frame after a reused frame: the model last ran two frames ago, so it gets the vectors over both.
@@ -419,7 +661,8 @@ void AfterModel(const Frame& f, const Plan& plan, bool succeeded, OwnedImage*& f
     // A full frame with last frame's history: pull the model's new detail toward the moved previous detail, as far as
     // that is trusted, so this frame and the reused one next to it differ less.
     if (!plan.reused && succeeded && finalAnswer != nullptr && decision.historyUsable && host.params.Steady > 0.0f &&
-        estimate.Valid() && steadied.Valid() && EstimateThen(f, DlssNrDetailReuse_Steady, finalAnswer, &steadied))
+        estimate.Valid() && steadied.Valid() &&
+        EstimateThen(f, DlssNrDetailReuse_Steady, finalAnswer, &steadied, measureWithSteady))
         finalAnswer = &steadied;
 
     // Every processed frame keeps its detail (answer - input), input colour and depth for the next frame. Not a reused
@@ -454,7 +697,7 @@ DlssNr::DetailReuseInfo Published() { return host.Published(DlssNr::VkFrameClock
 void Release(bool deviceAlive)
 {
     OwnedImage* const images[] = { &detail[0], &detail[1], &colourDepth[0], &colourDepth[1], &prevMotion, &composed,
-                                   &estimate, &steadied, &depthOnly };
+                                   &estimate, &steadied, &depthOnly, &coverage };
     for (OwnedImage* img : images)
     {
         if (deviceAlive)
@@ -463,14 +706,23 @@ void Release(bool deviceAlive)
     }
     if (deviceAlive)
     {
+        RetireCoverageBuffers();
+        DestroyRetiredBuffers(true);
         DestroyRetired(true);
         pass.reset();
     }
     else
     {
+        // The device is gone: its images, buffers and mappings went with it, so they are abandoned, never destroyed.
+        for (CoverageSlot& slot : coverageSlots)
+            slot = CoverageSlot {};
+        coverageNext = 0;
+        retiredBuffers.clear();
         retired.clear();
         pass.release(); // its pipeline and descriptors went with the device
     }
+    coverageFailed = false;
+    measureWithSteady = false;
     passFailed = false;
     depthRead = {};
     workWidth = workHeight = 0;

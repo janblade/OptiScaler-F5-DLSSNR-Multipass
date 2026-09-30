@@ -40,6 +40,9 @@ void BeginFrameNow(Backend& gpu, const ::Config& cfg, unsigned int width, unsign
         else
             LOG_INFO("DLSS-NR calibrate: started at {:+.2f} EV, {} steps, measuring at white point {:.4g}",
                      Tidy(run.sweep.CurrentEv()), run.sweep.StepCount(), run.measureWhitePoint);
+        if (events.afterSr)
+            LOG_INFO("DLSS-NR calibrate: Before SR is set; this run measures after SR and NR goes back before SR when "
+                     "it ends");
     }
 
     // A run tunes against Automatic's own exposure; Follow is learned again meanwhile, so the result holds once it is

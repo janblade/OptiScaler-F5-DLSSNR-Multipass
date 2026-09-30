@@ -248,6 +248,7 @@ Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool au
         g_vk.followingGame ? Cal::BaseDisagreementEv(CalibrationVkFollowedBase(), CalibrationVkOwnBase()) : 0.0f;
     s.gameExposureNow = gameExposureNow;
     s.gameExposureReading = g_vk.gameExposure > 1e-6f;
+    s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default();
 
     if (s.source == 1)
         s.anchors = !DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()).empty() ||

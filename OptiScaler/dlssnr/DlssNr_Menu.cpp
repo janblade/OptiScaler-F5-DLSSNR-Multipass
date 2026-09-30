@@ -224,7 +224,9 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                    "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
                    "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
                    "\nholds for any number of passes. With Follow the game's exposure on, it tunes against Automatic's"
-                   "\nown exposure and learns Follow again during the run, so the result holds once Follow takes over.");
+                   "\nown exposure and learns Follow again during the run, so the result holds once Follow takes over."
+                   "\nWith NR before Super Resolution, the run itself happens after SR (the picture changes for a"
+                   "\nmoment) and NR goes back before SR when it ends; the setting is not changed.");
 
         if (!cal.available && !cal.unavailable.empty())
             ImGui::TextDisabled("Not available: %s", cal.unavailable.c_str());

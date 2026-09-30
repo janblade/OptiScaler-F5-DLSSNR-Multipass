@@ -4513,8 +4513,11 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // and prevents using the SR-only deferred-residual experiment on an RR feature.
     // Skipped entirely while RR is active: configuredBefore below forces post-SR regardless of
     // this result, so there is nothing to gain from the GetResource/GetDesc work every frame.
+    // A Tune runs after SR while Before SR is set, and NR goes back before SR when it ends (TuneRunsAfterSr).
+    const bool beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() &&
+                             !DlssNrExposureCalibrate::TuneRunsAfterSr(DlssNrExposureCalibrate::TheRun());
     bool preSrCompatible = true;
-    if (cfg.DlssNrRunBeforeSr.value_or_default() && !rayReconstruction)
+    if (beforeSrSet && !rayReconstruction)
     {
         ID3D12Resource* preColor = GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color");
         unsigned int renderWidth = 0, renderHeight = 0, colorBaseX = 0, colorBaseY = 0;
@@ -4568,8 +4571,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // edit from noise it is trained to remove unless the edit is motion-consistent across frames
     // the way real scene detail is. Running NR after RR sidesteps that entirely: RR active forces
     // post-SR placement unconditionally, regardless of the RunBeforeSR setting.
-    const bool configuredBefore = cfg.DlssNrRunBeforeSr.value_or_default() &&
-                                  preSrCompatible && !rayReconstruction;
+    const bool configuredBefore = beforeSrSet && preSrCompatible && !rayReconstruction;
 
     if (configuredBefore != beforeUpscale)
         return;

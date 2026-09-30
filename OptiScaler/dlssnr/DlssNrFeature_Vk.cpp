@@ -2120,7 +2120,9 @@ NVSDK_NGX_Resource_VK* EvaluateBeforeUpscaleVk(VkCommandBuffer cmd, NVSDK_NGX_Pa
                                              bool rayReconstruction)
 {
     handled = false;
-    if (!Config::Instance()->DlssNrRunBeforeSr.value_or_default())
+    // A Tune runs after SR while Before SR is set, and NR goes back before SR when it ends (TuneRunsAfterSr).
+    if (!Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
+        DlssNrExposureCalibrate::TuneRunsAfterSr(DlssNrExposureCalibrate::TheRun()))
         return nullptr;
     bool applied = false;
     EvaluateAtSeamVk(cmd, params, instance, pd, device, true, rayReconstruction, applied, &handled);

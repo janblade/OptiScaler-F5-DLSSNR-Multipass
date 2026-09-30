@@ -147,6 +147,7 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
     s.followDisagreementEv = FollowDisagreementEv();
     s.gameExposureNow = gameExposureNow;
     s.gameExposureReading = g_nr.gameExposure > 1e-6f;
+    s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default();
 
     if (s.source == 1)
         s.anchors = !DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()).empty() ||

@@ -52,6 +52,9 @@ constexpr unsigned int kRing = 20;
 static_assert(kRing > kReadDelay + 1, "a measure measures every evaluation: the ring must outlast the read delay");
 // No evaluation for this long: NR stopped. A run is abandoned and a pending start dropped.
 constexpr unsigned long long kStallMs = 2000;
+// With Before SR set, a Tune runs after SR (TuneRunsAfterSr): this many evaluations after it was asked for, so NR has
+// rebuilt at the new size and its history has settled, before the run starts (about half a second at 60 fps).
+constexpr unsigned long long kAfterSrSettle = 30;
 // The menu counts as looking for this long after it last polled; availability is only worked out meanwhile.
 constexpr unsigned long long kMenuMs = 1000;
 // Thresholds for damage, on the picture the model was shown (its peak channel above the shoulder, or below the floor),
@@ -83,6 +86,8 @@ struct RunState
     // The run (or the start asked for) is a Measure detail, not a Tune. Atomic: Follow's easing reads it lock-free
     // (HoldsFollow).
     std::atomic<bool> measuring { false };
+    // With Before SR set: the evaluation a Tune asked for may start from (0 until the first one after the request).
+    unsigned long long startAt = 0;
     // Measure detail's results: the latest and the one before it (samples 0 when there is none), how many, and the
     // scale each was measured at (its white point source and measuring white point): two results compare only at
     // the same scale.
@@ -126,6 +131,7 @@ struct FrameEvents
 {
     bool started = false;       // a run started (RunState::sweep has its steps, RunState::measureWhitePoint its scale)
     bool relearnFollow = false; // ... and Follow the game's exposure is to be learned again (RelearnFollowOnStart)
+    bool afterSr = false;       // ... and it runs after SR although Before SR is set (TuneRunsAfterSr)
     bool finished = false;      // a run ended, by a result or an abort: ResultLines is due in the log
 };
 
@@ -275,9 +281,21 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
 
     const Context ctx { width, height, situation.source, true, baseWhitePoint, blocker };
 
-    if (run.startRequested && !run.sweep.Running())
+    // A Tune with Before SR set runs after SR: the request itself moved NR there (TuneRunsAfterSr), and the run waits
+    // until NR has settled at the new size.
+    bool settling = false;
+
+    if (run.startRequested && !run.sweep.Running() && !run.measuring && situation.beforeSrSet)
+    {
+        if (run.startAt == 0)
+            run.startAt = evaluation + kAfterSrSettle;
+        settling = evaluation < run.startAt;
+    }
+
+    if (run.startRequested && !run.sweep.Running() && !settling)
     {
         run.startRequested = false;
+        run.startAt = 0;
         run.startError = "";
 
         if (blocker != Blocker::None)
@@ -309,6 +327,7 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
             events.started = true;
             // A measure leaves the brightness and Follow alone.
             events.relearnFollow = !run.measuring && RelearnFollowOnStart(situation);
+            events.afterSr = !run.measuring && situation.beforeSrSet;
         }
     }
 
@@ -415,6 +434,13 @@ inline bool HoldsFollow(const RunState& run)
     return run.active.load(std::memory_order_acquire) && !run.measuring.load(std::memory_order_acquire);
 }
 
+// Whether NR runs after SR for now although Before SR is set: while a Tune is on (asked for, running, or its readbacks
+// draining). Before SR the game's frame is jittered, so a still scene reads as moving and a Tune cannot get through
+// its stillness check; the user asked for Tune to run after SR there and go back afterwards. In memory only -- the
+// setting itself is never changed, so nothing is left behind if the game exits mid-run. The result is measured after
+// SR and applied to the Before SR picture. Not for a measure, which measures the setup as it is. Lock-free.
+inline bool TuneRunsAfterSr(const RunState& run) { return HoldsFollow(run); }
+
 // Two measurements compare (the menu's "vs previous") only when taken at the same scale: the same white point source,
 // and measuring white points within 2% (the detail noise floor on a still NBA 2K27 scene was 0.3%).
 inline bool SameScale(const RunState::Scale& a, const RunState::Scale& b)
@@ -433,6 +459,7 @@ inline void RequestStart(RunState& run, uint32_t source)
 
     run.source = source;
     run.measuring = false;
+    run.startAt = 0;
     run.sweep.Clear();
     run.startError = "";
     run.startRequested = true;

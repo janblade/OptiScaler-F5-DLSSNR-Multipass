@@ -187,6 +187,8 @@ struct Situation
     bool gameExposureReading = false;
     bool anchors = false;
     bool colourConverted = false; // DlssNrColourEncoding::ShaderConverts for this frame
+    bool beforeSrSet = false;     // RunBeforeSR is on: a Tune runs after SR instead (TuneRunsAfterSr), so it waits
+                                  // for NR to settle there before its first step
 };
 
 // `measuring`: for "Measure detail", which leaves the brightness alone, so ini Trim anchors do not stand in its way.

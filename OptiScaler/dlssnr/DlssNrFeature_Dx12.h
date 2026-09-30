@@ -172,6 +172,7 @@ struct ExposureCalibrationStatus
     bool unrepeated = false; // the passes disagreed (firstPassEv, lastPassEv): the current is kept
     float firstPassEv = 0.0f, lastPassEv = 0.0f;
     float resultEv = 0.0f;
+    bool rawAgreed = false; // both passes picked the same raw best (within a step): "Apply raw instead" is honest
     float bestRawEv = 0.0f;
     float bestBandEv = 0.0f;
     std::vector<float> ev, scoreRaw, scoreBand; // measured steps

@@ -199,13 +199,15 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
             ImGui::TextDisabled("Score from %+.1f EV (left) to %+.1f EV (right). Best: band-pass %+.1f, raw %+.1f.",
                                 cal.ev.front(), cal.ev.back(), cal.bestBandEv, cal.bestRawEv);
             // What the model does to the game's colour and shadows there (output against the game's frame).
-            ImGui::TextDisabled("At %+.1f EV: saturation %+.0f%%, warmth %+.3f, shadows %+.0f%% darker, %.1f%% crushed.",
+            ImGui::TextDisabled("At %+.1f EV: saturation %+.0f%%, warmth %+.3f, shadows %.0f%% %s, %.1f%% crushed.",
                                 cal.resultStepEv, 100.0f * cal.resultSaturation, cal.resultWarmth,
-                                100.0f * cal.resultShadowDarkening, 100.0f * cal.resultCrushed);
+                                std::fabs(100.0f * cal.resultShadowDarkening),
+                                cal.resultShadowDarkening >= 0.0f ? "darker" : "lifted", 100.0f * cal.resultCrushed);
 
-            // Not when the run was unsure or its passes disagreed: those keep the current value
-            // for either measure.
-            ImGui::BeginDisabled(cal.unsure || cal.unrepeated);
+            // Not when the run was unsure or its passes disagreed: those keep the current value for either measure.
+            // Nor when the passes picked different raw bests -- the number shown is the last pass's, and offering it
+            // would be a single-pass answer from a run that promised two.
+            ImGui::BeginDisabled(cal.unsure || cal.unrepeated || !cal.rawAgreed);
 
             if (ImGui::SmallButton("Apply raw instead##tune"))
             {
@@ -227,8 +229,8 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
 
         ImGui::EndDisabled();
         HelpMarker("Finds the Model input brightness above that gives NR the most detail on the scene on screen."
-                   "\nTries the slider across its useful range, about 12 frames a step, and checks each step for"
-                   "\ndetail, flicker and clipping. Hold the camera still while it runs: the picture gets brighter"
+                   "\nTries the slider across its useful range twice over, about 12 frames a step, and checks each step"
+                   "\nfor detail, flicker and clipping, offering a change only when both sweeps agree. Hold the camera still while it runs: the picture gets brighter"
                    "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
                    "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
                    "\nand measures the first pass only: that is the one that sees the game's picture, so the result"

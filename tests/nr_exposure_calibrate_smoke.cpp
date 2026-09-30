@@ -598,7 +598,7 @@ int main()
     }
 
     // A run whose best is the first or last step (NBA 2K27 with Follow-game's stale -3.42 EV calibration, every step
-    // 4.3 EV brighter than its label): the real best may lie beyond the range, so nothing is offered.
+    // 4.3 EV brighter than its label): its best sits at an end of the range, which is offered like any other.
     static const Row kEdge[] = {
         { -3.0f, .04136f, .01895f, .01637f, .00176f, .00022f, 0, .0324f },
         { -2.5f, .04180f, .01879f, .01637f, .01143f, .00023f, 0, .0226f },
@@ -718,7 +718,7 @@ int main()
         CHECK(!s.Finished() && s.AbortReason() == Abort::Motion);
     }
 
-    // ...and with the movement checks lifted it still keeps the current value: its best band sits at the top step,
+    // ...and with the movement checks lifted it offers its best, which sits at an end of the range: its best band sits at the top step,
     // so the real best may lie beyond. (Before, the unsure rule caught it; that rule no longer reads movement --
     // the movement checks are what stop a moving run.)
     {
@@ -1636,7 +1636,57 @@ int main()
             st.chromaOut = 0.05f * (Near(ev, -1.0f) ? 1.3f : 1.02f);
             return st;
         });
-        CHECK(s.Finished() && !Near(s.ResultEv(), -1.0f) && Near(std::fabs(s.ResultEv() + 1.0f), 0.5f));
+        CHECK(s.Finished() && Near(s.ResultEv(), -1.5f)); // the first plateau step that does not recolour
+
+        // The other way round: the recolouring step is the one a tie would hand it to, so only the colour term can move
+        // the answer off it. Under-saturating costs the same as over-saturating.
+        Sweep under;
+        under.Start(1.5f, OnePass(), kCtx);
+        Run(under, [](float ev) {
+            Stats st = Peaked(ev, -1.0f);
+            st.chromaIn = 0.05f;
+            if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
+                st.detailRaw = st.detailBand = 1.0f;
+            st.chromaOut = 0.05f * (Near(ev, -1.5f) ? 0.7f : 0.98f); // -1.5 EV loses 30% of the chroma
+            return st;
+        });
+        CHECK(under.Finished() && !Near(under.ResultEv(), -1.5f));
+
+        // What the weight is worth: 30% off the chroma costs 0.15, so a step must bring more detail than that to win.
+        const auto tradeColour = [](float advantage) {
+            Sweep s;
+            s.Start(1.5f, OnePass(), kCtx);
+            Run(s, [&](float ev) {
+                Stats st = Peaked(ev, -1.0f);
+                st.chromaIn = 0.05f;
+                if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
+                    st.detailRaw = st.detailBand = 1.0f;
+                st.chromaOut = 0.05f;
+                if (Near(ev, -1.5f))
+                {
+                    st.detailRaw = st.detailBand = 1.0f + advantage;
+                    st.chromaOut = 0.05f * 1.3f;
+                }
+                return st;
+            });
+            return s;
+        };
+        CHECK(!Near(tradeColour(0.05f).ResultEv(), -1.5f));
+        CHECK(Near(tradeColour(0.25f).ResultEv(), -1.5f));
+
+        // A picture with no colour in it is not compared at all: the same 30% swing on a near-grey frame scores nothing,
+        // so the plateau's first step wins. (chromaIn below StepResult::kGreyChroma.)
+        Sweep grey;
+        grey.Start(1.5f, OnePass(), kCtx);
+        Run(grey, [](float ev) {
+            Stats st = Peaked(ev, -1.0f);
+            st.chromaIn = 2e-6f;
+            if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
+                st.detailRaw = st.detailBand = 1.0f;
+            st.chromaOut = st.chromaIn * (Near(ev, -1.5f) ? 20.0f : 1.0f);
+            return st;
+        });
+        CHECK(grey.Finished() && Near(grey.ResultEv(), -1.5f));
         StepResult r;
         r.chromaIn = 0.05f;
         r.chromaOut = 0.045f;
@@ -1649,13 +1699,14 @@ int main()
     // Shadows: of steps with the same detail, one that crushes 2% of the picture or darkens its shadows by 30% loses;
     // lifting them is free.
     {
-        const auto flatWith = [](auto mark) {
+        const auto flatWith = [](auto mark, float share = 0.4f) {
             Sweep s;
             s.Start(1.5f, OnePass(), kCtx);
             Run(s, [&](float ev) {
                 Stats st = Peaked(ev, -1.0f);
                 if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
                     st.detailRaw = st.detailBand = 1.0f;
+                st.shadowShare = share;
                 st.shadowIn = 0.02f;
                 st.shadowOut = 0.02f;
                 mark(ev, st);
@@ -1673,11 +1724,70 @@ int main()
                 st.shadowOut = 0.014f;
         });
         CHECK(darkened.Finished() && Near(darkened.ResultEv(), -1.0f));
+
+        // Lifting is free, and it is not the tie-break saying so: the lifted step has less detail than the plateau, so
+        // a term that paid for lifting would hand it the win.
         const Sweep lifted = flatWith([](float ev, Stats& st) {
             if (Near(ev, -1.5f))
+            {
                 st.shadowOut = 0.03f;
+                st.detailRaw = st.detailBand = 0.99f;
+            }
         });
-        CHECK(lifted.Finished() && Near(lifted.ResultEv(), -1.5f)); // the first of the equal steps, as with nothing
+        CHECK(lifted.Finished() && !Near(lifted.ResultEv(), -1.5f));
+
+        // Hardly any shadow in the picture cannot veto a step: the same darkening over 0.2% of the frame is not scored,
+        // so the plateau's first step wins as it would with no shadows at all.
+        const Sweep slivers = flatWith(
+            [](float ev, Stats& st) {
+                if (Near(ev, -1.5f))
+                    st.shadowOut = 0.002f; // 90% darker, but of almost nothing
+            },
+            0.002f);
+        CHECK(slivers.Finished() && Near(slivers.ResultEv(), -1.5f));
+
+        // The weights are worth what they say. Half the picture in shadow left 20% darker costs 0.1 at shadowWeight 1,
+        // so a step has to bring more than that in detail to win; 2% of the picture crushed costs 0.2 at crushWeight 10.
+        const auto tradeShadow = [](float advantage) {
+            Sweep s;
+            s.Start(1.5f, OnePass(), kCtx);
+            Run(s, [&](float ev) {
+                Stats st = Peaked(ev, -1.0f);
+                if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
+                    st.detailRaw = st.detailBand = 1.0f;
+                st.shadowShare = 0.5f;
+                st.shadowIn = 0.02f;
+                st.shadowOut = 0.02f;
+                if (Near(ev, -1.5f))
+                {
+                    st.detailRaw = st.detailBand = 1.0f + advantage;
+                    st.shadowOut = 0.016f; // 20% darker over half the picture: 0.1
+                }
+                return st;
+            });
+            return s;
+        };
+        CHECK(!Near(tradeShadow(0.05f).ResultEv(), -1.5f)); // 0.05 of detail does not buy off 0.1 of shadows
+        CHECK(Near(tradeShadow(0.15f).ResultEv(), -1.5f));  // 0.15 does
+
+        const auto tradeCrush = [](float advantage) {
+            Sweep s;
+            s.Start(1.5f, OnePass(), kCtx);
+            Run(s, [&](float ev) {
+                Stats st = Peaked(ev, -1.0f);
+                if (ev >= -1.5f - 1e-4f && ev <= -0.5f + 1e-4f)
+                    st.detailRaw = st.detailBand = 1.0f;
+                if (Near(ev, -1.5f))
+                {
+                    st.detailRaw = st.detailBand = 1.0f + advantage;
+                    st.crushed = 0.02f; // 0.2 at crushWeight 10
+                }
+                return st;
+            });
+            return s;
+        };
+        CHECK(!Near(tradeCrush(0.1f).ResultEv(), -1.5f));
+        CHECK(Near(tradeCrush(0.3f).ResultEv(), -1.5f));
     }
 
     // Measure detail in words.
@@ -1707,7 +1817,52 @@ int main()
         smooth.detailBand = 0.008f;
         smooth.inputChange = 0.0f;
         CHECK(DetailWords(smooth) == "Detail: 20% less than the game's own (NR smooths here)");
-        CHECK(FlickerWords(smooth).find("held perfectly still") != std::string::npos);
+        CHECK(FlickerWords(smooth).find("held still") != std::string::npos);
+        // A frame that only looks still (a few millionths of change) must not print a multiple of hundreds.
+        StepResult nearlyStill = r;
+        nearlyStill.inputChange = 3e-6f;
+        nearlyStill.outputChange = 2e-3f;
+        CHECK(FlickerWords(nearlyStill).find("held still") != std::string::npos);
+        // A comparison against nothing says so, rather than "about the same".
+        StepResult wasStill = r, nowFlickers = r;
+        wasStill.outputChange = wasStill.inputChange;   // Flicker() == 0
+        nowFlickers.outputChange = nowFlickers.inputChange + 0.005f;
+        CHECK(CompareWords(nowFlickers, wasStill).find("flicker was none, now") != std::string::npos);
+
+        // Every clause of the words, not just the ones the first case happened to take.
+        StepResult warm = r, cool = r;
+        warm.warmth = 0.02f;
+        cool.warmth = -0.02f;
+        CHECK(ColourWords(warm).find(", warmer") != std::string::npos);
+        CHECK(ColourWords(cool).find(", cooler") != std::string::npos);
+
+        StepResult crushedALot = r;
+        crushedALot.crushed = 0.004f;
+        CHECK(ShadowWords(crushedALot).find("0.4% of the picture crushed") != std::string::npos);
+        CHECK(ShadowWords(r).find("nothing crushed") != std::string::npos);
+
+        // CompareWords' own saturation and shadow clauses, each on its own.
+        StepResult moreColour = r;
+        moreColour.chromaOut = r.chromaIn * 1.2f; // r is 12% less saturated, this is 20% more
+        CHECK(CompareWords(moreColour, r).find("more saturated") != std::string::npos);
+        CHECK(CompareWords(r, moreColour).find("less saturated") != std::string::npos);
+
+        StepResult darkerShadows = r;
+        darkerShadows.shadowOut = r.shadowIn * 0.5f; // r lifts its shadows; this darkens them
+        CHECK(CompareWords(darkerShadows, r).find("shadows darker") != std::string::npos);
+        CHECK(CompareWords(r, darkerShadows).find("shadows lighter") != std::string::npos);
+
+        // The measured line reads the chroma the right way round: r's output has less chroma than its input.
+        const std::string measured = MeasureText(r);
+        CHECK(measured.find("saturation -12.0% (chroma out 0.0440 in 0.0500)") != std::string::npos);
+    }
+
+    // Two steps apart is not agreement: the window is one step, and these two peaks have no flat top to overlap.
+    {
+        Sweep s;
+        s.Start(0.0f, Settings(), kCtx);
+        Run(s, [&](float ev) { return Peaked(ev, s.Pass() == 0 ? -1.0f : -2.0f); });
+        CHECK(s.Finished() && s.Unrepeated() && !s.Changed() && Near(s.ResultEv(), 0.0f));
     }
 
     // Two passes by default (Measure detail one): a run offers a change only when they agree.

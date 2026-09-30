@@ -156,6 +156,7 @@ ExposureCalibrationStatus ExposureCalibration()
         s.lastPassEv = Cal::Tidy(sweep.LastPass().result);
         s.resultEv = Cal::Tidy(sweep.ResultEv());
         s.bestRawEv = Cal::Tidy(sweep.BestEv(Cal::Detail::Raw));
+        s.rawAgreed = sweep.RawAgreed();
         s.bestBandEv = Cal::Tidy(sweep.BestEv(Cal::Detail::BandPass));
     }
 

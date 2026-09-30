@@ -561,9 +561,13 @@ int wmain(int argc, wchar_t** argv) try
                 const float v = 0.2f * x / W * x / W;
                 ramp.at(x, y) = {v, v, v, 1};
             }
-        const auto with = [&](float scale) {
+        const auto with2 = [&](float scale) {
             Image out = ramp;
             for (Pixel& q : out.px) { q.r *= scale; q.g *= scale; q.b *= scale; }
+            return out;
+        };
+        const auto with = [&](float scale) {
+            const Image out = with2(scale);
             return Reduce(gpu.Stats(k, out, out, ramp, ramp, ramp));
         };
         const Cal::Stats same = with(1.0f), halved = with(0.1f), lifted = with(2.0f);
@@ -575,6 +579,24 @@ int wmain(int argc, wchar_t** argv) try
         expect(std::abs(darkening(same)) < 1e-6f && same.crushed == 0.0f, "the same picture darkens or crushes shadows");
         expect(darkening(halved) > 0.3f && halved.crushed > 0.1f, "a much darker output does not measure crushed shadows");
         expect(darkening(lifted) < -0.1f && lifted.crushed == 0.0f, "a lifted output measures crushed shadows");
+
+        // What counts as crushed, against the same rule written out on the CPU: a shadow pixel above the black level
+        // that the model took below half its level. The ramp straddles both constants, so the share only matches if the
+        // shader uses the same black level and the same half -- the per-tile scene above has no crushed pixels at all,
+        // so nothing else here pins them.
+        const Frames ramped { with2(0.4f), with2(0.4f), ramp, ramp, ramp };
+        const Cal::Stats gotRamp = Reduce(gpu.Stats(k, ramped.out, ramped.prevOut, ramped.in, ramped.prevIn,
+                                                    ramped.proxy));
+        const Cal::Stats wantRamp = ReferenceStats(Reference(k, ramped));
+        std::printf("crushed at x0.4: shader %.4f, reference %.4f (shadow share %.3f)\n", gotRamp.crushed,
+                    wantRamp.crushed, gotRamp.shadowShare);
+        expect(wantRamp.crushed > 0.05f, "the ramp at 0.4x crushes nothing to compare");
+        expect(std::abs(gotRamp.crushed - wantRamp.crushed) < 1e-4f,
+               "the shader's crushed share differs from the rule (black level or the half)");
+        expect(std::abs(gotRamp.shadowShare - wantRamp.shadowShare) < 1e-4f &&
+                   std::abs(gotRamp.shadowIn - wantRamp.shadowIn) < 1e-5f &&
+                   std::abs(gotRamp.shadowOut - wantRamp.shadowOut) < 1e-5f,
+               "the shader's shadow share or levels differ from the rule");
     }
 
     if (fails)

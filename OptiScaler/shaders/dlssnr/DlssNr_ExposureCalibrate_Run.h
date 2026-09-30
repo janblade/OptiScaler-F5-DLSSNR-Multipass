@@ -200,14 +200,21 @@ inline std::string DetailWords(const StepResult& r)
     if (!(r.inputBand > 1e-6f))
         return std::format("Detail: {:+.5f} added (the game's frame has no detail to compare with)", added);
     const float share = added / r.inputBand;
+    if (std::fabs(share) < kSamePoints) // a fraction of a percent reads as "0% more", which says nothing
+        return "Detail: about as much as the game's own";
     return share >= 0.0f ? std::format("Detail: {:.0f}% more than the game's own", 100.0f * share)
                          : std::format("Detail: {:.0f}% less than the game's own (NR smooths here)", -100.0f * share);
 }
 
+// A still frame measures about 0.0002 of input change (NBA 2K27), so anything below kStillInput is "held still": a
+// multiple taken against a few millionths reads as hundreds of times and means nothing.
+constexpr float kStillInput = 1e-4f;
+
 inline std::string FlickerWords(const StepResult& r)
 {
-    if (!(r.inputChange > 1e-6f))
-        return std::format("Flicker: {:.5f} (the game's frame held perfectly still)", r.Flicker());
+    if (!(r.inputChange > kStillInput))
+        return std::format("Flicker: {:.5f} of the picture changes between frames (the game's frame held still)",
+                           r.Flicker());
     return std::format("Flicker: the output moves {:.1f}x as much as the game's frame between frames (1x = none added)",
                        r.outputChange / r.inputChange);
 }
@@ -249,16 +256,30 @@ inline std::string CompareWords(const StepResult& now, const StepResult& before)
     std::vector<std::string> parts;
     const auto relative = [](float a, float b) { return std::fabs(b) > 1e-7f ? (a - b) / std::fabs(b) : 0.0f; };
 
-    const float detail = relative(now.DetailOf(Detail::BandPass), before.DetailOf(Detail::BandPass));
-    parts.push_back(std::fabs(detail) < kSameWithin
-                        ? std::string("detail about the same")
-                        : std::format("{} detail ({:+.0f}%)", detail > 0.0f ? "more" : "less", 100.0f * detail));
+    // A percentage against nothing is not a comparison: "was none, now X" says what happened, where relative() would
+    // report "about the same" however large the new value is (Flicker() is exactly 0 whenever the output moved no more
+    // than the game's frame, which a paused scene does reach).
+    const auto fromZero = [](const char* name, float now, float scale)
+    { return std::format("{} was none, now {:.5f}", name, now * scale); };
 
-    const float flicker = relative(now.Flicker(), before.Flicker());
-    parts.push_back(std::fabs(flicker) < kSameWithin
-                        ? std::string("flicker about the same")
-                        : std::format("{} flicker ({:+.0f}%, {})", flicker > 0.0f ? "more" : "less", 100.0f * flicker,
-                                      flicker > 0.0f ? "worse" : "better"));
+    const float nowDetail = now.DetailOf(Detail::BandPass), beforeDetail = before.DetailOf(Detail::BandPass);
+    const float detail = relative(nowDetail, beforeDetail);
+    if (std::fabs(beforeDetail) <= 1e-7f && std::fabs(nowDetail) > 1e-7f)
+        parts.push_back(fromZero("detail", nowDetail, 1.0f));
+    else
+        parts.push_back(std::fabs(detail) < kSameWithin
+                            ? std::string("detail about the same")
+                            : std::format("{} detail ({:+.0f}%)", detail > 0.0f ? "more" : "less", 100.0f * detail));
+
+    const float nowFlicker = now.Flicker(), beforeFlicker = before.Flicker();
+    const float flicker = relative(nowFlicker, beforeFlicker);
+    if (beforeFlicker <= 1e-7f && nowFlicker > 1e-7f)
+        parts.push_back(fromZero("flicker", nowFlicker, 1.0f) + " (worse)");
+    else
+        parts.push_back(std::fabs(flicker) < kSameWithin
+                            ? std::string("flicker about the same")
+                            : std::format("{} flicker ({:+.0f}%, {})", flicker > 0.0f ? "more" : "less",
+                                          100.0f * flicker, flicker > 0.0f ? "worse" : "better"));
 
     const float sat = now.Saturation() - before.Saturation();
     if (std::fabs(sat) >= kSamePoints)
@@ -322,7 +343,7 @@ inline std::vector<std::string> ResultLines(const Sweep& s)
     {
         return std::format("best raw {:+.1f} EV, best band {:+.1f} EV, result {:+.2f} EV{}", Tidy(v.bestRaw),
                            Tidy(v.bestBand), Tidy(v.result),
-                           v.unsure ? " (unsure)" : v.atLimit ? " (at the end of the range)" : "");
+                           v.unsure ? " (unsure)" : "");
     };
 
     // The passes before the last, then the last (or the one a stop cut short).

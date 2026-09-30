@@ -1510,6 +1510,10 @@ void ConsumeMeterReadback()
                          "(Automatic's base white point is {:.3g}x the game's); follows the game's exposure from here "
                          "while AutoExposureFollowGame is on",
                          DlssNrFollowGame::Instance().OffsetEv(), DlssNrFollowGame::Instance().Scale());
+            else if (DlssNr::FollowGameOn(*Config::Instance()))
+                DlssNr::SayFollowTrack(DlssNrFollowGame::Instance().Track(
+                    g_nr.autoExposurePreExposure / autoReading, g_nr.autoPairPreExposure / g_nr.autoPairGameExposure,
+                    GetTickCount64(), DlssNrExposureCalibrate::TheRun().active.load(std::memory_order_acquire)));
         }
     }
 

@@ -1051,9 +1051,11 @@ void RenderMenu(Config* config, float menuResScale)
                 HelpMarker("For games that hand over their frame before applying their own exposure: on by default"
                            "\nfor those known to (RDR2), off for every other game. Automatic learns how its own metering"
                            "\nrelates to the game's exposure in the first seconds of play, then follows the game's exposure,"
-                           "\nso brightness moves exactly with the game: cutscenes, menus, fades. The brightness slider"
-                           "\nkeeps its meaning. Leave it off for games that expose their frame themselves (most games):"
-                           "\nit would apply their exposure twice. On Vulkan it follows a few frames behind the game.");
+                           "\nso brightness moves exactly with the game: cutscenes, menus, fades. If the two stay more than"
+                           "\n0.75 EV apart for a moment, the calibration eases toward Automatic (0.25 EV a second at most)."
+                           "\nThe brightness slider keeps its meaning. Leave it off for games that expose their frame"
+                           "\nthemselves (most games): it would apply their exposure twice. On Vulkan it follows a few"
+                           "\nframes behind the game.");
 
                 // Status and Re-learn only while following: off, the checkbox already says so, and a second
                 // "calibrate" button next to Tune for this scene read as the same thing.
@@ -1073,14 +1075,25 @@ void RenderMenu(Config* config, float menuResScale)
                         ImGui::TextDisabled("Calibration %+.2f EV against the game's exposure%s", calibration.OffsetEv(),
                                             followStatus.following ? "; following" : "; not following");
 
-                    // A calibration learned in other conditions (a cutscene, a menu) can sit far from where Automatic
-                    // would put the picture; say so where the fix is, beside Re-learn.
-                    if (std::fabs(followStatus.disagreementEv) > DlssNrExposureCalibrate::kFollowDisagreementLimitEv)
-                        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                                           "%+.1f EV off Automatic's own exposure: Re-learn in an ordinary scene.",
+                    // The calibration eases toward Automatic when the two stay apart (DlssNr_FollowGame.h Track), so a
+                    // large disagreement is usually on its way out; say which, wrapped (it ran off the panel before).
+                    if (calibration.Locked() && calibration.Easing())
+                    {
+                        ImGui::PushTextWrapPos(0.0f);
+                        ImGui::TextDisabled("Easing the calibration toward Automatic's own exposure (%+.1f EV apart).",
+                                            followStatus.disagreementEv);
+                        ImGui::PopTextWrapPos();
+                    }
+                    else if (std::fabs(followStatus.disagreementEv) > DlssNrExposureCalibrate::kFollowDisagreementLimitEv)
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+                        ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. It eases back by itself if this lasts; "
+                                           "Re-learn to start over in an ordinary scene.",
                                            followStatus.disagreementEv);
+                        ImGui::PopStyleColor();
+                    }
 
-                    // The calibration is learned once per session; this learns it again.
+                    // Learns the calibration again from scratch.
                     if (ImGui::SmallButton("Re-learn##autoexposure"))
                     {
                         DlssNrFollowGame::Instance().Reset();
@@ -1089,8 +1102,8 @@ void RenderMenu(Config* config, float menuResScale)
 
                     HelpMarker("Learns the calibration against the game's exposure again, for example when it was"
                                "\nlearned during a cutscene or a loading screen. Plain Automatic is used meanwhile (about 2 s)."
-                               "\nRe-learn in an ordinary daylight scene, not snow, night or indoors: the brightness"
-                               "\nlearned there is kept for the whole game.");
+                               "\nRe-learn in an ordinary daylight scene, not snow, night or indoors. Afterwards the"
+                               "\ncalibration eases toward Automatic by itself whenever the two stay more than 0.75 EV apart.");
                     ImGui::Unindent();
                 }
             }

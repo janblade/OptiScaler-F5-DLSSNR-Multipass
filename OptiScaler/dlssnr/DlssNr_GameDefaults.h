@@ -7,6 +7,7 @@
 #include <Config.h>
 #include <State.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
+#include <shaders/dlssnr/DlssNr_FollowGame.h>
 
 #include <atomic>
 
@@ -41,5 +42,16 @@ inline void ReportAutoExposureDefaults()
              "(+{:.1f} EV)",
              known ? "known unexposed game" : "not a known unexposed game", State::Instance().gameExe,
              known ? "on" : "off", DlssNrAutoTrim::kDefaultTrim, DlssNrAutoTrim::kDefaultEv);
+}
+
+// Logs what Follow's Track() did (DlssNr_FollowGame.h): the offset starting to ease toward Automatic, and arriving.
+inline void SayFollowTrack(const DlssNrFollowGame::TrackEvent& e)
+{
+    if (e.started)
+        LOG_INFO("DLSS-NR automatic exposure: Automatic and the game's exposure have stayed apart; easing the "
+                 "calibration from {:+.2f} EV toward {:+.2f} EV",
+                 e.fromEv, e.toEv);
+    if (e.settled)
+        LOG_INFO("DLSS-NR automatic exposure: calibration eased from {:+.2f} EV to {:+.2f} EV", e.fromEv, e.toEv);
 }
 } // namespace DlssNr

@@ -833,6 +833,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                          "game's exposure from here while AutoExposureFollowGame is on (Vulkan: a few "
                                          "frames behind the game)",
                                          DlssNrFollowGame::Instance().OffsetEv(), DlssNrFollowGame::Instance().Scale());
+                            else if (DlssNr::FollowGameOn(*Config::Instance()))
+                                DlssNr::SayFollowTrack(DlssNrFollowGame::Instance().Track(
+                                    g_vk.autoExposurePreExposure / autoReading, g_vk.pairPreExposure / g_vk.pairGameExposure,
+                                    GetTickCount64(),
+                                    DlssNrExposureCalibrate::TheRun().active.load(std::memory_order_acquire)));
                         }
 
                         if (!g_vk.pairValiditySaid && g_vk.pairReads >= DlssNrFollowGame::kWindow)

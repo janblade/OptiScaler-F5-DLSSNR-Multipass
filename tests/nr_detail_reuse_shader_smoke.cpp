@@ -2,8 +2,9 @@
 // Checks each mode on small synthetic images: detail follows the motion (at the motion texture's own size, subrect and
 // scale), dropped where depth or colour disagree, kept at still edges, the better of the pixel's own and the nearer
 // surface's motion, no ringing, composed vectors across a render-size change (and with a subrect, half size and game
-// scale), padded depth guides, invalid saved detail, fill (including partial trust), steadiness, NaN safety; and the
-// Replace modes, which land a moved change so that it cannot blow up near white.
+// scale), padded depth guides, invalid saved detail, fill (including partial trust), steadiness, NaN safety; the coverage
+// grid that says how much of a frame had no detail to move; and the Replace modes, which land a moved change so that
+// it cannot blow up near white.
 // cl /std:c++20 /EHsc /W4 /wd4324 tests/nr_detail_reuse_shader_smoke.cpp d3d11.lib d3dcompiler.lib
 // nr_detail_reuse_shader_smoke.exe OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl [reference.hlsl]
 // With a reference (the shader before the Replace change: git show c62aae96:<that path> > reference.hlsl), every run
@@ -115,7 +116,8 @@ struct Gpu
     {
         Img u1;
         Img u0 = RunOn(shader.Get(), c, inputs, u1, outW, outH);
-        if (reference && c.ReplaceCurve == DlssNrReplaceCurve_None)
+        // Coverage is newer than the reference shader, which has no such mode to compare with.
+        if (reference && c.ReplaceCurve == DlssNrReplaceCurve_None && c.Mode != DlssNrDetailReuse_Coverage)
         {
             Img r1;
             const Img r0 = RunOn(reference.Get(), c, inputs, r1, outW, outH);
@@ -827,6 +829,177 @@ try
             expect(std::abs(Decode(out.at(8, 3).r, curve) / lit - 1.2f) < 2e-3f,
                    "Replace: Fill among its own brightness takes the neighbours' change whole");
         }
+    }
+
+    // Coverage: the share of the frame with no detail to move, summed per tile over every second pixel. Checked
+    // against a reference that walks the same pixels the shader does, on an estimate with an untrusted strip down the
+    // left (what running brings in from off-screen), a half-trusted band and a NaN tile.
+    {
+        constexpr unsigned cw = 128, ch = 64;
+        const unsigned tiles = kDlssNrDetailReuseCoverageTiles;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const auto trustAt = [&](unsigned x, unsigned y) -> float
+        {
+            if (x >= 40 && x < 44 && y < 4)
+                return nan; // not finite: no detail at all, as Fill reads it
+            if (x < 30)
+                return 0.0f; // came in from off-screen
+            if (y >= 32 && y < 40)
+                return 0.5f; // half trusted
+            return 1.0f;
+        };
+        const auto estimate = Fill([&](unsigned x, unsigned y) { return Px { 0.01f, 0.01f, 0.01f, trustAt(x, y) }; },
+                                   cw, ch);
+
+        DlssNrDetailReuseConstants coverage = Base(DlssNrDetailReuse_Coverage);
+        coverage.WorkWidth = cw;
+        coverage.WorkHeight = ch;
+        const unsigned threads = tiles * 8; // one 8x8 thread group per tile
+        const Img grid = gpu.Run(coverage, { estimate, estimate, estimate, estimate, estimate }, nullptr, threads,
+                                 threads);
+
+        double wantDropped = 0.0, wantPixels = 0.0;
+        bool perTile = true;
+        for (unsigned ty = 0; ty < tiles; ++ty)
+            for (unsigned tx = 0; tx < tiles; ++tx)
+            {
+                const unsigned x0 = (tx * cw) / tiles, y0 = (ty * ch) / tiles;
+                const unsigned x1 = ((tx + 1) * cw) / tiles, y1 = ((ty + 1) * ch) / tiles;
+                double dropped = 0.0, pixels = 0.0;
+                for (unsigned ly = 0; ly < 8; ++ly)
+                    for (unsigned lx = 0; lx < 8; ++lx)
+                        for (unsigned y = y0 + ly * 2; y < y1; y += 16)
+                            for (unsigned x = x0 + lx * 2; x < x1; x += 16)
+                            {
+                                const float t = trustAt(x, y);
+                                dropped += 1.0 - (std::isfinite(t) ? std::clamp(t, 0.0f, 1.0f) : 0.0f);
+                                pixels += 1.0;
+                            }
+                const Px got = grid.at(tx, ty);
+                if (!Near(got.r, (float) dropped, 1e-3f) || !Near(got.g, (float) pixels, 1e-3f))
+                    perTile = false;
+                wantDropped += dropped;
+                wantPixels += pixels;
+            }
+        expect(perTile, "Coverage: a tile's dropped and measured sums differ from the reference");
+        expect(wantPixels == (double) (cw / 2) * (ch / 2), "Coverage: not every second pixel was measured exactly once");
+
+        double gotDropped = 0.0, gotPixels = 0.0;
+        for (unsigned y = 0; y < tiles; ++y)
+            for (unsigned x = 0; x < tiles; ++x)
+            {
+                gotDropped += grid.at(x, y).r;
+                gotPixels += grid.at(x, y).g;
+            }
+        const double share = gotPixels > 0.0 ? gotDropped / gotPixels : -1.0;
+        std::printf("Coverage: %.1f%% of the frame had no detail to move (%.0f of %.0f pixels measured)\n",
+                    100.0 * share, gotDropped, gotPixels);
+        expect(Near((float) gotPixels, (float) wantPixels, 1e-3f) && Near((float) gotDropped, (float) wantDropped, 1e-2f),
+               "Coverage: the frame's totals differ from the reference");
+        // The strip is 30 of 128 columns, the half-trusted band 8 of 64 rows of the rest, and the NaN tile 4x4 pixels.
+        expect(share > 0.2 && share < 0.35, "Coverage: the measured share is not the strip plus the band");
+
+        // A tile count in the shader that differs from the host's is caught by the per-tile and total checks above:
+        // the reference walks the tiles the host's constant describes, so a wider or narrower grid in the shader gives
+        // different sums. (A check for texels outside the grid cannot catch it: the dispatch is derived from the same
+        // host constant, so nothing is ever written there whatever the shader believes.)
+    }
+
+    // Coverage on tiles large enough that every lane of a group works and the strided loops wrap: 512x512 gives 16x16
+    // pixel tiles, so all 64 lanes contribute and the reduction's upper half carries data. Also an estimate whose rgb
+    // is not finite while its alpha is: no detail at all, as Fill reads it.
+    {
+        constexpr unsigned cw = 512, ch = 512;
+        const unsigned tiles = kDlssNrDetailReuseCoverageTiles;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const auto badRgb = [&](unsigned x, unsigned y) { return x >= 64 && x < 96 && y >= 64 && y < 96; };
+        const auto trustAt = [&](unsigned x, unsigned y) -> float { return x < 100 ? 0.25f : 1.0f; };
+        const auto estimate = Fill(
+            [&](unsigned x, unsigned y)
+            {
+                const float t = trustAt(x, y);
+                return badRgb(x, y) ? Px { nan, 0.01f, 0.01f, t } : Px { 0.01f, 0.01f, 0.01f, t };
+            },
+            cw, ch);
+
+        DlssNrDetailReuseConstants coverage = Base(DlssNrDetailReuse_Coverage);
+        coverage.WorkWidth = cw;
+        coverage.WorkHeight = ch;
+        const unsigned threads = tiles * 8;
+        const Img grid = gpu.Run(coverage, { estimate, estimate, estimate, estimate, estimate }, nullptr, threads,
+                                 threads);
+
+        double wantDropped = 0.0, wantPixels = 0.0, gotDropped = 0.0, gotPixels = 0.0;
+        bool perTile = true;
+        for (unsigned ty = 0; ty < tiles; ++ty)
+            for (unsigned tx = 0; tx < tiles; ++tx)
+            {
+                const unsigned x0 = (tx * cw) / tiles, x1 = ((tx + 1) * cw) / tiles;
+                const unsigned y0 = (ty * ch) / tiles, y1 = ((ty + 1) * ch) / tiles;
+                double dropped = 0.0, pixels = 0.0;
+                for (unsigned ly = 0; ly < 8; ++ly)
+                    for (unsigned lx = 0; lx < 8; ++lx)
+                        for (unsigned y = y0 + ly * 2; y < y1; y += 16)
+                            for (unsigned x = x0 + lx * 2; x < x1; x += 16)
+                            {
+                                dropped += badRgb(x, y) ? 1.0 : 1.0 - trustAt(x, y);
+                                pixels += 1.0;
+                            }
+                const Px got = grid.at(tx, ty);
+                if (!Near(got.r, (float) dropped, 1e-2f) || !Near(got.g, (float) pixels, 1e-3f))
+                    perTile = false;
+                wantDropped += dropped;
+                wantPixels += pixels;
+                gotDropped += got.r;
+                gotPixels += got.g;
+            }
+        std::printf("Coverage at 512x512 (16x16 tiles): %.1f%% dropped over %.0f pixels\n",
+                    100.0 * gotDropped / std::max(gotPixels, 1.0), gotPixels);
+        expect(perTile, "Coverage: a 16x16 tile's sums differ from the reference (every lane, both strided loops)");
+        expect(wantPixels == (double) (cw / 2) * (ch / 2) && Near((float) gotPixels, (float) wantPixels, 1e-3f),
+               "Coverage: not every second pixel of a 16x16 tile was measured exactly once");
+        expect(Near((float) gotDropped, (float) wantDropped, 0.5f),
+               "Coverage: the totals differ from the reference at 16x16 tiles");
+        // The untrusted quarter is 100 of 512 columns at trust 0.25, plus a 32x32 patch of non-finite rgb.
+        expect(gotDropped > 0.0 && gotPixels > 0.0, "Coverage: nothing was measured at 512x512");
+    }
+
+    // Coverage on a frame narrower than the grid: the tiles that fall outside it are empty, and no column is counted
+    // twice (an overlap would bias the share).
+    {
+        constexpr unsigned cw = 20, ch = 20;
+        const unsigned tiles = kDlssNrDetailReuseCoverageTiles;
+        const auto estimate = Fill([&](unsigned, unsigned) { return Px { 0.01f, 0.01f, 0.01f, 0.0f }; }, cw, ch);
+        DlssNrDetailReuseConstants coverage = Base(DlssNrDetailReuse_Coverage);
+        coverage.WorkWidth = cw;
+        coverage.WorkHeight = ch;
+        const Img grid = gpu.Run(coverage, { estimate, estimate, estimate, estimate, estimate }, nullptr, tiles * 8,
+                                 tiles * 8);
+        double pixels = 0.0;
+        for (unsigned y = 0; y < tiles; ++y)
+            for (unsigned x = 0; x < tiles; ++x)
+                pixels += grid.at(x, y).g;
+        // Tiles this small are a pixel wide or empty, so the stride measures every pixel rather than every second one.
+        // What must hold is that no pixel is measured twice: count the visits the tiling makes.
+        std::vector<int> visits(cw * ch, 0);
+        for (unsigned ty = 0; ty < tiles; ++ty)
+            for (unsigned tx = 0; tx < tiles; ++tx)
+            {
+                const unsigned x0 = std::min((tx * cw) / tiles, cw), x1 = std::min(((tx + 1) * cw) / tiles, cw);
+                const unsigned y0 = std::min((ty * ch) / tiles, ch), y1 = std::min(((ty + 1) * ch) / tiles, ch);
+                for (unsigned ly = 0; ly < 8; ++ly)
+                    for (unsigned lx = 0; lx < 8; ++lx)
+                        for (unsigned y = y0 + ly * 2; y < y1; y += 16)
+                            for (unsigned x = x0 + lx * 2; x < x1; x += 16)
+                                ++visits[y * cw + x];
+            }
+        const int worst = *std::max_element(visits.begin(), visits.end());
+        const double counted = (double) std::count_if(visits.begin(), visits.end(), [](int v) { return v > 0; });
+        std::printf("Coverage at 20x20 (tiles smaller than a pixel): %.0f measured, worst visited %dx\n", pixels,
+                    worst);
+        expect(worst <= 1, "Coverage: a frame narrower than the grid measures a pixel more than once");
+        expect(Near((float) pixels, (float) counted, 1e-3f) && pixels > 0.0,
+               "Coverage: a frame narrower than the grid measures a different set of pixels than the tiling covers");
     }
 
     if (gpu.reference)

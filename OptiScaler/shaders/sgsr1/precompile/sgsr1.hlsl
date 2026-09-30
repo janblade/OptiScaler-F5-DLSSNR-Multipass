@@ -30,8 +30,9 @@
 // threshold off the curve it wasn't tuned for without ever touching the unbounded scene-linear N
 // behind it (an earlier version of this fix went all the way to N via NeutwoDecode/HybridDecode,
 // then re-entered LinearToSrgb, whose saturate crushed every highlight above the white point flat
-// -- see DecodeDomain's own comment). Identity when ReversibleMode is 0 (soft knee) or the frame
-// is passthrough, so that already-working case is untouched byte-for-byte.
+// -- see DecodeDomain's own comment). Identity when ReversibleMode is 0 (soft knee), 5-7 (the signal
+// curves, whose stored value is already what the model reads) or the frame is passthrough, so those
+// cases are untouched byte-for-byte.
 //
 //============================================================================================================
 
@@ -58,7 +59,7 @@ cbuffer Params : register(b0)
     // coord = imgCoordPixel*con1.xy), not from external docs.
     float4 ViewportInfo;
     int2   DstSize;
-    uint   ReversibleMode; // matches dlssnr.hlsl's gReversibleMode: 0 off, 1/2 Neutwo, 3/4 hybrid
+    uint   ReversibleMode; // matches dlssnr.hlsl's gReversibleMode: 0 off, 1/2 Neutwo, 3/4 hybrid, 5-7 signal curves
     uint   Passthrough;
     // Retuned versions of upstream's own fixed kEdgeThreshold/kEdgeSharpness (8/255, 2.0) -- an
     // in-game A/B found the vote firing on noisy high-frequency content (skin, hair) upstream's
@@ -93,9 +94,13 @@ float3 SrgbToLinear(float3 v)
 // saturation ever triggers for a value already in [0,1)), so this is lossless, and it still moves
 // the edge-vote/weight math below off the outer gamma curve and onto the reversible mapping's own
 // shape, closer to what SGSR1's fixed threshold was tuned against.
+// Only Neutwo and the hybrid (modes 1-4) are shaped in light under an outer sRGB gamma. The knee (0) and the signal
+// curves (5 HLG, 6 PQ, 7 linear) already store the value the model reads, so SGSR1 works on it as it is.
+bool StripsOuterGamma() { return Passthrough == 0 && ReversibleMode >= 1 && ReversibleMode <= 4; }
+
 float3 DecodeDomain(float3 c)
 {
-    return (Passthrough != 0 || ReversibleMode == 0) ? c : SrgbToLinear(c);
+    return StripsOuterGamma() ? SrgbToLinear(c) : c;
 }
 
 // Exact inverse of DecodeDomain (a plain sRGB gamma encode of an already-[0,1) value has no
@@ -104,7 +109,7 @@ float3 DecodeDomain(float3 c)
 // the same curve it would have from an un-upscaled answer.
 float3 EncodeDomain(float3 c)
 {
-    return (Passthrough != 0 || ReversibleMode == 0) ? c : LinearToSrgb(c);
+    return StripsOuterGamma() ? LinearToSrgb(c) : c;
 }
 
 // Same gamma-only strip as DecodeDomain, for the Gather taps below: GatherGreen only ever returns
@@ -113,7 +118,7 @@ float3 EncodeDomain(float3 c)
 // all, just the outer gamma, same as DecodeDomain).
 float DecodeGreenScalar(float g)
 {
-    return (Passthrough != 0 || ReversibleMode == 0) ? g : SrgbToLinear(float3(g, g, g)).x;
+    return StripsOuterGamma() ? SrgbToLinear(float3(g, g, g)).x : g;
 }
 
 float fastLanczos2(float x)

@@ -26,6 +26,10 @@
 //                over output, previous output, input, previous input and the picture the model was shown, into a free
 //                readback slot (FreeSlot, then Submitted)
 // Input and output are each kept twice, alternating, so the previous evaluation's copy is still there to compare with.
+//
+// "Measure detail" (RequestMeasure) is the same run with MeasureSettings: every evaluation of it is copied and measured
+// (Frame::capture) with the white point left live, and its result is kept as the latest measurement beside the one
+// before it, so the menu can show an A/B.
 
 #include "DlssNr_ExposureCalibrate.h"
 
@@ -40,16 +44,21 @@ namespace DlssNrExposureCalibrate
 {
 // Readbacks are read this many evaluations after they were recorded, so the GPU is certainly done with them. Frame
 // generation keeps the GPU further behind than the 8 the frame statistics use (the retirement list waits 32). The ring
-// holds every measured evaluation of that window: at most 4 measured per 12 (8 settle + 4), so 8 in any 16.
+// holds every measured evaluation of that window. A measure measures every evaluation: on D3D12 16 are in flight (a
+// slot is read back at the start of the evaluation it is due in, before that evaluation takes one); Vulkan stamps a
+// submission with the next evaluation's count, so 17. A sweep has at most 8. A full ring drops samples (FreeSlot).
 constexpr unsigned int kReadDelay = 16;
-constexpr unsigned int kRing = 12;
+constexpr unsigned int kRing = 20;
+static_assert(kRing > kReadDelay + 1, "a measure measures every evaluation: the ring must outlast the read delay");
 // No evaluation for this long: NR stopped. A run is abandoned and a pending start dropped.
 constexpr unsigned long long kStallMs = 2000;
+// With Before SR set, a Tune runs after SR (TuneRunsAfterSr): this many evaluations after it was asked for, so NR has
+// rebuilt at the new size and its history has settled, before the run starts (about half a second at 60 fps).
+constexpr unsigned long long kAfterSrSettle = 30;
 // The menu counts as looking for this long after it last polled; availability is only worked out meanwhile.
 constexpr unsigned long long kMenuMs = 1000;
-// Thresholds for damage, on the picture the model was shown: its peak channel above the shoulder, or below the floor.
-constexpr float kShoulder = 0.95f;
-constexpr float kFloor = 0.02f;
+// Thresholds for damage, on the picture the model was shown (its peak channel above the shoulder, or below the floor),
+// depend on the proxy curve: DlssNrProxyCurve::Thresholds, taken when the stats pass is dispatched.
 
 // A backend's GPU side of a run: the grid, the readback ring and the copies.
 class Backend
@@ -72,7 +81,30 @@ struct RunState
     bool startRequested = false;
     uint32_t source = 3;                  // the panel a run was started from: 3 Automatic, 1 Game exposure
     Blocker blocker = Blocker::NrStopped; // why a run cannot start or go on, as of the last wanted evaluation
+    Blocker measureBlocker = Blocker::NrStopped; // the same for "Measure detail"
     const char* startError = "";          // why the last start did not happen, "" if it did
+    // The run (or the start asked for) is a Measure detail, not a Tune. Atomic: Follow's easing reads it lock-free
+    // (HoldsFollow).
+    std::atomic<bool> measuring { false };
+    // With Before SR set: the evaluation a Tune asked for may start from (0 until the first one after the request).
+    unsigned long long startAt = 0;
+    // A Tune is asked for or running (not a measure, not readbacks draining after it). Read lock-free by Follow's
+    // easing and the placement (HoldsFollow, TuneRunsAfterSr); cleared when the run ends, a start is refused, or NR
+    // has stopped calling in.
+    std::atomic<bool> tuneOn { false };
+    // Measure detail's results: the latest and the one before it (samples 0 when there is none), how many, and the
+    // scale each was measured at (its white point source and measuring white point): two results compare only at
+    // the same scale.
+    StepResult latest {};
+    StepResult previous {};
+    unsigned measurements = 0;
+    struct Scale
+    {
+        uint32_t source = 0;
+        float whitePoint = 0.0f;
+    };
+    Scale latestScale {};
+    Scale previousScale {};
 
     // Either thread, lock-free: read every evaluation.
     std::atomic<bool> active { false }; // a start is pending, a run is on, or resources are held
@@ -103,6 +135,7 @@ struct FrameEvents
 {
     bool started = false;       // a run started (RunState::sweep has its steps, RunState::measureWhitePoint its scale)
     bool relearnFollow = false; // ... and Follow the game's exposure is to be learned again (RelearnFollowOnStart)
+    bool afterSr = false;       // ... and it runs after SR although Before SR is set (TuneRunsAfterSr)
     bool finished = false;      // a run ended, by a result or an abort: ResultLines is due in the log
 };
 
@@ -113,13 +146,58 @@ inline std::string StopText(const Sweep& s)
     if (s.AbortReason() == Abort::Unavailable)
         text = text + ": " + BlockerText(s.StopBlocker());
 
+    // Movement is tried again before it stops a run, so a stop says what the last try measured.
+    if (s.AbortReason() == Abort::Motion)
+    {
+        if (s.LastSceneBand() >= 0.0f)
+            text += std::format(" (the view changed again: input detail {:.5f}, the run started at {:.5f})",
+                                s.LastSceneBand(), s.SceneBand());
+        else
+            text += std::format(" (input change {:.5f} after {} tries, limit {:.5f})", s.LastInputChange(),
+                                s.Config().motionRetries + 1, s.Config().motionLimit);
+    }
+
     return text;
+}
+
+// A note from a running sweep, for the log. A measure has one step, the current value, so it names no EV.
+inline std::string NoteText(const Note& n, bool measure = false)
+{
+    if (measure && n.kind == Note::Kind::Retry)
+        return std::format("DLSS-NR measure: the picture moved (input change {:.5f}, limit {:.5f}), measuring again (try {})",
+                           n.value, n.against, n.count + 1);
+    if (n.kind == Note::Kind::Retry)
+        return std::format("DLSS-NR calibrate: {:+.1f} EV moved (input change {:.5f}, limit {:.5f}), measuring it again "
+                           "(try {})",
+                           Tidy(n.ev), n.value, n.against, n.count + 1);
+    return std::format("DLSS-NR calibrate: the view changed at {:+.1f} EV (input detail {:.5f}, the run started at "
+                       "{:.5f}), starting over (restart {})",
+                       Tidy(n.ev), n.value, n.against, n.count);
+}
+
+// One measurement, for the log: the same numbers as a sweep step's line.
+inline std::string MeasureText(const StepResult& r)
+{
+    return std::format("n {} | raw {:.5f} band {:.5f} (out {:.5f} in {:.5f}) | flicker {:.5f} (out {:.5f} in {:.5f}) | "
+                       "shoulder {:.4f} floor {:.4f}",
+                       r.samples, r.detailRaw, r.DetailOf(Detail::BandPass), r.detailBand, r.inputBand, r.Flicker(),
+                       r.outputChange, r.inputChange, r.shoulder, r.floor);
 }
 
 // The log of a run that ended: the abort, one line per measured step, the result.
 inline std::vector<std::string> ResultLines(const Sweep& s)
 {
     std::vector<std::string> lines;
+
+    if (s.Config().measureOnly)
+    {
+        if (s.AbortReason() != Abort::None)
+            lines.push_back(std::format("DLSS-NR measure: stopped: {}", StopText(s)));
+        else if (s.Finished())
+            lines.push_back(std::format("DLSS-NR measure: {}", MeasureText(s.Steps().front())));
+        return lines;
+    }
+
     const auto& steps = s.Steps();
     const float neutral = s.Config().neutralTrim;
 
@@ -136,19 +214,16 @@ inline std::vector<std::string> ResultLines(const Sweep& s)
         if (r.samples == 0)
             continue;
 
-        lines.push_back(std::format(
-            "DLSS-NR calibrate: {:+.1f} EV (trim {:.3f}) n {} | raw {:.5f} band {:.5f} (out {:.5f} in {:.5f}) | "
-            "flicker {:.5f} (out {:.5f} in {:.5f}) | shoulder {:.4f} floor {:.4f} | score raw {:.3f} band {:.3f}",
-            Tidy(r.ev), TrimForEv(r.ev, neutral), r.samples, r.detailRaw, r.DetailOf(Detail::BandPass), r.detailBand,
-            r.inputBand, r.Flicker(), r.outputChange, r.inputChange, r.shoulder, r.floor, s.Score(i, Detail::Raw),
-            s.Score(i, Detail::BandPass)));
+        lines.push_back(std::format("DLSS-NR calibrate: {:+.1f} EV (trim {:.3f}) {} | score raw {:.3f} band {:.3f}",
+                                    Tidy(r.ev), TrimForEv(r.ev, neutral), MeasureText(r), s.Score(i, Detail::Raw),
+                                    s.Score(i, Detail::BandPass)));
     }
 
     if (s.Finished())
         lines.push_back(std::format(
             "DLSS-NR calibrate: current {:+.2f} EV, best raw {:+.1f} EV, best band {:+.1f} EV, result {:+.2f} EV{}",
             Tidy(s.CurrentEv()), Tidy(s.BestEv(Detail::Raw)), Tidy(s.BestEv(Detail::BandPass)), Tidy(s.ResultEv()),
-            s.Unsure()    ? " (unsure: detail varied less than the quiet steps flicker, keeps the current value)"
+            s.Unsure()    ? " (unsure: detail varied no more than the measurement does on its own, keeps the current value)"
             : s.AtEdge()  ? " (at the edge of the range: the real best may lie beyond, keeps the current value)"
             : s.Changed() ? ""
                           : " (flat: keeps the current value)"));
@@ -186,6 +261,8 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
     }
 
     run.blocker = Availability(situation);
+    run.measureBlocker = Availability(situation, true);
+    const Blocker blocker = run.measuring ? run.measureBlocker : run.blocker;
 
     // A measured evaluation that never reached the stats pass (a failed evaluate, another path): its ticket is
     // returned empty, so the sweep does not wait for it.
@@ -206,16 +283,29 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
         }
     }
 
-    const Context ctx { width, height, situation.source, true, baseWhitePoint, run.blocker };
+    const Context ctx { width, height, situation.source, true, baseWhitePoint, blocker };
 
-    if (run.startRequested && !run.sweep.Running())
+    // A Tune with Before SR set runs after SR: the request itself moved NR there (TuneRunsAfterSr), and the run waits
+    // until NR has settled at the new size.
+    bool settling = false;
+
+    if (run.startRequested && !run.sweep.Running() && !run.measuring && situation.beforeSrSet &&
+        blocker == Blocker::None)
+    {
+        if (run.startAt == 0)
+            run.startAt = evaluation + kAfterSrSettle;
+        settling = evaluation < run.startAt;
+    }
+
+    if (run.startRequested && !run.sweep.Running() && !settling)
     {
         run.startRequested = false;
+        run.startAt = 0;
         run.startError = "";
 
-        if (run.blocker != Blocker::None)
+        if (blocker != Blocker::None)
         {
-            run.startError = BlockerText(run.blocker);
+            run.startError = BlockerText(blocker);
         }
         else if (!(baseWhitePoint > 0.0f))
         {
@@ -229,15 +319,20 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
         {
             // Each source tunes its own slider: Automatic around its 5x neutral, Game exposure around 1x.
             run.source = situation.source;
-            if (situation.source == 1)
-                run.sweep.Start(start.gameExposure, GameExposureSettings(), ctx);
+            const float current = situation.source == 1 ? start.gameExposure : start.automatic;
+            if (run.measuring)
+                run.sweep.Start(current, MeasureSettings(situation.source), ctx);
+            else if (situation.source == 1)
+                run.sweep.Start(current, GameExposureSettings(), ctx);
             else
-                run.sweep.Start(start.automatic, Settings {}, ctx);
+                run.sweep.Start(current, Settings {}, ctx);
             // One scale for every step and every run, whatever the slider was at (Sweep::MeasureWhitePoint).
             run.measureWhitePoint = run.sweep.MeasureWhitePoint();
             run.logged = false;
             events.started = true;
-            events.relearnFollow = RelearnFollowOnStart(situation);
+            // A measure leaves the brightness and Follow alone.
+            events.relearnFollow = !run.measuring && RelearnFollowOnStart(situation);
+            events.afterSr = !run.measuring && situation.beforeSrSet;
         }
     }
 
@@ -245,13 +340,22 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
     run.measurePending = run.frame.measure;
     run.frameWhitePoint = run.frame.override ? run.sweep.WhitePointFor(run.frame.ev) : 0.0f;
 
-    if (run.frame.override)
+    if (run.frame.capture)
         run.current ^= 1u;
 
     if (!run.sweep.Running() && !run.logged)
     {
         run.logged = true;
         events.finished = true;
+
+        if (run.measuring && run.sweep.Finished())
+        {
+            run.previous = run.latest;
+            run.previousScale = run.latestScale;
+            run.latest = run.sweep.Steps().front();
+            run.latestScale = { run.source, run.measureWhitePoint };
+            ++run.measurements;
+        }
     }
 
     // Everything back once the run is over and nothing is still in flight to a readback.
@@ -260,14 +364,17 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
     if (!run.sweep.Running() && gpu.Held() && !inFlight)
         gpu.Release();
 
+    if (!run.sweep.Running() && !run.startRequested)
+        run.tuneOn.store(false, std::memory_order_release);
+
     if (!run.sweep.Running() && !run.startRequested && !gpu.Held())
         run.active.store(false, std::memory_order_release);
 
     return events;
 }
 
-// This evaluation is a step of a run and the resources are there: copy and measure.
-inline bool Active(const RunState& run, const Backend& gpu) { return run.frame.override && gpu.Held(); }
+// This evaluation is part of a run and the resources are there: copy and measure.
+inline bool Active(const RunState& run, const Backend& gpu) { return run.frame.capture && gpu.Held(); }
 
 // A readback slot nothing is in flight to, or kRing when all are busy.
 inline unsigned int FreeSlot(const RunState& run)
@@ -303,6 +410,7 @@ inline void Shutdown(RunState& run, Backend& gpu)
         busy = false;
 
     gpu.Release();
+    run.tuneOn.store(false, std::memory_order_release);
     run.active.store(false, std::memory_order_release);
 }
 
@@ -320,9 +428,41 @@ inline Blocker PollLocked(RunState& run, unsigned long long nowMs)
     {
         run.sweep.Abandon(Abort::NrOff);
         run.startRequested = false;
+        run.tuneOn.store(false, std::memory_order_release);
     }
 
     return stalled ? Blocker::NrStopped : run.blocker;
+}
+
+// A finished Tune whose result the menu still offers (Apply / Keep): a measure would clear it. Under the mutex.
+inline bool TuneResultWaiting(const RunState& run) { return !run.measuring && run.sweep.Finished(); }
+
+// A Tune is on (asked for or running) and NR is still calling in: after kStallMs without an evaluation it no longer
+// counts, so nothing it holds can outlive NR (a failed build after SR returns before the run's BeginFrame, and would
+// otherwise keep the run on for the session). Lock-free.
+inline bool TuneOn(const RunState& run, unsigned long long nowMs)
+{
+    const unsigned long long last = run.lastEvaluationMs.load(std::memory_order_relaxed);
+    return run.tuneOn.load(std::memory_order_acquire) && (last == 0 || nowMs - last <= kStallMs);
+}
+
+// Whether Follow the game's exposure holds its easing still (DlssNrFollowGame::Track's `hold`): while a Tune is on, as
+// its steps are measured against a frozen base. Not for a measure, which measures the picture as it plays.
+inline bool HoldsFollow(const RunState& run, unsigned long long nowMs) { return TuneOn(run, nowMs); }
+
+// Whether NR runs after SR for now although Before SR is set: while a Tune is on. Before SR the game's frame is
+// jittered, so a still scene reads as moving and a Tune cannot get through its stillness check; the user asked for
+// Tune to run after SR there and go back afterwards. In memory only -- the setting itself is never changed, so nothing
+// is left behind if the game exits mid-run. The result is measured after SR and applied to the Before SR picture. Not
+// for a measure, which measures the setup as it is.
+inline bool TuneRunsAfterSr(const RunState& run, unsigned long long nowMs) { return TuneOn(run, nowMs); }
+
+// Two measurements compare (the menu's "vs previous") only when taken at the same scale: the same white point source,
+// and measuring white points within 2% (the detail noise floor on a still NBA 2K27 scene was 0.3%).
+inline bool SameScale(const RunState::Scale& a, const RunState::Scale& b)
+{
+    return a.source == b.source && a.whitePoint > 0.0f && b.whitePoint > 0.0f &&
+           std::fabs(a.whitePoint / b.whitePoint - 1.0f) <= 0.02f;
 }
 
 // The menu's buttons.
@@ -334,6 +474,25 @@ inline void RequestStart(RunState& run, uint32_t source)
         return;
 
     run.source = source;
+    run.measuring = false;
+    run.startAt = 0;
+    run.sweep.Clear();
+    run.startError = "";
+    run.startRequested = true;
+    run.tuneOn.store(true, std::memory_order_release);
+    run.active.store(true, std::memory_order_release);
+}
+
+// "Measure detail": the white point source is whatever is in use when it starts (it sets the measuring scale only).
+inline void RequestMeasure(RunState& run)
+{
+    std::lock_guard<std::mutex> lock(run.mutex);
+
+    // Not over a Tune result still waiting for Apply or Keep: starting would clear it (TuneResultWaiting).
+    if (run.sweep.Running() || TuneResultWaiting(run))
+        return;
+
+    run.measuring = true;
     run.sweep.Clear();
     run.startError = "";
     run.startRequested = true;

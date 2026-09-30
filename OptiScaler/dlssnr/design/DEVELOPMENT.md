@@ -27,14 +27,26 @@ review for its change type below, against the specs here.**
 5. **Shared struct == cbuffer.** `DlssNrConstants` (C++) and the `Params` cbuffer (HLSL) are ONE
    ordered list of 4-byte scalars. Append only, to the end, in both, in the same order. A mismatch
    silently corrupts every constant past the divergence — the worst outcome in the tree.
-6. **Shader rebuild is real.** After editing `dlssnr.hlsl`, recompile BOTH targets (dxc `cs_6_0` DXIL →
-   `DlssNr_Shader.h` array `DlssNr_cso`; dxc `-spirv -D VK_MODE` → `DlssNr_Shader_Vk.h` array
-   `dlssnr_spv`) and confirm the `.cso`/`.spv` mtime is newer than the source and the built DLL is
-   newer than the regenerated header. A stale header ships old shader logic silently.
+6. **Shader rebuild is real.** After editing `dlssnr.hlsl`, recompile BOTH targets (fxc
+   `/T cs_5_0 /E CSMain /O3` DXBC → `DlssNr_Shader.h` array `DlssNr_cso`; dxc `-spirv -T cs_6_0 -E CSMain
+   -O3 -Qstrip_debug -D VK_MODE -Cc -Vi` → `DlssNr_Shader_Vk.h` array `dlssnr_spv`; both headers with
+   `shader_tools/create_header.py`, run from `precompile/` so `#include "dlssnr_pq.hlsli"` resolves; with
+   Git Bash set `MSYS_NO_PATHCONV=1` or fxc reads `/T` as a path) and confirm the `.cso`/`.spv` mtime is
+   newer than the source and the built DLL is newer than the regenerated header. A stale header ships old
+   shader logic silently. Check the recipe first: the committed source must rebuild byte-identically.
+   `dlssnr_finished_color_Shader.h` is dxc `cs_6_0 -O3` DXIL (`-Fh`, `-Vn dlssnr_finished_color_cso`),
+   committed from dxc 1.8; the tree's dxc 1.9 differs only in version metadata and hash.
+   `sgsr1_Shader.h` (array `sgsr1_Shader_cso`) is dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL, which
+   reproduces the committed binary byte-identically; its SPIR-V (`sgsr1_spv`) uses the dlssnr recipe. SGSR1 mirrors
+   `ReversibleMode`, so a new proxy curve means rebuilding it too.
 7. **Passthrough is sacred.** Any encode/decode/proxy change must leave already-tone-mapped
    (`gPassthrough != 0`) frames untouched. Both the encode AND every place that reproduces the encode
    (e.g. the matched-residual `fullProxy`) must carry the same passthrough gate. (This is exactly the
    defect the reversible-proxy review caught.)
+   One deliberate exception: `[DlssNr] ColourEncoding` = tone-mapped gamma 2.2 converts a passthrough frame
+   to sRGB of the same light at the encode and back at every resolve write (`DecodeGameColour` /
+   `EncodeGameColour`). Auto never converts; the WARP test `tests/nr_colour_encoding_shader_smoke.cpp`
+   holds Auto bit-identical to the shader before the override.
 8. **Vulkan lifetime.** Never free a Vulkan resource the GPU may still use: drain (`vkDeviceWaitIdle`)
    before a resize/teardown on a live device, and ABANDON (never `vkDestroy`/`.reset()`) handles that
    belong to a device that has gone away.

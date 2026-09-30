@@ -31,6 +31,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include "../shaders/dlssnr/DlssNr_ColourEncoding.h"
+#include "../shaders/dlssnr/DlssNr_ProxyCurve.h"
+#include "DlssNr_ColourEncodingStatus.h"
 
 namespace DlssNr
 {
@@ -115,6 +118,7 @@ struct VkState
     OwnedImage keep;
     OwnedImage preColor;
     bool beforeSr = false;
+    bool beforeSrPlacement = false; // before SR without a Tune moving it (EvaluateBeforeUpscaleVk)
     bool rayReconstruction = false;
 
     // The proxy at the model's working size, when that is below the frame. The model -- 98% of the
@@ -830,6 +834,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                          "game's exposure from here while AutoExposureFollowGame is on (Vulkan: a few "
                                          "frames behind the game)",
                                          DlssNrFollowGame::Instance().OffsetEv(), DlssNrFollowGame::Instance().Scale());
+                            else if (DlssNr::FollowGameOn(*Config::Instance()))
+                                DlssNr::SayFollowTrack(DlssNrFollowGame::Instance().Track(
+                                    g_vk.autoExposurePreExposure / autoReading, g_vk.pairPreExposure / g_vk.pairGameExposure,
+                                    GetTickCount64(),
+                                    DlssNrExposureCalibrate::HoldsFollow(DlssNrExposureCalibrate::TheRun(), GetTickCount64())));
                         }
 
                         if (!g_vk.pairValiditySaid && g_vk.pairReads >= DlssNrFollowGame::kWindow)
@@ -1256,7 +1265,19 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     // Both have to agree. A game can set the HDR flag on a buffer that cannot hold open-ended light,
     // and encoding an already tone-mapped frame a second time looks washed out and banded.
-    const bool linearHdr = gameSaysHdr && FormatCanHoldLinearHdr(colour->Resource.ImageViewInfo.Format);
+    // [DlssNr] ColourEncoding can overrule both (DlssNr_ColourEncoding.h); Auto is exactly this rule.
+    const auto colourChoice = DlssNrColourEncoding::Resolve(cfg.DlssNrColourEncoding.value_or_default(), gameSaysHdr,
+                                                            FormatCanHoldLinearHdr(colour->Resource.ImageViewInfo.Format));
+    const bool linearHdr = colourChoice.LinearHdr();
+    const uint32_t shaderConversion = DlssNrColourEncoding::ShaderConversion(colourChoice.encoding);
+    // Forced PQ is display light: its reference white is 1.0 after the decode, whatever the game's or Automatic's
+    // exposure says (the D3D12 path's ApplyColourEncoding does the same).
+    const bool displayWhite = colourChoice.encoding == DlssNrColourEncoding::Encoding::Pq;
+    {
+        char colourFormat[32];
+        std::snprintf(colourFormat, sizeof(colourFormat), "VkFormat %d", (int) colour->Resource.ImageViewInfo.Format);
+        DlssNr::ReportColourEncoding(colourChoice, colourFormat, "Vulkan");
+    }
 
     // The same rule as the D3D12 path, deliberately spelled the same way: the game divides its frame
     // by preExposure and multiplies by exposure, so undoing that is the divisor this pass wants, and
@@ -1306,7 +1327,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         g_vk.followingGame = follow;
     }
 
-    if (requestedWhitePointSource == 1 && g_vk.gameExposure > 1e-6f)
+    if (requestedWhitePointSource == 1 && g_vk.gameExposure > 1e-6f && !displayWhite)
     {
         // The Trim is the slider, or interpolated from the Trim anchors at this base white point when
         // there are any. Resolved here on the CPU: this backend has no live exposure path in the shader.
@@ -1333,14 +1354,27 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         debugWhitePoint = std::clamp(baseWhitePoint, 0.01f, 4096.0f);
     }
 
-    static bool saidEncoding = false;
+    if (displayWhite)
+    {
+        whitePoint = 1.0f;
+        debugWhitePoint = 1.0f;
+    }
 
-    if (!saidEncoding)
+    static bool saidEncoding = false;
+    static uint32_t saidSetting = 0;
+
+    if (!saidEncoding || saidSetting != cfg.DlssNrColourEncoding.value_or_default())
     {
         saidEncoding = true;
-        LOG_INFO("DLSS-NR Vulkan: the game's buffer is {} (flag {}, format {}), depth {}",
-                 linearHdr ? "linear HDR" : "already tone-mapped", gameSaysHdr ? "set" : "clear",
-                 (int) colour->Resource.ImageViewInfo.Format, depthInverted ? "inverted" : "normal");
+        saidSetting = cfg.DlssNrColourEncoding.value_or_default();
+        if (colourChoice.automatic)
+            LOG_INFO("DLSS-NR Vulkan: the game's buffer is {} (flag {}, format {}), depth {}",
+                     linearHdr ? "linear HDR" : "already tone-mapped", gameSaysHdr ? "set" : "clear",
+                     (int) colour->Resource.ImageViewInfo.Format, depthInverted ? "inverted" : "normal");
+        else
+            LOG_INFO("DLSS-NR Vulkan: colour encoding forced to {} (flag {}, format {}), depth {}",
+                     DlssNrColourEncoding::Name(colourChoice.encoding), gameSaysHdr ? "set" : "clear",
+                     (int) colour->Resource.ImageViewInfo.Format, depthInverted ? "inverted" : "normal");
     }
 
     DlssNrConstants encode {};
@@ -1349,6 +1383,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     encode.Height = height;
     encode.WhitePoint = whitePoint;
     encode.Passthrough = linearHdr ? 0u : 1u;
+    encode.InputEncoding = shaderConversion; // carried into the resolve, which starts as a copy
     encode.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
     encode.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
     encode.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
@@ -1413,7 +1448,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     g_vk.autoExposureActive = false;
     g_vk.autoExposureAdapting = false;
 
-    if (requestedWhitePointSource == 3 && linearHdr && g_vk.meter.Valid() && g_vk.autoExposure.Valid())
+    if (requestedWhitePointSource == 3 && linearHdr && !displayWhite && g_vk.meter.Valid() && g_vk.autoExposure.Valid())
     {
         const VkImageLayout meterInputLayout =
             beforeSr ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
@@ -1423,6 +1458,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         meterParams.Width = kMeterSide;
         meterParams.Height = kMeterSide;
         meterParams.MeterCopiesExposure = 0;
+        meterParams.InputEncoding = shaderConversion; // reads the game's frame
 
         Transition(cmdBuffer, g_vk.meter, VK_IMAGE_LAYOUT_GENERAL);
 
@@ -1599,7 +1635,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                          exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW &&
                                          exposure->Resource.ImageViewInfo.ImageView != VK_NULL_HANDLE;
     const float calibrationWhitePoint = CalibrationVkBeginFrame(cfg, width, height, linearHdr,
-                                                                g_vk.autoExposureActive, calibrationGameExposure);
+                                                                g_vk.autoExposureActive, calibrationGameExposure,
+                                                                DlssNrColourEncoding::ShaderConverts(shaderConversion));
     const bool calibrationPinned = calibrationWhitePoint > 0.0f;
 
     if (calibrationPinned)
@@ -1807,7 +1844,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     reuseFrame.mvScaleX = gameMvX;
     reuseFrame.mvScaleY = gameMvY;
     reuseFrame.modelReset = g_vk.reset;
-    reuseFrame.blocked = calibrationPinned || Cal::Active(Cal::TheRun(), g_calVk);
+    // A Tune step pins the white point; a Measure detail run measures Reuse bottleneck as it runs.
+    reuseFrame.blocked = calibrationPinned;
     reuseFrame.vulkan = true;
     reuseFrame.present = VkFrameClock();
     // NR's own frames, which step exactly once per evaluate: the present count is read on this thread while presents
@@ -2085,6 +2123,11 @@ NVSDK_NGX_Resource_VK* EvaluateBeforeUpscaleVk(VkCommandBuffer cmd, NVSDK_NGX_Pa
     handled = false;
     if (!Config::Instance()->DlssNrRunBeforeSr.value_or_default())
         return nullptr;
+    // A Tune runs after SR while Before SR is set, and NR goes back before SR when it ends (TuneRunsAfterSr).
+    if (DlssNrExposureCalibrate::TuneRunsAfterSr(DlssNrExposureCalibrate::TheRun(), GetTickCount64()))
+        return nullptr;
+    // Where NR runs without a Tune, for the run's wait (CalibrationVkSituation).
+    g_vk.beforeSrPlacement = !rayReconstruction;
     bool applied = false;
     EvaluateAtSeamVk(cmd, params, instance, pd, device, true, rayReconstruction, applied, &handled);
     return applied ? &g_vk.preColor.ngx : nullptr;

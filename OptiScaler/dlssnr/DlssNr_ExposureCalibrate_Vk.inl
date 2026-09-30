@@ -235,17 +235,21 @@ float CalibrationVkBase(const Config& cfg)
 
 // Everything availability depends on, from this evaluation. This backend has no proxy backend, frame hold or
 // finished-picture mode (it does not run NR in the last), so those never block here.
-Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool autoRunning, bool gameExposureNow)
+Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool autoRunning, bool gameExposureNow,
+                                      bool colourConverted)
 {
     Cal::Situation s;
     s.source = cfg.DlssNrWhitePointSource.value_or_default();
     s.hdr = linearHdr;
+    s.colourConverted = colourConverted;
     s.autoRunning = autoRunning;
     s.followLocked = DlssNr::FollowGameOn(cfg) && DlssNrFollowGame::Instance().Locked();
     s.followDisagreementEv =
         g_vk.followingGame ? Cal::BaseDisagreementEv(CalibrationVkFollowedBase(), CalibrationVkOwnBase()) : 0.0f;
     s.gameExposureNow = gameExposureNow;
     s.gameExposureReading = g_vk.gameExposure > 1e-6f;
+    // Where NR runs without a Tune: not Before SR under Ray Reconstruction, so no wait.
+    s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() && g_vk.beforeSrPlacement;
 
     if (s.source == 1)
         s.anchors = !DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()).empty() ||
@@ -259,7 +263,7 @@ Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool au
 
 // Each evaluation, before the white point is used: the pinned white point of this evaluation, 0 when no run is on.
 float CalibrationVkBeginFrame(const Config& cfg, uint32_t width, uint32_t height, bool linearHdr, bool autoRunning,
-                              bool gameExposureNow)
+                              bool gameExposureNow, bool colourConverted)
 {
     g_calVk.Tick();
 
@@ -269,7 +273,7 @@ float CalibrationVkBeginFrame(const Config& cfg, uint32_t width, uint32_t height
         return 0.0f;
     }
 
-    Cal::BeginFrameNow(g_calVk, cfg, width, height, CalibrationVkSituation(cfg, linearHdr, autoRunning, gameExposureNow),
+    Cal::BeginFrameNow(g_calVk, cfg, width, height, CalibrationVkSituation(cfg, linearHdr, autoRunning, gameExposureNow, colourConverted),
                        CalibrationVkBase(cfg), g_vk.frames);
     return Cal::TheRun().frameWhitePoint;
 }
@@ -348,8 +352,10 @@ void CalibrationVkMeasure(VkCommandBuffer cmd, VkImageView edited, VkImageLayout
     params.WhitePoint = run.measureWhitePoint;
     params.Width = width;
     params.Height = height;
-    params.TransferStrength = Cal::kShoulder;
-    params.ColourStrength = Cal::kFloor;
+    const DlssNrProxyCurve::TuneThresholds damage =
+        DlssNrProxyCurve::Thresholds(Config::Instance()->DlssNrReversibleMode.value_or_default());
+    params.TransferStrength = damage.shoulder;
+    params.ColourStrength = damage.floor;
 
     // The model's input is read as a storage image (the layout has four sampled bindings, the stats pass reads five).
     Transition(cmd, modelInput, VK_IMAGE_LAYOUT_GENERAL);

@@ -10,33 +10,14 @@ Texture2D<float4> reference : register(t1);
 Texture2D<float4> original : register(t2);
 RWTexture2D<float4> target : register(u0);
 
-float3 DecodePQ(float3 code)
-{
-    const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0;
-    const float c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
-    float3 p = pow(saturate(code), 1.0 / m2);
-    return pow(max(p - c1, 0.0) / max(c2 - c3 * p, 1e-6), 1.0 / m1) * 125.0;
-}
-float3 EncodePQ(float3 light)
-{
-    const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0;
-    const float c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
-    float3 p = pow(saturate(light / 125.0), m1);
-    return pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
-}
+#include "dlssnr_pq.hlsli"
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= width || id.y >= height) return;
     float4 pixel = source.Load(int3(id.xy, 0));
-    const float3x3 to709 = {
-         1.6604910, -0.5876411, -0.0728499,
-        -0.1245505,  1.1328999, -0.0083494,
-        -0.0181508, -0.1005789,  1.1187297 };
-    const float3x3 to2020 = {
-        0.6274039, 0.3292830, 0.0433131,
-        0.0690973, 0.9195404, 0.0113623,
-        0.0163914, 0.0880133, 0.8955953 };
+    const float3x3 to709 = kBt2020To709;
+    const float3x3 to2020 = kBt709To2020;
     if (mode == 5)
     {
         // Carry a bounded relative change through DLSS. An absolute signed residual

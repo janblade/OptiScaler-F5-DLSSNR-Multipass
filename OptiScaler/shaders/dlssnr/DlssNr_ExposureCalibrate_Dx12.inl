@@ -133,7 +133,7 @@ void CalibrationIdleFrame() { Cal::IdleNow(); }
 
 // Everything availability depends on, from this evaluation. Only called while wanted (it parses the Trim anchors).
 Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, bool isHdrBuffer, bool finishedPicture,
-                                    bool gameExposureNow)
+                                    bool gameExposureNow, bool colourConverted)
 {
     Cal::Situation s;
     s.source = cfg.DlssNrWhitePointSource.value_or_default();
@@ -141,11 +141,14 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
     s.holdFrame = cfg.DlssNrHoldFrame.value_or_default();
     s.finishedPicture = finishedPicture;
     s.hdr = isHdrBuffer;
+    s.colourConverted = colourConverted;
     s.autoRunning = usingAutoExposure;
     s.followLocked = DlssNr::FollowGameOn(cfg) && DlssNrFollowGame::Instance().Locked();
     s.followDisagreementEv = FollowDisagreementEv();
     s.gameExposureNow = gameExposureNow;
     s.gameExposureReading = g_nr.gameExposure > 1e-6f;
+    // Where NR runs without a Tune: not Before SR under Ray Reconstruction or an unsupported colour layout, so no wait.
+    s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() && g_nr.beforeSrPlacement;
 
     if (s.source == 1)
         s.anchors = !DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()).empty() ||
@@ -263,8 +266,10 @@ void CalibrationMeasure(DlssNr_Dx12* pass, ID3D12GraphicsCommandList* cmdList, I
     params.WhitePoint = g_cal.measureWhitePoint;
     params.Width = width;
     params.Height = height;
-    params.TransferStrength = Cal::kShoulder;
-    params.ColourStrength = Cal::kFloor;
+    const DlssNrProxyCurve::TuneThresholds damage =
+        DlssNrProxyCurve::Thresholds(Config::Instance()->DlssNrReversibleMode.value_or_default());
+    params.TransferStrength = damage.shoulder;
+    params.ColourStrength = damage.floor;
 
     if (!pass->DispatchDetailStats(cmdList, params, g_calDx.output[i], g_calDx.output[prev], g_calDx.input[i],
                                    g_calDx.input[prev], modelInput, g_calDx.grid))

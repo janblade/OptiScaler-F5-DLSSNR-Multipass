@@ -467,8 +467,12 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     frame.SubmissionEpoch = submittedEpoch;
     frame.RenderSubrectWidth = g.w; frame.RenderSubrectHeight = g.h;
     frame.DepthInverted = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
-    frame.ColourIsLinearHdr = (UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags) &
-        NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0 && FormatCanHoldLinearHdr(outDesc.Format);
+    // With Finished Picture on, the forced choice is the screen's (DlssNr_Late.inl): this pre-SR scene buffer keeps
+    // the game's own rule, and the screen's choice is the one reported.
+    const bool finishedPicture = cfg.DlssNrFinishedPicture.value_or_default();
+    ApplyColourEncoding(frame, finishedPicture ? DlssNrColourEncoding::kAuto : cfg.DlssNrColourEncoding.value_or_default(),
+                        (UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags) & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0,
+                        outDesc.Format, !finishedPicture);
     frame.Reset = UInt(source, NVSDK_NGX_Parameter_Reset) != 0 || g.reset || g.sampleAndHold || privateJob;
     frame.MvScaleX = Float(source, NVSDK_NGX_Parameter_MV_Scale_X, 1);
     frame.MvScaleY = Float(source, NVSDK_NGX_Parameter_MV_Scale_Y, 1);
@@ -496,7 +500,8 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         {
             encode.Mode = 5; // finished-colour shader: encode relative changes before FP16 storage
             encode.WhitePoint = frame.PreExposure;
-            encode.TransferStrength = frame.ColourIsLinearHdr ? 1.0f : 0.0f;
+            // Relative changes only for linear light; a PQ frame is compared in its own signal, like a tone-mapped one.
+            encode.TransferStrength = frame.ColourEncoding == (uint32_t) DlssNrColourEncoding::Encoding::LinearHdr ? 1.0f : 0.0f;
             encode.MaxRatio = std::clamp(cfg.DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
             ok = g.codec->DispatchResidualPass(cmd, encode, color, g.edited, nullptr, nullptr, g.residualInput);
         }
@@ -595,6 +600,7 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
     g.reset = false;
     if (cfg.DlssNrFinishedPicture.value_or_default())
     {
+        // Finished Picture is on here, so this scene buffer follows the game's own rule (the override is the screen's).
         const bool sceneLinear = (UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags) &
             NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0 && FormatCanHoldLinearHdr(g.outputFormat);
         if (Late::CaptureResidual(cmd, pair.output, g.residualOutput, pair.scale, sceneLinear))

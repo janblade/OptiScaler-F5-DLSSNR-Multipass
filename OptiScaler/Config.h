@@ -344,10 +344,15 @@ class Config
     // way the composed modes do. 0 = today's behaviour, unchanged.
     CustomOptional<float> DlssNrReplaceDetailStrength { 0.5f };
 
-    // The RenoDX reversible proxy mode. 0 = today's soft-knee encode + our composition (default,
-    // byte-identical); 1 = unclipped Neutwo proxy + our composition; 2 = Neutwo proxy + pure-inverse
-    // replace. An in-game A/B and a way back. Default 0 = byte-identical to before.
+    // The proxy curve (Final Image Composition), values in shaders/dlssnr/DlssNr_ProxyCurve.h. 0 = soft
+    // knee + our composition (default); 1/2 = unclipped Neutwo proxy + composition / pure-inverse replace;
+    // 3/4 = the balanced (hybrid) curve, the same two ways; 5 HLG and 6 PQ + composition; 7 linear +
+    // composition, a diagnostic set in the ini only. Out-of-range values fall back to 0.
     CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
+
+    // How the NR pass decodes the game's colour. 0 Auto (the game's DLSS HDR flag + the output format, as before),
+    // 1 linear HDR, 2 tone-mapped sRGB, 3 tone-mapped gamma 2.2, 4 PQ. Values are DlssNr_ColourEncoding.h's.
+    CustomOptional<uint32_t> DlssNrColourEncoding { 0 };
 
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
     // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.

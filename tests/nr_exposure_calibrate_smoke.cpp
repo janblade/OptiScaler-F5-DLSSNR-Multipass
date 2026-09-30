@@ -1044,10 +1044,11 @@ int main()
         const StartPoints start { 0.0f, 0.0f };
         const float base = 1.0f;
 
-        // Drives `evaluations` NR evaluations from `evaluation`, 16 ms apart; `submit` submits every measured one.
+        // Drives `evaluations` NR evaluations from `evaluation`, 16 ms apart; `submit` submits every measured one,
+        // stamped `submitOffset` evaluations on (Vulkan counts the evaluation before it submits: 1).
         const auto drive = [&](RunState& run, FakeGpu& gpu, unsigned long long& evaluation, unsigned long long& ms,
                                int evaluations, bool submit, int& started, int& finished, int& relearns,
-                               const Situation& s) {
+                               const Situation& s, unsigned long long submitOffset = 0) {
             for (int i = 0; i < evaluations; ++i, ++evaluation, ms += 16)
             {
                 if (!Wanted(run, ms))
@@ -1061,8 +1062,9 @@ int main()
                 relearns += ev.relearnFollow ? 1 : 0;
                 if (ev.started)
                     CHECK(run.measureWhitePoint > 0.0f);
+                // A sweep pins the white point; a measure leaves it live.
                 if (Active(run, gpu))
-                    CHECK(run.frameWhitePoint > 0.0f);
+                    CHECK(run.measuring ? run.frameWhitePoint == 0.0f : run.frameWhitePoint > 0.0f);
                 if (submit && Active(run, gpu) && run.measurePending)
                 {
                     const unsigned int slot = FreeSlot(run);
@@ -1070,7 +1072,7 @@ int main()
                     if (slot < kRing)
                     {
                         gpu.submittedAt[slot] = evaluation;
-                        Submitted(run, slot, evaluation);
+                        Submitted(run, slot, evaluation + submitOffset);
                     }
                 }
             }
@@ -1099,6 +1101,13 @@ int main()
             CHECK(!gpu.held && !run.active.load());
             CHECK(run.frameWhitePoint == 0.0f && !Active(run, gpu));
             CHECK(!ResultLines(run.sweep).empty());
+            bool stepLine = false;
+            for (const std::string& line : ResultLines(run.sweep))
+                stepLine = stepLine || (line.find("DLSS-NR calibrate: -3.0 EV (trim ") == 0 &&
+                                        line.find(") n 4 | raw 0.10000 band 0.05000 (out 0.10000 in 0.05000) | flicker ") !=
+                                            std::string::npos &&
+                                        line.find(" | score raw ") != std::string::npos);
+            CHECK(stepLine);
             CHECK(!Wanted(run, ms + kMenuMs)); // the menu stopped looking a while ago
         }
 
@@ -1178,6 +1187,101 @@ int main()
             }
         }
 
+        // Measure detail: every evaluation measured (the ring never runs out), the white point never pinned, Follow
+        // not re-learned, Trim anchors not in the way; the result kept beside the one before it.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            Situation s = ok;
+            s.followLocked = true;
+            s.anchors = true;
+            IdleFrame(run, ms);
+            RequestMeasure(run);
+            drive(run, gpu, evaluation, ms, 200, true, started, finished, relearns, s);
+            CHECK(started == 1 && finished == 1 && relearns == 0);
+            CHECK(run.sweep.Finished() && run.sweep.AbortReason() == Abort::None);
+            CHECK(run.measurements == 1 && run.latest.samples == kMeasureEvaluations && run.previous.samples == 0);
+            CHECK(Near(run.latest.detailBand, 0.1f) && Near(run.latest.inputBand, 0.05f));
+            CHECK(gpu.early == 0 && gpu.releasedInFlight == 0 && !gpu.held && !run.active.load());
+            const std::vector<std::string> lines = ResultLines(run.sweep);
+            CHECK(lines.size() == 1 && lines[0].find("DLSS-NR measure: n 60 |") == 0);
+            CHECK(lines[0].find("band 0.05000 (out 0.10000 in 0.05000)") != std::string::npos);
+
+            CHECK(run.latestScale.source == 3 && Near(run.latestScale.whitePoint, run.measureWhitePoint));
+
+            // Vulkan's timing (a slot due 17 evaluations on): still every sample, the ring does not run out.
+            RequestMeasure(run);
+            drive(run, gpu, evaluation, ms, 200, true, started, finished, relearns, s, 1);
+            CHECK(run.measurements == 2 && run.previous.samples == kMeasureEvaluations);
+            CHECK(run.latest.samples == kMeasureEvaluations && gpu.early == 0);
+            CHECK(SameScale(run.latestScale, run.previousScale));
+
+            // Follow's easing is held by a Tune, not by a measure.
+            RequestMeasure(run);
+            drive(run, gpu, evaluation, ms, 20, true, started, finished, relearns, ok);
+            CHECK(run.active.load() && !HoldsFollow(run));
+            RequestCancel(run);
+            drive(run, gpu, evaluation, ms, 40, true, started, finished, relearns, ok);
+            CHECK(!run.active.load() && !HoldsFollow(run));
+
+            // A Tune after it is a Tune again: pinned, and the anchors stop it.
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 3, true, started, finished, relearns, s);
+            CHECK(!run.measuring && std::string(run.startError).size() > 0);
+        }
+
+        // A Tune result still offered (Apply / Keep) is not cleared by a measure; once dismissed, a measure starts.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, ms, 20, true, started, finished, relearns, ok);
+            CHECK(HoldsFollow(run)); // a Tune holds Follow's easing
+            drive(run, gpu, evaluation, ms, 400, true, started, finished, relearns, ok);
+            CHECK(run.sweep.Finished() && TuneResultWaiting(run));
+            const size_t steps = run.sweep.Steps().size();
+            RequestMeasure(run);
+            CHECK(!run.measuring && !run.startRequested && run.sweep.Finished() && run.sweep.Steps().size() == steps);
+            Dismiss(run);
+            CHECK(!TuneResultWaiting(run));
+            RequestMeasure(run);
+            CHECK(run.measuring && run.startRequested);
+        }
+
+        // Two results compare only at the same scale.
+        {
+            CHECK(SameScale({ 3, 1.508f }, { 3, 1.513f }));
+            CHECK(!SameScale({ 3, 1.508f }, { 3, 1.26f }));
+            CHECK(!SameScale({ 3, 1.5f }, { 1, 1.5f }));
+            CHECK(!SameScale({ 3, 1.5f }, { 3, 0.0f }));
+        }
+
+        // Measure detail with nothing ever submitted: it says so, and gives everything back.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, ms = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            IdleFrame(run, ms);
+            RequestMeasure(run);
+            drive(run, gpu, evaluation, ms, 200, false, started, finished, relearns, ok);
+            CHECK(finished == 1 && run.sweep.AbortReason() == Abort::NothingMeasured && run.measurements == 0);
+            const std::vector<std::string> lines = ResultLines(run.sweep);
+            CHECK(lines.size() == 1 && lines[0].find("DLSS-NR measure: stopped: nothing could be measured") == 0);
+            CHECK(!gpu.held && !run.active.load());
+        }
+
         // Cancel mid-run, and Shutdown: slots cleared, resources given back, no pin.
         {
             RunState run;
@@ -1200,6 +1304,83 @@ int main()
             Shutdown(run, gpu);
             CHECK(!gpu.held && !run.active.load() && run.frameWhitePoint == 0.0f && FreeSlot(run) == 0);
         }
+    }
+
+    // Measure detail's sweep: one step at the current value, the white point left alone, 8 evaluations to fill the
+    // copies and then 60 measured, the means of them as the result, nothing scored or chosen.
+    {
+        Sweep s;
+        s.Start(1.25f, MeasureSettings(3), kCtx);
+        CHECK(s.Running() && s.StepCount() == 1 && Near(s.Steps()[0].ev, 1.25f));
+        int measured = 0, settled = 0, n = 0;
+        while (s.Running() && n < 1000)
+        {
+            const Frame f = s.NextFrame(kCtx);
+            CHECK(!f.override && f.capture);
+            if (f.measure)
+            {
+                Stats st {};
+                st.detailRaw = 0.2f;
+                st.detailBand = 0.1f + 0.01f * (float) (measured % 2); // a computed/reused alternation
+                st.inputBand = 0.05f;
+                st.outputChange = 0.003f;
+                st.inputChange = 0.0002f;
+                s.AddStats(f.ticket, st);
+                ++measured;
+            }
+            else if (measured == 0)
+                ++settled;
+            ++n;
+        }
+        CHECK(s.Finished() && !s.Changed() && !s.Unsure() && !s.AtEdge());
+        CHECK(settled == 8 && measured == (int) kMeasureEvaluations);
+        const StepResult& r = s.Steps()[0];
+        CHECK(r.samples == kMeasureEvaluations && Near(r.detailBand, 0.105f) && Near(r.DetailOf(Detail::BandPass), 0.055f));
+        CHECK(Near(r.Flicker(), 0.0028f));
+
+        // Game exposure measures at its own scale, as its sweep does.
+        Sweep g;
+        g.Start(0.0f, MeasureSettings(1), kCtx);
+        CHECK(g.Config().neutralTrim == kGameExposureNeutralTrim && g.Config().measureOnly);
+
+        // Fewer than half the evaluations back (failed copies, a full ring): not a result.
+        Sweep f;
+        f.Start(0.0f, MeasureSettings(3), kCtx);
+        int given = 0;
+        Run(f, [&given](float) {
+            Stats st {};
+            st.detailRaw = st.detailBand = 0.1f;
+            st.inputBand = 0.05f;
+            if (given++ % 3 != 0)
+                st.detailBand = NAN; // two in three dropped
+            return st;
+        });
+        CHECK(!f.Finished() && f.AbortReason() == Abort::TooFewMeasured);
+        CHECK(ResultLines(f).size() == 1 && ResultLines(f)[0].find("DLSS-NR measure: stopped: too few") == 0);
+
+        // Movement is measured again, as in a sweep, and the note says it is a measure.
+        Sweep m;
+        m.Start(0.0f, MeasureSettings(3), kCtx);
+        int calls = 0;
+        Run(m, [&calls](float) {
+            Stats st {};
+            st.detailRaw = st.detailBand = 0.1f;
+            st.inputBand = 0.05f;
+            st.inputChange = ++calls == 10 ? 0.01f : 0.0f;
+            return st;
+        });
+        CHECK(m.Finished() && m.Steps()[0].samples == kMeasureEvaluations);
+        const std::vector<Note> moved = m.TakeNotes();
+        CHECK(moved.size() == 1 && NoteText(moved[0], true).find("DLSS-NR measure: the picture moved") == 0);
+        CHECK(NoteText(moved[0]).find("DLSS-NR calibrate:") == 0);
+
+        // Anchors stop a Tune, not a measure.
+        Situation a {};
+        a.source = 3;
+        a.hdr = true;
+        a.autoRunning = true;
+        a.anchors = true;
+        CHECK(Availability(a) == Blocker::Anchors && Availability(a, true) == Blocker::None);
     }
 
     // Abandoned from outside, then cleared; Clear does nothing to a running sweep.

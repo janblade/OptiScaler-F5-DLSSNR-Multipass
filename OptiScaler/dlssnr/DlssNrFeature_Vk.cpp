@@ -837,7 +837,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                 DlssNr::SayFollowTrack(DlssNrFollowGame::Instance().Track(
                                     g_vk.autoExposurePreExposure / autoReading, g_vk.pairPreExposure / g_vk.pairGameExposure,
                                     GetTickCount64(),
-                                    DlssNrExposureCalibrate::TheRun().active.load(std::memory_order_acquire)));
+                                    DlssNrExposureCalibrate::HoldsFollow(DlssNrExposureCalibrate::TheRun())));
                         }
 
                         if (!g_vk.pairValiditySaid && g_vk.pairReads >= DlssNrFollowGame::kWindow)
@@ -1843,7 +1843,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     reuseFrame.mvScaleX = gameMvX;
     reuseFrame.mvScaleY = gameMvY;
     reuseFrame.modelReset = g_vk.reset;
-    reuseFrame.blocked = calibrationPinned || Cal::Active(Cal::TheRun(), g_calVk);
+    // A Tune step pins the white point; a Measure detail run measures Reuse bottleneck as it runs.
+    reuseFrame.blocked = calibrationPinned;
     reuseFrame.vulkan = true;
     reuseFrame.present = VkFrameClock();
     // NR's own frames, which step exactly once per evaluate: the present count is read on this thread while presents

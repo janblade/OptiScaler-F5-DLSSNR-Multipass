@@ -172,11 +172,30 @@ struct ExposureCalibrationStatus
     float bestRawEv = 0.0f;
     float bestBandEv = 0.0f;
     std::vector<float> ev, scoreRaw, scoreBand; // measured steps
+    bool measure = false; // the run above (running, finished or stopped) is a Measure detail, not a Tune
+
+    // "Measure detail" (the Compare section): a still scene's detail and flicker at the current settings, for A/B.
+    bool measureAvailable = false;
+    std::string measureUnavailable;
+    unsigned measurements = 0; // taken this session
+    // The latest measurement and the one before it (hasPrevious false when there is none): detail is the output's
+    // band-pass detail minus the input's, raw the output's Laplacian, flicker the output's frame-to-frame change beyond
+    // the input's; all display-encoded luma, frames the evaluations measured.
+    struct Measurement
+    {
+        float detail = 0.0f, detailOut = 0.0f, detailIn = 0.0f, raw = 0.0f;
+        float flicker = 0.0f, flickerOut = 0.0f, flickerIn = 0.0f;
+        unsigned frames = 0;
+    };
+    Measurement latest, previous;
+    bool hasPrevious = false;
+    bool comparable = false; // latest and previous were measured at the same scale (source and white point)
 };
 
 ExposureCalibrationStatus ExposureCalibration();
 // `source` is the panel it was pressed in (3 Automatic, 1 Game exposure), so that panel shows the run and its result.
 void StartExposureCalibration(uint32_t source);
+void StartMeasureDetail(); // cancelled and dismissed like a Tune run
 void CancelExposureCalibration();
 void DismissExposureCalibration();
 

@@ -1513,7 +1513,7 @@ void ConsumeMeterReadback()
             else if (DlssNr::FollowGameOn(*Config::Instance()))
                 DlssNr::SayFollowTrack(DlssNrFollowGame::Instance().Track(
                     g_nr.autoExposurePreExposure / autoReading, g_nr.autoPairPreExposure / g_nr.autoPairGameExposure,
-                    GetTickCount64(), DlssNrExposureCalibrate::TheRun().active.load(std::memory_order_acquire)));
+                    GetTickCount64(), DlssNrExposureCalibrate::HoldsFollow(DlssNrExposureCalibrate::TheRun())));
         }
     }
 
@@ -3818,7 +3818,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     reuseFrame.depth = depthIn;
     reuseFrame.output = g_nr.output;
     reuseFrame.modelReset = g_nr.reset;
-    reuseFrame.blocked = calibrationPinned || CalibrationActive() || g_nr.heldActive;
+    // A Tune step pins the white point (calibrationPinned); a Measure detail run copies and measures without pinning,
+    // and measures Reuse bottleneck as it runs.
+    reuseFrame.blocked = calibrationPinned || g_nr.heldActive;
     reuseFrame.frameNumber = frame.SubmissionEpoch != 0 ? frame.SubmissionEpoch : g_frames;
     {
         // The motion size is left out on purpose: saved vectors are uv displacements, so a render-size change does not

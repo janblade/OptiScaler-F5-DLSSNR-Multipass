@@ -32,6 +32,10 @@
 // camera is: if a step's mean drifts from the run's first step by more than sceneTolerance, the camera came to rest
 // somewhere else and the sweep starts over, sceneRestarts times at most. Only then does movement stop the run.
 //
+// The same machinery measures without tuning: "Measure detail" (MeasureSettings) is a run of one step at the current
+// value, shown the live exposure rather than a pinned one, measured over many evaluations and not scored -- the numbers
+// an A/B of any setting is judged by, on a still scene.
+//
 // Also here, so the host test covers them: ReduceGrid (the grid -> Stats) and Availability (when a run may start or go
 // on). Pure CPU, no D3D: DlssNr_ExposureCalibrate_Run.h drives it for both backends, the menu shows it,
 // tests/nr_exposure_calibrate_smoke.cpp checks it.
@@ -89,6 +93,7 @@ enum class Abort : uint32_t
     ExposureMoved, // the base white point (Automatic's metering, or the followed game exposure) moved
     Unavailable,   // a run could not go on for longer than Settings::unavailableTolerance (StopBlocker says why)
     NothingMeasured, // every measurement came back empty (another NR path ran, or the stats pass failed)
+    TooFewMeasured,  // a measure got fewer than half its evaluations back: not a number to compare with
 };
 
 inline const char* AbortText(Abort a)
@@ -113,6 +118,8 @@ inline const char* AbortText(Abort a)
         return "it could not go on";
     case Abort::NothingMeasured:
         return "nothing could be measured; nothing changed";
+    case Abort::TooFewMeasured:
+        return "too few frames could be measured: try again";
     }
     return "";
 }
@@ -182,7 +189,8 @@ struct Situation
     bool colourConverted = false; // DlssNrColourEncoding::ShaderConverts for this frame
 };
 
-inline Blocker Availability(const Situation& s)
+// `measuring`: for "Measure detail", which leaves the brightness alone, so ini Trim anchors do not stand in its way.
+inline Blocker Availability(const Situation& s, bool measuring = false)
 {
     if (s.source != 3 && s.source != 1)
         return Blocker::Source;
@@ -210,7 +218,7 @@ inline Blocker Availability(const Situation& s)
             return Blocker::AutoNotRunning;
     }
 
-    if (s.anchors)
+    if (s.anchors && !measuring)
         return Blocker::Anchors;
     return Blocker::None;
 }
@@ -258,6 +266,9 @@ struct Settings
     // Consecutive evaluations a run may be unavailable (the game dropping its exposure texture for a frame, Automatic's
     // meter missing one) before it aborts; meanwhile it holds its step and measures nothing.
     unsigned unavailableTolerance = 30;
+    // "Measure detail": one step at the current value, the white point left live (Frame::override stays off, so the
+    // picture is exactly what the settings give), measured and not scored. Movement is handled as in a sweep.
+    bool measureOnly = false;
 };
 
 // Game exposure (white point source 1): its slider's 0 EV is the game's exposure as is, and a pre-exposed game's own
@@ -269,6 +280,18 @@ inline Settings GameExposureSettings()
     s.neutralTrim = kGameExposureNeutralTrim;
     s.minEv = -5.5f;
     s.maxEv = 2.0f;
+    return s;
+}
+
+// "Measure detail" on the white point source `source` (its neutral is the scale detail is measured at, as in a sweep):
+// 8 evaluations for the copies to fill, then 60 measured, about a second at 60 fps. Even, like a sweep's step.
+constexpr unsigned kMeasureEvaluations = 60;
+inline Settings MeasureSettings(uint32_t source)
+{
+    Settings s = source == 1 ? GameExposureSettings() : Settings {};
+    s.measureOnly = true;
+    s.firstSettle = s.settle;
+    s.measure = kMeasureEvaluations;
     return s;
 }
 
@@ -389,6 +412,7 @@ struct Note
 struct Frame
 {
     bool override = false; // use `ev` instead of the configured Trim
+    bool capture = false;  // part of a run: copy the input and the output (a measure's evaluations do, unpinned)
     float ev = 0.0f;
     bool measure = false; // dispatch the stats pass and hand its result back with `ticket`
     Ticket ticket {};
@@ -442,11 +466,20 @@ class Sweep
         const float hi = std::min(settings.maxEv, EvForTrim(DlssNrTrim::kMinTrim, settings.neutralTrim));
         const float step = settings.stepEv > 0.01f ? settings.stepEv : 0.5f;
 
-        for (int i = 0; lo + i * step <= hi + 1e-4f; ++i)
+        if (settings.measureOnly)
         {
             StepResult r;
-            r.ev = lo + i * step;
+            r.ev = currentEv;
             steps_.push_back(r);
+        }
+        else
+        {
+            for (int i = 0; lo + i * step <= hi + 1e-4f; ++i)
+            {
+                StepResult r;
+                r.ev = lo + i * step;
+                steps_.push_back(r);
+            }
         }
 
         retries_.assign(steps_.size(), 0);
@@ -495,7 +528,8 @@ class Sweep
                 return Stop(Abort::Unavailable), f;
             }
 
-            f.override = true;
+            f.override = !settings_.measureOnly;
+            f.capture = true;
             f.ev = step_ < steps_.size() ? steps_[step_].ev : currentEv_;
             return f;
         }
@@ -506,7 +540,8 @@ class Sweep
             std::fabs(std::log2(now.baseWhitePoint / context_.baseWhitePoint)) > settings_.baseToleranceEv)
             return Stop(Abort::ExposureMoved), f;
 
-        f.override = true;
+        f.override = !settings_.measureOnly;
+        f.capture = true;
 
         // Every step issued: back at the current value while the last results come home.
         if (step_ >= steps_.size())
@@ -732,8 +767,20 @@ class Sweep
             return;
         }
 
+        // A measure stands for the scene only with enough of its evaluations back (failed copies or a full readback
+        // ring drop samples).
+        if (settings_.measureOnly && steps_.front().samples < settings_.measure / 2)
+        {
+            Stop(Abort::TooFewMeasured);
+            return;
+        }
+
         running_ = false;
         finished_ = true;
+
+        // A measure is its numbers, nothing to choose.
+        if (settings_.measureOnly)
+            return;
 
         // The step nearest the current value stands for it.
         int nearest = -1;

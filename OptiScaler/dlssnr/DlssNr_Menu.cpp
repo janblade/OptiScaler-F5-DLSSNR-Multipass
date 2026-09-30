@@ -104,8 +104,9 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
 static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral)
 {
     const auto cal = DlssNr::ExposureCalibration();
-    // A result belongs to the panel it was tuned in: its EVs are in that slider's units.
-    const bool mine = cal.source == source;
+    // A result belongs to the panel it was tuned in: its EVs are in that slider's units. A Measure detail run is shown
+    // under Compare instead.
+    const bool mine = cal.source == source && !cal.measure;
     ImGui::Indent();
 
     if ((cal.running || cal.starting) && mine)
@@ -240,6 +241,75 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
     }
 
     ImGui::Unindent();
+}
+
+// "Measure detail" (Story 1 of the input canvas epic): measures NR's output on the scene on screen at the current
+// settings -- detail added over the game's frame, and flicker beyond the input's -- for about a second, and shows it
+// beside the previous measurement, so any setting can be A/B'd by number. Shares Tune's run (DlssNr_ExposureCalibrate.h,
+// MeasureSettings); nothing is dispatched until the button is pressed.
+static void RenderMeasureDetail()
+{
+    const auto cal = DlssNr::ExposureCalibration();
+
+    if (cal.measure && (cal.running || cal.starting))
+    {
+        ImGui::ProgressBar(cal.progress, ImVec2(-FLT_MIN, 0.0f),
+                           cal.starting ? "Starting..." : "Measuring: hold the camera still");
+
+        if (ImGui::SmallButton("Cancel##measure"))
+            DlssNr::CancelExposureCalibration();
+
+        return;
+    }
+
+    ImGui::BeginDisabled(!cal.measureAvailable);
+
+    if (ImGui::Button("Measure detail"))
+        DlssNr::StartMeasureDetail();
+
+    ImGui::EndDisabled();
+    HelpMarker("Measures NR's output on the scene on screen at the current settings, for about a second: the detail it"
+               "\nadds over the game's frame, and how much it flickers beyond the game's own frame-to-frame change."
+               "\nPress it on a still scene (a paused replay, photo mode), change one setting, press it again: the"
+               "\nchange against the previous measurement shows what the setting did. Two runs in a row show the noise."
+               "\nNothing else changes; the numbers also go to OptiScaler.log.");
+
+    if (!cal.measureAvailable && !cal.measureUnavailable.empty())
+        ImGui::TextDisabled("Not available: %s", cal.measureUnavailable.c_str());
+
+    if (cal.measure && !cal.startError.empty())
+        ImGui::TextDisabled("Could not start: %s", cal.startError.c_str());
+    else if (cal.measure && !cal.aborted.empty())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+        ImGui::TextWrapped("Stopped: %s", cal.aborted.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    if (cal.measurements == 0)
+        return;
+
+    const auto& m = cal.latest;
+    ImGui::Text("#%u  Detail added %.5f  Flicker %.5f", cal.measurements, m.detail, m.flicker);
+    ImGui::TextDisabled("detail out %.5f in %.5f, raw %.5f | change out %.5f in %.5f | %u frames", m.detailOut,
+                        m.detailIn, m.raw, m.flickerOut, m.flickerIn, m.frames);
+
+    if (cal.hasPrevious && !cal.comparable)
+    {
+        ImGui::TextDisabled("vs #%u: not comparable (measured at another exposure: let it settle, or the white point "
+                            "source changed)", cal.measurements - 1);
+    }
+    else if (cal.hasPrevious)
+    {
+        // Relative to the previous measurement; a value near zero has no meaningful percentage.
+        const auto change = [](float now, float before)
+        {
+            return std::fabs(before) > 1e-7f ? 100.0f * (now - before) / std::fabs(before) : 0.0f;
+        };
+        const auto& p = cal.previous;
+        ImGui::Text("vs #%u: detail %+.1f%%, flicker %+.1f%%, raw %+.1f%%", cal.measurements - 1,
+                    change(m.detail, p.detail), change(m.flicker, p.flicker), change(m.raw, p.raw));
+    }
 }
 
 // The "(?)" marker every control carries, matching the rest of the menu.
@@ -1952,6 +2022,8 @@ void RenderMenu(Config* config, float menuResScale)
             config->DlssNrFrameStats = frameStats;
 
         HelpMarker("Diagnostic. Every 2 seconds or so, writes a line to OptiScaler.log describing the frame NR is given: format, luminance percentiles, the game's exposure value and the white point in use.");
+
+        RenderMeasureDetail();
 
         bool kernelProfile = config->DlssNrKernelProfile.value_or_default();
         if (ImGui::Checkbox("Log NR kernel profile", &kernelProfile))

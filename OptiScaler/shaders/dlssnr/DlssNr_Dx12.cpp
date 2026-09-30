@@ -316,6 +316,8 @@ struct NrState
     // same frame. heldWhitePoint is the snapshot used while held -- measurement is suspended.
     ID3D12Resource* heldColor = nullptr;
     bool heldActive = false;
+    // Where NR runs without a Tune moving it (EvaluateInternal): before SR, for the run's wait (CalibrationSituation).
+    bool beforeSrPlacement = false;
     unsigned int heldWidth = 0;
     unsigned int heldHeight = 0;
     DXGI_FORMAT heldFormat = DXGI_FORMAT_UNKNOWN;
@@ -1513,7 +1515,7 @@ void ConsumeMeterReadback()
             else if (DlssNr::FollowGameOn(*Config::Instance()))
                 DlssNr::SayFollowTrack(DlssNrFollowGame::Instance().Track(
                     g_nr.autoExposurePreExposure / autoReading, g_nr.autoPairPreExposure / g_nr.autoPairGameExposure,
-                    GetTickCount64(), DlssNrExposureCalibrate::HoldsFollow(DlssNrExposureCalibrate::TheRun())));
+                    GetTickCount64(), DlssNrExposureCalibrate::HoldsFollow(DlssNrExposureCalibrate::TheRun(), GetTickCount64())));
         }
     }
 
@@ -4514,8 +4516,29 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // Skipped entirely while RR is active: configuredBefore below forces post-SR regardless of
     // this result, so there is nothing to gain from the GetResource/GetDesc work every frame.
     // A Tune runs after SR while Before SR is set, and NR goes back before SR when it ends (TuneRunsAfterSr).
-    const bool beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() &&
-                             !DlssNrExposureCalibrate::TuneRunsAfterSr(DlssNrExposureCalibrate::TheRun());
+    const bool tuneAfterSr = cfg.DlssNrRunBeforeSr.value_or_default() &&
+                             DlssNrExposureCalibrate::TuneRunsAfterSr(DlssNrExposureCalibrate::TheRun(), GetTickCount64());
+    const bool beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() && !tuneAfterSr;
+
+    // NR failing while a Tune moved it after SR (the model does not fit at output size, say) is a failure of that
+    // placement, not of the user's: back before SR, it tries once more.
+    {
+        static bool failedAfterSrForTune = false;
+        if (tuneAfterSr && g_nr.failed)
+        {
+            failedAfterSrForTune = true;
+        }
+        else if (!tuneAfterSr && failedAfterSrForTune)
+        {
+            failedAfterSrForTune = false;
+            if (g_nr.failed)
+            {
+                LOG_WARN("DLSS-NR: failed after SR during Tune ({}); back before SR, trying again", g_nr.reason);
+                RetryAfterFailure();
+            }
+        }
+    }
+
     bool preSrCompatible = true;
     if (beforeSrSet && !rayReconstruction)
     {
@@ -4572,6 +4595,10 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // the way real scene detail is. Running NR after RR sidesteps that entirely: RR active forces
     // post-SR placement unconditionally, regardless of the RunBeforeSR setting.
     const bool configuredBefore = beforeSrSet && preSrCompatible && !rayReconstruction;
+
+    // Where NR would run without a Tune, for the run's wait (CalibrationSituation): kept from before the Tune moved it.
+    if (!tuneAfterSr)
+        g_nr.beforeSrPlacement = configuredBefore;
 
     if (configuredBefore != beforeUpscale)
         return;

@@ -479,8 +479,10 @@ int wmain(int argc, wchar_t** argv) try
     }
 
     // 7. Shadows under the OkLab residual (transfer 2, the model at half size): an unchanged answer gives the dark
-    //    pixels back on every curve, and a 10% brighter one moves them by about that -- the residual's 0.1 floor is
-    //    for the ratio, not for the pixel it is applied to. Before the fix: 1.25 (knee), 0.5 (HLG), 12.9 (linear).
+    //    pixels back on every curve, and a 10% brighter one never moves them by more than that -- the residual's 0.1
+    //    floor is for the ratio, not for the pixel it is applied to. Before the fix: 1.25 (knee), 0.5 (HLG), 12.9
+    //    (linear). An edit lying wholly below OkLab L 0.1 is not carried at all, by design (the floor on the ratio);
+    //    the brightest grey here (0.03) is above it on every curve, and at least half the edit must arrive there.
     {
         Row dark, darkBrighter;
         for (float v : {0.0f, 1e-5f, 1e-4f, 3e-4f, 1e-3f, 3e-3f, 0.01f, 0.03f})
@@ -509,7 +511,7 @@ int wmain(int argc, wchar_t** argv) try
                 const Row same = Resolve(gpu, shader.Get(), frame.half.Get(), frame.half.Get(), frame.keep.Get(), n, settings);
                 const Row lifted = Resolve(gpu, shader.Get(), frame.half.Get(), answer.half.Get(), frame.keep.Get(), n, settings);
                 // Errors against 1e-3 of white or the pixel, whichever is larger: what shows on screen.
-                float worstSame = 0.0f, worstLift = 0.0f;
+                float worstSame = 0.0f, worstLift = 0.0f, leastCarried = 1e9f;
                 for (UINT i = 0; i < n; ++i)
                 {
                     const float scale = std::max(Peak(dark[i]), 1e-3f);
@@ -520,13 +522,18 @@ int wmain(int argc, wchar_t** argv) try
                         // Moved by more than the answer's 10%, either way. The residual carries an edit within about
                         // a point of the full-size model's on HLG and PQ, so 2% of the pixel is allowed.
                         worstLift = std::max(worstLift, std::abs((&lifted[i].r)[c] - in) / scale - 0.1f * in / scale);
+                        // How much of the +10% arrives on the brightest grey.
+                        if (dark[i].r == 0.03f && dark[i].g == 0.03f)
+                            leastCarried = std::min(leastCarried, ((&lifted[i].r)[c] - in) / (0.1f * in));
                     }
                 }
-                std::printf("OkLab residual shadows, curve %u, passthrough %u: unchanged answer %.2e, brighter answer overshoot %.2e\n",
-                            mode, passthrough, worstSame, worstLift);
+                std::printf("OkLab residual shadows, curve %u, passthrough %u: unchanged answer %.2e, brighter answer overshoot %.2e, "
+                            "carried at 0.03 %.2f\n",
+                            mode, passthrough, worstSame, worstLift, leastCarried);
                 expect(Finite(same) && Finite(lifted), "not finite" + what);
                 expect(worstSame < 1e-3f, "an unchanged answer does not give the shadows back" + what);
                 expect(worstLift < 0.02f, "a 10% brighter answer moves the shadows by more than 12%" + what);
+                expect(leastCarried >= 0.5f, "less than half of a 10% brighter answer arrives on a 0.03 grey" + what);
             }
     }
 

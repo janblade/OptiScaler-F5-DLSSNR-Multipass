@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -298,7 +299,8 @@ int main()
             const std::vector<Note> notes = s.TakeNotes();
             bool restarted = false;
             for (const Note& n : notes)
-                restarted = restarted || (n.kind == Note::Kind::Restart && Near(n.value, 0.2f) && Near(n.against, 0.1f));
+                restarted = restarted || (n.kind == Note::Kind::Restart && Near(n.value, 0.2f) && Near(n.against, 0.1f) &&
+                                          n.ev >= -0.5f - 1e-4f && n.ev <= 0.0f + 1e-4f); // the step the band changed at
             CHECK(restarted);
         }
 
@@ -1223,10 +1225,10 @@ int main()
             // Follow's easing is held by a Tune, not by a measure.
             RequestMeasure(run);
             drive(run, gpu, evaluation, ms, 20, true, started, finished, relearns, ok);
-            CHECK(run.active.load() && !HoldsFollow(run));
+            CHECK(run.active.load() && !HoldsFollow(run, ms));
             RequestCancel(run);
             drive(run, gpu, evaluation, ms, 40, true, started, finished, relearns, ok);
-            CHECK(!run.active.load() && !HoldsFollow(run));
+            CHECK(!run.active.load() && !HoldsFollow(run, ms));
 
             // A Tune after it is a Tune again: pinned, and the anchors stop it.
             RequestStart(run, 3);
@@ -1245,7 +1247,7 @@ int main()
             IdleFrame(run, ms);
             RequestStart(run, 3);
             drive(run, gpu, evaluation, ms, 20, true, started, finished, relearns, ok);
-            CHECK(HoldsFollow(run)); // a Tune holds Follow's easing
+            CHECK(HoldsFollow(run, ms)); // a Tune holds Follow's easing
             drive(run, gpu, evaluation, ms, 400, true, started, finished, relearns, ok);
             CHECK(run.sweep.Finished() && TuneResultWaiting(run));
             const size_t steps = run.sweep.Steps().size();
@@ -1269,27 +1271,27 @@ int main()
             Situation before = ok;
             before.beforeSrSet = true;
             IdleFrame(run, ms);
-            CHECK(!TuneRunsAfterSr(run));
+            CHECK(!TuneRunsAfterSr(run, ms));
             RequestStart(run, 3);
-            CHECK(TuneRunsAfterSr(run)); // at once, so the next evaluation is already after SR
+            CHECK(TuneRunsAfterSr(run, ms)); // at once, so the next evaluation is already after SR
             drive(run, gpu, evaluation, ms, (int) kAfterSrSettle, true, started, finished, relearns, before);
-            CHECK(started == 0 && run.startRequested && TuneRunsAfterSr(run));
+            CHECK(started == 0 && run.startRequested && TuneRunsAfterSr(run, ms));
             drive(run, gpu, evaluation, ms, 1, true, started, finished, relearns, before);
-            CHECK(started == 1 && run.sweep.Running() && TuneRunsAfterSr(run));
+            CHECK(started == 1 && run.sweep.Running() && TuneRunsAfterSr(run, ms));
             drive(run, gpu, evaluation, ms, 400, true, started, finished, relearns, before);
-            CHECK(finished == 1 && run.sweep.Finished() && !run.active.load() && !TuneRunsAfterSr(run));
+            CHECK(finished == 1 && run.sweep.Finished() && !run.active.load() && !TuneRunsAfterSr(run, ms));
 
             // Tune again: waits again.
             RequestStart(run, 3);
             drive(run, gpu, evaluation, ms, 5, true, started, finished, relearns, before);
-            CHECK(started == 1 && TuneRunsAfterSr(run));
+            CHECK(started == 1 && TuneRunsAfterSr(run, ms));
             RequestCancel(run);
             drive(run, gpu, evaluation, ms, 40, true, started, finished, relearns, before);
-            CHECK(!run.active.load() && !TuneRunsAfterSr(run)); // a cancelled wait goes back too
+            CHECK(!run.active.load() && !TuneRunsAfterSr(run, ms)); // a cancelled wait goes back too
 
             // A measure: before SR as set, no wait.
             RequestMeasure(run);
-            CHECK(!TuneRunsAfterSr(run));
+            CHECK(!TuneRunsAfterSr(run, ms));
             int mstarted = 0;
             drive(run, gpu, evaluation, ms, 1, true, mstarted, finished, relearns, before);
             CHECK(mstarted == 1);
@@ -1305,6 +1307,34 @@ int main()
             RequestStart(plain, 3);
             drive(plain, g2, e2, ms, 1, true, s2, finished, relearns, ok);
             CHECK(s2 == 1);
+        }
+
+        // A Tune whose NR stopped calling in (a failed build after SR returns before BeginFrame) no longer counts after
+        // kStallMs: the placement and Follow's easing are released even with nobody looking at the menu.
+        {
+            RunState run;
+            const unsigned long long ms = 100000;
+            IdleFrame(run, ms);
+            RequestStart(run, 3);
+            CHECK(TuneRunsAfterSr(run, ms) && HoldsFollow(run, ms));
+            CHECK(!TuneRunsAfterSr(run, ms + kStallMs + 1) && !HoldsFollow(run, ms + kStallMs + 1));
+        }
+
+        // A start that is refused (a blocker) does not wait after SR, and lets go at once.
+        {
+            RunState run;
+            FakeGpu gpu;
+            unsigned long long evaluation = 1, t = 100000;
+            gpu.run = &run;
+            gpu.now = &evaluation;
+            int started = 0, finished = 0, relearns = 0;
+            Situation blocked = ok;
+            blocked.beforeSrSet = true;
+            blocked.anchors = true;
+            IdleFrame(run, t);
+            RequestStart(run, 3);
+            drive(run, gpu, evaluation, t, 1, true, started, finished, relearns, blocked);
+            CHECK(started == 0 && std::string(run.startError).size() > 0 && !TuneRunsAfterSr(run, t));
         }
 
         // Two results compare only at the same scale.
@@ -1431,6 +1461,72 @@ int main()
         a.autoRunning = true;
         a.anchors = true;
         CHECK(Availability(a) == Blocker::Anchors && Availability(a, true) == Blocker::None);
+    }
+
+    // NR's output noisier than the game's input (Reuse alternating, a noisy still), no real trend, the input bit-identical
+    // at every step: the step means' own spread keeps it unsure instead of offering a random value.
+    {
+        int changed = 0, unsure = 0;
+        for (uint32_t seed = 1; seed <= 200; ++seed)
+        {
+            uint32_t state = seed * 2654435761u;
+            auto noise = [&state]() { state = state * 1664525u + 1013904223u; return ((state >> 8) & 0xFFFF) / 32767.5f - 1.0f; };
+            Sweep s;
+            s.Start(1.0f, Settings {}, kCtx);
+            Run(s, [&noise](float) {
+                Stats st {};
+                st.inputBand = 0.01f;
+                st.detailBand = st.inputBand + 0.003f * (1.0f + 0.03f * noise()); // +-3% of the added detail
+                st.detailRaw = 0.02f * (1.0f + 0.03f * noise());
+                st.outputChange = 0.0008f;
+                st.inputChange = 0.0002f;
+                return st;
+            });
+            changed += s.Changed() ? 1 : 0;
+            unsure += s.Unsure() ? 1 : 0;
+        }
+        printf("output noise +-3%%, no trend: %d of 200 changed, %d unsure\n", changed, unsure);
+        CHECK(changed <= 4 && unsure >= 180);
+    }
+
+    // A late moved result for the last step, arriving after the sweep is back at the current value, sends it back more
+    // than a step: that step settles long (firstSettle), as the first one does.
+    {
+        Sweep s;
+        s.Start(1.5f, Settings {}, kCtx);
+        std::vector<std::pair<int, Ticket>> pending; // due evaluation, ticket
+        int n = 0, settleAfterRewind = -1, counting = -1;
+        bool rewound = false;
+        for (; n < 2000 && s.Running(); ++n)
+        {
+            const Frame f = s.NextFrame(kCtx);
+            if (counting >= 0)
+            {
+                if (f.measure) { settleAfterRewind = counting; counting = -1; }
+                else ++counting;
+            }
+            if (f.measure)
+                pending.push_back({ n + 7, f.ticket });
+            for (size_t i = 0; i < pending.size();)
+            {
+                if (pending[i].first <= n)
+                {
+                    Stats st = Peaked(f.ev, 1.0f);
+                    const bool last = pending[i].second.step == s.StepCount() - 1;
+                    if (last && !rewound && s.StepIndex() >= s.StepCount())
+                    {
+                        st.inputChange = 0.01f; // the late moved one
+                        rewound = true;
+                        counting = 0;
+                    }
+                    s.AddStats(pending[i].second, st);
+                    pending.erase(pending.begin() + (std::ptrdiff_t) i);
+                }
+                else
+                    ++i;
+            }
+        }
+        CHECK(rewound && settleAfterRewind == (int) Settings {}.firstSettle);
     }
 
     // Abandoned from outside, then cleared; Clear does nothing to a running sweep.

@@ -118,6 +118,7 @@ struct VkState
     OwnedImage keep;
     OwnedImage preColor;
     bool beforeSr = false;
+    bool beforeSrPlacement = false; // before SR without a Tune moving it (EvaluateBeforeUpscaleVk)
     bool rayReconstruction = false;
 
     // The proxy at the model's working size, when that is below the frame. The model -- 98% of the
@@ -837,7 +838,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                 DlssNr::SayFollowTrack(DlssNrFollowGame::Instance().Track(
                                     g_vk.autoExposurePreExposure / autoReading, g_vk.pairPreExposure / g_vk.pairGameExposure,
                                     GetTickCount64(),
-                                    DlssNrExposureCalibrate::HoldsFollow(DlssNrExposureCalibrate::TheRun())));
+                                    DlssNrExposureCalibrate::HoldsFollow(DlssNrExposureCalibrate::TheRun(), GetTickCount64())));
                         }
 
                         if (!g_vk.pairValiditySaid && g_vk.pairReads >= DlssNrFollowGame::kWindow)
@@ -2120,10 +2121,13 @@ NVSDK_NGX_Resource_VK* EvaluateBeforeUpscaleVk(VkCommandBuffer cmd, NVSDK_NGX_Pa
                                              bool rayReconstruction)
 {
     handled = false;
-    // A Tune runs after SR while Before SR is set, and NR goes back before SR when it ends (TuneRunsAfterSr).
-    if (!Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
-        DlssNrExposureCalibrate::TuneRunsAfterSr(DlssNrExposureCalibrate::TheRun()))
+    if (!Config::Instance()->DlssNrRunBeforeSr.value_or_default())
         return nullptr;
+    // A Tune runs after SR while Before SR is set, and NR goes back before SR when it ends (TuneRunsAfterSr).
+    if (DlssNrExposureCalibrate::TuneRunsAfterSr(DlssNrExposureCalibrate::TheRun(), GetTickCount64()))
+        return nullptr;
+    // Where NR runs without a Tune, for the run's wait (CalibrationVkSituation).
+    g_vk.beforeSrPlacement = !rayReconstruction;
     bool applied = false;
     EvaluateAtSeamVk(cmd, params, instance, pd, device, true, rayReconstruction, applied, &handled);
     return applied ? &g_vk.preColor.ngx : nullptr;

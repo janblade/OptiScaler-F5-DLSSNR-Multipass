@@ -88,6 +88,10 @@ struct RunState
     std::atomic<bool> measuring { false };
     // With Before SR set: the evaluation a Tune asked for may start from (0 until the first one after the request).
     unsigned long long startAt = 0;
+    // A Tune is asked for or running (not a measure, not readbacks draining after it). Read lock-free by Follow's
+    // easing and the placement (HoldsFollow, TuneRunsAfterSr); cleared when the run ends, a start is refused, or NR
+    // has stopped calling in.
+    std::atomic<bool> tuneOn { false };
     // Measure detail's results: the latest and the one before it (samples 0 when there is none), how many, and the
     // scale each was measured at (its white point source and measuring white point): two results compare only at
     // the same scale.
@@ -285,7 +289,8 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
     // until NR has settled at the new size.
     bool settling = false;
 
-    if (run.startRequested && !run.sweep.Running() && !run.measuring && situation.beforeSrSet)
+    if (run.startRequested && !run.sweep.Running() && !run.measuring && situation.beforeSrSet &&
+        blocker == Blocker::None)
     {
         if (run.startAt == 0)
             run.startAt = evaluation + kAfterSrSettle;
@@ -359,6 +364,9 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
     if (!run.sweep.Running() && gpu.Held() && !inFlight)
         gpu.Release();
 
+    if (!run.sweep.Running() && !run.startRequested)
+        run.tuneOn.store(false, std::memory_order_release);
+
     if (!run.sweep.Running() && !run.startRequested && !gpu.Held())
         run.active.store(false, std::memory_order_release);
 
@@ -402,6 +410,7 @@ inline void Shutdown(RunState& run, Backend& gpu)
         busy = false;
 
     gpu.Release();
+    run.tuneOn.store(false, std::memory_order_release);
     run.active.store(false, std::memory_order_release);
 }
 
@@ -419,6 +428,7 @@ inline Blocker PollLocked(RunState& run, unsigned long long nowMs)
     {
         run.sweep.Abandon(Abort::NrOff);
         run.startRequested = false;
+        run.tuneOn.store(false, std::memory_order_release);
     }
 
     return stalled ? Blocker::NrStopped : run.blocker;
@@ -427,19 +437,25 @@ inline Blocker PollLocked(RunState& run, unsigned long long nowMs)
 // A finished Tune whose result the menu still offers (Apply / Keep): a measure would clear it. Under the mutex.
 inline bool TuneResultWaiting(const RunState& run) { return !run.measuring && run.sweep.Finished(); }
 
-// Whether Follow the game's exposure holds its easing still (DlssNrFollowGame::Track's `hold`): while a Tune runs, as
-// its steps are measured against a frozen base. Not for a measure, which measures the picture as it plays. Lock-free.
-inline bool HoldsFollow(const RunState& run)
+// A Tune is on (asked for or running) and NR is still calling in: after kStallMs without an evaluation it no longer
+// counts, so nothing it holds can outlive NR (a failed build after SR returns before the run's BeginFrame, and would
+// otherwise keep the run on for the session). Lock-free.
+inline bool TuneOn(const RunState& run, unsigned long long nowMs)
 {
-    return run.active.load(std::memory_order_acquire) && !run.measuring.load(std::memory_order_acquire);
+    const unsigned long long last = run.lastEvaluationMs.load(std::memory_order_relaxed);
+    return run.tuneOn.load(std::memory_order_acquire) && (last == 0 || nowMs - last <= kStallMs);
 }
 
-// Whether NR runs after SR for now although Before SR is set: while a Tune is on (asked for, running, or its readbacks
-// draining). Before SR the game's frame is jittered, so a still scene reads as moving and a Tune cannot get through
-// its stillness check; the user asked for Tune to run after SR there and go back afterwards. In memory only -- the
-// setting itself is never changed, so nothing is left behind if the game exits mid-run. The result is measured after
-// SR and applied to the Before SR picture. Not for a measure, which measures the setup as it is. Lock-free.
-inline bool TuneRunsAfterSr(const RunState& run) { return HoldsFollow(run); }
+// Whether Follow the game's exposure holds its easing still (DlssNrFollowGame::Track's `hold`): while a Tune is on, as
+// its steps are measured against a frozen base. Not for a measure, which measures the picture as it plays.
+inline bool HoldsFollow(const RunState& run, unsigned long long nowMs) { return TuneOn(run, nowMs); }
+
+// Whether NR runs after SR for now although Before SR is set: while a Tune is on. Before SR the game's frame is
+// jittered, so a still scene reads as moving and a Tune cannot get through its stillness check; the user asked for
+// Tune to run after SR there and go back afterwards. In memory only -- the setting itself is never changed, so nothing
+// is left behind if the game exits mid-run. The result is measured after SR and applied to the Before SR picture. Not
+// for a measure, which measures the setup as it is.
+inline bool TuneRunsAfterSr(const RunState& run, unsigned long long nowMs) { return TuneOn(run, nowMs); }
 
 // Two measurements compare (the menu's "vs previous") only when taken at the same scale: the same white point source,
 // and measuring white points within 2% (the detail noise floor on a still NBA 2K27 scene was 0.3%).
@@ -463,6 +479,7 @@ inline void RequestStart(RunState& run, uint32_t source)
     run.sweep.Clear();
     run.startError = "";
     run.startRequested = true;
+    run.tuneOn.store(true, std::memory_order_release);
     run.active.store(true, std::memory_order_release);
 }
 

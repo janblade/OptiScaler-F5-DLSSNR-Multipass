@@ -17,9 +17,10 @@
 // flicker = how much the output changed between evaluations beyond what the input did (the still-camera case of a
 // warping error), damage = the share of the encoded model input on the shoulder or in the floor.
 // A run is unsure when detail varies across the steps no more than the measurement's own noise: then the pick would
-// follow the noise, not the picture, and the current value is kept. The noise is read off the input: every step
-// measures the band detail of the same, untouched game frame, so however much that varies across the steps is what
-// the measurement does on its own, in the units the detail is compared in (Finish has the rule). The detail measure
+// follow the noise, not the picture, and the current value is kept. The noise is the larger of two, both in the units
+// the detail is compared in (Finish has the rule): the input's -- every step measures the band detail of the same,
+// untouched game frame, so however much that varies across the steps is the measurement on its own -- and the
+// output's -- how uncertain each step's mean is from the spread of its own samples. The detail measure
 // is selectable: the output's raw Laplacian (the focus-measure classic, sensitive to single-pixel grain) or a band-pass
 // at the model's own scale, taken as the output's band energy minus the input's. Both are kept per step for the log.
 //
@@ -432,10 +433,23 @@ struct StepResult
     float inputChange = 0.0f;
     float shoulder = 0.0f;
     float floor = 0.0f;
+    // Sums of squared deviations of the step's samples (Welford), for each detail measure: how much they spread.
+    float spreadRaw = 0.0f;
+    float spreadBand = 0.0f;
 
     float Flicker() const { return std::max(outputChange - inputChange, 0.0f); }
     float Damage() const { return shoulder + floor; }
     float DetailOf(Detail d) const { return d == Detail::Raw ? detailRaw : detailBand - inputBand; }
+
+    // The standard error of the step's mean detail, from its samples' spread (0 with fewer than two). Its samples are
+    // consecutive evaluations, which are correlated, so this reads low; the unsure rule allows for that.
+    float MeanError(Detail d) const
+    {
+        if (samples < 2)
+            return 0.0f;
+        const float spread = d == Detail::Raw ? spreadRaw : spreadBand;
+        return std::sqrt(std::max(spread, 0.0f) / (float) (samples - 1) / (float) samples);
+    }
 };
 
 class Sweep
@@ -461,6 +475,8 @@ class Sweep
         sceneBand_ = -1.0f;
         lastInputChange_ = 0.0f;
         lastSceneBand_ = -1.0f;
+        shownEv_ = currentEv;
+        longSettle_ = false;
         notes_.clear();
         steps_.clear();
 
@@ -549,10 +565,12 @@ class Sweep
         if (step_ >= steps_.size())
         {
             f.ev = currentEv_;
+            shownEv_ = f.ev;
             return f;
         }
 
         f.ev = steps_[step_].ev;
+        shownEv_ = f.ev;
 
         if (frameInStep_ >= SettleOf(step_))
         {
@@ -564,6 +582,7 @@ class Sweep
         if (++frameInStep_ >= SettleOf(step_) + settings_.measure)
         {
             frameInStep_ = 0;
+            longSettle_ = false;
             ++step_;
         }
 
@@ -584,9 +603,9 @@ class Sweep
             if (s.inputChange > settings_.motionLimit)
                 return Moved(ticket.step, s.inputChange);
 
-
             StepResult& r = steps_[ticket.step];
             const float n = (float) r.samples;
+            const float rawBefore = r.DetailOf(Detail::Raw), bandBefore = r.DetailOf(Detail::BandPass);
             auto mean = [n](float& m, float v) { m = (m * n + v) / (n + 1.0f); };
             mean(r.detailRaw, s.detailRaw);
             mean(r.detailBand, s.detailBand);
@@ -597,13 +616,18 @@ class Sweep
             mean(r.floor, s.floor);
             ++r.samples;
 
+            // Welford: the means above moved from `before` to the step's DetailOf now.
+            const float rawNow = s.detailRaw, bandNow = s.detailBand - s.inputBand;
+            r.spreadRaw += (rawNow - rawBefore) * (rawNow - r.DetailOf(Detail::Raw));
+            r.spreadBand += (bandNow - bandBefore) * (bandNow - r.DetailOf(Detail::BandPass));
+
             // Where the camera is, judged on whole steps: a single reading is noisier than a step's mean.
             if (r.samples == settings_.measure)
             {
                 if (sceneBand_ < 0.0f)
                     sceneBand_ = r.inputBand;
                 else if (std::fabs(r.inputBand - sceneBand_) > settings_.sceneTolerance * sceneBand_)
-                    return ViewChanged(r.inputBand);
+                    return ViewChanged(ticket.step, r.inputBand);
             }
         }
 
@@ -648,7 +672,8 @@ class Sweep
     // What the run did since the last call, for the log.
     std::vector<Note> TakeNotes() { return std::exchange(notes_, {}); }
 
-    // Finished, but detail varied less across the steps than flicker did: the result is the current value.
+    // Finished, but detail varied across the steps no more than the measurement's own noise: the result is the
+    // current value.
     bool Unsure() const { return unsure_; }
 
     // Finished, but the best step was the first or the last measured one: the real best may lie beyond the range, so
@@ -691,7 +716,13 @@ class Sweep
     bool Changed() const { return finished_ && std::fabs(result_ - currentEv_) > 1e-4f; }
 
   private:
-    unsigned SettleOf(size_t step) const { return step == 0 ? std::max(settings_.firstSettle, settings_.settle) : settings_.settle; }
+    // The first step, and a step measured again after a jump of more than a step (a late rewind while the sweep was
+    // already back at the current value), settle long: after 8 evaluations the model's history still flickered.
+    unsigned SettleOf(size_t step) const
+    {
+        return step == 0 || (step == step_ && longSettle_) ? std::max(settings_.firstSettle, settings_.settle)
+                                                           : settings_.settle;
+    }
 
     int BestIndex(Detail d) const
     {
@@ -720,6 +751,7 @@ class Sweep
             steps_[i] = StepResult {};
             steps_[i].ev = ev;
         }
+        longSettle_ = step < steps_.size() && std::fabs(steps_[step].ev - shownEv_) > settings_.stepEv + 1e-3f;
         step_ = step;
         frameInStep_ = 0;
         outstanding_ = 0;
@@ -741,7 +773,7 @@ class Sweep
     }
 
     // The camera came to rest somewhere else: start the sweep over, or stop once it has happened often enough.
-    void ViewChanged(float band)
+    void ViewChanged(size_t step, float band)
     {
         if (restarts_ >= settings_.sceneRestarts)
         {
@@ -750,8 +782,7 @@ class Sweep
         }
 
         ++restarts_;
-        notes_.push_back({ Note::Kind::Restart, steps_[step_ < steps_.size() ? step_ : steps_.size() - 1].ev, band,
-                           sceneBand_, restarts_ });
+        notes_.push_back({ Note::Kind::Restart, steps_[step].ev, band, sceneBand_, restarts_ });
         sceneBand_ = -1.0f;
         std::fill(retries_.begin(), retries_.end(), 0u);
         Rewind(0);
@@ -793,6 +824,7 @@ class Sweep
 
         float detailLo = std::numeric_limits<float>::infinity(), detailHi = -std::numeric_limits<float>::infinity();
         float inputLo = std::numeric_limits<float>::infinity(), inputHi = -std::numeric_limits<float>::infinity();
+        float meanError = 0.0f;
         for (const StepResult& r : steps_)
         {
             if (r.samples == 0)
@@ -801,15 +833,19 @@ class Sweep
             detailHi = std::max(detailHi, r.DetailOf(settings_.detail));
             inputLo = std::min(inputLo, r.inputBand);
             inputHi = std::max(inputHi, r.inputBand);
+            meanError = std::max(meanError, r.MeanError(settings_.detail));
         }
 
-        // Unsure when detail varies no more than the measurement does on its own: the input's band detail, the same
-        // frame at every step, spread across the steps. Flicker is not that yardstick -- it is how much the output
+        // Unsure when detail varies no more than the measurement does on its own. Two sources, the larger counts: the
+        // input's band detail -- the same frame at every step -- spread across the steps; and the least certain step
+        // mean, from the spread of its own samples (NR's output can wobble while the game's frame is bit-identical:
+        // Reuse bottleneck alternating, a noisy still). Flicker is not that yardstick -- it is how much the output
         // changes from one evaluation to the next, not how well a step's mean repeats, and it stays in the score. It
         // was, until NBA 2K27 on the HLG and PQ curves: three runs in a row repeated every step to 0.00002 and all put
         // band-pass at +1.5 EV, yet detail varied 0.0005 against 0.00056 of flicker, so every run came back unsure.
         // Movement is the movement checks' job (AddStats).
-        if (detailHi - detailLo <= settings_.unsureNoise * std::max(inputHi - inputLo, settings_.noiseFloor))
+        const float noise = std::max({ inputHi - inputLo, meanError, settings_.noiseFloor });
+        if (detailHi - detailLo <= settings_.unsureNoise * noise)
         {
             unsure_ = true;
             return;
@@ -854,6 +890,8 @@ class Sweep
     float lastInputChange_ = 0.0f;
     float lastSceneBand_ = -1.0f;
     std::vector<Note> notes_;
+    float shownEv_ = 0.0f;     // the EV the last evaluation was shown
+    bool longSettle_ = false;  // the step on screen was rewound to from more than a step away
     bool running_ = false;
     bool finished_ = false;
     bool unsure_ = false;

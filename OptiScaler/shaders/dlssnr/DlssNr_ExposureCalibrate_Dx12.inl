@@ -147,7 +147,8 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
     s.followDisagreementEv = FollowDisagreementEv();
     s.gameExposureNow = gameExposureNow;
     s.gameExposureReading = g_nr.gameExposure > 1e-6f;
-    s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default();
+    // Where NR runs without a Tune: not Before SR under Ray Reconstruction or an unsupported colour layout, so no wait.
+    s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() && g_nr.beforeSrPlacement;
 
     if (s.source == 1)
         s.anchors = !DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()).empty() ||

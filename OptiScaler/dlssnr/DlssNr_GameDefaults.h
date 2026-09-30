@@ -53,5 +53,11 @@ inline void SayFollowTrack(const DlssNrFollowGame::TrackEvent& e)
                  e.fromEv, e.toEv);
     if (e.settled)
         LOG_INFO("DLSS-NR automatic exposure: calibration eased from {:+.2f} EV to {:+.2f} EV", e.fromEv, e.toEv);
+    if (e.stopped)
+        LOG_INFO("DLSS-NR automatic exposure: easing stopped at {:+.2f} EV (from {:+.2f} EV): {}", e.toEv, e.fromEv,
+                 e.why);
+    if (e.gameMoves)
+        LOG_INFO("DLSS-NR automatic exposure: the game's own exposure moves, so the learned calibration stays as it is "
+                 "(no easing) until it is learned again");
 }
 } // namespace DlssNr

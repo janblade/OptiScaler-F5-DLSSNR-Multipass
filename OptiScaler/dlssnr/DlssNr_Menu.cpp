@@ -1123,8 +1123,9 @@ void RenderMenu(Config* config, float menuResScale)
                 HelpMarker("For games that hand over their frame before applying their own exposure: on by default"
                            "\nfor those known to (RDR2), off for every other game. Automatic learns how its own metering"
                            "\nrelates to the game's exposure in the first seconds of play, then follows the game's exposure,"
-                           "\nso brightness moves exactly with the game: cutscenes, menus, fades. If the two stay more than"
-                           "\n0.75 EV apart for a moment, the calibration eases toward Automatic (0.25 EV a second at most)."
+                           "\nso brightness moves exactly with the game: cutscenes, menus, fades. In a game whose own"
+                           "\nexposure never moves, if the two stay more than 0.75 EV apart for a moment, the calibration"
+                           "\neases toward Automatic (0.25 EV a second at most)."
                            "\nThe brightness slider keeps its meaning. Leave it off for games that expose their frame"
                            "\nthemselves (most games): it would apply their exposure twice. On Vulkan it follows a few"
                            "\nframes behind the game.");
@@ -1149,7 +1150,7 @@ void RenderMenu(Config* config, float menuResScale)
 
                     // The calibration eases toward Automatic when the two stay apart (DlssNr_FollowGame.h Track), so a
                     // large disagreement is usually on its way out; say which, wrapped (it ran off the panel before).
-                    if (calibration.Locked() && calibration.Easing())
+                    if (followStatus.following && calibration.Locked() && calibration.Easing())
                     {
                         ImGui::PushTextWrapPos(0.0f);
                         ImGui::TextDisabled("Easing the calibration toward Automatic's own exposure (%+.1f EV apart).",
@@ -1159,9 +1160,15 @@ void RenderMenu(Config* config, float menuResScale)
                     else if (std::fabs(followStatus.disagreementEv) > DlssNrExposureCalibrate::kFollowDisagreementLimitEv)
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
-                        ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. It eases back by itself if this lasts; "
-                                           "Re-learn to start over in an ordinary scene.",
-                                           followStatus.disagreementEv);
+                        // Easing is off in a game whose own exposure moves (DlssNr_FollowGame.h): then only Re-learn.
+                        if (calibration.GameMoves())
+                            ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. Re-learn in an ordinary scene if "
+                                               "the picture looks too bright or too dark.",
+                                               followStatus.disagreementEv);
+                        else
+                            ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. It eases back by itself if this "
+                                               "lasts; Re-learn to start over in an ordinary scene.",
+                                               followStatus.disagreementEv);
                         ImGui::PopStyleColor();
                     }
 

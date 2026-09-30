@@ -10,11 +10,14 @@
 // against that reference on the resolved frame:
 //
 //   err    mean |Y - Y_ref| / max(Y_ref, 0.005), all pixels
-//   halo   the largest brightening past the reference on dark pixels (frame Y < 0.1), relative, and where
+//   halo   the largest brightening past the reference on dark pixels (frame Y < 0.1), relative, and `at`, the pixel
+//          where it occurs
 //   carried  how much of the edit arrives: sum |Y - Y_frame| / sum |Y_ref - Y_frame| (1 = all of it)
 //   hue    the largest change of chromaticity (rgb / Y) past the reference, on pixels the edit touched
 //
-// It prints a table; it fails only when a mode's output is not finite or the harness breaks.
+// It prints a table; it fails only when a mode's output is not finite or the harness breaks. A scoreboard of the
+// modes, not a regression test: none of its scenes reaches below OkLab L 0.1, so the near-black fix
+// (nr_proxy_curves_shader_smoke.cpp section 7) does not show here.
 //
 // Build: cl /nologo /std:c++20 /EHsc /W3 tests\nr_residual_compare_shader_smoke.cpp /link d3d11.lib d3dcompiler.lib
 // Run:   nr_residual_compare_shader_smoke.exe <dlssnr.hlsl>

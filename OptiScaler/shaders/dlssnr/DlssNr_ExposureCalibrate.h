@@ -16,13 +16,21 @@
 //   detail / (the largest detail of any step) - flickerWeight * flicker / (that same largest detail) - damageWeight * damage
 // flicker = how much the output changed between evaluations beyond what the input did (the still-camera case of a
 // warping error), damage = the share of the encoded model input on the shoulder or in the floor.
-// A run is unsure when detail varies less across the steps than the typical (median) step flickers: then the pick
-// follows the flicker's noise, not the picture, and the current value is kept. The median, so one step whose history
-// has not caught up cannot make a still scene look unsure. The detail measure
+// A run is unsure when detail varies across the steps no more than the measurement's own noise: then the pick would
+// follow the noise, not the picture, and the current value is kept. The noise is read off the input: every step
+// measures the band detail of the same, untouched game frame, so however much that varies across the steps is what
+// the measurement does on its own, in the units the detail is compared in (Finish has the rule). The detail measure
 // is selectable: the output's raw Laplacian (the focus-measure classic, sensitive to single-pixel grain) or a band-pass
 // at the model's own scale, taken as the output's band energy minus the input's. Both are kept per step for the log.
 //
 // The weighting is a heuristic, not a published metric; the numbers per step are logged so it can be refitted.
+//
+// Movement does not end a run at once. A measured evaluation whose input moved (inputChange over motionLimit) sends the
+// sweep back to that step: its measurements and every later step's are dropped, it settles again and is measured again,
+// up to motionRetries times per step. Results issued before the rewind come back tagged with the old generation and are
+// ignored. The input's own band detail (the game's frame, measured at one scale for every step) also marks where the
+// camera is: if a step's mean drifts from the run's first step by more than sceneTolerance, the camera came to rest
+// somewhere else and the sweep starts over, sceneRestarts times at most. Only then does movement stop the run.
 //
 // Also here, so the host test covers them: ReduceGrid (the grid -> Stats) and Availability (when a run may start or go
 // on). Pure CPU, no D3D: DlssNr_ExposureCalibrate_Run.h drives it for both backends, the menu shows it,
@@ -34,6 +42,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace DlssNrExposureCalibrate
@@ -91,7 +100,7 @@ inline const char* AbortText(Abort a)
     case Abort::Cancelled:
         return "cancelled";
     case Abort::Motion:
-        return "the picture moved: hold the camera still and try again";
+        return "the picture kept moving: hold the camera still and try again";
     case Abort::Resolution:
         return "the resolution changed";
     case Abort::NrOff:
@@ -231,7 +240,19 @@ struct Settings
     // Mean absolute input change between evaluations, display-encoded. A still NBA 2K27 scene measured 0.0002, a
     // moving one 0.003-0.012 (which chose nonsense at the old 0.05).
     float motionLimit = 0.001f;
+    // A step whose input moved is measured again, this many times at most, before movement stops the run.
+    unsigned motionRetries = 3;
+    // How far a step's mean input band detail may drift from the run's first step (relative) before the view counts as
+    // changed. A still NBA 2K27 scene read the same to 4 digits at every step; a still Cyberpunk 2077 camera with ray
+    // reconstruction drifted up to 7% from its noise alone.
+    float sceneTolerance = 0.12f;
+    // How many times a changed view starts the sweep over before movement stops the run.
+    unsigned sceneRestarts = 1;
     float flatTolerance = 0.02f; // a best score this close to the current step's keeps the current value
+    // Unsure when detail varies across the steps no more than unsureNoise times the input band's own spread across
+    // them (at least noiseFloor, the stats' last printed digit): the input is the same frame at every step.
+    float unsureNoise = 4.0f;
+    float noiseFloor = 1e-5f;
     float baseToleranceEv = 0.25f; // how far the live base white point may drift from the frozen one
     float neutralTrim = kNeutralTrim; // the slider's 0 EV, and the scale detail is measured at
     // Consecutive evaluations a run may be unavailable (the game dropping its exposure texture for a frame, Automatic's
@@ -346,6 +367,22 @@ struct Ticket
 {
     uint32_t run = 0;
     uint32_t step = 0;
+    uint32_t generation = 0; // bumped when the sweep goes back after movement: older results are dropped
+};
+
+// Something a run did that the log should say: a step measured again, or the sweep started over.
+struct Note
+{
+    enum class Kind : uint32_t
+    {
+        Retry,   // the step moved and is measured again
+        Restart, // the view changed and the sweep starts over
+    };
+    Kind kind = Kind::Retry;
+    float ev = 0.0f;       // the step
+    float value = 0.0f;    // Retry: the input change; Restart: the input band now
+    float against = 0.0f;  // Retry: the motion limit; Restart: the run's first input band
+    unsigned count = 0;    // Retry: which retry of this step; Restart: which restart
 };
 
 // What one evaluation should do.
@@ -393,6 +430,12 @@ class Sweep
         step_ = 0;
         frameInStep_ = 0;
         outstanding_ = 0;
+        generation_ = 0;
+        restarts_ = 0;
+        sceneBand_ = -1.0f;
+        lastInputChange_ = 0.0f;
+        lastSceneBand_ = -1.0f;
+        notes_.clear();
         steps_.clear();
 
         const float lo = std::max(settings.minEv, EvForTrim(DlssNrTrim::kMaxTrim, settings.neutralTrim));
@@ -406,6 +449,7 @@ class Sweep
             steps_.push_back(r);
         }
 
+        retries_.assign(steps_.size(), 0);
         running_ = !steps_.empty() && settings.measure > 0;
     }
 
@@ -476,7 +520,7 @@ class Sweep
         if (frameInStep_ >= SettleOf(step_))
         {
             f.measure = true;
-            f.ticket = { run_, (uint32_t) step_ };
+            f.ticket = { run_, (uint32_t) step_, generation_ };
             ++outstanding_;
         }
 
@@ -492,7 +536,7 @@ class Sweep
     // A measured evaluation's stats, whenever the readback delivers them.
     void AddStats(const Ticket& ticket, const Stats& s)
     {
-        if (!running_ || ticket.run != run_ || ticket.step >= steps_.size())
+        if (!running_ || ticket.run != run_ || ticket.step >= steps_.size() || ticket.generation != generation_)
             return;
 
         if (outstanding_ > 0)
@@ -501,7 +545,8 @@ class Sweep
         if (Finite(s))
         {
             if (s.inputChange > settings_.motionLimit)
-                return Stop(Abort::Motion);
+                return Moved(ticket.step, s.inputChange);
+
 
             StepResult& r = steps_[ticket.step];
             const float n = (float) r.samples;
@@ -514,6 +559,15 @@ class Sweep
             mean(r.shoulder, s.shoulder);
             mean(r.floor, s.floor);
             ++r.samples;
+
+            // Where the camera is, judged on whole steps: a single reading is noisier than a step's mean.
+            if (r.samples == settings_.measure)
+            {
+                if (sceneBand_ < 0.0f)
+                    sceneBand_ = r.inputBand;
+                else if (std::fabs(r.inputBand - sceneBand_) > settings_.sceneTolerance * sceneBand_)
+                    return ViewChanged(r.inputBand);
+            }
         }
 
         if (step_ >= steps_.size() && outstanding_ == 0)
@@ -547,6 +601,15 @@ class Sweep
 
     // Why an Abort::Unavailable run could not go on.
     Blocker StopBlocker() const { return stopBlocker_; }
+
+    // For an Abort::Motion stop: the input change that ended it (0 when the view changed instead), and the input band
+    // the changed view read against the run's first (-1 when it was not a view change).
+    float LastInputChange() const { return lastInputChange_; }
+    float LastSceneBand() const { return lastSceneBand_; }
+    float SceneBand() const { return sceneBand_; }
+
+    // What the run did since the last call, for the log.
+    std::vector<Note> TakeNotes() { return std::exchange(notes_, {}); }
 
     // Finished, but detail varied less across the steps than flicker did: the result is the current value.
     bool Unsure() const { return unsure_; }
@@ -610,6 +673,53 @@ class Sweep
         abort_ = reason;
     }
 
+    // Back to `step`: its measurements and every later step's are dropped, it settles and is measured again, and
+    // results already issued come back under the old generation and are ignored.
+    void Rewind(size_t step)
+    {
+        for (size_t i = step; i < steps_.size(); ++i)
+        {
+            const float ev = steps_[i].ev;
+            steps_[i] = StepResult {};
+            steps_[i].ev = ev;
+        }
+        step_ = step;
+        frameInStep_ = 0;
+        outstanding_ = 0;
+        ++generation_;
+    }
+
+    // A measured evaluation's input moved: measure the step again, or stop once it has been tried often enough.
+    void Moved(size_t step, float change)
+    {
+        if (retries_[step] >= settings_.motionRetries)
+        {
+            lastInputChange_ = change;
+            return Stop(Abort::Motion);
+        }
+
+        ++retries_[step];
+        notes_.push_back({ Note::Kind::Retry, steps_[step].ev, change, settings_.motionLimit, retries_[step] });
+        Rewind(step);
+    }
+
+    // The camera came to rest somewhere else: start the sweep over, or stop once it has happened often enough.
+    void ViewChanged(float band)
+    {
+        if (restarts_ >= settings_.sceneRestarts)
+        {
+            lastSceneBand_ = band;
+            return Stop(Abort::Motion);
+        }
+
+        ++restarts_;
+        notes_.push_back({ Note::Kind::Restart, steps_[step_ < steps_.size() ? step_ : steps_.size() - 1].ev, band,
+                           sceneBand_, restarts_ });
+        sceneBand_ = -1.0f;
+        std::fill(retries_.begin(), retries_.end(), 0u);
+        Rewind(0);
+    }
+
     void Finish()
     {
         result_ = currentEv_;
@@ -633,25 +743,24 @@ class Sweep
                 nearest = (int) i;
 
         float detailLo = std::numeric_limits<float>::infinity(), detailHi = -std::numeric_limits<float>::infinity();
-        std::vector<float> flicker;
+        float inputLo = std::numeric_limits<float>::infinity(), inputHi = -std::numeric_limits<float>::infinity();
         for (const StepResult& r : steps_)
         {
             if (r.samples == 0)
                 continue;
             detailLo = std::min(detailLo, r.DetailOf(settings_.detail));
             detailHi = std::max(detailHi, r.DetailOf(settings_.detail));
-            flicker.push_back(r.Flicker());
+            inputLo = std::min(inputLo, r.inputBand);
+            inputHi = std::max(inputHi, r.inputBand);
         }
 
-        // Unsure when detail varies no more than the flicker of the sweep's quieter quarter. Not the median: in some games
-        // the output flickers far more at a brighter input (Cyberpunk 2077 with ray reconstruction, about 10x from -3 to
-        // +2.5 EV on a still camera), so the median came from the bright end and called every run unsure while the
-        // scores all pointed the same way. A scene that flickers at every step (a moving one) still flickers more in its
-        // quiet quarter than its detail varies.
-        const size_t quiet = flicker.size() / 4;
-        std::nth_element(flicker.begin(), flicker.begin() + (std::ptrdiff_t) quiet, flicker.end());
-
-        if (detailHi - detailLo <= flicker[quiet])
+        // Unsure when detail varies no more than the measurement does on its own: the input's band detail, the same
+        // frame at every step, spread across the steps. Flicker is not that yardstick -- it is how much the output
+        // changes from one evaluation to the next, not how well a step's mean repeats, and it stays in the score. It
+        // was, until NBA 2K27 on the HLG and PQ curves: three runs in a row repeated every step to 0.00002 and all put
+        // band-pass at +1.5 EV, yet detail varied 0.0005 against 0.00056 of flicker, so every run came back unsure.
+        // Movement is the movement checks' job (AddStats).
+        if (detailHi - detailLo <= settings_.unsureNoise * std::max(inputHi - inputLo, settings_.noiseFloor))
         {
             unsure_ = true;
             return;
@@ -689,6 +798,13 @@ class Sweep
     size_t step_ = 0;
     unsigned frameInStep_ = 0;
     unsigned outstanding_ = 0;
+    uint32_t generation_ = 0;
+    std::vector<unsigned> retries_;
+    unsigned restarts_ = 0;
+    float sceneBand_ = -1.0f; // the mean input band of the run's first measured step, -1 before it
+    float lastInputChange_ = 0.0f;
+    float lastSceneBand_ = -1.0f;
+    std::vector<Note> notes_;
     bool running_ = false;
     bool finished_ = false;
     bool unsure_ = false;

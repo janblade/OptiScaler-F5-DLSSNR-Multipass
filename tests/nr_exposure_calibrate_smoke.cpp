@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <string>
 #include <vector>
 
 using namespace DlssNrExposureCalibrate;
@@ -228,6 +229,93 @@ int main()
         st.detailBand = 0.5f;
         st.inputBand = 0.2f;
         CHECK(Near(AddedBand(st), 0.3f));
+    }
+
+    // Movement is measured again before it stops a run.
+    {
+        // A still scene: the result every retry case below must reproduce.
+        Sweep still;
+        still.Start(0.0f, Settings {}, kCtx);
+        Run(still, [](float ev) { return Peaked(ev, 1.5f); });
+        CHECK(still.Finished() && Near(still.ResultEv(), 1.5f));
+
+        // One moved measurement at +1.0 EV (a player walking through): the step is measured again, the result is the
+        // still one, every step has its four samples, and the log gets one note -- whatever the readback lag.
+        for (int lag : { 0, 4, 7 })
+        {
+            Sweep s;
+            s.Start(0.0f, Settings {}, kCtx);
+            int moved = 0;
+            Run(s, [&moved](float ev) {
+                Stats st = Peaked(ev, 1.5f);
+                if (Near(ev, 1.0f) && moved++ == 1)
+                    st.inputChange = 0.004f;
+                return st;
+            }, lag);
+            CHECK(s.Finished());
+            CHECK(Near(s.ResultEv(), still.ResultEv()));
+            for (const StepResult& r : s.Steps())
+                CHECK(r.samples == 4);
+            const std::vector<Note> notes = s.TakeNotes();
+            CHECK(notes.size() == 1 && notes[0].kind == Note::Kind::Retry && Near(notes[0].ev, 1.0f) &&
+                  Near(notes[0].value, 0.004f) && notes[0].count == 1);
+            CHECK(s.TakeNotes().empty());
+        }
+
+        // A step that keeps moving stops the run after motionRetries more tries, and the stop says what it measured.
+        {
+            Sweep s;
+            s.Start(0.0f, Settings {}, kCtx);
+            Run(s, [](float ev) {
+                Stats st = Peaked(ev, 1.5f);
+                if (Near(ev, 1.0f))
+                    st.inputChange = 0.003f;
+                return st;
+            });
+            CHECK(!s.Finished() && s.AbortReason() == Abort::Motion);
+            CHECK(Near(s.LastInputChange(), 0.003f) && s.LastSceneBand() < 0.0f);
+            CHECK(s.TakeNotes().size() == Settings {}.motionRetries);
+            const std::string text = StopText(s);
+            CHECK(text.find("0.00300") != std::string::npos && text.find("0.00100") != std::string::npos);
+        }
+
+        // The camera moved and came to rest somewhere else (the input's band detail changed): the sweep starts over on the
+        // new view and finds that view's best.
+        {
+            Sweep s;
+            s.Start(0.0f, Settings {}, kCtx);
+            int evaluations = 0;
+            Run(s, [&evaluations](float ev) {
+                const bool after = evaluations++ >= 20; // the camera settles elsewhere during the sweep's sixth step
+                Stats st = Peaked(ev, after ? -1.0f : 1.5f);
+                st.inputBand = after ? 0.2f : 0.1f;
+                if (evaluations == 21)
+                    st.inputChange = 0.01f; // the move itself
+                return st;
+            });
+            CHECK(s.Finished());
+            CHECK(Near(s.ResultEv(), -1.0f));
+            const std::vector<Note> notes = s.TakeNotes();
+            bool restarted = false;
+            for (const Note& n : notes)
+                restarted = restarted || (n.kind == Note::Kind::Restart && Near(n.value, 0.2f) && Near(n.against, 0.1f));
+            CHECK(restarted);
+        }
+
+        // A view that keeps changing stops the run after sceneRestarts restarts.
+        {
+            Sweep s;
+            s.Start(0.0f, Settings {}, kCtx);
+            int evaluations = 0;
+            Run(s, [&evaluations](float ev) {
+                Stats st = Peaked(ev, 1.5f);
+                st.inputBand = 0.1f * (1.0f + (float) (evaluations++ / 10)); // a slow pan: a new view every 10 readings
+                return st;
+            });
+            CHECK(!s.Finished() && s.AbortReason() == Abort::Motion);
+            CHECK(s.LastSceneBand() > 0.0f);
+            CHECK(StopText(s).find("view changed") != std::string::npos);
+        }
     }
 
     // Camera motion aborts.
@@ -572,17 +660,17 @@ int main()
         CHECK(!s.Finished() && s.AbortReason() == Abort::Motion);
     }
 
-    // ...and with the limit lifted it is unsure (flicker swings more than detail does), so it keeps the current value.
+    // ...and with the movement checks lifted it still keeps the current value: its best band sits at the top step,
+    // so the real best may lie beyond. (Before, the unsure rule caught it; that rule no longer reads movement --
+    // the movement checks are what stop a moving run.)
     {
         Settings loose;
         loose.motionLimit = 1.0f;
+        loose.sceneTolerance = 1e9f;
         Sweep s;
         s.Start(0.0f, loose, kCtx);
         Run(s, replay(kMoving));
-        CHECK(s.Finished());
-        CHECK(s.Unsure());
-        CHECK(Near(s.ResultEv(), 0.0f));
-        CHECK(!s.Changed());
+        CHECK(s.Finished() && s.AtEdge() && !s.Changed());
     }
 
     // Cyberpunk 2077 with ray reconstruction, a still camera (OptiScaler.log, 2026-09-28): the output flickers about 10x
@@ -616,7 +704,9 @@ int main()
         CHECK(s.Changed());
     }
 
-    // Its run 3 stays unsure: a flicker spike at -2.5 EV next to a near-flat bottom, too little detail spread to call.
+    // Its run 3 keeps the current value: detail and flicker both point to the darkest step, so the real best may lie
+    // beyond the range. (The old flicker rule called it unsure; its input band drifts 8% across the steps, and detail
+    // varies well beyond 4x that.)
     static const Row kCyberpunkNoisy[] = {
         { -3.0f, .00987f, .00614f, .00436f, .00151f, .00018f, 0, .0024f },
         { -2.5f, .00995f, .00617f, .00435f, .00282f, .0002f, 0, 0 },
@@ -638,9 +728,116 @@ int main()
         Sweep s;
         s.Start(1.5f, Settings {}, kCtx);
         Run(s, replay(kCyberpunkNoisy));
-        CHECK(s.Finished());
-        CHECK(s.Unsure());
-        CHECK(!s.Changed());
+        CHECK(s.Finished() && s.AtEdge() && Near(s.BestEv(Detail::BandPass), -3.0f) && !s.Changed());
+    }
+
+    // NBA 2K27 on the HLG and PQ curves and on Neutwo (OptiScaler.log, 2026-09-29 and -30): the flicker rule called the
+    // first three unsure though they repeat. Their input band is the same to the last digit at every step.
+    static const Row kHlg[] = { // 2026-09-30 11:14:24, HLG, started at -3.3 EV; two runs before it gave the same curve
+        { -3.0f, .01666f, .00988f, .00995f, .00143f, .00012f, 0, .2424f },
+        { -2.5f, .01646f, .00981f, .00995f, .00133f, .00013f, 0, .2087f },
+        { -2.0f, .01629f, .00975f, .00995f, .00114f, .00012f, 0, .1814f },
+        { -1.5f, .01622f, .00977f, .00995f, .00105f, .00013f, 0, .0863f },
+        { -1.0f, .01617f, .00990f, .00995f, .00094f, .00012f, 0, .0415f },
+        { -0.5f, .01600f, .00991f, .00995f, .00084f, .00013f, 0, .0178f },
+        { 0.0f, .01599f, .00998f, .00995f, .00077f, .00012f, 0, .0066f },
+        { 0.5f, .01617f, .01005f, .00995f, .00076f, .00013f, 0, .0010f },
+        { 1.0f, .01613f, .01017f, .00995f, .00070f, .00012f, 0, 0 },
+        { 1.5f, .01601f, .01017f, .00995f, .00067f, .00013f, 0, 0 },
+        { 2.0f, .01601f, .01015f, .00995f, .00070f, .00012f, 0, 0 },
+        { 2.5f, .01632f, .01014f, .00995f, .00074f, .00013f, .0119f, 0 },
+        { 3.0f, .01677f, .01019f, .00995f, .00077f, .00012f, .1423f, 0 },
+        { 3.5f, .01682f, .01021f, .00995f, .00085f, .00013f, .5433f, 0 },
+        { 4.0f, .01715f, .01024f, .00995f, .00087f, .00012f, .5936f, 0 },
+    };
+    static const Row kHlgOther[] = { // 2026-09-30 11:23:52, HLG, another scene, started at +1.0 EV
+        { -3.0f, .01284f, .00786f, .00879f, .00153f, .00010f, 0, .2100f },
+        { -2.5f, .01275f, .00784f, .00879f, .00135f, .00011f, 0, .0643f },
+        { -2.0f, .01261f, .00788f, .00879f, .00121f, .00010f, 0, .0287f },
+        { -1.5f, .01260f, .00797f, .00879f, .00121f, .00011f, 0, .0182f },
+        { -1.0f, .01258f, .00804f, .00879f, .00105f, .00010f, 0, .0128f },
+        { -0.5f, .01243f, .00810f, .00879f, .00102f, .00011f, 0, .0090f },
+        { 0.0f, .01232f, .00811f, .00879f, .00099f, .00010f, 0, .0054f },
+        { 0.5f, .01223f, .00805f, .00879f, .00097f, .00011f, 0, .0027f },
+        { 1.0f, .01239f, .00799f, .00879f, .00100f, .00010f, .0140f, .0011f },
+        { 1.5f, .01263f, .00798f, .00879f, .00101f, .00011f, .1062f, .0001f },
+        { 2.0f, .01263f, .00791f, .00879f, .00107f, .00010f, .3320f, 0 },
+        { 2.5f, .01276f, .00796f, .00879f, .00103f, .00011f, .3531f, 0 },
+        { 3.0f, .01283f, .00803f, .00879f, .00096f, .00010f, .3672f, 0 },
+        { 3.5f, .01270f, .00822f, .00879f, .00086f, .00011f, .3834f, 0 },
+        { 4.0f, .01278f, .00852f, .00879f, .00072f, .00010f, .4019f, 0 },
+    };
+    static const Row kPq[] = { // 2026-09-30 11:32:42, PQ, started at +0.5 EV: detail nearly flat, the floor decides
+        { -3.0f, .03292f, .01983f, .01603f, .00150f, .00018f, 0, .3296f },
+        { -2.5f, .03311f, .01997f, .01603f, .00155f, .00020f, 0, .2239f },
+        { -2.0f, .03325f, .02009f, .01603f, .00140f, .00018f, 0, .1693f },
+        { -1.5f, .03322f, .02011f, .01603f, .00140f, .00020f, 0, .1290f },
+        { -1.0f, .03323f, .02015f, .01603f, .00133f, .00018f, 0, .0902f },
+        { -0.5f, .03325f, .02022f, .01603f, .00136f, .00020f, 0, .0554f },
+        { 0.0f, .03300f, .02011f, .01603f, .00139f, .00018f, 0, .0301f },
+        { 0.5f, .03278f, .02003f, .01603f, .00142f, .00020f, 0, .0132f },
+        { 1.0f, .03324f, .02017f, .01603f, .00140f, .00018f, .0030f, .0085f },
+        { 1.5f, .03330f, .02015f, .01603f, .00147f, .00020f, .0628f, .0046f },
+        { 2.0f, .03331f, .02011f, .01603f, .00142f, .00018f, .2279f, .0027f },
+        { 2.5f, .03337f, .01999f, .01603f, .00149f, .00020f, .2819f, .0015f },
+        { 3.0f, .03403f, .02013f, .01603f, .00151f, .00018f, .3214f, .0002f },
+        { 3.5f, .03439f, .02026f, .01603f, .00155f, .00020f, .3631f, 0 },
+        { 4.0f, .03405f, .02003f, .01603f, .00157f, .00018f, .4100f, 0 },
+    };
+    static const Row kNeutwo[] = { // 2026-09-29 09:27:50, Neutwo, started at +0.5 EV: the run that was always sure
+        { -3.0f, .02870f, .01669f, .01613f, .00117f, .00021f, 0, .3609f },
+        { -2.5f, .03066f, .01735f, .01613f, .00116f, .00021f, 0, .2635f },
+        { -2.0f, .03188f, .01769f, .01613f, .00109f, .00021f, 0, .1400f },
+        { -1.5f, .03262f, .01796f, .01613f, .00097f, .00021f, 0, .0605f },
+        { -1.0f, .03286f, .01803f, .01613f, .00096f, .00021f, 0, .0254f },
+        { -0.5f, .03286f, .01795f, .01612f, .00091f, .00021f, 0, .0129f },
+        { 0.0f, .03275f, .01777f, .01613f, .00085f, .00021f, 0, .0057f },
+        { 0.5f, .03263f, .01758f, .01612f, .00084f, .00021f, 0, .0021f },
+        { 1.0f, .03245f, .01738f, .01613f, .00080f, .00021f, .0021f, .0008f },
+        { 1.5f, .03239f, .01724f, .01612f, .00078f, .00021f, .0053f, .0003f },
+        { 2.0f, .03221f, .01707f, .01613f, .00073f, .00021f, .0168f, .0001f },
+        { 2.5f, .03205f, .01692f, .01613f, .00067f, .00021f, .1696f, .0001f },
+        { 3.0f, .03178f, .01680f, .01613f, .00064f, .00021f, .2436f, 0 },
+        { 3.5f, .03152f, .01667f, .01613f, .00060f, .00021f, .2819f, 0 },
+        { 4.0f, .03123f, .01658f, .01613f, .00057f, .00021f, .3223f, 0 },
+    };
+    {
+        struct Case { const Row* rows; float start, expect; const char* name; };
+        for (const Case& c : { Case { kHlg, -3.3f, 1.5f, "HLG" }, Case { kHlgOther, 1.0f, 0.5f, "HLG, other scene" },
+                               Case { kPq, 0.5f, 1.0f, "PQ" }, Case { kNeutwo, 0.5f, -0.5f, "Neutwo" } })
+        {
+            Sweep s;
+            s.Start(c.start, Settings {}, kCtx);
+            Run(s, replay(c.rows));
+            CHECK(s.Finished() && !s.Unsure() && !s.AtEdge());
+            CHECK(Near(s.ResultEv(), c.expect));
+        }
+    }
+
+    // Unsure still means something: detail that varies less than the input does on its own across the steps (the
+    // same frame measuring differently -- noise, or a scene that is not quite still) keeps the current value.
+    {
+        Sweep s;
+        s.Start(1.0f, Settings {}, kCtx);
+        Run(s, [](float ev) {
+            Stats st = Peaked(ev, 2.0f);
+            const int step = (int) std::lround((ev + 3.0f) * 2.0f);
+            st.inputBand = 0.01f + ((step & 1) ? 0.0002f : -0.0002f); // spread 0.0004
+            st.detailBand = st.inputBand + 0.001f + 0.0003f * st.detailRaw; // added detail varies 0.0003 at most
+            return st;
+        });
+        CHECK(s.Finished() && s.Unsure() && Near(s.ResultEv(), 1.0f) && !s.Changed());
+        // ...and a genuinely flat curve on a perfectly steady input is unsure too (range 0 is within the floor).
+        Sweep f;
+        f.Start(1.0f, Settings {}, kCtx);
+        Run(f, [](float) {
+            Stats st {};
+            st.detailRaw = 0.02f;
+            st.detailBand = 0.011f;
+            st.inputBand = 0.01f;
+            return st;
+        });
+        CHECK(f.Finished() && f.Unsure() && !f.Changed());
     }
 
     // The step on screen, for the menu's progress text.

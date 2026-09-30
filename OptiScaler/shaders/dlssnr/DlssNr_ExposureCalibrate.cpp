@@ -48,6 +48,12 @@ void BeginFrameNow(Backend& gpu, const ::Config& cfg, unsigned int width, unsign
                  situation.followDisagreementEv);
     }
 
+    {
+        std::lock_guard<std::mutex> lock(run.mutex);
+        for (const Note& note : run.sweep.TakeNotes())
+            LOG_INFO("{}", NoteText(note));
+    }
+
     if (events.finished)
     {
         std::lock_guard<std::mutex> lock(run.mutex);

@@ -112,7 +112,30 @@ inline std::string StopText(const Sweep& s)
     if (s.AbortReason() == Abort::Unavailable)
         text = text + ": " + BlockerText(s.StopBlocker());
 
+    // Movement is tried again before it stops a run, so a stop says what the last try measured.
+    if (s.AbortReason() == Abort::Motion)
+    {
+        if (s.LastSceneBand() >= 0.0f)
+            text += std::format(" (the view changed again: input detail {:.5f}, the run started at {:.5f})",
+                                s.LastSceneBand(), s.SceneBand());
+        else
+            text += std::format(" (input change {:.5f} after {} tries, limit {:.5f})", s.LastInputChange(),
+                                s.Config().motionRetries + 1, s.Config().motionLimit);
+    }
+
     return text;
+}
+
+// A note from a running sweep, for the log.
+inline std::string NoteText(const Note& n)
+{
+    if (n.kind == Note::Kind::Retry)
+        return std::format("DLSS-NR calibrate: {:+.1f} EV moved (input change {:.5f}, limit {:.5f}), measuring it again "
+                           "(try {})",
+                           Tidy(n.ev), n.value, n.against, n.count + 1);
+    return std::format("DLSS-NR calibrate: the view changed at {:+.1f} EV (input detail {:.5f}, the run started at "
+                       "{:.5f}), starting over (restart {})",
+                       Tidy(n.ev), n.value, n.against, n.count);
 }
 
 // The log of a run that ended: the abort, one line per measured step, the result.
@@ -147,7 +170,7 @@ inline std::vector<std::string> ResultLines(const Sweep& s)
         lines.push_back(std::format(
             "DLSS-NR calibrate: current {:+.2f} EV, best raw {:+.1f} EV, best band {:+.1f} EV, result {:+.2f} EV{}",
             Tidy(s.CurrentEv()), Tidy(s.BestEv(Detail::Raw)), Tidy(s.BestEv(Detail::BandPass)), Tidy(s.ResultEv()),
-            s.Unsure()    ? " (unsure: detail varied less than the quiet steps flicker, keeps the current value)"
+            s.Unsure()    ? " (unsure: detail varied no more than the measurement does on its own, keeps the current value)"
             : s.AtEdge()  ? " (at the edge of the range: the real best may lie beyond, keeps the current value)"
             : s.Changed() ? ""
                           : " (flat: keeps the current value)"));

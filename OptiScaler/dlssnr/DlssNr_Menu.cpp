@@ -127,17 +127,29 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
     }
     else if (cal.finished && mine)
     {
+        // The long results wrap, and their buttons go on the next line: on one unwrapped line OK ran off the panel's
+        // right edge, and without it the result could not be dismissed, so Tune could not be run again.
+        const auto warning = [](const char* text)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+            ImGui::TextWrapped("%s", text);
+            ImGui::PopStyleColor();
+        };
+        bool ownLine = false;
+
         if (cal.unsure)
         {
-            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                               "The picture kept changing between steps (moving effects or noise), so no value "
-                               "stood out. Nothing changed.");
+            warning("The brightness steps changed NR's detail no more than the measurement varies on its own, so no "
+                    "step was clearly better. Your current value is kept.");
+            ownLine = true;
         }
         else if (cal.atEdge)
         {
-            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                               "Best was at the edge of the range (%+.1f EV), so it may lie beyond. Nothing changed.",
-                               cal.bestBandEv);
+            char text[128];
+            snprintf(text, sizeof(text), "Best was at the edge of the range (%+.1f EV), so it may lie beyond. "
+                                         "Your current value is kept.", cal.bestBandEv);
+            warning(text);
+            ownLine = true;
         }
         else if (cal.changed)
         {
@@ -157,10 +169,19 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                                cal.currentEv);
         }
 
-        ImGui::SameLine();
+        if (!ownLine)
+            ImGui::SameLine();
 
         if (ImGui::SmallButton(cal.changed ? "Keep##tune" : "OK##tune"))
             DlssNr::DismissExposureCalibration();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!cal.available);
+
+        if (ImGui::SmallButton("Tune again##tune"))
+            DlssNr::StartExposureCalibration(source); // clears this result itself
+
+        ImGui::EndDisabled();
 
         // The curves and the raw measure are for checking the tuning itself, not for choosing.
         if (!cal.ev.empty() && ImGui::TreeNode("Details##tune"))
@@ -210,7 +231,12 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         if (mine && !cal.startError.empty())
             ImGui::TextDisabled("Could not start: %s", cal.startError.c_str());
         else if (mine && !cal.aborted.empty())
-            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f), "Stopped: %s", cal.aborted.c_str());
+        {
+            // Wrapped: a stop now says what it measured, and an unwrapped line runs off the panel.
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+            ImGui::TextWrapped("Stopped: %s", cal.aborted.c_str());
+            ImGui::PopStyleColor();
+        }
     }
 
     ImGui::Unindent();

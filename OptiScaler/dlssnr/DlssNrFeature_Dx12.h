@@ -166,7 +166,7 @@ struct ExposureCalibrationStatus
     std::string aborted; // why the last run stopped early, empty if it did not
     float currentEv = 0.0f;
     bool changed = false; // the chosen value differs from the current one (a flat curve keeps the current)
-    bool unsure = false;  // detail varied no more than the flicker: the current value is kept
+    bool unsure = false;  // detail varied no more than the measurement's own noise: the current value is kept
     bool atEdge = false;  // the best step was the first or last: the real best may lie beyond, the current is kept
     float resultEv = 0.0f;
     float bestRawEv = 0.0f;

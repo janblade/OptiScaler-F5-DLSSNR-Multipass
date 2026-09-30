@@ -115,6 +115,9 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
 
         if (cal.starting)
             snprintf(text, sizeof(text), "Starting...");
+        else if (cal.stepIndex < cal.stepCount && cal.passes > 1)
+            snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u, pass %u of %u): hold the camera still", cal.stepEv,
+                     cal.stepIndex + 1, cal.stepCount, cal.pass + 1, cal.passes);
         else if (cal.stepIndex < cal.stepCount)
             snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u): hold the camera still", cal.stepEv,
                      cal.stepIndex + 1, cal.stepCount);
@@ -144,11 +147,12 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                     "step was clearly better. Your current value is kept.");
             ownLine = true;
         }
-        else if (cal.atEdge)
+        else if (cal.unrepeated)
         {
-            char text[128];
-            snprintf(text, sizeof(text), "Best was at the edge of the range (%+.1f EV), so it may lie beyond. "
-                                         "Your current value is kept.", cal.bestBandEv);
+            char text[192];
+            snprintf(text, sizeof(text), "The two passes disagreed (%+.1f EV, then %+.1f EV), so neither is reliable. "
+                                         "Your current value is kept. Hold the camera still and try again.",
+                     cal.firstPassEv, cal.lastPassEv);
             warning(text);
             ownLine = true;
         }
@@ -194,9 +198,16 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                              ImVec2(0.0f, 50.0f));
             ImGui::TextDisabled("Score from %+.1f EV (left) to %+.1f EV (right). Best: band-pass %+.1f, raw %+.1f.",
                                 cal.ev.front(), cal.ev.back(), cal.bestBandEv, cal.bestRawEv);
+            // What the model does to the game's colour and shadows there (output against the game's frame).
+            ImGui::TextDisabled("At %+.1f EV: saturation %+.0f%%, warmth %+.3f, shadows %.0f%% %s, %.1f%% crushed.",
+                                cal.resultStepEv, 100.0f * cal.resultSaturation, cal.resultWarmth,
+                                std::fabs(100.0f * cal.resultShadowDarkening),
+                                cal.resultShadowDarkening >= 0.0f ? "darker" : "lifted", 100.0f * cal.resultCrushed);
 
-            // Not when the run was unsure or its best sat at the edge: those keep the current value for either measure.
-            ImGui::BeginDisabled(cal.unsure || cal.atEdge);
+            // Not when the run was unsure or its passes disagreed: those keep the current value for either measure.
+            // Nor when the passes picked different raw bests -- the number shown is the last pass's, and offering it
+            // would be a single-pass answer from a run that promised two.
+            ImGui::BeginDisabled(cal.unsure || cal.unrepeated || !cal.rawAgreed);
 
             if (ImGui::SmallButton("Apply raw instead##tune"))
             {
@@ -218,8 +229,8 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
 
         ImGui::EndDisabled();
         HelpMarker("Finds the Model input brightness above that gives NR the most detail on the scene on screen."
-                   "\nTries the slider across its useful range, about 12 frames a step, and checks each step for"
-                   "\ndetail, flicker and clipping. Hold the camera still while it runs: the picture gets brighter"
+                   "\nTries the slider across its useful range twice over, about 12 frames a step, and checks each step"
+                   "\nfor detail, flicker and clipping, offering a change only when both sweeps agree. Hold the camera still while it runs: the picture gets brighter"
                    "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
                    "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
                    "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
@@ -270,11 +281,16 @@ static void RenderMeasureDetail()
         DlssNr::StartMeasureDetail();
 
     ImGui::EndDisabled();
-    HelpMarker("Measures NR's output on the scene on screen at the current settings, for about a second: the detail it"
-               "\nadds over the game's frame, and how much it flickers beyond the game's own frame-to-frame change."
-               "\nPress it on a still scene (a paused replay, photo mode), change one setting, press it again: the"
-               "\nchange against the previous measurement shows what the setting did. Two runs in a row show the noise."
-               "\nNothing else changes; the numbers also go to OptiScaler.log.");
+    HelpMarker("Measures NR's output on the scene on screen at the current settings, for about a second, against the"
+               "\ngame's own frame:"
+               "\n  Detail - how much fine detail NR adds (50% more = half as much again as the game had)."
+               "\n  Flicker - how much the picture changes from frame to frame, as a multiple of the game's own change"
+               "\n    (1x = NR adds no flicker; on a paused, perfectly still frame it is shown as a small number)."
+               "\n  Colour - whether NR makes the picture more or less saturated, warmer or cooler."
+               "\n  Shadows - whether NR lifts or darkens the darkest parts, and how much it crushes to black."
+               "\nTo compare settings: on a still scene (a paused replay, photo mode) press it, change ONE setting, press"
+               "\nit again. The line below says what changed; differences of a few percent are noise (press it twice"
+               "\nwithout changing anything to see how much). The raw numbers are greyed out and go to OptiScaler.log.");
 
     if (!cal.measureAvailable && !cal.measureUnavailable.empty())
         ImGui::TextDisabled("Not available: %s", cal.measureUnavailable.c_str());
@@ -292,9 +308,14 @@ static void RenderMeasureDetail()
         return;
 
     const auto& m = cal.latest;
-    ImGui::Text("#%u  Detail added %.5f  Flicker %.5f", cal.measurements, m.detail, m.flicker);
-    ImGui::TextDisabled("detail out %.5f in %.5f, raw %.5f | change out %.5f in %.5f | %u frames", m.detailOut,
-                        m.detailIn, m.raw, m.flickerOut, m.flickerIn, m.frames);
+    ImGui::Text("Measurement #%u", cal.measurements);
+    ImGui::TextWrapped("%s", cal.detailWords.c_str());
+    ImGui::TextWrapped("%s", cal.flickerWords.c_str());
+    ImGui::TextWrapped("%s", cal.colourWords.c_str());
+    ImGui::TextWrapped("%s", cal.shadowWords.c_str());
+    ImGui::TextDisabled("detail added %.5f (out %.5f in %.5f), raw %.5f | flicker %.5f (change out %.5f in %.5f) | %u "
+                        "frames", m.detail, m.detailOut, m.detailIn, m.raw, m.flicker, m.flickerOut, m.flickerIn,
+                        m.frames);
 
     if (cal.hasPrevious && !cal.comparable)
     {
@@ -303,14 +324,7 @@ static void RenderMeasureDetail()
     }
     else if (cal.hasPrevious)
     {
-        // Relative to the previous measurement; a value near zero has no meaningful percentage.
-        const auto change = [](float now, float before)
-        {
-            return std::fabs(before) > 1e-7f ? 100.0f * (now - before) / std::fabs(before) : 0.0f;
-        };
-        const auto& p = cal.previous;
-        ImGui::Text("vs #%u: detail %+.1f%%, flicker %+.1f%%, raw %+.1f%%", cal.measurements - 1,
-                    change(m.detail, p.detail), change(m.flicker, p.flicker), change(m.raw, p.raw));
+        ImGui::TextWrapped("Against #%u: %s", cal.measurements - 1, cal.compareWords.c_str());
     }
 }
 

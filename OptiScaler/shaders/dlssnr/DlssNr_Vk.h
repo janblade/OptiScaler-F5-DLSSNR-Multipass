@@ -100,7 +100,7 @@ class DlssNr_Vk : public Shader_Vk
                                VkImageView InEased);
 
     // One stats pass of "Tune for this scene" (dlssnr_detail_stats.hlsl): 64x64 groups, one per tile, into the
-    // 128x64 RGBA32F InGrid (GENERAL). The four copies are read sampled (SHADER_READ_ONLY_OPTIMAL); InProxy, the
+    // 256x64 RGBA32F InGrid (GENERAL). The four copies are read sampled (SHADER_READ_ONLY_OPTIMAL); InProxy, the
     // RGBA16F picture the model was shown, is read as a storage image (GENERAL) in gKeep's binding, the layout having
     // only four sampled ones. False (no-op) if the pipeline cannot be built.
     bool DispatchDetailStats(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, VkImageView InOutput,

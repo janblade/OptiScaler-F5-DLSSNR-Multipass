@@ -13,9 +13,9 @@ void ParkNrResource(ID3D12Resource*& res);
 
 namespace Cal = DlssNrExposureCalibrate;
 
-// The stats grid: 64x64 tiles, two RGBA32F texels each, side by side (Cal::ReduceGrid has the layout). 128 * 16 = 2048
+// The stats grid: 64x64 tiles, four RGBA32F texels each, side by side (Cal::ReduceGrid has the layout). 256 * 16 = 4096
 // bytes a row, a multiple of the 256 a texture-to-buffer copy needs, so the readback is a flat array.
-constexpr unsigned int kCalGridWidth = Cal::kGridTiles * 2;
+constexpr unsigned int kCalGridWidth = Cal::kGridTiles * Cal::kGridColumns;
 constexpr unsigned int kCalGridHeight = Cal::kGridTiles;
 constexpr unsigned int kCalRowBytes = Cal::kGridRowFloats * sizeof(float);
 constexpr unsigned int kCalGridBytes = kCalRowBytes * kCalGridHeight;

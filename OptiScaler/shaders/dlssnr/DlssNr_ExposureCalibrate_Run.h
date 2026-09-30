@@ -179,9 +179,124 @@ inline std::string NoteText(const Note& n, bool measure = false)
 inline std::string MeasureText(const StepResult& r)
 {
     return std::format("n {} | raw {:.5f} band {:.5f} (out {:.5f} in {:.5f}) | flicker {:.5f} (out {:.5f} in {:.5f}) | "
-                       "shoulder {:.4f} floor {:.4f}",
+                       "shoulder {:.4f} floor {:.4f} | colour saturation {:+.1f}% (chroma out {:.4f} in {:.4f}) shift "
+                       "{:.4f} warmth {:+.4f} | shadows {:.3f} of the picture, darkened {:+.1f}% (out {:.5f} in {:.5f}), "
+                       "crushed {:.4f}",
                        r.samples, r.detailRaw, r.DetailOf(Detail::BandPass), r.detailBand, r.inputBand, r.Flicker(),
-                       r.outputChange, r.inputChange, r.shoulder, r.floor);
+                       r.outputChange, r.inputChange, r.shoulder, r.floor, 100.0f * r.Saturation(), r.chromaOut,
+                       r.chromaIn, r.colourShift, r.warmth, r.shadowShare, 100.0f * r.ShadowDarkening(), r.shadowOut,
+                       r.shadowIn, r.crushed);
+}
+
+// "Measure detail" in words, for the menu: each measure against the game's own frame, then against the measurement
+// before. Changes within kSameWithin (relative) or kSamePoints (percentage points) read as the same: a still NBA 2K27
+// scene repeated detail to 0.3%, so this leaves room for a busier one; two measurements in a row show the real noise.
+constexpr float kSameWithin = 0.03f;
+constexpr float kSamePoints = 0.02f;
+
+inline std::string DetailWords(const StepResult& r)
+{
+    const float added = r.DetailOf(Detail::BandPass);
+    if (!(r.inputBand > 1e-6f))
+        return std::format("Detail: {:+.5f} added (the game's frame has no detail to compare with)", added);
+    const float share = added / r.inputBand;
+    if (std::fabs(share) < kSamePoints) // a fraction of a percent reads as "0% more", which says nothing
+        return "Detail: about as much as the game's own";
+    return share >= 0.0f ? std::format("Detail: {:.0f}% more than the game's own", 100.0f * share)
+                         : std::format("Detail: {:.0f}% less than the game's own (NR smooths here)", -100.0f * share);
+}
+
+// A still frame measures about 0.0002 of input change (NBA 2K27), so anything below kStillInput is "held still": a
+// multiple taken against a few millionths reads as hundreds of times and means nothing.
+constexpr float kStillInput = 1e-4f;
+
+inline std::string FlickerWords(const StepResult& r)
+{
+    if (!(r.inputChange > kStillInput))
+        return std::format("Flicker: {:.5f} of the picture changes between frames (the game's frame held still)",
+                           r.Flicker());
+    return std::format("Flicker: the output moves {:.1f}x as much as the game's frame between frames (1x = none added)",
+                       r.outputChange / r.inputChange);
+}
+
+inline std::string ColourWords(const StepResult& r)
+{
+    if (!(r.chromaIn > 1e-4f))
+        return "Colour: the picture is almost grey, nothing to compare";
+    const float sat = r.Saturation();
+    std::string text = std::fabs(sat) < kSamePoints
+                           ? std::string("Colour: saturation as the game's")
+                           : std::format("Colour: {:.0f}% {} saturated than the game's", 100.0f * std::fabs(sat),
+                                         sat > 0.0f ? "more" : "less");
+    const float warmth = r.warmth;
+    if (std::fabs(warmth) >= 0.006f)
+        text += warmth > 0.0f ? ", warmer" : ", cooler";
+    else if (std::fabs(warmth) >= 0.002f)
+        text += warmth > 0.0f ? ", slightly warmer" : ", slightly cooler";
+    return text;
+}
+
+inline std::string ShadowWords(const StepResult& r)
+{
+    if (r.shadowShare < 0.005f)
+        return "Shadows: hardly any in the picture";
+    const float dark = r.ShadowDarkening();
+    std::string text = std::format("Shadows ({:.0f}% of the picture): ", 100.0f * r.shadowShare);
+    text += std::fabs(dark) < kSamePoints ? std::string("kept as the game's")
+            : dark < 0.0f                 ? std::format("{:.0f}% lifted", -100.0f * dark)
+                                          : std::format("{:.0f}% darker", 100.0f * dark);
+    text += r.crushed < 0.0005f ? ", nothing crushed"
+                                : std::format(", {:.1f}% of the picture crushed toward black", 100.0f * r.crushed);
+    return text;
+}
+
+// The latest measurement against the one before (both at the same scale).
+inline std::string CompareWords(const StepResult& now, const StepResult& before)
+{
+    std::vector<std::string> parts;
+    const auto relative = [](float a, float b) { return std::fabs(b) > 1e-7f ? (a - b) / std::fabs(b) : 0.0f; };
+
+    // A percentage against nothing is not a comparison: "was none, now X" says what happened, where relative() would
+    // report "about the same" however large the new value is (Flicker() is exactly 0 whenever the output moved no more
+    // than the game's frame, which a paused scene does reach).
+    const auto fromZero = [](const char* name, float now, float scale)
+    { return std::format("{} was none, now {:.5f}", name, now * scale); };
+
+    const float nowDetail = now.DetailOf(Detail::BandPass), beforeDetail = before.DetailOf(Detail::BandPass);
+    const float detail = relative(nowDetail, beforeDetail);
+    if (std::fabs(beforeDetail) <= 1e-7f && std::fabs(nowDetail) > 1e-7f)
+        parts.push_back(fromZero("detail", nowDetail, 1.0f));
+    else
+        parts.push_back(std::fabs(detail) < kSameWithin
+                            ? std::string("detail about the same")
+                            : std::format("{} detail ({:+.0f}%)", detail > 0.0f ? "more" : "less", 100.0f * detail));
+
+    const float nowFlicker = now.Flicker(), beforeFlicker = before.Flicker();
+    const float flicker = relative(nowFlicker, beforeFlicker);
+    if (beforeFlicker <= 1e-7f && nowFlicker > 1e-7f)
+        parts.push_back(fromZero("flicker", nowFlicker, 1.0f) + " (worse)");
+    else
+        parts.push_back(std::fabs(flicker) < kSameWithin
+                            ? std::string("flicker about the same")
+                            : std::format("{} flicker ({:+.0f}%, {})", flicker > 0.0f ? "more" : "less",
+                                          100.0f * flicker, flicker > 0.0f ? "worse" : "better"));
+
+    const float sat = now.Saturation() - before.Saturation();
+    if (std::fabs(sat) >= kSamePoints)
+        parts.push_back(std::format("{} saturated ({:+.0f} points)", sat > 0.0f ? "more" : "less", 100.0f * sat));
+
+    const float dark = now.ShadowDarkening() - before.ShadowDarkening();
+    if (std::fabs(dark) >= kSamePoints)
+        parts.push_back(std::format("shadows {} ({:+.0f} points)", dark > 0.0f ? "darker" : "lighter", 100.0f * dark));
+
+    const float crushed = now.crushed - before.crushed;
+    if (std::fabs(crushed) >= 0.001f)
+        parts.push_back(std::format("{} crushed ({:+.1f} points)", crushed > 0.0f ? "more" : "less", 100.0f * crushed));
+
+    std::string text;
+    for (size_t i = 0; i < parts.size(); ++i)
+        text += (i == 0 ? "" : ", ") + parts[i];
+    return text;
 }
 
 // The log of a run that ended: the abort, one line per measured step, the result.
@@ -200,33 +315,59 @@ inline std::vector<std::string> ResultLines(const Sweep& s)
 
     const auto& steps = s.Steps();
     const float neutral = s.Config().neutralTrim;
+    const bool passes = s.Passes() > 1;
+    // With several passes each line says which; one pass keeps the lines as they were.
+    const auto passText = [passes](unsigned pass) { return passes ? std::format("pass {}: ", pass + 1) : std::string(); };
 
     if (s.AbortReason() != Abort::None)
         lines.push_back(std::format(
-            "DLSS-NR calibrate: stopped after {} of {} steps: {}",
+            "DLSS-NR calibrate: stopped after {} of {} steps{}: {}",
             std::count_if(steps.begin(), steps.end(), [](const StepResult& r) { return r.samples > 0; }),
-            steps.size(), StopText(s)));
+            steps.size(), passes ? std::format(" of pass {} of {}", s.Pass() + 1, s.Passes()) : "", StopText(s)));
 
-    for (size_t i = 0; i < steps.size(); ++i)
+    const auto stepLines = [&](const std::vector<StepResult>& pass, unsigned index)
     {
-        const StepResult& r = steps[i];
+        for (size_t i = 0; i < pass.size(); ++i)
+        {
+            const StepResult& r = pass[i];
 
-        if (r.samples == 0)
-            continue;
+            if (r.samples == 0)
+                continue;
 
-        lines.push_back(std::format("DLSS-NR calibrate: {:+.1f} EV (trim {:.3f}) {} | score raw {:.3f} band {:.3f}",
-                                    Tidy(r.ev), TrimForEv(r.ev, neutral), MeasureText(r), s.Score(i, Detail::Raw),
-                                    s.Score(i, Detail::BandPass)));
+            lines.push_back(std::format("DLSS-NR calibrate: {}{:+.1f} EV (trim {:.3f}) {} | score raw {:.3f} band {:.3f}",
+                                        passText(index), Tidy(r.ev), TrimForEv(r.ev, neutral), MeasureText(r),
+                                        s.ScoreIn(pass, i, Detail::Raw), s.ScoreIn(pass, i, Detail::BandPass)));
+        }
+    };
+    const auto verdictText = [](const PassVerdict& v)
+    {
+        return std::format("best raw {:+.1f} EV, best band {:+.1f} EV, result {:+.2f} EV{}", Tidy(v.bestRaw),
+                           Tidy(v.bestBand), Tidy(v.result),
+                           v.unsure ? " (unsure)" : "");
+    };
+
+    // The passes before the last, then the last (or the one a stop cut short).
+    if (!s.FirstPassSteps().empty())
+    {
+        stepLines(s.FirstPassSteps(), 0);
+        lines.push_back(std::format("DLSS-NR calibrate: pass 1: {}", verdictText(s.FirstPass())));
     }
+
+    stepLines(steps, s.Pass());
+
+    if (s.Finished() && passes)
+        lines.push_back(std::format("DLSS-NR calibrate: pass {}: {}", s.Pass() + 1, verdictText(s.LastPass())));
 
     if (s.Finished())
         lines.push_back(std::format(
             "DLSS-NR calibrate: current {:+.2f} EV, best raw {:+.1f} EV, best band {:+.1f} EV, result {:+.2f} EV{}",
             Tidy(s.CurrentEv()), Tidy(s.BestEv(Detail::Raw)), Tidy(s.BestEv(Detail::BandPass)), Tidy(s.ResultEv()),
-            s.Unsure()    ? " (unsure: detail varied no more than the measurement does on its own, keeps the current value)"
-            : s.AtEdge()  ? " (at the edge of the range: the real best may lie beyond, keeps the current value)"
-            : s.Changed() ? ""
-                          : " (flat: keeps the current value)"));
+            s.Unsure()       ? " (unsure: detail varied no more than the measurement does on its own, keeps the current value)"
+            : s.Unrepeated() ? std::format(" (did not repeat: pass 1 gave {:+.1f} EV, pass 2 {:+.1f} EV, keeps the "
+                                           "current value)",
+                                           Tidy(s.FirstPass().result), Tidy(s.LastPass().result))
+            : s.Changed()    ? (s.AtLimit() ? " (the best step is the end of the range; offered anyway)" : "")
+                             : " (flat: keeps the current value)"));
 
     return lines;
 }

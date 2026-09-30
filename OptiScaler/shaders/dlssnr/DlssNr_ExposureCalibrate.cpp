@@ -124,6 +124,15 @@ ExposureCalibrationStatus ExposureCalibration()
     s.previous = measurement(run.previous);
     s.hasPrevious = run.previous.samples > 0;
     s.comparable = s.hasPrevious && Cal::SameScale(run.latestScale, run.previousScale);
+    if (run.measurements > 0)
+    {
+        s.detailWords = Cal::DetailWords(run.latest);
+        s.flickerWords = Cal::FlickerWords(run.latest);
+        s.colourWords = Cal::ColourWords(run.latest);
+        s.shadowWords = Cal::ShadowWords(run.latest);
+        if (s.comparable)
+            s.compareWords = Cal::CompareWords(run.latest, run.previous);
+    }
     s.starting = run.startRequested;
     s.startError = run.startError;
     s.running = sweep.Running();
@@ -132,6 +141,8 @@ ExposureCalibrationStatus ExposureCalibration()
     s.stepEv = Cal::Tidy(sweep.StepEv());
     s.stepIndex = (unsigned) sweep.StepIndex();
     s.stepCount = (unsigned) sweep.StepCount();
+    s.pass = sweep.Pass();
+    s.passes = sweep.Passes();
     s.aborted = Cal::StopText(sweep);
     s.currentEv = Cal::Tidy(sweep.CurrentEv());
     s.source = run.source;
@@ -140,9 +151,12 @@ ExposureCalibrationStatus ExposureCalibration()
     {
         s.changed = sweep.Changed();
         s.unsure = sweep.Unsure();
-        s.atEdge = sweep.AtEdge();
+        s.unrepeated = sweep.Unrepeated();
+        s.firstPassEv = Cal::Tidy(sweep.FirstPass().result);
+        s.lastPassEv = Cal::Tidy(sweep.LastPass().result);
         s.resultEv = Cal::Tidy(sweep.ResultEv());
         s.bestRawEv = Cal::Tidy(sweep.BestEv(Cal::Detail::Raw));
+        s.rawAgreed = sweep.RawAgreed();
         s.bestBandEv = Cal::Tidy(sweep.BestEv(Cal::Detail::BandPass));
     }
 
@@ -151,6 +165,16 @@ ExposureCalibrationStatus ExposureCalibration()
     {
         if (steps[i].samples == 0)
             continue;
+        // The step the result stands on (the current value's nearest when it keeps it), for Details.
+        if (s.finished && (s.ev.empty() || std::fabs(steps[i].ev - sweep.ResultEv()) <
+                                               std::fabs(s.resultStepEv - sweep.ResultEv())))
+        {
+            s.resultStepEv = steps[i].ev;
+            s.resultSaturation = steps[i].Saturation();
+            s.resultWarmth = steps[i].warmth;
+            s.resultShadowDarkening = steps[i].ShadowDarkening();
+            s.resultCrushed = steps[i].crushed;
+        }
         s.ev.push_back(steps[i].ev);
         s.scoreRaw.push_back(sweep.Score(i, Cal::Detail::Raw));
         s.scoreBand.push_back(sweep.Score(i, Cal::Detail::BandPass));

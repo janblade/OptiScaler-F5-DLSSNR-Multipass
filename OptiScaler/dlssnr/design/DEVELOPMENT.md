@@ -43,6 +43,9 @@ review for its change type below, against the specs here.**
    `-Vn dlssnr_detail_reuse_cso`, disassembly included); its SPIR-V uses the dlssnr recipe (`dlssnr_detail_reuse_spv`).
    Run from `precompile/`: it and `dlssnr.hlsl` share `dlssnr_replace_curve.hlsli` (sRGB, Neutwo, the hybrid, `kRatioFloor`), so a
    change there means rebuilding both.
+   `dlssnr_detail_stats_Shader.cso` / `.h` (Tune's statistics) are dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL (the
+   header with `-Fh -Vn dlssnr_detail_stats_cso`), which reproduces the committed binary byte-identically; its SPIR-V
+   uses the dlssnr recipe (`dlssnr_detail_stats_spv`).
 7. **Passthrough is sacred.** Any encode/decode/proxy change must leave already-tone-mapped
    (`gPassthrough != 0`) frames untouched. Both the encode AND every place that reproduces the encode
    (e.g. the matched-residual `fullProxy`) must carry the same passthrough gate. (This is exactly the

@@ -14,6 +14,7 @@
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <shaders/dlssnr/DlssNr_DetailReuseConstants.h>
 #include <shaders/dlssnr/DlssNr_FinishedReady.h>
+#include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 
 #include <algorithm>
 #include <chrono>
@@ -42,7 +43,31 @@ struct HostFrame
     unsigned long long present = 0;         // the API's frame clock (DXGI presents, DlssNr::VkFrameClock on Vulkan)
     bool vulkan = false;                    // which DLSS-G stamp goes with that clock
     unsigned long long revision = 0;        // changes when anything that changes the model's answer changes
+    bool passthrough = false;               // the frame is already tone-mapped: no proxy curve, nothing to decode
+    uint32_t reversibleMode = 0;            // the proxy curve this frame's input was encoded with (DlssNr_ProxyCurve.h)
 };
+
+// The curve the resolve decodes a Replace answer through, for a proxy curve on a frame that is (passthrough) or is not
+// already tone-mapped. Every Replace curve needs one here, or reuse would land its moved changes as differences.
+constexpr DlssNrReplaceCurve ReplaceCurveFor(uint32_t reversibleMode, bool passthrough)
+{
+    if (passthrough || !DlssNrProxyCurve::IsReplace(reversibleMode))
+        return DlssNrReplaceCurve_None;
+    return reversibleMode == DlssNrProxyCurve::kNeutwoReplace ? DlssNrReplaceCurve_Neutwo : DlssNrReplaceCurve_Hybrid;
+}
+
+constexpr bool ReplaceCurvesMatch()
+{
+    for (uint32_t mode = 0; mode < DlssNrProxyCurve::kCount; ++mode)
+    {
+        if ((ReplaceCurveFor(mode, false) != DlssNrReplaceCurve_None) != DlssNrProxyCurve::IsReplace(mode) ||
+            ReplaceCurveFor(mode, true) != DlssNrReplaceCurve_None)
+            return false;
+    }
+    return ReplaceCurveFor(DlssNrProxyCurve::kNeutwoReplace, false) == DlssNrReplaceCurve_Neutwo &&
+           ReplaceCurveFor(DlssNrProxyCurve::kBalancedReplace, false) == DlssNrReplaceCurve_Hybrid;
+}
+static_assert(ReplaceCurvesMatch(), "a Replace proxy curve with no reuse curve (or the reverse)");
 
 // What Gate decided: whether reuse's textures are wanted this frame, whether they may stay while it is held off, and
 // the settings they follow.
@@ -167,7 +192,12 @@ class Host
         // counter can also count generated frames (up to 3 per real one with multi frame generation).
         facts.frame = f.frameNumber;
         facts.maxStep = w.withFg ? 4 : 1;
+        // The saved change is in the values of the proxy curve it was made in, so another curve (or a frame that turns
+        // passthrough, or back) starts over like any other change to the model's answer.
+        const DlssNrReplaceCurve replaceCurve = ReplaceCurveFor(f.reversibleMode, f.passthrough);
         facts.revision = f.revision;
+        for (const unsigned long long part : { (unsigned long long) f.reversibleMode, f.passthrough ? 1ull : 0ull })
+            facts.revision = facts.revision * 1000003ull ^ part;
         decision = cadence.Next(facts);
 
         params = {};
@@ -196,6 +226,7 @@ class Host
                             std::clamp(std::sqrt((float) f.workWidth * (float) f.workHeight / (1920.0f * 1080.0f)),
                                        0.5f, 2.0f);
         params.DebugView = f.cfg->DlssNrDetailReuseDebug.value_or_default() ? 1u : 0u;
+        params.ReplaceCurve = replaceCurve;
     }
 
     // The end of the frame's decision. Returns whether the model's history must start over: it last ran two frames ago

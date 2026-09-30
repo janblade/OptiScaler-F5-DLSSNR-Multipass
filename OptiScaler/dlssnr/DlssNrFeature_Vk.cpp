@@ -1841,6 +1841,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     reuseFrame.depthBaseX = guides.depth.x;
     reuseFrame.depthBaseY = guides.depth.y;
     reuseFrame.depthInverted = depthInverted;
+    reuseFrame.passthrough = !linearHdr;
+    reuseFrame.reversibleMode = encode.ReversibleMode;
     reuseFrame.mvScaleX = gameMvX;
     reuseFrame.mvScaleY = gameMvY;
     reuseFrame.modelReset = g_vk.reset;

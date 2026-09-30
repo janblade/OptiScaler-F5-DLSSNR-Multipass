@@ -3813,6 +3813,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     reuseFrame.depthBaseX = depthBaseX;
     reuseFrame.depthBaseY = depthBaseY;
     reuseFrame.depthInverted = g_nr.guideDepthInverted;
+    reuseFrame.passthrough = !isHdrBuffer;
+    reuseFrame.reversibleMode = encodeParams.ReversibleMode;
     reuseFrame.mvScaleX = g_nr.guideMvScaleX;
     reuseFrame.mvScaleY = g_nr.guideMvScaleY;
     reuseFrame.modelInput = modelInput;

@@ -19,6 +19,16 @@ enum DlssNrDetailReuseMode : uint32_t
                                       //          detail is filled from trusted neighbours on the same surface
 };
 
+// The curve a Replace answer is decoded through (dlssnr.hlsl: Neutwo + replace, balanced + replace). None for the
+// Composed modes and for passthrough frames, which land a moved change as the difference in the model's own values.
+// Which proxy curve gives which: DlssNrDetailReuse::ReplaceCurveFor (dlssnr/DlssNrDetailReuseHost.h).
+enum DlssNrReplaceCurve : uint32_t
+{
+    DlssNrReplaceCurve_None = 0,
+    DlssNrReplaceCurve_Neutwo = 1,
+    DlssNrReplaceCurve_Hybrid = 2,
+};
+
 struct alignas(256) DlssNrDetailReuseConstants
 {
     uint32_t Mode;
@@ -43,6 +53,10 @@ struct alignas(256) DlssNrDetailReuseConstants
     uint32_t DebugView;   // Reproject / Fill: paint dropped detail magenta (Fill: filled detail cyan)
     float FillStrength;   // Fill: how much of the neighbours' detail goes into dropped pixels (0..1)
     float FillRadius;     // Fill: outer radius of the neighbour search, in working-size pixels
+    // Which curve decodes a Replace answer (DlssNrReplaceCurve). Not None: a moved change lands as the difference or as
+    // the ratio of light it made at its source, whichever moves the pixel less, since the decode's inverse amplifies a
+    // moved difference of proxy values without bound near white.
+    uint32_t ReplaceCurve;
 };
 static_assert(sizeof(DlssNrDetailReuseConstants) == 256);
 

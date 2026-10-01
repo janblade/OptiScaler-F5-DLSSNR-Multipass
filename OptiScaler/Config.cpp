@@ -372,6 +372,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrDetailReuseDebug.set_from_config(readBool("DlssNr", "DetailReuseDebug"));
             DlssNrDetailReuseSteady.set_from_config(readFloat("DlssNr", "DetailReuseSteady"));
             DlssNrDetailReuseFill.set_from_config(readFloat("DlssNr", "DetailReuseFill"));
+            DlssNrDetailReuseDepthTolerance.set_from_config(readFloat("DlssNr", "DetailReuseDepthTolerance"));
+            DlssNrDetailReuseClipGamma.set_from_config(readFloat("DlssNr", "DetailReuseClipGamma"));
+            DlssNrDetailReuseClipFalloff.set_from_config(readFloat("DlssNr", "DetailReuseClipFalloff"));
+            DlssNrDetailReuseSigmaFloor.set_from_config(readFloat("DlssNr", "DetailReuseSigmaFloor"));
             DlssNrDetailReuseWithFg.set_from_config(readBool("DlssNr", "DetailReuseWithFG"));
             DlssNrDetailReuseMinFps.set_from_config(readFloat("DlssNr", "DetailReuseMinFps"));
             DlssNrDetailReuseMaxDropped.set_from_config(readFloat("DlssNr", "DetailReuseMaxDropped"));
@@ -399,6 +403,37 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DlssNrDetailReuseSteady = std::isfinite(DlssNrDetailReuseSteady.value())
                                               ? std::clamp(DlssNrDetailReuseSteady.value(), 0.0f, 1.0f)
                                               : 0.0f;
+            if (DlssNrDetailReuseDepthTolerance.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseDepthTolerance.value()) ||
+                 DlssNrDetailReuseDepthTolerance.value() < 0.0f || DlssNrDetailReuseDepthTolerance.value() > 1.0f))
+            {
+                // Out of range is clamped, but a value that is not a number is CLEARED rather than set to a
+                // literal: the default lives in one place (kDlssNrDetailReuseDepthTolerance) and a copy here would
+                // silently go stale the next time it moves, with SaveIni then writing the stale value back.
+                if (std::isfinite(DlssNrDetailReuseDepthTolerance.value()))
+                    DlssNrDetailReuseDepthTolerance = std::clamp(DlssNrDetailReuseDepthTolerance.value(), 0.0f, 1.0f);
+                else
+                    DlssNrDetailReuseDepthTolerance = std::optional<float> {};
+            }
+            if (DlssNrDetailReuseClipGamma.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseClipGamma.value()) || DlssNrDetailReuseClipGamma.value() < 0.0f ||
+                 DlssNrDetailReuseClipGamma.value() > 10.0f))
+                DlssNrDetailReuseClipGamma = std::isfinite(DlssNrDetailReuseClipGamma.value())
+                                                 ? std::clamp(DlssNrDetailReuseClipGamma.value(), 0.0f, 10.0f)
+                                                 : 1.25f;
+            // Never 0: the shader divides by max(clipFalloff, 1e-3), so at 0 trust would stop fading and go binary.
+            if (DlssNrDetailReuseClipFalloff.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseClipFalloff.value()) || DlssNrDetailReuseClipFalloff.value() < 0.01f ||
+                 DlssNrDetailReuseClipFalloff.value() > 10.0f))
+                DlssNrDetailReuseClipFalloff = std::isfinite(DlssNrDetailReuseClipFalloff.value())
+                                                   ? std::clamp(DlssNrDetailReuseClipFalloff.value(), 0.01f, 10.0f)
+                                                   : 1.0f;
+            if (DlssNrDetailReuseSigmaFloor.has_value() &&
+                (!std::isfinite(DlssNrDetailReuseSigmaFloor.value()) || DlssNrDetailReuseSigmaFloor.value() < 0.0f ||
+                 DlssNrDetailReuseSigmaFloor.value() > 1.0f))
+                DlssNrDetailReuseSigmaFloor = std::isfinite(DlssNrDetailReuseSigmaFloor.value())
+                                                  ? std::clamp(DlssNrDetailReuseSigmaFloor.value(), 0.0f, 1.0f)
+                                                  : 0.01f;
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
@@ -1361,6 +1396,10 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "DetailReuseDebug", GetBoolValue(Instance()->DlssNrDetailReuseDebug.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseSteady", GetFloatValue(Instance()->DlssNrDetailReuseSteady.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(Instance()->DlssNrDetailReuseFill.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseDepthTolerance", GetFloatValue(Instance()->DlssNrDetailReuseDepthTolerance.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseClipGamma", GetFloatValue(Instance()->DlssNrDetailReuseClipGamma.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseClipFalloff", GetFloatValue(Instance()->DlssNrDetailReuseClipFalloff.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "DetailReuseSigmaFloor", GetFloatValue(Instance()->DlssNrDetailReuseSigmaFloor.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMaxDropped", GetFloatValue(Instance()->DlssNrDetailReuseMaxDropped.value_for_config()).c_str());

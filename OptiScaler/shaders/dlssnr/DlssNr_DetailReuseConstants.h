@@ -64,8 +64,22 @@ struct alignas(256) DlssNrDetailReuseConstants
 };
 static_assert(sizeof(DlssNrDetailReuseConstants) == 256);
 
-// Starting values, to be set from in-game tests with the debug view.
-constexpr float kDlssNrDetailReuseDepthTolerance = 0.02f;
+// The defaults behind the DetailReuse* config entries of the same name. These were starting values, never
+// measured against a game, until DepthTolerance was (see its note below); the other three still are not.
+// Raised from 0.02 on 2026-10-01. At 0.02 the depth half of a moved sample's trust rejects samples the
+// reprojection got right, and a reused frame then keeps none of its own moved detail there, so full and reused
+// frames differ and the picture alternates between them. Seen on water at a distance in The Witcher 3 and in
+// RDR2, which is why this is a default rather than a per-game value. Measured in the Witcher (paused lake):
+// blinks at 0.02, still blinks at 0.030-0.040, clean from 0.051 up; no ghosting at 0.05 in NBA 2K27's fast
+// breaks, the case most likely to show a loose depth test, nor anywhere in the Witcher at 0.25.
+// That fixes the SIZE of the depth disagreement, about 0.05, and not its cause. Two fit and the measurement
+// does not separate them: a depth guide that describes something other than the surface the colour and the
+// vectors come from (for shallow water, the bed), or a surface seen near edge-on, where the test's sub-pixel
+// slack becomes a large relative difference on the right surface. 0.051 carries no margin above the one value
+// measured, so a game needing more sets DetailReuseDepthTolerance itself.
+// NOTE: Fill weights its neighbour taps over three times this, so this also widens how far across a depth step
+// Fill may borrow detail. The measurement above exercised the trust test; the Fill side was not isolated.
+constexpr float kDlssNrDetailReuseDepthTolerance = 0.051f;
 constexpr float kDlssNrDetailReuseClipGamma = 1.25f;
 constexpr float kDlssNrDetailReuseClipFalloff = 1.0f;
 constexpr float kDlssNrDetailReuseSigmaFloor = 0.01f;

@@ -229,10 +229,13 @@ class Host
         // The game's own scale: raw times it is pixels of the motion subrect, which the shader divides by its size.
         params.MvScaleX = f.mvScaleX;
         params.MvScaleY = f.mvScaleY;
-        params.DepthTolerance = kDlssNrDetailReuseDepthTolerance;
-        params.ClipGamma = kDlssNrDetailReuseClipGamma;
-        params.ClipFalloff = kDlssNrDetailReuseClipFalloff;
-        params.SigmaFloor = kDlssNrDetailReuseSigmaFloor;
+        // The four values behind trust, live from the config so they can be found in a game rather than guessed.
+        // Their defaults mirror the k constants in DlssNr_DetailReuseConstants.h, so an untouched install behaves
+        // as before, with one exception: DepthTolerance's own default was raised at the same time (see there).
+        params.DepthTolerance = f.cfg->DlssNrDetailReuseDepthTolerance.value_or_default();
+        params.ClipGamma = f.cfg->DlssNrDetailReuseClipGamma.value_or_default();
+        params.ClipFalloff = f.cfg->DlssNrDetailReuseClipFalloff.value_or_default();
+        params.SigmaFloor = f.cfg->DlssNrDetailReuseSigmaFloor.value_or_default();
         params.Steady = w.steady;
         params.FillStrength = w.fill;
         // Scaled with the working size, like the colour box: the same reach on screen at any model resolution.

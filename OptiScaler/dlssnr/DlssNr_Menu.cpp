@@ -1610,6 +1610,32 @@ void RenderMenu(Config* config, float menuResScale)
                 HelpMarker("Pulls the model's new detail on full frames toward the detail moved from the frame before, "
                            "where that is trusted, so full and reused frames differ less and detail pumps less.\n"
                            "Adds a little lag to detail on motion. 0 = off (default).");
+                ImGui::SeparatorText("How far a moved sample is trusted");
+                float depthTolerance = config->DlssNrDetailReuseDepthTolerance.value_or_default();
+                if (ImGui::SliderFloat("Depth tolerance", &depthTolerance, 0.0f, 1.0f, "%.3f"))
+                    config->DlssNrDetailReuseDepthTolerance = std::clamp(depthTolerance, 0.0f, 1.0f);
+                HelpMarker("How far this pixel's surface may lie outside the depth the saved detail came from, as a "
+                           "share of the nearer of the two, and still be trusted in full; trust is gone at twice "
+                           "it.\nRaise it where detail is dropped on a surface the depth guide does not describe "
+                           "well, such as water or glass.\nFill uses three times this as the depth window it borrows detail "
+                           "over, so this widens that too.\nDefault 0.051, raised from 0.020 because distant water "
+                           "blinked between the model's picture and the game's own.");
+                float clipGamma = config->DlssNrDetailReuseClipGamma.value_or_default();
+                if (ImGui::SliderFloat("Colour box", &clipGamma, 0.0f, 10.0f, "%.2f sigma"))
+                    config->DlssNrDetailReuseClipGamma = std::clamp(clipGamma, 0.0f, 10.0f);
+                HelpMarker("Half-width of the box around this pixel's 3x3 average that the saved colour must fall "
+                           "in, in standard deviations.\nRaise it where detail is dropped on fine, busy content "
+                           "whose colour never sits still. Default 1.25.");
+                float clipFalloff = config->DlssNrDetailReuseClipFalloff.value_or_default();
+                if (ImGui::SliderFloat("Colour falloff", &clipFalloff, 0.01f, 10.0f, "%.2f sigma"))
+                    config->DlssNrDetailReuseClipFalloff = std::clamp(clipFalloff, 0.01f, 10.0f);
+                HelpMarker("How far outside that box trust fades to nothing, in standard deviations. Small values "
+                           "make trust all-or-nothing, which is what speckles.\nNever 0. Default 1.00.");
+                float sigmaFloor = config->DlssNrDetailReuseSigmaFloor.value_or_default();
+                if (ImGui::SliderFloat("Sigma floor", &sigmaFloor, 0.0f, 1.0f, "%.3f"))
+                    config->DlssNrDetailReuseSigmaFloor = std::clamp(sigmaFloor, 0.0f, 1.0f);
+                HelpMarker("Smallest standard deviation the colour box is allowed to use, so a flat area does not "
+                           "reject its own detail over noise. Default 0.010.");
                 bool withFg = config->DlssNrDetailReuseWithFg.value_or_default();
                 if (ImGui::Checkbox("Keep on with frame generation", &withFg))
                     config->DlssNrDetailReuseWithFg = withFg;

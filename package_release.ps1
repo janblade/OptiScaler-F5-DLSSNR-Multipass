@@ -246,6 +246,16 @@ foreach ($requiredTextFile in @("$stage\INSTALL-DLSSNR.md", "$stage\setup_window
 }
 Write-Host "cross-generation guidance: present and hash-pinned"
 
+# A scanner verdict on this package is a recurring event, not a one-off: on 2026-10-01 a build was blocked
+# as Trojan:Win32/Tecabans.ST!cl and the same bytes scanned clean about four hours later, corrected
+# cloud-side with no local change. The guide section is how a user learns to check the hash and wait rather
+# than switch protection off, so a release must not ship without it.
+$avHeading = '## If antivirus flags the download'
+if ((Get-Content -LiteralPath "$stage\INSTALL-DLSSNR.md" -Raw).IndexOf($avHeading, [StringComparison]::Ordinal) -lt 0) {
+    throw "REFUSING: '$avHeading' is missing from $stage\INSTALL-DLSSNR.md"
+}
+Write-Host "antivirus guidance: present"
+
 if ($HybridAssetsDirectory) {
     $manifest = Get-Content -LiteralPath (Join-Path $HybridAssetsDirectory 'asset-manifest.json') -Raw | ConvertFrom-Json
     foreach ($item in $manifest.files) {
@@ -350,6 +360,36 @@ Not validated on real AMD or Intel hardware.
     Set-Content -LiteralPath "$optionalDir\README.txt" -Value $portReadme -Encoding utf8 -NoNewline
     Write-Host "vendor-neutral port backend: staged under Optional\ (not the default)"
 }
+
+# The shipped DLL is unsigned, and a scanner's static model reads these properties. They are all correct
+# today and cost nothing to keep that way; what this catches is a future build configuration quietly
+# dropping one -- a debug build's PDB path, or ASLR turned off -- and adding an avoidable signal on top of
+# the unavoidable ones. Checked on the staged copy, so it describes what actually ships.
+$stagedDll = "$stage\OptiScaler.dll"
+$peBytes = [System.IO.File]::ReadAllBytes($stagedDll)
+$peHeader = [BitConverter]::ToUInt32($peBytes, 0x3c)
+$dllCharacteristics = [BitConverter]::ToUInt16($peBytes, $peHeader + 4 + 20 + 70)
+
+foreach ($flag in @{ 'HIGH_ENTROPY_VA' = 0x0020; 'DYNAMICBASE' = 0x0040; 'NX_COMPAT' = 0x0100 }.GetEnumerator()) {
+    if (($dllCharacteristics -band $flag.Value) -eq 0) {
+        throw ("REFUSING: staged OptiScaler.dll has {0} cleared (DllCharacteristics 0x{1:X4})" -f $flag.Key, $dllCharacteristics)
+    }
+}
+
+# A PDB path names a private build directory and marks the binary as a debug build.
+if ([System.Text.Encoding]::ASCII.GetString($peBytes).IndexOf('.pdb', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    throw 'REFUSING: staged OptiScaler.dll carries an embedded PDB path. Release sets GenerateDebugInformation=false.'
+}
+
+# Empty version-resource fields are themselves a signal, and this is what setup_windows.bat reads to
+# recognise an existing install.
+$versionInfo = (Get-Item -LiteralPath $stagedDll).VersionInfo
+foreach ($field in 'CompanyName', 'FileDescription', 'ProductName', 'OriginalFilename', 'LegalCopyright', 'InternalName') {
+    if ([string]::IsNullOrWhiteSpace($versionInfo.$field)) {
+        throw "REFUSING: staged OptiScaler.dll has an empty $field in its version resource"
+    }
+}
+Write-Host ("binary hygiene: DllCharacteristics 0x{0:X4}, version resource complete, no PDB path" -f $dllCharacteristics)
 
 # Hash every shipped file after the staging tree is final. Use forward slashes so the list is easy
 # to verify from PowerShell, 7-Zip, Linux, or Wine.

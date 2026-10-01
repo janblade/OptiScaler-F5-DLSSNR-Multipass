@@ -99,6 +99,57 @@ TargetProcessName=auto
 Do not copy an INI containing another game's executable name. A mismatch intentionally puts
 OptiScaler into pass-through mode, which means no menu and no Neural Rendering.
 
+## If antivirus flags the download
+
+Windows Defender has flagged this package. On 2026-10-01 a build was blocked as
+`Trojan:Win32/Tecabans.ST!cl`, and about four hours later the same bytes scanned clean with no local
+change and no action taken. Local definitions never moved, so the correction happened in Microsoft's
+cloud, which is what the `!cl` suffix means: the verdict is delivered per-lookup and can be withdrawn
+the same way.
+
+Two things follow, and the first is the useful one.
+
+**Waiting is often the right response.** If the verdict ends in `!cl` or `!ml`, it can disappear on its
+own. Check what you actually have before changing any setting:
+
+```powershell
+Get-MpThreatDetection | Select-Object -Last 3 | Format-List InitialDetectionTime, ThreatID, Resources
+Get-MpThreat | Select-Object ThreatID, ThreatName, IsActive
+```
+
+**Verify the bytes, rather than trusting the file.** Every release ships `SHA256SUMS.txt`, and the
+release notes carry the archive's own hash. Compare both:
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\OptiScaler-DLSSNR-F5-<tag>.zip
+Get-ChildItem -Recurse -File | Where-Object Name -ne SHA256SUMS.txt |
+    Get-FileHash -Algorithm SHA256 | Format-Table Hash, Path
+```
+
+A hash that matches the release notes means you have the published file. A hash that does not means the
+download is not ours, and no antivirus setting is the right fix for that.
+
+Why a scanner reacts at all, since the honest answer is more useful than calling it a false alarm: this
+mod loads by being renamed over a DLL the game already imports, and it detours Direct3D and Vulkan entry
+points once loaded. That is the same mechanism a malicious DLL uses, and a scanner cannot tell the two
+apart from the outside. Nothing here hides that, and the project does not ask you to turn protection off.
+
+If you need to play before a cloud verdict clears, scope an exclusion to the one game directory — never
+to a drive, and never by turning real-time protection off:
+
+```powershell
+Add-MpPreference -ExclusionPath 'C:\Games\<your game>'
+```
+
+Remove it when the verdict clears, so the folder is covered again:
+
+```powershell
+Remove-MpPreference -ExclusionPath 'C:\Games\<your game>'
+```
+
+Both commands need an administrator PowerShell. An exclusion covers that directory and nothing else, and
+it changes nothing for anyone else who downloads the release.
+
 ## Game notes
 
 - **Baldur's Gate 3:** install beside `bg3.exe` / `bg3_dx11.exe` in `Baldurs Gate 3\bin`.

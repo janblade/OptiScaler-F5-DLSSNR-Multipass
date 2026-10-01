@@ -163,15 +163,23 @@ struct ExposureCalibrationStatus
     float stepEv = 0.0f;      // the step on screen while running
     unsigned stepIndex = 0;   // 0-based
     unsigned stepCount = 0;
+    unsigned pass = 0;        // 0-based, of `passes` over the same steps
+    unsigned passes = 1;
     std::string aborted; // why the last run stopped early, empty if it did not
     float currentEv = 0.0f;
     bool changed = false; // the chosen value differs from the current one (a flat curve keeps the current)
     bool unsure = false;  // detail varied no more than the measurement's own noise: the current value is kept
-    bool atEdge = false;  // the best step was the first or last: the real best may lie beyond, the current is kept
+    bool unrepeated = false; // the passes disagreed (firstPassEv, lastPassEv): the current is kept
+    float firstPassEv = 0.0f, lastPassEv = 0.0f;
     float resultEv = 0.0f;
+    bool rawAgreed = false; // both passes picked the same raw best (within a step): "Apply raw instead" is honest
     float bestRawEv = 0.0f;
     float bestBandEv = 0.0f;
     std::vector<float> ev, scoreRaw, scoreBand; // measured steps
+    // What the model did at the step nearest the result: saturation (0.1 = 10% more chroma than the game's), warmth
+    // (OkLab b, + warmer), shadows darkened (0.1 = 10% darker) and the share of the picture crushed toward black.
+    float resultStepEv = 0.0f, resultSaturation = 0.0f, resultWarmth = 0.0f, resultShadowDarkening = 0.0f,
+          resultCrushed = 0.0f;
     bool measure = false; // the run above (running, finished or stopped) is a Measure detail, not a Tune
 
     // "Measure detail" (the Compare section): a still scene's detail and flicker at the current settings, for A/B.
@@ -190,6 +198,8 @@ struct ExposureCalibrationStatus
     Measurement latest, previous;
     bool hasPrevious = false;
     bool comparable = false; // latest and previous were measured at the same scale (source and white point)
+    // The latest in words (DlssNrExposureCalibrate::DetailWords and the rest), and against the previous when comparable.
+    std::string detailWords, flickerWords, colourWords, shadowWords, compareWords;
 };
 
 ExposureCalibrationStatus ExposureCalibration();
@@ -222,10 +232,13 @@ void CurrentModelSize(unsigned int& width, unsigned int& height);
 struct DetailReuseInfo
 {
     unsigned long long full = 0, reused = 0, fallback = 0;
+    unsigned long long held = 0; // reuses given up because the picture moved too fast (MotionGuard)
     std::string why;
     double lightMs = 0.0, heavyMs = 0.0, averageMs = 0.0;
     double baseFps = 0.0;
     bool active = false;
+    bool holding = false;   // reuse is paused right now: the picture is moving too fast
+    float dropped = -1.0f;  // share of the last measured frame that had no detail to move, or negative if unmeasured
 };
 DetailReuseInfo DetailReuseStatus();
 

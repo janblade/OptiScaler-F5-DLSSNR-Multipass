@@ -281,11 +281,29 @@ class Config
     // Reused frames: where the moved detail was dropped, how much of the trusted detail of neighbours on the same
     // surface goes in instead (0..1). Stops dropped areas flashing to the un-NR'd image with several passes.
     CustomOptional<float> DlssNrDetailReuseFill { 1.0f };
-    // Keep reusing detail while frame generation is on, for A/B testing. Off by default: it can flicker there.
-    CustomOptional<bool> DlssNrDetailReuseWithFg { false };
+    // How far a moved sample is trusted (shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl, MovedFrom):
+    // trust = depthTrust * colourTrust, and these four set both halves. Defaults are the values the feature shipped
+    // with, which have never been measured against a game; they are here so that can finally be done in one, without
+    // a rebuild. Moving them changes the picture on reused frames, and on full frames too wherever Steady is on,
+    // since Steady pulls the full frame toward the same estimate.
+    CustomOptional<float> DlssNrDetailReuseDepthTolerance { 0.051f }; // relative depth outside the saved 2x2 range still trusted fully; trust is gone at twice it. Fill uses three times it as its neighbour depth window, so this widens that too. Raised from 0.02 on 2026-10-01, see DlssNr_DetailReuseConstants.h
+    CustomOptional<float> DlssNrDetailReuseClipGamma { 1.25f };      // half-width of the colour box around the current 3x3 mean, in standard deviations
+    CustomOptional<float> DlssNrDetailReuseClipFalloff { 1.0f };     // distance outside that box, in standard deviations, over which trust fades to zero
+    CustomOptional<float> DlssNrDetailReuseSigmaFloor { 0.01f };     // smallest standard deviation used (proxy units), so flat areas do not reject on noise
+    // Keep reusing detail while frame generation is on. On by default since the edges of the screen stopped flickering
+    // in fast motion (DlssNrDetailReuseMaxDropped): before that, reuse turned itself off here, which also meant its
+    // saving quietly disappeared for anyone using frame generation. Full and reused frames still cost differently, so
+    // the frame times alternate; a limiter just below the average rate evens them out.
+    CustomOptional<bool> DlssNrDetailReuseWithFg { true };
     // Reuse runs only while the rendered frame rate is at least this (0 = no minimum): at low frame rates things move
     // farther between frames and the moved detail trails.
     CustomOptional<float> DlssNrDetailReuseMinFps { 25.0f };
+    // Reuse pauses while more than this much of the picture (percent) arrives with no detail to move -- running or
+    // turning fast brings in more from off-screen than Fill reaches into, and those frames flicker at the edges. It
+    // comes back once the share has stayed at or under this for 0.3 s. 0 = never paused. Above 50 nothing would ever
+    // pause, so that is the top of the range. (DlssNrDetailReuse::MotionGuard; the default is from in-game
+    // measurements: a Witcher 3 run measured 3% while calm and 21% while running.)
+    CustomOptional<float> DlssNrDetailReuseMaxDropped { 10.0f };
     CustomOptional<bool> DlssNrResidualFgApproxCamera { false }; // forced off, as DlssNrResidualFg
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.

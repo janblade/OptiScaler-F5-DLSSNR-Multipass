@@ -1,4 +1,4 @@
-// "Tune for this scene" (DlssNr_ExposureCalibrate.h): one measured NR evaluation -> a 128x64 grid of tile
+// "Tune for this scene" (DlssNr_ExposureCalibrate.h): one measured NR evaluation -> a 256x64 grid of tile
 // statistics, read back and averaged on the CPU. Only while a calibration runs.
 //
 // Separate from dlssnr.hlsl so the shared shader, its SPIR-V twin and the occupancy of every ordinary pass stay as
@@ -9,6 +9,10 @@
 // the results are means, and a quarter of the pixels is plenty for a mean. Per tile:
 //   (x, y)      raw detail of the output, band detail of the output, band detail of the input, output change
 //   (x + 64, y) input change, shoulder share, floor share, pixels measured
+//   (x + 128, y) colour: OkLab chroma of the input, of the output, |output - input| in OkLab's a-b plane, and the
+//               output's b minus the input's (+ is warmer, toward yellow)
+//   (x + 192, y) shadows: the share of pixels whose input is in the shadows, their input level, their output level (both
+//               summed and divided by the pixels measured, like the rest), and the share the model crushed
 //
 // Detail and change are taken on display-encoded luma: luma / white point -> Neutwo -> sRGB, with the white point
 // the calibration froze when it started, so every step is measured on the same scale while only what the model is
@@ -18,6 +22,12 @@
 //         finest detail a 0.59x model can make, so grain is gone), B2 sigma ~3 px
 // Shoulder and floor are read off the picture the model was shown (already encoded) -- the proxy, or its shrink when the
 // model runs reduced: its peak channel above the shoulder threshold, or below the floor threshold.
+// Colour compares the output with the input pixel for pixel, both at the same frozen white point: each divided by it,
+// its highlights rolled off by Neutwo on the peak channel (hue kept, as the proxy's own encode), then OkLab. What the
+// model does to colour at each step -- saturating, warming -- whatever the step showed it.
+// Shadows compare the same pixels' display-encoded luma (as detail) where the input is below kShadowLevel: what the model
+// does to the darkest part of the picture -- darkening it, or crushing a pixel to under half its level toward black.
+// Unlike the floor share (what the model was shown), it is the result, so it moves from step to step.
 
 #ifdef VK_MODE
 [[vk::binding(0, 0)]]
@@ -68,8 +78,43 @@ SamplerState gLinear          : register(s0);
 
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 static const uint kGrid = 64;
+static const float kShadowLevel = 0.15; // display-encoded luma below which a pixel is in the shadows (~2% of white)
+static const float kBlackLevel = 0.02;  // below this the input is black already: nothing left to crush
 
 float Neutwo(float x) { return x * rsqrt(x * x + 1.0); }
+
+// Linear light -> the display-range colour Colour() measures: / the white point, the peak channel rolled off by
+// Neutwo with the others scaled alike (NeutwoEncode's hue-keeping shape), no sRGB (OkLab takes linear light).
+float3 DisplayColour(float3 rgb)
+{
+    const float3 x = max(rgb, 0.0) / max(measureWhitePoint, 1e-6);
+    const float m = max(x.r, max(x.g, x.b));
+    if (!(m > 1e-6) || !isfinite(m))
+        return 0.0;
+    return x * (Neutwo(m) / m);
+}
+
+// Bjorn Ottosson's OkLab (the matrices dlssnr.hlsl's ToOkLab uses).
+float3 ToOkLab(float3 c)
+{
+    const float3x3 rgbToLms = { 0.4122214708, 0.5363325363, 0.0514459929,
+                                0.2119034982, 0.6806995451, 0.1073969566,
+                                0.0883024619, 0.2817188376, 0.6299787005 };
+    const float3x3 lmsToLab = { 0.2104542553, 0.7936177850, -0.0040720468,
+                                1.9779984951, -2.4285922050, 0.4505937099,
+                                0.0259040371, 0.7827717662, -0.8086757660 };
+    const float3 lms = mul(rgbToLms, c);
+    return mul(lmsToLab, sign(lms) * pow(abs(lms), 1.0 / 3.0));
+}
+
+// Chroma in, chroma out, the a-b distance between them, and the b difference (warmth), for one pixel.
+float4 Colour(float3 input, float3 output)
+{
+    const float2 abIn = ToOkLab(DisplayColour(input)).yz;
+    const float2 abOut = ToOkLab(DisplayColour(output)).yz;
+    const float4 c = float4(length(abIn), length(abOut), length(abOut - abIn), abOut.y - abIn.y);
+    return all(isfinite(c)) ? c : 0.0;
+}
 
 float LinearToSrgb(float v)
 {
@@ -125,6 +170,8 @@ float Band(Texture2D<float4> tex, int2 p)
 
 groupshared float4 gSumA[64];
 groupshared float4 gSumB[64];
+groupshared float4 gSumC[64];
+groupshared float4 gSumD[64];
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
@@ -154,6 +201,8 @@ void CSMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 
     float4 a = 0.0; // raw, band out, band in, output change
     float4 b = 0.0; // input change, shoulder, floor, pixels
+    float4 c4 = 0.0; // chroma in, chroma out, colour shift, warmth
+    float4 d = 0.0;  // shadow pixels, their input level, their output level, crushed pixels
 
     [loop] for (uint y = y0 + groupThreadId.y * 2u; y < y1; y += 16u)
     {
@@ -174,11 +223,17 @@ void CSMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
             a += float4(lap, Band(gOutput, p), Band(gInput, p), abs(c - EncodedAt(gPrevOutput, p)));
             b += float4(abs(EncodedAt(gInput, p) - EncodedAt(gPrevInput, p)), peak > shoulderThreshold ? 1.0 : 0.0,
                         peak < floorThreshold ? 1.0 : 0.0, 1.0);
+            c4 += Colour(gInput.Load(int3(p, 0)).rgb, gOutput.Load(int3(p, 0)).rgb);
+            const float lin = EncodedAt(gInput, p);
+            if (lin < kShadowLevel)
+                d += float4(1.0, lin, c, lin >= kBlackLevel && c < 0.5 * lin ? 1.0 : 0.0);
         }
     }
 
     gSumA[lane] = a;
     gSumB[lane] = b;
+    gSumC[lane] = c4;
+    gSumD[lane] = d;
     GroupMemoryBarrierWithGroupSync();
 
     [unroll] for (uint stride = 32u; stride > 0u; stride >>= 1u)
@@ -187,6 +242,8 @@ void CSMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
         {
             gSumA[lane] += gSumA[lane + stride];
             gSumB[lane] += gSumB[lane + stride];
+            gSumC[lane] += gSumC[lane + stride];
+            gSumD[lane] += gSumD[lane + stride];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -196,5 +253,7 @@ void CSMain(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
         const float n = max(gSumB[0].w, 1.0);
         gGrid[uint2(groupId.x, groupId.y)] = gSumA[0] / n;
         gGrid[uint2(groupId.x + kGrid, groupId.y)] = float4(gSumB[0].xyz / n, gSumB[0].w);
+        gGrid[uint2(groupId.x + 2u * kGrid, groupId.y)] = gSumC[0] / n;
+        gGrid[uint2(groupId.x + 3u * kGrid, groupId.y)] = gSumD[0] / n;
     }
 }

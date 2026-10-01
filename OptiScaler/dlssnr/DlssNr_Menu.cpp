@@ -115,6 +115,9 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
 
         if (cal.starting)
             snprintf(text, sizeof(text), "Starting...");
+        else if (cal.stepIndex < cal.stepCount && cal.passes > 1)
+            snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u, pass %u of %u): hold the camera still", cal.stepEv,
+                     cal.stepIndex + 1, cal.stepCount, cal.pass + 1, cal.passes);
         else if (cal.stepIndex < cal.stepCount)
             snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u): hold the camera still", cal.stepEv,
                      cal.stepIndex + 1, cal.stepCount);
@@ -144,11 +147,12 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                     "step was clearly better. Your current value is kept.");
             ownLine = true;
         }
-        else if (cal.atEdge)
+        else if (cal.unrepeated)
         {
-            char text[128];
-            snprintf(text, sizeof(text), "Best was at the edge of the range (%+.1f EV), so it may lie beyond. "
-                                         "Your current value is kept.", cal.bestBandEv);
+            char text[192];
+            snprintf(text, sizeof(text), "The two passes disagreed (%+.1f EV, then %+.1f EV), so neither is reliable. "
+                                         "Your current value is kept. Hold the camera still and try again.",
+                     cal.firstPassEv, cal.lastPassEv);
             warning(text);
             ownLine = true;
         }
@@ -194,9 +198,16 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                              ImVec2(0.0f, 50.0f));
             ImGui::TextDisabled("Score from %+.1f EV (left) to %+.1f EV (right). Best: band-pass %+.1f, raw %+.1f.",
                                 cal.ev.front(), cal.ev.back(), cal.bestBandEv, cal.bestRawEv);
+            // What the model does to the game's colour and shadows there (output against the game's frame).
+            ImGui::TextDisabled("At %+.1f EV: saturation %+.0f%%, warmth %+.3f, shadows %.0f%% %s, %.1f%% crushed.",
+                                cal.resultStepEv, 100.0f * cal.resultSaturation, cal.resultWarmth,
+                                std::fabs(100.0f * cal.resultShadowDarkening),
+                                cal.resultShadowDarkening >= 0.0f ? "darker" : "lifted", 100.0f * cal.resultCrushed);
 
-            // Not when the run was unsure or its best sat at the edge: those keep the current value for either measure.
-            ImGui::BeginDisabled(cal.unsure || cal.atEdge);
+            // Not when the run was unsure or its passes disagreed: those keep the current value for either measure.
+            // Nor when the passes picked different raw bests -- the number shown is the last pass's, and offering it
+            // would be a single-pass answer from a run that promised two.
+            ImGui::BeginDisabled(cal.unsure || cal.unrepeated || !cal.rawAgreed);
 
             if (ImGui::SmallButton("Apply raw instead##tune"))
             {
@@ -218,8 +229,8 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
 
         ImGui::EndDisabled();
         HelpMarker("Finds the Model input brightness above that gives NR the most detail on the scene on screen."
-                   "\nTries the slider across its useful range, about 12 frames a step, and checks each step for"
-                   "\ndetail, flicker and clipping. Hold the camera still while it runs: the picture gets brighter"
+                   "\nTries the slider across its useful range twice over, about 12 frames a step, and checks each step"
+                   "\nfor detail, flicker and clipping, offering a change only when both sweeps agree. Hold the camera still while it runs: the picture gets brighter"
                    "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
                    "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
                    "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
@@ -270,11 +281,16 @@ static void RenderMeasureDetail()
         DlssNr::StartMeasureDetail();
 
     ImGui::EndDisabled();
-    HelpMarker("Measures NR's output on the scene on screen at the current settings, for about a second: the detail it"
-               "\nadds over the game's frame, and how much it flickers beyond the game's own frame-to-frame change."
-               "\nPress it on a still scene (a paused replay, photo mode), change one setting, press it again: the"
-               "\nchange against the previous measurement shows what the setting did. Two runs in a row show the noise."
-               "\nNothing else changes; the numbers also go to OptiScaler.log.");
+    HelpMarker("Measures NR's output on the scene on screen at the current settings, for about a second, against the"
+               "\ngame's own frame:"
+               "\n  Detail - how much fine detail NR adds (50% more = half as much again as the game had)."
+               "\n  Flicker - how much the picture changes from frame to frame, as a multiple of the game's own change"
+               "\n    (1x = NR adds no flicker; on a paused, perfectly still frame it is shown as a small number)."
+               "\n  Colour - whether NR makes the picture more or less saturated, warmer or cooler."
+               "\n  Shadows - whether NR lifts or darkens the darkest parts, and how much it crushes to black."
+               "\nTo compare settings: on a still scene (a paused replay, photo mode) press it, change ONE setting, press"
+               "\nit again. The line below says what changed; differences of a few percent are noise (press it twice"
+               "\nwithout changing anything to see how much). The raw numbers are greyed out and go to OptiScaler.log.");
 
     if (!cal.measureAvailable && !cal.measureUnavailable.empty())
         ImGui::TextDisabled("Not available: %s", cal.measureUnavailable.c_str());
@@ -292,9 +308,14 @@ static void RenderMeasureDetail()
         return;
 
     const auto& m = cal.latest;
-    ImGui::Text("#%u  Detail added %.5f  Flicker %.5f", cal.measurements, m.detail, m.flicker);
-    ImGui::TextDisabled("detail out %.5f in %.5f, raw %.5f | change out %.5f in %.5f | %u frames", m.detailOut,
-                        m.detailIn, m.raw, m.flickerOut, m.flickerIn, m.frames);
+    ImGui::Text("Measurement #%u", cal.measurements);
+    ImGui::TextWrapped("%s", cal.detailWords.c_str());
+    ImGui::TextWrapped("%s", cal.flickerWords.c_str());
+    ImGui::TextWrapped("%s", cal.colourWords.c_str());
+    ImGui::TextWrapped("%s", cal.shadowWords.c_str());
+    ImGui::TextDisabled("detail added %.5f (out %.5f in %.5f), raw %.5f | flicker %.5f (change out %.5f in %.5f) | %u "
+                        "frames", m.detail, m.detailOut, m.detailIn, m.raw, m.flicker, m.flickerOut, m.flickerIn,
+                        m.frames);
 
     if (cal.hasPrevious && !cal.comparable)
     {
@@ -303,14 +324,7 @@ static void RenderMeasureDetail()
     }
     else if (cal.hasPrevious)
     {
-        // Relative to the previous measurement; a value near zero has no meaningful percentage.
-        const auto change = [](float now, float before)
-        {
-            return std::fabs(before) > 1e-7f ? 100.0f * (now - before) / std::fabs(before) : 0.0f;
-        };
-        const auto& p = cal.previous;
-        ImGui::Text("vs #%u: detail %+.1f%%, flicker %+.1f%%, raw %+.1f%%", cal.measurements - 1,
-                    change(m.detail, p.detail), change(m.flicker, p.flicker), change(m.raw, p.raw));
+        ImGui::TextWrapped("Against #%u: %s", cal.measurements - 1, cal.compareWords.c_str());
     }
 }
 
@@ -1565,10 +1579,14 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
                    "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
                    "any pass count. Detail can pop where objects move and reveal new areas.\n"
+                   "Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to "
+                   "move times how much the model changes the picture, and passes build on each other, so with two or "
+                   "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
+                   "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
                    "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
-                   "Turns itself off while frame generation is on (unless Debug > Keep on with frame generation): "
-                   "generated frames are built from real ones, and alternating full and reused frames can flicker "
-                   "under it.");
+                   "It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and "
+                   "reused frames cost differently, so the game's frame times alternate: a limiter just below the "
+                   "average rate evens them out.");
         if (detailReuse)
         {
             // Debugging and A/B testing only; the defaults are the tuned values.
@@ -1592,11 +1610,40 @@ void RenderMenu(Config* config, float menuResScale)
                 HelpMarker("Pulls the model's new detail on full frames toward the detail moved from the frame before, "
                            "where that is trusted, so full and reused frames differ less and detail pumps less.\n"
                            "Adds a little lag to detail on motion. 0 = off (default).");
+                ImGui::SeparatorText("How far a moved sample is trusted");
+                float depthTolerance = DlssNr::DetailReuseDepthToleranceEffective(*config);
+                if (ImGui::SliderFloat("Depth tolerance", &depthTolerance, 0.0f, 1.0f, "%.3f"))
+                    config->DlssNrDetailReuseDepthTolerance = std::clamp(depthTolerance, 0.0f, 1.0f);
+                HelpMarker("How far this pixel's surface may lie outside the depth the saved detail came from, as a "
+                           "share of the nearer of the two, and still be trusted in full; trust is gone at twice "
+                           "it.\nRaise it where detail is dropped on a surface the depth guide does not describe "
+                           "well, such as water or glass.\nFill uses three times this as the depth window it borrows detail "
+                           "over, so this widens that too.\nDefault 0.051, raised from 0.020 because distant water "
+                           "blinked between the model's picture and the game's own. RDR2 defaults to 0.267 instead: "
+                           "its own distant water needed far more than other games measured so far.");
+                float clipGamma = config->DlssNrDetailReuseClipGamma.value_or_default();
+                if (ImGui::SliderFloat("Colour box", &clipGamma, 0.0f, 10.0f, "%.2f sigma"))
+                    config->DlssNrDetailReuseClipGamma = std::clamp(clipGamma, 0.0f, 10.0f);
+                HelpMarker("Half-width of the box around this pixel's 3x3 average that the saved colour must fall "
+                           "in, in standard deviations.\nRaise it where detail is dropped on fine, busy content "
+                           "whose colour never sits still. Default 1.25.");
+                float clipFalloff = config->DlssNrDetailReuseClipFalloff.value_or_default();
+                if (ImGui::SliderFloat("Colour falloff", &clipFalloff, 0.01f, 10.0f, "%.2f sigma"))
+                    config->DlssNrDetailReuseClipFalloff = std::clamp(clipFalloff, 0.01f, 10.0f);
+                HelpMarker("How far outside that box trust fades to nothing, in standard deviations. Small values "
+                           "make trust all-or-nothing, which is what speckles.\nNever 0. Default 1.00.");
+                float sigmaFloor = config->DlssNrDetailReuseSigmaFloor.value_or_default();
+                if (ImGui::SliderFloat("Sigma floor", &sigmaFloor, 0.0f, 1.0f, "%.3f"))
+                    config->DlssNrDetailReuseSigmaFloor = std::clamp(sigmaFloor, 0.0f, 1.0f);
+                HelpMarker("Smallest standard deviation the colour box is allowed to use, so a flat area does not "
+                           "reject its own detail over noise. Default 0.010.");
                 bool withFg = config->DlssNrDetailReuseWithFg.value_or_default();
                 if (ImGui::Checkbox("Keep on with frame generation", &withFg))
                     config->DlssNrDetailReuseWithFg = withFg;
-                HelpMarker("Keeps reusing detail while frame generation is on, to compare with it off.\n"
-                           "Can flicker: generated frames are built from pairs of full and reused frames.");
+                HelpMarker("Keeps reusing detail while frame generation is on. On by default: generated frames are "
+                           "built from pairs of full and reused frames, which used to flicker at the edges of the "
+                           "screen in fast motion, and Pause while moving fast is what stopped that.\nTurn it off to "
+                           "have reuse stand aside whenever frame generation is running.");
                 float minFps = config->DlssNrDetailReuseMinFps.value_or_default();
                 if (ImGui::SliderFloat("Minimum frame rate", &minFps, 0.0f, 120.0f, "%.0f fps"))
                     config->DlssNrDetailReuseMinFps = std::clamp(minFps, 0.0f, 240.0f);
@@ -1604,6 +1651,17 @@ void RenderMenu(Config* config, float menuResScale)
                            "below it every frame runs the model. At low frame rates things move farther between "
                            "frames and the moved detail trails around moving bodies.\nComes back 15% above the "
                            "minimum. 0 = no minimum. Default 25.");
+                float maxDropped = config->DlssNrDetailReuseMaxDropped.value_or_default();
+                if (ImGui::SliderFloat("Pause while moving fast", &maxDropped, 0.0f, 50.0f, "%.0f%% dropped"))
+                    config->DlssNrDetailReuseMaxDropped = std::clamp(maxDropped, 0.0f, 50.0f);
+                HelpMarker("Detail can only be moved to where the picture already was: what comes in from off-screen, "
+                           "and what a moving body uncovers, has none, and Fill reaches only a few dozen pixels into "
+                           "it.\nRunning or turning fast brings in more than that every frame, so the edges of the "
+                           "screen flicker between the model's picture and the game's own. Above this share of the "
+                           "picture, every frame runs the model, until the share has stayed at or under it for a third "
+                           "of a second.\nThe frames it gives up are the ones reuse looked wrong on. The share is "
+                           "measured on the GPU, so the pause starts two or three frames into a fast turn (more on "
+                           "Vulkan): the first frames of it still flicker.\n0 = never paused. Default 10%.");
                 ImGui::TreePop();
             }
             const auto& status = detailReuseStatus;
@@ -1613,6 +1671,17 @@ void RenderMenu(Config* config, float menuResScale)
             {
                 ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu   Rendered: %.0f fps", status.full,
                             status.reused, status.fallback, status.baseFps);
+                if (status.held > 0 || status.holding)
+                {
+                    if (status.holding)
+                        ImGui::TextUnformatted("Reuse: paused while moving fast");
+                    if (status.dropped >= 0.0f)
+                        ImGui::TextDisabled("%.0f%% of the last measured frame had no detail to move; paused on %llu "
+                                            "frames so far",
+                                            100.0f * status.dropped, status.held);
+                    else
+                        ImGui::TextDisabled("paused on %llu frames so far", status.held);
+                }
                 if (status.heavyMs > 0.0)
                 {
                     ImGui::Text("NR GPU time per frame: %.2f ms on average, %.2f to %.2f ms", status.averageMs,

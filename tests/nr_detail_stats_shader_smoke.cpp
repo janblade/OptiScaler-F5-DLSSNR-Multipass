@@ -12,6 +12,11 @@
 //   4. Change is zero between identical frames and grows with the difference.
 //   5. The shoulder and floor shares are exactly the share of measured pixels above / below the thresholds.
 //   6. The whole chain: ReduceGrid of the grid equals the pixel-weighted means over the frame.
+//   7. Colour: the same picture in and out measures no shift and no saturation change; a more saturated output
+//      measures more chroma out than in; a warmer one measures positive warmth; a brighter one with the same hue and
+//      saturation measures (almost) none of either.
+//   8. Shadows: the same picture measures no darkening and nothing crushed; halving the shadows crushes those not black
+//      already; lifting them measures negative darkening; the share is the share of pixels below the level.
 //
 // D3D12's pass only; Vulkan's copy (mode 1, VK_MODE) is not run here.
 //
@@ -138,7 +143,7 @@ struct Gpu
             check(device->CreateShaderResourceView(textures[i].Get(), nullptr, &views[i]));
             srvs[i] = views[i].Get();
         }
-        auto grid = Texture(nullptr, Cal::kGridTiles * 2, Cal::kGridTiles);
+        auto grid = Texture(nullptr, Cal::kGridTiles * Cal::kGridColumns, Cal::kGridTiles);
         ComPtr<ID3D11UnorderedAccessView> uav;
         check(device->CreateUnorderedAccessView(grid.Get(), nullptr, &uav));
 
@@ -175,6 +180,25 @@ static double EncodedAt(const Image& im, int x, int y, double wp)
 {
     const Pixel& p = Clamped(im, x, y);
     return Encode(p.r, p.g, p.b, wp);
+}
+
+// Colour: / the white point, the peak rolled off by Neutwo (hue kept), then OkLab's a and b.
+struct Ab { double a = 0, b = 0; };
+static Ab OkAb(const Pixel& px, double wp)
+{
+    double c[3] = {std::max((double) px.r, 0.0) / wp, std::max((double) px.g, 0.0) / wp, std::max((double) px.b, 0.0) / wp};
+    const double m = std::max({c[0], c[1], c[2]});
+    if (!(m > 1e-6))
+        return {};
+    const double k = (m / std::sqrt(m * m + 1.0)) / m;
+    for (double& v : c)
+        v *= k;
+    const double l = 0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2];
+    const double mm = 0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2];
+    const double s = 0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2];
+    const double l3 = std::cbrt(l), m3 = std::cbrt(mm), s3 = std::cbrt(s);
+    return {1.9779984951 * l3 - 2.4285922050 * m3 + 0.4505937099 * s3,
+            0.0259040371 * l3 + 0.7827717662 * m3 - 0.8086757660 * s3};
 }
 
 // A bilinear tap `o` pixels from pixel (x, y)'s centre along each axis, clamped: every offset used is a half, so the
@@ -219,8 +243,8 @@ static double Band(const Image& im, int x, int y, double wp)
 
 struct Frames { Image out, prevOut, in, prevIn, proxy; };
 
-// Per tile (x, y): the eight grid values, as the shader writes them.
-struct TileRef { double v[8] = {}; };
+// Per tile (x, y): the sixteen grid values, as the shader writes them (pixels measured is v[7]).
+struct TileRef { double v[16] = {}; };
 
 static std::vector<TileRef> Reference(const Params& k, const Frames& f)
 {
@@ -231,7 +255,7 @@ static std::vector<TileRef> Reference(const Params& k, const Frames& f)
         {
             const uint32_t x0 = gx * k.width / Cal::kGridTiles, x1 = std::max((gx + 1) * k.width / Cal::kGridTiles, x0 + 1);
             const uint32_t y0 = gy * k.height / Cal::kGridTiles, y1 = std::max((gy + 1) * k.height / Cal::kGridTiles, y0 + 1);
-            double s[7] = {}, n = 0;
+            double s[15] = {}, n = 0;
             for (uint32_t y = y0; y < y1; y += 2)
                 for (uint32_t x = x0; x < x1; x += 2)
                 {
@@ -250,12 +274,28 @@ static std::vector<TileRef> Reference(const Params& k, const Frames& f)
                     const double peak = std::max({q.r, q.g, q.b});
                     s[5] += peak > k.shoulder ? 1 : 0;
                     s[6] += peak < k.floor ? 1 : 0;
+                    const Ab in = OkAb(f.in.at(x, y), wp), out = OkAb(f.out.at(x, y), wp);
+                    s[7] += std::hypot(in.a, in.b);
+                    s[8] += std::hypot(out.a, out.b);
+                    s[9] += std::hypot(out.a - in.a, out.b - in.b);
+                    s[10] += out.b - in.b;
+                    // Shadows: the input's encoded luma below 0.15; crushed: not black (0.02) and under half its level.
+                    const double lin = EncodedAt(f.in, px, py, wp);
+                    if (lin < 0.15)
+                    {
+                        s[11] += 1;
+                        s[12] += lin;
+                        s[13] += c;
+                        s[14] += lin >= 0.02 && c < 0.5 * lin ? 1 : 0;
+                    }
                     ++n;
                 }
             TileRef& t = tiles[gy * Cal::kGridTiles + gx];
             for (int i = 0; i < 7; ++i)
                 t.v[i] = s[i] / std::max(n, 1.0);
             t.v[7] = n;
+            for (int i = 0; i < 8; ++i)
+                t.v[8 + i] = s[7 + i] / std::max(n, 1.0);
         }
     return tiles;
 }
@@ -263,11 +303,13 @@ static std::vector<TileRef> Reference(const Params& k, const Frames& f)
 // The frame-wide means the reference implies (pixel-weighted, as ReduceGrid).
 static Cal::Stats ReferenceStats(const std::vector<TileRef>& tiles)
 {
-    double s[7] = {}, n = 0;
+    double s[15] = {}, n = 0;
     for (const TileRef& t : tiles)
     {
         for (int i = 0; i < 7; ++i)
             s[i] += t.v[i] * t.v[7];
+        for (int i = 0; i < 8; ++i)
+            s[7 + i] += t.v[8 + i] * t.v[7];
         n += t.v[7];
     }
     Cal::Stats r;
@@ -278,21 +320,31 @@ static Cal::Stats ReferenceStats(const std::vector<TileRef>& tiles)
     r.inputChange = (float) (s[4] / n);
     r.shoulder = (float) (s[5] / n);
     r.floor = (float) (s[6] / n);
+    r.chromaIn = (float) (s[7] / n);
+    r.chromaOut = (float) (s[8] / n);
+    r.colourShift = (float) (s[9] / n);
+    r.warmth = (float) (s[10] / n);
+    r.shadowShare = (float) (s[11] / n);
+    r.shadowIn = (float) (s[12] / n);
+    r.shadowOut = (float) (s[13] / n);
+    r.crushed = (float) (s[14] / n);
     return r;
 }
 
-// The largest difference between the grid and the reference, per value (0..7).
+// The largest difference between the grid and the reference, per value (0..15).
 static std::vector<double> GridError(const Image& grid, const std::vector<TileRef>& ref)
 {
-    std::vector<double> worst(8, 0.0);
+    std::vector<double> worst(16, 0.0);
     for (uint32_t gy = 0; gy < Cal::kGridTiles; ++gy)
         for (uint32_t gx = 0; gx < Cal::kGridTiles; ++gx)
         {
             const Pixel& a = grid.at(gx, gy);
             const Pixel& b = grid.at(gx + Cal::kGridTiles, gy);
-            const float got[8] = {a.r, a.g, a.b, a.a, b.r, b.g, b.b, b.a};
+            const Pixel& c = grid.at(gx + 2 * Cal::kGridTiles, gy);
+            const Pixel& d = grid.at(gx + 3 * Cal::kGridTiles, gy);
+            const float got[16] = {a.r, a.g, a.b, a.a, b.r, b.g, b.b, b.a, c.r, c.g, c.b, c.a, d.r, d.g, d.b, d.a};
             const TileRef& t = ref[gy * Cal::kGridTiles + gx];
-            for (int i = 0; i < 8; ++i)
+            for (int i = 0; i < 16; ++i)
                 worst[i] = std::max(worst[i], std::isfinite(got[i]) ? std::abs(got[i] - t.v[i]) : 1e9);
         }
     return worst;
@@ -305,7 +357,8 @@ static Cal::Stats Reduce(const Image& grid) { return Cal::ReduceGrid(&grid.px[0]
 static uint32_t g_seed = 12345;
 static float Noise() { g_seed = g_seed * 1664525u + 1013904223u; return ((g_seed >> 8) & 0xFFFF) / 65535.0f; }
 
-// A scene in linear HDR around the white point: a gradient, an edge, grain and a weave, a little colour.
+// A scene in linear HDR around the white point: a gradient, an edge, a band in the shadows, grain and a weave, a
+// little colour.
 static Image Scene(UINT w, UINT h, float wp)
 {
     Image im = Make(w, h);
@@ -314,6 +367,7 @@ static Image Scene(UINT w, UINT h, float wp)
         {
             float v = 0.2f + 0.6f * x / w;
             if (x > w / 2 && y < h / 3) v = 2.5f;                                     // a bright block with an edge
+            if (y > 2 * h / 3) v *= 0.03f;                                          // a band in the shadows
             v *= 1.0f + 0.3f * std::sin(0.785f * x) * std::sin(0.785f * y + 0.4f);  // a weave, period 8
             v *= 1.0f + 0.2f * (Noise() - 0.5f);                                     // grain
             im.at(x, y) = {v * wp * 1.1f, v * wp, v * wp * 0.8f, 1};
@@ -357,10 +411,14 @@ int wmain(int argc, wchar_t** argv) try
         const Image grid = gpu.Stats(k, f.out, f.prevOut, f.in, f.prevIn, f.proxy);
         const std::vector<TileRef> ref = Reference(k, f);
         const std::vector<double> err = GridError(grid, ref);
-        static const char* names[8] = {"raw", "band out", "band in", "output change", "input change", "shoulder", "floor", "pixels"};
+        static const char* names[16] = {"raw", "band out", "band in", "output change", "input change", "shoulder", "floor",
+                                        "pixels", "chroma in", "chroma out", "colour shift", "warmth", "shadow share",
+                                        "shadow in", "shadow out", "crushed"};
         std::printf("per-tile error vs the reference:");
-        for (int i = 0; i < 8; ++i)
-            std::printf(" %s %.1e%s", names[i], err[i], i < 7 ? "," : "\n");
+        for (int i = 0; i < 16; ++i)
+            std::printf(" %s %.1e%s", names[i], err[i], i < 15 ? "," : "\n");
+        for (int i = 8; i < 16; ++i)
+            expect(err[i] < 1e-4, std::string("tile ") + names[i] + " differs from the reference");
         for (int i = 0; i < 5; ++i)
             expect(err[i] < 1e-4, std::string("tile ") + names[i] + " differs from the reference");
         expect(err[5] < 1e-6 && err[6] < 1e-6, "tile shoulder/floor shares differ from the reference");
@@ -375,6 +433,15 @@ int wmain(int argc, wchar_t** argv) try
                    close(got.inputBand, want.inputBand) && close(got.outputChange, want.outputChange) &&
                    close(got.inputChange, want.inputChange) && close(got.shoulder, want.shoulder) && close(got.floor, want.floor),
                "ReduceGrid of the grid differs from the frame-wide reference");
+        expect(close(got.chromaIn, want.chromaIn) && close(got.chromaOut, want.chromaOut) &&
+                   close(got.colourShift, want.colourShift) && close(got.warmth, want.warmth),
+               "ReduceGrid's colour differs from the frame-wide reference");
+        expect(close(got.shadowShare, want.shadowShare) && close(got.shadowIn, want.shadowIn) &&
+                   close(got.shadowOut, want.shadowOut) && close(got.crushed, want.crushed),
+               "ReduceGrid's shadows differ from the frame-wide reference");
+        expect(want.shadowShare > 0.0f, "the scene has no shadows to measure");
+        std::printf("colour: chroma in %.4f out %.4f shift %.4f warmth %+.4f\n", got.chromaIn, got.chromaOut,
+                    got.colourShift, got.warmth);
         expect(got.detailRaw > 0 && got.detailBand > 0 && got.outputChange > got.inputChange,
                "the textured scene measures no detail, or the bigger change is not the bigger number");
         // 5. The shares are the share of measured pixels whose model picture is above / below the thresholds.
@@ -445,6 +512,91 @@ int wmain(int argc, wchar_t** argv) try
             last = s.outputChange;
         }
         std::printf("change at +10%% brightness: %.5f\n", last);
+    }
+
+    // 7. Colour: nothing, more saturation, warmer, brighter with the same colour.
+    {
+        const UINT W = 128, H = 128;
+        Params k;
+        k.whitePoint = 1.7f;
+        k.width = W;
+        k.height = H;
+        const Image base = Scene(W, H, k.whitePoint);
+        const auto change = [&](auto f) {
+            Image out = base;
+            for (Pixel& q : out.px)
+                f(q);
+            return Reduce(gpu.Stats(k, out, out, base, base, base));
+        };
+        const Cal::Stats same = change([](Pixel&) {});
+        const Cal::Stats saturated = change([](Pixel& q) {
+            const float y = 0.2126f * q.r + 0.7152f * q.g + 0.0722f * q.b;
+            q.r = y + 1.5f * (q.r - y); q.g = y + 1.5f * (q.g - y); q.b = y + 1.5f * (q.b - y);
+        });
+        const Cal::Stats warmer = change([](Pixel& q) { q.r *= 1.05f; q.b *= 0.9f; });
+        const Cal::Stats brighter = change([](Pixel& q) { q.r *= 1.2f; q.g *= 1.2f; q.b *= 1.2f; });
+        std::printf("colour: same shift %.1e | 1.5x saturation chroma %.4f -> %.4f | warmer warmth %+.4f | "
+                    "brighter shift %.4f warmth %+.4f\n", same.colourShift, saturated.chromaIn, saturated.chromaOut,
+                    warmer.warmth, brighter.colourShift, brighter.warmth);
+        expect(same.colourShift == 0.0f && same.warmth == 0.0f && same.chromaIn == same.chromaOut,
+               "the same picture in and out measures a colour change");
+        expect(saturated.chromaOut > 1.3f * saturated.chromaIn, "a more saturated output does not measure more chroma");
+        expect(warmer.warmth > 0.002f && warmer.colourShift > 0.002f, "a warmer output does not measure warmth");
+        expect(brighter.colourShift < 0.25f * saturated.colourShift && std::abs(brighter.warmth) < 0.25f * warmer.warmth,
+               "a brighter output with the same colour measures as much colour change as a saturated one");
+    }
+
+    // 8. Shadows: nothing, halved, lifted.
+    {
+        const UINT W = 128, H = 128;
+        Params k;
+        k.whitePoint = 1.0f;
+        k.width = W;
+        k.height = H;
+        // A ramp from black to mid grey: the left part is in the shadows.
+        Image ramp = Make(W, H);
+        for (UINT y = 0; y < H; ++y)
+            for (UINT x = 0; x < W; ++x)
+            {
+                const float v = 0.2f * x / W * x / W;
+                ramp.at(x, y) = {v, v, v, 1};
+            }
+        const auto with2 = [&](float scale) {
+            Image out = ramp;
+            for (Pixel& q : out.px) { q.r *= scale; q.g *= scale; q.b *= scale; }
+            return out;
+        };
+        const auto with = [&](float scale) {
+            const Image out = with2(scale);
+            return Reduce(gpu.Stats(k, out, out, ramp, ramp, ramp));
+        };
+        const Cal::Stats same = with(1.0f), halved = with(0.1f), lifted = with(2.0f);
+        const auto darkening = [](const Cal::Stats& st) { return st.shadowIn > 0 ? 1.0f - st.shadowOut / st.shadowIn : 0.0f; };
+        std::printf("shadows: share %.3f | same darkened %+.3f crushed %.4f | x0.1 darkened %+.3f crushed %.4f | x2 "
+                    "darkened %+.3f crushed %.4f\n", same.shadowShare, darkening(same), same.crushed, darkening(halved),
+                    halved.crushed, darkening(lifted), lifted.crushed);
+        expect(same.shadowShare > 0.2f && same.shadowShare < 0.9f, "the ramp's shadow share is not a part of it");
+        expect(std::abs(darkening(same)) < 1e-6f && same.crushed == 0.0f, "the same picture darkens or crushes shadows");
+        expect(darkening(halved) > 0.3f && halved.crushed > 0.1f, "a much darker output does not measure crushed shadows");
+        expect(darkening(lifted) < -0.1f && lifted.crushed == 0.0f, "a lifted output measures crushed shadows");
+
+        // What counts as crushed, against the same rule written out on the CPU: a shadow pixel above the black level
+        // that the model took below half its level. The ramp straddles both constants, so the share only matches if the
+        // shader uses the same black level and the same half -- the per-tile scene above has no crushed pixels at all,
+        // so nothing else here pins them.
+        const Frames ramped { with2(0.4f), with2(0.4f), ramp, ramp, ramp };
+        const Cal::Stats gotRamp = Reduce(gpu.Stats(k, ramped.out, ramped.prevOut, ramped.in, ramped.prevIn,
+                                                    ramped.proxy));
+        const Cal::Stats wantRamp = ReferenceStats(Reference(k, ramped));
+        std::printf("crushed at x0.4: shader %.4f, reference %.4f (shadow share %.3f)\n", gotRamp.crushed,
+                    wantRamp.crushed, gotRamp.shadowShare);
+        expect(wantRamp.crushed > 0.05f, "the ramp at 0.4x crushes nothing to compare");
+        expect(std::abs(gotRamp.crushed - wantRamp.crushed) < 1e-4f,
+               "the shader's crushed share differs from the rule (black level or the half)");
+        expect(std::abs(gotRamp.shadowShare - wantRamp.shadowShare) < 1e-4f &&
+                   std::abs(gotRamp.shadowIn - wantRamp.shadowIn) < 1e-5f &&
+                   std::abs(gotRamp.shadowOut - wantRamp.shadowOut) < 1e-5f,
+               "the shader's shadow share or levels differ from the rule");
     }
 
     if (fails)

@@ -123,7 +123,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                               ID3D12Resource* OutTarget);
 
     // One stats pass of "Tune for this scene" (dlssnr_detail_stats.hlsl): 64x64 thread groups, one per tile, into
-    // the 128x64 RGBA32F grid. Same descriptor table shape as DispatchPass. False (no-op) if the PSO cannot be built.
+    // the 256x64 RGBA32F grid. Same descriptor table shape as DispatchPass. False (no-op) if the PSO cannot be built.
     bool DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
                              ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput, ID3D12Resource* InInput,
                              ID3D12Resource* InPrevInput, ID3D12Resource* InProxy, ID3D12Resource* OutGrid);

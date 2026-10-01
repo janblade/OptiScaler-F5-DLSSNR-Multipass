@@ -2,9 +2,13 @@
 // Checks each mode on small synthetic images: detail follows the motion (at the motion texture's own size, subrect and
 // scale), dropped where depth or colour disagree, kept at still edges, the better of the pixel's own and the nearer
 // surface's motion, no ringing, composed vectors across a render-size change (and with a subrect, half size and game
-// scale), padded depth guides, invalid saved detail, fill (including partial trust), steadiness, NaN safety.
+// scale), padded depth guides, invalid saved detail, fill (including partial trust), steadiness, NaN safety; the coverage
+// grid that says how much of a frame had no detail to move; and the Replace modes, which land a moved change so that
+// it cannot blow up near white.
 // cl /std:c++20 /EHsc /W4 /wd4324 tests/nr_detail_reuse_shader_smoke.cpp d3d11.lib d3dcompiler.lib
-// nr_detail_reuse_shader_smoke.exe OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl
+// nr_detail_reuse_shader_smoke.exe OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl [reference.hlsl]
+// With a reference (the shader before the Replace change: git show c62aae96:<that path> > reference.hlsl), every run
+// that is not a Replace one must give bit-identical output on both.
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
@@ -68,6 +72,8 @@ struct Gpu
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> ctx;
     ComPtr<ID3D11ComputeShader> shader;
+    ComPtr<ID3D11ComputeShader> reference; // optional: the shader before the Replace change
+    int identityRuns = 0, identityDiffs = 0;
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11SamplerState> sampler;
 
@@ -103,9 +109,30 @@ struct Gpu
         return result;
     }
 
-    // Runs one mode over outW x outH threads; returns u0 (and u1 when asked), both outW x outH.
+    // Runs one mode over outW x outH threads; returns u0 (and u1 when asked), both outW x outH. Outside the Replace
+    // modes the reference shader, when there is one, must give the same bits.
     Img Run(const DlssNrDetailReuseConstants& c, const std::vector<Img>& inputs, Img* second = nullptr,
             unsigned outW = W, unsigned outH = H)
+    {
+        Img u1;
+        Img u0 = RunOn(shader.Get(), c, inputs, u1, outW, outH);
+        // Coverage is newer than the reference shader, which has no such mode to compare with.
+        if (reference && c.ReplaceCurve == DlssNrReplaceCurve_None && c.Mode != DlssNrDetailReuse_Coverage)
+        {
+            Img r1;
+            const Img r0 = RunOn(reference.Get(), c, inputs, r1, outW, outH);
+            ++identityRuns;
+            if (memcmp(u0.px.data(), r0.px.data(), u0.px.size() * sizeof(Px)) != 0 ||
+                memcmp(u1.px.data(), r1.px.data(), u1.px.size() * sizeof(Px)) != 0)
+                ++identityDiffs;
+        }
+        if (second != nullptr)
+            *second = u1;
+        return u0;
+    }
+
+    Img RunOn(ID3D11ComputeShader* program, const DlssNrDetailReuseConstants& c, const std::vector<Img>& inputs,
+              Img& second, unsigned outW, unsigned outH)
     {
         std::vector<ComPtr<ID3D11ShaderResourceView>> srvs;
         for (const auto& in : inputs)
@@ -128,7 +155,7 @@ struct Gpu
         for (int i = 0; i < 5; ++i)
             views[i] = srvs[i].Get();
         ID3D11UnorderedAccessView* uavs[] = { uav0.Get(), uav1.Get() };
-        ctx->CSSetShader(shader.Get(), nullptr, 0);
+        ctx->CSSetShader(program, nullptr, 0);
         ctx->CSSetShaderResources(0, 5, views);
         ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
         ctx->CSSetConstantBuffers(0, 1, constants.GetAddressOf());
@@ -138,8 +165,7 @@ struct Gpu
         ID3D11UnorderedAccessView* none[] = { nullptr, nullptr };
         ctx->CSSetUnorderedAccessViews(0, 2, none, nullptr);
 
-        if (second != nullptr)
-            *second = Img { outW, outH, Read(out1.Get(), outW, outH) };
+        second = Img { outW, outH, Read(out1.Get(), outW, outH) };
         return Img { outW, outH, Read(out0.Get(), outW, outH) };
     }
 };
@@ -168,22 +194,87 @@ static DlssNrDetailReuseConstants Base(DlssNrDetailReuseMode mode)
 static Px Detail(unsigned x, unsigned y) { return { 0.01f * x, -0.02f * y, 0.005f * (x + y), 1 }; }
 static Px Plus(Px in, Px d) { return { in.r + d.r, in.g + d.g, in.b + d.b, 1 }; }
 
-int wmain(int argc, wchar_t** argv)
-try
+// What the resolve does with a Replace answer, on a grey (dlssnr_replace_curve.hlsli; the peak channel is the value).
+static float SrgbToLinear1(float v)
 {
-    if (argc != 2)
-        throw std::runtime_error("Pass the dlssnr_detail_reuse.hlsl path");
+    v = std::clamp(v, 0.0f, 1.0f);
+    return v >= 0.04045f ? std::pow((v + 0.055f) / 1.055f, 2.4f) : v / 12.92f;
+}
+static float LinearToSrgb1(float v)
+{
+    v = std::clamp(v, 0.0f, 1.0f);
+    return v >= 0.0031308f ? 1.055f * std::pow(std::max(v, 1e-8f), 1.0f / 2.4f) - 0.055f : v * 12.92f;
+}
+static float NeutwoOf(float x) { return x / std::sqrt(x * x + 1.0f); }
+static float NeutwoInv(float y)
+{
+    y = std::min(y, 0.999999f);
+    return y / std::sqrt(std::max(1.0f - y * y, 1e-8f));
+}
+static float HybridOf(float x) { return x <= 0.75f ? x : 0.75f + 0.25f * NeutwoOf((x - 0.75f) / 0.25f); }
+static float HybridInv(float y) { return y <= 0.75f ? y : 0.75f + 0.25f * NeutwoInv((y - 0.75f) / 0.25f); }
+// Scene light -> the stored proxy value, and back.
+static float Encode(float light, uint32_t curve)
+{
+    return LinearToSrgb1(curve == DlssNrReplaceCurve_Neutwo ? NeutwoOf(light) : HybridOf(light));
+}
+static float Decode(float proxy, uint32_t curve)
+{
+    const float y = SrgbToLinear1(proxy);
+    return curve == DlssNrReplaceCurve_Neutwo ? NeutwoInv(y) : HybridInv(y);
+}
+static Img GreyImg(float v) { return Fill([=](unsigned, unsigned) { return Grey(v); }); }
+// The same on a colour: one scalar from the peak channel, so the hue is kept (NeutwoEncode / HybridEncode).
+static Px EncodeRgb(Px light, uint32_t curve)
+{
+    const float m = std::max(light.r, std::max(light.g, light.b));
+    const float scale = (curve == DlssNrReplaceCurve_Neutwo ? NeutwoOf(m) : HybridOf(m)) / m;
+    return { LinearToSrgb1(light.r * scale), LinearToSrgb1(light.g * scale), LinearToSrgb1(light.b * scale), 1 };
+}
+static Px DecodeRgb(Px proxy, uint32_t curve)
+{
+    const Px y { SrgbToLinear1(proxy.r), SrgbToLinear1(proxy.g), SrgbToLinear1(proxy.b), 1 };
+    const float m = std::max(y.r, std::max(y.g, y.b));
+    if (m <= 1e-6f)
+        return y;
+    const float scale = (curve == DlssNrReplaceCurve_Neutwo ? NeutwoInv(m) : HybridInv(m)) / m;
+    return { y.r * scale, y.g * scale, y.b * scale, 1 };
+}
+// How far `to` is from `from` (both light), in stops of whichever channel moved most.
+static float WorstStops(Px from, Px to)
+{
+    const auto stops = [](float a, float b) { return std::abs(std::log2((b + 1.0f / 512) / (a + 1.0f / 512))); };
+    return std::max(stops(from.r, to.r), std::max(stops(from.g, to.g), stops(from.b, to.b)));
+}
+
+static ComPtr<ID3DBlob> Compile(const wchar_t* path)
+{
     ComPtr<ID3DBlob> code, errors;
-    const HRESULT compiled = D3DCompileFromFile(argv[1], nullptr, nullptr, "CSMain", "cs_5_0",
+    const HRESULT compiled = D3DCompileFromFile(path, nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "CSMain", "cs_5_0",
                                                 D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
     if (errors)
         std::fprintf(stderr, "%s", (char*) errors->GetBufferPointer());
     check(compiled);
+    return code;
+}
+
+int wmain(int argc, wchar_t** argv)
+try
+{
+    if (argc != 2 && argc != 3)
+        throw std::runtime_error("Pass the dlssnr_detail_reuse.hlsl path, and optionally the reference shader's");
+    const auto code = Compile(argv[1]);
 
     Gpu gpu;
     check(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &gpu.device,
                             nullptr, &gpu.ctx));
     check(gpu.device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &gpu.shader));
+    if (argc == 3)
+    {
+        const auto referenceCode = Compile(argv[2]);
+        check(gpu.device->CreateComputeShader(referenceCode->GetBufferPointer(), referenceCode->GetBufferSize(), nullptr,
+                                              &gpu.reference));
+    }
     D3D11_BUFFER_DESC buffer {};
     buffer.ByteWidth = sizeof(DlssNrDetailReuseConstants);
     buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -555,6 +646,371 @@ try
         // q = 7: 7.5/8 + 1/8 is past the right edge; the saved displacement is not read.
         expect(Near(out.at(W / 2 - 1, 2).r, 2.0f), "Compose: history from off-screen keeps this frame's raw vector");
     }
+
+    // Replace modes (Neutwo + replace, balanced + replace): the answer IS the picture, decoded through the curve's
+    // inverse, which runs away near white. A change is saved as a difference of proxy values (as in every mode) and
+    // moved; at an edge it lands a pixel off. On a highlight that difference decodes to up to hundreds of times the pixel
+    // and the resolve's guard shows it at 2x -- the white flashes. Replace modes land a moved change both as the
+    // difference and as the ratio it made at its source, and keep the one that changes the pixel less.
+    //
+    // Each case: last frame's picture had `from` everywhere (saved colour), the model answered `from * factor`; this
+    // frame the pixel at x = 5 shows `to`, with an edge at x = 5 so its colour box still trusts the moved change a little.
+    // Returns what the resolve gets there, relative to `to`; `before` gets what v0.1.24 landed with the same trust.
+    const auto landOnEdge = [&](uint32_t curve, float from, float factor, float to, float& before)
+    {
+        DlssNrDetailReuseConstants capture = Base(DlssNrDetailReuse_Capture);
+        capture.ReplaceCurve = curve;
+        Img savedColour;
+        const auto change =
+            gpu.Run(capture, { GreyImg(Encode(from, curve)), GreyImg(Encode(from * factor, curve)), depth }, &savedColour);
+        const auto input = Fill([&](unsigned x, unsigned) { return Grey(Encode(x < 5 ? from : to, curve)); });
+        DlssNrDetailReuseConstants reproject = Base(DlssNrDetailReuse_Reproject);
+        reproject.ReplaceCurve = curve;
+        const auto out = gpu.Run(reproject, { input, change, savedColour, still, depth });
+        const auto estimate = gpu.Run(Base(DlssNrDetailReuse_Estimate), { input, change, savedColour, still, depth });
+        const float trust = estimate.at(5, 3).a;
+        expect(trust > 0.2f, "Replace: the edge's moved change is trusted, so the edge cases test the landing");
+        before = Decode(input.at(5, 3).r + change.at(5, 3).r * trust, curve) / to;
+        return Decode(out.at(5, 3).r, curve) / to;
+    };
+
+    for (const uint32_t curve : { (uint32_t) DlssNrReplaceCurve_Neutwo, (uint32_t) DlssNrReplaceCurve_Hybrid })
+    {
+        const char* name = curve == DlssNrReplaceCurve_Neutwo ? "Neutwo" : "balanced";
+        const float guard = 2.0f; // the resolve's guard against the frame (MaxRatio's default)
+        float before = 0.0f;
+
+        // A mid grey's +5% landing on a highlight: about +5% there, not a flash.
+        float now = landOnEdge(curve, 0.5f, 1.05f, 6.0f, before);
+        std::printf("Replace %s: a mid grey's +5%% on a highlight: %.3fx (v0.1.24: %.3fx after the guard, %.1fx before)\n",
+                    name, now, std::min(before, guard), before);
+        expect(now >= 0.98f && now <= 1.1f, "Replace: a mid grey's change on a highlight stays about its size");
+
+        // A dark pixel halved, landing on the lit floor (a shadow's edge): as v0.1.24 landed it -- not half the floor.
+        now = landOnEdge(curve, 0.02f, 0.5f, 0.5f, before);
+        std::printf("Replace %s: a dark pixel halved, on the floor: %.3fx (v0.1.24: %.3fx)\n", name, now, before);
+        expect(std::abs(now / before - 1.0f) < 0.01f, "Replace: a dark pixel's change on the floor lands as in v0.1.24");
+
+        // A highlight's +20% landing on the floor beside it (a reflection's edge): as v0.1.24 landed it -- small.
+        now = landOnEdge(curve, 6.0f, 1.2f, 0.5f, before);
+        std::printf("Replace %s: a highlight's +20%% on the floor: %.3fx (v0.1.24: %.3fx)\n", name, now, before);
+        expect(std::abs(now / before - 1.0f) < 0.01f, "Replace: a highlight's change on the floor lands as in v0.1.24");
+
+        // A blue jersey's change (brighter red and green, a little less blue) landing on a pale surface beside it: the
+        // difference, as in v0.1.24. The ratio it made on the blue is near-black red and green tripled -- a colour
+        // shift the brightest channel alone does not see.
+        {
+            DlssNrDetailReuseConstants capture = Base(DlssNrDetailReuse_Capture);
+            capture.ReplaceCurve = curve;
+            const Px blue { 0.0f, 0.0f, 0.6f, 1 }, blueAnswer { 0.05f, 0.05f, 0.59f, 1 };
+            Img savedColour;
+            const auto change = gpu.Run(capture, { Fill([&](unsigned, unsigned) { return blue; }),
+                                                   Fill([&](unsigned, unsigned) { return blueAnswer; }), depth },
+                                        &savedColour);
+            const Px pale = EncodeRgb({ 0.1f, 0.2f, 0.9f, 1 }, curve);
+            const auto input = Fill([&](unsigned x, unsigned) { return x < 5 ? blue : pale; });
+            DlssNrDetailReuseConstants reproject = Base(DlssNrDetailReuse_Reproject);
+            reproject.ReplaceCurve = curve;
+            const auto out = gpu.Run(reproject, { input, change, savedColour, still, depth });
+            const auto estimate =
+                gpu.Run(Base(DlssNrDetailReuse_Estimate), { input, change, savedColour, still, depth });
+            const float trust = estimate.at(5, 3).a;
+            const Px d = change.at(5, 3);
+            const Px asBefore { pale.r + d.r * trust, pale.g + d.g * trust, pale.b + d.b * trust, 1 };
+            const Px light = DecodeRgb(pale, curve);
+            const float nowStops = WorstStops(light, DecodeRgb(out.at(5, 3), curve));
+            const float beforeStops = WorstStops(light, DecodeRgb(asBefore, curve));
+            std::printf("Replace %s: a blue's change on a pale surface: %.3f stops (v0.1.24: %.3f), trust %.2f\n", name,
+                        nowStops, beforeStops, trust);
+            expect(trust > 0.2f, "Replace: the colour edge's moved change is trusted");
+            expect(nowStops <= beforeStops + 1e-3f,
+                   "Replace: a colour's change shifts no channel more than v0.1.24 did");
+        }
+
+        // The Estimate that Steady and Fill take is the same landed change Reproject adds.
+        {
+            DlssNrDetailReuseConstants capture = Base(DlssNrDetailReuse_Capture);
+            capture.ReplaceCurve = curve;
+            Img savedColour;
+            const auto change =
+                gpu.Run(capture, { GreyImg(Encode(0.5f, curve)), GreyImg(Encode(0.525f, curve)), depth }, &savedColour);
+            const auto input = Fill([&](unsigned x, unsigned) { return Grey(Encode(x < 5 ? 0.5f : 6.0f, curve)); });
+            DlssNrDetailReuseConstants reproject = Base(DlssNrDetailReuse_Reproject);
+            reproject.ReplaceCurve = curve;
+            DlssNrDetailReuseConstants estimateMode = reproject;
+            estimateMode.Mode = DlssNrDetailReuse_Estimate;
+            const auto out = gpu.Run(reproject, { input, change, savedColour, still, depth });
+            const auto estimate = gpu.Run(estimateMode, { input, change, savedColour, still, depth });
+            const Px e = estimate.at(5, 3);
+            expect(Near(input.at(5, 3).r + e.r * e.a, out.at(5, 3).r, 1e-6f),
+                   "Replace: Estimate gives Steady and Fill the landed change");
+        }
+
+        // When the nearer surface's motion wins, the change is landed against the picture it came from there, not the
+        // one at the pixel's own motion. Pixel (5, 3) is far (0.1); its own motion (+4) finds a mid grey on the near
+        // surface (depth 0.3, so it is dropped); the nearer surface's motion (-2) finds the highlight the change was made
+        // on (+2%). Landed against the highlight it is +2%; against the grey, the ratio there would be about none.
+        {
+            const float highlight = 6.0f;
+            const auto savedColour = Fill([&](unsigned x, unsigned) {
+                const float v = Encode(x <= 4 ? highlight : 0.5f, curve);
+                return Px { v, v, v, 0.3f };
+            });
+            const float d = Encode(highlight * 1.02f, curve) - Encode(highlight, curve);
+            const auto change = Fill([&](unsigned, unsigned) { return Px { d, d, d, 1 }; });
+            const auto motion = Fill([](unsigned x, unsigned) { return Px { x == 5 ? 4.0f : -2.0f, 0, 0, 0 }; });
+            const auto depths = Fill([](unsigned x, unsigned y) { return Grey(x == 5 && y == 3 ? 0.1f : 0.3f); });
+            DlssNrDetailReuseConstants reproject = Base(DlssNrDetailReuse_Reproject);
+            reproject.ReplaceCurve = curve;
+            const auto out =
+                gpu.Run(reproject, { GreyImg(Encode(highlight, curve)), change, savedColour, motion, depths });
+            const float landed = Decode(out.at(5, 3).r, curve) / highlight;
+            std::printf("Replace %s: the nearer surface's change, landed on its own picture: %.4fx\n", name, landed);
+            expect(std::abs(landed - 1.02f) < 2e-3f,
+                   "Replace: the nearer surface's change lands against the picture it came from");
+        }
+
+        // On the surface it came from, the change lands whole, from near black to a highlight.
+        bool sameSurface = true;
+        for (const float light : { 0.01f, 0.2f, 0.5f, 2.0f, 6.0f })
+        {
+            DlssNrDetailReuseConstants capture = Base(DlssNrDetailReuse_Capture);
+            capture.ReplaceCurve = curve;
+            Img savedColour;
+            const auto change = gpu.Run(
+                capture, { GreyImg(Encode(light, curve)), GreyImg(Encode(light * 1.05f, curve)), depth }, &savedColour);
+            DlssNrDetailReuseConstants reproject = Base(DlssNrDetailReuse_Reproject);
+            reproject.ReplaceCurve = curve;
+            const auto out = gpu.Run(reproject, { GreyImg(Encode(light, curve)), change, savedColour, still, depth });
+            sameSurface = sameSurface && std::abs(Decode(out.at(5, 3).r, curve) / (light * 1.05f) - 1.0f) < 2e-3f;
+        }
+        expect(sameSurface, "Replace: on its own surface a change lands whole (0.01 to 6x white)");
+
+        // Dropped (another surface was there): the input exactly.
+        {
+            DlssNrDetailReuseConstants reproject = Base(DlssNrDetailReuse_Reproject);
+            reproject.ReplaceCurve = curve;
+            const auto input = GreyImg(Encode(6.0f, curve));
+            const auto farther = Fill([&](unsigned, unsigned) {
+                const float v = Encode(0.5f, curve);
+                return Px { v, v, v, 0.15f };
+            });
+            const auto change = Fill([&](unsigned, unsigned) { return Grey(0.01f); });
+            const auto out = gpu.Run(reproject, { input, change, farther, still, depth });
+            expect(out.at(5, 3).r == input.at(5, 3).r, "Replace: a dropped change leaves the input exactly");
+        }
+
+        // Fill: a dropped highlight among mid-grey neighbours whose change was +5% takes about +5%, not a flash; among
+        // neighbours on its own brightness it takes their change whole.
+        {
+            DlssNrDetailReuseConstants fill = Base(DlssNrDetailReuse_Fill);
+            fill.ReplaceCurve = curve;
+            fill.FillStrength = 1.0f;
+            fill.FillRadius = 6.0f;
+            const auto input = Fill([&](unsigned x, unsigned y) { return Grey(Encode(x == 8 && y == 3 ? 6.0f : 0.5f, curve)); });
+            const float midChange = Encode(0.5f * 1.05f, curve) - Encode(0.5f, curve);
+            const auto holed = Fill([&](unsigned x, unsigned y) {
+                return x == 8 && y == 3 ? Px { 0, 0, 0, 0 } : Px { midChange, midChange, midChange, 1 };
+            });
+            auto out = gpu.Run(fill, { input, holed, grey, grey, depth });
+            now = Decode(out.at(8, 3).r, curve) / 6.0f;
+            const float oldFill = Decode(input.at(8, 3).r + midChange, curve) / 6.0f;
+            std::printf("Replace %s: Fill of a highlight among mid greys +5%%: %.3fx (v0.1.24: %.1fx before the guard)\n",
+                        name, now, oldFill);
+            expect(now >= 0.98f && now <= 1.1f, "Replace: Fill does not flash a dropped highlight");
+
+            const float lit = 2.0f;
+            const auto litInput = GreyImg(Encode(lit, curve));
+            const float litChange = Encode(lit * 1.2f, curve) - Encode(lit, curve);
+            const auto litHoled = Fill([&](unsigned x, unsigned y) {
+                return x == 8 && y == 3 ? Px { 0, 0, 0, 0 } : Px { litChange, litChange, litChange, 1 };
+            });
+            out = gpu.Run(fill, { litInput, litHoled, grey, grey, depth });
+            expect(std::abs(Decode(out.at(8, 3).r, curve) / lit - 1.2f) < 2e-3f,
+                   "Replace: Fill among its own brightness takes the neighbours' change whole");
+        }
+    }
+
+    // Coverage: the share of the frame with no detail to move, summed per tile over every second pixel. Checked
+    // against a reference that walks the same pixels the shader does, on an estimate with an untrusted strip down the
+    // left (what running brings in from off-screen), a half-trusted band and a NaN tile.
+    {
+        constexpr unsigned cw = 128, ch = 64;
+        const unsigned tiles = kDlssNrDetailReuseCoverageTiles;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const auto trustAt = [&](unsigned x, unsigned y) -> float
+        {
+            if (x >= 40 && x < 44 && y < 4)
+                return nan; // not finite: no detail at all, as Fill reads it
+            if (x < 30)
+                return 0.0f; // came in from off-screen
+            if (y >= 32 && y < 40)
+                return 0.5f; // half trusted
+            return 1.0f;
+        };
+        const auto estimate = Fill([&](unsigned x, unsigned y) { return Px { 0.01f, 0.01f, 0.01f, trustAt(x, y) }; },
+                                   cw, ch);
+
+        DlssNrDetailReuseConstants coverage = Base(DlssNrDetailReuse_Coverage);
+        coverage.WorkWidth = cw;
+        coverage.WorkHeight = ch;
+        const unsigned threads = tiles * 8; // one 8x8 thread group per tile
+        const Img grid = gpu.Run(coverage, { estimate, estimate, estimate, estimate, estimate }, nullptr, threads,
+                                 threads);
+
+        double wantDropped = 0.0, wantPixels = 0.0;
+        bool perTile = true;
+        for (unsigned ty = 0; ty < tiles; ++ty)
+            for (unsigned tx = 0; tx < tiles; ++tx)
+            {
+                const unsigned x0 = (tx * cw) / tiles, y0 = (ty * ch) / tiles;
+                const unsigned x1 = ((tx + 1) * cw) / tiles, y1 = ((ty + 1) * ch) / tiles;
+                double dropped = 0.0, pixels = 0.0;
+                for (unsigned ly = 0; ly < 8; ++ly)
+                    for (unsigned lx = 0; lx < 8; ++lx)
+                        for (unsigned y = y0 + ly * 2; y < y1; y += 16)
+                            for (unsigned x = x0 + lx * 2; x < x1; x += 16)
+                            {
+                                const float t = trustAt(x, y);
+                                dropped += 1.0 - (std::isfinite(t) ? std::clamp(t, 0.0f, 1.0f) : 0.0f);
+                                pixels += 1.0;
+                            }
+                const Px got = grid.at(tx, ty);
+                if (!Near(got.r, (float) dropped, 1e-3f) || !Near(got.g, (float) pixels, 1e-3f))
+                    perTile = false;
+                wantDropped += dropped;
+                wantPixels += pixels;
+            }
+        expect(perTile, "Coverage: a tile's dropped and measured sums differ from the reference");
+        expect(wantPixels == (double) (cw / 2) * (ch / 2), "Coverage: not every second pixel was measured exactly once");
+
+        double gotDropped = 0.0, gotPixels = 0.0;
+        for (unsigned y = 0; y < tiles; ++y)
+            for (unsigned x = 0; x < tiles; ++x)
+            {
+                gotDropped += grid.at(x, y).r;
+                gotPixels += grid.at(x, y).g;
+            }
+        const double share = gotPixels > 0.0 ? gotDropped / gotPixels : -1.0;
+        std::printf("Coverage: %.1f%% of the frame had no detail to move (%.0f of %.0f pixels measured)\n",
+                    100.0 * share, gotDropped, gotPixels);
+        expect(Near((float) gotPixels, (float) wantPixels, 1e-3f) && Near((float) gotDropped, (float) wantDropped, 1e-2f),
+               "Coverage: the frame's totals differ from the reference");
+        // The strip is 30 of 128 columns, the half-trusted band 8 of 64 rows of the rest, and the NaN tile 4x4 pixels.
+        expect(share > 0.2 && share < 0.35, "Coverage: the measured share is not the strip plus the band");
+
+        // A tile count in the shader that differs from the host's is caught by the per-tile and total checks above:
+        // the reference walks the tiles the host's constant describes, so a wider or narrower grid in the shader gives
+        // different sums. (A check for texels outside the grid cannot catch it: the dispatch is derived from the same
+        // host constant, so nothing is ever written there whatever the shader believes.)
+    }
+
+    // Coverage on tiles large enough that every lane of a group works and the strided loops wrap: 512x512 gives 16x16
+    // pixel tiles, so all 64 lanes contribute and the reduction's upper half carries data. Also an estimate whose rgb
+    // is not finite while its alpha is: no detail at all, as Fill reads it.
+    {
+        constexpr unsigned cw = 512, ch = 512;
+        const unsigned tiles = kDlssNrDetailReuseCoverageTiles;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const auto badRgb = [&](unsigned x, unsigned y) { return x >= 64 && x < 96 && y >= 64 && y < 96; };
+        const auto trustAt = [&](unsigned x, unsigned y) -> float { return x < 100 ? 0.25f : 1.0f; };
+        const auto estimate = Fill(
+            [&](unsigned x, unsigned y)
+            {
+                const float t = trustAt(x, y);
+                return badRgb(x, y) ? Px { nan, 0.01f, 0.01f, t } : Px { 0.01f, 0.01f, 0.01f, t };
+            },
+            cw, ch);
+
+        DlssNrDetailReuseConstants coverage = Base(DlssNrDetailReuse_Coverage);
+        coverage.WorkWidth = cw;
+        coverage.WorkHeight = ch;
+        const unsigned threads = tiles * 8;
+        const Img grid = gpu.Run(coverage, { estimate, estimate, estimate, estimate, estimate }, nullptr, threads,
+                                 threads);
+
+        double wantDropped = 0.0, wantPixels = 0.0, gotDropped = 0.0, gotPixels = 0.0;
+        bool perTile = true;
+        for (unsigned ty = 0; ty < tiles; ++ty)
+            for (unsigned tx = 0; tx < tiles; ++tx)
+            {
+                const unsigned x0 = (tx * cw) / tiles, x1 = ((tx + 1) * cw) / tiles;
+                const unsigned y0 = (ty * ch) / tiles, y1 = ((ty + 1) * ch) / tiles;
+                double dropped = 0.0, pixels = 0.0;
+                for (unsigned ly = 0; ly < 8; ++ly)
+                    for (unsigned lx = 0; lx < 8; ++lx)
+                        for (unsigned y = y0 + ly * 2; y < y1; y += 16)
+                            for (unsigned x = x0 + lx * 2; x < x1; x += 16)
+                            {
+                                dropped += badRgb(x, y) ? 1.0 : 1.0 - trustAt(x, y);
+                                pixels += 1.0;
+                            }
+                const Px got = grid.at(tx, ty);
+                if (!Near(got.r, (float) dropped, 1e-2f) || !Near(got.g, (float) pixels, 1e-3f))
+                    perTile = false;
+                wantDropped += dropped;
+                wantPixels += pixels;
+                gotDropped += got.r;
+                gotPixels += got.g;
+            }
+        std::printf("Coverage at 512x512 (16x16 tiles): %.1f%% dropped over %.0f pixels\n",
+                    100.0 * gotDropped / std::max(gotPixels, 1.0), gotPixels);
+        expect(perTile, "Coverage: a 16x16 tile's sums differ from the reference (every lane, both strided loops)");
+        expect(wantPixels == (double) (cw / 2) * (ch / 2) && Near((float) gotPixels, (float) wantPixels, 1e-3f),
+               "Coverage: not every second pixel of a 16x16 tile was measured exactly once");
+        expect(Near((float) gotDropped, (float) wantDropped, 0.5f),
+               "Coverage: the totals differ from the reference at 16x16 tiles");
+        // The untrusted quarter is 100 of 512 columns at trust 0.25, plus a 32x32 patch of non-finite rgb.
+        expect(gotDropped > 0.0 && gotPixels > 0.0, "Coverage: nothing was measured at 512x512");
+    }
+
+    // Coverage on a frame narrower than the grid: the tiles that fall outside it are empty, and no column is counted
+    // twice (an overlap would bias the share).
+    {
+        constexpr unsigned cw = 20, ch = 20;
+        const unsigned tiles = kDlssNrDetailReuseCoverageTiles;
+        const auto estimate = Fill([&](unsigned, unsigned) { return Px { 0.01f, 0.01f, 0.01f, 0.0f }; }, cw, ch);
+        DlssNrDetailReuseConstants coverage = Base(DlssNrDetailReuse_Coverage);
+        coverage.WorkWidth = cw;
+        coverage.WorkHeight = ch;
+        const Img grid = gpu.Run(coverage, { estimate, estimate, estimate, estimate, estimate }, nullptr, tiles * 8,
+                                 tiles * 8);
+        double pixels = 0.0;
+        for (unsigned y = 0; y < tiles; ++y)
+            for (unsigned x = 0; x < tiles; ++x)
+                pixels += grid.at(x, y).g;
+        // Tiles this small are a pixel wide or empty, so the stride measures every pixel rather than every second one.
+        // What must hold is that no pixel is measured twice: count the visits the tiling makes.
+        std::vector<int> visits(cw * ch, 0);
+        for (unsigned ty = 0; ty < tiles; ++ty)
+            for (unsigned tx = 0; tx < tiles; ++tx)
+            {
+                const unsigned x0 = std::min((tx * cw) / tiles, cw), x1 = std::min(((tx + 1) * cw) / tiles, cw);
+                const unsigned y0 = std::min((ty * ch) / tiles, ch), y1 = std::min(((ty + 1) * ch) / tiles, ch);
+                for (unsigned ly = 0; ly < 8; ++ly)
+                    for (unsigned lx = 0; lx < 8; ++lx)
+                        for (unsigned y = y0 + ly * 2; y < y1; y += 16)
+                            for (unsigned x = x0 + lx * 2; x < x1; x += 16)
+                                ++visits[y * cw + x];
+            }
+        const int worst = *std::max_element(visits.begin(), visits.end());
+        const double counted = (double) std::count_if(visits.begin(), visits.end(), [](int v) { return v > 0; });
+        std::printf("Coverage at 20x20 (tiles smaller than a pixel): %.0f measured, worst visited %dx\n", pixels,
+                    worst);
+        expect(worst <= 1, "Coverage: a frame narrower than the grid measures a pixel more than once");
+        expect(Near((float) pixels, (float) counted, 1e-3f) && pixels > 0.0,
+               "Coverage: a frame narrower than the grid measures a different set of pixels than the tiling covers");
+    }
+
+    if (gpu.reference)
+    {
+        std::printf("Reference: %d runs outside the Replace modes compared, %d differ\n", gpu.identityRuns,
+                    gpu.identityDiffs);
+        expect(gpu.identityRuns > 0 && gpu.identityDiffs == 0,
+               "Outside the Replace modes the output is bit-identical to the reference shader");
+    }
+    else
+        std::puts("Reference: SKIPPED (no reference shader given; outside the Replace modes nothing was compared)");
 
     if (fails == 0)
         std::puts("PASS: nr_detail_reuse_shader_smoke (WARP HLSL)");

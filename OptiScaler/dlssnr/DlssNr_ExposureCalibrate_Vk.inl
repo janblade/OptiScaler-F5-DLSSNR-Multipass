@@ -13,8 +13,8 @@
 
 namespace Cal = DlssNrExposureCalibrate;
 
-// The stats grid (Cal::ReduceGrid has the layout): 128x64 RGBA32F, copied into a tightly packed buffer.
-constexpr uint32_t kCalVkGridWidth = Cal::kGridTiles * 2;
+// The stats grid (Cal::ReduceGrid has the layout): 256x64 RGBA32F, copied into a tightly packed buffer.
+constexpr uint32_t kCalVkGridWidth = Cal::kGridTiles * Cal::kGridColumns;
 constexpr uint32_t kCalVkGridHeight = Cal::kGridTiles;
 constexpr VkDeviceSize kCalVkGridBytes = (VkDeviceSize) Cal::kGridRowFloats * sizeof(float) * Cal::kGridTiles;
 // Frames in flight here are three; the readback delay (which allows for frame generation) is plenty.

@@ -17,11 +17,11 @@
 //
 // Header-only and free of D3D/Vulkan types so it can be exercised on the host (tests/nr_auto_trim_smoke.cpp).
 
-#include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <optional>
 #include <string>
+
+#include "DlssNr_ExeMatch.h"
 
 namespace DlssNrAutoTrim
 {
@@ -37,18 +37,7 @@ constexpr const char* kUnexposedGames[] = {
 };
 
 // Whether the game's exe (name or full path, any case) is on kUnexposedGames.
-inline bool IsKnownUnexposedGame(const std::string& exe)
-{
-    const size_t slash = exe.find_last_of("\\/");
-    std::string name = slash == std::string::npos ? exe : exe.substr(slash + 1);
-    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return (char) std::tolower(c); });
-
-    for (const char* known : kUnexposedGames)
-        if (name == known)
-            return true;
-
-    return false;
-}
+inline bool IsKnownUnexposedGame(const std::string& exe) { return DlssNrExeMatch::IsKnownGame(exe, kUnexposedGames); }
 
 // The Trim in force: the user's own when they set one, otherwise the default.
 inline float Effective(const std::optional<float>& userTrim) { return userTrim.has_value() ? *userTrim : kDefaultTrim; }

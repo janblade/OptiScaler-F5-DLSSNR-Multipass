@@ -12,6 +12,7 @@
 
 #include <dlssnr/DlssNrDetailReuse.h>
 #include <dlssnr/DlssNrFeature_Dx12.h>
+#include <dlssnr/DlssNr_GameDefaults.h>
 #include <shaders/dlssnr/DlssNr_DetailReuseConstants.h>
 #include <shaders/dlssnr/DlssNr_FinishedReady.h>
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
@@ -231,8 +232,11 @@ class Host
         params.MvScaleY = f.mvScaleY;
         // The four values behind trust, live from the config so they can be found in a game rather than guessed.
         // Their defaults mirror the k constants in DlssNr_DetailReuseConstants.h, so an untouched install behaves
-        // as before, with one exception: DepthTolerance's own default was raised at the same time (see there).
-        params.DepthTolerance = f.cfg->DlssNrDetailReuseDepthTolerance.value_or_default();
+        // as before, with two exceptions: DepthTolerance's own default was raised at the same time (see there),
+        // and it is now a per-game default rather than a single one -- DetailReuseDepthToleranceEffective
+        // (DlssNr_GameDefaults.h) gives a short list of measured games (currently just RDR2) their own value
+        // instead, unless the user set DetailReuseDepthTolerance themselves.
+        params.DepthTolerance = DlssNr::DetailReuseDepthToleranceEffective(*f.cfg);
         params.ClipGamma = f.cfg->DlssNrDetailReuseClipGamma.value_or_default();
         params.ClipFalloff = f.cfg->DlssNrDetailReuseClipFalloff.value_or_default();
         params.SigmaFloor = f.cfg->DlssNrDetailReuseSigmaFloor.value_or_default();

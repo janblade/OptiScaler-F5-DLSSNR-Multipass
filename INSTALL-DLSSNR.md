@@ -161,35 +161,42 @@ it changes nothing for anyone else who downloads the release.
 Do not install the RenoDX DLSS add-on merely to obtain its compatibility runtime. This OptiScaler
 fork drives `nvngx_dlssnr.dll` itself, and two Neural Rendering injectors can conflict.
 
-## Troubleshoot flickering with Reuse detail between frames
+## Troubleshoot flickering or ghosting with Reuse detail between frames
 
 **Reuse detail between frames** runs the model every other frame and moves its detail onto the frame
-in between. Where it does not trust a surface, that frame keeps none of the model's detail there, so
-a full and a reused frame differ and the picture alternates between them — seen as flicker or shimmer.
-Water, which looks slightly different every frame, triggers this more than solid ground.
+in between, where it is trusted. **Flickering** is too little trust: a surface the depth or colour
+guide describes poorly gets none of the model's detail on a reused frame, so a full and a reused frame
+differ and the picture alternates between them. **Ghosting** (trailing detail behind a moving object)
+is the opposite failure, too much trust: detail gets dragged across a moving object's own edge into
+the background behind it. The two pull in opposite directions, so the fix for one can cause the other.
 
-1. **Confirm this is the cause.** Untick **Neural Rendering → Reuse detail between frames**. If the
-   flicker stops, the steps below apply. If it does not, this feature is not involved.
+1. **Confirm Reuse is the cause.** Untick **Neural Rendering → Reuse detail between frames**. If the
+   artifact stops, the steps below apply. If it does not, this feature is not involved.
 2. **See where it happens.** Tick **Debug → Show dropped detail**. On reused frames this paints
-   magenta where detail was dropped and cyan where Fill replaced it, so you can watch the flickering
-   area and confirm it lines up with a dropped region.
-3. **Most cases: raise Depth tolerance**, under **Debug → How far a moved sample is trusted** (ini key
-   `DetailReuseDepthTolerance`, under `[DlssNr]`). This is the fix for a surface the depth guide does
-   not describe well — water, glass, fine geometry. Raise it until the flickering area settles; Fill
-   uses three times whatever it is set to as its own neighbour window, so raising it also widens how
-   far Fill may borrow detail across a depth step. **Red Dead Redemption 2** gets a higher value
-   (0.267) automatically; every other game starts at 0.051.
-4. **Flicker on fine, busy, colour-shifting detail instead** (foliage, patterned surfaces): try
+   magenta where detail was dropped and cyan where Fill replaced it, so you can watch the affected
+   area and confirm it lines up with a dropped (flicker) or a moving-edge (ghosting) region.
+3. **Flickering, most cases: raise Depth tolerance**, under **Debug → How far a moved sample is
+   trusted** (ini key `DetailReuseDepthTolerance`, under `[DlssNr]`). This is the fix for a surface the
+   depth guide does not describe well — water, glass, fine geometry. Raise it until the flickering
+   area settles; Fill uses three times whatever it is set to as its own neighbour window, so raising it
+   also widens how far Fill may borrow detail across a depth step. **Red Dead Redemption 2** gets a
+   higher value (0.267) automatically; every other game starts at 0.051. **Raising it too far is what
+   causes ghosting** — it is the same test, loosened past the point where it still stops detail
+   crossing a moving object's edge. If ghosting appears after raising this, lower it again rather than
+   chasing the flicker further; see the next step if frame generation is also on.
+4. **Flickering on fine, busy, colour-shifting detail instead** (foliage, patterned surfaces): try
    **Colour box** and **Colour falloff** in the same section, which govern how far the saved colour
    may drift from the current pixel and still be trusted, rather than depth.
-5. **Flicker specifically at the edges of the screen while moving or turning fast** is a different,
+5. **Ghosting, with frame generation on**: frame generation interpolates between pairs of full and
+   reused frames, so any trailing in a reused frame — most likely from Depth tolerance set higher than
+   this content needs — shows up doubled, in the generated frames too. Turn off **Keep on with frame
+   generation** to have Reuse stand aside whenever frame generation is running: no reuse there at all
+   while it runs, but no ghosting from it either.
+6. **Flickering at the edges of the screen while moving or turning fast** is a separate,
    already-handled case: check **Pause while moving fast** is not set to 0 — it runs every frame
    through the model during fast motion instead of reusing.
-6. **Flicker only with frame generation on**: check **Keep on with frame generation**. Turning it off
-   makes Reuse stand aside whenever frame generation is running — no reuse there at all, but no
-   flicker from it either.
-7. **Still flickering**: Reuse suits a single model pass best, since the same dropped areas compound
-   across 2 or 3 passes. Reduce to one pass, or turn Reuse off for that scene as a last resort.
+7. **Still not right**: Reuse suits a single model pass best, since the same dropped or trailing areas
+   compound across 2 or 3 passes. Reduce to one pass, or turn Reuse off for that scene as a last resort.
 
 ## Individual pass controls
 

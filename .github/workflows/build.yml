@@ -106,20 +106,22 @@ jobs:
             }
         }
         
-        # Extract version components (only the first match for each pattern)
-        $majorVersion = Get-Version-Component 'VER_MAJOR_VERSION' '#define VER_MAJOR_VERSION\s+'
-        $minorVersion = Get-Version-Component 'VER_MINOR_VERSION' '#define VER_MINOR_VERSION\s+'
-        $hotfixVersion = Get-Version-Component 'VER_HOTFIX_VERSION' '#define VER_HOTFIX_VERSION\s+'
-        $buildVersion = Get-Version-Component 'VER_BUILD_NUMBER' '#define VER_BUILD_NUMBER\s+'
-        
-        # Merge into a single version string
-        $version = "v$majorVersion.$minorVersion.$hotfixVersion-pre$buildVersion"
-        
+        # This fork tracks its own release line in NR_RELEASE_*, separately from upstream's VER_*
+        # fields (which this workflow used to read, so every nightly carried the same frozen
+        # "v0.7.7" regardless of how much NR work had actually landed). NR_RELEASE_* is also what
+        # package_release.ps1 checks a -Version string against below, so reading it here keeps
+        # the two in agreement.
+        $majorVersion = Get-Version-Component 'NR_RELEASE_MAJOR_VERSION' '#define NR_RELEASE_MAJOR_VERSION\s+'
+        $minorVersion = Get-Version-Component 'NR_RELEASE_MINOR_VERSION' '#define NR_RELEASE_MINOR_VERSION\s+'
+        $hotfixVersion = Get-Version-Component 'NR_RELEASE_HOTFIX_VERSION' '#define NR_RELEASE_HOTFIX_VERSION\s+'
+
         # Get the current date in a specific format (e.g., YYYYMMDD)
         $date = Get-Date -Format "yyyyMMdd"
-        
-        # Construct the output filename with version and date
-        $outputFileName = "OptiScaler_${version}_${date}"
+
+        # The date is what makes each nightly unique; a build counter isn't, so it is dropped here
+        # rather than carried over from upstream's VER_BUILD_NUMBER.
+        $version = "v$majorVersion.$minorVersion.$hotfixVersion-nightly-$date"
+        $outputFileName = "OptiScaler-DLSSNR-F5-${version}"
         
         # Output the generated filename
         Write-Output "Generated Filename: $outputFileName"
@@ -144,47 +146,58 @@ jobs:
       # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
       run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}} /verbosity:minimal
       
-    - name: Compress the artifact 
+    - name: Package via package_release.ps1
+      # The Build step above already built both projects in OptiScaler.sln (OptiScaler and
+      # dlssnr_forwarder), and the forwarder's own OutDir lands in the same shared x64\Release\a\
+      # folder package_release.ps1 falls back to -- so -SkipBuild is correct here, not a shortcut
+      # taken for speed. This is what gets the nightly the same file allowlist, forwarder-export
+      # check, and ini safety checks every tagged F5 release gets, instead of a raw copy of the
+      # build directory.
+      shell: powershell
       run: |
-        $zipName = "${{ steps.get_version.outputs.filename }}.7z"
-        7z a -r ${{ github.workspace }}\$zipName ${{ github.workspace }}\x64\Release\a\*.*
-
+        & .\package_release.ps1 -Version "${{ steps.get_version.outputs.version }}" -SkipBuild
+        if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { exit $LASTEXITCODE }
       continue-on-error: false
-        
+
     - uses: actions/upload-artifact@v7.0.0
       with:
         name: ${{ steps.get_version.outputs.filename }}
-        path: ${{ github.workspace }}\${{ steps.get_version.outputs.filename }}.7z
+        path: ${{ github.workspace }}\release\*.zip
         compression-level: 0
         archive: false
         if-no-files-found: error
-       
-   # - name: Remove Previous Artifacts
-   #    if: steps.check_release.outputs.release_exists == 'true'
-   #    uses: actions/github-script@v8
-   #    with:
-   #      script: |
-   #        const releaseId = ${{ steps.check_release.outputs.release_id }};
-   #        const assets = await github.rest.repos.listReleaseAssets({
-   #          owner: context.repo.owner,
-   #          repo: context.repo.repo,
-   #          release_id: releaseId,
-   #        });
 
-   #        for (const asset of assets.data) {
-   #          await github.rest.repos.deleteReleaseAsset({
-   #            owner: context.repo.owner,
-   #            repo: context.repo.repo,
-   #            asset_id: asset.id,
-   #          });
-   #          console.log(`Deleted asset: ${asset.name}`);
-   #        }
+    - name: Remove Previous Artifacts
+      # Restored: upstream disabled this (186c667a, "Keep artifacts from the previous days in
+      # the nightly release"), which on this fork meant 18 builds and 966.7 MB accumulating
+      # with zero downloads across any of them. Runs before the new asset uploads below, since
+      # it deletes every existing asset on the release -- after the new upload would delete the
+      # thing just uploaded too.
+      if: steps.check_release.outputs.release_exists == 'true'
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const releaseId = ${{ steps.check_release.outputs.release_id }};
+          const assets = await github.rest.repos.listReleaseAssets({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            release_id: releaseId,
+          });
+
+          for (const asset of assets.data) {
+            await github.rest.repos.deleteReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              asset_id: asset.id,
+            });
+            console.log(`Deleted asset: ${asset.name}`);
+          }
 
     - name: Upload Artifact to Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: nightly
-        files: ${{ github.workspace }}/${{ steps.get_version.outputs.filename }}.7z
+        files: ${{ github.workspace }}/release/*.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             

@@ -1,13 +1,16 @@
 #pragma once
 
-// The Automatic exposure defaults for the running game (DlssNr_AutoTrimDefault.h): the Trim (one default for every
-// game) and following the game's exposure (from the known-game list), unless the user set them. Every D3D12, Vulkan and
-// menu reader goes through here.
+// Per-game defaults for the running game: Automatic exposure (DlssNr_AutoTrimDefault.h) -- the Trim (one default for
+// every game) and following the game's exposure (from the known-game list) -- and detail reuse's depth tolerance
+// (DlssNr_ReuseDepthDefault.h), which is one shipped default for every game except a short list measured to need
+// more. Unless the user set them. Every D3D12, Vulkan and menu reader goes through here.
 
 #include <Config.h>
 #include <State.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
+#include <shaders/dlssnr/DlssNr_DetailReuseConstants.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
+#include <shaders/dlssnr/DlssNr_ReuseDepthDefault.h>
 
 #include <atomic>
 
@@ -22,6 +25,21 @@ inline bool KnownUnexposedGame()
 
 // The Automatic Trim in force: the user's, else the default.
 inline float AutoTrimEffective(const Config& cfg) { return DlssNrAutoTrim::Effective(cfg.DlssNrAutoExposureTrim); }
+
+// Whether the running game is on the list of games measured to need a relaxed detail-reuse depth tolerance.
+inline bool KnownRelaxedDepthGame()
+{
+    static const bool known = DlssNrReuseDepth::IsKnownRelaxedDepthGame(State::Instance().gameExe);
+    return known;
+}
+
+// Detail reuse's depth tolerance in force: the user's own when they set one, else the shipped default, unless this
+// is a known relaxed game, which gets its own measured value instead (DlssNr_ReuseDepthDefault.h).
+inline float DetailReuseDepthToleranceEffective(const Config& cfg)
+{
+    return DlssNrReuseDepth::Effective(cfg.DlssNrDetailReuseDepthTolerance, KnownRelaxedDepthGame(),
+                                        kDlssNrDetailReuseDepthTolerance);
+}
 
 // Whether Automatic follows the game's exposure: the user's choice, else on for a known unexposed game.
 inline bool FollowGameOn(const Config& cfg)

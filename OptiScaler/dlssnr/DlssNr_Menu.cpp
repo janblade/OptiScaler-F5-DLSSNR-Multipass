@@ -1611,7 +1611,7 @@ void RenderMenu(Config* config, float menuResScale)
                            "where that is trusted, so full and reused frames differ less and detail pumps less.\n"
                            "Adds a little lag to detail on motion. 0 = off (default).");
                 ImGui::SeparatorText("How far a moved sample is trusted");
-                float depthTolerance = config->DlssNrDetailReuseDepthTolerance.value_or_default();
+                float depthTolerance = DlssNr::DetailReuseDepthToleranceEffective(*config);
                 if (ImGui::SliderFloat("Depth tolerance", &depthTolerance, 0.0f, 1.0f, "%.3f"))
                     config->DlssNrDetailReuseDepthTolerance = std::clamp(depthTolerance, 0.0f, 1.0f);
                 HelpMarker("How far this pixel's surface may lie outside the depth the saved detail came from, as a "
@@ -1619,7 +1619,8 @@ void RenderMenu(Config* config, float menuResScale)
                            "it.\nRaise it where detail is dropped on a surface the depth guide does not describe "
                            "well, such as water or glass.\nFill uses three times this as the depth window it borrows detail "
                            "over, so this widens that too.\nDefault 0.051, raised from 0.020 because distant water "
-                           "blinked between the model's picture and the game's own.");
+                           "blinked between the model's picture and the game's own. RDR2 defaults to 0.263 instead: "
+                           "its own distant water needed far more than other games measured so far.");
                 float clipGamma = config->DlssNrDetailReuseClipGamma.value_or_default();
                 if (ImGui::SliderFloat("Colour box", &clipGamma, 0.0f, 10.0f, "%.2f sigma"))
                     config->DlssNrDetailReuseClipGamma = std::clamp(clipGamma, 0.0f, 10.0f);

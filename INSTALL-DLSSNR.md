@@ -161,6 +161,22 @@ it changes nothing for anyone else who downloads the release.
 Do not install the RenoDX DLSS add-on merely to obtain its compatibility runtime. This OptiScaler
 fork drives `nvngx_dlssnr.dll` itself, and two Neural Rendering injectors can conflict.
 
+## Water or other surfaces shimmer (detail reuse)
+
+Detail reuse moves detail from the previous frame onto the new one; where it does not trust a surface
+enough, that frame keeps none of the model's detail there, and the picture flickers between frames.
+Water, which looks slightly different every frame, triggers this more than solid ground.
+
+The control is **Neural Rendering → Reuse detail between frames → Debug → Depth tolerance** (ini key
+`DetailReuseDepthTolerance`, under `[DlssNr]`). Raising it trusts more surfaces; the default already
+covers most games. If shimmering remains on a particular surface, raise this slider until it settles —
+Fill uses three times whatever it is set to as its own neighbour window, so raising it also widens how
+far Fill may borrow detail across a depth step.
+
+**Red Dead Redemption 2** needs more than the default: its distant water is only clean at **0.263**,
+set automatically unless you have already set `DetailReuseDepthTolerance` yourself. Every other game
+keeps the shipped default.
+
 ## Individual pass controls
 
 Under **DLSS Neural Rendering → Model passes**, expand Pass 1, Pass 2, or Pass 3. Each contains

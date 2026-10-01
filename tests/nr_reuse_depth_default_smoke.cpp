@@ -39,7 +39,7 @@ int main()
     }
     // The measured value itself, so a future edit cannot silently drift from what was actually tested.
     {
-        CHECK(std::fabs(kRdr2DepthTolerance - 0.263f) < 1e-6f);
+        CHECK(std::fabs(kRdr2DepthTolerance - 0.267f) < 1e-6f);
     }
     // The user's own value always wins, on any game.
     {

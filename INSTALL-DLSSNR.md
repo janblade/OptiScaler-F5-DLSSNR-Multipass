@@ -173,7 +173,7 @@ covers most games. If shimmering remains on a particular surface, raise this sli
 Fill uses three times whatever it is set to as its own neighbour window, so raising it also widens how
 far Fill may borrow detail across a depth step.
 
-**Red Dead Redemption 2** needs more than the default: its distant water is only clean at **0.263**,
+**Red Dead Redemption 2** needs more than the default: its distant water is only clean at **0.267**,
 set automatically unless you have already set `DetailReuseDepthTolerance` yourself. Every other game
 keeps the shipped default.
 

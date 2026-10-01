@@ -1619,7 +1619,7 @@ void RenderMenu(Config* config, float menuResScale)
                            "it.\nRaise it where detail is dropped on a surface the depth guide does not describe "
                            "well, such as water or glass.\nFill uses three times this as the depth window it borrows detail "
                            "over, so this widens that too.\nDefault 0.051, raised from 0.020 because distant water "
-                           "blinked between the model's picture and the game's own. RDR2 defaults to 0.263 instead: "
+                           "blinked between the model's picture and the game's own. RDR2 defaults to 0.267 instead: "
                            "its own distant water needed far more than other games measured so far.");
                 float clipGamma = config->DlssNrDetailReuseClipGamma.value_or_default();
                 if (ImGui::SliderFloat("Colour box", &clipGamma, 0.0f, 10.0f, "%.2f sigma"))

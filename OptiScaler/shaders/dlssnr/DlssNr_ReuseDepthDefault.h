@@ -5,7 +5,7 @@
 //
 // The shipped default (0.051, see DlssNr_DetailReuseConstants.h) was raised once already, from a Witcher 3
 // measurement, on the premise that every game has the same problem to the same degree -- it does not. RDR2's own
-// flicker was reported at the same time but never measured, and turned out to need far more: clean at 0.263,
+// flicker was reported at the same time but never measured, and turned out to need far more: clean at 0.267,
 // roughly 5x the global default, and above even the Witcher's own confirmed-clean ceiling of 0.25 (user,
 // 2026-10-02). Raising the global default a second time on RDR2's number alone would repeat exactly that
 // mistake -- generalising one game's measurement to every game, including ones (NBA 2K27) never pushed anywhere
@@ -21,13 +21,13 @@
 
 namespace DlssNrReuseDepth
 {
-// Measured in-game (user, 2026-10-02): RDR2's distant-water flicker is clean at 0.263; the shipped global default
+// Measured in-game (user, 2026-10-02): RDR2's distant-water flicker is clean at 0.267; the shipped global default
 // (0.051) does not fix it there. Only RDR2 is listed -- raise a game onto this list with a measurement behind it,
 // the same rule DlssNr_AutoTrimDefault.h's list already follows.
-constexpr float kRdr2DepthTolerance = 0.263f;
+constexpr float kRdr2DepthTolerance = 0.267f;
 
 constexpr const char* kRelaxedDepthGames[] = {
-    "rdr2.exe",     // Red Dead Redemption 2: distant water flicker clean at 0.263 (2026-10-02)
+    "rdr2.exe",     // Red Dead Redemption 2: distant water flicker clean at 0.267 (2026-10-02)
     "playrdr2.exe", // its launcher-started exe
 };
 

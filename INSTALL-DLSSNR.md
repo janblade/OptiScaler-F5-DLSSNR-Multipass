@@ -161,21 +161,35 @@ it changes nothing for anyone else who downloads the release.
 Do not install the RenoDX DLSS add-on merely to obtain its compatibility runtime. This OptiScaler
 fork drives `nvngx_dlssnr.dll` itself, and two Neural Rendering injectors can conflict.
 
-## Water or other surfaces shimmer (detail reuse)
+## Troubleshoot flickering with Reuse detail between frames
 
-Detail reuse moves detail from the previous frame onto the new one; where it does not trust a surface
-enough, that frame keeps none of the model's detail there, and the picture flickers between frames.
+**Reuse detail between frames** runs the model every other frame and moves its detail onto the frame
+in between. Where it does not trust a surface, that frame keeps none of the model's detail there, so
+a full and a reused frame differ and the picture alternates between them — seen as flicker or shimmer.
 Water, which looks slightly different every frame, triggers this more than solid ground.
 
-The control is **Neural Rendering → Reuse detail between frames → Debug → Depth tolerance** (ini key
-`DetailReuseDepthTolerance`, under `[DlssNr]`). Raising it trusts more surfaces; the default already
-covers most games. If shimmering remains on a particular surface, raise this slider until it settles —
-Fill uses three times whatever it is set to as its own neighbour window, so raising it also widens how
-far Fill may borrow detail across a depth step.
-
-**Red Dead Redemption 2** needs more than the default: its distant water is only clean at **0.267**,
-set automatically unless you have already set `DetailReuseDepthTolerance` yourself. Every other game
-keeps the shipped default.
+1. **Confirm this is the cause.** Untick **Neural Rendering → Reuse detail between frames**. If the
+   flicker stops, the steps below apply. If it does not, this feature is not involved.
+2. **See where it happens.** Tick **Debug → Show dropped detail**. On reused frames this paints
+   magenta where detail was dropped and cyan where Fill replaced it, so you can watch the flickering
+   area and confirm it lines up with a dropped region.
+3. **Most cases: raise Depth tolerance**, under **Debug → How far a moved sample is trusted** (ini key
+   `DetailReuseDepthTolerance`, under `[DlssNr]`). This is the fix for a surface the depth guide does
+   not describe well — water, glass, fine geometry. Raise it until the flickering area settles; Fill
+   uses three times whatever it is set to as its own neighbour window, so raising it also widens how
+   far Fill may borrow detail across a depth step. **Red Dead Redemption 2** gets a higher value
+   (0.267) automatically; every other game starts at 0.051.
+4. **Flicker on fine, busy, colour-shifting detail instead** (foliage, patterned surfaces): try
+   **Colour box** and **Colour falloff** in the same section, which govern how far the saved colour
+   may drift from the current pixel and still be trusted, rather than depth.
+5. **Flicker specifically at the edges of the screen while moving or turning fast** is a different,
+   already-handled case: check **Pause while moving fast** is not set to 0 — it runs every frame
+   through the model during fast motion instead of reusing.
+6. **Flicker only with frame generation on**: check **Keep on with frame generation**. Turning it off
+   makes Reuse stand aside whenever frame generation is running — no reuse there at all, but no
+   flicker from it either.
+7. **Still flickering**: Reuse suits a single model pass best, since the same dropped areas compound
+   across 2 or 3 passes. Reduce to one pass, or turn Reuse off for that scene as a last resort.
 
 ## Individual pass controls
 

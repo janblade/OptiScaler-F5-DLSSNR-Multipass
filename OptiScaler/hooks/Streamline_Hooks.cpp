@@ -201,8 +201,11 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
 
     std::vector<const wchar_t*> storage;
 
-    // Replace the SL files to allow for MFG
-    if (State::Instance().activeFgInput == FGInput::NvngxFG && std::filesystem::exists(localSlPath / L"sl.common.dll"))
+    const bool ignoreStreamlineOTA = Config::Instance()->FGStreamlineIgnoreOTA.value_or_default();
+
+    // Replace the SL files to allow for MFG, or to keep Streamline off the driver's OTA cache
+    if ((State::Instance().activeFgInput == FGInput::NvngxFG || ignoreStreamlineOTA) &&
+        std::filesystem::exists(localSlPath / L"sl.common.dll"))
     {
         storage.assign(localPref.pathsToPlugins, localPref.pathsToPlugins + localPref.numPathsToPlugins);
 
@@ -287,8 +290,8 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
             }
         }
 
-        // Insert local path only if a newer plugin was found
-        if (hasNewerPlugin)
+        // Insert local path if a newer plugin was found, or if OTA is always to be ignored
+        if (hasNewerPlugin || ignoreStreamlineOTA)
         {
             LOG_DEBUG("Making the game use local streamline files");
 
@@ -309,6 +312,13 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         }
     }
 
+    if (ignoreStreamlineOTA)
+    {
+        LOG_INFO("StreamlineIgnoreOTA: blocking Streamline's OTA/downloaded plugins, using OptiScaler/streamline only");
+        localPref.flags &= ~sl::PreferenceFlags::eAllowOTA;
+        localPref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
+    }
+
     if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG)
     {
         std::vector<sl::Feature> localFeaturesToLoad(pref.featuresToLoad, pref.featuresToLoad + pref.numFeaturesToLoad);
@@ -320,19 +330,6 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         // return so that localFeaturesToLoad is valid
         return o_slInit(localPref, sdkVersion);
     }
-
-    // bool hookSetTag =
-    //     (State::Instance().activeFgInput == FGInput::NvngxFG || State::Instance().activeFgInput == FGInput::DLSSG);
-
-    // if (hookSetTag)
-    //     localPref->flags &= ~(sl::PreferenceFlags::eAllowOTA | sl::PreferenceFlags::eLoadDownloadedPlugins);
-
-    // To prevent mixed up OTA situations
-    // if (State::Instance().activeFgOutput == FGOutput::DLSSG)
-    //{
-    //    localPref.flags &= ~sl::PreferenceFlags::eAllowOTA;
-    //    localPref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
-    //}
 
     return o_slInit(localPref, sdkVersion);
 }

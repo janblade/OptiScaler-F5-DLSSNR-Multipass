@@ -143,6 +143,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGOutput.set_from_config(FGOutput::DLSSG);
             }
 
+            FGStreamlineIgnoreOTA.set_from_config(readBool("FrameGen", "StreamlineIgnoreOTA"));
+
             const bool canUseNvngxReplacement =
                 FGInput.value_or_default() == FGInput::NvngxFG || FGOutput.value_or_default() == FGOutput::DLSSG;
 
@@ -1149,6 +1151,9 @@ bool Config::SaveIni()
                 FGOutputString = "DLSSG";
         }
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
+
+        ini.SetValue("FrameGen", "StreamlineIgnoreOTA",
+                     GetBoolValue(Instance()->FGStreamlineIgnoreOTA.value_for_config()).c_str());
 
         std::string FGNvngxReplacementString = "auto";
         if (auto FGNvngxReplacementHeld = Instance()->FGNvngxReplacement.value_for_config();

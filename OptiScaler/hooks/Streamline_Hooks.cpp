@@ -71,6 +71,12 @@ public:
         if (!std::filesystem::exists(streamlineDir, ec) || ec)
             return;
 
+        // Phase 1: enumerate only -- never mutate streamlineDir while directory_iterator is live.
+        // It's backed by FindFirstFile/FindNextFile on Windows; creating .quarantine or renaming a
+        // file out of the very directory being scanned invalidates that handle, and the iterator's
+        // implicit operator++ in a range-based for throws filesystem_error on the next increment
+        // (uncaught here, which crashed the game on the first run of this code).
+        std::vector<std::wstring> toQuarantine;
         for (const auto& entry : std::filesystem::directory_iterator(streamlineDir, ec))
         {
             if (ec)
@@ -92,21 +98,27 @@ public:
                 isSafe = (lowerName == safeLower);
             }
 
-            if (isSafe)
-                continue;
+            if (!isSafe)
+                toQuarantine.push_back(entry.path().filename().wstring());
+        }
 
-            std::error_code dirEc;
-            std::filesystem::create_directories(quarantineDir_, dirEc);
-            if (dirEc)
-            {
-                LOG_WARN("UnsafePluginQuarantine: could not create quarantine folder ({}), leaving {} in place",
-                         dirEc.message(), wstring_to_string(entry.path().filename().wstring()));
-                continue;
-            }
+        if (toQuarantine.empty())
+            return;
 
-            std::wstring filename = entry.path().filename().wstring();
+        // Phase 2: mutate. The iterator above is long out of scope by now.
+        std::error_code dirEc;
+        std::filesystem::create_directories(quarantineDir_, dirEc);
+        if (dirEc)
+        {
+            LOG_WARN("UnsafePluginQuarantine: could not create quarantine folder ({}), leaving files in place",
+                     dirEc.message());
+            return;
+        }
+
+        for (const auto& filename : toQuarantine)
+        {
             std::error_code moveEc;
-            std::filesystem::rename(entry.path(), quarantineDir_ / filename, moveEc);
+            std::filesystem::rename(streamlineDir / filename, quarantineDir_ / filename, moveEc);
             if (moveEc)
             {
                 LOG_WARN("UnsafePluginQuarantine: could not quarantine {}: {}", wstring_to_string(filename),
@@ -114,7 +126,7 @@ public:
                 continue;
             }
 
-            moved_.push_back(std::move(filename));
+            moved_.push_back(filename);
         }
 
         if (!moved_.empty())

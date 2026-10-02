@@ -168,23 +168,7 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     // sl.interposer.dll
     if (CheckDllNameW(&libName, &slInterposerNamesW) && shouldHookSl)
     {
-        // Keep the interposer and its plugins as one matched set. If a much older interposer
-        // the game itself ships (its own native Streamline integration) is about to be pointed
-        // at OptiScaler/streamline's plugins via StreamlineIgnoreOTA, the two SDK generations
-        // can disagree on the plugin manifest schema and crash -- seen in practice: Starfield's
-        // bundled Streamline 2.2.0 (2023) failed to parse a 2.14.1-era plugin's JSON ('external'
-        // key missing) and took Streamline down with it. Loading the interposer itself from the
-        // same local folder keeps both halves from the same build.
-        std::filesystem::path interposerPath = lpLibFullPath;
-
-        if (Config::Instance()->FGStreamlineIgnoreOTA.value_or_default() && !pathInsideLocalSlPath)
-        {
-            std::filesystem::path localInterposer = localSlPath / L"sl.interposer.dll";
-            if (std::filesystem::exists(localInterposer))
-                interposerPath = localInterposer;
-        }
-
-        auto streamlineModule = NtdllProxy::LoadLibraryExW_Ldr(interposerPath.c_str(), NULL, 0);
+        auto streamlineModule = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
 
         if (streamlineModule != nullptr && streamlineModule != State::Instance().optiSlInterposer)
         {

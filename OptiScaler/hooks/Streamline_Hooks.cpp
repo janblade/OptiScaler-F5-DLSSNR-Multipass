@@ -589,6 +589,36 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
 
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
 
+    // NR scope probe: temporary, capped diagnostic dump of SR/RR-relevant tags to find out what a
+    // natively-Streamline-integrated game (no classic NGX CreateFeature/EvaluateFeature calls) actually
+    // hands us, so DLSS-NR's hook point can be ported off the legacy NVNGX wrapper. Remove once that
+    // work is scoped.
+    {
+        static int probeCallsLeft = 12;
+        int left = probeCallsLeft--;
+        if (left > 0)
+        {
+            LOG_INFO("NR scope probe: slSetTagForFrame frame={} viewport={} numResources={}",
+                     (uint32_t) frame, (uint32_t) viewport, numResources);
+
+            for (uint32_t i = 0; i < numResources; i++)
+            {
+                const auto& tag = resources[i];
+                const bool srRelevant = tag.type == sl::kBufferTypeDepth || tag.type == sl::kBufferTypeMotionVectors ||
+                    tag.type == sl::kBufferTypeScalingInputColor || tag.type == sl::kBufferTypeScalingOutputColor ||
+                    tag.type == sl::kBufferTypeExposure;
+
+                if (!srRelevant)
+                    continue;
+
+                void* native = (tag.resource != nullptr) ? tag.resource->native : nullptr;
+                LOG_INFO("NR scope probe:   tag[{}] type={} resource.native={} extent=(left={} top={} {}x{})",
+                         i, tag.type, native, tag.extent.left, tag.extent.top, tag.extent.width,
+                         tag.extent.height);
+            }
+        }
+    }
+
     if (State::Instance().activeFgInput == FGInput::DLSSG &&
         State::Instance().gameQuirks[GameQuirk::IgnoreTagsWithoutHudlessForFG])
     {
@@ -653,6 +683,54 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
                                                 sl::CommandBuffer* cmdBuffer)
 {
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
+
+    // NR scope probe: temporary, capped diagnostic dump -- see the matching block in
+    // hkslSetTagForFrame for why this exists. Remove once DLSS-NR's native-Streamline hook is scoped.
+    if (feature == sl::kFeatureDLSS || feature == sl::kFeatureDLSS_RR)
+    {
+        static int probeCallsLeft = 12;
+        int left = probeCallsLeft--;
+        if (left > 0)
+        {
+            LOG_INFO("NR scope probe: slEvaluateFeature feature={} ({}) numInputs={}", feature,
+                     feature == sl::kFeatureDLSS ? "DLSS" : "DLSS_RR", numInputs);
+
+            for (uint32_t i = 0; inputs != nullptr && i < numInputs; i++)
+            {
+                if (inputs[i] == nullptr)
+                {
+                    LOG_INFO("NR scope probe:   input[{}] = nullptr", i);
+                    continue;
+                }
+
+                if (inputs[i]->structType == sl::ResourceTag::s_structType)
+                {
+                    auto tag = (const sl::ResourceTag*) inputs[i];
+                    void* native = (tag->resource != nullptr) ? tag->resource->native : nullptr;
+                    LOG_INFO("NR scope probe:   input[{}] = ResourceTag type={} resource.native={} "
+                             "extent=(left={} top={} {}x{})",
+                             i, tag->type, native, tag->extent.left, tag->extent.top, tag->extent.width,
+                             tag->extent.height);
+                }
+                else if (inputs[i]->structType == sl::DLSSOptions::s_structType)
+                {
+                    auto opt = (const sl::DLSSOptions*) inputs[i];
+                    LOG_INFO("NR scope probe:   input[{}] = DLSSOptions mode={} outputWidth={} "
+                             "outputHeight={} preExposure={:.4f} exposureScale={:.4f}",
+                             i, (uint32_t) opt->mode, opt->outputWidth, opt->outputHeight, opt->preExposure,
+                             opt->exposureScale);
+                }
+                else
+                {
+                    const auto& g = inputs[i]->structType;
+                    LOG_INFO("NR scope probe:   input[{}] = unknown structType {{{:08x}-{:04x}-{:04x}-"
+                             "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}} version={}",
+                             i, g.data1, g.data2, g.data3, g.data4[0], g.data4[1], g.data4[2], g.data4[3],
+                             g.data4[4], g.data4[5], g.data4[6], g.data4[7], inputs[i]->structVersion);
+                }
+            }
+        }
+    }
 
     if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
     {

@@ -319,18 +319,22 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     }
 
     // Keep Streamline off the driver's OTA cache entirely -- but only if OptiScaler/streamline
-    // actually has a plugin set to fall back on, AND the caller's own declared SDK version is
-    // close enough to what that plugin set was built for. This is NOT about which interposer
-    // binary is running -- confirmed on Starfield with the modern 2.14.1 interposer itself
-    // loaded: the plugin manager takes a different internal path depending on the host SDK
-    // version the CALLER passes into slInit() (sdkVersion here), and an old caller (a game
-    // built in 2023 always declares the SDK it shipped with) hits a backward-compat parsing
-    // path that can't read a modern plugin's JSON manifest, crashing Streamline either way.
+    // actually has a plugin set to fall back on. The caller's own declared SDK version
+    // (sdkVersion here) decides which internal manifest-parsing path the plugin manager uses --
+    // confirmed on Starfield with the modern 2.14.1 interposer itself loaded: an old caller (a
+    // game built in 2023 always declares the SDK it shipped with) still hit a backward-compat
+    // parsing path that can't read a modern plugin's JSON manifest, crashing Streamline
+    // regardless of which interposer binary executed the call. sl::Preferences is itself a
+    // self-describing/extensible struct (same pattern as Vulkan's sType chains), so the ABI the
+    // interposer reads it with shouldn't depend on sdkVersion -- only which manifest parser it
+    // picks does. So: when the caller's version doesn't match what we bundle, claim our own
+    // instead, routing it to the modern parser rather than giving up on this caller entirely.
     const uint32_t callerSdkMajor = static_cast<uint32_t>(sdkVersion >> 48);
     const uint32_t callerSdkMinor = static_cast<uint32_t>((sdkVersion >> 32) & 0xFFFF);
     const bool sdkMatchesLocal = callerSdkMajor == SL_VERSION_MAJOR && callerSdkMinor == SL_VERSION_MINOR;
+    uint64_t effectiveSdkVersion = sdkVersion;
 
-    if (ignoreStreamlineOTA && sdkMatchesLocal && std::filesystem::exists(localSlPath / L"sl.common.dll"))
+    if (ignoreStreamlineOTA && std::filesystem::exists(localSlPath / L"sl.common.dll"))
     {
         LOG_DEBUG("Making the game use local streamline files (ignoring OTA)");
         insertLocalPathOnce();
@@ -338,14 +342,16 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         LOG_INFO("StreamlineIgnoreOTA: blocking Streamline's OTA/downloaded plugins, using OptiScaler/streamline only");
         localPref.flags &= ~sl::PreferenceFlags::eAllowOTA;
         localPref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
-    }
-    else if (ignoreStreamlineOTA && !sdkMatchesLocal)
-    {
-        LOG_WARN("StreamlineIgnoreOTA is enabled, but this caller declares SDK v{}.{} while "
-                 "OptiScaler/streamline was built for v{}.{} -- leaving this caller's own "
-                 "OTA/downloaded-plugin resolution in place rather than risk a version-mismatched "
-                 "plugin load",
-                 callerSdkMajor, callerSdkMinor, SL_VERSION_MAJOR, SL_VERSION_MINOR);
+
+        if (!sdkMatchesLocal)
+        {
+            LOG_WARN("StreamlineIgnoreOTA: caller declares SDK v{}.{}, below what OptiScaler/streamline "
+                     "was built for (v{}.{}) -- claiming our own SDK version for this call so its plugin "
+                     "manager uses the modern manifest parser instead of a backward-compat path that "
+                     "cannot read our plugins",
+                     callerSdkMajor, callerSdkMinor, SL_VERSION_MAJOR, SL_VERSION_MINOR);
+            effectiveSdkVersion = sl::kSDKVersion;
+        }
     }
     else if (ignoreStreamlineOTA)
     {
@@ -362,10 +368,10 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         localPref.numFeaturesToLoad = localFeaturesToLoad.size();
 
         // return so that localFeaturesToLoad is valid
-        return o_slInit(localPref, sdkVersion);
+        return o_slInit(localPref, effectiveSdkVersion);
     }
 
-    return o_slInit(localPref, sdkVersion);
+    return o_slInit(localPref, effectiveSdkVersion);
 }
 
 sl::Result StreamlineHooks::hkslIsFeatureSupported(sl::Feature feature, const sl::AdapterInfo& adapterInfo)

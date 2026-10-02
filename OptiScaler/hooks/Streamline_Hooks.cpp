@@ -199,16 +199,26 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
 
     auto localSlPathStr = localSlPath.wstring();
 
-    std::vector<const wchar_t*> storage;
+    std::vector<const wchar_t*> storage(localPref.pathsToPlugins, localPref.pathsToPlugins + localPref.numPathsToPlugins);
 
+    const bool isNvngxFG = State::Instance().activeFgInput == FGInput::NvngxFG;
     const bool ignoreStreamlineOTA = Config::Instance()->FGStreamlineIgnoreOTA.value_or_default();
+    bool localPathInserted = false;
 
-    // Replace the SL files to allow for MFG, or to keep Streamline off the driver's OTA cache
-    if ((State::Instance().activeFgInput == FGInput::NvngxFG || ignoreStreamlineOTA) &&
-        std::filesystem::exists(localSlPath / L"sl.common.dll"))
+    auto insertLocalPathOnce = [&]()
     {
-        storage.assign(localPref.pathsToPlugins, localPref.pathsToPlugins + localPref.numPathsToPlugins);
+        if (localPathInserted)
+            return;
 
+        storage.insert(storage.begin(), localSlPathStr.c_str());
+        localPref.pathsToPlugins = storage.data();
+        localPref.numPathsToPlugins = (uint32_t) storage.size();
+        localPathInserted = true;
+    };
+
+    // Replace the SL files to allow for MFG
+    if (isNvngxFG && std::filesystem::exists(localSlPath / L"sl.common.dll"))
+    {
         std::filesystem::path pluginsDir;
 
         // Find the first path that contains sl.common.dll
@@ -240,12 +250,6 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         std::vector<std::string> missingDlls;
         bool hasNewerPlugin = false;
 
-        // If we found the plugins folder, scan its contents. Full plugin parity only matters
-        // when replacing the FG provider (NvngxFG); for the plain ignore-OTA case we only want
-        // the version check below, not a warning about sl.dlss/sl.dlss_d-style plugins
-        // OptiScaler never bundles because it talks to nvngx_dlss.dll directly.
-        const bool checkForMissingDlls = State::Instance().activeFgInput == FGInput::NvngxFG;
-
         if (!pluginsDir.empty() && std::filesystem::exists(pluginsDir))
         {
             for (const auto& entry : std::filesystem::directory_iterator(pluginsDir))
@@ -272,8 +276,7 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
                     // Check if localSlPath also has this DLL
                     if (!std::filesystem::exists(localDllPath))
                     {
-                        if (checkForMissingDlls)
-                            missingDlls.push_back(entry.path().filename().string());
+                        missingDlls.push_back(entry.path().filename().string());
                     }
                     else
                     {
@@ -296,14 +299,11 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
             }
         }
 
-        // Insert local path if a newer plugin was found, or if OTA is always to be ignored
-        if (hasNewerPlugin || ignoreStreamlineOTA)
+        // Insert local path only if a newer plugin was found
+        if (hasNewerPlugin)
         {
             LOG_DEBUG("Making the game use local streamline files");
-
-            storage.insert(storage.begin(), localSlPathStr.c_str());
-            localPref.pathsToPlugins = storage.data();
-            localPref.numPathsToPlugins = (uint32_t) storage.size();
+            insertLocalPathOnce();
 
             if (!missingDlls.empty())
             {
@@ -318,11 +318,22 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         }
     }
 
-    if (ignoreStreamlineOTA)
+    // Keep Streamline off the driver's OTA cache entirely -- but only if OptiScaler/streamline
+    // actually has a plugin set to fall back on; otherwise blocking OTA would leave Streamline
+    // with no plugins at all
+    if (ignoreStreamlineOTA && std::filesystem::exists(localSlPath / L"sl.common.dll"))
     {
+        LOG_DEBUG("Making the game use local streamline files (ignoring OTA)");
+        insertLocalPathOnce();
+
         LOG_INFO("StreamlineIgnoreOTA: blocking Streamline's OTA/downloaded plugins, using OptiScaler/streamline only");
         localPref.flags &= ~sl::PreferenceFlags::eAllowOTA;
         localPref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
+    }
+    else if (ignoreStreamlineOTA)
+    {
+        LOG_WARN("StreamlineIgnoreOTA is enabled, but OptiScaler/streamline/sl.common.dll is missing -- "
+                 "leaving Streamline's own OTA/downloaded-plugin resolution in place");
     }
 
     if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG)

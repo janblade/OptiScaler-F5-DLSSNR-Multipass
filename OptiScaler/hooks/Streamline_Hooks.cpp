@@ -45,118 +45,6 @@ struct GamePluginLoadScope
     }
     ~GamePluginLoadScope() { gamePluginPreferences = previous; }
 };
-
-// Hands an SDK-mismatched Streamline caller a plugin set we trust without creating a second
-// module identity for the files it's allowed to see. Copying the safe plugins into a separate
-// `minimal/` folder (the earlier approach) made Windows load sl.common.dll etc. twice -- once
-// from `streamline/`, once from `streamline/minimal/`, byte-identical but different paths, so
-// each got its own copy of Streamline's plugin-manager globals. At process exit, one instance's
-// torn-down state got touched through a pointer that expected the other's, crashing in
-// sl.common.dll (confirmed via Starfield's own crash log showing sl.common.dll/sl.interposer.dll/
-// sl.pcl.dll/sl.reflex.dll each loaded twice at two addresses with identical hashes).
-//
-// This does the opposite: move the *unsafe* files out of `streamline/` for the duration of this
-// one slInit call, so the caller gets the same `streamline/` path -- and thus the same already-
-// loaded module instances -- as the SDK-matching session uses, then move them back. Streamline's
-// directory scan never sees the unsafe files (same protection the minimal folder gave), but no
-// duplicate module load happens for the safe ones.
-class UnsafePluginQuarantine
-{
-public:
-    UnsafePluginQuarantine(const std::filesystem::path& streamlineDir, const wchar_t* const* safeNames,
-                           size_t safeCount)
-        : quarantineDir_(streamlineDir / L".quarantine")
-    {
-        std::error_code ec;
-        if (!std::filesystem::exists(streamlineDir, ec) || ec)
-            return;
-
-        // Phase 1: enumerate only -- never mutate streamlineDir while directory_iterator is live.
-        // It's backed by FindFirstFile/FindNextFile on Windows; creating .quarantine or renaming a
-        // file out of the very directory being scanned invalidates that handle, and the iterator's
-        // implicit operator++ in a range-based for throws filesystem_error on the next increment
-        // (uncaught here, which crashed the game on the first run of this code).
-        std::vector<std::wstring> toQuarantine;
-        for (const auto& entry : std::filesystem::directory_iterator(streamlineDir, ec))
-        {
-            if (ec)
-                break;
-            if (!entry.is_regular_file())
-                continue;
-
-            std::wstring lowerName = entry.path().filename().wstring();
-            to_lower_in_place(lowerName);
-
-            if (!lowerName.starts_with(L"sl.") || !lowerName.ends_with(L".dll") || lowerName == L"sl.interposer.dll")
-                continue;
-
-            bool isSafe = false;
-            for (size_t i = 0; i < safeCount && !isSafe; i++)
-            {
-                std::wstring safeLower = safeNames[i];
-                to_lower_in_place(safeLower);
-                isSafe = (lowerName == safeLower);
-            }
-
-            if (!isSafe)
-                toQuarantine.push_back(entry.path().filename().wstring());
-        }
-
-        if (toQuarantine.empty())
-            return;
-
-        // Phase 2: mutate. The iterator above is long out of scope by now.
-        std::error_code dirEc;
-        std::filesystem::create_directories(quarantineDir_, dirEc);
-        if (dirEc)
-        {
-            LOG_WARN("UnsafePluginQuarantine: could not create quarantine folder ({}), leaving files in place",
-                     dirEc.message());
-            return;
-        }
-
-        for (const auto& filename : toQuarantine)
-        {
-            std::error_code moveEc;
-            std::filesystem::rename(streamlineDir / filename, quarantineDir_ / filename, moveEc);
-            if (moveEc)
-            {
-                LOG_WARN("UnsafePluginQuarantine: could not quarantine {}: {}", wstring_to_string(filename),
-                         moveEc.message());
-                continue;
-            }
-
-            moved_.push_back(filename);
-        }
-
-        if (!moved_.empty())
-        {
-            std::string names;
-            for (const auto& n : moved_)
-                names += wstring_to_string(n) + " ";
-            LOG_DEBUG("UnsafePluginQuarantine: moved out of streamline/ for this call: {}", names);
-        }
-    }
-
-    ~UnsafePluginQuarantine()
-    {
-        for (const auto& name : moved_)
-        {
-            std::error_code ec;
-            std::filesystem::rename(quarantineDir_ / name, quarantineDir_.parent_path() / name, ec);
-            if (ec)
-                LOG_WARN("UnsafePluginQuarantine: could not restore {} from quarantine: {}",
-                         wstring_to_string(name), ec.message());
-        }
-    }
-
-    UnsafePluginQuarantine(const UnsafePluginQuarantine&) = delete;
-    UnsafePluginQuarantine& operator=(const UnsafePluginQuarantine&) = delete;
-
-private:
-    std::filesystem::path quarantineDir_;
-    std::vector<std::wstring> moved_;
-};
 } // namespace
 
 HMODULE StreamlineHooks::LoadIsolatedGamePlugin(LPCWSTR requestedPath)
@@ -310,10 +198,7 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     localSlPath = localSlPath / L"streamline"; // Hardcoded streamline folder
 
     auto localSlPathStr = localSlPath.wstring();
-
-    // Lives until hkslInit returns (either return path below), restoring any quarantined files
-    // in its destructor once o_slInit has finished discovering plugins for this call.
-    std::optional<UnsafePluginQuarantine> unsafePluginQuarantine;
+    std::wstring minimalSlPathStr;
 
     std::vector<const wchar_t*> storage(localPref.pathsToPlugins, localPref.pathsToPlugins + localPref.numPathsToPlugins);
 
@@ -333,13 +218,32 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     };
 
     // Plugins confirmed (via Starfield minidump analysis) to load cleanly from a caller whose
-    // declared SDK version is far older than ours. sl.dlss_d, sl.deepdvc, sl.directsr, sl.nis and
-    // sl.nvperf each access-violate (null read at a small offset) when loaded this way instead --
-    // a bug inside NVIDIA's own closed-source plugin, not something tied to one specific file's
-    // JSON. sl.dlss itself is safe; excluding it too (an earlier, over-cautious version of this
-    // list) just hid DLSS as a selectable option in-game without preventing any crash.
+    // declared SDK version is far older than ours. sl.dlss, sl.dlss_d, sl.deepdvc and sl.directsr
+    // each access-violate (null read at a small offset) when loaded this way instead -- a bug
+    // inside NVIDIA's own closed-source plugin, not something tied to one specific file's JSON.
     static constexpr const wchar_t* kSafeStreamlinePlugins[] = { L"sl.common.dll", L"sl.dlss.dll", L"sl.dlss_g.dll",
                                                                   L"sl.reflex.dll", L"sl.pcl.dll" };
+
+    // Builds (or refreshes) a trimmed copy of the streamline folder containing only the plugins
+    // above, for handing to a caller we don't trust with the full set. Rebuilt every call rather
+    // than cached, since it's a handful of small files and this only runs for the rare mismatched-
+    // SDK case.
+    auto ensureMinimalPluginFolder = [&]() -> std::wstring
+    {
+        std::filesystem::path minimalPath = localSlPath / L"minimal";
+        std::error_code ec;
+        std::filesystem::create_directories(minimalPath, ec);
+
+        for (const wchar_t* name : kSafeStreamlinePlugins)
+        {
+            std::filesystem::path src = localSlPath / name;
+            if (std::filesystem::exists(src, ec))
+                std::filesystem::copy_file(src, minimalPath / name,
+                                            std::filesystem::copy_options::overwrite_existing, ec);
+        }
+
+        return minimalPath.wstring();
+    };
 
     // Replace the SL files to allow for MFG
     if (isNvngxFG && std::filesystem::exists(localSlPath / L"sl.common.dll"))
@@ -463,13 +367,12 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         }
         else
         {
-            unsafePluginQuarantine.emplace(localSlPath, kSafeStreamlinePlugins,
-                                           std::size(kSafeStreamlinePlugins));
+            minimalSlPathStr = ensureMinimalPluginFolder();
             LOG_WARN("StreamlineIgnoreOTA: caller declares SDK v{}.{} (OptiScaler/streamline built "
                      "for v{}.{}) -- using only the known-safe plugin subset (sl.common, sl.dlss, "
                      "sl.dlss_g, sl.reflex, sl.pcl) for this caller instead of the full folder",
                      callerSdkMajor, callerSdkMinor, SL_VERSION_MAJOR, SL_VERSION_MINOR);
-            insertLocalPathOnce(localSlPathStr.c_str());
+            insertLocalPathOnce(minimalSlPathStr.c_str());
         }
 
         LOG_INFO("StreamlineIgnoreOTA: blocking Streamline's OTA/downloaded plugins, using OptiScaler/streamline only");

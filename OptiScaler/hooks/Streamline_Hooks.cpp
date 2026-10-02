@@ -198,6 +198,7 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     localSlPath = localSlPath / L"streamline"; // Hardcoded streamline folder
 
     auto localSlPathStr = localSlPath.wstring();
+    std::wstring minimalSlPathStr;
 
     std::vector<const wchar_t*> storage(localPref.pathsToPlugins, localPref.pathsToPlugins + localPref.numPathsToPlugins);
 
@@ -205,15 +206,43 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     const bool ignoreStreamlineOTA = Config::Instance()->FGStreamlineIgnoreOTA.value_or_default();
     bool localPathInserted = false;
 
-    auto insertLocalPathOnce = [&]()
+    auto insertLocalPathOnce = [&](const wchar_t* pathToInsert)
     {
         if (localPathInserted)
             return;
 
-        storage.insert(storage.begin(), localSlPathStr.c_str());
+        storage.insert(storage.begin(), pathToInsert);
         localPref.pathsToPlugins = storage.data();
         localPref.numPathsToPlugins = (uint32_t) storage.size();
         localPathInserted = true;
+    };
+
+    // Plugins confirmed (via Starfield minidump analysis) to load cleanly from a caller whose
+    // declared SDK version is far older than ours. sl.dlss, sl.dlss_d, sl.deepdvc and sl.directsr
+    // each access-violate (null read at a small offset) when loaded this way instead -- a bug
+    // inside NVIDIA's own closed-source plugin, not something tied to one specific file's JSON.
+    static constexpr const wchar_t* kSafeStreamlinePlugins[] = { L"sl.common.dll", L"sl.dlss_g.dll",
+                                                                  L"sl.reflex.dll", L"sl.pcl.dll" };
+
+    // Builds (or refreshes) a trimmed copy of the streamline folder containing only the plugins
+    // above, for handing to a caller we don't trust with the full set. Rebuilt every call rather
+    // than cached, since it's a handful of small files and this only runs for the rare mismatched-
+    // SDK case.
+    auto ensureMinimalPluginFolder = [&]() -> std::wstring
+    {
+        std::filesystem::path minimalPath = localSlPath / L"minimal";
+        std::error_code ec;
+        std::filesystem::create_directories(minimalPath, ec);
+
+        for (const wchar_t* name : kSafeStreamlinePlugins)
+        {
+            std::filesystem::path src = localSlPath / name;
+            if (std::filesystem::exists(src, ec))
+                std::filesystem::copy_file(src, minimalPath / name,
+                                            std::filesystem::copy_options::overwrite_existing, ec);
+        }
+
+        return minimalPath.wstring();
     };
 
     // Replace the SL files to allow for MFG
@@ -303,7 +332,7 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         if (hasNewerPlugin)
         {
             LOG_DEBUG("Making the game use local streamline files");
-            insertLocalPathOnce();
+            insertLocalPathOnce(localSlPathStr.c_str());
 
             if (!missingDlls.empty())
             {
@@ -319,34 +348,36 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     }
 
     // Keep Streamline off the driver's OTA cache entirely -- but only if OptiScaler/streamline
-    // actually has a plugin set to fall back on, AND the caller's own declared SDK version is
-    // close enough to what that plugin set was built for. Confirmed on Starfield (modern 2.14.1
-    // interposer, both this call and OptiScaler's own bootstrap call): claiming our own SDK
-    // version for an old caller (sl::kSDKVersion, tried and reverted) does NOT avoid the crash --
-    // the same plugin, parsed by the same interposer build, throws the same JSON exception
-    // regardless of the declared SDK version, while OptiScaler's own slInit call parses it fine.
-    // Something other than sdkVersion distinguishes the two calls and we don't have visibility
-    // into NVIDIA's closed-source plugin manager to know what. Back off instead of guessing.
+    // actually has a plugin set to fall back on. A caller whose declared SDK version is far older
+    // than ours (Starfield: v2.2 vs our v2.11) crashes on four of our plugins specifically
+    // (see kSafeStreamlinePlugins above) regardless of which interposer binary executes the call
+    // or what SDK version we claim -- confirmed via minidump analysis, not a guess. For that case,
+    // hand it the trimmed, known-safe subset instead of either risking the crash or giving up
+    // on blocking OTA entirely.
     const uint32_t callerSdkMajor = static_cast<uint32_t>(sdkVersion >> 48);
     const uint32_t callerSdkMinor = static_cast<uint32_t>((sdkVersion >> 32) & 0xFFFF);
     const bool sdkMatchesLocal = callerSdkMajor == SL_VERSION_MAJOR && callerSdkMinor == SL_VERSION_MINOR;
 
-    if (ignoreStreamlineOTA && sdkMatchesLocal && std::filesystem::exists(localSlPath / L"sl.common.dll"))
+    if (ignoreStreamlineOTA && std::filesystem::exists(localSlPath / L"sl.common.dll"))
     {
-        LOG_DEBUG("Making the game use local streamline files (ignoring OTA)");
-        insertLocalPathOnce();
+        if (sdkMatchesLocal)
+        {
+            LOG_DEBUG("Making the game use local streamline files (ignoring OTA)");
+            insertLocalPathOnce(localSlPathStr.c_str());
+        }
+        else
+        {
+            minimalSlPathStr = ensureMinimalPluginFolder();
+            LOG_WARN("StreamlineIgnoreOTA: caller declares SDK v{}.{} (OptiScaler/streamline built "
+                     "for v{}.{}) -- using only the known-safe plugin subset (sl.common, sl.dlss_g, "
+                     "sl.reflex, sl.pcl) for this caller instead of the full folder",
+                     callerSdkMajor, callerSdkMinor, SL_VERSION_MAJOR, SL_VERSION_MINOR);
+            insertLocalPathOnce(minimalSlPathStr.c_str());
+        }
 
         LOG_INFO("StreamlineIgnoreOTA: blocking Streamline's OTA/downloaded plugins, using OptiScaler/streamline only");
         localPref.flags &= ~sl::PreferenceFlags::eAllowOTA;
         localPref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
-    }
-    else if (ignoreStreamlineOTA && !sdkMatchesLocal)
-    {
-        LOG_WARN("StreamlineIgnoreOTA is enabled, but this caller declares SDK v{}.{} while "
-                 "OptiScaler/streamline was built for v{}.{} -- leaving this caller's own "
-                 "OTA/downloaded-plugin resolution in place rather than risk a version-mismatched "
-                 "plugin load",
-                 callerSdkMajor, callerSdkMinor, SL_VERSION_MAJOR, SL_VERSION_MINOR);
     }
     else if (ignoreStreamlineOTA)
     {

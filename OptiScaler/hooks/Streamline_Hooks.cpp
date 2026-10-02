@@ -240,7 +240,12 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         std::vector<std::string> missingDlls;
         bool hasNewerPlugin = false;
 
-        // If we found the plugins folder, scan its contents
+        // If we found the plugins folder, scan its contents. Full plugin parity only matters
+        // when replacing the FG provider (NvngxFG); for the plain ignore-OTA case we only want
+        // the version check below, not a warning about sl.dlss/sl.dlss_d-style plugins
+        // OptiScaler never bundles because it talks to nvngx_dlss.dll directly.
+        const bool checkForMissingDlls = State::Instance().activeFgInput == FGInput::NvngxFG;
+
         if (!pluginsDir.empty() && std::filesystem::exists(pluginsDir))
         {
             for (const auto& entry : std::filesystem::directory_iterator(pluginsDir))
@@ -267,7 +272,8 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
                     // Check if localSlPath also has this DLL
                     if (!std::filesystem::exists(localDllPath))
                     {
-                        missingDlls.push_back(entry.path().filename().string());
+                        if (checkForMissingDlls)
+                            missingDlls.push_back(entry.path().filename().string());
                     }
                     else
                     {

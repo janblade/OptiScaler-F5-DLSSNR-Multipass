@@ -221,7 +221,7 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     // declared SDK version is far older than ours. sl.dlss, sl.dlss_d, sl.deepdvc and sl.directsr
     // each access-violate (null read at a small offset) when loaded this way instead -- a bug
     // inside NVIDIA's own closed-source plugin, not something tied to one specific file's JSON.
-    static constexpr const wchar_t* kSafeStreamlinePlugins[] = { L"sl.common.dll", L"sl.dlss_g.dll",
+    static constexpr const wchar_t* kSafeStreamlinePlugins[] = { L"sl.common.dll", L"sl.dlss.dll", L"sl.dlss_g.dll",
                                                                   L"sl.reflex.dll", L"sl.pcl.dll" };
 
     // Builds (or refreshes) a trimmed copy of the streamline folder containing only the plugins
@@ -369,8 +369,8 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         {
             minimalSlPathStr = ensureMinimalPluginFolder();
             LOG_WARN("StreamlineIgnoreOTA: caller declares SDK v{}.{} (OptiScaler/streamline built "
-                     "for v{}.{}) -- using only the known-safe plugin subset (sl.common, sl.dlss_g, "
-                     "sl.reflex, sl.pcl) for this caller instead of the full folder",
+                     "for v{}.{}) -- using only the known-safe plugin subset (sl.common, sl.dlss, "
+                     "sl.dlss_g, sl.reflex, sl.pcl) for this caller instead of the full folder",
                      callerSdkMajor, callerSdkMinor, SL_VERSION_MAJOR, SL_VERSION_MINOR);
             insertLocalPathOnce(minimalSlPathStr.c_str());
         }

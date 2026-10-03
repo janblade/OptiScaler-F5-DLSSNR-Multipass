@@ -951,7 +951,7 @@ class Config
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
     // Keeps Streamline from picking up the driver's OTA/downloaded plugins; only files in
     // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll
-    CustomOptional<bool> FGStreamlineIgnoreOTA { true };
+    CustomOptional<bool> FGStreamlineIgnoreOTA { false };
     CustomOptional<FGNvngxReplacement> FGNvngxReplacement { FGNvngxReplacement::None };
     CustomOptional<bool> FGDrawUIOverFG { false };
     CustomOptional<bool> FGUIPremultipliedAlpha { true };

@@ -184,8 +184,9 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
             pointNote = "The table of brightness points is full (8): delete one first.";
     };
     ImGui::Indent();
-    // Idle, running and result are different heights, and a run ends under the cursor: three lines are always reserved so
-    // the buttons below do not jump when it does. A long warning in the result still makes it taller.
+    // Running and result are different heights, and a run ends under the cursor: three lines are reserved from the moment
+    // one starts so the buttons below do not jump when it ends. Idle reserves nothing, so there is no blank stretch.
+    const bool tuneBusy = mine && (cal.running || cal.starting || cal.finished);
     const float tuneSlot = StatusSlotBegin();
 
     if ((cal.running || cal.starting) && mine)
@@ -364,7 +365,8 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         }
     }
 
-    StatusSlotEnd(tuneSlot, 3);
+    if (tuneBusy)
+        StatusSlotEnd(tuneSlot, 3);
     ImGui::Unindent();
 }
 
@@ -1008,81 +1010,85 @@ void RenderMenu(Config* config, float menuResScale)
             HelpMarker("Manual: use Paper white. Game exposure: use exposure supplied by the game.\nScanned exposure: estimate it from game buffers; requires calibration and may select the wrong buffer.\nAutomatic exposure: OptiScaler meters the linear HDR frame itself, so it needs nothing from the game.");
 
             // Availability, in colour, for the option currently chosen. Two lines at most, whichever source.
-            const float exposureSlot = StatusSlotBegin();
-            if (source == 1)
+            if (ImGui::TreeNode("Exposure readout##autoexposure"))
             {
-                if (!vk && ex.seenFrames == 0)
-                    ImGui::TextDisabled("Waiting for a frame...");
-                else if (!haveExposure)
-                    ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                                       "No game exposure available. Using manual paper white.");
-                else if (ex.exposure > 1e-6f)
+                const float exposureSlot = StatusSlotBegin();
+                if (source == 1)
                 {
-                    const float baseWhitePoint = ex.preExposure / ex.exposure;
-                    const auto trimAnchors =
-                        DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default());
-                    const float trim = DlssNrTrim::TrimForKey(
-                        baseWhitePoint, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
-                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                       "Game exposure %.4f  ->  model white at %.2f%s", ex.exposure,
-                                       baseWhitePoint * trim,
-                                       ex.offeredNow ? "" : "  (held: absent this frame)");
-                }
-                else
-                    ImGui::TextDisabled("Reading exposure...");
-            }
-            else if (source == 3)
-            {
-                const auto autoEx = vk ? DlssNr::AutoExposureStatusVk() : DlssNr::AutoExposureStatus();
-
-                if (autoEx.exposure > 1e-8f)
-                {
-                    const float baseWhitePoint = autoEx.preExposure / autoEx.exposure;
-                    const auto trimAnchors =
-                        DlssNrTrim::Parse(config->DlssNrAutoExposureTrimAnchors.value_or_default());
-                    const float trim = DlssNrTrim::TrimForKey(
-                        baseWhitePoint, DlssNr::AutoTrimEffective(*config), trimAnchors, false);
-                    // Middle-grey metering, mode 13 in dlssnr.hlsl: exposure = 0.18 / (0.82 * average scene brightness).
-                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                       "Scene brightness %.3f  ->  model white at %.2f",
-                                       0.18f / (0.82f * autoEx.exposure), baseWhitePoint * trim);
-                    HelpMarker("Measured from the linear HDR frame before NR runs (raw exposure value shown below).\n"
-                               "Model white is the brightness level the picture is scaled to: anything at or above it counts as full white.");
-                    ImGui::TextDisabled("Automatic exposure %.4f", autoEx.exposure);
-                }
-                else
-                    ImGui::TextDisabled("Calculating automatic exposure...");
-            }
-            else if (source == 2)
-            {
-                // "Nothing found" and "found several, none of them moving" are different states,
-                // and this said the first for both. In GTA V the log carried eight candidates while
-                // the panel claimed there were none, which reads as the scan being broken when what
-                // it actually needs is for the light to change.
-                if (anchorNow <= 0.0f)
-                {
-                    const unsigned int watching = (unsigned int) DlssNr::ExposureScan::Report().size();
-
-                    if (watching == 0)
+                    if (!vk && ex.seenFrames == 0)
+                        ImGui::TextDisabled("Waiting for a frame...");
+                    else if (!haveExposure)
                         ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                                           "No exposure candidates found.");
+                                           "No game exposure available. Using manual paper white.");
+                    else if (ex.exposure > 1e-6f)
+                    {
+                        const float baseWhitePoint = ex.preExposure / ex.exposure;
+                        const auto trimAnchors =
+                            DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default());
+                        const float trim = DlssNrTrim::TrimForKey(
+                            baseWhitePoint, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
+                        ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                                           "Game exposure %.4f  ->  model white at %.2f%s", ex.exposure,
+                                           baseWhitePoint * trim,
+                                           ex.offeredNow ? "" : "  (held: absent this frame)");
+                    }
                     else
-                        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                                           "%u candidates; move between bright and dark areas to test them.",
-                                           watching);
+                        ImGui::TextDisabled("Reading exposure...");
                 }
-                else if (!haveAnchor)
-                    ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
-                                       "Exposure candidate found. Adjust Paper white, then select Anchor here.");
-                // Once anchored, the scan -> white point readout sits above the sliders below; it is
-                // not repeated up here.
+                else if (source == 3)
+                {
+                    const auto autoEx = vk ? DlssNr::AutoExposureStatusVk() : DlssNr::AutoExposureStatus();
+
+                    if (autoEx.exposure > 1e-8f)
+                    {
+                        const float baseWhitePoint = autoEx.preExposure / autoEx.exposure;
+                        const auto trimAnchors =
+                            DlssNrTrim::Parse(config->DlssNrAutoExposureTrimAnchors.value_or_default());
+                        const float trim = DlssNrTrim::TrimForKey(
+                            baseWhitePoint, DlssNr::AutoTrimEffective(*config), trimAnchors, false);
+                        // Middle-grey metering, mode 13 in dlssnr.hlsl: exposure = 0.18 / (0.82 * average scene brightness).
+                        ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                                           "Scene brightness %.3f  ->  model white at %.2f",
+                                           0.18f / (0.82f * autoEx.exposure), baseWhitePoint * trim);
+                        HelpMarker("Measured from the linear HDR frame before NR runs (raw exposure value shown below).\n"
+                                   "Model white is the brightness level the picture is scaled to: anything at or above it counts as full white.");
+                        ImGui::TextDisabled("Automatic exposure %.4f", autoEx.exposure);
+                    }
+                    else
+                        ImGui::TextDisabled("Calculating automatic exposure...");
+                }
+                else if (source == 2)
+                {
+                    // "Nothing found" and "found several, none of them moving" are different states,
+                    // and this said the first for both. In GTA V the log carried eight candidates while
+                    // the panel claimed there were none, which reads as the scan being broken when what
+                    // it actually needs is for the light to change.
+                    if (anchorNow <= 0.0f)
+                    {
+                        const unsigned int watching = (unsigned int) DlssNr::ExposureScan::Report().size();
+
+                        if (watching == 0)
+                            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                               "No exposure candidates found.");
+                        else
+                            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                               "%u candidates; move between bright and dark areas to test them.",
+                                               watching);
+                    }
+                    else if (!haveAnchor)
+                        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                           "Exposure candidate found. Adjust Paper white, then select Anchor here.");
+                    // Once anchored, the scan -> white point readout sits above the sliders below; it is
+                    // not repeated up here.
+                }
+                else if (haveExposure)
+                {
+                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                                       "Game exposure is available.");
+                }
+                StatusSlotEnd(exposureSlot, 2);
+                ImGui::TreePop();
             }
-            else if (haveExposure)
-            {
-                ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                   "Game exposure is available.");
-            }
-            StatusSlotEnd(exposureSlot, 2);
         }
 
 
@@ -1272,49 +1278,53 @@ void RenderMenu(Config* config, float menuResScale)
                         followVk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus();
                     const auto& calibration = DlssNrFollowGame::Instance();
                     ImGui::Indent();
-                    const float followSlot = StatusSlotBegin();
-
-                    if (!followStatus.gameExposureSeen)
-                        ImGui::TextDisabled("Not available yet: no exposure from the game");
-                    else if (!calibration.Locked())
-                        ImGui::TextDisabled("Learning the calibration... (%u/%u)", calibration.Readings(),
-                                            DlssNrFollowGame::kWindow);
-                    else
-                        ImGui::TextDisabled("Calibration %+.2f EV against the game's exposure%s", calibration.OffsetEv(),
-                                            followStatus.following ? "; following" : "; not following");
-
-                    // The calibration eases toward Automatic when the two stay apart (DlssNr_FollowGame.h Track), so a
-                    // large disagreement is usually on its way out; say which, wrapped (it ran off the panel before).
-                    // The warning shows above the limit and stays until the disagreement is well under it: it changes every
-                    // frame, and hovering at the limit made the warning (and everything below it) flicker.
-                    static bool disagreementShown = false;
-                    const float disagreement = std::fabs(followStatus.disagreementEv);
-                    const float limit = DlssNrExposureCalibrate::kFollowDisagreementLimitEv;
-                    disagreementShown = disagreement > limit || (disagreementShown && disagreement > 0.75f * limit);
-
-                    if (followStatus.following && calibration.Locked() && calibration.Easing())
+                    if (ImGui::TreeNode("Follow status##autoexposure"))
                     {
-                        ImGui::PushTextWrapPos(0.0f);
-                        ImGui::TextDisabled("Easing the calibration toward Automatic's own exposure (%+.1f EV apart).",
-                                            followStatus.disagreementEv);
-                        ImGui::PopTextWrapPos();
-                    }
-                    else if (disagreementShown)
-                    {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
-                        // Easing is off in a game whose own exposure moves (DlssNr_FollowGame.h): then only Re-learn.
-                        if (calibration.GameMoves())
-                            ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. Re-learn in an ordinary scene if "
-                                               "the picture looks too bright or too dark.",
-                                               followStatus.disagreementEv);
+                        const float followSlot = StatusSlotBegin();
+
+                        if (!followStatus.gameExposureSeen)
+                            ImGui::TextDisabled("Not available yet: no exposure from the game");
+                        else if (!calibration.Locked())
+                            ImGui::TextDisabled("Learning the calibration... (%u/%u)", calibration.Readings(),
+                                                DlssNrFollowGame::kWindow);
                         else
-                            ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. It eases back by itself if this "
-                                               "lasts; Re-learn to start over in an ordinary scene.",
-                                               followStatus.disagreementEv);
-                        ImGui::PopStyleColor();
-                    }
+                            ImGui::TextDisabled("Calibration %+.2f EV against the game's exposure%s", calibration.OffsetEv(),
+                                                followStatus.following ? "; following" : "; not following");
 
-                    StatusSlotEnd(followSlot, 4);
+                        // The calibration eases toward Automatic when the two stay apart (DlssNr_FollowGame.h Track), so a
+                        // large disagreement is usually on its way out; say which, wrapped (it ran off the panel before).
+                        // The warning shows above the limit and stays until the disagreement is well under it: it changes every
+                        // frame, and hovering at the limit made the warning (and everything below it) flicker.
+                        static bool disagreementShown = false;
+                        const float disagreement = std::fabs(followStatus.disagreementEv);
+                        const float limit = DlssNrExposureCalibrate::kFollowDisagreementLimitEv;
+                        disagreementShown = disagreement > limit || (disagreementShown && disagreement > 0.75f * limit);
+
+                        if (followStatus.following && calibration.Locked() && calibration.Easing())
+                        {
+                            ImGui::PushTextWrapPos(0.0f);
+                            ImGui::TextDisabled("Easing the calibration toward Automatic's own exposure (%+.1f EV apart).",
+                                                followStatus.disagreementEv);
+                            ImGui::PopTextWrapPos();
+                        }
+                        else if (disagreementShown)
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+                            // Easing is off in a game whose own exposure moves (DlssNr_FollowGame.h): then only Re-learn.
+                            if (calibration.GameMoves())
+                                ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. Re-learn in an ordinary scene if "
+                                                   "the picture looks too bright or too dark.",
+                                                   followStatus.disagreementEv);
+                            else
+                                ImGui::TextWrapped("%+.1f EV off Automatic's own exposure. It eases back by itself if this "
+                                                   "lasts; Re-learn to start over in an ordinary scene.",
+                                                   followStatus.disagreementEv);
+                            ImGui::PopStyleColor();
+                        }
+
+                        StatusSlotEnd(followSlot, 4);
+                        ImGui::TreePop();
+                    }
 
                     // Learns the calibration again from scratch.
                     if (ImGui::SmallButton("Re-learn##autoexposure"))
@@ -1835,35 +1845,41 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TreePop();
             }
             const auto& status = detailReuseStatus;
-            // One line while it is not running, up to four while it is, and the last three come and go with the picture's
-            // motion: always four lines, so nothing below moves with the camera.
-            const float reuseSlot = StatusSlotBegin();
-            if (!status.why.empty())
-                ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
-            else
+            // Counters for tuning and bug reports, folded away by default so the menu is not left with a blank
+            // stretch while they are hidden. The slot inside keeps the lines below still while it is open.
+            if (ImGui::TreeNode("Statistics##detailReuse"))
             {
-                ImGui::Text("Full %llu | Reused %llu | Fallback %llu | %.0f fps", status.full,
-                            status.reused, status.fallback, status.baseFps);
-                if (status.held > 0 || status.holding)
+                // One line while it is not running, up to four while it is, and the last three come and go with the picture's
+                // motion: always four lines, so nothing below moves with the camera.
+                const float reuseSlot = StatusSlotBegin();
+                if (!status.why.empty())
+                    ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
+                else
                 {
-                    if (status.holding)
-                        ImGui::TextUnformatted("Reuse: paused while moving fast");
-                    if (status.dropped >= 0.0f)
-                        ImGui::TextDisabled("%.0f%% of the last measured frame had no detail to move; paused on %llu "
-                                            "frames so far",
-                                            100.0f * status.dropped, status.held);
-                    else
-                        ImGui::TextDisabled("paused on %llu frames so far", status.held);
+                    ImGui::Text("Full %llu | Reused %llu | Fallback %llu | %.0f fps", status.full,
+                                status.reused, status.fallback, status.baseFps);
+                    if (status.held > 0 || status.holding)
+                    {
+                        if (status.holding)
+                            ImGui::TextUnformatted("Reuse: paused while moving fast");
+                        if (status.dropped >= 0.0f)
+                            ImGui::TextDisabled("%.0f%% of the last measured frame had no detail to move; paused on %llu "
+                                                "frames so far",
+                                                100.0f * status.dropped, status.held);
+                        else
+                            ImGui::TextDisabled("paused on %llu frames so far", status.held);
+                    }
+                    if (status.heavyMs > 0.0)
+                    {
+                        ImGui::Text("NR GPU: %.2f ms avg (%.2f to %.2f)", status.averageMs,
+                                    status.lightMs, status.heavyMs);
+                        HelpMarker("Full and reused frames cost differently, so the game's frame times alternate. If "
+                                   "motion judders, a frame limiter just below the average frame rate evens them out.");
+                    }
                 }
-                if (status.heavyMs > 0.0)
-                {
-                    ImGui::Text("NR GPU: %.2f ms avg (%.2f to %.2f)", status.averageMs,
-                                status.lightMs, status.heavyMs);
-                    HelpMarker("Full and reused frames cost differently, so the game's frame times alternate. If "
-                               "motion judders, a frame limiter just below the average frame rate evens them out.");
-                }
+                StatusSlotEnd(reuseSlot, 4);
+                ImGui::TreePop();
             }
-            StatusSlotEnd(reuseSlot, 4);
         }
         if (precisionChoice > 0 && DlssNr::IsRunningVk())
         {
@@ -2059,18 +2075,22 @@ void RenderMenu(Config* config, float menuResScale)
 
             const auto status = DlssNr::ReadColourEncodingStatus();
             // The line and the warning are wrapped and the warning comes and goes with the detected format: a fixed slot.
-            const float encodingSlot = StatusSlotBegin();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", status.line.c_str());
-            ImGui::PopStyleColor();
-            if (!status.warning.empty())
+            if (ImGui::TreeNode("Detected format##colourEncoding"))
             {
-                // Wrapped: the sentence is longer than the menu is wide.
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
-                ImGui::TextWrapped("%s", status.warning.c_str());
+                const float encodingSlot = StatusSlotBegin();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("%s", status.line.c_str());
                 ImGui::PopStyleColor();
+                if (!status.warning.empty())
+                {
+                    // Wrapped: the sentence is longer than the menu is wide.
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                    ImGui::TextWrapped("%s", status.warning.c_str());
+                    ImGui::PopStyleColor();
+                }
+                StatusSlotEnd(encodingSlot, 5);
+                ImGui::TreePop();
             }
-            StatusSlotEnd(encodingSlot, 5);
         }
 
         // Experimental. 0 off (soft knee), 1 Reversible curve + our composition, 2 Reversible curve +

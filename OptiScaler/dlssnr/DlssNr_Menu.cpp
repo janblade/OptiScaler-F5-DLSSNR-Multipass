@@ -16,6 +16,7 @@
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ColourEncoding.h>
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 #include "DlssNr_ColourEncodingStatus.h"
@@ -46,6 +47,21 @@ static bool HaveGameExposure()
 }
 
 static void HelpMarker(const char* tip);
+
+// A stretch of the menu that shows status text which comes and goes, or re-wraps as it changes (a warning that appears, a
+// line that only shows while something is happening). Without a slot everything below it moves when that happens, and a click
+// aimed at a button lands on the next control. The slot takes `lines` lines of height whatever is in it: text drawn between
+// Begin and End that needs less is padded to that, more simply grows (rare, and then it is the text that decided).
+static float StatusSlotBegin() { return ImGui::GetCursorPosY(); }
+
+static void StatusSlotEnd(float begin, int lines)
+{
+    const float target = begin + (float) lines * ImGui::GetTextLineHeightWithSpacing();
+    const float gap = target - ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y;
+
+    if (gap > 0.5f)
+        ImGui::Dummy(ImVec2(0.0f, gap));
+}
 
 // Trim multiplies the white point, so a larger Trim darkens the picture NR is shown. The menu shows it in stops
 // instead, the other way round (+ = brighter) and centred on each source's own default, which reads as 0 EV.
@@ -92,8 +108,53 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
     HelpMarker(tip);
 
     if (anchorCount > 0)
-        ImGui::TextDisabled("%u brightness anchor point(s) from the ini are in use; the slider has no effect while they exist.",
+        ImGui::TextDisabled("%u brightness point(s) are in use (below); the slider has no effect while they exist.",
                             (unsigned int) anchorCount);
+}
+
+// The brightness points of one exposure source (the ini's Trim anchors, "base white point:Trim;"): where Tune's results are
+// saved. Each is the Model input brightness to use when the scene is as bright as it was at the Tune, blended in between
+// and held beyond the first and last. A row per point with its own delete, and one button for them all.
+static void RenderBrightnessPoints(CustomOptional<std::string>& table, float neutral, const char* idSuffix)
+{
+    std::string text = table.value_or_default();
+    const auto points = DlssNrTrim::Parse(text);
+
+    if (points.empty())
+        return;
+
+    ImGui::Indent();
+
+    if (ImGui::TreeNode((std::string("Brightness points##") + idSuffix).c_str()))
+    {
+        size_t remove = points.size();
+
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            ImGui::Text("Scene brightness %.4g: %+.1f EV", points[i].key, DlssNrExposureCalibrate::Tidy(TrimToEv(points[i].trim, neutral)));
+            ImGui::SameLine();
+
+            if (ImGui::SmallButton((std::string("Delete##") + idSuffix + std::to_string(i)).c_str()))
+                remove = i;
+        }
+
+        if (ImGui::SmallButton((std::string("Clear all points##") + idSuffix).c_str()))
+            table = std::string();
+        else if (remove < points.size())
+        {
+            DlssNrTrim::RemovePoint(text, remove);
+            table = text;
+        }
+
+        HelpMarker("Each point is the Model input brightness Tune found for a scene this bright. Automatic uses the"
+                   "\nnearest points, blended smoothly between two, so tune once in a bright scene and once in a dark one."
+                   "\nTune again in the same brightness (within 2%) to replace a point. Eight points at most."
+                   "\nWith no points the Model input brightness slider applies again."
+                   "\nA point belongs to the meter it was tuned with: after switching Meter, tune again.");
+        ImGui::TreePop();
+    }
+
+    ImGui::Unindent();
 }
 
 // "Tune for this scene" (shaders/dlssnr/DlssNr_ExposureCalibrate.h), under a brightness slider: sweeps it over the scene
@@ -101,13 +162,31 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
 // the slider it sets, a SmallButton like the other actions here. D3D12 and Vulkan. `source` is the panel's white point source
 // (3 Automatic, 1 Game exposure), `trim` / `neutral` its slider. Named apart from Follow-game's "Re-learn", which is a
 // different calibration.
-static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral)
+static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral,
+                                   CustomOptional<std::string>& table)
 {
     const auto cal = DlssNr::ExposureCalibration();
     // A result belongs to the panel it was tuned in: its EVs are in that slider's units. A Measure detail run is shown
     // under Compare instead.
     const bool mine = cal.source == source && !cal.measure;
+    const bool havePoints = !DlssNrTrim::Parse(table.value_or_default()).empty();
+    // Where a result goes: with brightness points the slider is not in force, so it is saved as a point; without any it is
+    // applied to the slider, as before, and "Save as point" starts a table.
+    static std::string pointNote;
+    const auto savePoint = [&](float ev)
+    {
+        std::string text = table.value_or_default();
+        pointNote.clear();
+
+        if (DlssNrTrim::AddPoint(text, cal.baseWhitePoint, EvToTrim(ev, neutral)))
+            table = text;
+        else
+            pointNote = "The table of brightness points is full (8): delete one first.";
+    };
     ImGui::Indent();
+    // Idle, running and result are different heights, and a run ends under the cursor: three lines are always reserved so
+    // the buttons below do not jump when it does. A long warning in the result still makes it taller.
+    const float tuneSlot = StatusSlotBegin();
 
     if ((cal.running || cal.starting) && mine)
     {
@@ -162,17 +241,44 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                                cal.resultEv, cal.currentEv);
             ImGui::SameLine();
 
-            if (ImGui::SmallButton("Apply##tune"))
+            if (havePoints)
             {
-                trim = EvToTrim(cal.resultEv, neutral);
-                DlssNr::DismissExposureCalibration();
+                if (ImGui::SmallButton("Save as point##tune"))
+                {
+                    savePoint(cal.resultEv);
+                    if (pointNote.empty())
+                        DlssNr::DismissExposureCalibration();
+                }
             }
+            else
+            {
+                if (ImGui::SmallButton("Apply##tune"))
+                {
+                    trim = EvToTrim(cal.resultEv, neutral);
+                    DlssNr::DismissExposureCalibration();
+                }
+
+                ImGui::SameLine();
+
+                if (ImGui::SmallButton("Save as point##tune"))
+                {
+                    savePoint(cal.resultEv);
+                    if (pointNote.empty())
+                        DlssNr::DismissExposureCalibration();
+                }
+            }
+
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", "Keeps this result for scenes about this bright and blends toward other points, instead of one value for every scene.");
         }
         else
         {
             ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "Best here: %+.1f EV, as it is now.",
                                cal.currentEv);
         }
+
+        if (!pointNote.empty())
+            warning(pointNote.c_str());
 
         if (!ownLine)
             ImGui::SameLine();
@@ -209,10 +315,15 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
             // would be a single-pass answer from a run that promised two.
             ImGui::BeginDisabled(cal.unsure || cal.unrepeated || !cal.rawAgreed);
 
-            if (ImGui::SmallButton("Apply raw instead##tune"))
+            if (ImGui::SmallButton(havePoints ? "Save raw as point instead##tune" : "Apply raw instead##tune"))
             {
-                trim = EvToTrim(cal.bestRawEv, neutral);
-                DlssNr::DismissExposureCalibration();
+                if (havePoints)
+                    savePoint(cal.bestRawEv);
+                else
+                    trim = EvToTrim(cal.bestRawEv, neutral);
+
+                if (pointNote.empty())
+                    DlssNr::DismissExposureCalibration();
             }
 
             ImGui::EndDisabled();
@@ -231,7 +342,7 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         HelpMarker("Finds the Model input brightness above that gives NR the most detail on the scene on screen."
                    "\nTries the slider across its useful range twice over, about 12 frames a step, and checks each step"
                    "\nfor detail, flicker and clipping, offering a change only when both sweeps agree. Hold the camera still while it runs: the picture gets brighter"
-                   "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
+                   "\nand darker on purpose. Nothing changes until you press Apply or Save as point. The result is an offset on the"
                    "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
                    "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
                    "\nholds for any number of passes. With Follow the game's exposure on, it tunes against Automatic's"
@@ -253,6 +364,7 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         }
     }
 
+    StatusSlotEnd(tuneSlot, 3);
     ImGui::Unindent();
 }
 
@@ -895,7 +1007,8 @@ void RenderMenu(Config* config, float menuResScale)
 
             HelpMarker("Manual: use Paper white. Game exposure: use exposure supplied by the game.\nScanned exposure: estimate it from game buffers; requires calibration and may select the wrong buffer.\nAutomatic exposure: OptiScaler meters the linear HDR frame itself, so it needs nothing from the game.");
 
-            // Availability, in colour, for the option currently chosen.
+            // Availability, in colour, for the option currently chosen. Two lines at most, whichever source.
+            const float exposureSlot = StatusSlotBegin();
             if (source == 1)
             {
                 if (!vk && ex.seenFrames == 0)
@@ -969,6 +1082,7 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
                                    "Game exposure is available.");
             }
+            StatusSlotEnd(exposureSlot, 2);
         }
 
 
@@ -1106,7 +1220,10 @@ void RenderMenu(Config* config, float menuResScale)
                                "Brightness of the picture handed to NR, relative to the exposure the game reports."
                                "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
                                "\nToo bright clips highlights; too dark hides shadow detail.");
-            RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim);
+            RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
+                                   config->DlssNrGameExposureTrimAnchors);
+            RenderBrightnessPoints(config->DlssNrGameExposureTrimAnchors, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
+                                   "gameexposure");
         }
         else if (wpSource == 3)
         {
@@ -1123,7 +1240,10 @@ void RenderMenu(Config* config, float menuResScale)
                                "\nAutomatic exposure is available on D3D12 and Vulkan.",
                                DlssNrAutoTrim::kDefaultTrim);
 
-            RenderTuneForThisScene(3, config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim);
+            RenderTuneForThisScene(3, config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim,
+                                   config->DlssNrAutoExposureTrimAnchors);
+            RenderBrightnessPoints(config->DlssNrAutoExposureTrimAnchors, DlssNrExposureCalibrate::kNeutralTrim,
+                                   "autoexposure");
 
             // Following the game's own exposure (DlssNr_FollowGame.h): on by default for a known unexposed game
             // (DlssNr_GameDefaults.h). Vulkan follows from the host value, a few frames behind the game.
@@ -1152,6 +1272,7 @@ void RenderMenu(Config* config, float menuResScale)
                         followVk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus();
                     const auto& calibration = DlssNrFollowGame::Instance();
                     ImGui::Indent();
+                    const float followSlot = StatusSlotBegin();
 
                     if (!followStatus.gameExposureSeen)
                         ImGui::TextDisabled("Not available yet: no exposure from the game");
@@ -1164,6 +1285,13 @@ void RenderMenu(Config* config, float menuResScale)
 
                     // The calibration eases toward Automatic when the two stay apart (DlssNr_FollowGame.h Track), so a
                     // large disagreement is usually on its way out; say which, wrapped (it ran off the panel before).
+                    // The warning shows above the limit and stays until the disagreement is well under it: it changes every
+                    // frame, and hovering at the limit made the warning (and everything below it) flicker.
+                    static bool disagreementShown = false;
+                    const float disagreement = std::fabs(followStatus.disagreementEv);
+                    const float limit = DlssNrExposureCalibrate::kFollowDisagreementLimitEv;
+                    disagreementShown = disagreement > limit || (disagreementShown && disagreement > 0.75f * limit);
+
                     if (followStatus.following && calibration.Locked() && calibration.Easing())
                     {
                         ImGui::PushTextWrapPos(0.0f);
@@ -1171,7 +1299,7 @@ void RenderMenu(Config* config, float menuResScale)
                                             followStatus.disagreementEv);
                         ImGui::PopTextWrapPos();
                     }
-                    else if (std::fabs(followStatus.disagreementEv) > DlssNrExposureCalibrate::kFollowDisagreementLimitEv)
+                    else if (disagreementShown)
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
                         // Easing is off in a game whose own exposure moves (DlssNr_FollowGame.h): then only Re-learn.
@@ -1185,6 +1313,8 @@ void RenderMenu(Config* config, float menuResScale)
                                                followStatus.disagreementEv);
                         ImGui::PopStyleColor();
                     }
+
+                    StatusSlotEnd(followSlot, 4);
 
                     // Learns the calibration again from scratch.
                     if (ImGui::SmallButton("Re-learn##autoexposure"))
@@ -1201,26 +1331,66 @@ void RenderMenu(Config* config, float menuResScale)
                 }
             }
 
-            float protection = config->DlssNrAutoExposureShadowProtection.value_or_default();
-            if (ImGui::SliderFloat("Ignore bright highlights", &protection, 0.0f, 100.0f, "%.0f%%"))
-                config->DlssNrAutoExposureShadowProtection = std::clamp(protection, 0.0f, 100.0f);
+            static const char* const meterNames[] = { "Average", "Percentile (log)" };
+            int meter = std::min<int>((int) config->DlssNrAutoExposureMeter.value_or_default(), 1);
 
-            HelpMarker("Stops the sky, lamps and reflections from darkening the rest of the picture."
-                       "\n0% averages the whole frame as it is; 100% counts bright areas the least."
-                       "\nBlack bars and black borders are always left out.");
+            if (ImGui::Combo("Meter", &meter, meterNames, IM_ARRAYSIZE(meterNames)))
+                config->DlssNrAutoExposureMeter = (uint32_t) meter;
+
+            HelpMarker("How the scene's brightness is read.\nAverage: the plain average of the frame with the brightest"
+                       "\nareas counted less (Ignore bright highlights).\nPercentile (log): the log-average of the picture"
+                       "\nbetween two brightness percentiles, as Unreal and Unity meter. A lamp or the sky cannot pull it"
+                       "\nup, and the darkest and brightest tails are left out. It reads about"
+                       "\ndifferently from Average, so re-check Model input brightness after switching.");
+
+            if (meter == (int) DlssNrExposureMeter::kPercentile)
+            {
+                float low = config->DlssNrAutoExposureMeterLowPercent.value_or_default();
+                float high = config->DlssNrAutoExposureMeterHighPercent.value_or_default();
+
+                if (ImGui::SliderFloat("Ignore darkest", &low, 0.0f, 50.0f, "%.0f%%"))
+                    config->DlssNrAutoExposureMeterLowPercent = std::clamp(low, 0.0f, 50.0f);
+
+                HelpMarker("The darkest share of the picture left out of the reading. Default 10%.");
+
+                if (ImGui::SliderFloat("Ignore brightest", &high, 50.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrAutoExposureMeterHighPercent = std::clamp(high, 50.0f, 100.0f);
+
+                HelpMarker("The brightest share of the picture is whatever lies above this percentile and is left out. Default 90%.");
+            }
+            else
+            {
+                float protection = config->DlssNrAutoExposureShadowProtection.value_or_default();
+                if (ImGui::SliderFloat("Ignore bright highlights", &protection, 0.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrAutoExposureShadowProtection = std::clamp(protection, 0.0f, 100.0f);
+
+                HelpMarker("Stops the sky, lamps and reflections from darkening the rest of the picture."
+                           "\n0% averages the whole frame as it is; 100% counts bright areas the least."
+                           "\nBlack bars and black borders are always left out.");
+            }
 
             // DlssNr_ExposureAdapt.h: a pass of its own on D3D12 and Vulkan.
-            float adapt = DlssNrExposureAdapt::Seconds(config->DlssNrAutoExposureAdaptSeconds.value_or_default());
+            float adaptBrighter = DlssNrExposureAdapt::Seconds(
+                config->DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(), DlssNrExposureAdapt::kDefaultBrighterSeconds);
+            float adaptDarker = DlssNrExposureAdapt::Seconds(config->DlssNrAutoExposureAdaptDarkerSeconds.value_or_default());
 
-            if (ImGui::SliderFloat("Eye adaptation", &adapt, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
-                                   adapt > 0.0f ? "%.2f s" : "off"))
-                config->DlssNrAutoExposureAdaptSeconds = DlssNrExposureAdapt::Seconds(adapt);
+            if (ImGui::SliderFloat("Eye adaptation, to brighter", &adaptBrighter, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
+                                   adaptBrighter > 0.0f ? "%.2f s" : "off"))
+                config->DlssNrAutoExposureAdaptBrighterSeconds =
+                    DlssNrExposureAdapt::Seconds(adaptBrighter, DlssNrExposureAdapt::kDefaultBrighterSeconds);
 
-            HelpMarker("How quickly Automatic follows a change in the scene's brightness, like an eye adapting."
-                       "\nStops a camera zoom or a brief shot of a dark crowd or a bright floor from pumping"
-                       "\nthe brightness and tone of the picture. A cut the game announces is followed at once."
+            HelpMarker("How quickly Automatic follows the scene getting brighter, like an eye adapting."
+                       "\nStops a camera zoom or a brief shot of a bright floor from pumping the brightness and tone"
+                       "\nof the picture. A cut the game announces is followed at once."
                        "\nAbout two thirds of a change is followed after this long. Off follows every frame at once."
                        "\nNot used while following the game's exposure: the game's own adapts.");
+
+            if (ImGui::SliderFloat("Eye adaptation, to darker", &adaptDarker, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
+                                   adaptDarker > 0.0f ? "%.2f s" : "off"))
+                config->DlssNrAutoExposureAdaptDarkerSeconds = DlssNrExposureAdapt::Seconds(adaptDarker);
+
+            HelpMarker("The same for the scene getting darker. Slower than brighter by default: an eye adapts to dark"
+                       "\nmore slowly than to light, and a quick flash should not darken the picture for long.");
         }
         else
         {
@@ -1665,11 +1835,14 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TreePop();
             }
             const auto& status = detailReuseStatus;
+            // One line while it is not running, up to four while it is, and the last three come and go with the picture's
+            // motion: always four lines, so nothing below moves with the camera.
+            const float reuseSlot = StatusSlotBegin();
             if (!status.why.empty())
                 ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
             else
             {
-                ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu   Rendered: %.0f fps", status.full,
+                ImGui::Text("Full %llu | Reused %llu | Fallback %llu | %.0f fps", status.full,
                             status.reused, status.fallback, status.baseFps);
                 if (status.held > 0 || status.holding)
                 {
@@ -1684,12 +1857,13 @@ void RenderMenu(Config* config, float menuResScale)
                 }
                 if (status.heavyMs > 0.0)
                 {
-                    ImGui::Text("NR GPU time per frame: %.2f ms on average, %.2f to %.2f ms", status.averageMs,
+                    ImGui::Text("NR GPU: %.2f ms avg (%.2f to %.2f)", status.averageMs,
                                 status.lightMs, status.heavyMs);
                     HelpMarker("Full and reused frames cost differently, so the game's frame times alternate. If "
                                "motion judders, a frame limiter just below the average frame rate evens them out.");
                 }
             }
+            StatusSlotEnd(reuseSlot, 4);
         }
         if (precisionChoice > 0 && DlssNr::IsRunningVk())
         {
@@ -1884,6 +2058,8 @@ void RenderMenu(Config* config, float menuResScale)
                        "2.2 and PQ are converted for the model and back.");
 
             const auto status = DlssNr::ReadColourEncodingStatus();
+            // The line and the warning are wrapped and the warning comes and goes with the detected format: a fixed slot.
+            const float encodingSlot = StatusSlotBegin();
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             ImGui::TextWrapped("%s", status.line.c_str());
             ImGui::PopStyleColor();
@@ -1894,6 +2070,7 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TextWrapped("%s", status.warning.c_str());
                 ImGui::PopStyleColor();
             }
+            StatusSlotEnd(encodingSlot, 5);
         }
 
         // Experimental. 0 off (soft knee), 1 Reversible curve + our composition, 2 Reversible curve +

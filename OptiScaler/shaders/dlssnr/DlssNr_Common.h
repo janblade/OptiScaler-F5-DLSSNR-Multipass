@@ -324,6 +324,16 @@ struct alignas(256) DlssNrConstants
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 
+// The reduce dispatch (DlssNrMode_AutoExposure) has no use for the Trim fields, so the meter's choice rides in them: the
+// percentile meter is ExposureTrimAnchorCount == 1, ExposureTrimAnchorExposure0 its low percent and
+// ExposureTrimAnchorTrim0 its high percent (dlssnr.hlsl, DlssNr_ExposureMeter.h). Anything else is the plain mean.
+inline void SetAutoExposureMeter(DlssNrConstants& params, bool percentile, float lowPercent, float highPercent)
+{
+    params.ExposureTrimAnchorCount = percentile ? 1u : 0u;
+    params.ExposureTrimAnchorExposure0 = percentile ? lowPercent : 0.0f;
+    params.ExposureTrimAnchorTrim0 = percentile ? highPercent : 0.0f;
+}
+
 class DlssNr_Common
 {
   protected:

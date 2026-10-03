@@ -1041,18 +1041,12 @@ int main()
         t.followLocked = true;
         CHECK(Availability(t) == Blocker::None);
         CHECK(!RelearnFollowOnStart(t));
-        t = autoOk;
-        t.anchors = true;
-        CHECK(Availability(t) == Blocker::Anchors);
         t = gameOk;
         t.gameExposureNow = false;
         CHECK(Availability(t) == Blocker::NoGameExposure);
         t = gameOk;
         t.gameExposureReading = false;
         CHECK(Availability(t) == Blocker::NoGameExposure);
-        t = gameOk;
-        t.anchors = true;
-        CHECK(Availability(t) == Blocker::Anchors);
         t = gameOk;
         t.followLocked = true; // Follow belongs to Automatic; it does not block Game exposure
         CHECK(Availability(t) == Blocker::None);
@@ -1195,7 +1189,7 @@ int main()
             gpu.now = &evaluation;
             int started = 0, finished = 0, relearns = 0;
             Situation blocked = ok;
-            blocked.anchors = true;
+            blocked.hdr = false;
             IdleFrame(run, ms);
             RequestStart(run, 3);
             drive(run, gpu, evaluation, ms, 3, true, started, finished, relearns, blocked);
@@ -1247,7 +1241,7 @@ int main()
         }
 
         // Measure detail: every evaluation measured (the ring never runs out), the white point never pinned, Follow
-        // not re-learned, Trim anchors not in the way; the result kept beside the one before it.
+        // not re-learned; the result kept beside the one before it.
         {
             RunState run;
             FakeGpu gpu;
@@ -1257,7 +1251,6 @@ int main()
             int started = 0, finished = 0, relearns = 0;
             Situation s = ok;
             s.followLocked = true;
-            s.anchors = true;
             IdleFrame(run, ms);
             RequestMeasure(run);
             drive(run, gpu, evaluation, ms, 200, true, started, finished, relearns, s);
@@ -1287,10 +1280,10 @@ int main()
             drive(run, gpu, evaluation, ms, 40, true, started, finished, relearns, ok);
             CHECK(!run.active.load() && !HoldsFollow(run, ms));
 
-            // A Tune after it is a Tune again: pinned, and the anchors stop it.
+            // A Tune after it is a Tune again: it starts, and the measure is over.
             RequestStart(run, 3);
             drive(run, gpu, evaluation, ms, 3, true, started, finished, relearns, s);
-            CHECK(!run.measuring && std::string(run.startError).size() > 0);
+            CHECK(!run.measuring && std::string(run.startError).empty());
         }
 
         // A Tune result still offered (Apply / Keep) is not cleared by a measure; once dismissed, a measure starts.
@@ -1387,7 +1380,7 @@ int main()
             int started = 0, finished = 0, relearns = 0;
             Situation blocked = ok;
             blocked.beforeSrSet = true;
-            blocked.anchors = true;
+            blocked.hdr = false;
             IdleFrame(run, t);
             RequestStart(run, 3);
             drive(run, gpu, evaluation, t, 1, true, started, finished, relearns, blocked);
@@ -1511,13 +1504,12 @@ int main()
         CHECK(moved.size() == 1 && NoteText(moved[0], true).find("DLSS-NR measure: the picture moved") == 0);
         CHECK(NoteText(moved[0]).find("DLSS-NR calibrate:") == 0);
 
-        // Anchors stop a Tune, not a measure.
+        // Trim anchors stop nothing: a Tune's result becomes a point on the table.
         Situation a {};
         a.source = 3;
         a.hdr = true;
         a.autoRunning = true;
-        a.anchors = true;
-        CHECK(Availability(a) == Blocker::Anchors && Availability(a, true) == Blocker::None);
+        CHECK(Availability(a) == Blocker::None);
     }
 
     // NR's output noisier than the game's input (Reuse alternating, a noisy still), no real trend, the input bit-identical

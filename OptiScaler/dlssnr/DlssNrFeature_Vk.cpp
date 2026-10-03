@@ -15,6 +15,7 @@
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
@@ -864,10 +865,13 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                  "following the game's exposure: {}",
                                  autoBase,
                                  g_vk.meterHasRaw[readSlot]
-                                     ? std::format(" (exposure {:.5g}, eye adaptation {:.1f} s, meter reading {:.5g})",
+                                     ? std::format(" (exposure {:.5g}, eye adaptation {:.1f} s brighter / {:.1f} s darker, meter reading {:.5g})",
                                                    g_vk.autoExposureValue,
                                                    DlssNrExposureAdapt::Seconds(
-                                                       cfg.DlssNrAutoExposureAdaptSeconds.value_or_default()),
+                                                       cfg.DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(),
+                                                       DlssNrExposureAdapt::kDefaultBrighterSeconds),
+                                                   DlssNrExposureAdapt::Seconds(
+                                                       cfg.DlssNrAutoExposureAdaptDarkerSeconds.value_or_default()),
                                                    g_vk.autoExposureRawValue)
                                      : std::string(),
                                  paired ? g_vk.pairGameExposure : 0.0f, gameBase,
@@ -1478,14 +1482,19 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             reduce.ExposureSourceHeight = height;
             reduce.AutoExposureShadowProtection =
                 std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
+            SetAutoExposureMeter(reduce, cfg.DlssNrAutoExposureMeter.value_or_default() != DlssNrExposureMeter::kAverage,
+                                 cfg.DlssNrAutoExposureMeterLowPercent.value_or_default(),
+                                 cfg.DlssNrAutoExposureMeterHighPercent.value_or_default());
 
             // Eye adaptation (DlssNr_ExposureAdapt.h): the reading goes to autoExposureRaw and a one-texel pass eases
             // autoExposure toward it. Without that image or the pass, the reduce writes autoExposure itself, as
             // before; the frames it does so leave a gap the adapter snaps across.
-            const float adaptSeconds =
-                DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptSeconds.value_or_default());
-            const bool adapting =
-                adaptSeconds > 0.0f && g_vk.autoExposureRaw.Valid() && g_vk.pass->ExposureAdaptReady();
+            const float brighterSeconds = DlssNrExposureAdapt::Seconds(
+                cfg.DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(), DlssNrExposureAdapt::kDefaultBrighterSeconds);
+            const float darkerSeconds =
+                DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptDarkerSeconds.value_or_default());
+            const bool adapting = (brighterSeconds > 0.0f || darkerSeconds > 0.0f) && g_vk.autoExposureRaw.Valid() &&
+                                  g_vk.pass->ExposureAdaptReady();
 
             if (adapting)
                 Transition(cmdBuffer, g_vk.autoExposureRaw, VK_IMAGE_LAYOUT_GENERAL);
@@ -1503,15 +1512,15 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                     const double now =
                         std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                     const DlssNrExposureAdapt::Step step =
-                        g_vk.autoExposureAdapter.Next(g_vk.frames, now, adaptSeconds, g_vk.reset);
+                        g_vk.autoExposureAdapter.Next(g_vk.frames, now, brighterSeconds, darkerSeconds, g_vk.reset);
 
-                    // Overlays the first fields (dlssnr_exposure_adapt.hlsl): WhitePoint carries the blend, Width the
-                    // snap.
+                    // Overlays the first fields (dlssnr_exposure_adapt.hlsl): WhitePoint carries the brighter blend, Width
+                    // the snap, Height the darker blend.
                     DlssNrConstants adaptParams {};
                     adaptParams.Mode = DlssNrMode_AutoExposure;
-                    adaptParams.WhitePoint = step.blend;
+                    adaptParams.WhitePoint = step.blendBrighter;
                     adaptParams.Width = step.snap ? 1u : 0u;
-                    adaptParams.Height = 0u;
+                    adaptParams.Height = step.DarkerBits();
 
                     if (g_vk.pass->DispatchExposureAdapt(cmdBuffer, adaptParams, g_vk.autoExposureRaw.view,
                                                          g_vk.autoExposure.view))

@@ -6,8 +6,8 @@
 // (DlssNr_Vk::DispatchExposureAdapt: the reading in gSource's binding, the eased value in gTarget's). One thread: the
 // exposure is one texel.
 //
-// The law is DlssNrExposureAdapt::Ease, mirrored line for line; change them together. The host works out the blend
-// (1 - exp(-dt / tau)) and whether to snap, so the frame clock stays on the CPU.
+// The law is DlssNrExposureAdapt::Ease, mirrored line for line; change them together. The host works out the two
+// blends (1 - exp(-dt / tau), one per direction) and whether to snap, so the frame clock stays on the CPU.
 
 #ifdef VK_MODE
 [[vk::binding(0, 0)]]
@@ -16,9 +16,9 @@ cbuffer Params : register(b0)
 {
     // Overlays the first fields of DlssNrConstants: Mode, WhitePoint, Width, Height.
     uint mode;
-    float blend; // the share of the way to the reading this evaluation takes
-    uint snap;   // 1: take the reading at once (a cut, or the eased value is stale)
-    uint unused;
+    float blend;       // the share of the way to the reading when the scene got brighter (reading below the eased value)
+    uint snap;         // 1: take the reading at once (a cut, or the eased value is stale)
+    float blendDarker; // ... and when it got darker
 };
 
 #ifdef VK_MODE
@@ -49,7 +49,8 @@ void CSMain()
     }
     else
     {
-        const float t = isfinite(blend) ? saturate(blend) : 0.0;
+        const float b = reading < previous ? blend : blendDarker;
+        const float t = isfinite(b) ? saturate(b) : 0.0;
         eased = exp2(log2(previous) + (log2(reading) - log2(previous)) * t);
     }
 

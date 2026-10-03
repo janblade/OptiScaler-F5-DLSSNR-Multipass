@@ -216,12 +216,14 @@ try
 
     // ---- 1. the meter and the reduction ---------------------------------------------------------
     // Source luminance is dot(rgb, kLuma) and the weights sum to 1, so a grey of v has luminance v.
-    auto exposureOf = [&](VkClearColorValue grey, float preExposure, float protection) {
+    auto exposureOf = [&](VkClearColorValue grey, float preExposure, float protection, bool percentile = false,
+                          float low = 10.0f, float high = 90.0f) {
         std::vector<Clear> clears { { Frame, grey } };
         DlssNrConstants meter {}; meter.Mode = DlssNrMode_Meter; meter.Width = kGrid; meter.Height = kGrid; meter.MeterCopiesExposure = 0;
         DlssNrConstants reduce {}; reduce.Mode = DlssNrMode_AutoExposure; reduce.Width = 1; reduce.Height = 1;
         reduce.PreExposure = preExposure; reduce.ExposureSourceWidth = kFrame; reduce.ExposureSourceHeight = kFrame;
         reduce.AutoExposureShadowProtection = protection;
+        SetAutoExposureMeter(reduce, percentile, low, high);
         std::vector<Dispatch> dispatches {
             { meter, { Frame, Frame, Frame, Frame, Meter, Keep }, kGrid, kGrid },
             { reduce, { Meter, Meter, Meter, Meter, Exposure, Keep }, 1, 1 } };
@@ -234,8 +236,10 @@ try
     expect("uniform 0.4, pre 2, protection 100", exposureOf(rgb(0.4f), 2.0f, 100.0f), 0.18f / (0.2f * 0.82f), 0.01f);
     // a missing PreExposure falls back to 1: 0.18 / (0.4 * 0.82)
     expect("uniform 0.4, pre 0 (missing -> 1)", exposureOf(rgb(0.4f), 0.0f, 0.0f), 0.18f / (0.4f * 0.82f), 0.01f);
+    expect("percentile uniform 0.4, pre 2", exposureOf(rgb(0.4f), 2.0f, 0.0f, true), 0.18f / (0.2f * 0.82f), 0.02f);
+    expect("percentile black frame (no reading)", exposureOf(rgb(0.0f), 1.0f, 0.0f, true), 0.0f, 0.01f);
     // a black frame is not a division by zero
-    expect("black frame", exposureOf(rgb(0.0f), 1.0f, 0.0f), 1.0f, 0.01f);
+    expect("black frame (0 = no reading; it was 1 before the shader kept the last value instead)", exposureOf(rgb(0.0f), 1.0f, 0.0f), 0.0f, 0.01f);
 
     // Half the frame 0.1 (top) and half 4.0 (bottom): clear the frame to 0.1, then overwrite the lower
     // half with a buffer-to-image copy of 4.0.
@@ -245,7 +249,7 @@ try
         auto staging = buffer(bright.size() * sizeof(float), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         std::memcpy(staging.mapped, bright.data(), bright.size() * sizeof(float));
 
-        auto splitExposure = [&](float protection) {
+        auto splitExposure = [&](float protection, bool percentile = false, float low = 10.0f, float high = 90.0f) {
             check(vkResetDescriptorPool(device, pool, 0)); check(vkResetCommandPool(device, commandPool, 0));
             VkCommandBufferAllocateInfo cai { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
             cai.commandPool = commandPool; cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cai.commandBufferCount = 1;
@@ -265,6 +269,7 @@ try
             DlssNrConstants reduce {}; reduce.Mode = DlssNrMode_AutoExposure; reduce.Width = 1; reduce.Height = 1;
             reduce.PreExposure = 1.0f; reduce.ExposureSourceWidth = kFrame; reduce.ExposureSourceHeight = kFrame;
             reduce.AutoExposureShadowProtection = protection;
+            SetAutoExposureMeter(reduce, percentile, low, high);
             const DlssNrConstants list[2] = { meter, reduce };
             const Bind binds[2] = { { Frame, Frame, Frame, Frame, Meter, Keep }, { Meter, Meter, Meter, Meter, Exposure, Keep } };
             const uint32_t groups[2] = { kGrid, 1 };
@@ -309,6 +314,17 @@ try
         const float compressed = reference + 1.0f + ((std::log2(4.0f) - reference) - 1.0f) * 0.35f;
         const float protectedMean = (0.1f + std::exp2(compressed)) * 0.5f;
         expect("half 0.1 / half 4.0, protection 100", splitExposure(100.0f), 0.18f / (protectedMean * 0.82f), 0.01f);
+
+        // The percentile meter (DlssNr_ExposureMeter.h): the log-average between two percentiles of the 4096 tiles.
+        // Half the tiles at 0.1 and half at 4.0: the 10..90 window takes 1638 of each, so log2 luma is their mean.
+        const float logMean = std::exp2(reference);
+        expect("percentile 10..90, half 0.1 / half 4.0", splitExposure(0.0f, true, 10.0f, 90.0f), 0.18f / (logMean * 0.82f), 0.02f);
+        expect("percentile 0..100, half 0.1 / half 4.0", splitExposure(0.0f, true, 0.0f, 100.0f), 0.18f / (logMean * 0.82f), 0.02f);
+        // 0..30 sees only the dark half; 70..100 only the bright half.
+        expect("percentile 0..30, half 0.1 / half 4.0", splitExposure(0.0f, true, 0.0f, 30.0f), 0.18f / (0.1f * 0.82f), 0.02f);
+        expect("percentile 70..100, half 0.1 / half 4.0", splitExposure(0.0f, true, 70.0f, 100.0f), 0.18f / (4.0f * 0.82f), 0.02f);
+        // The plain meter is untouched by the new fields: protection 0 still reads the arithmetic mean.
+        expect("average meter unchanged", splitExposure(0.0f, false), 0.18f / (2.05f * 0.82f), 0.01f);
     }
 
     // ---- 2. the live white point --------------------------------------------------------------------

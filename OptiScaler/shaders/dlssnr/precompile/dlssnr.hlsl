@@ -883,6 +883,11 @@ float3 ApplyReplaceGuard(float3 v, float3 nativeOriginal, float referenceLuma, f
 // passes keep effectively the same occupancy.
 groupshared float4 gExposureReduce[64];
 
+// The percentile meter's histogram (DlssNr_ExposureMeter.h): per bin, how many tiles and the sum of their log2 brightness
+// as fixed point (1/1024 EV from -24 EV). Integer, so the lanes can add with InterlockedAdd.
+groupshared uint gMeterHistCount[64];
+groupshared uint gMeterHistSum[64];
+
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
@@ -1048,6 +1053,86 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         const float blackLevel = coreMean * exp2(-12.0);
 
         GroupMemoryBarrierWithGroupSync();
+
+        // The percentile meter (gExposureTrimAnchorCount == 1; the reduce dispatch has no use for the Trim fields, so the
+        // choice and the window ride in them: Exposure0 the low percent, Trim0 the high percent). The same grid and
+        // black-tile rule as below, a different statistic: the log-average of the tiles between two percentiles of
+        // brightness. DlssNrExposureMeter::PercentileSceneLuma is the host mirror; change them together. Every lane
+        // takes this branch or none does, so the barriers stay uniform.
+        if (gExposureTrimAnchorCount == 1u)
+        {
+            gMeterHistCount[lane] = 0u;
+            gMeterHistSum[lane] = 0u;
+            GroupMemoryBarrierWithGroupSync();
+
+            [loop] for (uint indexP = lane; indexP < 4096u; indexP += 64u)
+            {
+                const float tileP = max(SanitizeFinite(gSource.Load(int3(indexP & 63u, indexP >> 6u, 0)).r, 0.0), 0.0);
+
+                if (tileP <= blackLevel)
+                    continue;
+
+                const float evP = clamp(log2(max(tileP / preExposure, 1e-8)), -24.0, 24.0);
+                const uint binP = min((uint) ((evP + 24.0) * (64.0 / 48.0)), 63u);
+                InterlockedAdd(gMeterHistCount[binP], 1u);
+                InterlockedAdd(gMeterHistSum[binP], (uint) ((evP + 24.0) * 1024.0 + 0.5));
+            }
+
+            GroupMemoryBarrierWithGroupSync();
+
+            if (lane == 0u)
+            {
+                uint totalTiles = 0u;
+
+                [loop] for (uint bT = 0u; bT < 64u; ++bT)
+                    totalTiles += gMeterHistCount[bT];
+
+                float lowPercent = isfinite(gExposureTrimAnchorExposure0) ? clamp(gExposureTrimAnchorExposure0, 0.0, 100.0) : 10.0;
+                float highPercent = isfinite(gExposureTrimAnchorTrim0) ? clamp(gExposureTrimAnchorTrim0, 0.0, 100.0) : 90.0;
+
+                if (highPercent <= lowPercent)
+                {
+                    lowPercent = 0.0;
+                    highPercent = 100.0;
+                }
+
+                float windowLow = (float) totalTiles * lowPercent * 0.01;
+                float windowHigh = (float) totalTiles * highPercent * 0.01;
+
+                if (windowHigh - windowLow < 1.0)
+                {
+                    windowLow = 0.0;
+                    windowHigh = (float) totalTiles;
+                }
+
+                float cumulative = 0.0;
+                float windowWeight = 0.0;
+                float windowEv = 0.0;
+
+                [loop] for (uint bW = 0u; bW < 64u; ++bW)
+                {
+                    const float binCount = (float) gMeterHistCount[bW];
+                    const float from = max(cumulative, windowLow);
+                    const float to = min(cumulative + binCount, windowHigh);
+
+                    if (binCount > 0.0 && to > from)
+                    {
+                        windowEv += ((float) gMeterHistSum[bW] / (1024.0 * binCount) - 24.0) * (to - from);
+                        windowWeight += to - from;
+                    }
+
+                    cumulative += binCount;
+                }
+
+                const bool meteredP = totalTiles > 0u && (float) totalTiles >= 0.05 * 4096.0 && windowWeight > 0.0;
+                const float lumaP = meteredP ? exp2(windowEv / windowWeight) : 0.0;
+                float exposureP = lumaP > 1e-8 ? 0.18 / (lumaP * 0.82) : 0.0;
+                if (!isfinite(exposureP) || exposureP < 0.0)
+                    exposureP = 0.0;
+                gTarget[uint2(0, 0)] = float4(exposureP, 0.0, 0.0, 1.0);
+            }
+            return;
+        }
 
         float weightedBufferLuma = 0.0;
         float weightedSceneLogLuma = 0.0;

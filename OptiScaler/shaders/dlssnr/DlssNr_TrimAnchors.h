@@ -128,6 +128,31 @@ inline bool Upsert(std::vector<Anchor>& anchors, float key, float trim)
     return true;
 }
 
+// The table lives in the ini as text, so the menu works on the text: Tune's result becomes a point (replacing one within 2%
+// of the same brightness), a point can be removed. AddPoint is false when nothing changed (an unusable key, or the table
+// is full and nothing was within reach to replace).
+inline bool AddPoint(std::string& text, float baseWhitePoint, float trim)
+{
+    std::vector<Anchor> anchors = Parse(text);
+
+    if (!Upsert(anchors, baseWhitePoint, trim))
+        return false;
+
+    text = Serialize(anchors);
+    return true;
+}
+
+inline void RemovePoint(std::string& text, size_t index)
+{
+    std::vector<Anchor> anchors = Parse(text);
+
+    if (index >= anchors.size())
+        return;
+
+    anchors.erase(anchors.begin() + (std::ptrdiff_t) index);
+    text = Serialize(anchors);
+}
+
 // The Trim in force at a base white point: the slider when there are no anchors, the key is unusable,
 // or preview is on; otherwise the anchors' Trim, log-interpolated between neighbours.
 inline float TrimForKey(float key, float sliderTrim, const std::vector<Anchor>& anchors, bool preview)

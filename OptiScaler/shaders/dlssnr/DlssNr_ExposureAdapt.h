@@ -9,9 +9,13 @@
 // gives Automatic the same.
 //
 // The law: exponential in log space, eased = previous * (reading / previous) ^ blend, blend = 1 - exp(-dt / tau), with
-// dt the time since the last evaluation. Log space, so brightening and darkening by the same stops take the same time;
+// dt the time since the last evaluation. Log space, so a change of N stops takes the same time at any starting level;
 // the exponential in dt, so the response per second is the same at any frame rate. tau is the menu's "Eye adaptation"
 // in seconds, 0 = off (the reading as it is).
+//
+// Two taus, as in Unreal (Speed Up / Speed Down) and Unity HDRP (Speed Dark to Light / Light to Dark): the eye adapts to
+// light faster than to dark, so a scene getting brighter takes tauBrighter and one getting darker tauDarker. The exposure
+// is what the picture is multiplied by, so a reading BELOW the eased value is a brighter scene.
 //
 // It snaps -- takes the reading at once -- on a cut the game signals (the DLSS reset), and whenever the eased value is
 // stale: the first evaluation, one after evaluations Automatic did not run on (another source, finished picture), and
@@ -30,19 +34,21 @@
 // checks both halves. Ease is mirrored in that shader line for line; change them together.
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 
 namespace DlssNrExposureAdapt
 {
-constexpr float kDefaultSeconds = 1.0f;
+constexpr float kDefaultBrighterSeconds = 0.5f;
+constexpr float kDefaultDarkerSeconds = 1.5f;
 constexpr float kMaxSeconds = 5.0f;
 
-// The setting as used: 0 (off) to kMaxSeconds, a broken value -> the default.
-inline float Seconds(float setting)
+// The setting as used: 0 (off) to kMaxSeconds, a broken value -> `fallback` (the darker tau unless said otherwise).
+inline float Seconds(float setting, float fallback = kDefaultDarkerSeconds)
 {
     if (!std::isfinite(setting))
-        return kDefaultSeconds;
+        return fallback;
     return std::clamp(setting, 0.0f, kMaxSeconds);
 }
 
@@ -60,14 +66,16 @@ inline float Blend(float dtSeconds, float tauSeconds)
 // An exposure the white point may be built from: the same test as the shader's WhitePoint().
 inline bool Valid(float exposure) { return std::isfinite(exposure) && exposure > 1e-8f && exposure < 1e8f; }
 
-// The eased exposure: `previous` is last evaluation's eased value, `reading` this evaluation's meter.
-inline float Ease(float previous, float reading, float blend, bool snap)
+// The eased exposure: `previous` is last evaluation's eased value, `reading` this evaluation's meter. A reading below
+// `previous` is a brighter scene (blendBrighter), above it a darker one (blendDarker).
+inline float Ease(float previous, float reading, float blendBrighter, float blendDarker, bool snap)
 {
     if (!Valid(reading))
         return !snap && Valid(previous) ? previous : 0.0f;
     if (snap || !Valid(previous))
         return reading;
 
+    const float blend = reading < previous ? blendBrighter : blendDarker;
     const float t = std::isfinite(blend) ? std::clamp(blend, 0.0f, 1.0f) : 0.0f;
     return std::exp2(std::log2(previous) + (std::log2(reading) - std::log2(previous)) * t);
 }
@@ -75,8 +83,13 @@ inline float Ease(float previous, float reading, float blend, bool snap)
 // One evaluation's instructions for the shader.
 struct Step
 {
-    float blend = 1.0f;
+    float blendBrighter = 1.0f;
+    float blendDarker = 1.0f;
     bool snap = true;
+
+    // The shader's constants overlay DlssNrConstants' first fields (Mode, WhitePoint, Width, Height): the brighter blend
+    // rides in WhitePoint, the snap in Width, and the darker blend, bit for bit, in Height.
+    uint32_t DarkerBits() const { return std::bit_cast<uint32_t>(blendDarker); }
 };
 
 // Keeps the clock and says when the eased value is stale. `evaluation` counts NR evaluations (whether or not Automatic
@@ -84,13 +97,15 @@ struct Step
 class Adapter
 {
   public:
-    Step Next(uint64_t evaluation, double seconds, float tauSeconds, bool reset)
+    Step Next(uint64_t evaluation, double seconds, float tauBrighterSeconds, float tauDarkerSeconds, bool reset)
     {
         Step s;
         const bool continuous = primed_ && evaluation == last_ + 1 && !reset;
+        const float dt = (float) (seconds - lastSeconds_);
 
         s.snap = !continuous;
-        s.blend = continuous ? Blend((float) (seconds - lastSeconds_), tauSeconds) : 1.0f;
+        s.blendBrighter = continuous ? Blend(dt, tauBrighterSeconds) : 1.0f;
+        s.blendDarker = continuous ? Blend(dt, tauDarkerSeconds) : 1.0f;
 
         primed_ = true;
         last_ = evaluation;

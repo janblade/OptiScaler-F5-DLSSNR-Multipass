@@ -949,6 +949,9 @@ class Config
     CustomOptional<std::string, NoDefault> FGDLSSGAmpereMfgKernelImage;     // Auto / PTX / Cubin
     CustomOptional<bool> FGDLSSGAmpereMfgHardwareBilinear { false };        // Optional approximate sampling (SM86 only)
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
+    // Keeps Streamline from picking up the driver's OTA/downloaded plugins; only files in
+    // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll
+    CustomOptional<bool> FGStreamlineIgnoreOTA { true };
     CustomOptional<FGNvngxReplacement> FGNvngxReplacement { FGNvngxReplacement::None };
     CustomOptional<bool> FGDrawUIOverFG { false };
     CustomOptional<bool> FGUIPremultipliedAlpha { true };

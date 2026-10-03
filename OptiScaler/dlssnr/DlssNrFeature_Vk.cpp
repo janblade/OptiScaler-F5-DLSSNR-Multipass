@@ -1482,7 +1482,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             reduce.ExposureSourceHeight = height;
             reduce.AutoExposureShadowProtection =
                 std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
-            SetAutoExposureMeter(reduce, cfg.DlssNrAutoExposureMeter.value_or_default() == DlssNrExposureMeter::kPercentile,
+            SetAutoExposureMeter(reduce, cfg.DlssNrAutoExposureMeter.value_or_default() != DlssNrExposureMeter::kAverage,
                                  cfg.DlssNrAutoExposureMeterLowPercent.value_or_default(),
                                  cfg.DlssNrAutoExposureMeterHighPercent.value_or_default());
 

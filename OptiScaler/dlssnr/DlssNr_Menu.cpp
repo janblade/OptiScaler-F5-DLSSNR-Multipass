@@ -1211,7 +1211,7 @@ void RenderMenu(Config* config, float menuResScale)
             HelpMarker("How the scene's brightness is read.\nAverage: the plain average of the frame with the brightest"
                        "\nareas counted less (Ignore bright highlights).\nPercentile (log): the log-average of the picture"
                        "\nbetween two brightness percentiles, as Unreal and Unity meter. A lamp or the sky cannot pull it"
-                       "\nup, and the darkest and brightest tails are left out. Experimental: it reads about"
+                       "\nup, and the darkest and brightest tails are left out. It reads about"
                        "\ndifferently from Average, so re-check Model input brightness after switching.");
 
             if (meter == (int) DlssNrExposureMeter::kPercentile)

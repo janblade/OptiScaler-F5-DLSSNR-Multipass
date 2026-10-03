@@ -3239,7 +3239,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         autoParams.ExposureSourceHeight = height;
         autoParams.AutoExposureShadowProtection =
             std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
-        SetAutoExposureMeter(autoParams, cfg.DlssNrAutoExposureMeter.value_or_default() == DlssNrExposureMeter::kPercentile,
+        SetAutoExposureMeter(autoParams, cfg.DlssNrAutoExposureMeter.value_or_default() != DlssNrExposureMeter::kAverage,
                              cfg.DlssNrAutoExposureMeterLowPercent.value_or_default(),
                              cfg.DlssNrAutoExposureMeterHighPercent.value_or_default());
 

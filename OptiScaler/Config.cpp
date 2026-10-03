@@ -1465,6 +1465,9 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureShadowProtection",
                  GetFloatValue(Instance()->DlssNrAutoExposureShadowProtection.value_for_config()).c_str());
+    // The one speed both used to share is only read (and copied into both); drop it so a choice equal to a default is not
+    // overridden by it on the next load.
+    ini.Delete("DlssNr", "AutoExposureAdaptSeconds");
     ini.SetValue("DlssNr", "AutoExposureMeter", GetIntValue(Instance()->DlssNrAutoExposureMeter.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureMeterLowPercent",
                  GetFloatValue(Instance()->DlssNrAutoExposureMeterLowPercent.value_for_config()).c_str());

@@ -93,8 +93,53 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
     HelpMarker(tip);
 
     if (anchorCount > 0)
-        ImGui::TextDisabled("%u brightness anchor point(s) from the ini are in use; the slider has no effect while they exist.",
+        ImGui::TextDisabled("%u brightness point(s) are in use (below); the slider has no effect while they exist.",
                             (unsigned int) anchorCount);
+}
+
+// The brightness points of one exposure source (the ini's Trim anchors, "base white point:Trim;"): where Tune's results are
+// saved. Each is the Model input brightness to use when the scene is as bright as it was at the Tune, blended in between
+// and held beyond the first and last. A row per point with its own delete, and one button for them all.
+static void RenderBrightnessPoints(CustomOptional<std::string>& table, float neutral, const char* idSuffix)
+{
+    std::string text = table.value_or_default();
+    const auto points = DlssNrTrim::Parse(text);
+
+    if (points.empty())
+        return;
+
+    ImGui::Indent();
+
+    if (ImGui::TreeNode((std::string("Brightness points##") + idSuffix).c_str()))
+    {
+        size_t remove = points.size();
+
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            ImGui::Text("Scene brightness %.4g: %+.1f EV", points[i].key, DlssNrExposureCalibrate::Tidy(TrimToEv(points[i].trim, neutral)));
+            ImGui::SameLine();
+
+            if (ImGui::SmallButton((std::string("Delete##") + idSuffix + std::to_string(i)).c_str()))
+                remove = i;
+        }
+
+        if (ImGui::SmallButton((std::string("Clear all points##") + idSuffix).c_str()))
+            table = std::string();
+        else if (remove < points.size())
+        {
+            DlssNrTrim::RemovePoint(text, remove);
+            table = text;
+        }
+
+        HelpMarker("Each point is the Model input brightness Tune found for a scene this bright. Automatic uses the"
+                   "\nnearest points, blended smoothly between two, so tune once in a bright scene and once in a dark one."
+                   "\nTune again in the same brightness (within 2%) to replace a point. Eight points at most."
+                   "\nWith no points the Model input brightness slider applies again."
+                   "\nA point belongs to the meter it was tuned with: after switching Meter, tune again.");
+        ImGui::TreePop();
+    }
+
+    ImGui::Unindent();
 }
 
 // "Tune for this scene" (shaders/dlssnr/DlssNr_ExposureCalibrate.h), under a brightness slider: sweeps it over the scene
@@ -102,12 +147,27 @@ static void RenderTrimEvSlider(CustomOptional<float>& trim, float neutral, size_
 // the slider it sets, a SmallButton like the other actions here. D3D12 and Vulkan. `source` is the panel's white point source
 // (3 Automatic, 1 Game exposure), `trim` / `neutral` its slider. Named apart from Follow-game's "Re-learn", which is a
 // different calibration.
-static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral)
+static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim, float neutral,
+                                   CustomOptional<std::string>& table)
 {
     const auto cal = DlssNr::ExposureCalibration();
     // A result belongs to the panel it was tuned in: its EVs are in that slider's units. A Measure detail run is shown
     // under Compare instead.
     const bool mine = cal.source == source && !cal.measure;
+    const bool havePoints = !DlssNrTrim::Parse(table.value_or_default()).empty();
+    // Where a result goes: with brightness points the slider is not in force, so it is saved as a point; without any it is
+    // applied to the slider, as before, and "Save as point" starts a table.
+    static std::string pointNote;
+    const auto savePoint = [&](float ev)
+    {
+        std::string text = table.value_or_default();
+        pointNote.clear();
+
+        if (DlssNrTrim::AddPoint(text, cal.baseWhitePoint, EvToTrim(ev, neutral)))
+            table = text;
+        else
+            pointNote = "The table of brightness points is full (8): delete one first.";
+    };
     ImGui::Indent();
 
     if ((cal.running || cal.starting) && mine)
@@ -163,17 +223,44 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                                cal.resultEv, cal.currentEv);
             ImGui::SameLine();
 
-            if (ImGui::SmallButton("Apply##tune"))
+            if (havePoints)
             {
-                trim = EvToTrim(cal.resultEv, neutral);
-                DlssNr::DismissExposureCalibration();
+                if (ImGui::SmallButton("Save as point##tune"))
+                {
+                    savePoint(cal.resultEv);
+                    if (pointNote.empty())
+                        DlssNr::DismissExposureCalibration();
+                }
             }
+            else
+            {
+                if (ImGui::SmallButton("Apply##tune"))
+                {
+                    trim = EvToTrim(cal.resultEv, neutral);
+                    DlssNr::DismissExposureCalibration();
+                }
+
+                ImGui::SameLine();
+
+                if (ImGui::SmallButton("Save as point##tune"))
+                {
+                    savePoint(cal.resultEv);
+                    if (pointNote.empty())
+                        DlssNr::DismissExposureCalibration();
+                }
+            }
+
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", "Keeps this result for scenes about this bright and blends toward other points, instead of one value for every scene.");
         }
         else
         {
             ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "Best here: %+.1f EV, as it is now.",
                                cal.currentEv);
         }
+
+        if (!pointNote.empty())
+            warning(pointNote.c_str());
 
         if (!ownLine)
             ImGui::SameLine();
@@ -210,10 +297,15 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
             // would be a single-pass answer from a run that promised two.
             ImGui::BeginDisabled(cal.unsure || cal.unrepeated || !cal.rawAgreed);
 
-            if (ImGui::SmallButton("Apply raw instead##tune"))
+            if (ImGui::SmallButton(havePoints ? "Save raw as point instead##tune" : "Apply raw instead##tune"))
             {
-                trim = EvToTrim(cal.bestRawEv, neutral);
-                DlssNr::DismissExposureCalibration();
+                if (havePoints)
+                    savePoint(cal.bestRawEv);
+                else
+                    trim = EvToTrim(cal.bestRawEv, neutral);
+
+                if (pointNote.empty())
+                    DlssNr::DismissExposureCalibration();
             }
 
             ImGui::EndDisabled();
@@ -232,7 +324,7 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         HelpMarker("Finds the Model input brightness above that gives NR the most detail on the scene on screen."
                    "\nTries the slider across its useful range twice over, about 12 frames a step, and checks each step"
                    "\nfor detail, flicker and clipping, offering a change only when both sweeps agree. Hold the camera still while it runs: the picture gets brighter"
-                   "\nand darker on purpose. Nothing changes until you press Apply. The result is an offset on the"
+                   "\nand darker on purpose. Nothing changes until you press Apply or Save as point. The result is an offset on the"
                    "\nexposure, so it keeps following the scene afterwards. With more than one model pass, it runs"
                    "\nand measures the first pass only: that is the one that sees the game's picture, so the result"
                    "\nholds for any number of passes. With Follow the game's exposure on, it tunes against Automatic's"
@@ -1107,7 +1199,10 @@ void RenderMenu(Config* config, float menuResScale)
                                "Brightness of the picture handed to NR, relative to the exposure the game reports."
                                "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
                                "\nToo bright clips highlights; too dark hides shadow detail.");
-            RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim);
+            RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
+                                   config->DlssNrGameExposureTrimAnchors);
+            RenderBrightnessPoints(config->DlssNrGameExposureTrimAnchors, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
+                                   "gameexposure");
         }
         else if (wpSource == 3)
         {
@@ -1124,7 +1219,10 @@ void RenderMenu(Config* config, float menuResScale)
                                "\nAutomatic exposure is available on D3D12 and Vulkan.",
                                DlssNrAutoTrim::kDefaultTrim);
 
-            RenderTuneForThisScene(3, config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim);
+            RenderTuneForThisScene(3, config->DlssNrAutoExposureTrim, DlssNrExposureCalibrate::kNeutralTrim,
+                                   config->DlssNrAutoExposureTrimAnchors);
+            RenderBrightnessPoints(config->DlssNrAutoExposureTrimAnchors, DlssNrExposureCalibrate::kNeutralTrim,
+                                   "autoexposure");
 
             // Following the game's own exposure (DlssNr_FollowGame.h): on by default for a known unexposed game
             // (DlssNr_GameDefaults.h). Vulkan follows from the host value, a few frames behind the game.

@@ -139,7 +139,6 @@ enum class Blocker : uint32_t
     NotHdr,          // an already tone-mapped frame has no scene exposure to tune
     AutoNotRunning,  // Automatic's meter has no reading this evaluation
     NoGameExposure,  // Game exposure: the game supplied no exposure texture, or there is no reading yet
-    Anchors,         // Trim anchors in the ini decide the brightness, not the slider
     NrStopped,       // NR has not run for a while
     ColourConverted, // Colour encoding converts the frame (gamma 2.2, PQ): the measurement would mix encodings
 };
@@ -164,8 +163,6 @@ inline const char* BlockerText(Blocker b)
         return "Automatic exposure has no reading";
     case Blocker::NoGameExposure:
         return "the game supplies no exposure on this frame";
-    case Blocker::Anchors:
-        return "Trim anchors in the ini decide the brightness";
     case Blocker::NrStopped:
         return "NR is not running";
     case Blocker::ColourConverted:
@@ -174,9 +171,10 @@ inline const char* BlockerText(Blocker b)
     return "";
 }
 
-// What availability depends on, gathered by the caller each evaluation. `anchors` is the tuned source's own
-// (Automatic's anchors for source 3, Game exposure's for source 1); the Follow fields matter to Automatic only, and
-// only to RelearnFollowOnStart: Follow never blocks a run.
+// What availability depends on, gathered by the caller each evaluation. The Follow fields matter to Automatic only,
+// and only to RelearnFollowOnStart: Follow never blocks a run. Nor do Trim anchors: a run pins its own white point
+// (the frozen base times the step's Trim), so it measures the same with or without them, and its result is offered as a
+// point on the table.
 struct Situation
 {
     uint32_t source = 0;
@@ -189,14 +187,12 @@ struct Situation
     float followDisagreementEv = 0.0f; // while following: its base against Automatic's own, in EV (for the log)
     bool gameExposureNow = false;
     bool gameExposureReading = false;
-    bool anchors = false;
     bool colourConverted = false; // DlssNrColourEncoding::ShaderConverts for this frame
     bool beforeSrSet = false;     // RunBeforeSR is on: a Tune runs after SR instead (TuneRunsAfterSr), so it waits
                                   // for NR to settle there before its first step
 };
 
-// `measuring`: for "Measure detail", which leaves the brightness alone, so ini Trim anchors do not stand in its way.
-inline Blocker Availability(const Situation& s, bool measuring = false)
+inline Blocker Availability(const Situation& s)
 {
     if (s.source != 3 && s.source != 1)
         return Blocker::Source;
@@ -224,8 +220,6 @@ inline Blocker Availability(const Situation& s, bool measuring = false)
             return Blocker::AutoNotRunning;
     }
 
-    if (s.anchors && !measuring)
-        return Blocker::Anchors;
     return Blocker::None;
 }
 

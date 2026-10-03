@@ -60,6 +60,29 @@ int main()
     CHECK(!Upsert(b, 0, 2));
     auto full = Parse("1:1;2:1;3:1;4:1;5:1;6:1;7:1;8:1;");
     CHECK(!Upsert(full, 50, 2) && full.size() == 8);
+
+    // The menu's helpers on the ini text: Tune's result added as a point, one removed, the table full.
+    {
+        std::string text;
+        CHECK(AddPoint(text, 100.0f, 4.0f) && Parse(text).size() == 1);
+        CHECK(AddPoint(text, 400.0f, 2.0f) && Parse(text).size() == 2);
+        CHECK(AddPoint(text, 101.0f, 6.0f) && Parse(text).size() == 2); // within 2% of 100: replaced, not added
+        CHECK(near(Parse(text)[0].trim, 6.0f));
+        CHECK(!AddPoint(text, 0.0f, 3.0f) && Parse(text).size() == 2);  // an unusable key changes nothing
+        CHECK(!AddPoint(text, -5.0f, 3.0f) && Parse(text).size() == 2);
+        RemovePoint(text, 7);                                           // out of range: nothing
+        CHECK(Parse(text).size() == 2);
+        RemovePoint(text, 0);
+        CHECK(Parse(text).size() == 1 && near(Parse(text)[0].key, 400.0f));
+        RemovePoint(text, 0);
+        CHECK(text.empty() && Parse(text).empty());
+
+        std::string many;
+        for (int i = 0; i < 8; ++i)
+            CHECK(AddPoint(many, 10.0f * std::pow(2.0f, (float) i), 2.0f));
+        CHECK(!AddPoint(many, 3.0f, 2.0f) && Parse(many).size() == 8);  // full, nothing within reach
+        CHECK(AddPoint(many, 10.1f, 5.0f) && Parse(many).size() == 8);  // full, but within reach of one: replaced
+    }
     CHECK(Upsert(full, 4.05f, 9) && full.size() == 8); // replaces the 4
 
     // FillConstants writes pairs in the shader's field order

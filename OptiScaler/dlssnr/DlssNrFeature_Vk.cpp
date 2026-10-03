@@ -15,6 +15,7 @@
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
@@ -1481,6 +1482,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             reduce.ExposureSourceHeight = height;
             reduce.AutoExposureShadowProtection =
                 std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
+            SetAutoExposureMeter(reduce, cfg.DlssNrAutoExposureMeter.value_or_default() == DlssNrExposureMeter::kPercentile,
+                                 cfg.DlssNrAutoExposureMeterLowPercent.value_or_default(),
+                                 cfg.DlssNrAutoExposureMeterHighPercent.value_or_default());
 
             // Eye adaptation (DlssNr_ExposureAdapt.h): the reading goes to autoExposureRaw and a one-texel pass eases
             // autoExposure toward it. Without that image or the pass, the reduce writes autoExposure itself, as

@@ -30,6 +30,7 @@
 #include "DlssNr_ExposureCalibrate_Run.h"
 #include "DlssNr_ProxyCurve.h"
 #include "DlssNr_ExposureAdapt.h"
+#include "DlssNr_ExposureMeter.h"
 #include "DlssNr_FinishedReady.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
 
@@ -3238,6 +3239,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         autoParams.ExposureSourceHeight = height;
         autoParams.AutoExposureShadowProtection =
             std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
+        SetAutoExposureMeter(autoParams, cfg.DlssNrAutoExposureMeter.value_or_default() == DlssNrExposureMeter::kPercentile,
+                             cfg.DlssNrAutoExposureMeterLowPercent.value_or_default(),
+                             cfg.DlssNrAutoExposureMeterHighPercent.value_or_default());
 
         // Eye adaptation (DlssNr_ExposureAdapt.h): the reading goes to autoExposureRaw and a one-texel pass eases
         // autoExposure toward it. Without that texture or the pass, the meter writes autoExposure itself, as before;

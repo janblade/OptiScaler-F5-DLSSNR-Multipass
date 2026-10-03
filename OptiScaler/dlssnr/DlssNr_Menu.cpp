@@ -16,6 +16,7 @@
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ColourEncoding.h>
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 #include "DlssNr_ColourEncodingStatus.h"
@@ -1201,13 +1202,43 @@ void RenderMenu(Config* config, float menuResScale)
                 }
             }
 
-            float protection = config->DlssNrAutoExposureShadowProtection.value_or_default();
-            if (ImGui::SliderFloat("Ignore bright highlights", &protection, 0.0f, 100.0f, "%.0f%%"))
-                config->DlssNrAutoExposureShadowProtection = std::clamp(protection, 0.0f, 100.0f);
+            static const char* const meterNames[] = { "Average", "Percentile (log)" };
+            int meter = std::min<int>((int) config->DlssNrAutoExposureMeter.value_or_default(), 1);
 
-            HelpMarker("Stops the sky, lamps and reflections from darkening the rest of the picture."
-                       "\n0% averages the whole frame as it is; 100% counts bright areas the least."
-                       "\nBlack bars and black borders are always left out.");
+            if (ImGui::Combo("Meter", &meter, meterNames, IM_ARRAYSIZE(meterNames)))
+                config->DlssNrAutoExposureMeter = (uint32_t) meter;
+
+            HelpMarker("How the scene's brightness is read.\nAverage: the plain average of the frame with the brightest"
+                       "\nareas counted less (Ignore bright highlights).\nPercentile (log): the log-average of the picture"
+                       "\nbetween two brightness percentiles, as Unreal and Unity meter. A lamp or the sky cannot pull it"
+                       "\nup, and the darkest and brightest tails are left out. Experimental: it reads about"
+                       "\ndifferently from Average, so re-check Model input brightness after switching.");
+
+            if (meter == (int) DlssNrExposureMeter::kPercentile)
+            {
+                float low = config->DlssNrAutoExposureMeterLowPercent.value_or_default();
+                float high = config->DlssNrAutoExposureMeterHighPercent.value_or_default();
+
+                if (ImGui::SliderFloat("Ignore darkest", &low, 0.0f, 50.0f, "%.0f%%"))
+                    config->DlssNrAutoExposureMeterLowPercent = std::clamp(low, 0.0f, 50.0f);
+
+                HelpMarker("The darkest share of the picture left out of the reading. Default 10%.");
+
+                if (ImGui::SliderFloat("Ignore brightest", &high, 50.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrAutoExposureMeterHighPercent = std::clamp(high, 50.0f, 100.0f);
+
+                HelpMarker("The brightest share of the picture is whatever lies above this percentile and is left out. Default 90%.");
+            }
+            else
+            {
+                float protection = config->DlssNrAutoExposureShadowProtection.value_or_default();
+                if (ImGui::SliderFloat("Ignore bright highlights", &protection, 0.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrAutoExposureShadowProtection = std::clamp(protection, 0.0f, 100.0f);
+
+                HelpMarker("Stops the sky, lamps and reflections from darkening the rest of the picture."
+                           "\n0% averages the whole frame as it is; 100% counts bright areas the least."
+                           "\nBlack bars and black borders are always left out.");
+            }
 
             // DlssNr_ExposureAdapt.h: a pass of its own on D3D12 and Vulkan.
             float adaptBrighter = DlssNrExposureAdapt::Seconds(

@@ -559,6 +559,13 @@ class Config
     // AutoExposureShadowProtection is the menu's "Ignore bright highlights" (percent).
     CustomOptional<float> DlssNrAutoExposureTrim { 5.0f };
     CustomOptional<float> DlssNrAutoExposureShadowProtection { 100.0f };
+    // AutoExposureMeter is the menu's "Meter": 0 the plain average with the highlight knee above (AutoExposureShadowProtection),
+    // 1 the log-average between two percentiles of brightness, as Unreal and Unity HDRP meter (the Low / High percent are the
+    // window). Off (0) until its constant has been compared against the other in the reference games. See
+    // shaders/dlssnr/DlssNr_ExposureMeter.h.
+    CustomOptional<uint32_t> DlssNrAutoExposureMeter { 0 };
+    CustomOptional<float> DlssNrAutoExposureMeterLowPercent { 10.0f };
+    CustomOptional<float> DlssNrAutoExposureMeterHighPercent { 90.0f };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

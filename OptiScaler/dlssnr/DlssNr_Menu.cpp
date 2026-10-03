@@ -48,6 +48,21 @@ static bool HaveGameExposure()
 
 static void HelpMarker(const char* tip);
 
+// A stretch of the menu that shows status text which comes and goes, or re-wraps as it changes (a warning that appears, a
+// line that only shows while something is happening). Without a slot everything below it moves when that happens, and a click
+// aimed at a button lands on the next control. The slot takes `lines` lines of height whatever is in it: text drawn between
+// Begin and End that needs less is padded to that, more simply grows (rare, and then it is the text that decided).
+static float StatusSlotBegin() { return ImGui::GetCursorPosY(); }
+
+static void StatusSlotEnd(float begin, int lines)
+{
+    const float target = begin + (float) lines * ImGui::GetTextLineHeightWithSpacing();
+    const float gap = target - ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y;
+
+    if (gap > 0.5f)
+        ImGui::Dummy(ImVec2(0.0f, gap));
+}
+
 // Trim multiplies the white point, so a larger Trim darkens the picture NR is shown. The menu shows it in stops
 // instead, the other way round (+ = brighter) and centred on each source's own default, which reads as 0 EV.
 // The conversions are Tune for this scene's own (DlssNrExposureCalibrate), so the slider and a tuned value can never
@@ -169,6 +184,9 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
             pointNote = "The table of brightness points is full (8): delete one first.";
     };
     ImGui::Indent();
+    // Idle, running and result are different heights, and a run ends under the cursor: three lines are always reserved so
+    // the buttons below do not jump when it does. A long warning in the result still makes it taller.
+    const float tuneSlot = StatusSlotBegin();
 
     if ((cal.running || cal.starting) && mine)
     {
@@ -346,6 +364,7 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         }
     }
 
+    StatusSlotEnd(tuneSlot, 3);
     ImGui::Unindent();
 }
 
@@ -988,7 +1007,8 @@ void RenderMenu(Config* config, float menuResScale)
 
             HelpMarker("Manual: use Paper white. Game exposure: use exposure supplied by the game.\nScanned exposure: estimate it from game buffers; requires calibration and may select the wrong buffer.\nAutomatic exposure: OptiScaler meters the linear HDR frame itself, so it needs nothing from the game.");
 
-            // Availability, in colour, for the option currently chosen.
+            // Availability, in colour, for the option currently chosen. Two lines at most, whichever source.
+            const float exposureSlot = StatusSlotBegin();
             if (source == 1)
             {
                 if (!vk && ex.seenFrames == 0)
@@ -1062,6 +1082,7 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
                                    "Game exposure is available.");
             }
+            StatusSlotEnd(exposureSlot, 2);
         }
 
 
@@ -1251,6 +1272,7 @@ void RenderMenu(Config* config, float menuResScale)
                         followVk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus();
                     const auto& calibration = DlssNrFollowGame::Instance();
                     ImGui::Indent();
+                    const float followSlot = StatusSlotBegin();
 
                     if (!followStatus.gameExposureSeen)
                         ImGui::TextDisabled("Not available yet: no exposure from the game");
@@ -1263,6 +1285,13 @@ void RenderMenu(Config* config, float menuResScale)
 
                     // The calibration eases toward Automatic when the two stay apart (DlssNr_FollowGame.h Track), so a
                     // large disagreement is usually on its way out; say which, wrapped (it ran off the panel before).
+                    // The warning shows above the limit and stays until the disagreement is well under it: it changes every
+                    // frame, and hovering at the limit made the warning (and everything below it) flicker.
+                    static bool disagreementShown = false;
+                    const float disagreement = std::fabs(followStatus.disagreementEv);
+                    const float limit = DlssNrExposureCalibrate::kFollowDisagreementLimitEv;
+                    disagreementShown = disagreement > limit || (disagreementShown && disagreement > 0.75f * limit);
+
                     if (followStatus.following && calibration.Locked() && calibration.Easing())
                     {
                         ImGui::PushTextWrapPos(0.0f);
@@ -1270,7 +1299,7 @@ void RenderMenu(Config* config, float menuResScale)
                                             followStatus.disagreementEv);
                         ImGui::PopTextWrapPos();
                     }
-                    else if (std::fabs(followStatus.disagreementEv) > DlssNrExposureCalibrate::kFollowDisagreementLimitEv)
+                    else if (disagreementShown)
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
                         // Easing is off in a game whose own exposure moves (DlssNr_FollowGame.h): then only Re-learn.
@@ -1284,6 +1313,8 @@ void RenderMenu(Config* config, float menuResScale)
                                                followStatus.disagreementEv);
                         ImGui::PopStyleColor();
                     }
+
+                    StatusSlotEnd(followSlot, 4);
 
                     // Learns the calibration again from scratch.
                     if (ImGui::SmallButton("Re-learn##autoexposure"))
@@ -1804,11 +1835,14 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TreePop();
             }
             const auto& status = detailReuseStatus;
+            // One line while it is not running, up to four while it is, and the last three come and go with the picture's
+            // motion: always four lines, so nothing below moves with the camera.
+            const float reuseSlot = StatusSlotBegin();
             if (!status.why.empty())
                 ImGui::TextDisabled("Reuse detail: %s (rendered %.0f fps)", status.why.c_str(), status.baseFps);
             else
             {
-                ImGui::Text("Full NR: %llu   Reused: %llu   Fallback: %llu   Rendered: %.0f fps", status.full,
+                ImGui::Text("Full %llu | Reused %llu | Fallback %llu | %.0f fps", status.full,
                             status.reused, status.fallback, status.baseFps);
                 if (status.held > 0 || status.holding)
                 {
@@ -1823,12 +1857,13 @@ void RenderMenu(Config* config, float menuResScale)
                 }
                 if (status.heavyMs > 0.0)
                 {
-                    ImGui::Text("NR GPU time per frame: %.2f ms on average, %.2f to %.2f ms", status.averageMs,
+                    ImGui::Text("NR GPU: %.2f ms avg (%.2f to %.2f)", status.averageMs,
                                 status.lightMs, status.heavyMs);
                     HelpMarker("Full and reused frames cost differently, so the game's frame times alternate. If "
                                "motion judders, a frame limiter just below the average frame rate evens them out.");
                 }
             }
+            StatusSlotEnd(reuseSlot, 4);
         }
         if (precisionChoice > 0 && DlssNr::IsRunningVk())
         {
@@ -2023,6 +2058,8 @@ void RenderMenu(Config* config, float menuResScale)
                        "2.2 and PQ are converted for the model and back.");
 
             const auto status = DlssNr::ReadColourEncodingStatus();
+            // The line and the warning are wrapped and the warning comes and goes with the detected format: a fixed slot.
+            const float encodingSlot = StatusSlotBegin();
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             ImGui::TextWrapped("%s", status.line.c_str());
             ImGui::PopStyleColor();
@@ -2033,6 +2070,7 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TextWrapped("%s", status.warning.c_str());
                 ImGui::PopStyleColor();
             }
+            StatusSlotEnd(encodingSlot, 5);
         }
 
         // Experimental. 0 off (soft knee), 1 Reversible curve + our composition, 2 Reversible curve +

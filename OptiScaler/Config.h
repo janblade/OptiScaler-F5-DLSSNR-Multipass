@@ -561,9 +561,9 @@ class Config
     CustomOptional<float> DlssNrAutoExposureShadowProtection { 100.0f };
     // AutoExposureMeter is the menu's "Meter": 0 the plain average with the highlight knee above (AutoExposureShadowProtection),
     // 1 the log-average between two percentiles of brightness, as Unreal and Unity HDRP meter (the Low / High percent are the
-    // window). Off (0) until its constant has been compared against the other in the reference games. See
-    // shaders/dlssnr/DlssNr_ExposureMeter.h.
-    CustomOptional<uint32_t> DlssNrAutoExposureMeter { 0 };
+    // window). Default 1 (user decision 2026-10-03, after NBA 2K27: "looking good, the image quality even upped"); an ini
+    // that sets 0 keeps the plain average. See shaders/dlssnr/DlssNr_ExposureMeter.h.
+    CustomOptional<uint32_t> DlssNrAutoExposureMeter { 1 };
     CustomOptional<float> DlssNrAutoExposureMeterLowPercent { 10.0f };
     CustomOptional<float> DlssNrAutoExposureMeterHighPercent { 90.0f };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long

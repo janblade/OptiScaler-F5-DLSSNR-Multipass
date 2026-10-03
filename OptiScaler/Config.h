@@ -559,8 +559,12 @@ class Config
     // AutoExposureShadowProtection is the menu's "Ignore bright highlights" (percent).
     CustomOptional<float> DlssNrAutoExposureTrim { 5.0f };
     CustomOptional<float> DlssNrAutoExposureShadowProtection { 100.0f };
-    // AutoExposureAdaptSeconds is the menu's "Eye adaptation": how long Automatic takes to follow a change of the scene's
-    // brightness, as a time constant in seconds; 0 = at once. See shaders/dlssnr/DlssNr_ExposureAdapt.h.
+    // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
+    // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
+    // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.
+    CustomOptional<float> DlssNrAutoExposureAdaptBrighterSeconds { 0.5f };
+    CustomOptional<float> DlssNrAutoExposureAdaptDarkerSeconds { 1.5f };
+    // The single speed both used to share: read, and copied into both new keys when they are absent. Never written.
     CustomOptional<float> DlssNrAutoExposureAdaptSeconds { 1.0f };
     // Automatic follows the game's own exposure times a calibration learned against Automatic's meter (Vulkan: a few
     // frames behind). See DlssNr_FollowGame.h. Unset (auto) = on for a known unexposed game (DlssNr_AutoTrimDefault.h

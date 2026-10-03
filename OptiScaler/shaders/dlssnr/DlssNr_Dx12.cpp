@@ -1320,9 +1320,12 @@ void ReportFrameStats(float whitePoint, uint32_t source)
         autoText = std::format("{:.5g} (white point it gives: {:.4g}){}{}", g_nr.autoExposureValue,
                                g_nr.autoExposurePreExposure / g_nr.autoExposureValue,
                                g_nr.autoExposureAdapting
-                                   ? std::format(", eye adaptation {:.1f} s, meter reading {:.5g}",
+                                   ? std::format(", eye adaptation {:.1f} s brighter / {:.1f} s darker, meter reading {:.5g}",
                                                  DlssNrExposureAdapt::Seconds(
-                                                     Config::Instance()->DlssNrAutoExposureAdaptSeconds.value_or_default()),
+                                                     Config::Instance()->DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(),
+                                                     DlssNrExposureAdapt::kDefaultBrighterSeconds),
+                                                 DlssNrExposureAdapt::Seconds(
+                                                     Config::Instance()->DlssNrAutoExposureAdaptDarkerSeconds.value_or_default()),
                                                  g_nr.autoExposureRawValue)
                                    : std::string(),
                                g_nr.followingGame
@@ -3239,9 +3242,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Eye adaptation (DlssNr_ExposureAdapt.h): the reading goes to autoExposureRaw and a one-texel pass eases
         // autoExposure toward it. Without that texture or the pass, the meter writes autoExposure itself, as before;
         // the evaluations it does so leave a gap the adapter snaps across.
-        const float adaptSeconds =
-            DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptSeconds.value_or_default());
-        const bool adapting = adaptSeconds > 0.0f && g_nr.autoExposureRaw != nullptr && ExposureAdaptReady();
+        const float brighterSeconds = DlssNrExposureAdapt::Seconds(
+            cfg.DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(), DlssNrExposureAdapt::kDefaultBrighterSeconds);
+        const float darkerSeconds = DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptDarkerSeconds.value_or_default());
+        const bool adapting = (brighterSeconds > 0.0f || darkerSeconds > 0.0f) && g_nr.autoExposureRaw != nullptr &&
+                              ExposureAdaptReady();
         g_nr.autoExposureAdapting = adapting;
 
         DispatchPass(cmdList, autoParams, g_nr.meter, nullptr, nullptr, nullptr, nullptr,
@@ -3257,14 +3262,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             const double now =
                 std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
             const DlssNrExposureAdapt::Step step =
-                g_nr.autoExposureAdapter.Next(g_frames, now, adaptSeconds, g_nr.reset);
+                g_nr.autoExposureAdapter.Next(g_frames, now, brighterSeconds, darkerSeconds, g_nr.reset);
 
-            // Overlays the first fields (dlssnr_exposure_adapt.hlsl): WhitePoint carries the blend, Width the snap.
+            // Overlays the first fields (dlssnr_exposure_adapt.hlsl): WhitePoint carries the brighter blend, Width the snap, Height the darker blend.
             DlssNrConstants adaptParams {};
             adaptParams.Mode = DlssNrMode_AutoExposure;
-            adaptParams.WhitePoint = step.blend;
+            adaptParams.WhitePoint = step.blendBrighter;
             adaptParams.Width = step.snap ? 1u : 0u;
-            adaptParams.Height = 0u;
+            adaptParams.Height = step.DarkerBits();
 
             if (!DispatchExposureAdapt(cmdList, adaptParams, g_nr.autoExposureRaw, g_nr.autoExposure))
             {

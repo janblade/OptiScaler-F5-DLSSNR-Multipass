@@ -1210,17 +1210,27 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nBlack bars and black borders are always left out.");
 
             // DlssNr_ExposureAdapt.h: a pass of its own on D3D12 and Vulkan.
-            float adapt = DlssNrExposureAdapt::Seconds(config->DlssNrAutoExposureAdaptSeconds.value_or_default());
+            float adaptBrighter = DlssNrExposureAdapt::Seconds(
+                config->DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(), DlssNrExposureAdapt::kDefaultBrighterSeconds);
+            float adaptDarker = DlssNrExposureAdapt::Seconds(config->DlssNrAutoExposureAdaptDarkerSeconds.value_or_default());
 
-            if (ImGui::SliderFloat("Eye adaptation", &adapt, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
-                                   adapt > 0.0f ? "%.2f s" : "off"))
-                config->DlssNrAutoExposureAdaptSeconds = DlssNrExposureAdapt::Seconds(adapt);
+            if (ImGui::SliderFloat("Eye adaptation, to brighter", &adaptBrighter, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
+                                   adaptBrighter > 0.0f ? "%.2f s" : "off"))
+                config->DlssNrAutoExposureAdaptBrighterSeconds =
+                    DlssNrExposureAdapt::Seconds(adaptBrighter, DlssNrExposureAdapt::kDefaultBrighterSeconds);
 
-            HelpMarker("How quickly Automatic follows a change in the scene's brightness, like an eye adapting."
-                       "\nStops a camera zoom or a brief shot of a dark crowd or a bright floor from pumping"
-                       "\nthe brightness and tone of the picture. A cut the game announces is followed at once."
+            HelpMarker("How quickly Automatic follows the scene getting brighter, like an eye adapting."
+                       "\nStops a camera zoom or a brief shot of a bright floor from pumping the brightness and tone"
+                       "\nof the picture. A cut the game announces is followed at once."
                        "\nAbout two thirds of a change is followed after this long. Off follows every frame at once."
                        "\nNot used while following the game's exposure: the game's own adapts.");
+
+            if (ImGui::SliderFloat("Eye adaptation, to darker", &adaptDarker, 0.0f, DlssNrExposureAdapt::kMaxSeconds,
+                                   adaptDarker > 0.0f ? "%.2f s" : "off"))
+                config->DlssNrAutoExposureAdaptDarkerSeconds = DlssNrExposureAdapt::Seconds(adaptDarker);
+
+            HelpMarker("The same for the scene getting darker. Slower than brighter by default: an eye adapts to dark"
+                       "\nmore slowly than to light, and a quick flash should not darken the picture for long.");
         }
         else
         {

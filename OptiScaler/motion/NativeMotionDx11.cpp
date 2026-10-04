@@ -92,16 +92,16 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
     }
 
     native::NativeProducer::Options options;
-    options.applyNr = Config::Instance()->DlssNrNativeInput.value_or_default();
+    options.apply = Config::Instance()->DlssNrNativeInput.value_or_default();
 
-    const auto applyNr = [](ID3D12GraphicsCommandList* cmd, ID3D12Resource* color, ID3D12Resource* depth,
-                            ID3D12Resource* motion, bool reversed, bool reset, native::ColorSpace space,
-                            D3D12_RESOURCE_STATES state)
+    const auto applyNr = [](ID3D12GraphicsCommandList* cmd, const native::NativeFrame& frame)
     {
-        const DXGI_COLOR_SPACE_TYPE type = space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
-                                           : space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-                                                                              : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-        return DlssNr::ApplyNativeInput(g_source.Queue12(), cmd, color, depth, motion, reversed, reset, type, state);
+        const DXGI_COLOR_SPACE_TYPE type =
+            frame.space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
+            : frame.space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                                     : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        return DlssNr::ApplyNativeInput(g_source.Queue12(), cmd, frame.color, frame.depth, frame.motion,
+                                        frame.depthReversed, frame.reset, type, frame.pictureState);
     };
 
     native::FrameOutput output;

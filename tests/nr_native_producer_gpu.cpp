@@ -323,6 +323,7 @@ struct NrCalls
     bool reset = false;
     native::ColorSpace space = native::ColorSpace::Srgb;
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool guidesSeen = false;
 };
 
@@ -347,16 +348,15 @@ int main()
     }
 
     NrCalls nr;
-    const native::NativeProducer::ApplyNrFn applyNr = [&](ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource* depth,
-                                                          ID3D12Resource* motion, bool reversed, bool reset,
-                                                          native::ColorSpace space, D3D12_RESOURCE_STATES state)
+    const native::NativeProducer::ApplyFn applyNr = [&](ID3D12GraphicsCommandList*, const native::NativeFrame& f)
     {
         ++nr.count;
-        nr.reversed = reversed;
-        nr.reset = reset;
-        nr.space = space;
-        nr.state = state;
-        nr.guidesSeen = depth != nullptr && motion != nullptr;
+        nr.reversed = f.depthReversed;
+        nr.reset = f.reset;
+        nr.space = f.space;
+        nr.state = f.pictureState;
+        nr.format = f.colorFormat;
+        nr.guidesSeen = f.depth != nullptr && f.motion != nullptr;
         return true;
     };
 
@@ -399,7 +399,7 @@ int main()
         }
 
         native::NativeProducer::Options options;
-        options.applyNr = applyOn;
+        options.apply = applyOn;
 
         const auto result = producer.Run(gpu.queue.Get(), input, options, applyNr, output);
 
@@ -434,6 +434,7 @@ int main()
         ok &= Check("NR called on it with the guides", r.nativeRan && nr.count >= 1 && nr.guidesSeen);
         ok &= Check("... with reversed-Z, sRGB and the picture's state", nr.reversed && nr.space == native::ColorSpace::Srgb &&
                                                                      nr.state == kRead);
+        ok &= Check("... and the picture's typed format", nr.format == DXGI_FORMAT_R8G8B8A8_UNORM);
         ok &= Check("the output reports it was processed", output.processed && output.done.fence != nullptr);
         ok &= Check("the picture is bit-identical after (NR did nothing)", before == after);
     }

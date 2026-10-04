@@ -87,7 +87,7 @@ void NativeProducer::Reset()
 }
 
 NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const FrameInput& input, const Options& options,
-                                           const ApplyNrFn& applyNr, FrameOutput& output)
+                                           const ApplyFn& apply, FrameOutput& output)
 {
     Result result;
     output = FrameOutput {};
@@ -175,18 +175,28 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         }
     }
 
-    // Back to the state the adapter expects the picture in, then DLSS-NR on it with the guides, on this same list.
+    // Back to the state the adapter expects the picture in, then the consumer on it with the guides, on this same list.
     if (needsBarrier)
     {
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         list->ResourceBarrier(1, &barrier);
     }
 
-    if (nativeReady && options.applyNr && applyNr)
+    if (nativeReady && options.apply && apply)
     {
         if (_trust->BuildGuides(list, nativeInputs, input.width, input.height))
-            result.nativeRan = applyNr(list, input.picture, _trust->GuideDepth(), _trust->GuideMotion(),
-                                       nativeInputs.depthReversed, nativeReset, input.colorSpace, input.pictureState);
+        {
+            NativeFrame frame;
+            frame.color = input.picture;
+            frame.colorFormat = input.pictureFormat;
+            frame.pictureState = input.pictureState;
+            frame.space = input.colorSpace;
+            frame.depth = _trust->GuideDepth();
+            frame.motion = _trust->GuideMotion();
+            frame.depthReversed = nativeInputs.depthReversed;
+            frame.reset = nativeReset;
+            result.nativeRan = apply(list, frame);
+        }
     }
 
     if (SUCCEEDED(list->Close()))

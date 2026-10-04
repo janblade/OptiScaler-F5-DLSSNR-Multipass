@@ -18,6 +18,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+#include <motion/NativeMotion_Dx12.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -1175,6 +1176,14 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         IUnknown* device = state.currentD3D12Device ? state.currentD3D12Device : (IUnknown*) state.currentD3D11Device;
         InputCommon::mark_present_start(device);
 #endif
+    }
+
+    // Native input runs here, on the game's picture and queue, ahead of frame generation and before its lock below: when it
+    // presents to the virtual upscaler, that call feeds frame generation (UpscaleStart takes the same lock).
+    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && state.currentCommandQueue != nullptr &&
+        state.currentD3D12Device != nullptr)
+    {
+        NativeMotionDx12::OnFGPresent(This, state.currentCommandQueue, state.currentD3D12Device);
     }
 
     IFGFeature* fg = state.currentFG;

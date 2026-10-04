@@ -7,6 +7,7 @@
 #include <NVNGX_Parameter.h>
 #include <State.h>
 #include <Config.h>
+#include <Util.h>
 #include <upscalers/FeatureProvider_Dx12.h>
 #include <upscalers/IFeature_Dx12.h>
 #include <inputs/FG/Upscaler_Inputs_Dx12.h>
@@ -16,151 +17,259 @@ namespace native
 
 namespace
 {
-// Our own handle id for the synthetic feature: never registered in the real NGX handle tables (HandleToFeature,
-// Dx12Contexts), so it cannot collide with a real game's handles or be found by a real NGX call.
+// Our feature's handle id: never in the real NGX handle tables (HandleToFeature, Dx12Contexts), so no game call finds it. It is
+// in State::changeBackend, so the menu's backend switch reaches it like any other feature.
 constexpr UINT kVirtualHandleId = 0x4E524631; // 'NRF1'
+
+// Releases a texture once the GPU can no longer be using it, by the same delay Util::DelayedDestroy gives features.
+struct ReleaseLater
+{
+    explicit ReleaseLater(ID3D12Resource* resource) : resource(resource) {}
+    ~ReleaseLater() { resource->Release(); }
+    ReleaseLater(const ReleaseLater&) = delete;
+    ReleaseLater& operator=(const ReleaseLater&) = delete;
+    ID3D12Resource* resource;
+};
+
+void ReleaseTexture(ID3D12Resource*& texture)
+{
+    if (texture == nullptr)
+        return;
+
+    Util::DelayedDestroy(std::make_unique<ReleaseLater>(texture));
+    texture = nullptr;
+}
+
+void Transition(ID3D12GraphicsCommandList* cmd, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                D3D12_RESOURCE_STATES after)
+{
+    if (before == after)
+        return;
+
+    D3D12_RESOURCE_BARRIER b {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = resource;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = before;
+    b.Transition.StateAfter = after;
+    cmd->ResourceBarrier(1, &b);
+}
+
+// UAVs cannot be sRGB; the bytes are the same, so the copy in and out keeps the picture exact.
+DXGI_FORMAT UavFormat(DXGI_FORMAT view)
+{
+    switch (view)
+    {
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8X8_UNORM;
+    default:
+        return view;
+    }
+}
+
+bool IsUnrealGame()
+{
+    const auto& state = State::Instance();
+    return state.NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL || state.gameEngine == GameEngineType::Unreal ||
+           state.gameQuirks & GameQuirk::ForceUnrealEngine;
+}
+
+// The FSR and XeSS backends take each input in the state its *ResourceBarrier setting names (and hand it back in it), and in
+// an Unreal game set colour and motion to RENDER_TARGET and UNORDERED_ACCESS on their first Evaluate. Setting those here,
+// before UpscaleStart, makes frame generation's copies (which read the same settings) agree with the backend from the first
+// frame. DLSS takes everything in its working state.
+bool UsesBarrierSettings(Upscaler backend) { return backend != Upscaler::DLSS && backend != Upscaler::DLSSD; }
+
+D3D12_RESOURCE_STATES SettingOr(const CustomOptional<int32_t, NoDefault>& setting, D3D12_RESOURCE_STATES working)
+{
+    return setting.has_value() ? (D3D12_RESOURCE_STATES) setting.value() : working;
+}
+
+Upscaler WantedBackend()
+{
+    const auto& cfg = *Config::Instance();
+    const Upscaler wanted = cfg.Dx12Upscaler.has_value() ? cfg.Dx12Upscaler.value() : Upscaler::FFX;
+
+    // Ray Reconstruction needs inputs we do not have; the config stores it as DLSS anyway.
+    return wanted == Upscaler::DLSSD ? Upscaler::DLSS : wanted;
+}
 } // namespace
 
 VirtualUpscalerDriver::VirtualUpscalerDriver() = default;
 
 VirtualUpscalerDriver::~VirtualUpscalerDriver()
 {
-    // The feature must be destroyed before the parameters it was built with; the unique_ptr does that first.
-    _feature.reset();
-
-    if (_params != nullptr)
-    {
-        delete _params;
-        _params = nullptr;
-    }
-
-    if (_output != nullptr)
-    {
-        _output->Release();
-        _output = nullptr;
-    }
+    Release();
+    ReleaseTexture(_output);
+    ReleaseTexture(_input);
+    delete _params;
 }
 
-bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, uint32_t width, uint32_t height,
-                                          bool depthReversed)
+void VirtualUpscalerDriver::DropFeature(bool destroyFgContext)
 {
-    if (_feature != nullptr && _featureWidth == width && _featureHeight == height &&
-        _featureDepthReversed == depthReversed)
-        return true;
+    auto& state = State::Instance();
 
-    _feature.reset();
-
-    if (_params != nullptr)
+    // What NVSDK_NGX_D3D12_ReleaseFeature (destroyFgContext) and FeatureProvider_Dx12::ChangeFeature (not) do for a game's
+    // feature.
+    if (state.currentFG != nullptr && state.activeFgInput == FGInput::Upscaler)
     {
-        delete _params;
-        _params = nullptr;
+        state.fgChanged = true;
+        state.clearCapturedHudlesses = true;
+
+        if (destroyFgContext)
+            state.currentFG->DestroyFGContext();
     }
 
-    // Our own parameter block, built the same way NVSDK_NGX_D3D12_AllocateParameters' non-NVIDIA fallback builds one for
-    // a real game (inputs/NVNGX_DLSS_Dx12.cpp) -- no real game call, no real NVIDIA NGX core needed.
-    _params = new NVNGX_Parameters(API::DX12, false);
+    UpscalerInputsDx12::Reset();
 
-    _params->Set(NVSDK_NGX_Parameter_Width, width);
-    _params->Set(NVSDK_NGX_Parameter_Height, height);
-    _params->Set(NVSDK_NGX_Parameter_OutWidth, width);
-    _params->Set(NVSDK_NGX_Parameter_OutHeight, height);
+    if (state.currentFeature == _feature.get())
+        state.currentFeature = nullptr;
+
+    Util::DelayedDestroy(std::move(_feature));
+}
+
+void VirtualUpscalerDriver::Release()
+{
+    if (_feature == nullptr)
+        return;
+
+    LOG_INFO("Virtual upscaler: releasing the {} backend", _backendName);
+    DropFeature(true);
+    State::Instance().changeBackend.erase(kVirtualHandleId);
+    _backendName.clear();
+}
+
+bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend)
+{
+    _params->Set(NVSDK_NGX_Parameter_Width, key.width);
+    _params->Set(NVSDK_NGX_Parameter_Height, key.height);
+    _params->Set(NVSDK_NGX_Parameter_OutWidth, key.width);
+    _params->Set(NVSDK_NGX_Parameter_OutHeight, key.height);
     _params->Set(NVSDK_NGX_Parameter_PerfQualityValue, 1);
 
-    // Not jittered, not low-res: the trust mask's guide (TrustMaskDx12::BuildGuides) is already full (output)
-    // resolution motion with no jitter applied, since render size == output size here (scale 1.0, no upscaling).
-    // AutoExposure is required: we supply no NVSDK_NGX_Parameter_ExposureTexture (we have no such thing), and
-    // FFXFeatureDx12::EvaluateInternal, finding AutoExposure() false and no exposure texture, returns true
-    // without ever dispatching anything -- a silent no-op that looks identical to success in every log we have,
-    // which is why the picture was black: nothing ever wrote to it. FSR computes its own exposure internally when
-    // this flag is set, which is exactly our situation.
+    // Not jittered and not low-res: the guides are output-sized, unjittered motion. AutoExposure because there is no exposure
+    // texture to give: without both, FFXFeatureDx12::EvaluateInternal returns true having dispatched nothing.
     unsigned int flags = NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
 
-    if (depthReversed)
+    if (key.depthReversed)
         flags |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+
+    if (key.hdr)
+        flags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
 
     _params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
 
-    // Our own call: must not stand down the depth finder/optical flow pipeline that is feeding it.
-    SyntheticUpscalerCallScope guard;
-
     std::unique_ptr<IFeature_Dx12> feature;
 
-    if (!FeatureProvider_Dx12::GetFeature(Upscaler::FFX, kVirtualHandleId, _params, &feature) || feature == nullptr)
+    if (!FeatureProvider_Dx12::GetFeature(backend, kVirtualHandleId, _params, &feature) || feature == nullptr)
     {
-        _error = "could not create the FSR backend";
-        LOG_WARN("Story F: {}", _error);
-        delete _params;
-        _params = nullptr;
+        _error = std::format("could not create the {} backend", UpscalerDisplayName(backend));
+        LOG_WARN("Virtual upscaler: {}", _error);
         return false;
     }
 
     if (!feature->Init(_device, cmd, _params))
     {
-        _error = "the FSR backend failed to initialise";
-        LOG_WARN("Story F: {}", _error);
-        delete _params;
-        _params = nullptr;
+        _error = std::format("the {} backend failed to initialise", feature->Name());
+        LOG_WARN("Virtual upscaler: {}", _error);
+        Util::DelayedDestroy(std::move(feature));
         return false;
     }
 
     _feature = std::move(feature);
-    _featureWidth = width;
-    _featureHeight = height;
-    _featureDepthReversed = depthReversed;
-    _error.clear();
-    LOG_INFO("Story F: FSR backend ready, {}x{}, depth reversed {}", width, height, depthReversed);
     return true;
 }
 
-bool VirtualUpscalerDriver::EnsureOutput(DXGI_FORMAT format, uint32_t width, uint32_t height)
+bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild)
 {
-    if (_output != nullptr && _outputWidth == width && _outputHeight == height && _outputFormat == format)
+    if (_feature != nullptr && !rebuild && key == _featureKey)
         return true;
 
-    if (_output != nullptr)
+    // Tried and failed for exactly this: not again every frame.
+    if (_feature == nullptr && !rebuild && _failed && key == _failedKey)
+        return false;
+
+    const bool replacing = _feature != nullptr;
+
+    if (replacing)
     {
-        _output->Release();
-        _output = nullptr;
+        LOG_INFO("Virtual upscaler: rebuilding the {} backend", _backendName);
+        DropFeature(false);
     }
+
+    const auto backend = (Upscaler) key.backend;
+
+    // Like the real path's fallback when a chosen backend will not initialise; FFX needs nothing from the game.
+    if (!CreateFeature(cmd, key, backend) && (backend == Upscaler::FFX || !CreateFeature(cmd, key, Upscaler::FFX)))
+    {
+        _failed = true;
+        _failedKey = key;
+        return false;
+    }
+
+    _failed = false;
+    auto& state = State::Instance();
+
+    // GetFeature recorded what it built in Dx12Upscaler, which WantedBackend reads: the key matches it from the next frame on.
+    _featureKey = key;
+    _featureKey.backend = (int) WantedBackend();
+    _backendName = _feature->Name();
+    _error.clear();
+
+    state.changeBackend[kVirtualHandleId] = false;
+
+    if (replacing && state.currentFG != nullptr && state.activeFgInput == FGInput::Upscaler)
+        state.currentFG->UpdateTarget();
+
+    LOG_INFO("Virtual upscaler: {} ready, {}x{}, depth reversed {}, HDR {}", _backendName, key.width, key.height,
+             key.depthReversed, key.hdr);
+    return true;
+}
+
+bool VirtualUpscalerDriver::EnsureTexture(ID3D12Resource*& texture, Key& made, const Key& key,
+                                          D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES restState, const char* what)
+{
+    if (texture != nullptr && made.width == key.width && made.height == key.height && made.format == key.format)
+        return true;
+
+    ReleaseTexture(texture);
 
     D3D12_HEAP_PROPERTIES heap {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
     D3D12_RESOURCE_DESC desc {};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Width = width;
-    desc.Height = height;
+    desc.Width = key.width;
+    desc.Height = key.height;
     desc.DepthOrArraySize = 1;
     desc.MipLevels = 1;
-    desc.Format = format;
+    desc.Format = key.format;
     desc.SampleDesc.Count = 1;
-    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    desc.Flags = flags;
 
-    // Created already in the state Evaluate expects its Output in (FFXFeatureDx12::EvaluateInternal does not barrier
-    // Output itself -- the caller is expected to hand it over ready).
-    const HRESULT hr = _device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
-                                                        IID_PPV_ARGS(&_output));
+    const HRESULT hr = _device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, restState, nullptr,
+                                                        IID_PPV_ARGS(&texture));
 
     if (FAILED(hr))
     {
-        _error = std::format("creating the {}x{} output scratch texture failed: {:X}", width, height, (UINT) hr);
-        LOG_WARN("Story F: {} (format {})", _error, (int) format);
-        _output = nullptr;
+        texture = nullptr;
+        _error = std::format("creating the {}x{} {} texture (format {}) failed: {:X}", key.width, key.height, what,
+                             (int) key.format, (UINT) hr);
+        LOG_WARN("Virtual upscaler: {}", _error);
         return false;
     }
 
-    _outputWidth = width;
-    _outputHeight = height;
-    _outputFormat = format;
+    made = key;
     return true;
 }
 
-bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, ID3D12Resource* color, ID3D12Resource* depth,
-                                ID3D12Resource* motion, bool depthReversed, bool reset, ColorSpace space,
-                                D3D12_RESOURCE_STATES pictureState)
+bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame)
 {
-    if (cmd == nullptr || color == nullptr || depth == nullptr || motion == nullptr)
+    if (cmd == nullptr || frame.color == nullptr || frame.depth == nullptr || frame.motion == nullptr)
         return false;
 
     if (_device == nullptr)
@@ -173,89 +282,162 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
             return false;
         }
 
-        _device = device.Get(); // kept raw, not AddRef'd further: lives exactly as long as the game's own device does
+        _device = device.Get(); // not kept alive by us: lives as long as the game's device
     }
 
-    const D3D12_RESOURCE_DESC colorDesc = color->GetDesc();
-    const auto width = (uint32_t) colorDesc.Width;
-    const auto height = colorDesc.Height;
+    if (_params == nullptr)
+        _params = new NVNGX_Parameters(API::DX12, false);
 
-    // Our own call, for the whole sequence below: feature creation (if needed), UpscaleStart/End and Evaluate.
+    const D3D12_RESOURCE_DESC colorDesc = frame.color->GetDesc();
+
+    Key key;
+    key.width = (uint32_t) colorDesc.Width;
+    key.height = colorDesc.Height;
+    key.format = UavFormat(frame.colorFormat != DXGI_FORMAT_UNKNOWN ? frame.colorFormat : colorDesc.Format);
+    key.depthReversed = frame.depthReversed;
+    key.hdr = frame.space == ColorSpace::ScRgb; // PQ is a perceptual encoding, as sRGB is: passed as it comes
+    key.backend = (int) WantedBackend();
+
+    auto& state = State::Instance();
+    auto& cfg = *Config::Instance();
+
+    // Our own call, for all of it: GetFeature and Evaluate both tell the depth finder a game is calling an upscaler.
     SyntheticUpscalerCallScope guard;
 
-    if (!EnsureFeature(cmd, width, height, depthReversed))
+    // A backend switch from the menu, or a backend asking to be rebuilt (FeatureProvider_Dx12::ChangeFeature's job for a game's
+    // feature).
+    bool rebuild = false;
+
+    if (const auto change = state.changeBackend.find(kVirtualHandleId);
+        _feature != nullptr && change != state.changeBackend.end() && change->second)
+    {
+        if (state.newBackend != Upscaler::Reset)
+        {
+            key.backend = (int) (state.newBackend == Upscaler::DLSSD ? Upscaler::DLSS : state.newBackend);
+            state.newBackend = Upscaler::Reset;
+        }
+
+        change->second = false;
+        rebuild = true;
+    }
+
+    if (!EnsureFeature(cmd, key, rebuild))
         return false;
 
-    if (!EnsureOutput(colorDesc.Format, width, height))
+    const bool copyIn = colorDesc.Format != key.format;
+
+    if (!EnsureTexture(_output, _outputKey, key, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "output"))
         return false;
+
+    if (copyIn && !EnsureTexture(_input, _inputKey, key, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, "input"))
+        return false;
+
+    // Frame generation's Upscaler input only has a device once NVSDK_NGX_D3D12_Init gave it one, which a game with no upscaler
+    // never calls.
+    UpscalerInputsDx12::Init(_device);
+
+    const auto backend = _feature->GetUpscalerType();
+    const bool usesSettings = UsesBarrierSettings(backend);
+
+    if (usesSettings && IsUnrealGame())
+    {
+        if (!cfg.ColorResourceBarrier.has_value())
+            cfg.ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        if (!cfg.MVResourceBarrier.has_value())
+            cfg.MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    constexpr auto kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    constexpr auto kWrite = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    // Frame generation's copies (UpscaleStart/UpscaleEnd) read the settings whatever the backend.
+    const auto fgMotion = SettingOr(cfg.MVResourceBarrier, kRead);
+    const auto fgDepth = SettingOr(cfg.DepthResourceBarrier, kRead);
+    const auto fgOutput = SettingOr(cfg.OutputResourceBarrier, kWrite);
+
+    const auto inColor = usesSettings ? SettingOr(cfg.ColorResourceBarrier, kRead) : kRead;
+    const auto inMotion = usesSettings ? fgMotion : kRead;
+    const auto inDepth = usesSettings ? fgDepth : kRead;
+    const auto inOutput = usesSettings ? fgOutput : kWrite;
+
+    // The colour the backend reads: the picture itself, or a typed copy of it. The picture stays in COPY_SOURCE until the
+    // result is copied back over it.
+    ID3D12Resource* color = frame.color;
+    D3D12_RESOURCE_STATES pictureNow = frame.pictureState;
+
+    if (copyIn)
+    {
+        Transition(cmd, frame.color, pictureNow, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        pictureNow = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        cmd->CopyResource(_input, frame.color);
+        Transition(cmd, _input, D3D12_RESOURCE_STATE_COPY_DEST, inColor);
+        color = _input;
+    }
+    else
+    {
+        Transition(cmd, frame.color, pictureNow, inColor);
+        pictureNow = inColor;
+    }
 
     _params->Set(NVSDK_NGX_Parameter_Color, color);
-    _params->Set(NVSDK_NGX_Parameter_Depth, depth);
-    _params->Set(NVSDK_NGX_Parameter_MotionVectors, motion);
+    _params->Set(NVSDK_NGX_Parameter_Depth, frame.depth);
+    _params->Set(NVSDK_NGX_Parameter_MotionVectors, frame.motion);
     _params->Set(NVSDK_NGX_Parameter_Output, _output);
     _params->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
     _params->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
     _params->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
     _params->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0f);
-    _params->Set(NVSDK_NGX_Parameter_Reset, reset ? 1u : 0u);
+    _params->Set(NVSDK_NGX_Parameter_Reset, frame.reset ? 1u : 0u);
     _params->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
     _params->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
-    (void) space; // HDR encoding of the finished picture is not threaded through yet (SDR/scRGB both pass as-is); see
-                  // plans/2026-10-04-native-input-multi-api.md, Story F, stage 3.
 
-    const auto barrier = [cmd](ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-    {
-        if (before == after)
-            return;
+    Transition(cmd, frame.motion, kRead, fgMotion);
+    Transition(cmd, frame.depth, kRead, fgDepth);
+    Transition(cmd, _output, kWrite, fgOutput);
 
-        D3D12_RESOURCE_BARRIER b {};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = resource;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = before;
-        b.Transition.StateAfter = after;
-        cmd->ResourceBarrier(1, &b);
-    };
+    state.currentFeature = _feature.get();
 
-    // `color` must be NON_PIXEL_SHADER_RESOURCE for Evaluate (FFXFeatureDx12::EvaluateInternal does not barrier its
-    // inputs itself; the caller is expected to hand them over ready -- see the file for the (opt-in, off by default)
-    // exceptions it makes for Unreal and a user override, neither of which apply here).
-    barrier(color, pictureState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-    State::Instance().currentFeature = _feature.get();
-
-    // The exact sequence NVNGX_DLSS_Dx12.cpp's TryEvaluateOptiFeature uses for a real game call: UpscaleStart/UpscaleEnd
-    // is what feeds frame generation (inputs/FG/Upscaler_Inputs_Dx12.cpp), then the feature itself.
     UpscalerInputsDx12::UpscaleStart(cmd, _params, _feature.get());
     UpscalerInputsDx12::UpscaleEnd(cmd, _params, _feature.get());
 
-    const bool evaluated = _feature->Evaluate(cmd, _params);
+    Transition(cmd, frame.motion, fgMotion, inMotion);
+    Transition(cmd, frame.depth, fgDepth, inDepth);
+    Transition(cmd, _output, fgOutput, inOutput);
 
-    static int calls = 0;
+    bool evaluated = false;
+    {
+        ScopedSkipHeapCapture skip {};
+        evaluated = _feature->Evaluate(cmd, _params);
+    }
 
-    if (calls < 8 || calls % 300 == 0)
-        LOG_INFO("Story F: Evaluate call {} -> {}, {}x{} colour format {}, depth format {} motion format {}, "
-                 "reset {}, depth reversed {}",
-                 calls, evaluated, width, height, (int) colorDesc.Format, (int) depth->GetDesc().Format,
-                 (int) motion->GetDesc().Format, reset, depthReversed);
+    if (_evaluations < 8 || _evaluations % 300 == 0)
+        LOG_INFO("Virtual upscaler: Evaluate {} -> {}, {} {}x{}, colour format {}{}, reset {}, depth reversed {}",
+                 _evaluations, evaluated, _backendName, key.width, key.height, (int) key.format,
+                 copyIn ? " (copied)" : "", frame.reset, _featureKey.depthReversed);
 
-    ++calls;
+    ++_evaluations;
+
+    // The backend hands its inputs back in the states it took them in.
+    Transition(cmd, frame.motion, inMotion, kRead);
+    Transition(cmd, frame.depth, inDepth, kRead);
+
+    if (copyIn)
+        Transition(cmd, _input, inColor, D3D12_RESOURCE_STATE_COPY_DEST);
 
     if (evaluated)
     {
-        // Output -> color, the same "copy the result into the real target" pattern the frame sources use.
-        barrier(color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        barrier(_output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-
-        cmd->CopyResource(color, _output);
-
-        barrier(color, D3D12_RESOURCE_STATE_COPY_DEST, pictureState);
-        barrier(_output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Transition(cmd, _output, inOutput, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(cmd, frame.color, pictureNow, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->CopyResource(frame.color, _output);
+        Transition(cmd, frame.color, D3D12_RESOURCE_STATE_COPY_DEST, frame.pictureState);
+        Transition(cmd, _output, D3D12_RESOURCE_STATE_COPY_SOURCE, kWrite);
     }
     else
     {
-        // Nothing wrote to color: put it back where it came from.
-        barrier(color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, pictureState);
+        Transition(cmd, frame.color, pictureNow, frame.pictureState);
+        Transition(cmd, _output, inOutput, kWrite);
     }
 
     return evaluated;

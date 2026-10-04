@@ -30,8 +30,8 @@ void DepthFinderCore::Start(LogFn log)
 
 void DepthFinderCore::NoteUpscalerCall()
 {
-    // Our own synthetic call (Story F): the finder must not see this as the game having an upscaler, or it stands down the
-    // very pipeline that is feeding this call.
+    // Our own synthetic call: the finder must not see it as the game having an upscaler, or it stands down the very pipeline
+    // that is feeding the call.
     if (g_syntheticUpscalerDepth > 0)
         return;
 
@@ -175,9 +175,14 @@ SnapshotRequest DepthFinderCore::OnDepthClear(uint64_t context, const DepthBuffe
     stats.height = buffer.height;
     stats.format = buffer.format;
 
-    // Reversed-Z games clear to 0.0 (or anything but 1.0).
-    if (value != 1.0f)
+    // Reversed-Z games clear to 0.0 (or anything but 1.0). The first clear of a frame decides afresh; any later one in the same
+    // frame can only add reversed, as before.
+    if (!stats.clearedThisFrame)
+        stats.reversed = value != 1.0f;
+    else if (value != 1.0f)
         stats.reversed = true;
+
+    stats.clearedThisFrame = true;
 
     // A clear with no work before it (the start of a frame) means nothing.
     if (stats.current.drawcalls == 0)
@@ -338,7 +343,7 @@ uint64_t DepthFinderCore::BeginPresent(uint32_t pictureWidth, uint32_t pictureHe
         stats.current = DrawStats {};
         stats.clears = 0;
         stats.bestClear = -1;
-        stats.reversed = false;
+        stats.clearedThisFrame = false;
         ++it;
     }
 

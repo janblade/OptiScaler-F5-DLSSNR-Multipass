@@ -12,8 +12,13 @@
 
 namespace NativeMotionDx12
 {
-// Once per presented frame, from the menu's present hook, before the menu is drawn. `queue` is the swap chain's queue.
+// Once per presented frame, from the menu's present hook, before the menu is drawn. `queue` is the swap chain's queue. Does
+// nothing while OnFGPresent is being called.
 void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device);
+
+// Once per game frame under frame generation, from FGHooks::FGPresent before frame generation presents and before it takes
+// its lock: the picture is the game's own, `queue` the game's. Frame generation's Upscaler input is fed from here.
+void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device);
 
 // ImGui: the checkbox, a status line and the flow picture. Call inside the menu.
 void DrawDebugUi();

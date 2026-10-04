@@ -29,9 +29,9 @@
 namespace native
 {
 
-// Marks the current thread's calls into an upscaler as our own synthetic one (Story F: presenting native input to a real
-// upscaler backend as if the game had called it), so NoteUpscalerCall() below does not stand itself down in response to its
-// own call. Construct one around the whole synthetic Evaluate sequence; nested/re-entrant on the same thread is fine.
+// Marks the current thread's calls into an upscaler as our own synthetic one (native input presented to a real upscaler
+// backend as if the game had called it), so NoteUpscalerCall() below does not stand the finder down over its own call.
+// Construct one around the whole synthetic Evaluate sequence; nesting on the same thread is fine.
 class SyntheticUpscalerCallScope
 {
   public:
@@ -165,7 +165,10 @@ class DepthFinderCore
         DrawStats current;      // since the last clear
         uint32_t clears = 0;    // clears that came after real work
         int32_t bestClear = -1; // the clear a snapshot would be taken at
-        bool reversed = false;  // cleared to something other than 1.0
+        // Cleared to something other than 1.0. Kept across frames: a frame whose clear the hooks miss would otherwise report
+        // the same buffer as not reversed, and a consumer that latches it (an upscaler's creation flags) rebuilds.
+        bool reversed = false;
+        bool clearedThisFrame = false;
     };
 
     struct ContextState

@@ -1,25 +1,23 @@
 #pragma once
 
-// Story F spike: presents native input (NativeProducer's picture, the depth finder's depth and the optical flow) to a
-// real OptiScaler upscaler backend (FFX/FSR) as a synthetic Evaluate call -- no real game call anywhere in the chain --
-// so everything already keyed off a live upscaler feature (the menu's status and, above all, frame generation) can work
-// in a game that never calls one. Separate from and mutually exclusive with the existing native-input seam
-// (DlssNr::ApplyNativeInput, shaders/dlssnr/DlssNr_Late.inl): this does not touch it.
+// Presents native input (the producer's picture, and the depth finder's depth and the optical flow as guides) to a real
+// OptiScaler upscaler backend as a synthetic Evaluate call, for a game that never calls one. Everything keyed off a live
+// upscaler feature -- the menu's status, backend switching and, above all, frame generation with the Upscaler input -- then
+// works as it does for a game's own call. An alternative to DLSS-NR's native input (DlssNr::ApplyNativeInput); the two are
+// mutually exclusive.
 //
-// Shaped to match native::NativeProducer::ApplyNrFn exactly, so it is used the same way ApplyNativeInput is: passed as
-// the applyNr callback to NativeProducer::Run. No changes to NativeProducer, Dx12FrameSource or the frame acquisition
-// path are needed.
+// The call follows the real one (inputs/NVNGX_DLSS_Dx12.cpp, TryEvaluateOptiFeature): currentFeature, then
+// UpscalerInputsDx12::UpscaleStart and UpscaleEnd (which feed frame generation), then Evaluate. It must run before frame
+// generation presents, on the game's queue: native/NativeMotion_Dx12.cpp drives it from FGHooks::FGPresent when frame
+// generation owns the swapchain.
 //
-// Jitter is always zero and render size always equals output size (scale 1.0): there is no upscaling here. FSR runs as
-// a temporal stabiliser/AA pass on the native-resolution picture, not a reconstruction. See
-// plans/2026-10-04-native-input-multi-api.md, Story F, for the design and the open questions this still carries.
+// Jitter is zero and render size equals output size: there is no upscaling, the backend runs as a temporal stabiliser on the
+// native-resolution picture.
 //
-// Known side effect, not yet addressed: FeatureProvider_Dx12::GetFeature sets Config::Instance()->Dx12Upscaler to
-// whatever backend it created (FFX here) as a matter of course for a real game call -- our synthetic call does the
-// same, which can overwrite the user's own upscaler choice in the config. Acceptable for a first spike (opt-in,
-// off by default); revisit if the spike proceeds past stage 1.
+// The feature is kept out of the real NGX handle tables. Like a game's own feature it makes FeatureProvider_Dx12 record the
+// backend it built in Config::Dx12Upscaler, which is also the backend it builds: the user's choice, FFX when there is none.
 
-#include "FrameContract.h"
+#include "NativeProducer.h"
 
 #include <d3d12.h>
 #include <dxgiformat.h>
@@ -28,7 +26,8 @@
 #include <string>
 
 class IFeature_Dx12;
-struct NVSDK_NGX_Parameter;
+struct NVNGX_Parameters;
+enum class Upscaler;
 
 namespace native
 {
@@ -42,29 +41,51 @@ class VirtualUpscalerDriver
     VirtualUpscalerDriver(const VirtualUpscalerDriver&) = delete;
     VirtualUpscalerDriver& operator=(const VirtualUpscalerDriver&) = delete;
 
-    // Matches native::NativeProducer::ApplyNrFn. `color` arrives in `pictureState` and must be left there; `depth` and
-    // `motion` (the trust mask's guides) arrive already in NON_PIXEL_SHADER_RESOURCE, per TrustMaskDx12::BuildGuides.
-    // The device is taken from `cmd` (cached after the first call; this driver does not expect it to change in its
-    // lifetime). True when the synthetic Evaluate ran.
-    bool Run(ID3D12GraphicsCommandList* cmd, ID3D12Resource* color, ID3D12Resource* depth, ID3D12Resource* motion,
-             bool depthReversed, bool reset, ColorSpace space, D3D12_RESOURCE_STATES pictureState);
+    // A NativeProducer::ApplyFn: one synthetic upscaler call on `frame`, recorded on `cmd`, with the picture written back in
+    // place. True when the backend evaluated.
+    bool Run(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame);
 
+    // Drops the backend the way a game releasing its feature does: frame generation is told, currentFeature is cleared, and the
+    // feature is destroyed once the GPU can no longer be using it. Nothing happens when there is none.
+    void Release();
+
+    bool Active() const { return _feature != nullptr; }
     const std::string& Error() const { return _error; }
+    const std::string& BackendName() const { return _backendName; }
 
   private:
-    bool EnsureFeature(ID3D12GraphicsCommandList* cmd, uint32_t width, uint32_t height, bool depthReversed);
-    bool EnsureOutput(DXGI_FORMAT format, uint32_t width, uint32_t height);
+    struct Key
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN; // typed and UAV-capable: the output's, and the input copy's
+        bool depthReversed = false;
+        bool hdr = false;
+        int backend = 0; // an Upscaler
+
+        bool operator==(const Key&) const = default;
+    };
+
+    bool EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild);
+    bool CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend);
+    void DropFeature(bool destroyFgContext);
+    bool EnsureTexture(ID3D12Resource*& texture, Key& made, const Key& key, D3D12_RESOURCE_FLAGS flags,
+                       D3D12_RESOURCE_STATES restState, const char* what);
 
     ID3D12Device* _device = nullptr;
-    NVSDK_NGX_Parameter* _params = nullptr;
+    NVNGX_Parameters* _params = nullptr; // one block for the driver's life: features read it at Init only
     std::unique_ptr<IFeature_Dx12> _feature;
-    uint32_t _featureWidth = 0, _featureHeight = 0;
-    bool _featureDepthReversed = false;
+    Key _featureKey;
+    std::string _backendName;
+    bool _failed = false;
+    Key _failedKey;
 
-    ID3D12Resource* _output = nullptr;
-    uint32_t _outputWidth = 0, _outputHeight = 0;
-    DXGI_FORMAT _outputFormat = DXGI_FORMAT_UNKNOWN;
+    ID3D12Resource* _output = nullptr; // rests in UNORDERED_ACCESS
+    Key _outputKey;
+    ID3D12Resource* _input = nullptr; // a typed copy of the picture when the picture itself is typeless; rests in COPY_DEST
+    Key _inputKey;
 
+    uint64_t _evaluations = 0;
     std::string _error;
 };
 

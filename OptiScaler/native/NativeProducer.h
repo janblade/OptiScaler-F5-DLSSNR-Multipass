@@ -1,11 +1,13 @@
 #pragma once
 
 // The API-neutral half of the native input producer: given a FrameInput (a finished picture and the scene's depth copies, as
-// D3D12 resources) it runs the optical flow, the trust mask and the guides on one command list of its own, and has DLSS-NR run
-// on the picture. It knows nothing of the game's API (native/FrameContract.h); an adapter supplies the frames.
+// D3D12 resources) it runs the optical flow, the trust mask and the guides on one command list of its own, and hands the
+// picture and the guides to a consumer. It knows nothing of the game's API (native/FrameContract.h); an adapter supplies the
+// frames.
 //
-// DLSS-NR itself is not linked in here: the caller passes it in as a function (DlssNr::ApplyNativeInput in the game, a stand-in
-// in tests/nr_native_producer_gpu.cpp), so this class and everything it uses build and run without the model.
+// The consumer is not linked in here: the caller passes it in as a function (DLSS-NR's DlssNr::ApplyNativeInput, or an
+// upscaler backend through native::VirtualUpscalerDriver, in the game; a stand-in in tests/nr_native_producer_gpu.cpp), so
+// this class and everything it uses build and run without either.
 
 #include "FrameContract.h"
 
@@ -19,17 +21,28 @@
 namespace native
 {
 
+// What the producer hands its consumer for one frame. The consumer works on the picture in place.
+struct NativeFrame
+{
+    ID3D12Resource* color = nullptr;                          // the picture: in pictureState, and left in it
+    DXGI_FORMAT colorFormat = DXGI_FORMAT_UNKNOWN;            // a typed format to view it as (the resource may be typeless)
+    D3D12_RESOURCE_STATES pictureState = D3D12_RESOURCE_STATE_COMMON;
+    ColorSpace space = ColorSpace::Srgb;
+    ID3D12Resource* depth = nullptr;  // the guides (TrustMaskDx12::BuildGuides): picture-sized, unjittered, and in
+    ID3D12Resource* motion = nullptr; // NON_PIXEL_SHADER_RESOURCE, which the consumer must leave them in
+    bool depthReversed = false;
+    bool reset = false;               // the frame does not continue the last one
+};
+
 class NativeProducer
 {
   public:
-    // Runs DLSS-NR on `color` (in `pictureState`, left in it) with the guides, on `cmd`. True when the model ran.
-    using ApplyNrFn = std::function<bool(ID3D12GraphicsCommandList* cmd, ID3D12Resource* color, ID3D12Resource* depth,
-                                         ID3D12Resource* motion, bool depthReversed, bool reset, ColorSpace space,
-                                         D3D12_RESOURCE_STATES pictureState)>;
+    // Runs the consumer on `frame`, on `cmd`. True when it ran.
+    using ApplyFn = std::function<bool(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame)>;
 
     struct Options
     {
-        bool applyNr = false;         // run DLSS-NR (needs depth); off: flow and trust mask only
+        bool apply = false;           // run the consumer (needs depth); off: flow and trust mask only
         bool flowPreview = false;     // also draw the flow picture for the menu
         float previewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
     };
@@ -41,7 +54,7 @@ class NativeProducer
         bool trustRan = false;   // the trust mask ran in this frame (there was depth)
         bool sceneCut = false;   // the mask saw a hard cut: the histories were reset
         float distrustedShare = 0.0f;
-        bool nativeRan = false;  // DLSS-NR ran on the picture
+        bool nativeRan = false;  // the consumer ran on the picture
     };
 
     NativeProducer() = default;
@@ -58,7 +71,7 @@ class NativeProducer
 
     // One frame. `queue` is a direct queue of Device(); the work goes onto it after waiting for input.ready, and output.done is
     // the point it finishes at. The picture is processed in place.
-    Result Run(ID3D12CommandQueue* queue, const FrameInput& input, const Options& options, const ApplyNrFn& applyNr,
+    Result Run(ID3D12CommandQueue* queue, const FrameInput& input, const Options& options, const ApplyFn& apply,
                FrameOutput& output);
 
     // Forget the previous frames (the game calls an upscaler, a resolution change, a scene cut).

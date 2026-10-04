@@ -17,7 +17,9 @@
 #include <imgui/imgui.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 namespace
 {
@@ -34,13 +36,28 @@ enum class Status
 
 std::unique_ptr<native::NativeProducer> g_producer;
 native::Dx12FrameSource g_source;
-native::VirtualUpscalerDriver g_virtualUpscaler; // Story F: a synthetic upscaler call, an alternative to ApplyNativeInput
+
+// Made on first use and never destroyed at exit: its destructor would tear down an upscaler backend under the loader lock.
+native::VirtualUpscalerDriver* g_virtualUpscaler = nullptr;
+
+// Under frame generation the menu's present hook sees the real swap chain after frame generation ran, on its presenter's
+// thread and queue; FGPresent drives the step instead. The menu's hook stands aside while FGPresent ran within this many of
+// its presents (frame generation presents several frames for each of the game's).
+constexpr uint64_t kFgPresentGrace = 8;
+std::atomic<uint64_t> g_menuPresents { 0 };
+std::atomic<uint64_t> g_menuPresentsAtFg { 0 };
+std::atomic<bool> g_fgDriven { false };
+
+// The two hooks run on different threads while frame generation starts up. The menu's only tries it: its thread is frame
+// generation's presenter, which must never wait on the game thread.
+std::mutex g_runMutex;
+
 ID3D12Device* g_device = nullptr; // the menu's previews are made on it
 uint64_t g_frame = 0;
 bool g_previewWanted = false; // the menu node is open
 bool g_previewReady = false;  // a flow preview has been recorded
 bool g_trustRan = false;      // the trust mask was recorded in the last frame
-bool g_nativeRan = false;     // DLSS-NR ran on native input in the last frame
+bool g_nativeRan = false;     // DLSS-NR or the virtual upscaler ran on native input in the last frame
 uint64_t g_trustFrame = 0;    // the last frame it was
 uint64_t g_cuts = 0;          // scene cuts the mask reported
 Status g_status = Status::Off;
@@ -103,15 +120,17 @@ bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format,
     return true;
 }
 
-} // namespace
-
-namespace NativeMotionDx12
+void ReleaseVirtualUpscaler()
 {
+    if (g_virtualUpscaler != nullptr)
+        g_virtualUpscaler->Release();
+}
 
-void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
+void RunFrame(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
 {
     if (!Config::Instance()->DlssNrNativeMotion.value_or_default())
     {
+        ReleaseVirtualUpscaler();
         g_status = Status::Off;
         return;
     }
@@ -126,6 +145,8 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
 
     if (acquired == native::AcquireStatus::WaitingForUpscaler)
     {
+        // The game's own upscaler call takes over: ours goes, as a game's feature would.
+        ReleaseVirtualUpscaler();
         g_status = Status::Waiting;
 
         if (g_producer)
@@ -150,36 +171,47 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
             return;
         }
 
+        // The upscaler backend belongs to the old device too.
+        if (g_virtualUpscaler != nullptr)
+        {
+            delete g_virtualUpscaler;
+            g_virtualUpscaler = nullptr;
+        }
+
         g_producer = std::move(fresh);
         g_device = device;
         LOG_INFO("Native motion: optical flow and trust mask ready");
     }
 
-    // Story F: present this to OptiScaler's own FSR backend as a synthetic upscaler call instead of feeding DLSS-NR's
-    // finished-picture seam directly. Mutually exclusive with NativeInput; takes priority when both are on.
+    // Presents the picture to an upscaler backend as a synthetic call instead of running DLSS-NR on it. Takes priority when
+    // both are on.
     const bool useVirtualUpscaler = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
 
+    if (useVirtualUpscaler && g_virtualUpscaler == nullptr)
+        g_virtualUpscaler = new native::VirtualUpscalerDriver();
+    else if (!useVirtualUpscaler)
+        ReleaseVirtualUpscaler();
+
     native::NativeProducer::Options options;
-    options.applyNr = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
+    options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
     options.flowPreview = g_previewWanted;
     options.previewMaxSpeed = kPreviewMaxSpeed;
 
-    // DLSS-NR (or Story F's synthetic FSR call) is the one thing the producer does not link: it is handed in.
-    const auto applyNr = [useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
-                                              ID3D12Resource* depth, ID3D12Resource* motion, bool reversed, bool reset,
-                                              native::ColorSpace space, D3D12_RESOURCE_STATES state)
+    const auto apply = [useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, const native::NativeFrame& frame)
     {
         if (useVirtualUpscaler)
-            return g_virtualUpscaler.Run(cmd, color, depth, motion, reversed, reset, space, state);
+            return g_virtualUpscaler->Run(cmd, frame);
 
-        const DXGI_COLOR_SPACE_TYPE type = space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
-                                           : space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-                                                                              : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-        return DlssNr::ApplyNativeInput(g_source.Queue(), cmd, color, depth, motion, reversed, reset, type, state);
+        const DXGI_COLOR_SPACE_TYPE type =
+            frame.space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
+            : frame.space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                                     : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        return DlssNr::ApplyNativeInput(g_source.Queue(), cmd, frame.color, frame.depth, frame.motion,
+                                        frame.depthReversed, frame.reset, type, frame.pictureState);
     };
 
     native::FrameOutput output;
-    const auto result = g_producer->Run(queue, input, options, applyNr, output);
+    const auto result = g_producer->Run(queue, input, options, apply, output);
     g_source.Return(input, output);
 
     g_trustRan = result.trustRan;
@@ -218,6 +250,36 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
     g_previewWanted = false;
 }
 
+} // namespace
+
+namespace NativeMotionDx12
+{
+
+void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
+{
+    const uint64_t presents = ++g_menuPresents;
+
+    if (g_fgDriven.load() && presents - g_menuPresentsAtFg.load() <= kFgPresentGrace)
+        return;
+
+    std::unique_lock lock(g_runMutex, std::try_to_lock);
+
+    if (!lock.owns_lock())
+        return;
+
+    g_fgDriven = false;
+    RunFrame(swapChain, queue, device);
+}
+
+void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
+{
+    g_menuPresentsAtFg = g_menuPresents.load();
+    g_fgDriven = true;
+
+    std::lock_guard lock(g_runMutex);
+    RunFrame(swapChain, queue, device);
+}
+
 void DrawDebugUi()
 {
     auto* config = Config::Instance();
@@ -242,27 +304,25 @@ void DrawDebugUi()
 
     bool virtualUpscaler = config->DlssNrNativeUpscaler.value_or_default();
 
-    if (ImGui::Checkbox("Present this to OptiScaler as an upscaler (Story F, experimental)##nativeupscaler",
-                        &virtualUpscaler))
+    if (ImGui::Checkbox("Present this to OptiScaler as an upscaler (experimental)##nativeupscaler", &virtualUpscaler))
         config->DlssNrNativeUpscaler = virtualUpscaler;
 
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
-            "%s", "Spike: instead of feeding DLSS-NR directly, presents the depth finder's depth and the estimated\n"
-                  "motion to OptiScaler's own FSR backend as a synthetic call, as if the game had called it. Render\n"
-                  "size equals output size and jitter is zero -- a stabiliser/AA pass, not a reconstruction -- but it\n"
-                  "makes the menu's upscaler status and, above all, frame generation reachable in a game with no\n"
-                  "upscaler of its own. Mutually exclusive with Run Neural Rendering on this; takes priority when\n"
-                  "both are on. Applies at once.");
+            "%s", "Experimental. Instead of feeding DLSS-NR directly, presents the depth finder's depth and the\n"
+                  "estimated motion to OptiScaler's upscaler (the one chosen in the menu, FSR when none is) as if\n"
+                  "the game had called it. Render size equals output size and jitter is zero, so it works as a\n"
+                  "stabiliser, not a reconstruction; it makes frame generation with the Upscaler input work in a\n"
+                  "game with no upscaler. Takes priority over Run Neural Rendering on this. Applies at once.");
 
     if (virtualUpscaler)
     {
-        if (g_nativeRan)
-            ImGui::TextDisabled("Story F: FSR is running on this picture.");
-        else if (!g_virtualUpscaler.Error().empty())
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Story F: %s", g_virtualUpscaler.Error().c_str());
+        if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
+            ImGui::TextDisabled("%s is running on this picture.", g_virtualUpscaler->BackendName().c_str());
+        else if (g_virtualUpscaler != nullptr && !g_virtualUpscaler->Error().empty())
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Upscaler: %s", g_virtualUpscaler->Error().c_str());
         else
-            ImGui::TextDisabled("Story F: waiting for the first frame.");
+            ImGui::TextDisabled("Upscaler: waiting for the first frame with depth.");
     }
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();

@@ -282,6 +282,9 @@ int main()
 
         CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
 
+        // Cleared once, before the first frame: the reversed-Z it showed then still holds for every frame after.
+        CHECK(core.CurrentPick().reversed);
+
         // The binding is never lost: a further frame with no new draw offers nothing (current is empty), and one more draw
         // and flush offers one again.
         CHECK(!core.FlushForPresent(ctx).take);
@@ -290,6 +293,76 @@ int main()
             core.OnDraw(ctx, 6000, 1);
 
         CHECK(core.FlushForPresent(ctx).take);
+    }
+
+    // A frame whose clear the hooks do not see keeps the buffer's reversed-Z; the next clear decides again, both ways.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored);
+
+        CHECK(core.CurrentPick().reversed);
+
+        const uint64_t ctx = 1;
+
+        for (int frame = 0; frame < 3; ++frame)
+        {
+            core.OnDepthBound(ctx, true, &kScene);
+            core.OnViewport(ctx, (float) W);
+            for (int i = 0; i < 200; ++i)
+                core.OnDraw(ctx, 6000, 1);
+            core.OnDepthBound(ctx, false, nullptr);
+            core.BeginPresent(W, H);
+            core.EndPresent(W, H, kWarmup);
+
+            CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+            CHECK(core.CurrentPick().reversed);
+        }
+
+        core.OnDepthBound(ctx, true, &kScene);
+        core.OnDepthClear(ctx, kScene, 1.0f);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(ctx, 6000, 1);
+        core.OnDepthBound(ctx, false, nullptr);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+
+        CHECK(!core.CurrentPick().reversed);
+    }
+
+    // Our own synthetic upscaler call does not stand the finder down, nested or not; a call outside the scope still does.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored);
+
+        for (int frame = 0; frame < 3; ++frame)
+        {
+            {
+                SyntheticUpscalerCallScope outer;
+                core.NoteUpscalerCall();
+                {
+                    SyntheticUpscalerCallScope inner;
+                    core.NoteUpscalerCall();
+                }
+                core.NoteUpscalerCall();
+            }
+
+            SingleContextFrame(core, ignored);
+            CHECK(!core.GameCallsUpscaler());
+            CHECK(core.CurrentPick().valid);
+        }
+
+        core.NoteUpscalerCall();
+        core.BeginPresent(W, H);
+        CHECK(core.EndPresent(W, H, kWarmup));
+        CHECK(core.GameCallsUpscaler());
     }
 
     printf(fails == 0 ? "all passed\n" : "FAILED (%d)\n", fails);

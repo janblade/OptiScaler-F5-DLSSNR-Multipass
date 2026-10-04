@@ -113,6 +113,14 @@ std::atomic<bool> g_upscalerSeen { false };
 std::atomic<bool> g_armed { false };
 std::atomic<bool> g_overlayOn { false };
 
+// What the hooks have seen since start, for the log: tells "the game has no depth buffer at this point" (a menu, a video)
+// from "the hooks are blind" (descriptors created before they were installed, a path they do not cover).
+std::atomic<uint64_t> g_countDsvCreated { 0 };
+std::atomic<uint64_t> g_countOmSet { 0 };
+std::atomic<uint64_t> g_countOmSetWithDepth { 0 };     // an OMSetRenderTargets that carried a depth descriptor
+std::atomic<uint64_t> g_countOmSetUnknownDepth { 0 };  // ... of which the descriptor was not one the hooks had seen created
+std::atomic<uint64_t> g_countDraws { 0 };              // every draw, whatever was bound
+
 // The copy of the picked depth buffer for the overlay (guarded by g_mutex like the rest).
 struct Backup
 {
@@ -160,6 +168,8 @@ void OnDraw(ID3D12GraphicsCommandList* list, uint64_t vertices, uint32_t instanc
 {
     if (!g_active.load(std::memory_order_relaxed))
         return;
+
+    g_countDraws.fetch_add(1, std::memory_order_relaxed);
 
     std::lock_guard lock(g_mutex);
 
@@ -316,6 +326,8 @@ void STDMETHODCALLTYPE hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resour
 {
     o_CreateDepthStencilView(This, pResource, pDesc, DestDescriptor);
 
+    g_countDsvCreated.fetch_add(1, std::memory_order_relaxed);
+
     std::lock_guard lock(g_mutex);
 
     if (pResource == nullptr)
@@ -429,6 +441,14 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
         }
 
         g_lists[This].stats = bound;
+
+        g_countOmSet.fetch_add(1, std::memory_order_relaxed);
+        if (pDepthStencilDescriptor != nullptr)
+        {
+            g_countOmSetWithDepth.fetch_add(1, std::memory_order_relaxed);
+            if (bound == nullptr)
+                g_countOmSetUnknownDepth.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     o_OMSetRenderTargets(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
@@ -559,6 +579,10 @@ void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, cons
 
     LOG_INFO("Depth finder: frame {}, picture {}x{}, {} depth buffer(s) in use{}", g_frames, pictureWidth,
              pictureHeight, sorted.size(), pick.valid ? "" : ", none qualifies");
+    LOG_INFO("Depth finder:   hooks so far: {} depth views created, {} OMSetRenderTargets ({} with a depth descriptor, "
+             "{} of those unknown to us), {} draws",
+             g_countDsvCreated.load(), g_countOmSet.load(), g_countOmSetWithDepth.load(),
+             g_countOmSetUnknownDepth.load(), g_countDraws.load());
 
     const size_t shown = std::min<size_t>(sorted.size(), 8);
 

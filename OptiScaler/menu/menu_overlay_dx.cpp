@@ -6,6 +6,7 @@
 #include <Logger.h>
 #include <Config.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <motion/NativeMotion_Dx12.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -431,6 +432,9 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         if (ImGui::GetCurrentContext() && g_mainRenderTargetResource[0])
         {
             _showRenderImGuiDebugOnce = true;
+
+            // The motion step reads the finished picture before the menu is drawn onto it (does nothing unless it is on).
+            NativeMotionDx12::OnPresent(pSwapChain, (ID3D12CommandQueue*) currentSCCommandQueue, device);
 
             ImGui_ImplDX12_NewFrame();
 

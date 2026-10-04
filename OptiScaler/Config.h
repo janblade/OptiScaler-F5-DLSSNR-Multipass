@@ -574,6 +574,9 @@ class Config
     // busiest clear and shows it in the DLSS-NR menu. That copy is recorded into the game's own command list.
     CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
     CustomOptional<bool> DlssNrNativeDepthOverlay { false };
+    // NativeMotion: debug; estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
+    // call, and shows it in the DLSS-NR menu. Changes apply at once. See motion/NativeMotion_Dx12.h.
+    CustomOptional<bool> DlssNrNativeMotion { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

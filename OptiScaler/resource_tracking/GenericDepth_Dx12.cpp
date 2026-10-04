@@ -1279,6 +1279,8 @@ void NoteUpscalerCall()
                              std::memory_order_relaxed);
 }
 
+bool GameCallsUpscaler() { return g_installed && g_upscalerSeen.load(); }
+
 bool Armed() { return g_installed && g_armed.load() && !g_upscalerSeen.load(); }
 
 // Under g_mutex. The overlay's texture needs a descriptor in the menu's heap; both come and go with the menu.

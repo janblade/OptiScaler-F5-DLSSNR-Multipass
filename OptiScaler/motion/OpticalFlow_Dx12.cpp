@@ -9,7 +9,7 @@ namespace
 {
 
 constexpr uint32_t kDescriptorsPerPass = 4; // three SRVs and one UAV
-constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1;
+constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
@@ -181,6 +181,21 @@ float Median9(float v[9])
     return v[4];
 }
 
+// Hue for the direction, brightness for the speed (scale is the speed that is full brightness).
+[numthreads(8, 8, 1)]
+void Visualise(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y)
+        return;
+
+    float2 f = FlowIn.Load(int3(id.xy, 0)).xy;
+    float hue = atan2(f.y, f.x) / 6.2831853 + 0.5;
+    float3 rgb = saturate(abs(frac(hue + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+    float level = saturate(length(f) / scale);
+
+    OutFlow[id.xy] = float4(rgb * level, 1.0);
+}
+
 [numthreads(8, 8, 1)]
 void Median(uint3 id : SV_DispatchThreadID)
 {
@@ -233,7 +248,7 @@ OpticalFlowDx12::~OpticalFlowDx12()
 {
     ReleaseTextures();
 
-    for (ID3D12PipelineState** pso : { &_luma, &_down, &_match, &_median })
+    for (ID3D12PipelineState** pso : { &_luma, &_down, &_match, &_median, &_visualise })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -319,7 +334,7 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
     };
 
     for (const Entry& entry : { Entry { "Luma", &_luma }, Entry { "Down", &_down }, Entry { "Match", &_match },
-                                Entry { "Median", &_median } })
+                                Entry { "Median", &_median }, Entry { "Visualise", &_visualise } })
     {
         ID3DBlob* code = Compile(entry.name, &_error);
 
@@ -400,6 +415,7 @@ void OpticalFlowDx12::ReleaseTextures()
         release(tex);
 
     release(_flow);
+    release(_preview);
 }
 
 bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
@@ -431,7 +447,8 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
         h = (h + 1) / 2;
     }
 
-    return CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow");
+    return CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
+           CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM, L"OpticalFlow_Preview");
 }
 
 void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state)
@@ -565,5 +582,26 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
     _current = 1 - _current;
     _havePrevious = true;
+    return true;
+}
+
+bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, float maxSpeed)
+{
+    if (!_flowValid || _preview.resource == nullptr || list == nullptr)
+        return false;
+
+    // The flow rests in the combined read state; the pass wants the non-pixel one it was written to.
+    Transition(list, _flow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    Constants constants {};
+    constants.sizeX = _preview.width;
+    constants.sizeY = _preview.height;
+    constants.scale = maxSpeed;
+    Pass(list, _visualise, _flow.resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN,
+         _preview, DXGI_FORMAT_R8G8B8A8_UNORM, constants);
+
+    Transition(list, _flow,
+               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Transition(list, _preview, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return true;
 }

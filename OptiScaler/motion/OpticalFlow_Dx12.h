@@ -42,6 +42,11 @@ class OpticalFlowDx12
     // Forget the previous frame (a scene cut, a resolution change): the next Dispatch only stores its picture.
     void Reset() { _havePrevious = false; }
 
+    // A picture of the flow for a menu: hue is the direction, brightness the speed up to maxSpeed pixels, black is still.
+    // R8G8B8A8_UNORM at the flow's size, left in the PIXEL_SHADER_RESOURCE state. Call after Dispatch() when FlowValid().
+    bool Visualise(ID3D12GraphicsCommandList* list, float maxSpeed);
+    ID3D12Resource* Preview() const { return _preview.resource; }
+
     // The flow, in the NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE state between Dispatches.
     ID3D12Resource* Flow() const { return _flow.resource; }
     bool FlowValid() const { return _flowValid; }
@@ -92,6 +97,7 @@ class OpticalFlowDx12
     ID3D12PipelineState* _down = nullptr;
     ID3D12PipelineState* _match = nullptr;
     ID3D12PipelineState* _median = nullptr;
+    ID3D12PipelineState* _visualise = nullptr;
     ID3D12DescriptorHeap* _heap = nullptr;
     UINT _descriptorSize = 0;
     UINT _heapCursor = 0;
@@ -99,6 +105,7 @@ class OpticalFlowDx12
     Tex _pyramid[2][kLevels]; // luma, 1/2 .. 1/16 of the colour; one set is the current frame, the other the previous
     Tex _levelFlow[kLevels];
     Tex _flow;
+    Tex _preview;
     int _current = 0;
     bool _havePrevious = false;
     bool _flowValid = false;

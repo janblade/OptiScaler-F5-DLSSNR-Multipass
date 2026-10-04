@@ -83,6 +83,7 @@ bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, uint32
     if (!FeatureProvider_Dx12::GetFeature(Upscaler::FFX, kVirtualHandleId, _params, &feature) || feature == nullptr)
     {
         _error = "could not create the FSR backend";
+        LOG_WARN("Story F: {}", _error);
         delete _params;
         _params = nullptr;
         return false;
@@ -91,6 +92,7 @@ bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, uint32
     if (!feature->Init(_device, cmd, _params))
     {
         _error = "the FSR backend failed to initialise";
+        LOG_WARN("Story F: {}", _error);
         delete _params;
         _params = nullptr;
         return false;
@@ -101,6 +103,7 @@ bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, uint32
     _featureHeight = height;
     _featureDepthReversed = depthReversed;
     _error.clear();
+    LOG_INFO("Story F: FSR backend ready, {}x{}, depth reversed {}", width, height, depthReversed);
     return true;
 }
 
@@ -137,6 +140,7 @@ bool VirtualUpscalerDriver::EnsureOutput(DXGI_FORMAT format, uint32_t width, uin
     if (FAILED(hr))
     {
         _error = std::format("creating the {}x{} output scratch texture failed: {:X}", width, height, (UINT) hr);
+        LOG_WARN("Story F: {} (format {})", _error, (int) format);
         _output = nullptr;
         return false;
     }
@@ -221,6 +225,16 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
     UpscalerInputsDx12::UpscaleEnd(cmd, _params, _feature.get());
 
     const bool evaluated = _feature->Evaluate(cmd, _params);
+
+    static int calls = 0;
+
+    if (calls < 8 || calls % 300 == 0)
+        LOG_INFO("Story F: Evaluate call {} -> {}, {}x{} colour format {}, depth format {} motion format {}, "
+                 "reset {}, depth reversed {}",
+                 calls, evaluated, width, height, (int) colorDesc.Format, (int) depth->GetDesc().Format,
+                 (int) motion->GetDesc().Format, reset, depthReversed);
+
+    ++calls;
 
     if (evaluated)
     {

@@ -4,6 +4,9 @@
 #include "OpticalFlow_Dx12.h"
 #include "TrustMask_Dx12.h"
 
+#include <native/Dx12FrameSource.h>
+#include <native/NativeProducer.h>
+
 #include <Config.h>
 
 #include <menu/menu_overlay_dx.h>
@@ -18,7 +21,6 @@
 namespace
 {
 
-constexpr uint32_t kRing = 3;
 constexpr float kPreviewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
 
 enum class Status
@@ -29,18 +31,10 @@ enum class Status
     Running
 };
 
-std::unique_ptr<OpticalFlowDx12> g_flow;
-std::unique_ptr<TrustMaskDx12> g_trust;
-ID3D12Device* g_device = nullptr;
-ID3D12CommandAllocator* g_allocators[kRing] = {};
-ID3D12GraphicsCommandList* g_list = nullptr;
-ID3D12Fence* g_fence = nullptr;
-HANDLE g_event = nullptr;
-UINT64 g_values[kRing] = {};
-UINT64 g_signalled = 0;
+std::unique_ptr<native::NativeProducer> g_producer;
+native::Dx12FrameSource g_source;
+ID3D12Device* g_device = nullptr; // the menu's previews are made on it
 uint64_t g_frame = 0;
-uint32_t g_width = 0;
-uint32_t g_height = 0;
 bool g_previewWanted = false; // the menu node is open
 bool g_previewReady = false;  // a flow preview has been recorded
 bool g_trustRan = false;      // the trust mask was recorded in the last frame
@@ -62,81 +56,6 @@ struct PreviewView
 ID3D12DescriptorHeap* g_srvHeap = nullptr;
 PreviewView g_flowView;
 PreviewView g_maskView;
-
-void WaitFor(UINT64 value)
-{
-    if (g_fence == nullptr || value == 0 || g_fence->GetCompletedValue() >= value)
-        return;
-
-    g_fence->SetEventOnCompletion(value, g_event);
-    WaitForSingleObject(g_event, 1000);
-}
-
-bool CreateObjects(ID3D12Device* device)
-{
-    g_flow = std::make_unique<OpticalFlowDx12>();
-    g_trust = std::make_unique<TrustMaskDx12>();
-
-    if (!g_flow->Init(device))
-    {
-        g_failure = g_flow->Error();
-        g_flow.reset();
-        g_trust.reset();
-        return false;
-    }
-
-    if (!g_trust->Init(device))
-    {
-        g_failure = g_trust->Error();
-        g_flow.reset();
-        g_trust.reset();
-        return false;
-    }
-
-    for (auto& allocator : g_allocators)
-        if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
-        {
-            g_failure = "creating a command allocator";
-            return false;
-        }
-
-    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_allocators[0], nullptr,
-                                         IID_PPV_ARGS(&g_list))))
-    {
-        g_failure = "creating the command list";
-        return false;
-    }
-
-    g_list->Close();
-
-    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_fence))))
-    {
-        g_failure = "creating the fence";
-        return false;
-    }
-
-    g_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    g_device = device;
-    return true;
-}
-
-// The colour format to read the swap chain's buffer through (a typeless buffer needs a typed view).
-DXGI_FORMAT ViewFormat(DXGI_FORMAT format)
-{
-    switch (format)
-    {
-    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-        return DXGI_FORMAT_R8G8B8A8_UNORM;
-    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-        return DXGI_FORMAT_B8G8R8A8_UNORM;
-    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-        return DXGI_FORMAT_R10G10B10A2_UNORM;
-    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-        return DXGI_FORMAT_R16G16B16A16_FLOAT;
-    default:
-        return format;
-    }
-}
 
 // Shows a texture in the menu: a descriptor in the menu's heap (made once, and again if the heap or the texture changes).
 // `grayFromRed` shows a one-channel texture as gray.
@@ -198,167 +117,95 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
     if (swapChain == nullptr || queue == nullptr || device == nullptr || g_status == Status::Failed)
         return;
 
-    // The game has an upscaler of its own: this is not the case the producer is for, and the pictures before and after a
-    // change would be compared across it.
-    if (GenericDepthDx12::GameCallsUpscaler())
+    g_source.SetPresent(swapChain, queue);
+
+    native::FrameInput input;
+    const auto acquired = g_source.Acquire(input);
+
+    if (acquired == native::AcquireStatus::WaitingForUpscaler)
     {
         g_status = Status::Waiting;
 
-        if (g_flow)
-            g_flow->Reset();
-        if (g_trust)
-            g_trust->Reset();
+        if (g_producer)
+            g_producer->Reset();
 
         return;
     }
 
-    if (g_flow == nullptr || g_device != device)
+    if (acquired != native::AcquireStatus::Ready)
+        return;
+
+    if (g_producer == nullptr || g_producer->Device() != device)
     {
-        if (!CreateObjects(device))
+        auto fresh = std::make_unique<native::NativeProducer>();
+
+        if (!fresh->Init(device))
         {
+            g_failure = fresh->Error();
             g_status = Status::Failed;
             LOG_ERROR("Native motion: {}", g_failure);
+            g_source.Return(input, native::FrameOutput {});
             return;
         }
 
+        g_producer = std::move(fresh);
+        g_device = device;
         LOG_INFO("Native motion: optical flow and trust mask ready");
     }
 
-    IDXGISwapChain3* chain3 = nullptr;
-    UINT index = 0;
+    native::NativeProducer::Options options;
+    options.applyNr = Config::Instance()->DlssNrNativeInput.value_or_default();
+    options.flowPreview = g_previewWanted;
+    options.previewMaxSpeed = kPreviewMaxSpeed;
 
-    if (SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&chain3))))
+    // DLSS-NR is the one thing the producer does not link: it is handed in.
+    const auto applyNr = [](ID3D12GraphicsCommandList* cmd, ID3D12Resource* color, ID3D12Resource* depth,
+                            ID3D12Resource* motion, bool reversed, bool reset, native::ColorSpace space,
+                            D3D12_RESOURCE_STATES state)
     {
-        index = chain3->GetCurrentBackBufferIndex();
-        chain3->Release();
-    }
+        const DXGI_COLOR_SPACE_TYPE type = space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
+                                           : space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                                                              : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        return DlssNr::ApplyNativeInput(g_source.Queue(), cmd, color, depth, motion, reversed, reset, type, state);
+    };
 
-    ID3D12Resource* backBuffer = nullptr;
+    native::FrameOutput output;
+    const auto result = g_producer->Run(queue, input, options, applyNr, output);
+    g_source.Return(input, output);
 
-    if (FAILED(swapChain->GetBuffer(index, IID_PPV_ARGS(&backBuffer))))
-        return;
+    g_trustRan = result.trustRan;
+    g_nativeRan = result.nativeRan;
 
-    const D3D12_RESOURCE_DESC desc = backBuffer->GetDesc();
+    if (result.trustRan)
+        g_trustFrame = g_frame;
 
-    // The previous work may still be reading the textures a new size replaces.
-    if (desc.Width != g_width || desc.Height != g_height)
+    if (result.flowValid)
     {
-        WaitFor(g_signalled);
-        g_width = (uint32_t) desc.Width;
-        g_height = desc.Height;
-        g_flow->Reset();
-        g_trust->Reset();
-    }
-
-    const UINT slot = (UINT) (g_frame % kRing);
-    WaitFor(g_values[slot]);
-
-    if (FAILED(g_allocators[slot]->Reset()) || FAILED(g_list->Reset(g_allocators[slot], nullptr)))
-    {
-        backBuffer->Release();
-        return;
-    }
-
-    D3D12_RESOURCE_BARRIER barrier {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = backBuffer;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    g_list->ResourceBarrier(1, &barrier);
-
-    const bool recorded = g_flow->Dispatch(g_list, backBuffer, ViewFormat(desc.Format));
-
-    g_trustRan = false;
-    g_nativeRan = false;
-    bool backBufferInPresent = false;
-    TrustMaskDx12::Inputs nativeInputs;
-    bool nativeReady = false;
-    bool nativeReset = false;
-
-    if (recorded && g_flow->FlowValid())
-    {
-        if (g_previewWanted)
-            g_previewReady = g_flow->Visualise(g_list, kPreviewMaxSpeed) || g_previewReady;
-
-        // The trust mask needs the scene's depth as the depth finder copied it this frame.
-        const auto depth = GenericDepthDx12::BestSnapshot();
-
-        if (depth.valid)
-        {
-            TrustMaskDx12::Inputs in;
-            in.flow = g_flow->Flow();
-            in.flowWidth = g_flow->FlowWidth();
-            in.flowHeight = g_flow->FlowHeight();
-            in.fullPerFlow = (float) desc.Width / (float) g_flow->FlowWidth();
-            in.lumaNow = g_flow->LumaOfLastFrame();
-            in.lumaBefore = g_flow->LumaOfFrameBefore();
-            in.depthCount = (std::min)(depth.copyCount, (int) TrustMaskDx12::Inputs::kMaxDepths);
-
-            for (int i = 0; i < in.depthCount; ++i)
-                in.depths[i] = depth.copies[i];
-
-            in.depthFormat = depth.viewFormat;
-            in.depthWidth = depth.width;
-            in.depthHeight = depth.height;
-            in.depthReversed = depth.reversed;
-            g_trustRan = g_trust->Dispatch(g_list, in);
-            nativeInputs = in;
-            nativeReady = g_trustRan;
-
-            if (g_trustRan)
-                g_trustFrame = g_frame;
-        }
-
         // How often the depth finder has a copy for the mask: the log shows it every 600 frames.
         static uint64_t seen = 0, ran = 0;
         ++seen;
-        ran += g_trustRan ? 1 : 0;
+        ran += result.trustRan ? 1 : 0;
 
         if (seen == 600)
         {
             LOG_INFO("Native motion: the trust mask ran in {} of {} frames", ran, seen);
             seen = ran = 0;
         }
-
-        // A hard cut: nothing carried over from before it is worth keeping.
-        if (g_trust->SceneCutSeen())
-        {
-            ++g_cuts;
-            LOG_INFO("Native motion: scene cut seen ({:.0f}% of the picture distrusted), histories reset",
-                     g_trust->DistrustedShare() * 100.0f);
-            g_flow->Reset();
-            g_trust->Reset();
-            nativeReady = false;
-            nativeReset = true;
-        }
     }
 
-    // Native input: DLSS-NR on this picture with the finder's depth and the flow, on this same list.
-    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-    g_list->ResourceBarrier(1, &barrier);
-    backBufferInPresent = true;
-
-    if (nativeReady && Config::Instance()->DlssNrNativeInput.value_or_default())
+    if (result.sceneCut)
     {
-        if (g_trust->BuildGuides(g_list, nativeInputs, (uint32_t) desc.Width, desc.Height))
-            g_nativeRan = DlssNr::ApplyNativeInput(swapChain, queue, g_list, backBuffer, g_trust->GuideDepth(),
-                                                    g_trust->GuideMotion(), nativeInputs.depthReversed, nativeReset);
+        ++g_cuts;
+        LOG_INFO("Native motion: scene cut seen ({:.0f}% of the picture distrusted), histories reset",
+                 result.distrustedShare * 100.0f);
     }
 
-    (void) backBufferInPresent;
-
-    if (SUCCEEDED(g_list->Close()))
+    if (result.submitted)
     {
-        ID3D12CommandList* lists[] = { g_list };
-        queue->ExecuteCommandLists(1, lists);
-        queue->Signal(g_fence, ++g_signalled);
-        g_values[slot] = g_signalled;
         ++g_frame;
         g_status = Status::Running;
     }
 
-    backBuffer->Release();
     g_previewWanted = false;
 }
 
@@ -386,9 +233,9 @@ void DrawDebugUi()
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
-    if (debugView && g_flow && ImGui::TreeNode("Flow tuning (to compare, applies at once)##flowtuning"))
+    if (debugView && g_producer && ImGui::TreeNode("Flow tuning (to compare, applies at once)##flowtuning"))
     {
-        auto& tune = g_flow->Tuning();
+        auto& tune = g_producer->Flow()->Tuning();
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 3);
         ImGui::SetNextItemWidth(160.0f);
@@ -458,8 +305,8 @@ void DrawDebugUi()
     {
         g_previewWanted = true;
 
-        if (g_flow && g_previewReady)
-            drawn = ShowTexture(g_flowView, g_flow->Preview(), DXGI_FORMAT_R8G8B8A8_UNORM, false, boxWidth, boxHeight);
+        if (g_producer && g_producer->PreviewReady())
+            drawn = ShowTexture(g_flowView, g_producer->Flow()->Preview(), DXGI_FORMAT_R8G8B8A8_UNORM, false, boxWidth, boxHeight);
     }
 
     if (!drawn)
@@ -479,22 +326,22 @@ void DrawDebugUi()
     else
         ImGui::TextDisabled("Trust: -");
 
-    if (g_trust)
+    if (g_producer)
     {
         static const char* kViews[] = { "Final mask", "Depth check", "Revealed-surface check", "Flow consistency check",
                                         "Luma check", "Outside the picture" };
-        int view = g_trust->Tuning().debugView;
+        int view = g_producer->Trust()->Tuning().debugView;
 
         ImGui::SetNextItemWidth(220.0f);
 
         if (ImGui::Combo("Show##trustview", &view, kViews, IM_ARRAYSIZE(kViews)))
-            g_trust->Tuning().debugView = view;
+            g_producer->Trust()->Tuning().debugView = view;
     }
 
     bool maskDrawn = false;
 
-    if (g_status == Status::Running && trustRecent && g_trust)
-        maskDrawn = ShowTexture(g_maskView, g_trust->Mask(), DXGI_FORMAT_R8_UNORM, true, boxWidth, boxHeight);
+    if (g_status == Status::Running && trustRecent && g_producer)
+        maskDrawn = ShowTexture(g_maskView, g_producer->Trust()->Mask(), DXGI_FORMAT_R8_UNORM, true, boxWidth, boxHeight);
 
     if (!maskDrawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));

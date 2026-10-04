@@ -520,9 +520,21 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
                  State::Instance().currentFG->IsActive() && !State::Instance().currentFG->IsPaused());
 }
 
-bool ApplyNativeInput(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
-                      ID3D12Resource* color, ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed,
-                      bool reset)
+DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format)
+{
+    auto colorSpace = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
+                                                                : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    UINT colorSpaceSize = sizeof(colorSpace);
+
+    if (swapchain != nullptr)
+        swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
+
+    return colorSpace;
+}
+
+bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
+                      ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
+                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState)
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
@@ -531,7 +543,7 @@ bool ApplyNativeInput(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, ID3D
         Late::Say("Native input needs Finished picture and Enable Neural Rendering on.");
         return false;
     }
-    if (!swapchain || !queue || !cmd || !color || !depth || !motion ||
+    if (!queue || !cmd || !color || !depth || !motion ||
         State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         return false;
     if (Late::PausedForGameFrameGeneration())
@@ -549,10 +561,6 @@ bool ApplyNativeInput(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, ID3D
     }
     Late::device = currentDevice;
     const auto desc = color->GetDesc();
-    auto colorSpace = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
-        ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-    UINT colorSpaceSize = sizeof(colorSpace);
-    swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
     const bool screenPq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
     const bool screenScrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
     const bool screenSdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
@@ -592,7 +600,7 @@ bool ApplyNativeInput(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, ID3D
     frame.OutputHeight = desc.Height;
     frame.FinishedPicture = true;
     frame.IndependentCommands = true;
-    frame.OutputArrivalState = D3D12_RESOURCE_STATE_PRESENT;
+    frame.OutputArrivalState = pictureState;
     frame.SubmissionEpoch = State::Instance().frameCount;
 
     DlssNrNative::SetPrecision(Config::Instance()->DlssNrPrecision.value_or_default());

@@ -2,6 +2,8 @@
 
 #include "GenericDepth_Dx12.h"
 
+#include <native/DepthFinderCore.h>
+
 #include <Config.h>
 #include <Util.h>
 
@@ -81,29 +83,6 @@ PFN_Dispatch o_Dispatch = nullptr;
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Close)(ID3D12GraphicsCommandList* This);
 PFN_Close o_Close = nullptr;
 
-struct DrawStats
-{
-    uint64_t vertices = 0;
-    uint32_t drawcalls = 0;
-    uint32_t drawcallsIndirect = 0;
-    float lastViewportWidth = 0.0f;
-};
-
-// One depth-stencil buffer's counts for the frame being recorded.
-struct Stats
-{
-    uint32_t width = 0;
-    uint32_t height = 0;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    ID3D12Resource* resource = nullptr;
-    bool readOnlyDepth = false;
-    DrawStats total;
-    DrawStats current;       // since the last clear
-    uint32_t clears = 0;     // clears that came after real work
-    int32_t bestClear = -1;  // the clear a snapshot would be taken at
-    bool reversed = false;   // cleared to something other than 1.0
-};
-
 struct DsvInfo
 {
     ID3D12Resource* resource = nullptr;
@@ -113,33 +92,9 @@ struct DsvInfo
     bool readOnlyDepth = false; // the view is read-only for depth, so the buffer is in the depth-read state while bound
 };
 
-struct ListState
-{
-    Stats* stats = nullptr;       // the depth buffer this list draws into now
-    float viewportWidth = 0.0f;   // its main viewport
-};
-
-// Whether the hooks count. Cleared for good once the game is seen making an upscaler call, so a game that has one pays a
-// relaxed load per call and nothing more.
-std::atomic<bool> g_active { false };
-std::atomic<bool> g_upscalerSeen { false };          // an upscaler call was seen within the last kQuietPresents presents
-std::atomic<uint64_t> g_presentsNow { 0 };           // g_presents, readable without the lock
-std::atomic<uint64_t> g_lastUpscalerCall { 0 };      // the present count when the game last called an upscaler (0 never)
-std::atomic<bool> g_armed { false };
+// The API-neutral half of the finder: counting, picking, warm-up, stand-down. This file is the D3D12 adapter around it.
+native::DepthFinderCore g_core;
 std::atomic<bool> g_overlayOn { false };
-
-// What the hooks have seen since start, for the log: tells "the game has no depth buffer at this point" (a menu, a video)
-// from "the hooks are blind" (descriptors created before they were installed, a path they do not cover).
-std::atomic<uint64_t> g_countDsvCreated { 0 };
-std::atomic<uint64_t> g_countOmSet { 0 };
-std::atomic<uint64_t> g_countOmSetWithDepth { 0 };     // an OMSetRenderTargets that carried a depth descriptor
-std::atomic<uint64_t> g_countOmSetUnknownDepth { 0 };  // ... of which the descriptor was not one the hooks had seen created
-std::atomic<uint64_t> g_countDraws { 0 };              // every draw, whatever was bound
-std::atomic<uint64_t> g_countExecIndirect { 0 };       // every ExecuteIndirect, whatever was bound
-std::atomic<uint64_t> g_countExecBundle { 0 };         // every ExecuteBundle: draws recorded in a bundle are not seen by the
-                                                       // direct list's draw hooks if the bundle's functions are other code
-std::atomic<uint64_t> g_countDispatch { 0 };           // every Dispatch (a game that renders through compute draws little)
-std::atomic<int> g_bundleSameDraw { -1 };              // 1 the bundle's Draw functions are the direct list's, 0 not, -1 unknown
 
 // The geometry of the copies of the picked depth buffer, and the readback of the chosen one for the menu's preview (guarded
 // by g_mutex like the rest).
@@ -155,10 +110,6 @@ struct Backup
 
 std::mutex g_mutex;
 std::unordered_map<SIZE_T, DsvInfo> g_dsv;                       // CPU descriptor handle -> what it views
-std::unordered_map<ID3D12GraphicsCommandList*, ListState> g_lists;
-std::unordered_map<ID3D12Resource*, Stats> g_stats;              // node-stable: g_lists holds pointers into it
-uint64_t g_bestSnapshotVertices = 0;                             // the least a stretch must draw to be copied (a share of the pick's last frame)
-float g_pictureWidth = 0.0f;                                     // from the last present
 Backup g_backup;
 uint64_t g_previewFrame = 0;         // the frame the preview's readback was last filled in
 
@@ -176,57 +127,14 @@ struct SnapshotSlot
 
 SnapshotSlot g_slots[kSnapshotSlots];
 int g_slotsUsed = 0;                 // taken this frame
-std::atomic<bool> g_snapshotsWanted { false }; // the overlay is on, or the native motion step needs the depth
 GenericDepthDx12::Snapshot g_best;   // the frame just closed's choice
 std::vector<std::pair<ID3D12Resource*, uint64_t>> g_retired; // replaced copies, released a few frames later
-uint64_t g_presents = 0;
-uint64_t g_warmupStart = 0;          // the present count the current warm-up began at
-GenericDepthSelect::Selector g_selector;
-GenericDepthSelect::Pick g_pick;
 UINT g_dsvIncrement = 0;
-uint64_t g_frames = 0;
-uint64_t g_lastLoggedFrame = 0;
-uint64_t g_lastLoggedPick = 0;
 bool g_installed = false;
-
-constexpr uint64_t kLogEveryFrames = 600;
-
-// The finder stands down while the game is calling an upscaler and wakes again once it has stopped for this many presents
-// (a game's settings menu turning its upscaler off: Cyberpunk creates its Ray Reconstruction feature at startup, long
-// before anyone reaches the setting). About two seconds at 60 fps.
-constexpr uint64_t kQuietPresents = 120;
-
-void AddDraw(DrawStats& s, uint64_t vertices, uint32_t drawcalls, bool indirect)
-{
-    s.vertices += vertices;
-    s.drawcalls += drawcalls;
-    if (indirect)
-        s.drawcallsIndirect += drawcalls;
-}
 
 void OnDraw(ID3D12GraphicsCommandList* list, uint64_t vertices, uint32_t instances)
 {
-    if (!g_active.load(std::memory_order_relaxed))
-        return;
-
-    g_countDraws.fetch_add(1, std::memory_order_relaxed);
-
-    std::lock_guard lock(g_mutex);
-
-    const auto found = g_lists.find(list);
-
-    if (found == g_lists.end() || found->second.stats == nullptr)
-        return;
-
-    auto& state = found->second;
-    const uint64_t count = vertices * instances;
-
-    AddDraw(state.stats->total, count, 1, false);
-    AddDraw(state.stats->current, count, 1, false);
-
-    // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
-    if (!(vertices == 6 && instances == 1))
-        state.stats->current.lastViewportWidth = state.viewportWidth;
+    g_core.OnDraw((uint64_t) (size_t) list, vertices, instances);
 }
 
 // The typeless format a copy of a depth format is made in, and the format its depth plane is read through.
@@ -308,12 +216,12 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
     for (auto& slot : g_slots)
         if (slot.resource != nullptr)
         {
-            g_retired.emplace_back(slot.resource, g_presents);
+            g_retired.emplace_back(slot.resource, g_core.Presents());
             slot = SnapshotSlot {};
         }
 
     if (g_backup.readback != nullptr)
-        g_retired.emplace_back(g_backup.readback, g_presents);
+        g_retired.emplace_back(g_backup.readback, g_core.Presents());
 
     g_slotsUsed = 0;
     g_best = GenericDepthDx12::Snapshot {};
@@ -368,18 +276,18 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
     static uint64_t loggedFrames = 0, lastFrame = ~0ull;
     static int inFrame = 0;
 
-    if (g_presents != lastFrame)
+    if (g_core.Presents() != lastFrame)
     {
-        lastFrame = g_presents;
+        lastFrame = g_core.Presents();
         inFrame = 0;
 
-        if (g_presents % 600 == 0)
-            loggedFrames = g_presents; // a burst every 600 presents
+        if (g_core.Presents() % 600 == 0)
+            loggedFrames = g_core.Presents(); // a burst every 600 presents
     }
 
-    if (g_presents - loggedFrames < 2 && inFrame++ < 8)
-        LOG_INFO("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_presents, where,
-                 (size_t) list, stretchVertices, g_bestSnapshotVertices);
+    if (g_core.Presents() - loggedFrames < 2 && inFrame++ < 8)
+        LOG_INFO("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_core.Presents(), where,
+                 (size_t) list, stretchVertices, g_core.SnapshotFloor());
 
     const auto depthState = readOnlyDepth ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
@@ -444,7 +352,7 @@ void STDMETHODCALLTYPE hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resour
 {
     o_CreateDepthStencilView(This, pResource, pDesc, DestDescriptor);
 
-    g_countDsvCreated.fetch_add(1, std::memory_order_relaxed);
+    g_core.Counters().depthViewsCreated.fetch_add(1, std::memory_order_relaxed);
 
     std::lock_guard lock(g_mutex);
 
@@ -535,119 +443,60 @@ void STDMETHODCALLTYPE hkCopyDescriptors(ID3D12Device* This, UINT NumDestDescrip
 }
 
 // What each hook does, apart from calling on to the original: shared by the hooks on the runtime's own functions above and
-// by the thunks that go into a game command list's private vtable below.
+// by the thunks that go into a game command list's private vtable below. The counting itself is the core's; what stays here is
+// what only D3D12 can do: look a descriptor up, and record the copy the core asks for onto the list being recorded.
+void TakeSnapshot(ID3D12GraphicsCommandList* list, const native::SnapshotRequest& request)
+{
+    if (!request.take)
+        return;
+
+    std::lock_guard lock(g_mutex);
+    RecordSnapshot(list, (ID3D12Resource*) (size_t) request.id, request.readOnlyDepth, request.where,
+                   request.stretchVertices);
+}
+
 void OnViewports(ID3D12GraphicsCommandList* This, UINT NumViewports, const D3D12_VIEWPORT* pViewports)
 {
-    // Only the main viewport matters, as in ReShade's add-on.
-    if (NumViewports > 0 && pViewports != nullptr && g_active.load(std::memory_order_relaxed))
-    {
-        std::lock_guard lock(g_mutex);
-        g_lists[This].viewportWidth = pViewports[0].Width;
-    }
+    if (NumViewports > 0 && pViewports != nullptr)
+        g_core.OnViewport((uint64_t) (size_t) This, pViewports[0].Width);
 }
 
 void OnClear(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView, D3D12_CLEAR_FLAGS ClearFlags,
              FLOAT Depth)
 {
-    if ((ClearFlags & D3D12_CLEAR_FLAG_DEPTH) != 0 && g_active.load(std::memory_order_relaxed))
+    if ((ClearFlags & D3D12_CLEAR_FLAG_DEPTH) == 0 || !g_core.Active())
+        return;
+
+    native::DepthBuffer buffer;
+
     {
         std::lock_guard lock(g_mutex);
 
         const auto found = g_dsv.find(DepthStencilView.ptr);
 
-        if (found != g_dsv.end() && found->second.resource != nullptr)
-        {
-            auto& stats = g_stats[found->second.resource];
-            stats.width = found->second.width;
-            stats.height = found->second.height;
-            stats.format = found->second.format;
+        if (found == g_dsv.end() || found->second.resource == nullptr)
+            return;
 
-            // Reversed-Z games clear to 0.0 (or anything but 1.0).
-            if (Depth != 1.0f)
-                stats.reversed = true;
-
-            // A clear with no work before it (the start of a frame) means nothing.
-            if (stats.current.drawcalls != 0)
-            {
-                const DrawStats stretch = stats.current;
-                stats.current = DrawStats {};
-
-                // A clear after a render into a small viewport (a mirror, a portal) is not the scene; ReShade's rule.
-                const bool real = stretch.lastViewportWidth > 1024.0f || stretch.lastViewportWidth == 0.0f ||
-                                  g_pictureWidth <= 1024.0f;
-
-                if (real)
-                {
-                    // The busiest stretch of the frame is the one to snapshot; ties go to the later one, so a scene
-                    // drawn first into a shadow map and then for real picks the real one.
-                    const bool best = stretch.vertices >= g_bestSnapshotVertices;
-
-                    if (best)
-                    {
-                        stats.bestClear = (int32_t) stats.clears;
-
-                        // The overlay's copy: only of the buffer picked last frame, and only at the busiest stretch, so
-                        // the copy that is left at the end of the frame is the scene's.
-                        if (g_snapshotsWanted.load(std::memory_order_relaxed) && g_pick.valid &&
-                            g_pick.id == (uint64_t) (size_t) found->second.resource)
-                            RecordSnapshot(This, found->second.resource, false, "clear", stretch.vertices); // a clear needs depth-write
-                    }
-
-                    ++stats.clears;
-                }
-            }
-        }
+        buffer.id = (uint64_t) (size_t) found->second.resource;
+        buffer.width = found->second.width;
+        buffer.height = found->second.height;
+        buffer.format = (uint32_t) found->second.format;
+        buffer.readOnlyDepth = found->second.readOnlyDepth;
     }
+
+    TakeSnapshot(This, g_core.OnDepthClear((uint64_t) (size_t) This, buffer, Depth));
 }
 
 void OnIndirect(ID3D12GraphicsCommandList* This, UINT MaxCommandCount)
 {
-    if (g_active.load(std::memory_order_relaxed))
-    {
-        g_countExecIndirect.fetch_add(1, std::memory_order_relaxed);
-
-        std::lock_guard lock(g_mutex);
-
-        const auto found = g_lists.find(This);
-
-        if (found != g_lists.end() && found->second.stats != nullptr)
-        {
-            auto* stats = found->second.stats;
-            AddDraw(stats->total, 0, MaxCommandCount, true);
-            AddDraw(stats->current, 0, MaxCommandCount, true);
-            stats->current.lastViewportWidth = found->second.viewportWidth;
-        }
-    }
+    g_core.OnIndirect((uint64_t) (size_t) This, MaxCommandCount);
 }
 
 // A list that ends while still bound to the picked buffer never unbinds it, so the stretch drawn since its last clear (Cyberpunk
 // draws the world after the clear and ends the list there) is copied here, in the state the view says the buffer is in.
 void OnClose(ID3D12GraphicsCommandList* This)
 {
-    if (!g_active.load(std::memory_order_relaxed))
-        return;
-
-    std::lock_guard lock(g_mutex);
-
-    const auto found = g_lists.find(This);
-
-    if (found == g_lists.end() || found->second.stats == nullptr)
-        return;
-
-    Stats* stats = found->second.stats;
-
-    if (g_snapshotsWanted.load(std::memory_order_relaxed) && g_pick.valid && stats->resource != nullptr &&
-        g_pick.id == (uint64_t) (size_t) stats->resource && stats->current.drawcalls != 0)
-    {
-        if (stats->current.vertices >= g_bestSnapshotVertices)
-        {
-            RecordSnapshot(This, stats->resource, stats->readOnlyDepth, "close", stats->current.vertices);
-        }
-
-        stats->current = DrawStats {};
-    }
-
-    found->second.stats = nullptr;
+    TakeSnapshot(This, g_core.OnContextEnd((uint64_t) (size_t) This));
 }
 
 // ---- Game command lists with a vtable of their own ----------------------------------------------------------------------
@@ -722,7 +571,7 @@ void STDMETHODCALLTYPE hkTableClearDepthStencilView(ID3D12GraphicsCommandList* T
                                                     D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil,
                                                     UINT NumRects, const D3D12_RECT* pRects)
 {
-    if (g_active.load(std::memory_order_relaxed))
+    if (g_core.Active())
         OnClear(This, DepthStencilView, ClearFlags, Depth);
 
     if (auto previous = (PFN_ClearDepthStencilView) PreviousOf(This, kClear))
@@ -734,7 +583,7 @@ void STDMETHODCALLTYPE hkTableExecuteIndirect(ID3D12GraphicsCommandList* This, I
                                               UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer,
                                               UINT64 CountBufferOffset)
 {
-    if (g_active.load(std::memory_order_relaxed))
+    if (g_core.Active())
         OnIndirect(This, MaxCommandCount);
 
     if (auto previous = (PFN_ExecuteIndirect) PreviousOf(This, kIndirect))
@@ -843,57 +692,33 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
                  g_installTable ? (size_t) g_installTable[46] : 0);
     }
 
-    if (g_active.load(std::memory_order_relaxed))
+    if (g_core.Active())
         PatchListTable(This);
 
-    if (g_active.load(std::memory_order_relaxed))
+    if (g_core.Active())
     {
-        std::lock_guard lock(g_mutex);
-
-        Stats* bound = nullptr;
+        native::DepthBuffer buffer;
+        const native::DepthBuffer* bound = nullptr;
 
         if (pDepthStencilDescriptor != nullptr)
         {
+            std::lock_guard lock(g_mutex);
+
             const auto found = g_dsv.find(pDepthStencilDescriptor->ptr);
 
             if (found != g_dsv.end() && found->second.resource != nullptr)
             {
-                auto& stats = g_stats[found->second.resource];
-                stats.width = found->second.width;
-                stats.height = found->second.height;
-                stats.format = found->second.format;
-                stats.resource = found->second.resource;
-                stats.readOnlyDepth = found->second.readOnlyDepth;
-                bound = &stats;
+                buffer.id = (uint64_t) (size_t) found->second.resource;
+                buffer.width = found->second.width;
+                buffer.height = found->second.height;
+                buffer.format = (uint32_t) found->second.format;
+                buffer.readOnlyDepth = found->second.readOnlyDepth;
+                bound = &buffer;
             }
         }
 
-        // The picked buffer is often never cleared again in the frame it was drawn (Witcher 3 clears at the start of the
-        // pass), so the clear never offers a snapshot. The moment the list moves off it is the other chance: the busiest
-        // stretch of the frame is copied there, in the state the view says the buffer is in.
-        Stats* previous = g_lists[This].stats;
-
-        if (previous != nullptr && previous != bound && g_snapshotsWanted.load(std::memory_order_relaxed) && g_pick.valid &&
-            previous->resource != nullptr && g_pick.id == (uint64_t) (size_t) previous->resource &&
-            previous->current.drawcalls != 0)
-        {
-            if (previous->current.vertices >= g_bestSnapshotVertices)
-            {
-                RecordSnapshot(This, previous->resource, previous->readOnlyDepth, "unbind", previous->current.vertices);
-            }
-
-            previous->current = DrawStats {};
-        }
-
-        g_lists[This].stats = bound;
-
-        g_countOmSet.fetch_add(1, std::memory_order_relaxed);
-        if (pDepthStencilDescriptor != nullptr)
-        {
-            g_countOmSetWithDepth.fetch_add(1, std::memory_order_relaxed);
-            if (bound == nullptr)
-                g_countOmSetUnknownDepth.fetch_add(1, std::memory_order_relaxed);
-        }
+        // The core says whether leaving the buffer this list was bound to is the moment to copy it.
+        TakeSnapshot(This, g_core.OnDepthBound((uint64_t) (size_t) This, pDepthStencilDescriptor != nullptr, bound));
     }
 
     o_OMSetRenderTargets(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
@@ -958,48 +783,20 @@ HRESULT STDMETHODCALLTYPE hkClose(ID3D12GraphicsCommandList* This)
 void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX, UINT ThreadGroupCountY,
                                     UINT ThreadGroupCountZ)
 {
-    if (g_active.load(std::memory_order_relaxed))
-        g_countDispatch.fetch_add(1, std::memory_order_relaxed);
+    if (g_core.Active())
+        g_core.Counters().dispatches.fetch_add(1, std::memory_order_relaxed);
 
     o_Dispatch(This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
 }
 
 void STDMETHODCALLTYPE hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12GraphicsCommandList* pCommandList)
 {
-    if (g_active.load(std::memory_order_relaxed))
-        g_countExecBundle.fetch_add(1, std::memory_order_relaxed);
+    if (g_core.Active())
+        g_core.Counters().bundles.fetch_add(1, std::memory_order_relaxed);
 
     o_ExecuteBundle(This, pCommandList);
 }
 
-void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, const GenericDepthSelect::Pick& pick,
-                   uint32_t pictureWidth, uint32_t pictureHeight)
-{
-    auto sorted = frame;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) { return GenericDepthSelect::Score(a) > GenericDepthSelect::Score(b); });
-
-    LOG_INFO("Depth finder: frame {}, picture {}x{}, {} depth buffer(s) in use{}", g_frames, pictureWidth,
-             pictureHeight, sorted.size(), pick.valid ? "" : ", none qualifies");
-    LOG_INFO("Depth finder:   hooks so far: {} depth views created, {} OMSetRenderTargets ({} with a depth descriptor, "
-             "{} of those unknown to us), {} draws, {} ExecuteIndirect, {} ExecuteBundle (bundle draw code is the direct "
-             "list's: {}), {} Dispatch",
-             g_countDsvCreated.load(), g_countOmSet.load(), g_countOmSetWithDepth.load(),
-             g_countOmSetUnknownDepth.load(), g_countDraws.load(), g_countExecIndirect.load(), g_countExecBundle.load(),
-             g_bundleSameDraw.load() < 0 ? "unknown" : g_bundleSameDraw.load() ? "yes" : "no",
-             g_countDispatch.load());
-
-    const size_t shown = std::min<size_t>(sorted.size(), 8);
-
-    for (size_t i = 0; i < shown; ++i)
-    {
-        const auto& c = sorted[i];
-        LOG_INFO("Depth finder:   {}{:X}  {}x{}  format {}  {} vertices, {} draws ({} indirect), {} clear(s), best "
-                 "clear {}{}",
-                 pick.valid && pick.id == c.id ? "-> " : "   ", c.id, c.width, c.height, c.format, c.vertices,
-                 c.drawcalls, c.drawcallsIndirect, c.clears, c.bestClear, c.reversed ? ", reversed-Z" : "");
-    }
-}
 } // namespace
 
 namespace GenericDepthDx12
@@ -1073,7 +870,7 @@ void Install(ID3D12Device* device)
                 realBundle = bundle;
 
             PVOID* bundleTable = *(PVOID**) realBundle;
-            g_bundleSameDraw = (bundleTable[12] == listTable[12] && bundleTable[13] == listTable[13]) ? 1 : 0;
+            g_core.Counters().bundleSameDraw = (bundleTable[12] == listTable[12] && bundleTable[13] == listTable[13]) ? 1 : 0;
             bundle->Close();
         }
 
@@ -1127,7 +924,7 @@ void Install(ID3D12Device* device)
 
     g_overlayOn = Config::Instance()->DlssNrNativeDepthOverlay.value_or_default() &&
                   Config::Instance()->DlssNrNativeDebugView.value_or_default();
-    g_active = true;
+    g_core.Start([](const std::string& line) { LOG_INFO("{}", line); });
     g_installed = true;
     LOG_INFO("Depth finder: observing the game's depth buffers{}, after {} frames of warm-up; it stands down if the game "
              "makes an upscaler call",
@@ -1146,66 +943,9 @@ void OnPresent(IDXGISwapChain* swapChain)
     if (FAILED(swapChain->GetDesc(&desc)))
         return;
 
-    std::vector<GenericDepthSelect::Candidate> frame;
-
-    {
-        std::lock_guard lock(g_mutex);
-
-        g_pictureWidth = (float) desc.BufferDesc.Width;
-        // Lists are recorded in no fixed order, so "the busiest stretch so far" picked a different copy from frame to frame (the
-        // world one, or the first-person weapon's) and the preview flickered. Every stretch that draws a fair share of what the
-        // pick drew last frame is copied instead; the one that runs last on the GPU is left, the same every frame.
-        g_bestSnapshotVertices = 0;
-
-        if (g_pick.valid)
-        {
-            const auto picked = g_stats.find((ID3D12Resource*) (size_t) g_pick.id);
-
-            if (picked != g_stats.end())
-                g_bestSnapshotVertices = picked->second.total.vertices * 2 / 100;
-        }
-
-        frame.reserve(g_stats.size());
-
-        for (auto it = g_stats.begin(); it != g_stats.end();)
-        {
-            auto& stats = it->second;
-
-            if (stats.total.drawcalls == 0 && stats.clears == 0)
-            {
-                // Not touched this frame: forget it, and any command list still pointing at it.
-                for (auto& list : g_lists)
-                    if (list.second.stats == &stats)
-                        list.second.stats = nullptr;
-
-                it = g_stats.erase(it);
-                continue;
-            }
-
-            GenericDepthSelect::Candidate c;
-            c.id = (uint64_t) (size_t) it->first;
-            c.width = stats.width;
-            c.height = stats.height;
-            c.format = (uint32_t) stats.format;
-            c.vertices = stats.total.vertices;
-            c.drawcalls = stats.total.drawcalls;
-            c.drawcallsIndirect = stats.total.drawcallsIndirect;
-            c.clears = stats.clears;
-            c.bestClear = stats.bestClear;
-            c.reversed = stats.reversed;
-            frame.push_back(c);
-
-            // The next frame starts from nothing; the bound pointer stays valid because the entry stays.
-            stats.total = DrawStats {};
-            stats.current = DrawStats {};
-            stats.clears = 0;
-            stats.bestClear = -1;
-            stats.reversed = false;
-            ++it;
-        }
-    }
-
-    ++g_frames;
+    // Part one in the core: the frame's counts are closed and the floor for what is worth copying is found.
+    const uint64_t presents = g_core.BeginPresent(desc.BufferDesc.Width, desc.BufferDesc.Height);
+    const auto pick = g_core.CurrentPick();
 
     {
         std::lock_guard lock(g_mutex);
@@ -1219,15 +959,15 @@ void OnPresent(IDXGISwapChain* swapChain)
             if (chosen < 0 || g_slots[i].vertices > g_slots[chosen].vertices)
                 chosen = i;
 
-        if (chosen >= 0 && g_slots[chosen].resource != nullptr && g_pick.valid)
+        if (chosen >= 0 && g_slots[chosen].resource != nullptr && pick.valid)
         {
             g_best.valid = true;
             g_best.resource = g_slots[chosen].resource;
             g_best.viewFormat = g_backup.view;
             g_best.width = g_backup.width;
             g_best.height = g_backup.height;
-            g_best.reversed = g_pick.reversed;
-            g_best.frame = g_presents;
+            g_best.reversed = pick.reversed;
+            g_best.frame = presents;
 
             for (int i = 0; i < g_slotsUsed && i < GenericDepthDx12::Snapshot::kMaxCopies; ++i)
                 if (g_slots[i].resource != nullptr)
@@ -1235,14 +975,20 @@ void OnPresent(IDXGISwapChain* swapChain)
         }
 
         g_slotsUsed = 0;
-        g_snapshotsWanted = g_overlayOn.load() || Config::Instance()->DlssNrNativeMotion.value_or_default();
+        g_core.SetSnapshotsWanted(g_overlayOn.load() || Config::Instance()->DlssNrNativeMotion.value_or_default());
+    }
 
-        ++g_presents;
+    // Part two in the core: counts the present, stands down or wakes, and picks once the warm-up is over.
+    const bool stoodDown =
+        g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height, Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+
+    {
+        std::lock_guard lock(g_mutex);
 
         // Copies replaced a few frames ago are no longer being read by the menu.
         for (auto it = g_retired.begin(); it != g_retired.end();)
         {
-            if (g_presents > it->second + 4)
+            if (g_core.Presents() > it->second + 4)
             {
                 it->first->Release();
                 it = g_retired.erase(it);
@@ -1251,62 +997,10 @@ void OnPresent(IDXGISwapChain* swapChain)
                 ++it;
         }
 
-        g_presentsNow.store(g_presents, std::memory_order_relaxed);
-
-        const uint64_t last = g_lastUpscalerCall.load(std::memory_order_relaxed);
-        const bool calling = last != 0 && g_presents - last < kQuietPresents;
-
-        if (calling != g_upscalerSeen.load())
-        {
-            g_upscalerSeen = calling;
-
-            if (calling)
-                LOG_INFO("Depth finder: the game is calling an upscaler; the finder stands down while it does");
-            else
-                LOG_INFO("Depth finder: no upscaler call for {} presents; the finder is watching again", kQuietPresents);
-        }
-
-        if (calling)
-        {
-            // Stand down: stop counting, drop the tracking and the pick, and start the warm-up over for when it wakes.
-            g_active = false;
-            g_armed = false;
-            g_stats.clear();
-            g_lists.clear();
-            g_pick = GenericDepthSelect::Pick {};
-            g_selector.Reset();
+        // Stood down: the copies were of a frame the finder no longer vouches for.
+        if (stoodDown)
             g_best = GenericDepthDx12::Snapshot {};
-            g_warmupStart = g_presents;
-            return;
-        }
-
-        // Counting restarts here; the draws of the frame in which it woke are not seen, which is fine.
-        g_active = true;
     }
-
-    // Counting has gone on through the warm-up, but nothing is picked or reported until it is over.
-    if (g_presents - g_warmupStart <= Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default())
-    {
-        g_armed = false;
-        return;
-    }
-
-    g_armed = true;
-
-    const auto pick = g_selector.Update(frame, desc.BufferDesc.Width, desc.BufferDesc.Height);
-
-    const bool pickChanged = (pick.valid ? pick.id : 0) != g_lastLoggedPick;
-    const bool dueForLog = g_frames - g_lastLoggedFrame >= kLogEveryFrames || g_lastLoggedFrame == 0;
-
-    if (pickChanged || dueForLog)
-    {
-        LogCandidates(frame, pick, desc.BufferDesc.Width, desc.BufferDesc.Height);
-        g_lastLoggedFrame = g_frames;
-        g_lastLoggedPick = pick.valid ? pick.id : 0;
-    }
-
-    std::lock_guard lock(g_mutex);
-    g_pick = pick;
 }
 
 Snapshot BestSnapshot()
@@ -1355,13 +1049,12 @@ void RecordPreviewCopy(ID3D12GraphicsCommandList* list)
     D3D12_RESOURCE_BARRIER out = barrier(g_best.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, kSlotRest);
     list->ResourceBarrier(1, &out);
 
-    g_previewFrame = g_presents;
+    g_previewFrame = g_core.Presents();
 }
 
 GenericDepthSelect::Pick CurrentPick()
 {
-    std::lock_guard lock(g_mutex);
-    return g_pick;
+    return g_core.CurrentPick();
 }
 
 void NoteUpscalerCall()
@@ -1369,14 +1062,12 @@ void NoteUpscalerCall()
     if (!g_installed)
         return;
 
-    // Called on every upscaler evaluate: one relaxed store. OnPresent decides what it means.
-    g_lastUpscalerCall.store(std::max<uint64_t>(g_presentsNow.load(std::memory_order_relaxed), 1),
-                             std::memory_order_relaxed);
+    g_core.NoteUpscalerCall();
 }
 
-bool GameCallsUpscaler() { return g_installed && g_upscalerSeen.load(); }
+bool GameCallsUpscaler() { return g_installed && g_core.GameCallsUpscaler(); }
 
-bool Armed() { return g_installed && g_armed.load() && !g_upscalerSeen.load(); }
+bool Armed() { return g_installed && g_core.Armed(); }
 
 // Under g_mutex. The copy's depth as a grid of gray cells, nearer brighter on a log scale: a perspective depth is crowded
 // near 0 (reversed-Z) or near 1 (normal), where a straight gray ramp is black. Reads the readback while the GPU may still be
@@ -1396,7 +1087,7 @@ static bool DrawDepthPreview(float boxWidth, float boxHeight)
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float cellW = boxWidth / kCols;
     const float cellH = boxHeight / kRows;
-    const bool reversed = g_pick.reversed;
+    const bool reversed = g_core.CurrentPick().reversed;
     auto* draw = ImGui::GetWindowDrawList();
 
     draw->AddRectFilled(origin, ImVec2(origin.x + boxWidth, origin.y + boxHeight), IM_COL32(0, 0, 0, 255));
@@ -1525,10 +1216,11 @@ void DrawDebugUi()
 
     // Every branch writes exactly one short line and the picture has a box of its own size, so nothing below moves when the
     // pick changes.
-    if (g_upscalerSeen.load())
+    if (g_core.GameCallsUpscaler())
         ImGui::TextDisabled("Stood down: the game is calling an upscaler. Turn it off in the game.");
-    else if (!g_armed.load())
-        ImGui::TextDisabled("Watching (%llu of %u frames)...", (unsigned long long) (g_presents - g_warmupStart), warmup);
+    else if (!g_core.Armed())
+        ImGui::TextDisabled("Watching (%llu of %u frames)...",
+                            (unsigned long long) (g_core.Presents() - g_core.WarmupStart()), warmup);
     else if (!pick.valid)
         ImGui::TextDisabled("No depth buffer qualifies yet.");
     else

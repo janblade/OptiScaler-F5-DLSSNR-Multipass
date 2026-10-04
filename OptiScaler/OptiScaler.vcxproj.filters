@@ -431,6 +431,18 @@
     <ClInclude Include="motion\OpticalFlow_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\DepthFinderCore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\FrameContract.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\NativeProducer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\Dx12FrameSource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1254,6 +1266,15 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="motion\OpticalFlow_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\DepthFinderCore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\NativeProducer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\Dx12FrameSource.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="resource_tracking\GenericDepth_Dx12.cpp">

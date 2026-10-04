@@ -25,6 +25,7 @@
 #include "DlssNr_AutoTrimDefault.h"
 #include "DlssNr_ColourEncoding.h"
 #include <dlssnr/DlssNr_ColourEncodingStatus.h>
+#include <dlssnr/DlssNr_LutStatus.h>
 #include "DlssNr_FollowGame.h"
 #include "DlssNr_ExposureCalibrate.h"
 #include "DlssNr_ExposureCalibrate_Run.h"
@@ -3436,15 +3437,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     LOG_ERROR("DLSS-NR: could not allocate the LUT pass's scratch target; LutFile is ignored");
             }
 
+            if (g_nr.lutScratchFailed)
+                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, true,
+                                        "could not allocate the LUT pass's scratch target", lutPath,
+                                        cfg.DlssNrLutStrength.value_or_default());
+
             if (g_nr.lutScratch != nullptr)
             {
                 const D3D12_RESOURCE_STATES priorTargetState = targetState;
                 TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+                const float lutStrength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
                 const bool graded =
-                    DispatchLut(cmdList, target, g_nr.lutScratch, width, height,
-                                std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f), frame.InputEncoding,
+                    DispatchLut(cmdList, target, g_nr.lutScratch, width, height, lutStrength, frame.InputEncoding,
                                 isHdrBuffer, DlssNr::AutoTrimEffective(cfg), lutPath);
+
+                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, _lutState.failed,
+                                        _lutState.error, _lutState.attemptedPath, lutStrength);
 
                 if (graded)
                 {
@@ -3474,6 +3483,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // already released/parked.
             ParkNrResource(g_nr.lutScratch);
             ReleaseLutTexture();
+            DlssNr::ReportLutStatus(false, "", 0, false, "", "", cfg.DlssNrLutStrength.value_or_default());
         }
     }
 

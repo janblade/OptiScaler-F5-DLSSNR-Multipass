@@ -80,7 +80,7 @@ class TrustMaskDx12
         float revealTolerance = 0.25f;     // how much farther the surface is now than the one at this pixel a frame ago
         float decay = 0.5f;                // how much of last frame's distrust is kept
         int debugView = 0;                 // 0 the mask; 1 depth, 2 revealed, 3 flow consistency, 4 luma, 5 outside, one check alone
-        float cutShare = 0.95f;            // share of fully distrusted pixels that is called a scene cut (fast camera turns reach 0.9)
+        float cutShare = 0.98f;            // share of fully distrusted pixels that is called a scene cut (real cuts reach 0.99, fast camera turns 0.95)
     };
 
     Settings& Tuning() { return _settings; }

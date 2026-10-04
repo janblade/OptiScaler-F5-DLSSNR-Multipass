@@ -96,23 +96,33 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
         {
             int2 qi = clamp(int2(floor(q + 0.5)), 0, int2(size) - 1);
 
-            // Disocclusion: the surface here was at a different distance there.
             float zNow = DepthNow.Load(int3(p, 0));
-            float zBefore = DepthBefore.Load(int3(qi, 0));
+
+            // A game that jitters its picture for anti-aliasing moves a depth edge by a fraction of a pixel from frame to
+            // frame, so a single pixel's depth would call every edge a disocclusion. The depth before is taken from the
+            // 3x3 around the spot: the one closest to this depth for the disocclusion test, the farthest for the revealed
+            // test (only when everything around it was nearer did a nearer surface really leave).
+            float relativeBest = 1e9;
+            float farthestHere = 0.0;
+
+            [unroll] for (int j = -1; j <= 1; ++j)
+                [unroll] for (int i = -1; i <= 1; ++i)
+                {
+                    float z = DepthBefore.Load(int3(clamp(qi + int2(i, j), 0, int2(size) - 1), 0));
+                    relativeBest = min(relativeBest, abs(z - zNow) / zNow);
+
+                    float here = DepthBefore.Load(int3(clamp(p + int2(i, j), 0, int2(size) - 1), 0));
+                    farthestHere = max(farthestHere, here);
+                }
 
             // Revealed: a surface much nearer than this one was at this very pixel a frame ago and has moved off it. The
             // flow cannot be relied on for this, it bleeds from the moving surface into what it uncovers, so it looks at
             // the same pixel instead of the flow's.
-            float zHere = DepthBefore.Load(int3(p, 0));
-
-            if (zHere < zNow)
-                bad = max(bad, saturate(((zNow - zHere) / zNow - revealTolerance) / revealTolerance));
+            if (farthestHere < zNow)
+                bad = max(bad, saturate(((zNow - farthestHere) / zNow - revealTolerance) / revealTolerance));
 
             if (zNow < kSky)
-            {
-                float relative = abs(zBefore - zNow) / zNow;
-                bad = max(bad, saturate((relative - depthTolerance) / depthTolerance));
-            }
+                bad = max(bad, saturate((relativeBest - depthTolerance) / depthTolerance));
 
             // Consistency: the motion there was not this motion.
             float2 flowBefore = FlowBefore.SampleLevel(Linear, uv, 0).xy;

@@ -75,7 +75,7 @@ class TrustMaskDx12
         float lumaTolerance = 0.25f;       // relative luma excursion allowed
         float revealTolerance = 0.25f;     // how much farther the surface is now than the one at this pixel a frame ago
         float decay = 0.5f;                // how much of last frame's distrust is kept
-        float cutShare = 0.85f;            // share of fully distrusted pixels that is called a scene cut
+        float cutShare = 0.95f;            // share of fully distrusted pixels that is called a scene cut (fast camera turns reach 0.9)
     };
 
     Settings& Tuning() { return _settings; }

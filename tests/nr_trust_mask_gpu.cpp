@@ -225,11 +225,12 @@ struct Scene
     float squareX;       // the square's left edge; negative: none
     float backgroundZ;
     float squareZ;
+    float depthShift = 0;   // the depth map's square is this many pixels off the picture's (a jittered depth buffer)
 };
 
-bool InSquare(const Scene& s, uint32_t x, uint32_t y)
+bool InSquare(const Scene& s, uint32_t x, uint32_t y, float shift = 0)
 {
-    return s.squareX >= 0 && x >= s.squareX && x < s.squareX + 200 && y >= 260 && y < 460;
+    return s.squareX >= 0 && x >= s.squareX + shift && x < s.squareX + shift + 200 && y >= 260 && y < 460;
 }
 
 ComPtr<ID3D12Resource> Colour(Gpu& gpu, const Scene& s)
@@ -253,7 +254,7 @@ ComPtr<ID3D12Resource> Depth(Gpu& gpu, const Scene& s)
     return gpu.Upload(DXGI_FORMAT_R32_FLOAT, 4,
                       [&](uint32_t x, uint32_t y, uint8_t* px)
                       {
-                          const float z = InSquare(s, x, y) ? s.squareZ : s.backgroundZ;
+                          const float z = InSquare(s, x, y, s.depthShift) ? s.squareZ : s.backgroundZ;
                           const float d = 0.1f / z;
                           memcpy(px, &d, 4);
                       });
@@ -407,6 +408,25 @@ int main()
 
         ok &= Check("whole picture, mean mask", run.Mean(0, 0, kWidth, kHeight), run.Mean(0, 0, kWidth, kHeight) < 0.03);
         ok &= Check("no scene cut", run.trust.DistrustedShare(), !run.trust.SceneCutSeen());
+    }
+
+    // 4. nothing moves, but the depth buffer is jittered by a pixel from frame to frame, as a game that anti-aliases does
+    {
+        printf("static scene, jittered depth\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        for (int k = 0; k < 8; ++k)
+        {
+            Scene still { 7, 300, 20.0f, 5.0f };
+            still.depthShift = (k % 2) ? 1.0f : 0.0f;
+            run.Frame(still);
+        }
+
+        ok &= Check("whole picture, mean mask", run.Mean(0, 0, kWidth, kHeight), run.Mean(0, 0, kWidth, kHeight) < 0.03);
+        ok &= Check("along the square's edges, mean mask", run.Mean(280, 300, 320, 420),
+                    run.Mean(280, 300, 320, 420) < 0.1);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

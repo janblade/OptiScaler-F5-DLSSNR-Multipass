@@ -120,7 +120,9 @@ struct ListState
 // Whether the hooks count. Cleared for good once the game is seen making an upscaler call, so a game that has one pays a
 // relaxed load per call and nothing more.
 std::atomic<bool> g_active { false };
-std::atomic<bool> g_upscalerSeen { false };
+std::atomic<bool> g_upscalerSeen { false };          // an upscaler call was seen within the last kQuietPresents presents
+std::atomic<uint64_t> g_presentsNow { 0 };           // g_presents, readable without the lock
+std::atomic<uint64_t> g_lastUpscalerCall { 0 };      // the present count when the game last called an upscaler (0 never)
 std::atomic<bool> g_armed { false };
 std::atomic<bool> g_overlayOn { false };
 
@@ -162,6 +164,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE g_srvCpu {};
 D3D12_GPU_DESCRIPTOR_HANDLE g_srvGpu {};
 std::vector<std::pair<ID3D12Resource*, uint64_t>> g_retired; // replaced copies, released a few frames later
 uint64_t g_presents = 0;
+uint64_t g_warmupStart = 0;          // the present count the current warm-up began at
 GenericDepthSelect::Selector g_selector;
 GenericDepthSelect::Pick g_pick;
 UINT g_dsvIncrement = 0;
@@ -171,6 +174,11 @@ uint64_t g_lastLoggedPick = 0;
 bool g_installed = false;
 
 constexpr uint64_t kLogEveryFrames = 600;
+
+// The finder stands down while the game is calling an upscaler and wakes again once it has stopped for this many presents
+// (a game's settings menu turning its upscaler off: Cyberpunk creates its Ray Reconstruction feature at startup, long
+// before anyone reaches the setting). About two seconds at 60 fps.
+constexpr uint64_t kQuietPresents = 120;
 
 void AddDraw(DrawStats& s, uint64_t vertices, uint32_t drawcalls, bool indirect)
 {
@@ -1061,22 +1069,44 @@ void OnPresent(IDXGISwapChain* swapChain)
                 ++it;
         }
 
-        if (g_upscalerSeen.load())
+        g_presentsNow.store(g_presents, std::memory_order_relaxed);
+
+        const uint64_t last = g_lastUpscalerCall.load(std::memory_order_relaxed);
+        const bool calling = last != 0 && g_presents - last < kQuietPresents;
+
+        if (calling != g_upscalerSeen.load())
         {
-            // Stand down for good: stop counting, drop the tracking and the pick.
+            g_upscalerSeen = calling;
+
+            if (calling)
+                LOG_INFO("Depth finder: the game is calling an upscaler; the finder stands down while it does");
+            else
+                LOG_INFO("Depth finder: no upscaler call for {} presents; the finder is watching again", kQuietPresents);
+        }
+
+        if (calling)
+        {
+            // Stand down: stop counting, drop the tracking and the pick, and start the warm-up over for when it wakes.
             g_active = false;
             g_armed = false;
             g_stats.clear();
             g_lists.clear();
             g_pick = GenericDepthSelect::Pick {};
             g_selector.Reset();
+            g_warmupStart = g_presents;
             return;
         }
+
+        // Counting restarts here; the draws of the frame in which it woke are not seen, which is fine.
+        g_active = true;
     }
 
     // Counting has gone on through the warm-up, but nothing is picked or reported until it is over.
-    if (g_presents <= Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default())
+    if (g_presents - g_warmupStart <= Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default())
+    {
+        g_armed = false;
         return;
+    }
 
     g_armed = true;
 
@@ -1107,8 +1137,9 @@ void NoteUpscalerCall()
     if (!g_installed)
         return;
 
-    if (!g_upscalerSeen.exchange(true))
-        LOG_INFO("Depth finder: the game makes its own upscaler call; the finder stands down");
+    // Called on every upscaler evaluate: one relaxed store. OnPresent decides what it means.
+    g_lastUpscalerCall.store(std::max<uint64_t>(g_presentsNow.load(std::memory_order_relaxed), 1),
+                             std::memory_order_relaxed);
 }
 
 bool Armed() { return g_installed && g_armed.load() && !g_upscalerSeen.load(); }
@@ -1211,9 +1242,9 @@ void DrawDebugUi()
     // Every branch writes exactly one short line and the picture has a box of its own size, so nothing below moves when the
     // pick changes.
     if (g_upscalerSeen.load())
-        ImGui::TextDisabled("Stood down: the game has an upscaler of its own.");
+        ImGui::TextDisabled("Stood down: the game is calling an upscaler. Turn it off in the game.");
     else if (!g_armed.load())
-        ImGui::TextDisabled("Watching (%llu of %u frames)...", (unsigned long long) g_presents, warmup);
+        ImGui::TextDisabled("Watching (%llu of %u frames)...", (unsigned long long) (g_presents - g_warmupStart), warmup);
     else if (!pick.valid)
         ImGui::TextDisabled("No depth buffer qualifies yet.");
     else

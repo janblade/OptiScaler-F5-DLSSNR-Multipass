@@ -149,6 +149,8 @@ struct Backup
     uint32_t height = 0;
     DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN;
+    ID3D12Resource* readback = nullptr;                 // the same copy in CPU-readable memory, for the on-screen preview
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};    // where the first plane sits in it
 };
 
 std::mutex g_mutex;
@@ -274,10 +276,40 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
                                                IID_PPV_ARGS(&created))))
         return false;
 
+    // The preview is drawn on the CPU from a readback of the copy: depth is mostly near zero, which no plain texture view
+    // shows brightly, so it needs a curve.
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    UINT64 total = 0;
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &total);
+
+    ID3D12Resource* readback = nullptr;
+
+    if (total != 0)
+    {
+        D3D12_HEAP_PROPERTIES readHeap {};
+        readHeap.Type = D3D12_HEAP_TYPE_READBACK;
+
+        D3D12_RESOURCE_DESC bufferDesc {};
+        bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufferDesc.Width = total;
+        bufferDesc.Height = 1;
+        bufferDesc.DepthOrArraySize = 1;
+        bufferDesc.MipLevels = 1;
+        bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        bufferDesc.SampleDesc.Count = 1;
+        bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        if (FAILED(device->CreateCommittedResource(&readHeap, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback))))
+            readback = nullptr;
+    }
+
     if (g_backup.resource != nullptr)
         g_retired.emplace_back(g_backup.resource, g_presents);
+    if (g_backup.readback != nullptr)
+        g_retired.emplace_back(g_backup.readback, g_presents);
 
-    g_backup = Backup { created, (uint32_t) source.Width, source.Height, typeless, view };
+    g_backup = Backup { created, (uint32_t) source.Width, source.Height, typeless, view, readback, footprint };
     g_srvDirty = true;
     return true;
 }
@@ -338,6 +370,30 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
     src.SubresourceIndex = 0;
 
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    // The copy goes on into the readback buffer, which rests in the copy-destination state for good.
+    if (g_backup.readback != nullptr)
+    {
+        D3D12_RESOURCE_BARRIER mid = barrier(g_backup.resource, D3D12_RESOURCE_STATE_COPY_DEST,
+                                             D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->ResourceBarrier(1, &mid);
+
+        D3D12_TEXTURE_COPY_LOCATION readDst {};
+        readDst.pResource = g_backup.readback;
+        readDst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        readDst.PlacedFootprint = g_backup.footprint;
+
+        D3D12_TEXTURE_COPY_LOCATION readSrc {};
+        readSrc.pResource = g_backup.resource;
+        readSrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        readSrc.SubresourceIndex = 0;
+
+        list->CopyTextureRegion(&readDst, 0, 0, 0, &readSrc, nullptr);
+
+        D3D12_RESOURCE_BARRIER back = barrier(g_backup.resource, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                              D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1, &back);
+    }
 
     D3D12_RESOURCE_BARRIER out[2] = {
         barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
@@ -1245,6 +1301,71 @@ static void EnsureOverlayView()
     g_srvDirty = false;
 }
 
+// Under g_mutex. The copy's depth as a grid of gray cells, nearer brighter on a log scale: a perspective depth is crowded
+// near 0 (reversed-Z) or near 1 (normal), where a straight gray ramp is black. Reads the readback while the GPU may still be
+// writing it, which for a picture to look at only shows as a torn frame.
+static bool DrawDepthPreview(float boxWidth, float boxHeight)
+{
+    if (g_backup.readback == nullptr || g_backup.width == 0 || g_backup.height == 0)
+        return false;
+
+    D3D12_RANGE range { 0, (SIZE_T) (g_backup.footprint.Footprint.RowPitch * g_backup.height) };
+    uint8_t* data = nullptr;
+
+    if (FAILED(g_backup.readback->Map(0, &range, (void**) &data)) || data == nullptr)
+        return false;
+
+    constexpr int kCols = 96, kRows = 54;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float cellW = boxWidth / kCols;
+    const float cellH = boxHeight / kRows;
+    const bool reversed = g_pick.reversed;
+    auto* draw = ImGui::GetWindowDrawList();
+
+    draw->AddRectFilled(origin, ImVec2(origin.x + boxWidth, origin.y + boxHeight), IM_COL32(0, 0, 0, 255));
+
+    for (int row = 0; row < kRows; ++row)
+    {
+        const uint32_t y = std::min<uint32_t>(g_backup.height - 1, (uint32_t) ((row + 0.5f) * g_backup.height / kRows));
+        const uint8_t* line = data + (size_t) y * g_backup.footprint.Footprint.RowPitch;
+
+        for (int col = 0; col < kCols; ++col)
+        {
+            const uint32_t x = std::min<uint32_t>(g_backup.width - 1, (uint32_t) ((col + 0.5f) * g_backup.width / kCols));
+            float depth = 0.0f;
+
+            switch (g_backup.typeless)
+            {
+            case DXGI_FORMAT_R16_TYPELESS:
+                depth = ((const uint16_t*) line)[x] / 65535.0f;
+                break;
+            case DXGI_FORMAT_R24G8_TYPELESS:
+                depth = (((const uint32_t*) line)[x] & 0xFFFFFFu) / 16777215.0f;
+                break;
+            default:
+                depth = ((const float*) line)[x];
+                break;
+            }
+
+            // How near it is, from 0 (far) to 1 (on the near plane).
+            float near01 = reversed ? depth : 1.0f - depth;
+            near01 = std::clamp(near01, 0.0f, 1.0f);
+            const float shade = std::log1p(near01 * 5000.0f) / std::log1p(5000.0f);
+            const int level = (int) (shade * 255.0f + 0.5f);
+
+            draw->AddRectFilled(ImVec2(origin.x + col * cellW, origin.y + row * cellH),
+                                ImVec2(origin.x + (col + 1) * cellW, origin.y + (row + 1) * cellH),
+                                IM_COL32(level, level, level, 255));
+        }
+    }
+
+    D3D12_RANGE none { 0, 0 };
+    g_backup.readback->Unmap(0, &none);
+
+    ImGui::Dummy(ImVec2(boxWidth, boxHeight));
+    return true;
+}
+
 void DrawDebugUi()
 {
     auto* config = Config::Instance();
@@ -1323,20 +1444,14 @@ void DrawDebugUi()
 
             if (g_backupFrame != 0 && g_backup.resource != nullptr)
             {
-                EnsureOverlayView();
-
-                if (g_srvAllocated && !g_srvDirty)
-                {
-                    ImGui::Image((ImTextureID) g_srvGpu.ptr, ImVec2(boxWidth, boxHeight));
-                    drawn = true;
-                }
+                drawn = DrawDepthPreview(boxWidth, boxHeight);
             }
         }
 
         if (!drawn)
             ImGui::Dummy(ImVec2(boxWidth, boxHeight));
 
-        ImGui::TextDisabled(drawn ? "Raw depth; reversed-Z shows near as bright." : "Waiting for the picked buffer...");
+        ImGui::TextDisabled(drawn ? "Nearer is brighter (log scale)." : "Waiting for the picked buffer...");
     }
 
     ImGui::TreePop();

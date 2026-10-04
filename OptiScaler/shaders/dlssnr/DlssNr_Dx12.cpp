@@ -972,9 +972,8 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
     }
 
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.passScratch, &g_nr.passClampScratch, &g_nr.passClampScratch2,
-           &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall, &g_nr.outputNative, &g_nr.activeColor,
-           &g_nr.lutScratch })
+         { &g_nr.output, &g_nr.passScratch, &g_nr.passClampScratch, &g_nr.passClampScratch2, &g_nr.colorCopy,
+           &g_nr.hdrCopy, &g_nr.colorSmall, &g_nr.outputNative, &g_nr.activeColor, &g_nr.lutScratch })
         ParkNrResource(*r);
 
     g_nr.passScratchFailed = false;
@@ -2347,8 +2346,7 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
     HRESULT hr = _device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
-                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                  IID_PPV_ARGS(&_lutTexture));
+                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&_lutTexture));
     if (FAILED(hr) || _lutTexture == nullptr)
     {
         LOG_ERROR("DLSS-NR: the LUT texture could not be allocated ({0}x{0}x{0})", size);
@@ -2369,8 +2367,7 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
 
     ID3D12Resource* uploadBuffer = nullptr;
     hr = _device->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &uploadDesc,
-                                          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                          IID_PPV_ARGS(&uploadBuffer));
+                                          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
     if (FAILED(hr) || uploadBuffer == nullptr)
     {
         LOG_ERROR("DLSS-NR: the LUT texture's upload buffer could not be allocated");
@@ -2421,8 +2418,7 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     src.PlacedFootprint = footprint;
 
     InCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    Barrier(InCmdList, _lutTexture, D3D12_RESOURCE_STATE_COPY_DEST,
-           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Barrier(InCmdList, _lutTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // The copy above is only recorded, not yet executed -- the upload buffer must outlive it, which
     // ParkNrResource's deferred release (rather than an immediate one here) already guarantees for every
@@ -2433,17 +2429,17 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     return true;
 }
 
-bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource,
-                              ID3D12Resource* OutTarget, unsigned int Width, unsigned int Height,
-                              float Strength, uint32_t InputEncoding, const std::string& LutPath)
+bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
+                              unsigned int Width, unsigned int Height, float Strength, uint32_t InputEncoding,
+                              const std::string& LutPath)
 {
     DlssNr_LutEnsureParsed(&_lutState, LutPath);
 
     if (!_lutState.Loaded())
         return false;
 
-    if (InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr ||
-        Width == 0 || Height == 0)
+    if (InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr || Width == 0 ||
+        Height == 0)
         return false;
 
     if (!LutPipelineReady())
@@ -2491,9 +2487,8 @@ bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resour
 }
 
 bool DlssNr_Dx12::DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
-                                      ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput,
-                                      ID3D12Resource* InInput, ID3D12Resource* InPrevInput,
-                                      ID3D12Resource* InProxy, ID3D12Resource* OutGrid)
+                                      ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput, ID3D12Resource* InInput,
+                                      ID3D12Resource* InPrevInput, ID3D12Resource* InProxy, ID3D12Resource* OutGrid)
 {
     if (!_detailStatsPipelineState && _init)
         CreateComputePipeline(_device, &_detailStatsPipelineState, dlssnr_detail_stats_cso,
@@ -3442,8 +3437,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
                     Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    DlssNr::CopyActiveColor(cmdList, target, g_nr.lutScratch,
-                                            DlssNr::ColorExtent { width, height });
+                    DlssNr::CopyActiveColor(cmdList, target, g_nr.lutScratch, DlssNr::ColorExtent { width, height });
                     Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 }

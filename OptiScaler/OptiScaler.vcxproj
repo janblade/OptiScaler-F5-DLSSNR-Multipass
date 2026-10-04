@@ -509,6 +509,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="proxies\XeFG_Proxy.h" />
     <ClInclude Include="proxies\XeLL_Proxy.h" />
     <ClInclude Include="proxies\Ntdll_Proxy.h" />
+    <ClInclude Include="motion\OpticalFlow_Dx12.h" />
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h" />
     <ClInclude Include="resource_tracking\GenericDepth_Select.h" />
     <ClInclude Include="resource_tracking\ResTrack_dx12.h" />
@@ -779,6 +780,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="nvapi\NvApiHooks.cpp" />
     <ClCompile Include="nvapi\NvApiTypes.cpp" />
     <ClCompile Include="hooks\Reflex_Hooks.cpp" />
+    <ClCompile Include="motion\OpticalFlow_Dx12.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="resource_tracking\GenericDepth_Dx12.cpp" />
     <ClCompile Include="resource_tracking\ResTrack_dx12.cpp" />
     <ClCompile Include="shaders\hudless_compare\HC_Dx12.cpp" />

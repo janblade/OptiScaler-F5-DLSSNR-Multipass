@@ -242,6 +242,56 @@ int main()
         CHECK(!core.CurrentPick().valid);
     }
 
+    // A D3D11-style immediate context: bound once at the start and never rebound, never cleared again. Nothing but
+    // FlushForPresent (called once per presented frame, before BeginPresent, as the game's menu driver does) can ever offer a
+    // copy of it, and it must keep offering one every frame without losing track of the binding.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        const uint64_t ctx = 1;
+        std::vector<SnapshotRequest> ignored;
+
+        core.OnDepthBound(ctx, true, &kShadow);
+        core.OnViewport(ctx, 2048.0f);
+        for (int i = 0; i < 30; ++i)
+            core.OnDraw(ctx, 3000, 1);
+
+        core.OnDepthBound(ctx, true, &kScene); // bound once, for good
+        core.OnViewport(ctx, (float) W);
+        core.OnDepthClear(ctx, kScene, 0.0f); // cleared once, for good
+
+        // DepthFinderCore's own warm-up (kWarmup presents) and the Selector's own (a candidate must have been seen a couple
+        // of Selector updates, which only run once DepthFinderCore is armed) both have to clear before a pick is valid; eight
+        // frames is enough for both, matching the pattern the other tests in this file use.
+        for (int frame = 0; frame < 8; ++frame)
+        {
+            for (int i = 0; i < 200; ++i)
+                core.OnDraw(ctx, 6000, 1);
+
+            // FlushForPresent runs before BeginPresent, the same order the D3D11 driver uses.
+            const auto flushed = core.FlushForPresent(ctx);
+
+            if (frame >= 6) // picked and armed by then
+                CHECK(flushed.take && flushed.id == 0xA && std::string(flushed.where) == "present");
+
+            core.BeginPresent(W, H);
+            core.EndPresent(W, H, kWarmup);
+        }
+
+        CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+
+        // The binding is never lost: a further frame with no new draw offers nothing (current is empty), and one more draw
+        // and flush offers one again.
+        CHECK(!core.FlushForPresent(ctx).take);
+
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(ctx, 6000, 1);
+
+        CHECK(core.FlushForPresent(ctx).take);
+    }
+
     printf(fails == 0 ? "all passed\n" : "FAILED (%d)\n", fails);
     return fails == 0 ? 0 : 1;
 }

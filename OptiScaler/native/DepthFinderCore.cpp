@@ -231,6 +231,36 @@ SnapshotRequest DepthFinderCore::OnContextEnd(uint64_t context)
     return request;
 }
 
+SnapshotRequest DepthFinderCore::FlushForPresent(uint64_t context)
+{
+    SnapshotRequest request;
+
+    if (!_active.load(std::memory_order_relaxed))
+        return request;
+
+    std::lock_guard lock(_mutex);
+
+    const auto found = _contexts.find(context);
+
+    if (found == _contexts.end() || found->second.stats == nullptr)
+        return request;
+
+    Stats* stats = found->second.stats;
+
+    if (_snapshotsWanted.load(std::memory_order_relaxed) && _pick.valid && stats->resource != 0 &&
+        _pick.id == stats->resource && stats->current.drawcalls != 0 && stats->current.vertices >= _snapshotFloor)
+    {
+        request.take = true;
+        request.id = stats->resource;
+        request.readOnlyDepth = stats->readOnlyDepth;
+        request.stretchVertices = stats->current.vertices;
+        request.where = "present";
+        stats->current = DrawStats {};
+    }
+
+    return request;
+}
+
 uint64_t DepthFinderCore::BeginPresent(uint32_t pictureWidth, uint32_t pictureHeight)
 {
     (void) pictureHeight;

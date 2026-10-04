@@ -159,6 +159,15 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
 
     context->CopyResource(g_copy, resource);
     g_copyTaken = true;
+
+    static bool loggedFirst = false;
+
+    if (!loggedFirst)
+    {
+        loggedFirst = true;
+        LOG_INFO("Depth finder (D3D11): first depth copy taken, {}x{}, typeless format {}", g_copyWidth, g_copyHeight,
+                 (int) g_copyTypeless);
+    }
 }
 
 void OnBound(ID3D11DeviceContext* context, ID3D11DepthStencilView* view)
@@ -409,10 +418,64 @@ void OnPresent(IDXGISwapChain* swapChain)
                                Config::Instance()->DlssNrNativeDebugView.value_or_default()) ||
                               Config::Instance()->DlssNrNativeMotion.value_or_default());
 
+    // A game that neither re-clears nor unbinds the picked buffer before Present (it stays bound across many frames) would
+    // otherwise never offer a copy: the immediate context has no "list closes" moment the way a D3D12 command list does, so this
+    // is its equivalent, once per presented frame.
+    if (g_context != nullptr)
+    {
+        const auto request = g_core.FlushForPresent(g_contextId);
+
+        if (request.take)
+        {
+            ID3D11Resource* snapResource = (ID3D11Resource*) (size_t) request.id;
+            ID3D11Texture2D* tex = nullptr;
+
+            if (SUCCEEDED(snapResource->QueryInterface(IID_PPV_ARGS(&tex))))
+            {
+                D3D11_TEXTURE2D_DESC texDesc {};
+                tex->GetDesc(&texDesc);
+                tex->Release();
+
+                ID3D11Device* dev = nullptr;
+                g_context->GetDevice(&dev);
+
+                if (dev != nullptr)
+                {
+                    TakeSnapshot(g_context, dev, snapResource, texDesc.Width, texDesc.Height, texDesc.Format);
+                    dev->Release();
+                }
+            }
+        }
+    }
+
     g_core.BeginPresent(desc.BufferDesc.Width, desc.BufferDesc.Height);
     const bool stoodDown =
         g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height,
                           Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+
+    // Self-diagnosis: a pick that never gets a copy despite wanting one is otherwise invisible until someone asks why the trust
+    // mask never runs.
+    static uint64_t noCopyStreak = 0;
+    bool copyTakenNow = false;
+    {
+        std::lock_guard lock(g_mutex);
+        copyTakenNow = g_copyTaken;
+    }
+    const bool stillNoCopy = g_core.Armed() && g_core.CurrentPick().valid && !copyTakenNow &&
+                            (Config::Instance()->DlssNrNativeMotion.value_or_default() ||
+                             (Config::Instance()->DlssNrNativeDepthOverlay.value_or_default() &&
+                              Config::Instance()->DlssNrNativeDebugView.value_or_default()));
+
+    if (stillNoCopy)
+    {
+        if (++noCopyStreak == 300)
+            LOG_WARN("Depth finder (D3D11): the pick is valid but no depth copy has been taken in the last 300 frames "
+                     "wanting one; the game may clear, bind or end its draws in a way these hooks do not catch");
+    }
+    else
+    {
+        noCopyStreak = 0;
+    }
 
     if (stoodDown)
     {

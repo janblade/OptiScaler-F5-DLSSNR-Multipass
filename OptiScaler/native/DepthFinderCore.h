@@ -97,6 +97,13 @@ class DepthFinderCore
     // The context ends (a D3D12 command list closes) while it may still be bound to the picked buffer.
     SnapshotRequest OnContextEnd(uint64_t context);
 
+    // A context that is never unbound, never cleared again and never closes (a D3D11 immediate context the whole game uses):
+    // takes the stretch drawn into the picked buffer so far, without forgetting that this context is bound to it, so a game
+    // that only calls OMSetRenderTargets once keeps being tracked after the first copy. Call once per presented frame, before
+    // BeginPresent, so a frame that drew something into the picked buffer is never missed just because the game neither
+    // cleared nor rebound it.
+    SnapshotRequest FlushForPresent(uint64_t context);
+
     // ---- once per presented frame, in two parts around the adapter's own end-of-frame work -----------------------------------
     // Part one: closes the frame's counts and finds the stretch floor. Returns the present count before this frame.
     uint64_t BeginPresent(uint32_t pictureWidth, uint32_t pictureHeight);

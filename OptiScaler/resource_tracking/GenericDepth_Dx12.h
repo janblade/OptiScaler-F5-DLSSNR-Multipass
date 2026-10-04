@@ -23,4 +23,15 @@ void OnPresent(IDXGISwapChain* swapChain);
 GenericDepthSelect::Pick CurrentPick();
 
 bool Installed();
+
+// Called when the game creates an upscaler feature (every D3D12 input goes through FeatureProvider_Dx12::GetFeature): a game
+// with an upscaler of its own needs no depth finder, so it stands down for good.
+void NoteUpscalerCall();
+
+// The warm-up is over and no upscaler call was seen: the finder is allowed to pick and report.
+bool Armed();
+
+// ImGui: status of the finder, and with [DlssNr] NativeDepthOverlay the picked depth buffer as a grayscale image. Draws
+// nothing when the finder is not installed. Call inside the menu.
+void DrawDebugUi();
 } // namespace GenericDepthDx12

@@ -504,6 +504,23 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
 
 ID3D12GraphicsCommandList* MenuOverlayDx::MenuCommandList() { return g_pd3dCommandList; }
 
+ID3D12DescriptorHeap* MenuOverlayDx::SrvHeap() { return g_pd3dSrvDescHeap; }
+
+bool MenuOverlayDx::AllocSrv(D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu)
+{
+    if (g_pd3dSrvDescHeap == nullptr || g_pd3dSrvDescHeapAlloc.FreeIndices.Size <= 0)
+        return false;
+
+    g_pd3dSrvDescHeapAlloc.Alloc(cpu, gpu);
+    return true;
+}
+
+void MenuOverlayDx::FreeSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu)
+{
+    if (g_pd3dSrvDescHeap != nullptr)
+        g_pd3dSrvDescHeapAlloc.Free(cpu, gpu);
+}
+
 void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 {
     LOG_FUNC();

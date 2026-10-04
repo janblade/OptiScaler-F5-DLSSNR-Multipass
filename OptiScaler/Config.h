@@ -569,6 +569,11 @@ class Config
     // NativeDepthFinder: watch the game's depth buffers and pick the scene's (DirectX 12 only), the first stage of DLSS-NR
     // without a game upscaler call. Observes only. Startup only. See resource_tracking/GenericDepth_Dx12.h.
     CustomOptional<bool> DlssNrNativeDepthFinder { false };
+    // NativeDepthWarmupFrames: presented frames to watch before the finder trusts that the game makes no upscaler call of its
+    // own (it stands down for good the moment one is seen). NativeDepthOverlay: debug; copies the picked depth buffer at its
+    // busiest clear and shows it in the DLSS-NR menu. That copy is recorded into the game's own command list.
+    CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
+    CustomOptional<bool> DlssNrNativeDepthOverlay { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

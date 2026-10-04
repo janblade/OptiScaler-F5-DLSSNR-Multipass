@@ -3,6 +3,7 @@
 
 #include "Util.h"
 #include "Config.h"
+#include <resource_tracking/GenericDepth_Dx12.h>
 
 #include "NVNGX_Parameter.h"
 
@@ -18,6 +19,9 @@
 bool FeatureProvider_Dx12::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NGX_Parameter* parameters,
                                       std::unique_ptr<IFeature_Dx12>* feature)
 {
+    // A game that makes an upscaler call of its own needs no depth finder.
+    GenericDepthDx12::NoteUpscalerCall();
+
     State& state = State::Instance();
     Config& cfg = *Config::Instance();
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();

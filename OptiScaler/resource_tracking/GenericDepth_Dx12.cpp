@@ -7,9 +7,15 @@
 
 #include <detours/detours.h>
 
+#include <menu/menu_overlay_dx.h>
+
+#include <imgui/imgui.h>
+
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #ifndef STDMETHODCALLTYPE
 #include <Unknwn.h>
@@ -100,12 +106,38 @@ struct ListState
     float viewportWidth = 0.0f;   // its main viewport
 };
 
+// Whether the hooks count. Cleared for good once the game is seen making an upscaler call, so a game that has one pays a
+// relaxed load per call and nothing more.
+std::atomic<bool> g_active { false };
+std::atomic<bool> g_upscalerSeen { false };
+std::atomic<bool> g_armed { false };
+std::atomic<bool> g_overlayOn { false };
+
+// The copy of the picked depth buffer for the overlay (guarded by g_mutex like the rest).
+struct Backup
+{
+    ID3D12Resource* resource = nullptr;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN;
+};
+
 std::mutex g_mutex;
 std::unordered_map<SIZE_T, DsvInfo> g_dsv;                       // CPU descriptor handle -> what it views
 std::unordered_map<ID3D12GraphicsCommandList*, ListState> g_lists;
 std::unordered_map<ID3D12Resource*, Stats> g_stats;              // node-stable: g_lists holds pointers into it
 uint64_t g_bestSnapshotVertices = 0;                             // the busiest stretch before a clear, this frame
 float g_pictureWidth = 0.0f;                                     // from the last present
+Backup g_backup;
+uint64_t g_backupFrame = 0;          // the frame a copy was last recorded in
+bool g_srvDirty = true;
+bool g_srvAllocated = false;
+ID3D12DescriptorHeap* g_srvHeap = nullptr;
+D3D12_CPU_DESCRIPTOR_HANDLE g_srvCpu {};
+D3D12_GPU_DESCRIPTOR_HANDLE g_srvGpu {};
+std::vector<std::pair<ID3D12Resource*, uint64_t>> g_retired; // replaced copies, released a few frames later
+uint64_t g_presents = 0;
 GenericDepthSelect::Selector g_selector;
 GenericDepthSelect::Pick g_pick;
 UINT g_dsvIncrement = 0;
@@ -126,6 +158,9 @@ void AddDraw(DrawStats& s, uint64_t vertices, uint32_t drawcalls, bool indirect)
 
 void OnDraw(ID3D12GraphicsCommandList* list, uint64_t vertices, uint32_t instances)
 {
+    if (!g_active.load(std::memory_order_relaxed))
+        return;
+
     std::lock_guard lock(g_mutex);
 
     const auto found = g_lists.find(list);
@@ -142,6 +177,137 @@ void OnDraw(ID3D12GraphicsCommandList* list, uint64_t vertices, uint32_t instanc
     // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
     if (!(vertices == 6 && instances == 1))
         state.stats->current.lastViewportWidth = state.viewportWidth;
+}
+
+// The typeless format a copy of a depth format is made in, and the format its depth plane is read through.
+bool BackupFormats(DXGI_FORMAT depth, DXGI_FORMAT* typeless, DXGI_FORMAT* view)
+{
+    switch (depth)
+    {
+    case DXGI_FORMAT_D32_FLOAT:
+    case DXGI_FORMAT_R32_TYPELESS:
+        *typeless = DXGI_FORMAT_R32_TYPELESS;
+        *view = DXGI_FORMAT_R32_FLOAT;
+        return true;
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+        *typeless = DXGI_FORMAT_R32G8X24_TYPELESS;
+        *view = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        return true;
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24G8_TYPELESS:
+        *typeless = DXGI_FORMAT_R24G8_TYPELESS;
+        *view = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        return true;
+    case DXGI_FORMAT_D16_UNORM:
+    case DXGI_FORMAT_R16_TYPELESS:
+        *typeless = DXGI_FORMAT_R16_TYPELESS;
+        *view = DXGI_FORMAT_R16_UNORM;
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Under g_mutex. Makes the copy target when the depth buffer's size or format is new, retiring the old one for a few frames
+// (the menu may still be reading it).
+bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_FORMAT typeless, DXGI_FORMAT view)
+{
+    if (g_backup.resource != nullptr && g_backup.width == source.Width && g_backup.height == source.Height &&
+        g_backup.typeless == typeless)
+        return true;
+
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = source.Width;
+    desc.Height = source.Height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = typeless;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    ID3D12Resource* created = nullptr;
+
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                                               IID_PPV_ARGS(&created))))
+        return false;
+
+    if (g_backup.resource != nullptr)
+        g_retired.emplace_back(g_backup.resource, g_presents);
+
+    g_backup = Backup { created, (uint32_t) source.Width, source.Height, typeless, view };
+    g_srvDirty = true;
+    return true;
+}
+
+// Under g_mutex, from the clear hook, before the clear itself: the buffer is in the depth-write state a clear needs, so
+// it goes to copy-source and back around one copy of its first subresource into the overlay's texture. The overlay's own
+// texture rests in the shader-resource state. A multisampled buffer is skipped (it would need a resolve).
+void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source)
+{
+    const auto desc = source->GetDesc();
+
+    if (desc.SampleDesc.Count > 1)
+        return;
+
+    DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN, view = DXGI_FORMAT_UNKNOWN;
+
+    if (!BackupFormats(desc.Format, &typeless, &view))
+        return;
+
+    ID3D12Device* device = nullptr;
+
+    if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+        return;
+
+    const bool ready = EnsureBackup(device, desc, typeless, view);
+    device->Release();
+
+    if (!ready)
+        return;
+
+    auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    {
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = r;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = before;
+        b.Transition.StateAfter = after;
+        return b;
+    };
+
+    D3D12_RESOURCE_BARRIER in[2] = {
+        barrier(source, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE),
+        barrier(g_backup.resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST)
+    };
+    list->ResourceBarrier(2, in);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = g_backup.resource;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = source;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER out[2] = {
+        barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE),
+        barrier(g_backup.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    };
+    list->ResourceBarrier(2, out);
+
+    g_backupFrame = g_presents;
 }
 
 void STDMETHODCALLTYPE hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resource* pResource,
@@ -242,6 +408,7 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
                                             BOOL RTsSingleHandleToDescriptorRange,
                                             const D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
+    if (g_active.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(g_mutex);
 
@@ -272,7 +439,7 @@ void STDMETHODCALLTYPE hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT Nu
                                         const D3D12_VIEWPORT* pViewports)
 {
     // Only the main viewport matters, as in ReShade's add-on.
-    if (NumViewports > 0 && pViewports != nullptr)
+    if (NumViewports > 0 && pViewports != nullptr && g_active.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(g_mutex);
         g_lists[This].viewportWidth = pViewports[0].Width;
@@ -286,7 +453,7 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
                                                D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil,
                                                UINT NumRects, const D3D12_RECT* pRects)
 {
-    if ((ClearFlags & D3D12_CLEAR_FLAG_DEPTH) != 0)
+    if ((ClearFlags & D3D12_CLEAR_FLAG_DEPTH) != 0 && g_active.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(g_mutex);
 
@@ -323,6 +490,12 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
                     {
                         g_bestSnapshotVertices = stretch.vertices;
                         stats.bestClear = (int32_t) stats.clears;
+
+                        // The overlay's copy: only of the buffer picked last frame, and only at the busiest stretch, so
+                        // the copy that is left at the end of the frame is the scene's.
+                        if (g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid &&
+                            g_pick.id == (uint64_t) (size_t) found->second.resource)
+                            RecordSnapshot(This, found->second.resource);
                     }
 
                     ++stats.clears;
@@ -358,6 +531,7 @@ void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12
                                          UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer,
                                          UINT64 CountBufferOffset)
 {
+    if (g_active.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(g_mutex);
 
@@ -486,8 +660,14 @@ void Install(ID3D12Device* device)
         return;
     }
 
+    g_overlayOn = Config::Instance()->DlssNrNativeDepthOverlay.value_or_default();
+    g_active = true;
     g_installed = true;
-    LOG_INFO("Depth finder: observing the game's depth buffers (nothing is changed)");
+    LOG_INFO("Depth finder: observing the game's depth buffers{}, after {} frames of warm-up; it stands down if the game "
+             "makes an upscaler call",
+             g_overlayOn.load() ? " (the overlay's copy is recorded into the game's command list)"
+                                : " (nothing is changed)",
+             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
 }
 
 void OnPresent(IDXGISwapChain* swapChain)
@@ -549,6 +729,41 @@ void OnPresent(IDXGISwapChain* swapChain)
 
     ++g_frames;
 
+    {
+        std::lock_guard lock(g_mutex);
+        ++g_presents;
+
+        // Copies replaced a few frames ago are no longer being read by the menu.
+        for (auto it = g_retired.begin(); it != g_retired.end();)
+        {
+            if (g_presents > it->second + 4)
+            {
+                it->first->Release();
+                it = g_retired.erase(it);
+            }
+            else
+                ++it;
+        }
+
+        if (g_upscalerSeen.load())
+        {
+            // Stand down for good: stop counting, drop the tracking and the pick.
+            g_active = false;
+            g_armed = false;
+            g_stats.clear();
+            g_lists.clear();
+            g_pick = GenericDepthSelect::Pick {};
+            g_selector.Reset();
+            return;
+        }
+    }
+
+    // Counting has gone on through the warm-up, but nothing is picked or reported until it is over.
+    if (g_presents <= Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default())
+        return;
+
+    g_armed = true;
+
     const auto pick = g_selector.Update(frame, desc.BufferDesc.Width, desc.BufferDesc.Height);
 
     const bool pickChanged = (pick.valid ? pick.id : 0) != g_lastLoggedPick;
@@ -569,5 +784,118 @@ GenericDepthSelect::Pick CurrentPick()
 {
     std::lock_guard lock(g_mutex);
     return g_pick;
+}
+
+void NoteUpscalerCall()
+{
+    if (!g_installed)
+        return;
+
+    if (!g_upscalerSeen.exchange(true))
+        LOG_INFO("Depth finder: the game makes its own upscaler call; the finder stands down");
+}
+
+bool Armed() { return g_installed && g_armed.load() && !g_upscalerSeen.load(); }
+
+// Under g_mutex. The overlay's texture needs a descriptor in the menu's heap; both come and go with the menu.
+static void EnsureOverlayView()
+{
+    ID3D12DescriptorHeap* heap = MenuOverlayDx::SrvHeap();
+
+    if (heap == nullptr || g_backup.resource == nullptr)
+        return;
+
+    if (heap != g_srvHeap)
+    {
+        g_srvHeap = heap;
+        g_srvAllocated = false;
+        g_srvDirty = true;
+    }
+
+    if (!g_srvAllocated)
+    {
+        if (!MenuOverlayDx::AllocSrv(&g_srvCpu, &g_srvGpu))
+            return;
+
+        g_srvAllocated = true;
+        g_srvDirty = true;
+    }
+
+    if (!g_srvDirty)
+        return;
+
+    ID3D12Device* device = nullptr;
+
+    if (FAILED(g_backup.resource->GetDevice(IID_PPV_ARGS(&device))))
+        return;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
+    srv.Format = g_backup.view;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    // The depth on every colour channel, so it reads as gray rather than red.
+    srv.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
+    srv.Texture2D.MipLevels = 1;
+    srv.Texture2D.PlaneSlice = 0;
+
+    device->CreateShaderResourceView(g_backup.resource, &srv, g_srvCpu);
+    device->Release();
+    g_srvDirty = false;
+}
+
+void DrawDebugUi()
+{
+    if (!g_installed)
+        return;
+
+    if (!ImGui::TreeNode("Depth finder (debug)##depthfinder"))
+        return;
+
+    const auto pick = CurrentPick();
+    const uint32_t warmup = Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default();
+
+    if (g_upscalerSeen.load())
+        ImGui::TextDisabled("The game makes its own upscaler call: the depth finder has stood down.");
+    else if (!g_armed.load())
+        ImGui::TextDisabled("Watching the game's depth buffers (%llu of %u frames)...", (unsigned long long) g_presents,
+                            warmup);
+    else if (!pick.valid)
+        ImGui::TextDisabled("No depth buffer qualifies yet.");
+    else
+        ImGui::Text("Picked %ux%u, format %u, score %llu%s", pick.width, pick.height, pick.format,
+                    (unsigned long long) pick.score, pick.reversed ? ", reversed-Z" : "");
+
+    ImGui::TextDisabled("The log has the candidates (Depth finder lines).");
+
+    if (!g_overlayOn.load())
+    {
+        ImGui::TextDisabled("Set [DlssNr] NativeDepthOverlay=true and restart to see the picked depth here.");
+    }
+    else if (Armed() && pick.valid)
+    {
+        std::lock_guard lock(g_mutex);
+
+        if (g_backupFrame == 0 || g_backup.resource == nullptr)
+        {
+            ImGui::TextDisabled("Waiting for the picked buffer's first clear...");
+        }
+        else
+        {
+            EnsureOverlayView();
+
+            if (g_srvAllocated && !g_srvDirty)
+            {
+                const float width = std::min(360.0f, ImGui::GetContentRegionAvail().x);
+                const float height = width * (float) g_backup.height / (float) g_backup.width;
+                ImGui::Image((ImTextureID) g_srvGpu.ptr, ImVec2(width, height));
+                ImGui::TextDisabled("Raw depth: normal depth looks nearly white, reversed-Z shows near as bright.");
+            }
+            else
+                ImGui::TextDisabled("The menu could not give the image a descriptor.");
+        }
+    }
+
+    ImGui::TreePop();
 }
 } // namespace GenericDepthDx12

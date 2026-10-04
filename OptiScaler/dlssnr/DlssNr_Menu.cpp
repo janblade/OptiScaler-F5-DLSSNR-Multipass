@@ -9,6 +9,7 @@
 #include <Config.h>
 #include <State.h>
 #include <menu/menu_common.h>
+#include <resource_tracking/GenericDepth_Dx12.h>
 
 #include <imgui/imgui.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
@@ -751,6 +752,9 @@ void RenderMenu(Config* config, float menuResScale)
     {
         ScopedIndent indent {};
         ImGui::Spacing();
+
+        // Shows nothing unless [DlssNr] NativeDepthFinder is on.
+        GenericDepthDx12::DrawDebugUi();
 
         // Moved up here (out of its original spot just above the Model-resolution slider) so
         // the "Optimized Defaults" preset button, which sits earlier in the panel, can clear

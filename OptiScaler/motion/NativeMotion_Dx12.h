@@ -12,7 +12,11 @@
 
 namespace NativeMotionDx12
 {
-// Once per presented frame, from the menu's present hook, before the menu is drawn. `queue` is the swap chain's queue. Does
+// Both close the depth finder's frame (GenericDepthDx12::OnPresent) and then run the step, so the step reads the frame just
+// closed and the finder closes once per game frame.
+//
+// Once per presented frame, from the wrapped swap chain's present, before DLSS-NR's finished-picture pass (which composes
+// from what an upscaler call captured this frame) and before the menu is drawn. `queue` is the swap chain's queue. Does
 // nothing while OnFGPresent is being called.
 void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device);
 

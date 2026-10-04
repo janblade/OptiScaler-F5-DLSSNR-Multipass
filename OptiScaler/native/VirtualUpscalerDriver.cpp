@@ -11,6 +11,7 @@
 #include <upscalers/FeatureProvider_Dx12.h>
 #include <upscalers/IFeature_Dx12.h>
 #include <inputs/FG/Upscaler_Inputs_Dx12.h>
+#include <dlssnr/DlssNr.h>
 
 namespace native
 {
@@ -162,6 +163,9 @@ bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const 
         flags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
 
     _params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
+
+    // As TryCreateOptiFeature does: the menu and some backends read the API of the feature being run from here.
+    State::Instance().api = API::DX12;
 
     std::unique_ptr<IFeature_Dx12> feature;
 
@@ -393,9 +397,18 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     _params->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
     _params->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
 
-    Transition(cmd, frame.motion, kRead, fgMotion);
-    Transition(cmd, frame.depth, kRead, fgDepth);
-    Transition(cmd, _output, kWrite, fgOutput);
+    // From here the resources are where a game's would be at its call: in the states the backend takes them in.
+    Transition(cmd, frame.motion, kRead, inMotion);
+    Transition(cmd, frame.depth, kRead, inDepth);
+    Transition(cmd, _output, kWrite, inOutput);
+
+    // DLSS-NR hangs off NVSDK_NGX_D3D12_EvaluateFeature around the upscaler, not off the feature: before it (Run before SR,
+    // or the finished-picture capture of depth and motion) and after it (over Output).
+    DlssNr::EvaluateBeforeUpscale(cmd, _params);
+
+    Transition(cmd, frame.motion, inMotion, fgMotion);
+    Transition(cmd, frame.depth, inDepth, fgDepth);
+    Transition(cmd, _output, inOutput, fgOutput);
 
     state.currentFeature = _feature.get();
 
@@ -411,6 +424,9 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         ScopedSkipHeapCapture skip {};
         evaluated = _feature->Evaluate(cmd, _params);
     }
+
+    if (evaluated)
+        DlssNr::EvaluateAfterUpscale(cmd, _params);
 
     if (_evaluations < 8 || _evaluations % 300 == 0)
         LOG_INFO("Virtual upscaler: Evaluate {} -> {}, {} {}x{}, colour format {}{}, reset {}, depth reversed {}",

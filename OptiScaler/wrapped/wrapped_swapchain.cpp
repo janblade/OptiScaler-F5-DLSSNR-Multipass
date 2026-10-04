@@ -12,6 +12,7 @@
 #include <with_dx12/dx11_with_dx12_sync.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <motion/NativeMotion_Dx12.h>
 
 #include <misc/FrameLimit.h>
 
@@ -507,6 +508,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             else
                 currentFeature->TickFrozenCheck();
         }
+
+        // Before the finished-picture pass, which composes from what the virtual upscaler's call captured this frame.
+        if (cq && device12)
+            NativeMotionDx12::OnPresent(pSwapChain, cq, device12);
 
         if (cq && (fg == nullptr || !fg->IsActive() || fg->IsPaused()))
             DlssNr::ApplyToFinishedPicture(pSwapChain, cq);

@@ -438,9 +438,6 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         {
             _showRenderImGuiDebugOnce = true;
 
-            // The motion step reads the finished picture before the menu is drawn onto it (does nothing unless it is on).
-            NativeMotionDx12::OnPresent(pSwapChain, (ID3D12CommandQueue*) currentSCCommandQueue, device);
-
             ImGui_ImplDX12_NewFrame();
 
             if (MenuOverlayBase::RenderMenu())
@@ -554,7 +551,7 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
-    GenericDepthDx12::OnPresent(pSwapChain);
+    // D3D12's finder closes its frame with the native input step (NativeMotionDx12::OnPresent / OnFGPresent).
     GenericDepthDx11::OnPresent(pSwapChain);
 
     if (!Config::Instance()->OverlayMenu.value_or_default())

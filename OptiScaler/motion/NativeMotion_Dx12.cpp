@@ -268,6 +268,7 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
         return;
 
     g_fgDriven = false;
+    GenericDepthDx12::OnPresent(swapChain);
     RunFrame(swapChain, queue, device);
 }
 
@@ -277,6 +278,7 @@ void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Dev
     g_fgDriven = true;
 
     std::lock_guard lock(g_runMutex);
+    GenericDepthDx12::OnPresent(swapChain);
     RunFrame(swapChain, queue, device);
 }
 

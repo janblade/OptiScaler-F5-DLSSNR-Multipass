@@ -210,8 +210,20 @@ void Dx11FrameSource::Return(const FrameInput& input, const FrameOutput& output)
     if (_backBuffer == nullptr)
         return;
 
-    if (output.done.fence != nullptr)
-        _context4->Wait(_fence.Fence11(), output.done.value);
+    // output.done names NativeProducer's own internal fence (shared with no one -- it only tells the D3D12 adapter, which
+    // reads nothing back across an API boundary, that a frame was submitted). Waiting on it directly here was a bug: it
+    // checked output.done.fence for non-null but then waited on OUR shared fence for OUR value, two unrelated counters
+    // that happened to track closely enough to let the wait return immediately without ever actually waiting for the
+    // producer's GPU work -- so the D3D11 copy-back could run before DLSS-NR's write ever landed, and did.
+    // A fresh signal on the private queue, right after the producer's ExecuteCommandLists (already submitted when Run()
+    // returned, so this Signal is ordered after it on the GPU regardless of CPU timing), gives the D3D11 context
+    // something real to wait on.
+    if (output.done.fence != nullptr && _queue12 != nullptr)
+    {
+        const uint64_t doneValue = _fence.Next();
+        _queue12->Signal(_fence.Fence12(), doneValue);
+        _context4->Wait(_fence.Fence11(), doneValue);
+    }
 
     _context11->CopyResource(_backBuffer.Get(), _picture.Tex11());
     _backBuffer.Reset();

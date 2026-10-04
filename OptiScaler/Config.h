@@ -566,6 +566,9 @@ class Config
     CustomOptional<uint32_t> DlssNrAutoExposureMeter { 1 };
     CustomOptional<float> DlssNrAutoExposureMeterLowPercent { 10.0f };
     CustomOptional<float> DlssNrAutoExposureMeterHighPercent { 90.0f };
+    // NativeDepthFinder: watch the game's depth buffers and pick the scene's (DirectX 12 only), the first stage of DLSS-NR
+    // without a game upscaler call. Observes only. Startup only. See resource_tracking/GenericDepth_Dx12.h.
+    CustomOptional<bool> DlssNrNativeDepthFinder { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

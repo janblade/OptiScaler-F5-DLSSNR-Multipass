@@ -475,6 +475,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrAutoExposureMeter.set_from_config(readUInt("DlssNr", "AutoExposureMeter"));
             DlssNrAutoExposureMeterLowPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterLowPercent"));
             DlssNrAutoExposureMeterHighPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterHighPercent"));
+            DlssNrNativeDepthFinder.set_from_config(readBool("DlssNr", "NativeDepthFinder"));
             DlssNrAutoExposureAdaptBrighterSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptBrighterSeconds"));
             DlssNrAutoExposureAdaptDarkerSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptDarkerSeconds"));
             DlssNrAutoExposureAdaptSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptSeconds"));
@@ -1478,6 +1479,8 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrAutoExposureMeterLowPercent.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureMeterHighPercent",
                  GetFloatValue(Instance()->DlssNrAutoExposureMeterHighPercent.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthFinder",
+                 GetBoolValue(Instance()->DlssNrNativeDepthFinder.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureAdaptBrighterSeconds",
                  GetFloatValue(Instance()->DlssNrAutoExposureAdaptBrighterSeconds.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureAdaptDarkerSeconds",

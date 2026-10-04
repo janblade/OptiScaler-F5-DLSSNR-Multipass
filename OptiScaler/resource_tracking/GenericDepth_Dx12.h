@@ -30,7 +30,7 @@ GenericDepthSelect::Pick CurrentPick();
 // overwritten by the next frame's copies, which run later on the same queue than anything recorded at present.
 struct Snapshot
 {
-    static constexpr int kMaxCopies = 6;
+    static constexpr int kMaxCopies = 8;
 
     bool valid = false;
     ID3D12Resource* resource = nullptr;            // the copy of the stretch that drew the most (the menu's preview)

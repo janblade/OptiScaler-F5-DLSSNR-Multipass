@@ -42,7 +42,7 @@ class TrustMaskDx12
         ID3D12Resource* lumaBefore = nullptr;    // OpticalFlowDx12::LumaOfFrameBefore()
         // The scene's depth: one or more copies of the depth buffer (any size, all the same), readable as textures. With several
         // each is part of the scene (what one list drew) and the nearest surface over them all is used.
-        static constexpr int kMaxDepths = 6;
+        static constexpr int kMaxDepths = 8;
         ID3D12Resource* depths[kMaxDepths] = {};
         int depthCount = 0;
         DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN; // a typed readable format of it: R32_FLOAT, R16_UNORM, R32_FLOAT_X8X24_TYPELESS...
@@ -108,8 +108,8 @@ class TrustMaskDx12
     bool EnsureSize(ID3D12Device* device, uint32_t width, uint32_t height);
     void ReleaseTextures();
     void Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state);
-    void Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* const (&srv)[7],
-              const DXGI_FORMAT (&formats)[7], Tex& dst, DXGI_FORMAT dstFormat, uint32_t groupsX, uint32_t groupsY,
+    void Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* const (&srv)[8],
+              const DXGI_FORMAT (&formats)[8], Tex& dst, DXGI_FORMAT dstFormat, uint32_t groupsX, uint32_t groupsY,
               const Constants& constants);
 
     ID3D12Device* _device = nullptr;

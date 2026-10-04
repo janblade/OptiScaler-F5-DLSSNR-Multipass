@@ -166,7 +166,7 @@ uint64_t g_previewFrame = 0;         // the frame the preview's readback was las
 // holding whichever copy ran last on the GPU (the world, or the first-person weapon's pass) and the picture flickered. Each
 // stretch with a real share of the frame's draws gets a target of its own, and at present the one whose stretch drew the most
 // is chosen: that choice does not depend on the order the lists ran in.
-constexpr int kSnapshotSlots = 6;
+constexpr int kSnapshotSlots = 8;
 
 struct SnapshotSlot
 {
@@ -1161,7 +1161,7 @@ void OnPresent(IDXGISwapChain* swapChain)
             const auto picked = g_stats.find((ID3D12Resource*) (size_t) g_pick.id);
 
             if (picked != g_stats.end())
-                g_bestSnapshotVertices = picked->second.total.vertices * 15 / 100;
+                g_bestSnapshotVertices = picked->second.total.vertices * 2 / 100;
         }
 
         frame.reserve(g_stats.size());

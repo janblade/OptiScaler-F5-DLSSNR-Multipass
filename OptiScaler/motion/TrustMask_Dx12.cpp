@@ -8,7 +8,7 @@
 namespace
 {
 
-constexpr uint32_t kDescriptorsPerPass = 9; // seven SRVs, two UAVs
+constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs, two UAVs
 constexpr uint32_t kPassesPerFrame = 4;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -34,7 +34,7 @@ cbuffer P : register(b0)
 };
 
 SamplerState Linear : register(s0);
-Texture2D<float>  SceneDepths[6] : register(t0);
+Texture2D<float>  SceneDepths[8] : register(t0);
 Texture2D<float4> Flow : register(t0);
 Texture2D<float4> FlowBefore : register(t1);
 Texture2D<float>  DepthNow : register(t2);
@@ -63,7 +63,7 @@ void DepthProxy(uint3 id : SV_DispatchThreadID)
     // The nearest surface over all the copies: each holds only what its list had drawn, and the split differs per frame.
     float nearness = 1e-6;
 
-    [unroll] for (int k = 0; k < 6; ++k)
+    [unroll] for (int k = 0; k < 8; ++k)
         if (uint(k) < depthCount)
         {
             float d = SceneDepths[k].Load(int3(at, 0));
@@ -246,13 +246,13 @@ bool TrustMaskDx12::Init(ID3D12Device* device)
 
     D3D12_DESCRIPTOR_RANGE ranges[2] {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 7;
+    ranges[0].NumDescriptors = 8;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[1].NumDescriptors = 2;
     ranges[1].BaseShaderRegister = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 7;
+    ranges[1].OffsetInDescriptorsFromTableStart = 8;
 
     D3D12_ROOT_PARAMETER params[2] {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -468,8 +468,8 @@ void TrustMaskDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_
     tex.state = state;
 }
 
-void TrustMaskDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* const (&srv)[7],
-                         const DXGI_FORMAT (&formats)[7], Tex& dst, DXGI_FORMAT dstFormat, uint32_t groupsX,
+void TrustMaskDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* const (&srv)[8],
+                         const DXGI_FORMAT (&formats)[8], Tex& dst, DXGI_FORMAT dstFormat, uint32_t groupsX,
                          uint32_t groupsY, const Constants& constants)
 {
     Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -483,14 +483,17 @@ void TrustMaskDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* p
     cpu.ptr += (SIZE_T) first * _descriptorSize;
     gpu.ptr += (UINT64) first * _descriptorSize;
 
-    for (int i = 0; i < 7; ++i)
+    for (int i = 0; i < 8; ++i)
     {
+        // A slot a pass does not use still needs a valid view: it repeats the first.
+        ID3D12Resource* resource = srv[i] != nullptr ? srv[i] : srv[0];
+
         D3D12_SHADER_RESOURCE_VIEW_DESC view {};
-        view.Format = formats[i];
+        view.Format = srv[i] != nullptr ? formats[i] : formats[0];
         view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         view.Texture2D.MipLevels = 1;
-        _device->CreateShaderResourceView(srv[i], &view, cpu);
+        _device->CreateShaderResourceView(resource, &view, cpu);
         cpu.ptr += _descriptorSize;
     }
 
@@ -583,42 +586,38 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 
     // 1. the depth proxy at the flow's size
     {
-        // Six depth slots (t0..t5): the copies given, the first one again for any not given (every slot needs a view), and a
-        // filler in the seventh.
-        ID3D12Resource* srv[7];
-        DXGI_FORMAT formats[7];
+        // Eight depth slots (t0..t7): the copies given, the first one again for any not given (every slot needs a view).
+        ID3D12Resource* srv[8];
+        DXGI_FORMAT formats[8];
 
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < 8; ++i)
         {
             srv[i] = i < in.depthCount ? in.depths[i] : in.depths[0];
             formats[i] = in.depthFormat;
         }
-
-        srv[6] = _flowBefore.resource;
-        formats[6] = kFlowFormat;
         Pass(list, _depthProxy, srv, formats, _depth[write], kDepthFormat, groupsX, groupsY, constants);
     }
 
     // 2. the counter back to zero
     {
-        ID3D12Resource* const srv[7] = { _flowBefore.resource, _flowBefore.resource, _flowBefore.resource,
+        ID3D12Resource* const srv[8] = { _flowBefore.resource, _flowBefore.resource, _flowBefore.resource,
                                          _flowBefore.resource, _flowBefore.resource, _flowBefore.resource,
                                          _flowBefore.resource };
-        const DXGI_FORMAT formats[7] = { kFlowFormat, kFlowFormat, kFlowFormat, kFlowFormat,
+        const DXGI_FORMAT formats[8] = { kFlowFormat, kFlowFormat, kFlowFormat, kFlowFormat,
                                          kFlowFormat, kFlowFormat, kFlowFormat };
         Pass(list, _clearCounter, srv, formats, _mask[maskWrite], kMaskFormat, 1, 1, constants);
     }
 
     // 3. the mask
     {
-        ID3D12Resource* const srv[7] = { in.flow,
+        ID3D12Resource* const srv[8] = { in.flow,
                                          _flowBefore.resource,
                                          _depth[write].resource,
                                          _depth[_depthIndex].resource,
                                          in.lumaNow,
                                          in.lumaBefore,
                                          _mask[_maskIndex].resource };
-        const DXGI_FORMAT formats[7] = { kFlowFormat, kFlowFormat, kDepthFormat, kDepthFormat,
+        const DXGI_FORMAT formats[8] = { kFlowFormat, kFlowFormat, kDepthFormat, kDepthFormat,
                                          DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, kMaskFormat };
         Pass(list, _trust, srv, formats, _mask[maskWrite], kMaskFormat, groupsX, groupsY, constants);
     }
@@ -644,14 +643,14 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 
     // 4. this frame's flow, for the next frame's consistency check
     {
-        ID3D12Resource* const srv[7] = { in.flow,
+        ID3D12Resource* const srv[8] = { in.flow,
                                          _depth[write].resource,
                                          _depth[write].resource,
                                          _depth[write].resource,
                                          _depth[write].resource,
                                          _depth[write].resource,
                                          _depth[write].resource };
-        const DXGI_FORMAT formats[7] = { kFlowFormat, kDepthFormat, kDepthFormat, kDepthFormat,
+        const DXGI_FORMAT formats[8] = { kFlowFormat, kDepthFormat, kDepthFormat, kDepthFormat,
                                          kDepthFormat, kDepthFormat, kDepthFormat };
         Pass(list, _copyFlow, srv, formats, _flowBefore, kFlowFormat, groupsX, groupsY, constants);
     }

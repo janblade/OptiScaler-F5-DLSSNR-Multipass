@@ -68,7 +68,12 @@ bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, uint32
 
     // Not jittered, not low-res: the trust mask's guide (TrustMaskDx12::BuildGuides) is already full (output)
     // resolution motion with no jitter applied, since render size == output size here (scale 1.0, no upscaling).
-    unsigned int flags = 0;
+    // AutoExposure is required: we supply no NVSDK_NGX_Parameter_ExposureTexture (we have no such thing), and
+    // FFXFeatureDx12::EvaluateInternal, finding AutoExposure() false and no exposure texture, returns true
+    // without ever dispatching anything -- a silent no-op that looks identical to success in every log we have,
+    // which is why the picture was black: nothing ever wrote to it. FSR computes its own exposure internally when
+    // this flag is set, which is exactly our situation.
+    unsigned int flags = NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
 
     if (depthReversed)
         flags |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;

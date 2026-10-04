@@ -1,0 +1,195 @@
+#include "pch.h"
+
+#include "Dx11FrameSource.h"
+
+#include <dlssnr/DlssNrFeature_Dx12.h>
+#include <resource_tracking/GenericDepth_Dx11.h>
+#include <with_dx12/with_dx12.h>
+
+namespace native
+{
+
+namespace
+{
+ColorSpace ToColorSpace(DXGI_COLOR_SPACE_TYPE type)
+{
+    switch (type)
+    {
+    case DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709:
+        return ColorSpace::ScRgb;
+    case DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:
+        return ColorSpace::Pq;
+    default:
+        return ColorSpace::Srgb;
+    }
+}
+} // namespace
+
+void Dx11FrameSource::SetPresent(IDXGISwapChain* swapChain, ID3D11Device* device11)
+{
+    _swapChain = swapChain;
+
+    if (device11 != _device11)
+    {
+        _device11 = device11;
+        _context11.Reset();
+        _context4.Reset();
+        _device12 = nullptr;
+        _queue12 = nullptr;
+        _fence.Reset();
+        _picture.Reset();
+        _depth.Reset();
+    }
+}
+
+bool Dx11FrameSource::EnsureDevices(ID3D11Device* device11)
+{
+    if (_context11 == nullptr)
+    {
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+        device11->GetImmediateContext(&context);
+
+        if (context == nullptr || FAILED(context.As(&_context4)))
+        {
+            _error = "the D3D11 device's immediate context does not support ID3D11DeviceContext4 (needs Windows 10 "
+                     "1703 or later)";
+            return false;
+        }
+
+        _context11 = context;
+    }
+
+    if (_device12 == nullptr || _queue12 == nullptr)
+    {
+        if (!WithDx12::PrepareD3D12ForD3D11(device11, D3D_FEATURE_LEVEL_11_0))
+        {
+            _error = "could not make the D3D12 device paired with this D3D11 device";
+            return false;
+        }
+
+        _device12 = WithDx12::GetD3D12Device();
+        _queue12 = WithDx12::GetD3D12CommandQueue();
+
+        if (_device12 == nullptr || _queue12 == nullptr)
+        {
+            _error = "the paired D3D12 device or queue is not ready";
+            return false;
+        }
+    }
+
+    if (!_fence.Ready())
+    {
+        if (!_fence.Create(_device12, device11))
+        {
+            _error = _fence.Error();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
+{
+    _backBuffer.Reset();
+
+    if (_swapChain == nullptr || _device11 == nullptr)
+        return AcquireStatus::Unavailable;
+
+    if (GenericDepthDx11::GameCallsUpscaler())
+        return AcquireStatus::WaitingForUpscaler;
+
+    if (!EnsureDevices(_device11))
+        return AcquireStatus::Unavailable;
+
+    if (FAILED(_swapChain->GetBuffer(0, IID_PPV_ARGS(&_backBuffer))))
+    {
+        _error = "could not get the swap chain's buffer";
+        return AcquireStatus::Unavailable;
+    }
+
+    D3D11_TEXTURE2D_DESC desc {};
+    _backBuffer->GetDesc(&desc);
+
+    const DXGI_FORMAT pictureFormat = SharedPictureFormat(desc.Format);
+
+    if (!_picture.Matches(desc.Width, desc.Height, pictureFormat))
+    {
+        if (!_picture.Create(_device11, desc.Width, desc.Height, pictureFormat, D3D11_BIND_SHADER_RESOURCE) ||
+            !_picture.Open(_device12))
+        {
+            _error = _picture.Error();
+            return AcquireStatus::Unavailable;
+        }
+    }
+
+    _context11->CopyResource(_picture.Tex11(), _backBuffer.Get());
+
+    const auto depthSnap = GenericDepthDx11::BestSnapshot();
+    bool depthReady = false;
+
+    if (depthSnap.valid)
+    {
+        bool haveTexture = _depth.Matches(depthSnap.width, depthSnap.height, depthSnap.typelessFormat);
+
+        if (!haveTexture)
+            haveTexture = _depth.Create(_device11, depthSnap.width, depthSnap.height, depthSnap.typelessFormat,
+                                        D3D11_BIND_SHADER_RESOURCE);
+
+        if (haveTexture && _depth.Open(_device12))
+        {
+            depthReady = true;
+            _context11->CopyResource(_depth.Tex11(), depthSnap.resource);
+        }
+    }
+
+    const uint64_t signalValue = _fence.Next();
+    _context4->Signal(_fence.Fence11(), signalValue);
+    _context11->Flush();
+
+    input = FrameInput {};
+    input.api = Api::D3D11;
+    input.frame = ++_frame;
+    input.picture = _picture.Res12();
+    input.pictureFormat = pictureFormat;
+    input.pictureState = D3D12_RESOURCE_STATE_COMMON;
+    input.colorSpace = ToColorSpace(DlssNr::NativeInputColourSpace(_swapChain, desc.Format));
+    input.width = desc.Width;
+    input.height = desc.Height;
+
+    if (depthReady)
+    {
+        input.depth[0] = _depth.Res12();
+        input.depthCount = 1;
+        input.depthView = depthSnap.viewFormat;
+        input.depthWidth = depthSnap.width;
+        input.depthHeight = depthSnap.height;
+        input.depthReversed = depthSnap.reversed;
+    }
+
+    input.ready = SyncPoint { _fence.Fence12(), signalValue };
+    return AcquireStatus::Ready;
+}
+
+void Dx11FrameSource::Return(const FrameInput& input, const FrameOutput& output)
+{
+    (void) input;
+
+    if (_backBuffer == nullptr)
+        return;
+
+    if (output.done.fence != nullptr)
+        _context4->Wait(_fence.Fence11(), output.done.value);
+
+    _context11->CopyResource(_backBuffer.Get(), _picture.Tex11());
+    _backBuffer.Reset();
+}
+
+void Dx11FrameSource::OnResize()
+{
+    _picture.Reset();
+    _depth.Reset();
+    _backBuffer.Reset();
+}
+
+} // namespace native

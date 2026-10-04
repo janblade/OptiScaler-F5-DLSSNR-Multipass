@@ -10,7 +10,9 @@
 #include <State.h>
 #include <menu/menu_common.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <resource_tracking/GenericDepth_Dx11.h>
 #include <motion/NativeMotion_Dx12.h>
+#include <motion/NativeMotionDx11.h>
 
 #include <imgui/imgui.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
@@ -754,9 +756,18 @@ void RenderMenu(Config* config, float menuResScale)
         ScopedIndent indent {};
         ImGui::Spacing();
 
-        // Shows nothing unless [DlssNr] NativeDepthFinder is on.
-        GenericDepthDx12::DrawDebugUi();
-        NativeMotionDx12::DrawDebugUi();
+        // Shows nothing unless [DlssNr] NativeDepthFinder is on. The D3D11 sections only appear for a D3D11 game, so they are
+        // not shown twice for the (far more common) D3D12 case.
+        if (State::Instance().currentD3D11Device != nullptr)
+        {
+            GenericDepthDx11::DrawDebugUi();
+            NativeMotionDx11::DrawDebugUi();
+        }
+        else
+        {
+            GenericDepthDx12::DrawDebugUi();
+            NativeMotionDx12::DrawDebugUi();
+        }
 
         // Moved up here (out of its original spot just above the Model-resolution slider) so
         // the "Optimized Defaults" preset button, which sits earlier in the panel, can clear

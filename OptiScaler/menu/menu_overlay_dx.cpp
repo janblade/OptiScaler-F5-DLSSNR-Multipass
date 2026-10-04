@@ -6,7 +6,9 @@
 #include <Logger.h>
 #include <Config.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <resource_tracking/GenericDepth_Dx11.h>
 #include <motion/NativeMotion_Dx12.h>
+#include <motion/NativeMotionDx11.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -222,6 +224,9 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
     }
 
     LOG_FUNC();
+
+    // The motion step reads the finished picture before the menu is drawn onto it (does nothing unless it is on).
+    NativeMotionDx11::OnPresent(pSwapChain, g_pd3dDevice);
 
     ImGuiIO& io = ImGui::GetIO();
     (void) io;
@@ -550,6 +555,7 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
     GenericDepthDx12::OnPresent(pSwapChain);
+    GenericDepthDx11::OnPresent(pSwapChain);
 
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {

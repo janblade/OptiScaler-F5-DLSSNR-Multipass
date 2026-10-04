@@ -425,6 +425,9 @@
     <ClInclude Include="motion\NativeMotion_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="motion\NativeMotionDx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="motion\TrustMask_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -446,7 +449,13 @@
     <ClInclude Include="native\SharedFrame.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\Dx11FrameSource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="resource_tracking\GenericDepth_Dx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="resource_tracking\GenericDepth_Select.h">
@@ -1265,6 +1274,9 @@
     <ClCompile Include="motion\NativeMotion_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="motion\NativeMotionDx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="motion\TrustMask_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1283,7 +1295,13 @@
     <ClCompile Include="native\SharedFrame.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="native\Dx11FrameSource.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="resource_tracking\GenericDepth_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="resource_tracking\GenericDepth_Dx11.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="resource_tracking\ResTrack_dx12.cpp">

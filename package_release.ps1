@@ -149,6 +149,13 @@ foreach ($f in $sourceFiles) {
     Copy-Item -LiteralPath $source -Destination "$stage\$f" -Force
 }
 
+# Sets up DLSS-NR in a game with no DLSS of its own, from this zip (see docs/NON-DLSS-GAMES.md). Run from the extracted folder.
+$nonDlssInstaller = "$root\tools\Install-NonDlssGame.ps1"
+if (-not (Test-Path -LiteralPath $nonDlssInstaller)) {
+    throw "Required release file is missing: $nonDlssInstaller"
+}
+Copy-Item -LiteralPath $nonDlssInstaller -Destination "$stage\Install-NonDlssGame.ps1" -Force
+
 foreach ($d in @("Licenses", "OptiScaler")) {
     $source = "$src\$d"
     if (-not (Test-Path -LiteralPath $source -PathType Container)) {

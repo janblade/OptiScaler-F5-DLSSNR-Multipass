@@ -15,6 +15,10 @@
 #include <Unknwn.h>
 #endif
 
+// The counting rules (vertices weighed over draw calls, the viewport and workload tests on clears, the best snapshot, the
+// reversed-Z hint from the clear value) are adapted from ReShade's Generic Depth add-on, Copyright (C) 2021 Patrick Mours,
+// BSD-3-Clause; see Licenses/ReShade_GenericDepth_LICENSE.txt. This file only observes: it copies nothing yet.
+
 namespace
 {
 typedef void(STDMETHODCALLTYPE* PFN_CreateDepthStencilView)(ID3D12Device* This, ID3D12Resource* pResource,
@@ -44,6 +48,12 @@ typedef void(STDMETHODCALLTYPE* PFN_DrawInstanced)(ID3D12GraphicsCommandList* Th
 typedef void(STDMETHODCALLTYPE* PFN_DrawIndexedInstanced)(ID3D12GraphicsCommandList* This, UINT IndexCountPerInstance,
                                                           UINT InstanceCount, UINT StartIndexLocation,
                                                           INT BaseVertexLocation, UINT StartInstanceLocation);
+typedef void(STDMETHODCALLTYPE* PFN_RSSetViewports)(ID3D12GraphicsCommandList* This, UINT NumViewports,
+                                                    const D3D12_VIEWPORT* pViewports);
+typedef void(STDMETHODCALLTYPE* PFN_ExecuteIndirect)(ID3D12GraphicsCommandList* This,
+                                                     ID3D12CommandSignature* pCommandSignature, UINT MaxCommandCount,
+                                                     ID3D12Resource* pArgumentBuffer, UINT64 ArgumentBufferOffset,
+                                                     ID3D12Resource* pCountBuffer, UINT64 CountBufferOffset);
 
 PFN_CreateDepthStencilView o_CreateDepthStencilView = nullptr;
 PFN_CopyDescriptorsSimple o_CopyDescriptorsSimple = nullptr;
@@ -52,6 +62,16 @@ PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
 PFN_ClearDepthStencilView o_ClearDepthStencilView = nullptr;
 PFN_DrawInstanced o_DrawInstanced = nullptr;
 PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
+PFN_RSSetViewports o_RSSetViewports = nullptr;
+PFN_ExecuteIndirect o_ExecuteIndirect = nullptr;
+
+struct DrawStats
+{
+    uint64_t vertices = 0;
+    uint32_t drawcalls = 0;
+    uint32_t drawcallsIndirect = 0;
+    float lastViewportWidth = 0.0f;
+};
 
 // One depth-stencil buffer's counts for the frame being recorded.
 struct Stats
@@ -59,10 +79,11 @@ struct Stats
     uint32_t width = 0;
     uint32_t height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    uint64_t draws = 0;
-    uint64_t stretch = 0; // draws since the last clear
-    uint64_t peak = 0;    // the most draws between two clears
-    uint32_t clears = 0;
+    DrawStats total;
+    DrawStats current;       // since the last clear
+    uint32_t clears = 0;     // clears that came after real work
+    int32_t bestClear = -1;  // the clear a snapshot would be taken at
+    bool reversed = false;   // cleared to something other than 1.0
 };
 
 struct DsvInfo
@@ -73,13 +94,20 @@ struct DsvInfo
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 };
 
+struct ListState
+{
+    Stats* stats = nullptr;       // the depth buffer this list draws into now
+    float viewportWidth = 0.0f;   // its main viewport
+};
+
 std::mutex g_mutex;
-std::unordered_map<SIZE_T, DsvInfo> g_dsv;                         // CPU descriptor handle -> what it views
-std::unordered_map<ID3D12GraphicsCommandList*, Stats*> g_bound;    // command list -> the buffer it draws into now
-std::unordered_map<ID3D12Resource*, Stats> g_stats;                // node-stable: g_bound holds pointers into it
+std::unordered_map<SIZE_T, DsvInfo> g_dsv;                       // CPU descriptor handle -> what it views
+std::unordered_map<ID3D12GraphicsCommandList*, ListState> g_lists;
+std::unordered_map<ID3D12Resource*, Stats> g_stats;              // node-stable: g_lists holds pointers into it
+uint64_t g_bestSnapshotVertices = 0;                             // the busiest stretch before a clear, this frame
+float g_pictureWidth = 0.0f;                                     // from the last present
 GenericDepthSelect::Selector g_selector;
 GenericDepthSelect::Pick g_pick;
-ID3D12Device* g_device = nullptr;
 UINT g_dsvIncrement = 0;
 uint64_t g_frames = 0;
 uint64_t g_lastLoggedFrame = 0;
@@ -88,19 +116,32 @@ bool g_installed = false;
 
 constexpr uint64_t kLogEveryFrames = 600;
 
-void OnDraw(ID3D12GraphicsCommandList* list)
+void AddDraw(DrawStats& s, uint64_t vertices, uint32_t drawcalls, bool indirect)
+{
+    s.vertices += vertices;
+    s.drawcalls += drawcalls;
+    if (indirect)
+        s.drawcallsIndirect += drawcalls;
+}
+
+void OnDraw(ID3D12GraphicsCommandList* list, uint64_t vertices, uint32_t instances)
 {
     std::lock_guard lock(g_mutex);
 
-    const auto bound = g_bound.find(list);
+    const auto found = g_lists.find(list);
 
-    if (bound == g_bound.end() || bound->second == nullptr)
+    if (found == g_lists.end() || found->second.stats == nullptr)
         return;
 
-    auto* stats = bound->second;
-    stats->draws++;
-    stats->stretch++;
-    stats->peak = std::max(stats->peak, stats->stretch);
+    auto& state = found->second;
+    const uint64_t count = vertices * instances;
+
+    AddDraw(state.stats->total, count, 1, false);
+    AddDraw(state.stats->current, count, 1, false);
+
+    // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
+    if (!(vertices == 6 && instances == 1))
+        state.stats->current.lastViewportWidth = state.viewportWidth;
 }
 
 void STDMETHODCALLTYPE hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resource* pResource,
@@ -220,11 +261,24 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
             }
         }
 
-        g_bound[This] = bound;
+        g_lists[This].stats = bound;
     }
 
     o_OMSetRenderTargets(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
                          pDepthStencilDescriptor);
+}
+
+void STDMETHODCALLTYPE hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
+                                        const D3D12_VIEWPORT* pViewports)
+{
+    // Only the main viewport matters, as in ReShade's add-on.
+    if (NumViewports > 0 && pViewports != nullptr)
+    {
+        std::lock_guard lock(g_mutex);
+        g_lists[This].viewportWidth = pViewports[0].Width;
+    }
+
+    o_RSSetViewports(This, NumViewports, pViewports);
 }
 
 void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
@@ -244,9 +298,36 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
             stats.width = found->second.width;
             stats.height = found->second.height;
             stats.format = found->second.format;
-            stats.peak = std::max(stats.peak, stats.stretch);
-            stats.stretch = 0;
-            stats.clears++;
+
+            // Reversed-Z games clear to 0.0 (or anything but 1.0).
+            if (Depth != 1.0f)
+                stats.reversed = true;
+
+            // A clear with no work before it (the start of a frame) means nothing.
+            if (stats.current.drawcalls != 0)
+            {
+                const DrawStats stretch = stats.current;
+                stats.current = DrawStats {};
+
+                // A clear after a render into a small viewport (a mirror, a portal) is not the scene; ReShade's rule.
+                const bool real = stretch.lastViewportWidth > 1024.0f || stretch.lastViewportWidth == 0.0f ||
+                                  g_pictureWidth <= 1024.0f;
+
+                if (real)
+                {
+                    // The busiest stretch of the frame is the one to snapshot; ties go to the later one, so a scene
+                    // drawn first into a shadow map and then for real picks the real one.
+                    const bool best = stretch.vertices >= g_bestSnapshotVertices;
+
+                    if (best)
+                    {
+                        g_bestSnapshotVertices = stretch.vertices;
+                        stats.bestClear = (int32_t) stats.clears;
+                    }
+
+                    ++stats.clears;
+                }
+            }
         }
     }
 
@@ -256,7 +337,7 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
 void STDMETHODCALLTYPE hkDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance,
                                        UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
 {
-    OnDraw(This);
+    OnDraw(This, VertexCountPerInstance, InstanceCount);
     o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
 
@@ -264,9 +345,35 @@ void STDMETHODCALLTYPE hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, U
                                               UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
                                               UINT StartInstanceLocation)
 {
-    OnDraw(This);
+    OnDraw(This, IndexCountPerInstance, InstanceCount);
     o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
                            StartInstanceLocation);
+}
+
+// ExecuteIndirect carries draws, dispatches and mesh dispatches alike, and the command signature that says which is not
+// followed here: with a depth buffer bound it is counted as indirect draws (up to MaxCommandCount), which is a guess for a
+// dispatch issued while one happens to be bound. ReShade's add-on tells them apart through the API's own indirect type.
+void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12CommandSignature* pCommandSignature,
+                                         UINT MaxCommandCount, ID3D12Resource* pArgumentBuffer,
+                                         UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer,
+                                         UINT64 CountBufferOffset)
+{
+    {
+        std::lock_guard lock(g_mutex);
+
+        const auto found = g_lists.find(This);
+
+        if (found != g_lists.end() && found->second.stats != nullptr)
+        {
+            auto* stats = found->second.stats;
+            AddDraw(stats->total, 0, MaxCommandCount, true);
+            AddDraw(stats->current, 0, MaxCommandCount, true);
+            stats->current.lastViewportWidth = found->second.viewportWidth;
+        }
+    }
+
+    o_ExecuteIndirect(This, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer,
+                      CountBufferOffset);
 }
 
 void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, const GenericDepthSelect::Pick& pick,
@@ -274,7 +381,7 @@ void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, cons
 {
     auto sorted = frame;
     std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) { return a.peakDraws > b.peakDraws; });
+              [](const auto& a, const auto& b) { return GenericDepthSelect::Score(a) > GenericDepthSelect::Score(b); });
 
     LOG_INFO("Depth finder: frame {}, picture {}x{}, {} depth buffer(s) in use{}", g_frames, pictureWidth,
              pictureHeight, sorted.size(), pick.valid ? "" : ", none qualifies");
@@ -284,9 +391,10 @@ void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, cons
     for (size_t i = 0; i < shown; ++i)
     {
         const auto& c = sorted[i];
-        LOG_INFO("Depth finder:   {}{:X}  {}x{}  format {}  peak {} draws between clears, {} in all, {} clear(s)",
-                 pick.valid && pick.id == c.id ? "-> " : "   ", c.id, c.width, c.height, c.format, c.peakDraws,
-                 c.draws, c.clears);
+        LOG_INFO("Depth finder:   {}{:X}  {}x{}  format {}  {} vertices, {} draws ({} indirect), {} clear(s), best "
+                 "clear {}{}",
+                 pick.valid && pick.id == c.id ? "-> " : "   ", c.id, c.width, c.height, c.format, c.vertices,
+                 c.drawcalls, c.drawcallsIndirect, c.clears, c.bestClear, c.reversed ? ", reversed-Z" : "");
     }
 }
 } // namespace
@@ -333,12 +441,15 @@ void Install(ID3D12Device* device)
     o_CopyDescriptors = (PFN_CopyDescriptors) deviceTable[23];
     o_CopyDescriptorsSimple = (PFN_CopyDescriptorsSimple) deviceTable[24];
 
+    // ID3D12GraphicsCommandList vtable: DrawInstanced 12, DrawIndexedInstanced 13, RSSetViewports 21,
+    // OMSetRenderTargets 46, ClearDepthStencilView 47, ExecuteIndirect 59 (checked against the SDK header with offsetof).
     o_DrawInstanced = (PFN_DrawInstanced) listTable[12];
     o_DrawIndexedInstanced = (PFN_DrawIndexedInstanced) listTable[13];
+    o_RSSetViewports = (PFN_RSSetViewports) listTable[21];
     o_OMSetRenderTargets = (PFN_OMSetRenderTargets) listTable[46];
     o_ClearDepthStencilView = (PFN_ClearDepthStencilView) listTable[47];
+    o_ExecuteIndirect = (PFN_ExecuteIndirect) listTable[59];
 
-    g_device = device;
     g_dsvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
     DetourTransactionBegin();
@@ -349,8 +460,10 @@ void Install(ID3D12Device* device)
     DetourAttach(&(PVOID&) o_CopyDescriptorsSimple, hkCopyDescriptorsSimple);
     DetourAttach(&(PVOID&) o_DrawInstanced, hkDrawInstanced);
     DetourAttach(&(PVOID&) o_DrawIndexedInstanced, hkDrawIndexedInstanced);
+    DetourAttach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
     DetourAttach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
     DetourAttach(&(PVOID&) o_ClearDepthStencilView, hkClearDepthStencilView);
+    DetourAttach(&(PVOID&) o_ExecuteIndirect, hkExecuteIndirect);
 
     const auto result = DetourTransactionCommit();
 
@@ -366,8 +479,10 @@ void Install(ID3D12Device* device)
         o_CopyDescriptorsSimple = nullptr;
         o_DrawInstanced = nullptr;
         o_DrawIndexedInstanced = nullptr;
+        o_RSSetViewports = nullptr;
         o_OMSetRenderTargets = nullptr;
         o_ClearDepthStencilView = nullptr;
+        o_ExecuteIndirect = nullptr;
         return;
     }
 
@@ -390,19 +505,20 @@ void OnPresent(IDXGISwapChain* swapChain)
     {
         std::lock_guard lock(g_mutex);
 
+        g_pictureWidth = (float) desc.BufferDesc.Width;
+        g_bestSnapshotVertices = 0;
         frame.reserve(g_stats.size());
 
         for (auto it = g_stats.begin(); it != g_stats.end();)
         {
             auto& stats = it->second;
-            stats.peak = std::max(stats.peak, stats.stretch);
 
-            if (stats.draws == 0 && stats.clears == 0)
+            if (stats.total.drawcalls == 0 && stats.clears == 0)
             {
                 // Not touched this frame: forget it, and any command list still pointing at it.
-                for (auto& bound : g_bound)
-                    if (bound.second == &stats)
-                        bound.second = nullptr;
+                for (auto& list : g_lists)
+                    if (list.second.stats == &stats)
+                        list.second.stats = nullptr;
 
                 it = g_stats.erase(it);
                 continue;
@@ -413,16 +529,20 @@ void OnPresent(IDXGISwapChain* swapChain)
             c.width = stats.width;
             c.height = stats.height;
             c.format = (uint32_t) stats.format;
-            c.draws = stats.draws;
-            c.peakDraws = stats.peak;
+            c.vertices = stats.total.vertices;
+            c.drawcalls = stats.total.drawcalls;
+            c.drawcallsIndirect = stats.total.drawcallsIndirect;
             c.clears = stats.clears;
+            c.bestClear = stats.bestClear;
+            c.reversed = stats.reversed;
             frame.push_back(c);
 
             // The next frame starts from nothing; the bound pointer stays valid because the entry stays.
-            stats.draws = 0;
-            stats.stretch = 0;
-            stats.peak = 0;
+            stats.total = DrawStats {};
+            stats.current = DrawStats {};
             stats.clears = 0;
+            stats.bestClear = -1;
+            stats.reversed = false;
             ++it;
         }
     }

@@ -29,6 +29,18 @@
 namespace native
 {
 
+// Marks the current thread's calls into an upscaler as our own synthetic one (Story F: presenting native input to a real
+// upscaler backend as if the game had called it), so NoteUpscalerCall() below does not stand itself down in response to its
+// own call. Construct one around the whole synthetic Evaluate sequence; nested/re-entrant on the same thread is fine.
+class SyntheticUpscalerCallScope
+{
+  public:
+    SyntheticUpscalerCallScope();
+    ~SyntheticUpscalerCallScope();
+    SyntheticUpscalerCallScope(const SyntheticUpscalerCallScope&) = delete;
+    SyntheticUpscalerCallScope& operator=(const SyntheticUpscalerCallScope&) = delete;
+};
+
 // A depth buffer as the adapter identifies it. `id` is stable for the buffer's life (a pointer will do).
 struct DepthBuffer
 {
@@ -77,7 +89,8 @@ class DepthFinderCore
     void SetSnapshotsWanted(bool wanted) { _snapshotsWanted = wanted; }
 
     // ---- the game's upscaler: a game that has one needs no finder ---------------------------------------------------------
-    // One relaxed store, callable from anywhere on every upscaler call. OnPresent decides what it means.
+    // One relaxed store, callable from anywhere on every upscaler call. OnPresent decides what it means. A no-op inside a
+    // SyntheticUpscalerCallScope on this thread.
     void NoteUpscalerCall();
     bool GameCallsUpscaler() const { return _upscalerSeen.load(); }
     bool Armed() const { return _armed.load() && !_upscalerSeen.load(); }

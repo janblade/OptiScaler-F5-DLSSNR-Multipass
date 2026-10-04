@@ -7,6 +7,21 @@
 namespace native
 {
 
+namespace
+{
+thread_local int g_syntheticUpscalerDepth = 0;
+}
+
+SyntheticUpscalerCallScope::SyntheticUpscalerCallScope()
+{
+    ++g_syntheticUpscalerDepth;
+}
+
+SyntheticUpscalerCallScope::~SyntheticUpscalerCallScope()
+{
+    --g_syntheticUpscalerDepth;
+}
+
 void DepthFinderCore::Start(LogFn log)
 {
     _log = std::move(log);
@@ -15,6 +30,11 @@ void DepthFinderCore::Start(LogFn log)
 
 void DepthFinderCore::NoteUpscalerCall()
 {
+    // Our own synthetic call (Story F): the finder must not see this as the game having an upscaler, or it stands down the
+    // very pipeline that is feeding this call.
+    if (g_syntheticUpscalerDepth > 0)
+        return;
+
     // One relaxed store on every upscaler call: EndPresent decides what it means.
     _lastUpscalerCall.store(std::max<uint64_t>(_presentsNow.load(std::memory_order_relaxed), 1),
                             std::memory_order_relaxed);

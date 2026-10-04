@@ -404,6 +404,11 @@ void OnPresent(IDXGISwapChain* swapChain)
         g_copyTaken = false;
     }
 
+    // The overlay preview (not yet drawn for D3D11) or the motion step needs the depth copy taken.
+    g_core.SetSnapshotsWanted((Config::Instance()->DlssNrNativeDepthOverlay.value_or_default() &&
+                               Config::Instance()->DlssNrNativeDebugView.value_or_default()) ||
+                              Config::Instance()->DlssNrNativeMotion.value_or_default());
+
     g_core.BeginPresent(desc.BufferDesc.Width, desc.BufferDesc.Height);
     const bool stoodDown =
         g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height,

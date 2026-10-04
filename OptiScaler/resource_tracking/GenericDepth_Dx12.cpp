@@ -157,7 +157,7 @@ std::mutex g_mutex;
 std::unordered_map<SIZE_T, DsvInfo> g_dsv;                       // CPU descriptor handle -> what it views
 std::unordered_map<ID3D12GraphicsCommandList*, ListState> g_lists;
 std::unordered_map<ID3D12Resource*, Stats> g_stats;              // node-stable: g_lists holds pointers into it
-uint64_t g_bestSnapshotVertices = 0;                             // the busiest stretch before a clear, this frame
+uint64_t g_bestSnapshotVertices = 0;                             // the least a stretch must draw to be copied (a share of the pick's last frame)
 float g_pictureWidth = 0.0f;                                     // from the last present
 Backup g_backup;
 uint64_t g_backupFrame = 0;          // the frame a copy was last recorded in
@@ -550,7 +550,6 @@ void OnClear(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE DepthS
 
                     if (best)
                     {
-                        g_bestSnapshotVertices = stretch.vertices;
                         stats.bestClear = (int32_t) stats.clears;
 
                         // The overlay's copy: only of the buffer picked last frame, and only at the busiest stretch, so
@@ -608,7 +607,6 @@ void OnClose(ID3D12GraphicsCommandList* This)
     {
         if (stats->current.vertices >= g_bestSnapshotVertices)
         {
-            g_bestSnapshotVertices = stats->current.vertices;
             RecordSnapshot(This, stats->resource, stats->readOnlyDepth);
         }
 
@@ -847,7 +845,6 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
         {
             if (previous->current.vertices >= g_bestSnapshotVertices)
             {
-                g_bestSnapshotVertices = previous->current.vertices;
                 RecordSnapshot(This, previous->resource, previous->readOnlyDepth);
             }
 
@@ -1120,7 +1117,19 @@ void OnPresent(IDXGISwapChain* swapChain)
         std::lock_guard lock(g_mutex);
 
         g_pictureWidth = (float) desc.BufferDesc.Width;
+        // Lists are recorded in no fixed order, so "the busiest stretch so far" picked a different copy from frame to frame (the
+        // world one, or the first-person weapon's) and the preview flickered. Every stretch that draws a fair share of what the
+        // pick drew last frame is copied instead; the one that runs last on the GPU is left, the same every frame.
         g_bestSnapshotVertices = 0;
+
+        if (g_pick.valid)
+        {
+            const auto picked = g_stats.find((ID3D12Resource*) (size_t) g_pick.id);
+
+            if (picked != g_stats.end())
+                g_bestSnapshotVertices = picked->second.total.vertices * 15 / 100;
+        }
+
         frame.reserve(g_stats.size());
 
         for (auto it = g_stats.begin(); it != g_stats.end();)

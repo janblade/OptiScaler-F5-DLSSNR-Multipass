@@ -468,9 +468,16 @@ void OnPresent(IDXGISwapChain* swapChain)
 
     if (stillNoCopy)
     {
-        if (++noCopyStreak == 300)
-            LOG_WARN("Depth finder (D3D11): the pick is valid but no depth copy has been taken in the last 300 frames "
-                     "wanting one; the game may clear, bind or end its draws in a way these hooks do not catch");
+        if (++noCopyStreak % 300 == 0)
+        {
+            const auto pick = g_core.CurrentPick();
+            const auto diag = g_core.Diagnose(g_contextId);
+            LOG_WARN("Depth finder (D3D11): {} frames wanting a copy with no copy taken. Picked {:X}. Context: {}, {}, "
+                     "bound to {:X}, this stretch {} vertices / {} draws (floor {}), wanted={}",
+                     noCopyStreak, pick.id, diag.hasContext ? "known" : "UNKNOWN",
+                     diag.hasBoundBuffer ? "has a bound depth buffer" : "NOTHING BOUND", diag.boundResource,
+                     diag.currentVertices, diag.currentDrawcalls, g_core.SnapshotFloor(), diag.wanted);
+        }
     }
     else
     {

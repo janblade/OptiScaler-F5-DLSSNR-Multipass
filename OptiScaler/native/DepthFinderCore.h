@@ -116,6 +116,19 @@ class DepthFinderCore
     uint64_t Presents() const { return _presentsNow.load(std::memory_order_relaxed); }
     uint64_t WarmupStart() const;                     // the present count the current warm-up began at
     uint64_t SnapshotFloor() const;                   // the least a stretch must draw to be copied
+
+    // Diagnostics only (logged by an adapter when a valid pick still gets no copy, to say which check is failing): what the
+    // context is bound to right now, and how much it has drawn into it since the last clear/unbind/flush.
+    struct Diagnostic
+    {
+        bool hasContext = false;
+        bool hasBoundBuffer = false;
+        uint64_t boundResource = 0;
+        uint64_t currentVertices = 0;
+        uint32_t currentDrawcalls = 0;
+        bool wanted = false;
+    };
+    Diagnostic Diagnose(uint64_t context) const;
     HookCounters& Counters() { return _counters; }
 
   private:

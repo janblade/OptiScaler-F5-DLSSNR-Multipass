@@ -391,6 +391,29 @@ bool DepthFinderCore::EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, 
     return false;
 }
 
+DepthFinderCore::Diagnostic DepthFinderCore::Diagnose(uint64_t context) const
+{
+    std::lock_guard lock(_mutex);
+    Diagnostic d;
+    d.wanted = _snapshotsWanted.load(std::memory_order_relaxed);
+
+    const auto found = _contexts.find(context);
+
+    if (found == _contexts.end())
+        return d;
+
+    d.hasContext = true;
+
+    if (found->second.stats == nullptr)
+        return d;
+
+    d.hasBoundBuffer = true;
+    d.boundResource = found->second.stats->resource;
+    d.currentVertices = found->second.stats->current.vertices;
+    d.currentDrawcalls = found->second.stats->current.drawcalls;
+    return d;
+}
+
 GenericDepthSelect::Pick DepthFinderCore::CurrentPick() const
 {
     std::lock_guard lock(_mutex);

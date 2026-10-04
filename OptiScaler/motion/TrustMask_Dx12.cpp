@@ -9,7 +9,7 @@ namespace
 {
 
 constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs, two UAVs
-constexpr uint32_t kPassesPerFrame = 4;
+constexpr uint32_t kPassesPerFrame = 6;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_R32_FLOAT;
@@ -185,6 +185,38 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
         Counter.InterlockedAdd(0, gDistrusted);
 }
 
+// The raw depth for the model at the picture's size (size): the nearest surface over the copies, in the convention they have.
+[numthreads(8, 8, 1)]
+void GuideDepth(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y)
+        return;
+
+    float2 uv = (float2(id.xy) + 0.5) / float2(size);
+    int2 at = min(int2(uv * float2(depthSize)), int2(depthSize) - 1);
+    float value = reversed != 0 ? 0.0 : 1.0;
+
+    [unroll] for (int k = 0; k < 8; ++k)
+        if (uint(k) < depthCount)
+        {
+            float d = SceneDepths[k].Load(int3(at, 0));
+            value = reversed != 0 ? max(value, d) : min(value, d);
+        }
+
+    OutFloat[id.xy] = value;
+}
+
+// The flow enlarged to the picture's size; its values are already in picture pixels.
+[numthreads(8, 8, 1)]
+void GuideMotion(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y)
+        return;
+
+    float2 uv = (float2(id.xy) + 0.5) / float2(size);
+    OutFlow[id.xy] = float4(Flow.SampleLevel(Linear, uv, 0).xy, 0.0, 0.0);
+}
+
 [numthreads(8, 8, 1)]
 void CopyFlow(uint3 id : SV_DispatchThreadID)
 {
@@ -224,7 +256,7 @@ TrustMaskDx12::~TrustMaskDx12()
 {
     ReleaseTextures();
 
-    for (ID3D12PipelineState** pso : { &_depthProxy, &_clearCounter, &_trust, &_copyFlow })
+    for (ID3D12PipelineState** pso : { &_depthProxy, &_clearCounter, &_trust, &_copyFlow, &_guideDepthPso, &_guideMotionPso })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -309,7 +341,8 @@ bool TrustMaskDx12::Init(ID3D12Device* device)
     };
 
     for (const Entry& entry : { Entry { "DepthProxy", &_depthProxy }, Entry { "ClearCounter", &_clearCounter },
-                                Entry { "Trust", &_trust }, Entry { "CopyFlow", &_copyFlow } })
+                                Entry { "Trust", &_trust }, Entry { "CopyFlow", &_copyFlow },
+                                Entry { "GuideDepth", &_guideDepthPso }, Entry { "GuideMotion", &_guideMotionPso } })
     {
         ID3DBlob* code = Compile(entry.name, &_error);
 
@@ -406,7 +439,7 @@ bool TrustMaskDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXG
 
 void TrustMaskDx12::ReleaseTextures()
 {
-    for (Tex* tex : { &_depth[0], &_depth[1], &_mask[0], &_mask[1], &_flowBefore })
+    for (Tex* tex : { &_depth[0], &_depth[1], &_mask[0], &_mask[1], &_flowBefore, &_guideDepth, &_guideMotion })
     {
         if (tex->resource != nullptr)
             tex->resource->Release();
@@ -662,5 +695,64 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     // The newest mask can be read by a pixel shader too (a menu preview).
     Transition(list, _mask[_maskIndex], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     _haveHistory = true;
+    return true;
+}
+
+bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& in, uint32_t width, uint32_t height)
+{
+    if (_device == nullptr || _guideDepthPso == nullptr || list == nullptr || in.flow == nullptr || in.depthCount <= 0 ||
+        in.depths[0] == nullptr || width == 0 || height == 0)
+        return false;
+
+    if (_guideDepth.resource == nullptr || _guideDepth.width != width || _guideDepth.height != height)
+    {
+        // A picture size change: the owner has waited for the GPU as it does for any size change.
+        for (Tex* tex : { &_guideDepth, &_guideMotion })
+        {
+            if (tex->resource != nullptr)
+                tex->resource->Release();
+            *tex = Tex {};
+        }
+
+        if (!CreateTexture(_guideDepth, width, height, kDepthFormat, L"TrustMask_GuideDepth") ||
+            !CreateTexture(_guideMotion, width, height, kFlowFormat, L"TrustMask_GuideMotion"))
+        {
+            _error = "creating the guide textures";
+            return false;
+        }
+    }
+
+    Constants constants {};
+    constants.sizeX = width;
+    constants.sizeY = height;
+    constants.depthX = in.depthWidth != 0 ? in.depthWidth : width;
+    constants.depthY = in.depthHeight != 0 ? in.depthHeight : height;
+    constants.reversed = in.depthReversed ? 1 : 0;
+    constants.depthCount = (uint32_t) (std::min)(in.depthCount, (int) Inputs::kMaxDepths);
+
+    const uint32_t groupsX = (width + 7) / 8;
+    const uint32_t groupsY = (height + 7) / 8;
+
+    {
+        ID3D12Resource* srv[8];
+        DXGI_FORMAT formats[8];
+
+        for (int i = 0; i < 8; ++i)
+        {
+            srv[i] = i < in.depthCount ? in.depths[i] : in.depths[0];
+            formats[i] = in.depthFormat;
+        }
+
+        Pass(list, _guideDepthPso, srv, formats, _guideDepth, kDepthFormat, groupsX, groupsY, constants);
+    }
+
+    {
+        // The flow sits in its combined read state between frames; the pass reads it as a texture.
+        ID3D12Resource* const srv[8] = { in.flow, in.flow, in.flow, in.flow, in.flow, in.flow, in.flow, in.flow };
+        const DXGI_FORMAT formats[8] = { kFlowFormat, kFlowFormat, kFlowFormat, kFlowFormat,
+                                         kFlowFormat, kFlowFormat, kFlowFormat, kFlowFormat };
+        Pass(list, _guideMotionPso, srv, formats, _guideMotion, kFlowFormat, groupsX, groupsY, constants);
+    }
+
     return true;
 }

@@ -8,6 +8,7 @@
 
 #include <menu/menu_overlay_dx.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <dlssnr/DlssNrFeature_Dx12.h>
 
 #include <imgui/imgui.h>
 
@@ -43,6 +44,7 @@ uint32_t g_height = 0;
 bool g_previewWanted = false; // the menu node is open
 bool g_previewReady = false;  // a flow preview has been recorded
 bool g_trustRan = false;      // the trust mask was recorded in the last frame
+bool g_nativeRan = false;     // DLSS-NR ran on native input in the last frame
 uint64_t g_trustFrame = 0;    // the last frame it was
 uint64_t g_cuts = 0;          // scene cuts the mask reported
 Status g_status = Status::Off;
@@ -268,6 +270,11 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
     const bool recorded = g_flow->Dispatch(g_list, backBuffer, ViewFormat(desc.Format));
 
     g_trustRan = false;
+    g_nativeRan = false;
+    bool backBufferInPresent = false;
+    TrustMaskDx12::Inputs nativeInputs;
+    bool nativeReady = false;
+    bool nativeReset = false;
 
     if (recorded && g_flow->FlowValid())
     {
@@ -296,6 +303,8 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
             in.depthHeight = depth.height;
             in.depthReversed = depth.reversed;
             g_trustRan = g_trust->Dispatch(g_list, in);
+            nativeInputs = in;
+            nativeReady = g_trustRan;
 
             if (g_trustRan)
                 g_trustFrame = g_frame;
@@ -320,11 +329,24 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
                      g_trust->DistrustedShare() * 100.0f);
             g_flow->Reset();
             g_trust->Reset();
+            nativeReady = false;
+            nativeReset = true;
         }
     }
 
+    // Native input: DLSS-NR on this picture with the finder's depth and the flow, on this same list.
     std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
     g_list->ResourceBarrier(1, &barrier);
+    backBufferInPresent = true;
+
+    if (nativeReady && Config::Instance()->DlssNrNativeInput.value_or_default())
+    {
+        if (g_trust->BuildGuides(g_list, nativeInputs, (uint32_t) desc.Width, desc.Height))
+            g_nativeRan = DlssNr::ApplyNativeInput(swapChain, queue, g_list, backBuffer, g_trust->GuideDepth(),
+                                                    g_trust->GuideMotion(), nativeInputs.depthReversed, nativeReset);
+    }
+
+    (void) backBufferInPresent;
 
     if (SUCCEEDED(g_list->Close()))
     {
@@ -351,6 +373,20 @@ void DrawDebugUi()
 
     if (ImGui::Checkbox("Estimate motion of the picture##nativemotion", &on))
         config->DlssNrNativeMotion = on;
+
+    bool feed = config->DlssNrNativeInput.value_or_default();
+
+    if (ImGui::Checkbox("Run Neural Rendering on this (native input)##nativeinput", &feed))
+        config->DlssNrNativeInput = feed;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Experimental. Feeds DLSS-NR the depth finder's depth and the estimated motion, so it runs in a\n"
+                                "game with no upscaler. Needs the depth finder, Finished picture and Enable Neural Rendering on.\n"
+                                "SDR and scRGB only for now. Applies at once.");
+
+    if (feed)
+        ImGui::TextDisabled("%s", g_nativeRan ? "Native input: NR is running on this picture."
+                                              : DlssNr::FinishedPictureStatus().c_str());
 
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "Second step toward DLSS-NR in a game with no DLSS, FSR or XeSS: estimates how the picture\n"

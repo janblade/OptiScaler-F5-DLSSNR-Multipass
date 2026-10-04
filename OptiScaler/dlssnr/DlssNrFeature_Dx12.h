@@ -67,6 +67,14 @@ bool WaitForFinishedPicture();
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd);
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
+
+// The native input producer's entry: runs DLSS-NR on the back buffer `color` (in the PRESENT state) with a depth and a motion
+// texture of the picture's size made from the depth finder and the optical flow (both NON_PIXEL_SHADER_RESOURCE, motion in
+// full-resolution pixels towards the previous frame). Records onto `cmd`, a list of the caller's own, and leaves `color` in
+// PRESENT. False when it did not run (the reason is in FinishedPictureStatus()).
+bool ApplyNativeInput(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
+                      ID3D12Resource* color, ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed,
+                      bool reset);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);
 
 

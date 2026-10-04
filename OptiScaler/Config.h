@@ -577,6 +577,10 @@ class Config
     // NativeMotion: debug; estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, and shows it in the DLSS-NR menu. Changes apply at once. See motion/NativeMotion_Dx12.h.
     CustomOptional<bool> DlssNrNativeMotion { false };
+    // NativeInput: with NativeMotion on and the game making no upscaler call, runs DLSS-NR on the finished picture with the
+    // depth finder's depth and the optical flow as its depth and motion (Story 4 of the native input producer). Needs
+    // FinishedPicture and Enabled on as well. Changes apply at once.
+    CustomOptional<bool> DlssNrNativeInput { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

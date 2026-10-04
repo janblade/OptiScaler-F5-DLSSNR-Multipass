@@ -61,13 +61,6 @@ class TrustMaskDx12
     ID3D12Resource* GuideDepth() const { return _guideDepth.resource; }
     ID3D12Resource* GuideMotion() const { return _guideMotion.resource; }
 
-    // The fallback to the plain picture (see [DlssNr] NativeInputFallback). Around the NR pass, on the same list, with the
-    // picture in the PRESENT state both before and after: CopyPicture() first keeps the picture as it is, then
-    // BlendWithPicture() fades what NR made of it back toward the kept one by mask * strength. Call both only in a frame
-    // whose Dispatch() ran, so the mask is this frame's.
-    bool CopyPicture(ID3D12GraphicsCommandList* list, ID3D12Resource* picture);
-    bool BlendWithPicture(ID3D12GraphicsCommandList* list, ID3D12Resource* picture, float strength);
-
     // Drops the histories (a scene cut, a size change): the next mask is all distrust.
     void Reset()
     {
@@ -115,9 +108,7 @@ class TrustMaskDx12
         float depthTolerance, flowTolerance, lumaTolerance, decay;
         uint32_t reversed, hasHistory;
         float fullPerFlow, revealTolerance;
-        uint32_t depthCount, debugView;
-        float blendStrength;
-        uint32_t pad2;
+        uint32_t depthCount, debugView, pad1, pad2;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -136,9 +127,6 @@ class TrustMaskDx12
     ID3D12PipelineState* _copyFlow = nullptr;
     ID3D12PipelineState* _guideDepthPso = nullptr;
     ID3D12PipelineState* _guideMotionPso = nullptr;
-    ID3D12PipelineState* _blendPso = nullptr;
-    Tex _pre;       // the picture before NR
-    Tex _blendOut;  // the blended picture, copied back
     Tex _guideDepth;
     Tex _guideMotion;
     ID3D12DescriptorHeap* _heap = nullptr;

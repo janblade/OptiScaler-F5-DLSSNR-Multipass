@@ -342,17 +342,8 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
     if (nativeReady && Config::Instance()->DlssNrNativeInput.value_or_default())
     {
         if (g_trust->BuildGuides(g_list, nativeInputs, (uint32_t) desc.Width, desc.Height))
-        {
-            // The fallback to the plain picture where the last frame cannot be trusted: keep the picture, run NR, fade back.
-            const float fallback = std::clamp(Config::Instance()->DlssNrNativeInputFallback.value_or_default(), 0.0f, 1.0f);
-            const bool keep = fallback > 0.0f && g_trust->CopyPicture(g_list, backBuffer);
-
             g_nativeRan = DlssNr::ApplyNativeInput(swapChain, queue, g_list, backBuffer, g_trust->GuideDepth(),
                                                     g_trust->GuideMotion(), nativeInputs.depthReversed, nativeReset);
-
-            if (keep && g_nativeRan)
-                g_trust->BlendWithPicture(g_list, backBuffer, fallback);
-        }
     }
 
     (void) backBufferInPresent;
@@ -392,21 +383,6 @@ void DrawDebugUi()
         ImGui::SetTooltip("%s", "Experimental. Feeds DLSS-NR the depth finder's depth and the estimated motion, so it runs in a\n"
                                 "game with no upscaler. Needs the depth finder, Finished picture and Enable Neural Rendering on.\n"
                                 "SDR and scRGB only for now. Applies at once.");
-
-    if (feed)
-    {
-        float fallback = config->DlssNrNativeInputFallback.value_or_default();
-
-        ImGui::SetNextItemWidth(220.0f);
-
-        if (ImGui::SliderFloat("Fall back to the plain picture##nativefallback", &fallback, 0.0f, 1.0f, "%.2f"))
-            config->DlssNrNativeInputFallback = fallback;
-
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Where the trust mask says the last frame cannot be trusted (a surface that was just uncovered,\n"
-                                    "a cut), fade the Neural Rendering result back toward the picture as the game drew it, by\n"
-                                    "this amount times the mask. 0 is off. Costs a copy and a blend of the picture.");
-    }
 
     if (g_flow && ImGui::TreeNode("Flow tuning (to compare, applies at once)##flowtuning"))
     {

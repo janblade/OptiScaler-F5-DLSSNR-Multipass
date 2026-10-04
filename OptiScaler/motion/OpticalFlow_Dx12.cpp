@@ -8,7 +8,7 @@
 namespace
 {
 
-constexpr uint32_t kDescriptorsPerPass = 4; // three SRVs and one UAV
+constexpr uint32_t kDescriptorsPerPass = 5; // four SRVs and one UAV
 constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
@@ -23,6 +23,8 @@ cbuffer P : register(b0)
     uint hasPrediction;
     float lambda;
     float scale;
+    uint hasHistory;
+    uint3 pad;
 };
 
 SamplerState Linear : register(s0);
@@ -30,6 +32,7 @@ Texture2D<float4> Color : register(t0);
 Texture2D<float>  CurLuma : register(t0);
 Texture2D<float>  PrevLuma : register(t1);
 Texture2D<float4> Prediction : register(t2);
+Texture2D<float4> History : register(t3);
 Texture2D<float4> FlowIn : register(t0);
 RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
@@ -103,12 +106,46 @@ void Match(uint3 id : SV_DispatchThreadID)
         return;
 
     int2 p = int2(id.xy);
-    float2 predicted = 0.0;
+
+    // The candidates for where to search: no motion, the coarser level's answer at the four cells nearest this pixel (what a
+    // bilinear read would use; doubled, it is in this level's pixels) and the last frame's flow here. The one that matches
+    // best is where the search starts, so a steady pan carries over from frame to frame and an edge is not stuck with the
+    // answer of a cell that lies across it.
+    int2 centre = 0;
+    float start = Cost(p, centre);
 
     if (hasPrediction != 0)
-        predicted = Prediction.Load(int3(p >> 1, 0)).xy * 2.0;
+    {
+        int2 coarseHi = int2(aux) - 1;
+        int2 cp = min(p >> 1, coarseHi);
+        int2 step = int2((p.x & 1) != 0 ? 1 : -1, (p.y & 1) != 0 ? 1 : -1);
 
-    int2 centre = int2(round(predicted));
+        [unroll] for (int k = 0; k < 4; ++k)
+        {
+            int2 cell = cp + int2((k & 1) != 0 ? step.x : 0, (k & 2) != 0 ? step.y : 0);
+            int2 d = int2(round(Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0));
+            float c = Cost(p, d);
+
+            if (c < start)
+            {
+                start = c;
+                centre = d;
+            }
+        }
+    }
+
+    if (hasHistory != 0)
+    {
+        int2 d = int2(round(History.Load(int3(p, 0)).xy));
+        float c = Cost(p, d);
+
+        if (c < start)
+        {
+            start = c;
+            centre = d;
+        }
+    }
+
     float best = 1e30;
     int2 bestD = centre;
 
@@ -268,16 +305,16 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
 
     _device = device;
 
-    // One table (three SRVs, one UAV) and eight root constants.
+    // One table (four SRVs, one UAV) and the root constants.
     D3D12_DESCRIPTOR_RANGE ranges[2] {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 3;
+    ranges[0].NumDescriptors = 4;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[1].NumDescriptors = 1;
     ranges[1].BaseShaderRegister = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 3;
+    ranges[1].OffsetInDescriptorsFromTableStart = 4;
 
     D3D12_ROOT_PARAMETER params[2] {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -411,8 +448,9 @@ void OpticalFlowDx12::ReleaseTextures()
         for (auto& tex : set)
             release(tex);
 
-    for (auto& tex : _levelFlow)
-        release(tex);
+    for (auto& set : _levelFlow)
+        for (auto& tex : set)
+            release(tex);
 
     release(_flow);
     release(_preview);
@@ -440,8 +478,9 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
             if (!CreateTexture(_pyramid[set][level], w, h, kLumaFormat, L"OpticalFlow_Luma"))
                 return false;
 
-        if (!CreateTexture(_levelFlow[level], w, h, kFlowFormat, L"OpticalFlow_LevelFlow"))
-            return false;
+        for (int set = 0; set < 2; ++set)
+            if (!CreateTexture(_levelFlow[set][level], w, h, kFlowFormat, L"OpticalFlow_LevelFlow"))
+                return false;
 
         w = (w + 1) / 2;
         h = (h + 1) / 2;
@@ -468,7 +507,8 @@ void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D1
 
 void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* src0,
                            DXGI_FORMAT format0, ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2,
-                           DXGI_FORMAT format2, Tex& dst, DXGI_FORMAT dstFormat, const Constants& constants)
+                           DXGI_FORMAT format2, Tex& dst, DXGI_FORMAT dstFormat, const Constants& constants,
+                           ID3D12Resource* src3, DXGI_FORMAT format3)
 {
     Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -480,10 +520,12 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     cpu.ptr += (SIZE_T) first * _descriptorSize;
     gpu.ptr += (UINT64) first * _descriptorSize;
 
-    ID3D12Resource* sources[3] = { src0, src1 != nullptr ? src1 : src0, src2 != nullptr ? src2 : src0 };
-    const DXGI_FORMAT formats[3] = { format0, src1 != nullptr ? format1 : format0, src2 != nullptr ? format2 : format0 };
+    ID3D12Resource* sources[4] = { src0, src1 != nullptr ? src1 : src0, src2 != nullptr ? src2 : src0,
+                                   src3 != nullptr ? src3 : src0 };
+    const DXGI_FORMAT formats[4] = { format0, src1 != nullptr ? format1 : format0, src2 != nullptr ? format2 : format0,
+                                     src3 != nullptr ? format3 : format0 };
 
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
         srv.Format = formats[i];
@@ -546,7 +588,10 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
              DXGI_FORMAT_UNKNOWN, current[level], kLumaFormat, constants);
     }
 
+    const bool history = _flowValid; // the last frame made a flow: its levels are candidates
     _flowValid = false;
+    auto& levelNow = _levelFlow[_current];
+    auto& levelBefore = _levelFlow[1 - _current];
 
     if (_havePrevious)
     {
@@ -560,17 +605,24 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.radius = coarsest ? _settings.coarseRadius : _settings.radius;
             constants.hasPrediction = coarsest ? 0 : 1;
             constants.lambda = _settings.lambda;
+            constants.hasHistory = history ? 1 : 0;
+
+            if (!coarsest)
+            {
+                constants.auxX = current[level + 1].width;
+                constants.auxY = current[level + 1].height;
+            }
 
             Pass(list, _match, current[level].resource, kLumaFormat, previous[level].resource, kLumaFormat,
-                 coarsest ? nullptr : _levelFlow[level + 1].resource, kFlowFormat, _levelFlow[level], kFlowFormat,
-                 constants);
+                 coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat, constants,
+                 history ? levelBefore[level].resource : nullptr, kFlowFormat);
         }
 
         constants = Constants {};
         constants.sizeX = _flow.width;
         constants.sizeY = _flow.height;
         constants.scale = 2.0f; // the half-resolution level's pixels to full-resolution ones
-        Pass(list, _median, _levelFlow[0].resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
+        Pass(list, _median, levelNow[0].resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
              DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
 
         _flowValid = true;

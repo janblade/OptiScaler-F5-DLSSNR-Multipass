@@ -128,7 +128,8 @@ struct Gpu
     }
 
     // An RGBA8 texture holding the scene moved by (dx, dy), left in the non-pixel shader resource state.
-    ComPtr<ID3D12Resource> Picture(float dx, float dy)
+    // gain darkens it, noise (in 1/255 steps, peak) adds a different grain to every picture (noiseSeed).
+    ComPtr<ID3D12Resource> Picture(float dx, float dy, float gain = 1.0f, float noise = 0.0f, int noiseSeed = 0)
     {
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -156,7 +157,12 @@ struct Gpu
             {
                 uint8_t* px = data + (size_t) y * fp.Footprint.RowPitch + x * 4;
                 for (int c = 0; c < 3; ++c)
-                    px[c] = (uint8_t) std::clamp(Scene(x - dx, y - dy, c) * 255.0f + 0.5f, 0.0f, 255.0f);
+                {
+                    float v = Scene(x - dx, y - dy, c) * 255.0f * gain;
+                    if (noise > 0.0f)
+                        v += (Hash((int) x * 3 + c, (int) y, 1000 + noiseSeed) * 2.0f - 1.0f) * noise;
+                    px[c] = (uint8_t) std::clamp(v + 0.5f, 0.0f, 255.0f);
+                }
                 px[3] = 255;
             }
 
@@ -259,23 +265,50 @@ int main(int argc, char** argv)
     struct Case
     {
         float dx, dy;
-        double minWithinHalf; // the share of flow samples that must be within half a pixel
+        double minWithinHalf; // the share of flow samples that must be within half a pixel (0: only reported)
+        float gain = 1.0f;    // picture brightness
+        float noise = 0.0f;   // grain peak, in 1/255 steps, different on every picture
+        int frames = 2;       // pictures in the pan (constant velocity); the last pair is measured
+        const char* what = "";
     };
 
-    const Case cases[] = { { 0, 0, 0.95 },   { 3, -2, 0.90 },   { 2.5f, 1.5f, 0.85 }, { 11, 7, 0.90 },
-                           { 21, -14, 0.90 }, { -37, 29, 0.85 }, { 60, 0, 0.80 } };
+    const Case cases[] = {
+        { 0, 0, 0.95 },
+        { 3, -2, 0.90 },
+        { 2.5f, 1.5f, 0.85 },
+        { 11, 7, 0.90 },
+        { 21, -14, 0.90 },
+        { -37, 29, 0.85 },
+        { 60, 0, 0.80 },
+        // fast pans: reported until the flow handles them (the baseline of the flow upgrade)
+        { 100, -60, 0, 1.0f, 0.0f, 2, "fast pan" },
+        { -160, 40, 0, 1.0f, 0.0f, 2, "fast pan" },
+        { 220, 0, 0, 1.0f, 0.0f, 2, "fast pan" },
+        // the same pan a few pictures in a row: last frame's flow is known
+        { 30, -18, 0, 1.0f, 0.0f, 4, "steady pan, 4 pictures" },
+        { 90, 20, 0, 1.0f, 0.0f, 4, "steady fast pan, 4 pictures" },
+        // dark and grainy: flat areas where block matching has little to hold on to
+        { 3, -2, 0, 0.08f, 3.0f, 2, "dark and grainy" },
+        { 12, 5, 0, 0.08f, 3.0f, 4, "dark and grainy, 4 pictures" },
+    };
     bool ok = true;
 
     for (const Case& c : cases)
     {
         flow.Reset();
 
-        auto first = gpu.Picture(0, 0);
-        auto second = gpu.Picture(c.dx, c.dy);
+        // pictures 0..frames-1, picture k shifted by k times the velocity; every one but the last is submitted
+        std::vector<ComPtr<ID3D12Resource>> pictures;
+        for (int k = 0; k < c.frames; ++k)
+            pictures.push_back(gpu.Picture(c.dx * k, c.dy * k, c.gain, c.noise, k));
 
-        flow.Dispatch(gpu.list.Get(), first.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-        gpu.Submit();
-        flow.Dispatch(gpu.list.Get(), second.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        for (int k = 0; k + 1 < c.frames; ++k)
+        {
+            flow.Dispatch(gpu.list.Get(), pictures[k].Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            gpu.Submit();
+        }
+
+        flow.Dispatch(gpu.list.Get(), pictures[c.frames - 1].Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
 
         if (!flow.FlowValid())
         {
@@ -317,7 +350,7 @@ int main(int argc, char** argv)
         // Content that moved by +d was at p - d before: the flow is -d. Away from the border, where the shift brings in
         // content that was not in the previous picture.
         const int margin = (int) std::ceil(std::max(std::fabs(c.dx), std::fabs(c.dy)) / 2.0f) + 24;
-        uint64_t n = 0, half = 0, one = 0;
+        uint64_t n = 0, half = 0, one = 0, wild = 0;
         double sumErr = 0;
 
         for (uint32_t y = margin; y + margin < desc.Height; ++y)
@@ -330,15 +363,17 @@ int main(int argc, char** argv)
                 ++n;
                 half += err <= 0.5f;
                 one += err <= 1.0f;
+                wild += err > 3.0f;
             }
 
         readback->Unmap(0, nullptr);
 
         const double shareHalf = (double) half / n;
         const bool pass = shareHalf >= c.minWithinHalf;
-        ok = ok && pass;
-        printf("shift (%6.1f, %6.1f): mean error %.3f px, within 0.5 px %5.1f%%, within 1 px %5.1f%%   %s\n", c.dx, c.dy,
-               sumErr / n, 100.0 * shareHalf, 100.0 * one / n, pass ? "ok" : "FAIL");
+        ok = ok && (pass || c.minWithinHalf <= 0);
+        printf("shift (%6.1f, %6.1f): mean error %7.3f px, within 0.5 px %5.1f%%, within 1 px %5.1f%%, off by over 3 px %5.1f%%   %s  %s\n",
+               c.dx, c.dy, sumErr / n, 100.0 * shareHalf, 100.0 * one / n, 100.0 * wild / n,
+               c.minWithinHalf > 0 ? (pass ? "ok" : "FAIL") : "(reported)", c.what);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

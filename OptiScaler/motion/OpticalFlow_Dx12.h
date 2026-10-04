@@ -3,7 +3,8 @@
 // Dense optical flow on the GPU for the native input producer (DLSS-NR in a game that makes no upscaler call, so there are no
 // motion vectors to take from one). Our own implementation of the standard method: a luma pyramid, block matching from the
 // coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade gradient steps for the sub-pixel part, and a 3x3
-// median over the result. Nothing is taken from any shader of another project.
+// median over the result. At each level the candidates are the coarser level's answer at the nearest cells, the last
+// frame's flow at the same place and no motion; the best of them is refined by a small search. Nothing is taken from any shader of another project.
 //
 // Self-contained: it needs only D3D12 and the HLSL compiler, so tests/nr_optical_flow_gpu.cpp drives it with synthetic images
 // and known motion, with no game.
@@ -86,6 +87,7 @@ class OpticalFlowDx12
         uint32_t hasPrediction;
         float lambda;
         float scale;
+        uint32_t hasHistory, pad0, pad1, pad2;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -94,7 +96,8 @@ class OpticalFlowDx12
     void Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state);
     void Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* src0, DXGI_FORMAT format0,
               ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2, DXGI_FORMAT format2, Tex& dst,
-              DXGI_FORMAT dstFormat, const Constants& constants);
+              DXGI_FORMAT dstFormat, const Constants& constants, ID3D12Resource* src3 = nullptr,
+              DXGI_FORMAT format3 = DXGI_FORMAT_UNKNOWN);
 
     ID3D12Device* _device = nullptr;
     ID3D12RootSignature* _rootSignature = nullptr;
@@ -108,7 +111,7 @@ class OpticalFlowDx12
     UINT _heapCursor = 0;
 
     Tex _pyramid[2][kLevels]; // luma, 1/2 .. 1/16 of the colour; one set is the current frame, the other the previous
-    Tex _levelFlow[kLevels];
+    Tex _levelFlow[2][kLevels]; // this frame's flow at each level, and the last frame's (a candidate for this one)
     Tex _flow;
     Tex _preview;
     int _current = 0;

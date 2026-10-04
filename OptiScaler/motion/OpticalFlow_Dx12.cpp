@@ -9,7 +9,7 @@ namespace
 {
 
 constexpr uint32_t kDescriptorsPerPass = 5; // four SRVs and one UAV
-constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1;
+constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
@@ -24,7 +24,8 @@ cbuffer P : register(b0)
     float lambda;
     float scale;
     uint hasHistory;
-    uint3 pad;
+    float knee;
+    uint2 pad;
 };
 
 SamplerState Linear : register(s0);
@@ -33,6 +34,7 @@ Texture2D<float>  CurLuma : register(t0);
 Texture2D<float>  PrevLuma : register(t1);
 Texture2D<float4> Prediction : register(t2);
 Texture2D<float4> History : register(t3);
+Texture2D<float>  GuideLuma : register(t1);
 Texture2D<float4> FlowIn : register(t0);
 RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
@@ -166,6 +168,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     // difference is explained by the picture's gradient there; solve that for the shift. A match that is already exact has no
     // difference left and is not moved, which a fit through the costs either side cannot promise.
     float2 sub = 0.0;
+    float confidence = 0.0;
 
     [loop] for (int iteration = 0; iteration < 3; ++iteration)
     {
@@ -192,9 +195,14 @@ void Match(uint3 id : SV_DispatchThreadID)
 
         if (det > 1e-9)
             sub = clamp(sub + float2(c * e - b * f, a * f - b * e) / det, -1.5, 1.5);
+
+        // The weaker direction of the picture's structure in the window: a match along an edge, or in a flat area, is not sure
+        // across it.
+        float weak = 0.5 * ((a + c) - sqrt((a - c) * (a - c) + 4.0 * b * b));
+        confidence = weak / (weak + knee);
     }
 
-    OutFlow[id.xy] = float4(float2(bestD) + sub, 0.0, 1.0);
+    OutFlow[id.xy] = float4(float2(bestD) + sub, confidence, 1.0);
 }
 
 // A 3x3 median of each component, which removes the odd wrong block, scaled to full-resolution pixels.
@@ -252,7 +260,43 @@ void Median(uint3 id : SV_DispatchThreadID)
             ++k;
         }
 
-    OutFlow[id.xy] = float4(Median9(xs) * scale, Median9(ys) * scale, 0.0, 1.0);
+    OutFlow[id.xy] = float4(Median9(xs) * scale, Median9(ys) * scale, FlowIn.Load(int3(id.xy, 0)).z, 1.0);
+}
+
+// Edge-aware smoothing: the average of the neighbours' motion, each counted by how sure its match was, how close its motion
+// is to this pixel's and how close its brightness is, so noise in a flat area is averaged out and the edge of something that
+// moves differently is not.
+[numthreads(8, 8, 1)]
+void Smooth(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y)
+        return;
+
+    int2 hi = int2(size) - 1;
+    float4 centre = FlowIn.Load(int3(id.xy, 0));
+    float lumaCentre = GuideLuma.Load(int3(id.xy, 0));
+
+    float2 sum = centre.xy * (centre.z + 0.05);
+    float total = centre.z + 0.05;
+    float motionRange = 1.0 + 0.02 * dot(centre.xy, centre.xy);
+    float lumaRange = 0.15 * (lumaCentre + 0.05);
+
+    for (int j = -radius; j <= radius; ++j)
+        for (int i = -radius; i <= radius; ++i)
+        {
+            if (i == 0 && j == 0)
+                continue;
+
+            int2 q = clamp(int2(id.xy) + int2(i, j), 0, hi);
+            float4 other = FlowIn.Load(int3(q, 0));
+            float2 df = other.xy - centre.xy;
+            float dl = (GuideLuma.Load(int3(q, 0)) - lumaCentre) / lumaRange;
+            float w = (other.z + 0.05) * exp(-dot(df, df) / motionRange - dl * dl);
+            sum += other.xy * w;
+            total += w;
+        }
+
+    OutFlow[id.xy] = float4(sum / total, centre.z, 1.0);
 }
 )HLSL";
 
@@ -285,7 +329,7 @@ OpticalFlowDx12::~OpticalFlowDx12()
 {
     ReleaseTextures();
 
-    for (ID3D12PipelineState** pso : { &_luma, &_down, &_match, &_median, &_visualise })
+    for (ID3D12PipelineState** pso : { &_luma, &_down, &_match, &_median, &_smooth, &_visualise })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -371,7 +415,8 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
     };
 
     for (const Entry& entry : { Entry { "Luma", &_luma }, Entry { "Down", &_down }, Entry { "Match", &_match },
-                                Entry { "Median", &_median }, Entry { "Visualise", &_visualise } })
+                                Entry { "Median", &_median }, Entry { "Smooth", &_smooth },
+                                Entry { "Visualise", &_visualise } })
     {
         ID3DBlob* code = Compile(entry.name, &_error);
 
@@ -452,6 +497,7 @@ void OpticalFlowDx12::ReleaseTextures()
         for (auto& tex : set)
             release(tex);
 
+    release(_flowMedian);
     release(_flow);
     release(_preview);
 }
@@ -486,7 +532,8 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
         h = (h + 1) / 2;
     }
 
-    return CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
+    return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
+           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
            CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM, L"OpticalFlow_Preview");
 }
 
@@ -606,6 +653,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.hasPrediction = coarsest ? 0 : 1;
             constants.lambda = _settings.lambda;
             constants.hasHistory = history ? 1 : 0;
+            constants.knee = _settings.confidenceKnee;
 
             if (!coarsest)
             {
@@ -623,6 +671,13 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         constants.sizeY = _flow.height;
         constants.scale = 2.0f; // the half-resolution level's pixels to full-resolution ones
         Pass(list, _median, levelNow[0].resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
+             DXGI_FORMAT_UNKNOWN, _flowMedian, kFlowFormat, constants);
+
+        constants = Constants {};
+        constants.sizeX = _flow.width;
+        constants.sizeY = _flow.height;
+        constants.radius = _settings.smoothRadius;
+        Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, nullptr,
              DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
 
         _flowValid = true;

@@ -208,6 +208,7 @@ float Half(uint16_t h)
 int main(int argc, char** argv)
 {
     const bool perf = argc > 1 && std::string(argv[1]) == "perf";
+    const bool noSmoothing = (argc > 1 && std::string(argv[1]) == "nosmooth") || (argc > 2 && std::string(argv[2]) == "nosmooth");
 
     if (perf)
     {
@@ -230,6 +231,9 @@ int main(int argc, char** argv)
         printf("init failed: %s\n", flow.Error().c_str());
         return 1;
     }
+
+    if (noSmoothing)
+        flow.Tuning().smoothRadius = 0;
 
     if (perf)
     {
@@ -280,13 +284,13 @@ int main(int argc, char** argv)
         { 21, -14, 0.90 },
         { -37, 29, 0.85 },
         { 60, 0, 0.80 },
-        // fast pans: reported until the flow handles them (the baseline of the flow upgrade)
-        { 100, -60, 0, 1.0f, 0.0f, 2, "fast pan" },
-        { -160, 40, 0, 1.0f, 0.0f, 2, "fast pan" },
-        { 220, 0, 0, 1.0f, 0.0f, 2, "fast pan" },
+        // fast pans, which the pyramid must reach, and the same pan a few pictures in a row (last frame's flow is known)
+        { 100, -60, 0.95, 1.0f, 0.0f, 2, "fast pan" },
+        { -160, 40, 0.95, 1.0f, 0.0f, 2, "fast pan" },
+        { 220, 0, 0.95, 1.0f, 0.0f, 2, "fast pan" },
         // the same pan a few pictures in a row: last frame's flow is known
-        { 30, -18, 0, 1.0f, 0.0f, 4, "steady pan, 4 pictures" },
-        { 90, 20, 0, 1.0f, 0.0f, 4, "steady fast pan, 4 pictures" },
+        { 30, -18, 0.95, 1.0f, 0.0f, 4, "steady pan, 4 pictures" },
+        { 90, 20, 0.95, 1.0f, 0.0f, 4, "steady fast pan, 4 pictures" },
         // dark and grainy: flat areas where block matching has little to hold on to
         { 3, -2, 0, 0.08f, 3.0f, 2, "dark and grainy" },
         { 12, 5, 0, 0.08f, 3.0f, 4, "dark and grainy, 4 pictures" },

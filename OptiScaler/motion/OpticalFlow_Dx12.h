@@ -4,14 +4,17 @@
 // motion vectors to take from one). Our own implementation of the standard method: a luma pyramid, block matching from the
 // coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade gradient steps for the sub-pixel part, and a 3x3
 // median over the result. At each level the candidates are the coarser level's answer at the nearest cells, the last
-// frame's flow at the same place and no motion; the best of them is refined by a small search. Nothing is taken from any shader of another project.
+// frame's flow at the same place and no motion; the best of them is refined by a small search. The result is smoothed
+// where the matching is not sure (flat or grainy areas) without crossing the edges of moving things: each neighbour counts
+// by how much picture structure its match had, how close its motion is and how close its brightness is. Nothing is taken from any shader of another project.
 //
 // Self-contained: it needs only D3D12 and the HLSL compiler, so tests/nr_optical_flow_gpu.cpp drives it with synthetic images
 // and known motion, with no game.
 //
 // Convention: for each pixel of the current frame the flow is the offset, in full-resolution pixels, to where the same
 // content was in the previous frame (the usual game motion-vector direction, "from here to where it came from"). The flow
-// texture is half the colour's resolution (R16G16B16A16_FLOAT, x and y in .xy); a consumer samples it bilinearly.
+// texture is half the colour's resolution (R16G16B16A16_FLOAT, x and y in .xy, the match's confidence 0..1 in .z); a
+// consumer samples it bilinearly.
 //
 // Dispatch() records onto a command list the caller owns and changes the descriptor heaps bound on it, so it belongs on a
 // list of our own (the finished-picture seam), not on a game's list.
@@ -24,7 +27,7 @@
 class OpticalFlowDx12
 {
   public:
-    static constexpr int kLevels = 4; // pyramid levels below the half-resolution one used for the output (1/2 .. 1/16)
+    static constexpr int kLevels = 6; // pyramid levels (1/2 .. 1/64); the coarsest reaches about 250 pixels of motion
 
     OpticalFlowDx12() = default;
     ~OpticalFlowDx12();
@@ -63,9 +66,11 @@ class OpticalFlowDx12
     // Penalty added per pixel of distance from that answer, which keeps flat areas from picking noise.
     struct Settings
     {
-        int radius = 2;
+        int radius = 1;
         int coarseRadius = 4;
         float lambda = 0.01f;
+        int smoothRadius = 2;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
+        float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
     };
 
     Settings& Tuning() { return _settings; }
@@ -87,7 +92,9 @@ class OpticalFlowDx12
         uint32_t hasPrediction;
         float lambda;
         float scale;
-        uint32_t hasHistory, pad0, pad1, pad2;
+        uint32_t hasHistory;
+        float knee;
+        uint32_t pad0, pad1;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -105,13 +112,15 @@ class OpticalFlowDx12
     ID3D12PipelineState* _down = nullptr;
     ID3D12PipelineState* _match = nullptr;
     ID3D12PipelineState* _median = nullptr;
+    ID3D12PipelineState* _smooth = nullptr;
     ID3D12PipelineState* _visualise = nullptr;
     ID3D12DescriptorHeap* _heap = nullptr;
     UINT _descriptorSize = 0;
     UINT _heapCursor = 0;
 
-    Tex _pyramid[2][kLevels]; // luma, 1/2 .. 1/16 of the colour; one set is the current frame, the other the previous
+    Tex _pyramid[2][kLevels]; // luma, 1/2 .. 1/64 of the colour; one set is the current frame, the other the previous
     Tex _levelFlow[2][kLevels]; // this frame's flow at each level, and the last frame's (a candidate for this one)
+    Tex _flowMedian; // the median's result, which the smoothing reads
     Tex _flow;
     Tex _preview;
     int _current = 0;

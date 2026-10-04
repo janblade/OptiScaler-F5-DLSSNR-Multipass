@@ -69,6 +69,8 @@ class OpticalFlowDx12
         int radius = 1;
         int coarseRadius = 4;
         float lambda = 0.01f;
+        bool useHistory = true;         // last frame's flow as a candidate
+        int coarseCells = 4;            // how many of the coarser level's nearest cells are candidates (1..4)
         int smoothRadius = 2;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
         float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
     };
@@ -94,7 +96,7 @@ class OpticalFlowDx12
         float scale;
         uint32_t hasHistory;
         float knee;
-        uint32_t pad0, pad1;
+        uint32_t coarseCells, pad1;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);

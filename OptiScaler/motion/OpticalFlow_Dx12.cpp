@@ -25,7 +25,8 @@ cbuffer P : register(b0)
     float scale;
     uint hasHistory;
     float knee;
-    uint2 pad;
+    uint coarseCells;
+    uint pad;
 };
 
 SamplerState Linear : register(s0);
@@ -122,7 +123,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         int2 cp = min(p >> 1, coarseHi);
         int2 step = int2((p.x & 1) != 0 ? 1 : -1, (p.y & 1) != 0 ? 1 : -1);
 
-        [unroll] for (int k = 0; k < 4; ++k)
+        [loop] for (int k = 0; k < (int) coarseCells; ++k)
         {
             int2 cell = cp + int2((k & 1) != 0 ? step.x : 0, (k & 2) != 0 ? step.y : 0);
             int2 d = int2(round(Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0));
@@ -652,7 +653,8 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.radius = coarsest ? _settings.coarseRadius : _settings.radius;
             constants.hasPrediction = coarsest ? 0 : 1;
             constants.lambda = _settings.lambda;
-            constants.hasHistory = history ? 1 : 0;
+            constants.hasHistory = (history && _settings.useHistory) ? 1 : 0;
+            constants.coarseCells = (uint32_t) std::clamp(_settings.coarseCells, 1, 4);
             constants.knee = _settings.confidenceKnee;
 
             if (!coarsest)
@@ -663,7 +665,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
             Pass(list, _match, current[level].resource, kLumaFormat, previous[level].resource, kLumaFormat,
                  coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat, constants,
-                 history ? levelBefore[level].resource : nullptr, kFlowFormat);
+                 (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat);
         }
 
         constants = Constants {};

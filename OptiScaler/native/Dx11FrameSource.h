@@ -29,6 +29,13 @@ class Dx11FrameSource : public IFrameSource
     ID3D12CommandQueue* Queue12() const { return _queue12; }
     const std::string& Error() const { return _error; }
 
+    // The D3D12-side picture, valid once Acquire has succeeded: the producer's consumer (DLSS-NR or
+    // VirtualUpscalerDriver) writes into it in place, so after Run/Return this is that result, rests in
+    // D3D12_RESOURCE_STATE_COMMON. A caller with its own use for the D3D12 side of this frame (a D3D11-under-frame-
+    // generation present, which needs it copied into the real D3D12 back buffer) reads it from here rather than
+    // waiting for Return's D3D11 copy-back, which nothing shows in that case.
+    ID3D12Resource* ProcessedPicture() const { return _picture.Res12(); }
+
   private:
     bool EnsureDevices(ID3D11Device* device11);
 

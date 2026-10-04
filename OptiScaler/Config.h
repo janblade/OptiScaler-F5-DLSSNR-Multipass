@@ -589,6 +589,10 @@ class Config
     // finder's depth and the optical flow to OptiScaler's upscaler (Dx12Upscaler, FFX when unset) as a synthetic upscaler
     // call (render size == output size, no jitter: a stabiliser, not a reconstruction), so frame generation with the
     // Upscaler input works in a game that never calls an upscaler. Takes priority over NativeInput. Changes apply at once.
+    // For a D3D11 game, this is also the only one of the three native-input options (this, NativeInput, Finished
+    // Picture NR) that still works once FGInput=Upscaler is selected: that replaces the game's swap chain with
+    // with_dx12::Dx11wDx12SC, which the other two require not to be in play (see motion/NativeMotionDx11.cpp's
+    // OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's _ApplyNativeInputToFGBackBuffer).
     // See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long

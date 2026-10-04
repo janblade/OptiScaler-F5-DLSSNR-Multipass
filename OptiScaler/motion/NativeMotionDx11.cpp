@@ -4,6 +4,7 @@
 
 #include <native/Dx11FrameSource.h>
 #include <native/NativeProducer.h>
+#include <native/VirtualUpscalerDriver.h>
 
 #include <Config.h>
 #include <dlssnr/DlssNrFeature_Dx12.h>
@@ -31,6 +32,10 @@ enum class Status
 
 std::unique_ptr<native::NativeProducer> g_producer;
 native::Dx11FrameSource g_source;
+
+// Made on first use and never destroyed at exit: its destructor would tear down an upscaler backend under the loader lock.
+native::VirtualUpscalerDriver* g_virtualUpscaler = nullptr;
+
 uint64_t g_frame = 0;
 bool g_trustRan = false;
 bool g_nativeRan = false;
@@ -39,21 +44,26 @@ uint64_t g_cuts = 0;
 Status g_status = Status::Off;
 std::string g_failure;
 
-} // namespace
-
-namespace NativeMotionDx11
+void ReleaseVirtualUpscaler()
 {
+    if (g_virtualUpscaler != nullptr)
+        g_virtualUpscaler->Release();
+}
 
-void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
+// Shared by OnPresent and OnFGPresent; the depth finder's frame close is the caller's job (see the two entry points
+// below), since only one of them needs to do it. Returns the D3D12 picture the producer ended up with this frame, or
+// null when nothing ran.
+ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
 {
     if (!Config::Instance()->DlssNrNativeMotion.value_or_default())
     {
+        ReleaseVirtualUpscaler();
         g_status = Status::Off;
-        return;
+        return nullptr;
     }
 
     if (swapChain == nullptr || device == nullptr || g_status == Status::Failed)
-        return;
+        return nullptr;
 
     g_source.SetPresent(swapChain, device);
 
@@ -62,16 +72,18 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
 
     if (acquired == native::AcquireStatus::WaitingForUpscaler)
     {
+        // The game's own upscaler call takes over: ours goes, as a game's feature would.
+        ReleaseVirtualUpscaler();
         g_status = Status::Waiting;
 
         if (g_producer)
             g_producer->Reset();
 
-        return;
+        return nullptr;
     }
 
     if (acquired != native::AcquireStatus::Ready)
-        return;
+        return nullptr;
 
     if (g_producer == nullptr || g_producer->Device() != g_source.Device12())
     {
@@ -83,7 +95,14 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
             g_status = Status::Failed;
             LOG_ERROR("Native motion (D3D11): {}", g_failure);
             g_source.Return(input, native::FrameOutput {});
-            return;
+            return nullptr;
+        }
+
+        // The upscaler backend belongs to the old device too.
+        if (g_virtualUpscaler != nullptr)
+        {
+            delete g_virtualUpscaler;
+            g_virtualUpscaler = nullptr;
         }
 
         g_producer = std::move(fresh);
@@ -91,11 +110,24 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
                  "the game's D3D11 device");
     }
 
-    native::NativeProducer::Options options;
-    options.apply = Config::Instance()->DlssNrNativeInput.value_or_default();
+    // Presents the picture to an upscaler backend as a synthetic call instead of running DLSS-NR on it. Takes
+    // priority when both are on. Inert (same as the plain native-input checkbox and Finished Picture) while a D3D11
+    // game's swap chain has been replaced by Dx11wDx12SC for frame generation -- see OnFGPresent for that path.
+    const bool useVirtualUpscaler = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
 
-    const auto applyNr = [](ID3D12GraphicsCommandList* cmd, const native::NativeFrame& frame)
+    if (useVirtualUpscaler && g_virtualUpscaler == nullptr)
+        g_virtualUpscaler = new native::VirtualUpscalerDriver();
+    else if (!useVirtualUpscaler)
+        ReleaseVirtualUpscaler();
+
+    native::NativeProducer::Options options;
+    options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
+
+    const auto apply = [useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, const native::NativeFrame& frame)
     {
+        if (useVirtualUpscaler)
+            return g_virtualUpscaler->Run(cmd, frame);
+
         const DXGI_COLOR_SPACE_TYPE type =
             frame.space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
             : frame.space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
@@ -105,7 +137,7 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
     };
 
     native::FrameOutput output;
-    const auto result = g_producer->Run(g_source.Queue12(), input, options, applyNr, output);
+    const auto result = g_producer->Run(g_source.Queue12(), input, options, apply, output);
     g_source.Return(input, output);
 
     g_trustRan = result.trustRan;
@@ -139,6 +171,26 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
         ++g_frame;
         g_status = Status::Running;
     }
+
+    return result.submitted ? g_source.ProcessedPicture() : nullptr;
+}
+
+} // namespace
+
+namespace NativeMotionDx11
+{
+
+void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
+{
+    RunFrame(swapChain, device);
+}
+
+ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
+{
+    // The only call site that closes the D3D11 depth finder's frame on this path: GenericDepthDx11::OnPresent is
+    // otherwise only reached from MenuOverlayDx::Present, which Dx11wDx12SC::Present never calls.
+    GenericDepthDx11::OnPresent(real);
+    return RunFrame(real, device);
 }
 
 void DrawDebugUi()
@@ -161,7 +213,34 @@ void DrawDebugUi()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "Same as the DirectX 12 native input, for a Direct3D 11 game: the picture and depth are shared\n"
                                 "to a private D3D12 device, processed there, and shared back. Needs the D3D11 depth finder,\n"
-                                "Finished picture and Enable Neural Rendering on. No live preview yet. Applies at once.");
+                                "Finished picture and Enable Neural Rendering on. No live preview yet. Does nothing with\n"
+                                "FGInput=Upscaler selected (frame generation replaces this game's swap chain; use the option\n"
+                                "below instead). Applies at once.");
+
+    bool virtualUpscaler = config->DlssNrNativeUpscaler.value_or_default();
+
+    if (ImGui::Checkbox("Present this to OptiScaler as an upscaler (experimental)##nativeupscaler11", &virtualUpscaler))
+        config->DlssNrNativeUpscaler = virtualUpscaler;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "%s", "Experimental. Instead of feeding DLSS-NR directly, presents the depth finder's depth and the\n"
+                  "estimated motion to OptiScaler's upscaler (the one chosen in the menu, FSR when none is) as if\n"
+                  "the game had called it. Render size equals output size and jitter is zero, so it works as a\n"
+                  "stabiliser, not a reconstruction; it makes frame generation with the Upscaler input work in a\n"
+                  "D3D11 game with no upscaler, including with FGInput=Upscaler selected (unlike the checkbox\n"
+                  "above, this one is read from Dx11wDx12SC::Present when that applies). Takes priority over Run\n"
+                  "Neural Rendering on this. Applies at once.");
+
+    if (virtualUpscaler)
+    {
+        if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
+            ImGui::TextDisabled("%s is running on this picture.", g_virtualUpscaler->BackendName().c_str());
+        else if (g_virtualUpscaler != nullptr && !g_virtualUpscaler->Error().empty())
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Upscaler: %s", g_virtualUpscaler->Error().c_str());
+        else
+            ImGui::TextDisabled("Upscaler: waiting for the first frame with depth.");
+    }
 
     switch (g_status)
     {

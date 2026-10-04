@@ -51,9 +51,16 @@ class TrustMaskDx12
     bool Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in);
 
     // Drops the histories (a scene cut, a size change): the next mask is all distrust.
-    void Reset() { _haveHistory = false; }
+    void Reset()
+    {
+        _haveHistory = false;
+        _share = -1.0f;
 
-    // R8_UNORM at the flow's size, NON_PIXEL_SHADER_RESOURCE between Dispatches.
+        for (auto& frame : _readbackFrame)
+            frame = 0;
+    }
+
+    // R8_UNORM at the flow's size, NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE between Dispatches (a menu can show it).
     ID3D12Resource* Mask() const { return _mask[_maskIndex].resource; }
 
     // The share of pixels distrusted almost fully in a recent frame (a few frames old; -1 until there is one), and whether

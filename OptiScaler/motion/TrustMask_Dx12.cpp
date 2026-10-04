@@ -616,6 +616,9 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     (void) depthIn;
     _depthIndex = write;
     _maskIndex = maskWrite;
+
+    // The newest mask can be read by a pixel shader too (a menu preview).
+    Transition(list, _mask[_maskIndex], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     _haveHistory = true;
     return true;
 }

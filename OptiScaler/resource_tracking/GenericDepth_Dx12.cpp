@@ -141,10 +141,10 @@ std::atomic<uint64_t> g_countExecBundle { 0 };         // every ExecuteBundle: d
 std::atomic<uint64_t> g_countDispatch { 0 };           // every Dispatch (a game that renders through compute draws little)
 std::atomic<int> g_bundleSameDraw { -1 };              // 1 the bundle's Draw functions are the direct list's, 0 not, -1 unknown
 
-// The copy of the picked depth buffer for the overlay (guarded by g_mutex like the rest).
+// The geometry of the copies of the picked depth buffer, and the readback of the chosen one for the menu's preview (guarded
+// by g_mutex like the rest).
 struct Backup
 {
-    ID3D12Resource* resource = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
     DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN;
@@ -160,12 +160,24 @@ std::unordered_map<ID3D12Resource*, Stats> g_stats;              // node-stable:
 uint64_t g_bestSnapshotVertices = 0;                             // the least a stretch must draw to be copied (a share of the pick's last frame)
 float g_pictureWidth = 0.0f;                                     // from the last present
 Backup g_backup;
-uint64_t g_backupFrame = 0;          // the frame a copy was last recorded in
-bool g_srvDirty = true;
-bool g_srvAllocated = false;
-ID3D12DescriptorHeap* g_srvHeap = nullptr;
-D3D12_CPU_DESCRIPTOR_HANDLE g_srvCpu {};
-D3D12_GPU_DESCRIPTOR_HANDLE g_srvGpu {};
+uint64_t g_previewFrame = 0;         // the frame the preview's readback was last filled in
+
+// A frame's copies of the picked buffer. Game command lists are recorded in no fixed order, so one shared target ended up
+// holding whichever copy ran last on the GPU (the world, or the first-person weapon's pass) and the picture flickered. Each
+// stretch with a real share of the frame's draws gets a target of its own, and at present the one whose stretch drew the most
+// is chosen: that choice does not depend on the order the lists ran in.
+constexpr int kSnapshotSlots = 6;
+
+struct SnapshotSlot
+{
+    ID3D12Resource* resource = nullptr;
+    uint64_t vertices = 0;           // what the stretch it holds had drawn
+};
+
+SnapshotSlot g_slots[kSnapshotSlots];
+int g_slotsUsed = 0;                 // taken this frame
+std::atomic<bool> g_snapshotsWanted { false }; // the overlay is on, or the native motion step needs the depth
+GenericDepthDx12::Snapshot g_best;   // the frame just closed's choice
 std::vector<std::pair<ID3D12Resource*, uint64_t>> g_retired; // replaced copies, released a few frames later
 uint64_t g_presents = 0;
 uint64_t g_warmupStart = 0;          // the present count the current warm-up began at
@@ -247,16 +259,13 @@ bool BackupFormats(DXGI_FORMAT depth, DXGI_FORMAT* typeless, DXGI_FORMAT* view)
     }
 }
 
-// Under g_mutex. Makes the copy target when the depth buffer's size or format is new, retiring the old one for a few frames
-// (the menu may still be reading it).
+// Under g_mutex. Gets the geometry right when the depth buffer's size or format is new, retiring the old copies for a few
+// frames (the menu or the motion step may still be reading them), and makes the preview's readback.
 bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_FORMAT typeless, DXGI_FORMAT view)
 {
-    if (g_backup.resource != nullptr && g_backup.width == source.Width && g_backup.height == source.Height &&
-        g_backup.typeless == typeless)
+    if (g_backup.width == source.Width && g_backup.height == source.Height && g_backup.typeless == typeless &&
+        g_backup.readback != nullptr)
         return true;
-
-    D3D12_HEAP_PROPERTIES heap {};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
     D3D12_RESOURCE_DESC desc {};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -267,17 +276,9 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
     desc.Format = typeless;
     desc.SampleDesc.Count = 1;
     desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-    ID3D12Resource* created = nullptr;
-
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
-                                               IID_PPV_ARGS(&created))))
-        return false;
-
-    // The preview is drawn on the CPU from a readback of the copy: depth is mostly near zero, which no plain texture view
-    // shows brightly, so it needs a curve.
+    // The preview is drawn on the CPU from a readback of the chosen copy: depth is mostly near zero, which no plain texture
+    // view shows brightly, so it needs a curve.
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
     UINT64 total = 0;
     device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &total);
@@ -304,23 +305,66 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
             readback = nullptr;
     }
 
-    if (g_backup.resource != nullptr)
-        g_retired.emplace_back(g_backup.resource, g_presents);
+    for (auto& slot : g_slots)
+        if (slot.resource != nullptr)
+        {
+            g_retired.emplace_back(slot.resource, g_presents);
+            slot = SnapshotSlot {};
+        }
+
     if (g_backup.readback != nullptr)
         g_retired.emplace_back(g_backup.readback, g_presents);
 
-    g_backup = Backup { created, (uint32_t) source.Width, source.Height, typeless, view, readback, footprint };
-    g_srvDirty = true;
+    g_slotsUsed = 0;
+    g_best = GenericDepthDx12::Snapshot {};
+    g_previewFrame = 0;
+    g_backup = Backup { (uint32_t) source.Width, source.Height, typeless, view, readback, footprint };
     return true;
 }
 
-// Under g_mutex, from the clear hook, before the clear itself: the buffer is in the depth-write state a clear needs, so
-// it goes to copy-source and back around one copy of its first subresource into the overlay's texture. The overlay's own
-// texture rests in the shader-resource state. A multisampled buffer is skipped (it would need a resolve).
+constexpr D3D12_RESOURCE_STATES kSlotRest =
+    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+// Under g_mutex. A slot to copy into: made when it is first needed, in the state it rests in between frames. The depth is
+// read by compute passes and, for the menu, pixel shaders, so it rests readable by both.
+SnapshotSlot* TakeSlot(ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
+{
+    if (g_slotsUsed >= kSnapshotSlots)
+        return nullptr;
+
+    SnapshotSlot& slot = g_slots[g_slotsUsed];
+
+    if (slot.resource == nullptr)
+    {
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC desc {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = source.Width;
+        desc.Height = source.Height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = g_backup.typeless;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, kSlotRest, nullptr,
+                                                   IID_PPV_ARGS(&slot.resource))))
+            return nullptr;
+    }
+
+    ++g_slotsUsed;
+    return &slot;
+}
+
+// Under g_mutex, from a hook, before the clear itself or at the point the list leaves the buffer or closes: the buffer is in
+// the state its view says, so it goes to copy-source and back around one copy of its first subresource into a slot. A
+// multisampled buffer is skipped (it would need a resolve).
 void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, bool readOnlyDepth, const char* where = "",
                     uint64_t stretchVertices = 0)
 {
-    // The first copies of a frame in a few frames, with what they were taken after: which stretch the preview shows.
+    // The first copies of a frame in a few frames, with what they were taken after.
     static uint64_t loggedFrames = 0, lastFrame = ~0ull;
     static int inFrame = 0;
 
@@ -329,11 +373,11 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
         lastFrame = g_presents;
         inFrame = 0;
 
-        if (g_presents % 200 == 0)
-            loggedFrames = g_presents; // a burst every 200 presents
+        if (g_presents % 600 == 0)
+            loggedFrames = g_presents; // a burst every 600 presents
     }
 
-    if (g_presents - loggedFrames < 3 && inFrame++ < 8)
+    if (g_presents - loggedFrames < 2 && inFrame++ < 8)
         LOG_INFO("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_presents, where,
                  (size_t) list, stretchVertices, g_bestSnapshotVertices);
 
@@ -354,11 +398,13 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
     if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
         return;
 
-    const bool ready = EnsureBackup(device, desc, typeless, view);
+    SnapshotSlot* slot = EnsureBackup(device, desc, typeless, view) ? TakeSlot(device, desc) : nullptr;
     device->Release();
 
-    if (!ready)
+    if (slot == nullptr)
         return;
+
+    slot->vertices = stretchVertices;
 
     auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
@@ -371,14 +417,12 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
         return b;
     };
 
-    D3D12_RESOURCE_BARRIER in[2] = {
-        barrier(source, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE),
-        barrier(g_backup.resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST)
-    };
+    D3D12_RESOURCE_BARRIER in[2] = { barrier(source, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                                     barrier(slot->resource, kSlotRest, D3D12_RESOURCE_STATE_COPY_DEST) };
     list->ResourceBarrier(2, in);
 
     D3D12_TEXTURE_COPY_LOCATION dst {};
-    dst.pResource = g_backup.resource;
+    dst.pResource = slot->resource;
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     dst.SubresourceIndex = 0;
 
@@ -389,37 +433,9 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
 
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
-    // The copy goes on into the readback buffer, which rests in the copy-destination state for good.
-    if (g_backup.readback != nullptr)
-    {
-        D3D12_RESOURCE_BARRIER mid = barrier(g_backup.resource, D3D12_RESOURCE_STATE_COPY_DEST,
-                                             D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list->ResourceBarrier(1, &mid);
-
-        D3D12_TEXTURE_COPY_LOCATION readDst {};
-        readDst.pResource = g_backup.readback;
-        readDst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        readDst.PlacedFootprint = g_backup.footprint;
-
-        D3D12_TEXTURE_COPY_LOCATION readSrc {};
-        readSrc.pResource = g_backup.resource;
-        readSrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        readSrc.SubresourceIndex = 0;
-
-        list->CopyTextureRegion(&readDst, 0, 0, 0, &readSrc, nullptr);
-
-        D3D12_RESOURCE_BARRIER back = barrier(g_backup.resource, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                              D3D12_RESOURCE_STATE_COPY_DEST);
-        list->ResourceBarrier(1, &back);
-    }
-
-    D3D12_RESOURCE_BARRIER out[2] = {
-        barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
-        barrier(g_backup.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
-    };
+    D3D12_RESOURCE_BARRIER out[2] = { barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
+                                      barrier(slot->resource, D3D12_RESOURCE_STATE_COPY_DEST, kSlotRest) };
     list->ResourceBarrier(2, out);
-
-    g_backupFrame = g_presents;
 }
 
 void STDMETHODCALLTYPE hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resource* pResource,
@@ -572,7 +588,7 @@ void OnClear(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE DepthS
 
                         // The overlay's copy: only of the buffer picked last frame, and only at the busiest stretch, so
                         // the copy that is left at the end of the frame is the scene's.
-                        if (g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid &&
+                        if (g_snapshotsWanted.load(std::memory_order_relaxed) && g_pick.valid &&
                             g_pick.id == (uint64_t) (size_t) found->second.resource)
                             RecordSnapshot(This, found->second.resource, false, "clear", stretch.vertices); // a clear needs depth-write
                     }
@@ -620,7 +636,7 @@ void OnClose(ID3D12GraphicsCommandList* This)
 
     Stats* stats = found->second.stats;
 
-    if (g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid && stats->resource != nullptr &&
+    if (g_snapshotsWanted.load(std::memory_order_relaxed) && g_pick.valid && stats->resource != nullptr &&
         g_pick.id == (uint64_t) (size_t) stats->resource && stats->current.drawcalls != 0)
     {
         if (stats->current.vertices >= g_bestSnapshotVertices)
@@ -857,7 +873,7 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
         // stretch of the frame is copied there, in the state the view says the buffer is in.
         Stats* previous = g_lists[This].stats;
 
-        if (previous != nullptr && previous != bound && g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid &&
+        if (previous != nullptr && previous != bound && g_snapshotsWanted.load(std::memory_order_relaxed) && g_pick.valid &&
             previous->resource != nullptr && g_pick.id == (uint64_t) (size_t) previous->resource &&
             previous->current.drawcalls != 0)
         {
@@ -1192,6 +1208,30 @@ void OnPresent(IDXGISwapChain* swapChain)
 
     {
         std::lock_guard lock(g_mutex);
+
+        // The frame's copy of the picked buffer: the stretch that drew the most, whatever order the lists ran in.
+        g_best = GenericDepthDx12::Snapshot {};
+
+        int chosen = -1;
+
+        for (int i = 0; i < g_slotsUsed; ++i)
+            if (chosen < 0 || g_slots[i].vertices > g_slots[chosen].vertices)
+                chosen = i;
+
+        if (chosen >= 0 && g_slots[chosen].resource != nullptr && g_pick.valid)
+        {
+            g_best.valid = true;
+            g_best.resource = g_slots[chosen].resource;
+            g_best.viewFormat = g_backup.view;
+            g_best.width = g_backup.width;
+            g_best.height = g_backup.height;
+            g_best.reversed = g_pick.reversed;
+            g_best.frame = g_presents;
+        }
+
+        g_slotsUsed = 0;
+        g_snapshotsWanted = g_overlayOn.load() || Config::Instance()->DlssNrNativeMotion.value_or_default();
+
         ++g_presents;
 
         // Copies replaced a few frames ago are no longer being read by the menu.
@@ -1230,6 +1270,7 @@ void OnPresent(IDXGISwapChain* swapChain)
             g_lists.clear();
             g_pick = GenericDepthSelect::Pick {};
             g_selector.Reset();
+            g_best = GenericDepthDx12::Snapshot {};
             g_warmupStart = g_presents;
             return;
         }
@@ -1263,6 +1304,55 @@ void OnPresent(IDXGISwapChain* swapChain)
     g_pick = pick;
 }
 
+Snapshot BestSnapshot()
+{
+    std::lock_guard lock(g_mutex);
+    return g_best;
+}
+
+void RecordPreviewCopy(ID3D12GraphicsCommandList* list)
+{
+    if (list == nullptr || !g_overlayOn.load())
+        return;
+
+    std::lock_guard lock(g_mutex);
+
+    // Only from the chosen copy of the frame just closed, and only when the menu is about to show it.
+    if (!g_best.valid || g_backup.readback == nullptr || g_best.width != g_backup.width || g_best.height != g_backup.height)
+        return;
+
+    auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    {
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = r;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = before;
+        b.Transition.StateAfter = after;
+        return b;
+    };
+
+    D3D12_RESOURCE_BARRIER in = barrier(g_best.resource, kSlotRest, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->ResourceBarrier(1, &in);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = g_backup.readback;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = g_backup.footprint;
+
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = g_best.resource;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER out = barrier(g_best.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, kSlotRest);
+    list->ResourceBarrier(1, &out);
+
+    g_previewFrame = g_presents;
+}
+
 GenericDepthSelect::Pick CurrentPick()
 {
     std::lock_guard lock(g_mutex);
@@ -1282,53 +1372,6 @@ void NoteUpscalerCall()
 bool GameCallsUpscaler() { return g_installed && g_upscalerSeen.load(); }
 
 bool Armed() { return g_installed && g_armed.load() && !g_upscalerSeen.load(); }
-
-// Under g_mutex. The overlay's texture needs a descriptor in the menu's heap; both come and go with the menu.
-static void EnsureOverlayView()
-{
-    ID3D12DescriptorHeap* heap = MenuOverlayDx::SrvHeap();
-
-    if (heap == nullptr || g_backup.resource == nullptr)
-        return;
-
-    if (heap != g_srvHeap)
-    {
-        g_srvHeap = heap;
-        g_srvAllocated = false;
-        g_srvDirty = true;
-    }
-
-    if (!g_srvAllocated)
-    {
-        if (!MenuOverlayDx::AllocSrv(&g_srvCpu, &g_srvGpu))
-            return;
-
-        g_srvAllocated = true;
-        g_srvDirty = true;
-    }
-
-    if (!g_srvDirty)
-        return;
-
-    ID3D12Device* device = nullptr;
-
-    if (FAILED(g_backup.resource->GetDevice(IID_PPV_ARGS(&device))))
-        return;
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
-    srv.Format = g_backup.view;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    // The depth on every colour channel, so it reads as gray rather than red.
-    srv.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
-        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
-        D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
-    srv.Texture2D.MipLevels = 1;
-    srv.Texture2D.PlaneSlice = 0;
-
-    device->CreateShaderResourceView(g_backup.resource, &srv, g_srvCpu);
-    device->Release();
-    g_srvDirty = false;
-}
 
 // Under g_mutex. The copy's depth as a grid of gray cells, nearer brighter on a log scale: a perspective depth is crowded
 // near 0 (reversed-Z) or near 1 (normal), where a straight gray ramp is black. Reads the readback while the GPU may still be
@@ -1498,7 +1541,7 @@ void DrawDebugUi()
         {
             std::lock_guard lock(g_mutex);
 
-            if (g_backupFrame != 0 && g_backup.resource != nullptr)
+            if (g_previewFrame != 0 && g_backup.readback != nullptr)
             {
                 drawn = DrawDepthPreview(boxWidth, boxHeight);
             }

@@ -470,6 +470,9 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                     return;
                 }
 
+                // The depth finder's preview reads back its copy on this list.
+                GenericDepthDx12::RecordPreviewCopy(g_pd3dCommandList);
+
                 g_pd3dCommandList->ResourceBarrier(1, &barrier);
                 g_pd3dCommandList->OMSetRenderTargets(1, &g_mainRenderTargetDescriptor[backBufferIdx], FALSE, NULL);
                 g_pd3dCommandList->SetDescriptorHeaps(1, &g_pd3dSrvDescHeap);

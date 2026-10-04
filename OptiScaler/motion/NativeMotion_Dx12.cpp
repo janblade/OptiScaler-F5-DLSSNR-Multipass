@@ -2,6 +2,7 @@
 
 #include "NativeMotion_Dx12.h"
 #include "OpticalFlow_Dx12.h"
+#include "TrustMask_Dx12.h"
 
 #include <Config.h>
 
@@ -27,6 +28,7 @@ enum class Status
 };
 
 std::unique_ptr<OpticalFlowDx12> g_flow;
+std::unique_ptr<TrustMaskDx12> g_trust;
 ID3D12Device* g_device = nullptr;
 ID3D12CommandAllocator* g_allocators[kRing] = {};
 ID3D12GraphicsCommandList* g_list = nullptr;
@@ -38,16 +40,24 @@ uint64_t g_frame = 0;
 uint32_t g_width = 0;
 uint32_t g_height = 0;
 bool g_previewWanted = false; // the menu node is open
-bool g_previewReady = false;  // a preview has been recorded
+bool g_previewReady = false;  // a flow preview has been recorded
+bool g_trustRan = false;      // the trust mask was recorded in the last frame
+uint64_t g_cuts = 0;          // scene cuts the mask reported
 Status g_status = Status::Off;
 std::string g_failure;
 
-// The menu's descriptor for the preview picture.
+// The menu's descriptors for the two preview pictures.
+struct PreviewView
+{
+    bool allocated = false;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu {};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu {};
+    ID3D12Resource* resource = nullptr;
+};
+
 ID3D12DescriptorHeap* g_srvHeap = nullptr;
-bool g_srvAllocated = false;
-D3D12_CPU_DESCRIPTOR_HANDLE g_srvCpu {};
-D3D12_GPU_DESCRIPTOR_HANDLE g_srvGpu {};
-ID3D12Resource* g_srvResource = nullptr;
+PreviewView g_flowView;
+PreviewView g_maskView;
 
 void WaitFor(UINT64 value)
 {
@@ -61,11 +71,21 @@ void WaitFor(UINT64 value)
 bool CreateObjects(ID3D12Device* device)
 {
     g_flow = std::make_unique<OpticalFlowDx12>();
+    g_trust = std::make_unique<TrustMaskDx12>();
 
     if (!g_flow->Init(device))
     {
         g_failure = g_flow->Error();
         g_flow.reset();
+        g_trust.reset();
+        return false;
+    }
+
+    if (!g_trust->Init(device))
+    {
+        g_failure = g_trust->Error();
+        g_flow.reset();
+        g_trust.reset();
         return false;
     }
 
@@ -114,6 +134,50 @@ DXGI_FORMAT ViewFormat(DXGI_FORMAT format)
     }
 }
 
+// Shows a texture in the menu: a descriptor in the menu's heap (made once, and again if the heap or the texture changes).
+// `grayFromRed` shows a one-channel texture as gray.
+bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format, bool grayFromRed, float width,
+                 float height)
+{
+    ID3D12DescriptorHeap* heap = MenuOverlayDx::SrvHeap();
+
+    if (heap == nullptr || texture == nullptr)
+        return false;
+
+    if (heap != g_srvHeap)
+    {
+        g_srvHeap = heap;
+        g_flowView = PreviewView {};
+        g_maskView = PreviewView {};
+    }
+
+    if (!view.allocated && MenuOverlayDx::AllocSrv(&view.cpu, &view.gpu))
+        view.allocated = true;
+
+    if (!view.allocated)
+        return false;
+
+    if (texture != view.resource)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
+        srv.Format = format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping =
+            grayFromRed ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+                              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+                              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+                              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+                              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
+                        : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        g_device->CreateShaderResourceView(texture, &srv, view.cpu);
+        view.resource = texture;
+    }
+
+    ImGui::Image((ImTextureID) view.gpu.ptr, ImVec2(width, height));
+    return true;
+}
+
 } // namespace
 
 namespace NativeMotionDx12
@@ -138,6 +202,8 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
 
         if (g_flow)
             g_flow->Reset();
+        if (g_trust)
+            g_trust->Reset();
 
         return;
     }
@@ -151,7 +217,7 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
             return;
         }
 
-        LOG_INFO("Native motion: optical flow ready");
+        LOG_INFO("Native motion: optical flow and trust mask ready");
     }
 
     IDXGISwapChain3* chain3 = nullptr;
@@ -177,6 +243,7 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
         g_width = (uint32_t) desc.Width;
         g_height = desc.Height;
         g_flow->Reset();
+        g_trust->Reset();
     }
 
     const UINT slot = (UINT) (g_frame % kRing);
@@ -198,8 +265,43 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
 
     const bool recorded = g_flow->Dispatch(g_list, backBuffer, ViewFormat(desc.Format));
 
-    if (recorded && g_flow->FlowValid() && g_previewWanted)
-        g_previewReady = g_flow->Visualise(g_list, kPreviewMaxSpeed) || g_previewReady;
+    g_trustRan = false;
+
+    if (recorded && g_flow->FlowValid())
+    {
+        if (g_previewWanted)
+            g_previewReady = g_flow->Visualise(g_list, kPreviewMaxSpeed) || g_previewReady;
+
+        // The trust mask needs the scene's depth as the depth finder copied it this frame.
+        const auto depth = GenericDepthDx12::BestSnapshot();
+
+        if (depth.valid)
+        {
+            TrustMaskDx12::Inputs in;
+            in.flow = g_flow->Flow();
+            in.flowWidth = g_flow->FlowWidth();
+            in.flowHeight = g_flow->FlowHeight();
+            in.fullPerFlow = (float) desc.Width / (float) g_flow->FlowWidth();
+            in.lumaNow = g_flow->LumaOfLastFrame();
+            in.lumaBefore = g_flow->LumaOfFrameBefore();
+            in.depth = depth.resource;
+            in.depthFormat = depth.viewFormat;
+            in.depthWidth = depth.width;
+            in.depthHeight = depth.height;
+            in.depthReversed = depth.reversed;
+            g_trustRan = g_trust->Dispatch(g_list, in);
+        }
+
+        // A hard cut: nothing carried over from before it is worth keeping.
+        if (g_trust->SceneCutSeen())
+        {
+            ++g_cuts;
+            LOG_INFO("Native motion: scene cut seen ({:.0f}% of the picture distrusted), histories reset",
+                     g_trust->DistrustedShare() * 100.0f);
+            g_flow->Reset();
+            g_trust->Reset();
+        }
+    }
 
     std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
     g_list->ResourceBarrier(1, &barrier);
@@ -232,10 +334,11 @@ void DrawDebugUi()
 
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "Second step toward DLSS-NR in a game with no DLSS, FSR or XeSS: estimates how the picture\n"
-                                "moves from one frame to the next on the GPU (optical flow). Nothing in the game changes.\n"
-                                "It waits while the game calls an upscaler. Applies at once.");
+                                "moves from one frame to the next on the GPU (optical flow), and with the depth finder's\n"
+                                "depth which pixels the previous frame cannot be trusted at. The depth copy is recorded\n"
+                                "into the game's own command list. It waits while the game calls an upscaler. Applies at once.");
 
-    // Every branch writes one line and the picture has a box of its own size, so nothing below moves.
+    // Every branch writes one line and each picture has a box of its own size, so nothing below moves.
     switch (g_status)
     {
     case Status::Off:
@@ -248,7 +351,7 @@ void DrawDebugUi()
         ImGui::TextDisabled("Could not start (see the log).");
         break;
     default:
-        ImGui::TextDisabled("Hue is the direction, brightness the speed.");
+        ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
         break;
     }
 
@@ -260,41 +363,30 @@ void DrawDebugUi()
     {
         g_previewWanted = true;
 
-        ID3D12DescriptorHeap* heap = MenuOverlayDx::SrvHeap();
-        ID3D12Resource* preview = g_flow ? g_flow->Preview() : nullptr;
-
-        if (heap != nullptr && preview != nullptr && g_previewReady)
-        {
-            if (heap != g_srvHeap)
-            {
-                g_srvHeap = heap;
-                g_srvAllocated = false;
-                g_srvResource = nullptr;
-            }
-
-            if (!g_srvAllocated && MenuOverlayDx::AllocSrv(&g_srvCpu, &g_srvGpu))
-                g_srvAllocated = true;
-
-            if (g_srvAllocated)
-            {
-                if (preview != g_srvResource)
-                {
-                    D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
-                    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                    srv.Texture2D.MipLevels = 1;
-                    g_device->CreateShaderResourceView(preview, &srv, g_srvCpu);
-                    g_srvResource = preview;
-                }
-
-                ImGui::Image((ImTextureID) g_srvGpu.ptr, ImVec2(boxWidth, boxHeight));
-                drawn = true;
-            }
-        }
+        if (g_flow && g_previewReady)
+            drawn = ShowTexture(g_flowView, g_flow->Preview(), DXGI_FORMAT_R8G8B8A8_UNORM, false, boxWidth, boxHeight);
     }
 
     if (!drawn)
+        ImGui::Dummy(ImVec2(boxWidth, boxHeight));
+
+    if (g_status == Status::Running)
+    {
+        if (g_trustRan)
+            ImGui::TextDisabled("Trust: white is where the last frame cannot be trusted (%llu cuts seen).",
+                                (unsigned long long) g_cuts);
+        else
+            ImGui::TextDisabled("Trust: waiting for the depth finder's copy of the depth.");
+    }
+    else
+        ImGui::TextDisabled("Trust: -");
+
+    bool maskDrawn = false;
+
+    if (g_status == Status::Running && g_trustRan && g_trust)
+        maskDrawn = ShowTexture(g_maskView, g_trust->Mask(), DXGI_FORMAT_R8_UNORM, true, boxWidth, boxHeight);
+
+    if (!maskDrawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));
 
     ImGui::TreePop();

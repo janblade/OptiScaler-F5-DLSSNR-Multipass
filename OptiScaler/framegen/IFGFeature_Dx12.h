@@ -53,6 +53,11 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     bool WaitForUIAllocator(UINT index);
     bool SubmitUICommandList(UINT index);
 
+  public:
+    // The queue the game created the swapchain with, which frame generation takes the frame on. Not necessarily
+    // State::currentCommandQueue: that follows every swapchain created, including the one frame generation makes.
+    ID3D12CommandQueue* GameCommandQueue() const { return _gameCommandQueue; }
+
   protected:
     ID3D12Device* _device = nullptr;
     IDXGISwapChain* _swapChain = nullptr;

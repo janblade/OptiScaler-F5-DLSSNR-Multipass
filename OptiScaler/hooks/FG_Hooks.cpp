@@ -1178,12 +1178,30 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 #endif
     }
 
+    // Work on the game's picture before frame generation takes it must go on the queue frame generation takes it on.
+    ID3D12CommandQueue* gameQueue = state.currentCommandQueue;
+
+    if (auto* fg12 = dynamic_cast<IFGFeature_Dx12*>(state.currentFG); fg12 != nullptr && fg12->GameCommandQueue() != nullptr)
+    {
+        static bool logged = false;
+
+        if (!logged && fg12->GameCommandQueue() != state.currentCommandQueue)
+        {
+            logged = true;
+            LOG_INFO("FGPresent: frame generation's game queue {:X} is not State::currentCommandQueue {:X}; native input "
+                     "and the finished-picture pass use frame generation's",
+                     (size_t) fg12->GameCommandQueue(), (size_t) state.currentCommandQueue);
+        }
+
+        gameQueue = fg12->GameCommandQueue();
+    }
+
     // Native input runs here, on the game's picture and queue, ahead of frame generation and before its lock below: when it
     // presents to the virtual upscaler, that call feeds frame generation (UpscaleStart takes the same lock).
-    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && state.currentCommandQueue != nullptr &&
+    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && gameQueue != nullptr &&
         state.currentD3D12Device != nullptr)
     {
-        NativeMotionDx12::OnFGPresent(This, state.currentCommandQueue, state.currentD3D12Device);
+        NativeMotionDx12::OnFGPresent(This, gameQueue, state.currentD3D12Device);
     }
 
     IFGFeature* fg = state.currentFG;
@@ -1268,7 +1286,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
-        DlssNr::ApplyToFinishedPicture(This, state.currentCommandQueue);
+        DlssNr::ApplyToFinishedPicture(This, gameQueue);
         fg->Present();
     }
     else if (willPresent && fg != nullptr)

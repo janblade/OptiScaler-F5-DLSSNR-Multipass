@@ -846,11 +846,48 @@ static void EnsureOverlayView()
 
 void DrawDebugUi()
 {
-    if (!g_installed)
+    auto* config = Config::Instance();
+
+    if (!ImGui::TreeNode("Depth finder (experimental)##depthfinder"))
         return;
 
-    if (!ImGui::TreeNode("Depth finder (debug)##depthfinder"))
+    // Both switches are read when the game's device is created, so a change here is saved with the rest and applies at the
+    // next start.
+    bool finder = config->DlssNrNativeDepthFinder.value_or_default();
+
+    if (ImGui::Checkbox("Find the scene's depth##depthfinder", &finder))
+        config->DlssNrNativeDepthFinder = finder;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "First step toward DLSS-NR in a game with no DLSS, FSR or XeSS: watches the game's depth\n"
+                                "buffers (DirectX 12) and picks the scene's. It only observes, and it stands down for good if\n"
+                                "the game makes an upscaler call of its own. The log lists the candidates.\n"
+                                "Applies at the next start: save the settings and restart the game.");
+
+    if (!finder && !g_installed)
+    {
+        ImGui::TreePop();
         return;
+    }
+
+    bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
+
+    if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))
+        config->DlssNrNativeDepthOverlay = overlay;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
+                                "command list, and shows it below. Leave it off unless you are checking the pick.\n"
+                                "Applies at the next start.");
+
+    if (finder != g_installed)
+        ImGui::TextDisabled("Takes effect after saving and restarting the game.");
+
+    if (!g_installed)
+    {
+        ImGui::TreePop();
+        return;
+    }
 
     const auto pick = CurrentPick();
     const uint32_t warmup = Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default();
@@ -870,7 +907,7 @@ void DrawDebugUi()
 
     if (!g_overlayOn.load())
     {
-        ImGui::TextDisabled("Set [DlssNr] NativeDepthOverlay=true and restart to see the picked depth here.");
+        ImGui::TextDisabled("Tick the depth checkbox above and restart to see the picked buffer.");
     }
     else if (Armed() && pick.valid)
     {

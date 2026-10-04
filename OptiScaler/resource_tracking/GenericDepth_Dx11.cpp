@@ -13,6 +13,7 @@
 #include <imgui/imgui.h>
 
 #include <d3d11_4.h>
+#include <d3dcompiler.h>
 
 #include <mutex>
 
@@ -73,14 +74,71 @@ native::DepthFinderCore g_core;
 ID3D11DeviceContext* g_context = nullptr; // the immediate context, hooked once
 uint64_t g_contextId = 0;
 
-// A plain (non-shared) D3D11 copy of the picked depth buffer for the frame; one context means one copy, unlike the D3D12
-// finder's several command lists. Recreated when the size or format changes.
+// A plain (non-shared) D3D11 copy of the picked depth buffer for the frame, always R32_FLOAT (see LinearizeDepth): one context
+// means one copy, unlike the D3D12 finder's several command lists. Recreated when the size changes.
 ID3D11Texture2D* g_copy = nullptr;
-DXGI_FORMAT g_copyTypeless = DXGI_FORMAT_UNKNOWN;
-DXGI_FORMAT g_copyView = DXGI_FORMAT_UNKNOWN;
 uint32_t g_copyWidth = 0, g_copyHeight = 0;
 bool g_copyTaken = false; // a copy was recorded for the frame just closed
 bool g_installed = false;
+
+// Reads the picked depth buffer (whatever its own typeless/depth-stencil format) through a single-channel view and writes a
+// plain R32_FLOAT copy, compiled once on first use. A typeless depth-stencil format (R32G8X24_TYPELESS and the like) can fail
+// to make a cross-API (D3D11<->D3D12) shared NT handle outright (seen in practice: CreateTexture2D returns E_INVALIDARG for
+// such a format with D3D11_RESOURCE_MISC_SHARED_NTHANDLE, even though the same device shares an ordinary colour texture of
+// that size without trouble), where a plain float texture shares without issue; linearizing before sharing sidesteps the
+// restriction rather than depending on it being lifted.
+const char* kLinearizeSource = R"HLSL(
+Texture2D<float> Src : register(t0);
+RWTexture2D<float> Dst : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint w, h;
+    Dst.GetDimensions(w, h);
+
+    if (id.x >= w || id.y >= h)
+        return;
+
+    Dst[id.xy] = Src.Load(int3(id.xy, 0));
+}
+)HLSL";
+
+ID3D11ComputeShader* g_linearizeCs = nullptr;
+bool g_linearizeFailed = false;
+
+ID3D11ComputeShader* LinearizeShader(ID3D11Device* device)
+{
+    if (g_linearizeCs != nullptr || g_linearizeFailed)
+        return g_linearizeCs;
+
+    ID3DBlob* code = nullptr;
+    ID3DBlob* messages = nullptr;
+    const HRESULT hr = D3DCompile(kLinearizeSource, strlen(kLinearizeSource), "DepthLinearize", nullptr, nullptr,
+                                  "CSMain", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &messages);
+
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Depth finder (D3D11): compiling the linearize shader failed: {}",
+                 messages != nullptr ? (const char*) messages->GetBufferPointer() : "no message");
+        if (messages != nullptr)
+            messages->Release();
+        g_linearizeFailed = true;
+        return nullptr;
+    }
+
+    if (messages != nullptr)
+        messages->Release();
+
+    if (FAILED(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_linearizeCs)))
+    {
+        LOG_ERROR("Depth finder (D3D11): creating the linearize compute shader failed");
+        g_linearizeFailed = true;
+    }
+
+    code->Release();
+    return g_linearizeCs;
+}
 
 // The depth buffer a depth-stencil view points at, as a DepthBuffer (plain data for the core). `*outResource` gets an
 // addref'd ID3D11Resource the caller must Release (the copy, if taken, is made from it).
@@ -117,7 +175,8 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
     return true;
 }
 
-// Copies `resource` (the picked buffer) into the frame's D3D11-side slot, recreating it if the geometry changed.
+// Reads `resource` (the picked buffer, in whatever format the game made it) through the linearize shader into the frame's
+// D3D11-side slot, recreating it if the size changed.
 void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Resource* resource, uint32_t width,
                   uint32_t height, DXGI_FORMAT format, const char* where)
 {
@@ -144,9 +203,14 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         return;
     }
 
+    ID3D11ComputeShader* shader = LinearizeShader(device);
+
+    if (shader == nullptr)
+        return;
+
     std::lock_guard lock(g_mutex);
 
-    if (g_copy == nullptr || g_copyWidth != width || g_copyHeight != height || g_copyTypeless != typeless)
+    if (g_copy == nullptr || g_copyWidth != width || g_copyHeight != height)
     {
         if (g_copy != nullptr)
         {
@@ -159,27 +223,78 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         desc.Height = height;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
-        desc.Format = typeless;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
 
         const HRESULT hr = device->CreateTexture2D(&desc, nullptr, &g_copy);
 
         if (FAILED(hr))
         {
             g_copy = nullptr;
-            LOG_WARN("Depth finder (D3D11): creating the {}x{} typeless-{} copy texture failed: {:X}", width, height,
-                     (int) typeless, (UINT) hr);
+            LOG_WARN("Depth finder (D3D11): creating the {}x{} R32_FLOAT copy texture failed: {:X}", width, height,
+                     (UINT) hr);
             return;
         }
 
         g_copyWidth = width;
         g_copyHeight = height;
-        g_copyTypeless = typeless;
-        g_copyView = view;
     }
 
-    context->CopyResource(g_copy, resource);
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
+    srvDesc.Format = view;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* srv = nullptr;
+
+    if (FAILED(device->CreateShaderResourceView(resource, &srvDesc, &srv)))
+    {
+        static bool loggedSrvFail = false;
+
+        if (!loggedSrvFail)
+        {
+            loggedSrvFail = true;
+            LOG_WARN("Depth finder (D3D11): creating the read view (format {}) on the picked buffer failed", (int) view);
+        }
+
+        return;
+    }
+
+    D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc {};
+    uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+    ID3D11UnorderedAccessView* uav = nullptr;
+    const HRESULT uavResult = device->CreateUnorderedAccessView(g_copy, &uavDesc, &uav);
+
+    if (FAILED(uavResult))
+    {
+        srv->Release();
+        static bool loggedUavFail = false;
+
+        if (!loggedUavFail)
+        {
+            loggedUavFail = true;
+            LOG_WARN("Depth finder (D3D11): creating the write view on the copy texture failed: {:X}", (UINT) uavResult);
+        }
+
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0);
+    context->CSSetShaderResources(0, 1, &srv);
+    context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+    context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+
+    ID3D11ShaderResourceView* noSrv = nullptr;
+    ID3D11UnorderedAccessView* noUav = nullptr;
+    context->CSSetShaderResources(0, 1, &noSrv);
+    context->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+    context->CSSetShader(nullptr, nullptr, 0);
+
+    srv->Release();
+    uav->Release();
+
     g_copyTaken = true;
 
     static bool loggedFirst = false;
@@ -187,8 +302,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
     if (!loggedFirst)
     {
         loggedFirst = true;
-        LOG_INFO("Depth finder (D3D11): first depth copy taken, {}x{}, typeless format {}", g_copyWidth, g_copyHeight,
-                 (int) g_copyTypeless);
+        LOG_INFO("Depth finder (D3D11): first depth copy taken, {}x{}, linearized to R32_FLOAT", g_copyWidth, g_copyHeight);
     }
 }
 
@@ -527,8 +641,8 @@ Snapshot BestSnapshot()
     {
         snap.valid = true;
         snap.resource = g_copy;
-        snap.typelessFormat = g_copyTypeless;
-        snap.viewFormat = g_copyView;
+        snap.typelessFormat = DXGI_FORMAT_R32_FLOAT;
+        snap.viewFormat = DXGI_FORMAT_R32_FLOAT;
         snap.width = g_copyWidth;
         snap.height = g_copyHeight;
         snap.reversed = pick.reversed;

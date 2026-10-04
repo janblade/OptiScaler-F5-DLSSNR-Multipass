@@ -35,7 +35,10 @@ struct Sim
     float eased = 0.0f;
     uint64_t evaluation = 0;
     double seconds = 0.0;
-    float tau = kDefaultSeconds;
+    float tauBrighter = kDefaultBrighterSeconds;
+    float tauDarker = kDefaultDarkerSeconds;
+
+    void SetBoth(float tau) { tauBrighter = tauDarker = tau; }
 
     // `frames` evaluations of `reading` at `fps`. Returns the largest distance, in EV, of the eased value from `from`.
     float Run(float reading, int frames, float fps, float from = 0.0f, bool reset = false)
@@ -44,8 +47,8 @@ struct Sim
 
         for (int i = 0; i < frames; ++i)
         {
-            const Step step = adapter.Next(++evaluation, seconds, tau, reset && i == 0);
-            eased = Ease(eased, reading, step.blend, step.snap);
+            const Step step = adapter.Next(++evaluation, seconds, tauBrighter, tauDarker, reset && i == 0);
+            eased = Ease(eased, reading, step.blendBrighter, step.blendDarker, step.snap);
             seconds += 1.0 / fps;
 
             if (from > 0.0f)
@@ -71,58 +74,59 @@ int main()
     CHECK(Blend(0.016f, 1.0f) > 0.0f && Blend(0.016f, 1.0f) < 0.02f);
 
     // Ease: in log space, so a step up and the same step down take the same time.
-    CHECK(Near(Ease(1.0f, 4.0f, 0.5f, false), 2.0f));
-    CHECK(Near(Ease(4.0f, 1.0f, 0.5f, false), 2.0f));
-    CHECK(Near(Ease(1.0f, 4.0f, 0.0f, false), 1.0f));
-    CHECK(Near(Ease(1.0f, 4.0f, 1.0f, false), 4.0f));
-    CHECK(Near(Ease(1.0f, 4.0f, 2.0f, false), 4.0f));  // clamped, never overshoots
-    CHECK(Near(Ease(1.0f, 4.0f, -1.0f, false), 1.0f)); // clamped
-    CHECK(Near(Ease(1.0f, 4.0f, kNan, false), 1.0f));  // a broken blend moves nothing
-    CHECK(Near(Ease(1.0f, 4.0f, 0.1f, true), 4.0f));   // a snap takes the reading
-    CHECK(Near(Ease(0.0f, 4.0f, 0.1f, false), 4.0f));  // nothing to ease from: the reading
-    CHECK(Near(Ease(kNan, 4.0f, 0.1f, false), 4.0f));
-    CHECK(Near(Ease(kInf, 4.0f, 0.1f, false), 4.0f));
+    CHECK(Near(Ease(1.0f, 4.0f, 0.5f, 0.5f, false), 2.0f));
+    CHECK(Near(Ease(4.0f, 1.0f, 0.5f, 0.5f, false), 2.0f));
+    CHECK(Near(Ease(1.0f, 4.0f, 0.0f, 0.0f, false), 1.0f));
+    CHECK(Near(Ease(1.0f, 4.0f, 1.0f, 1.0f, false), 4.0f));
+    CHECK(Near(Ease(1.0f, 4.0f, 2.0f, 2.0f, false), 4.0f));  // clamped, never overshoots
+    CHECK(Near(Ease(1.0f, 4.0f, -1.0f, -1.0f, false), 1.0f)); // clamped
+    CHECK(Near(Ease(1.0f, 4.0f, kNan, kNan, false), 1.0f));  // a broken blend moves nothing
+    CHECK(Near(Ease(1.0f, 4.0f, 0.1f, 0.1f, true), 4.0f));   // a snap takes the reading
+    CHECK(Near(Ease(0.0f, 4.0f, 0.1f, 0.1f, false), 4.0f));  // nothing to ease from: the reading
+    CHECK(Near(Ease(kNan, 4.0f, 0.1f, 0.1f, false), 4.0f));
+    CHECK(Near(Ease(kInf, 4.0f, 0.1f, 0.1f, false), 4.0f));
     // 0 is "no reading" (a black frame, a fade): the last value is kept -- but not across a snap: a cut through a black
     // frame (or a source switch on a menu frame) leaves no reading, so the next real one snaps instead of easing from
     // the old scene.
-    CHECK(Near(Ease(2.0f, 0.0f, 0.5f, false), 2.0f));
-    CHECK(Ease(2.0f, 0.0f, 0.5f, true) == 0.0f);
-    CHECK(Near(Ease(Ease(2.0f, 0.0f, 0.5f, true), 4.0f, 0.01f, false), 4.0f));
-    CHECK(Near(Ease(2.0f, kNan, 0.5f, false), 2.0f));
-    CHECK(Near(Ease(2.0f, -1.0f, 0.5f, false), 2.0f));
-    CHECK(Near(Ease(2.0f, 1e9f, 0.5f, false), 2.0f)); // absurd, as the shader's WhitePoint() judges it
-    CHECK(Ease(0.0f, 0.0f, 0.5f, true) == 0.0f);      // nothing at all: still "no reading"
-    CHECK(Ease(kNan, kNan, 0.5f, false) == 0.0f);
+    CHECK(Near(Ease(2.0f, 0.0f, 0.5f, 0.5f, false), 2.0f));
+    CHECK(Ease(2.0f, 0.0f, 0.5f, 0.5f, true) == 0.0f);
+    CHECK(Near(Ease(Ease(2.0f, 0.0f, 0.5f, 0.5f, true), 4.0f, 0.01f, 0.01f, false), 4.0f));
+    CHECK(Near(Ease(2.0f, kNan, 0.5f, 0.5f, false), 2.0f));
+    CHECK(Near(Ease(2.0f, -1.0f, 0.5f, 0.5f, false), 2.0f));
+    CHECK(Near(Ease(2.0f, 1e9f, 0.5f, 0.5f, false), 2.0f)); // absurd, as the shader's WhitePoint() judges it
+    CHECK(Ease(0.0f, 0.0f, 0.5f, 0.5f, true) == 0.0f);      // nothing at all: still "no reading"
+    CHECK(Ease(kNan, kNan, 0.5f, 0.5f, false) == 0.0f);
     CHECK(Valid(1.0f) && !Valid(0.0f) && !Valid(kNan) && !Valid(1e9f) && !Valid(-1.0f));
 
     // The setting: seconds, 0 = off, clamped to the menu's range, a broken value -> the default.
     CHECK(Near(Seconds(1.0f), 1.0f));
     CHECK(Seconds(-1.0f) == 0.0f);
     CHECK(Near(Seconds(99.0f), kMaxSeconds));
-    CHECK(Near(Seconds(kNan), kDefaultSeconds));
+    CHECK(Near(Seconds(kNan), kDefaultDarkerSeconds)); // a broken value is the slower, calmer one
+    CHECK(Near(Seconds(kNan, kDefaultBrighterSeconds), kDefaultBrighterSeconds));
 
     // Adapter: the first evaluation, a cut the game signals, a gap in the evaluations, and Invalidate all snap.
     {
         Adapter a;
-        Step s = a.Next(10, 0.0, 1.0f, false);
-        CHECK(s.snap && s.blend == 1.0f);
-        s = a.Next(11, 0.5, 1.0f, false);
-        CHECK(!s.snap && Near(s.blend, 1.0f - std::exp(-0.5f)));
-        s = a.Next(12, 0.6, 1.0f, true);
+        Step s = a.Next(10, 0.0, 1.0f, 1.0f, false);
+        CHECK(s.snap && s.blendBrighter == 1.0f && s.blendDarker == 1.0f);
+        s = a.Next(11, 0.5, 1.0f, 1.0f, false);
+        CHECK(!s.snap && Near(s.blendBrighter, 1.0f - std::exp(-0.5f)) && Near(s.blendDarker, s.blendBrighter));
+        s = a.Next(12, 0.6, 1.0f, 1.0f, true);
         CHECK(s.snap);
-        s = a.Next(13, 0.7, 1.0f, false);
+        s = a.Next(13, 0.7, 1.0f, 1.0f, false);
         CHECK(!s.snap);
-        s = a.Next(15, 0.8, 1.0f, false); // evaluation 14 went elsewhere (another source, NR off): stale
+        s = a.Next(15, 0.8, 1.0f, 1.0f, false); // evaluation 14 went elsewhere (another source, NR off): stale
         CHECK(s.snap);
-        s = a.Next(16, 0.9, 1.0f, false);
+        s = a.Next(16, 0.9, 1.0f, 1.0f, false);
         CHECK(!s.snap);
-        s = a.Next(16, 1.0, 1.0f, false); // the same evaluation twice is not a continuation either
+        s = a.Next(16, 1.0, 1.0f, 1.0f, false); // the same evaluation twice is not a continuation either
         CHECK(s.snap);
         a.Invalidate();
-        s = a.Next(17, 1.1, 1.0f, false);
+        s = a.Next(17, 1.1, 1.0f, 1.0f, false);
         CHECK(s.snap);
-        s = a.Next(18, 1.2, 0.0f, false); // off: continuous, but the whole way
-        CHECK(!s.snap && s.blend == 1.0f);
+        s = a.Next(18, 1.2, 0.0f, 0.0f, false); // off: continuous, but the whole way
+        CHECK(!s.snap && s.blendBrighter == 1.0f && s.blendDarker == 1.0f);
     }
 
     // Frame-rate independent: one second after a 1.19 EV step, 30, 60 and 120 fps sit at the same place, 63% of the way.
@@ -133,6 +137,7 @@ int main()
         for (int i = 0; i < 3; ++i)
         {
             Sim sim;
+            sim.SetBoth(1.0f);
             sim.Run(1.45f, 10, fps[i]);
             sim.Run(3.30f, (int) fps[i], fps[i]);
             at[i] = Ev(sim.eased, 1.45f);
@@ -159,16 +164,16 @@ int main()
     // The same swing without eye adaptation (0 s): the full 1.19 EV at once, as before.
     {
         Sim sim;
-        sim.tau = 0.0f;
+        sim.SetBoth(0.0f);
         sim.Run(1.45f, 60, 60.0f);
         CHECK(sim.Run(3.30f, 1, 60.0f, 1.45f) > 1.15f);
     }
 
-    // A real change of scene that lasts is followed: within 0.05 EV after 4 s.
+    // A real change of scene that lasts is followed: within 0.05 EV after 8 s.
     {
         Sim sim;
         sim.Run(1.45f, 60, 60.0f);
-        sim.Run(3.30f, 240, 60.0f);
+        sim.Run(3.30f, 480, 60.0f); // 8 s: the darker tau is 1.5 s
         CHECK(std::fabs(Ev(sim.eased, 3.30f)) < 0.05f);
     }
 
@@ -197,6 +202,50 @@ int main()
         CHECK(Near(sim.eased, 1.45f));
         sim.Run(3.30f, 1, 60.0f);
         CHECK(Ev(sim.eased, 1.45f) < 0.05f);
+    }
+
+    // Two speeds. A reading BELOW the eased exposure is a brighter scene (exposure is what the picture is multiplied by),
+    // and takes the brighter blend; a reading above is a darker scene and takes the darker one.
+    CHECK(Near(Ease(4.0f, 1.0f, 1.0f, 0.0f, false), 1.0f)); // brighter scene: the brighter blend, all the way
+    CHECK(Near(Ease(4.0f, 1.0f, 0.0f, 1.0f, false), 4.0f)); // ... and the darker blend is not used
+    CHECK(Near(Ease(1.0f, 4.0f, 0.0f, 1.0f, false), 4.0f)); // darker scene: the darker blend
+    CHECK(Near(Ease(1.0f, 4.0f, 1.0f, 0.0f, false), 1.0f));
+    CHECK(Near(Ease(2.0f, 2.0f, 0.3f, 0.7f, false), 2.0f)); // no change: nothing to pick
+    CHECK(Near(Ease(1.0f, 4.0f, 0.2f, 0.5f, true), 4.0f));  // a snap ignores both
+
+    // Brightening takes tauBrighter and darkening tauDarker, at any frame rate: after one tau, 63% of the way.
+    for (const float fps : { 30.0f, 60.0f, 120.0f })
+    {
+        Sim up;
+        up.Run(3.0f, (int) (2 * fps), fps);
+        up.Run(1.0f, (int) (kDefaultBrighterSeconds * fps), fps);
+        CHECK(std::fabs(Ev(up.eased, 3.0f) / Ev(1.0f, 3.0f) - (1.0f - std::exp(-1.0f))) < 0.03f);
+
+        Sim down;
+        down.Run(1.0f, (int) (2 * fps), fps);
+        down.Run(3.0f, (int) (kDefaultDarkerSeconds * fps), fps);
+        CHECK(std::fabs(Ev(down.eased, 1.0f) / Ev(3.0f, 1.0f) - (1.0f - std::exp(-1.0f))) < 0.03f);
+    }
+
+    // The point of the split: after the same half second, a brighter scene is further along than a darker one.
+    {
+        Sim up, down;
+        up.Run(3.0f, 120, 60.0f);
+        down.Run(1.0f, 120, 60.0f);
+        up.Run(1.0f, 30, 60.0f);
+        down.Run(3.0f, 30, 60.0f);
+        CHECK(std::fabs(Ev(up.eased, 3.0f)) > 2.0f * std::fabs(Ev(down.eased, 1.0f)));
+    }
+
+    // One side off (0 s) follows at once that way and still eases the other.
+    {
+        Sim sim;
+        sim.tauBrighter = 0.0f;
+        sim.Run(3.0f, 60, 60.0f);
+        sim.Run(1.0f, 1, 60.0f);
+        CHECK(Near(sim.eased, 1.0f));
+        sim.Run(3.0f, 1, 60.0f);
+        CHECK(sim.eased < 1.2f);
     }
 
     if (fails == 0)

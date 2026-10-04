@@ -25,8 +25,16 @@ void BeginFrameNow(Backend& gpu, const ::Config& cfg, unsigned int width, unsign
     RunState& run = TheRun();
 
     // Each slider in its own EV: Automatic around its 5x neutral, Game exposure around 1x.
-    const StartPoints start { EvForTrim(DlssNr::AutoTrimEffective(cfg)),
-                              EvForTrim(cfg.DlssNrWhitePointTrim.value_or_default(), kGameExposureNeutralTrim) };
+    // With Trim anchors the Trim in force is the table's at this base white point, not the slider's (which they replace).
+    const float autoTrim = DlssNrTrim::TrimForKey(
+        situation.source == 3 ? baseWhitePoint : 0.0f, DlssNr::AutoTrimEffective(cfg),
+        DlssNrTrim::Parse(cfg.DlssNrAutoExposureTrimAnchors.value_or_default()),
+        cfg.DlssNrAutoExposureTrimPreview.value_or_default());
+    const float gameTrim = DlssNrTrim::TrimForKey(
+        situation.source == 1 ? baseWhitePoint : 0.0f, cfg.DlssNrWhitePointTrim.value_or_default(),
+        DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()),
+        cfg.DlssNrGameExposureTrimPreview.value_or_default());
+    const StartPoints start { EvForTrim(autoTrim), EvForTrim(gameTrim, kGameExposureNeutralTrim) };
 
     const FrameEvents events =
         BeginFrame(run, gpu, start, width, height, situation, baseWhitePoint, evaluation, GetTickCount64());
@@ -88,10 +96,9 @@ ExposureCalibrationStatus ExposureCalibration()
     s.unavailable = Cal::BlockerText(blocker);
     s.measure = run.measuring;
 
-    // PollLocked answers for Tune; a measure differs only in what it ignores (Availability's `measuring`).
-    const Cal::Blocker measureBlocker = blocker == Cal::Blocker::NrStopped ? blocker : run.measureBlocker;
-    s.measureAvailable = measureBlocker == Cal::Blocker::None;
-    s.measureUnavailable = Cal::BlockerText(measureBlocker);
+    // A Tune and a Measure detail are blocked by the same things.
+    s.measureAvailable = s.available;
+    s.measureUnavailable = s.unavailable;
 
     // One run at a time: while either kind runs, the other waits; and a Tune result still offered is not cleared by a
     // measure.
@@ -145,6 +152,7 @@ ExposureCalibrationStatus ExposureCalibration()
     s.passes = sweep.Passes();
     s.aborted = Cal::StopText(sweep);
     s.currentEv = Cal::Tidy(sweep.CurrentEv());
+    s.baseWhitePoint = sweep.FrozenBase();
     s.source = run.source;
 
     if (s.finished)

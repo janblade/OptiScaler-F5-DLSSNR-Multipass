@@ -81,7 +81,6 @@ struct RunState
     bool startRequested = false;
     uint32_t source = 3;                  // the panel a run was started from: 3 Automatic, 1 Game exposure
     Blocker blocker = Blocker::NrStopped; // why a run cannot start or go on, as of the last wanted evaluation
-    Blocker measureBlocker = Blocker::NrStopped; // the same for "Measure detail"
     const char* startError = "";          // why the last start did not happen, "" if it did
     // The run (or the start asked for) is a Measure detail, not a Tune. Atomic: Follow's easing reads it lock-free
     // (HoldsFollow).
@@ -402,8 +401,7 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
     }
 
     run.blocker = Availability(situation);
-    run.measureBlocker = Availability(situation, true);
-    const Blocker blocker = run.measuring ? run.measureBlocker : run.blocker;
+    const Blocker blocker = run.blocker;
 
     // A measured evaluation that never reached the stats pass (a failed evaluate, another path): its ticket is
     // returned empty, so the sweep does not wait for it.

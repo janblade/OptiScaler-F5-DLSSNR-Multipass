@@ -251,13 +251,6 @@ Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool au
     // Where NR runs without a Tune: not Before SR under Ray Reconstruction, so no wait.
     s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() && g_vk.beforeSrPlacement;
 
-    if (s.source == 1)
-        s.anchors = !DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()).empty() ||
-                    cfg.DlssNrGameExposureTrimPreview.value_or_default();
-    else
-        s.anchors = !DlssNrTrim::Parse(cfg.DlssNrAutoExposureTrimAnchors.value_or_default()).empty() ||
-                    cfg.DlssNrAutoExposureTrimPreview.value_or_default();
-
     return s;
 }
 

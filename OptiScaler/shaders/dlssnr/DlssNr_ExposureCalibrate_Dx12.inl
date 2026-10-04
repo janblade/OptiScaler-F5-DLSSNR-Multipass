@@ -150,13 +150,6 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
     // Where NR runs without a Tune: not Before SR under Ray Reconstruction or an unsupported colour layout, so no wait.
     s.beforeSrSet = cfg.DlssNrRunBeforeSr.value_or_default() && g_nr.beforeSrPlacement;
 
-    if (s.source == 1)
-        s.anchors = !DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()).empty() ||
-                    cfg.DlssNrGameExposureTrimPreview.value_or_default();
-    else
-        s.anchors = !DlssNrTrim::Parse(cfg.DlssNrAutoExposureTrimAnchors.value_or_default()).empty() ||
-                    cfg.DlssNrAutoExposureTrimPreview.value_or_default();
-
     return s;
 }
 

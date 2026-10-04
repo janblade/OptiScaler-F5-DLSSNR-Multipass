@@ -143,6 +143,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGOutput.set_from_config(FGOutput::DLSSG);
             }
 
+            FGStreamlineIgnoreOTA.set_from_config(readBool("FrameGen", "StreamlineIgnoreOTA"));
+
             const bool canUseNvngxReplacement =
                 FGInput.value_or_default() == FGInput::NvngxFG || FGOutput.value_or_default() == FGOutput::DLSSG;
 
@@ -470,7 +472,20 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
             DlssNrAutoExposureTrim.set_from_config(readFloat("DlssNr", "AutoExposureTrim"));
             DlssNrAutoExposureShadowProtection.set_from_config(readFloat("DlssNr", "AutoExposureShadowProtection"));
+            DlssNrAutoExposureMeter.set_from_config(readUInt("DlssNr", "AutoExposureMeter"));
+            DlssNrAutoExposureMeterLowPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterLowPercent"));
+            DlssNrAutoExposureMeterHighPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterHighPercent"));
+            DlssNrAutoExposureAdaptBrighterSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptBrighterSeconds"));
+            DlssNrAutoExposureAdaptDarkerSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptDarkerSeconds"));
             DlssNrAutoExposureAdaptSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptSeconds"));
+            // An ini from before the two speeds were split keeps its one speed both ways.
+            if (DlssNrAutoExposureAdaptSeconds.has_value())
+            {
+                if (!DlssNrAutoExposureAdaptBrighterSeconds.has_value())
+                    DlssNrAutoExposureAdaptBrighterSeconds = DlssNrAutoExposureAdaptSeconds.value();
+                if (!DlssNrAutoExposureAdaptDarkerSeconds.has_value())
+                    DlssNrAutoExposureAdaptDarkerSeconds = DlssNrAutoExposureAdaptSeconds.value();
+            }
             DlssNrAutoExposureFollowGame.set_from_config(readBool("DlssNr", "AutoExposureFollowGame"));
             DlssNrGameExposureTrimAnchors.set_from_config(readString("DlssNr", "GameExposureTrimAnchors"));
             DlssNrAutoExposureTrimAnchors.set_from_config(readString("DlssNr", "AutoExposureTrimAnchors"));
@@ -1150,6 +1165,9 @@ bool Config::SaveIni()
         }
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
 
+        ini.SetValue("FrameGen", "StreamlineIgnoreOTA",
+                     GetBoolValue(Instance()->FGStreamlineIgnoreOTA.value_for_config()).c_str());
+
         std::string FGNvngxReplacementString = "auto";
         if (auto FGNvngxReplacementHeld = Instance()->FGNvngxReplacement.value_for_config();
             FGNvngxReplacementHeld.has_value())
@@ -1452,8 +1470,18 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureShadowProtection",
                  GetFloatValue(Instance()->DlssNrAutoExposureShadowProtection.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "AutoExposureAdaptSeconds",
-                 GetFloatValue(Instance()->DlssNrAutoExposureAdaptSeconds.value_for_config()).c_str());
+    // The one speed both used to share is only read (and copied into both); drop it so a choice equal to a default is not
+    // overridden by it on the next load.
+    ini.Delete("DlssNr", "AutoExposureAdaptSeconds");
+    ini.SetValue("DlssNr", "AutoExposureMeter", GetIntValue(Instance()->DlssNrAutoExposureMeter.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoExposureMeterLowPercent",
+                 GetFloatValue(Instance()->DlssNrAutoExposureMeterLowPercent.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoExposureMeterHighPercent",
+                 GetFloatValue(Instance()->DlssNrAutoExposureMeterHighPercent.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoExposureAdaptBrighterSeconds",
+                 GetFloatValue(Instance()->DlssNrAutoExposureAdaptBrighterSeconds.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoExposureAdaptDarkerSeconds",
+                 GetFloatValue(Instance()->DlssNrAutoExposureAdaptDarkerSeconds.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureFollowGame",
                  GetBoolValue(Instance()->DlssNrAutoExposureFollowGame.value_for_config()).c_str());
     ini.SetValue("DlssNr", "GameExposureTrimAnchors",

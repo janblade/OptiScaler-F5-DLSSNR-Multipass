@@ -559,8 +559,19 @@ class Config
     // AutoExposureShadowProtection is the menu's "Ignore bright highlights" (percent).
     CustomOptional<float> DlssNrAutoExposureTrim { 5.0f };
     CustomOptional<float> DlssNrAutoExposureShadowProtection { 100.0f };
-    // AutoExposureAdaptSeconds is the menu's "Eye adaptation": how long Automatic takes to follow a change of the scene's
-    // brightness, as a time constant in seconds; 0 = at once. See shaders/dlssnr/DlssNr_ExposureAdapt.h.
+    // AutoExposureMeter is the menu's "Meter": 0 the plain average with the highlight knee above (AutoExposureShadowProtection),
+    // 1 the log-average between two percentiles of brightness, as Unreal and Unity HDRP meter (the Low / High percent are the
+    // window). Default 1 (user decision 2026-10-03, after NBA 2K27: "looking good, the image quality even upped"); an ini
+    // that sets 0 keeps the plain average. See shaders/dlssnr/DlssNr_ExposureMeter.h.
+    CustomOptional<uint32_t> DlssNrAutoExposureMeter { 1 };
+    CustomOptional<float> DlssNrAutoExposureMeterLowPercent { 10.0f };
+    CustomOptional<float> DlssNrAutoExposureMeterHighPercent { 90.0f };
+    // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
+    // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
+    // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.
+    CustomOptional<float> DlssNrAutoExposureAdaptBrighterSeconds { 0.5f };
+    CustomOptional<float> DlssNrAutoExposureAdaptDarkerSeconds { 1.5f };
+    // The single speed both used to share: read, and copied into both new keys when they are absent. Never written.
     CustomOptional<float> DlssNrAutoExposureAdaptSeconds { 1.0f };
     // Automatic follows the game's own exposure times a calibration learned against Automatic's meter (Vulkan: a few
     // frames behind). See DlssNr_FollowGame.h. Unset (auto) = on for a known unexposed game (DlssNr_AutoTrimDefault.h
@@ -938,6 +949,9 @@ class Config
     CustomOptional<std::string, NoDefault> FGDLSSGAmpereMfgKernelImage;     // Auto / PTX / Cubin
     CustomOptional<bool> FGDLSSGAmpereMfgHardwareBilinear { false };        // Optional approximate sampling (SM86 only)
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
+    // Keeps Streamline from picking up the driver's OTA/downloaded plugins; only files in
+    // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll
+    CustomOptional<bool> FGStreamlineIgnoreOTA { false };
     CustomOptional<FGNvngxReplacement> FGNvngxReplacement { FGNvngxReplacement::None };
     CustomOptional<bool> FGDrawUIOverFG { false };
     CustomOptional<bool> FGUIPremultipliedAlpha { true };

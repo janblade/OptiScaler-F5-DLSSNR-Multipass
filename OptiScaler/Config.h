@@ -585,6 +585,12 @@ class Config
     // depth finder's depth and the optical flow as its depth and motion (Story 4 of the native input producer). Needs
     // FinishedPicture and Enabled on as well. Changes apply at once.
     CustomOptional<bool> DlssNrNativeInput { false };
+    // NativeUpscaler: experimental (Story F). Instead of feeding DLSS-NR's finished-picture seam directly, presents the
+    // finder's depth and the optical flow to a real FSR backend as a synthetic upscaler call (render size == output size,
+    // no jitter -- a stabiliser/AA pass, not reconstruction), so the menu's upscaler status and, above all, frame
+    // generation can work in a game that never calls an upscaler. Separate from and mutually exclusive with NativeInput.
+    // See native/VirtualUpscalerDriver.h and plans/2026-10-04-native-input-multi-api.md, Story F. Changes apply at once.
+    CustomOptional<bool> DlssNrNativeUpscaler { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

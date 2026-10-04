@@ -78,6 +78,8 @@ PFN_RSSetViewports o_RSSetViewports = nullptr;
 PFN_ExecuteIndirect o_ExecuteIndirect = nullptr;
 PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 PFN_Dispatch o_Dispatch = nullptr;
+typedef HRESULT(STDMETHODCALLTYPE* PFN_Close)(ID3D12GraphicsCommandList* This);
+PFN_Close o_Close = nullptr;
 
 struct DrawStats
 {
@@ -529,6 +531,37 @@ void OnIndirect(ID3D12GraphicsCommandList* This, UINT MaxCommandCount)
     }
 }
 
+// A list that ends while still bound to the picked buffer never unbinds it, so the stretch drawn since its last clear (Cyberpunk
+// draws the world after the clear and ends the list there) is copied here, in the state the view says the buffer is in.
+void OnClose(ID3D12GraphicsCommandList* This)
+{
+    if (!g_active.load(std::memory_order_relaxed))
+        return;
+
+    std::lock_guard lock(g_mutex);
+
+    const auto found = g_lists.find(This);
+
+    if (found == g_lists.end() || found->second.stats == nullptr)
+        return;
+
+    Stats* stats = found->second.stats;
+
+    if (g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid && stats->resource != nullptr &&
+        g_pick.id == (uint64_t) (size_t) stats->resource && stats->current.drawcalls != 0)
+    {
+        if (stats->current.vertices >= g_bestSnapshotVertices)
+        {
+            g_bestSnapshotVertices = stats->current.vertices;
+            RecordSnapshot(This, stats->resource, stats->readOnlyDepth);
+        }
+
+        stats->current = DrawStats {};
+    }
+
+    found->second.stats = nullptr;
+}
+
 // ---- Game command lists with a vtable of their own ----------------------------------------------------------------------
 // Witcher 3 (2026-10-04): its command lists each carry a copy of the vtable in heap memory whose DrawInstanced and
 // DrawIndexedInstanced point into another module's code, while OMSetRenderTargets is the runtime's own. The hooks on the
@@ -542,11 +575,12 @@ enum Slot
     kViewports,
     kClear,
     kIndirect,
+    kClose,
     kSlots
 };
-constexpr int kSlotIndex[kSlots] = { 12, 13, 21, 47, 59 };
+constexpr int kSlotIndex[kSlots] = { 12, 13, 21, 47, 59, 9 };
 constexpr const char* kSlotName[kSlots] = { "DrawInstanced", "DrawIndexedInstanced", "RSSetViewports",
-                                            "ClearDepthStencilView", "ExecuteIndirect" };
+                                            "ClearDepthStencilView", "ExecuteIndirect", "Close" };
 
 struct TablePatch
 {
@@ -620,9 +654,19 @@ void STDMETHODCALLTYPE hkTableExecuteIndirect(ID3D12GraphicsCommandList* This, I
                  CountBufferOffset);
 }
 
+HRESULT STDMETHODCALLTYPE hkTableClose(ID3D12GraphicsCommandList* This)
+{
+    OnClose(This);
+
+    if (auto previous = (PFN_Close) PreviousOf(This, kClose))
+        return previous(This);
+
+    return E_FAIL;
+}
+
 const PVOID kTableHooks[kSlots] = { (PVOID) hkTableDrawInstanced, (PVOID) hkTableDrawIndexedInstanced,
                                     (PVOID) hkTableRSSetViewports, (PVOID) hkTableClearDepthStencilView,
-                                    (PVOID) hkTableExecuteIndirect };
+                                    (PVOID) hkTableExecuteIndirect, (PVOID) hkTableClose };
 
 void PatchListTable(ID3D12GraphicsCommandList* list)
 {
@@ -817,6 +861,13 @@ void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12
                       CountBufferOffset);
 }
 
+HRESULT STDMETHODCALLTYPE hkClose(ID3D12GraphicsCommandList* This)
+{
+    OnClose(This);
+
+    return o_Close(This);
+}
+
 void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX, UINT ThreadGroupCountY,
                                     UINT ThreadGroupCountZ)
 {
@@ -916,6 +967,7 @@ void Install(ID3D12Device* device)
     o_ExecuteIndirect = (PFN_ExecuteIndirect) listTable[59];
     o_ExecuteBundle = (PFN_ExecuteBundle) listTable[27];
     o_Dispatch = (PFN_Dispatch) listTable[14];
+    o_Close = (PFN_Close) listTable[9];
     g_installTable = listTable;
 
     // Is a bundle's DrawInstanced the same code as the direct list's? If not, draws recorded in bundles are invisible to the
@@ -960,6 +1012,7 @@ void Install(ID3D12Device* device)
     DetourAttach(&(PVOID&) o_ExecuteIndirect, hkExecuteIndirect);
     DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
     DetourAttach(&(PVOID&) o_Dispatch, hkDispatch);
+    DetourAttach(&(PVOID&) o_Close, hkClose);
 
     const auto result = DetourTransactionCommit();
 
@@ -981,6 +1034,7 @@ void Install(ID3D12Device* device)
         o_ExecuteIndirect = nullptr;
         o_ExecuteBundle = nullptr;
         o_Dispatch = nullptr;
+        o_Close = nullptr;
         return;
     }
 

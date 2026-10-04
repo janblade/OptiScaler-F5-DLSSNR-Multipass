@@ -119,12 +119,30 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
 
 // Copies `resource` (the picked buffer) into the frame's D3D11-side slot, recreating it if the geometry changed.
 void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Resource* resource, uint32_t width,
-                  uint32_t height, DXGI_FORMAT format)
+                  uint32_t height, DXGI_FORMAT format, const char* where)
 {
+    static int calls = 0;
+
+    if (calls < 8 || calls % 200 == 0)
+        LOG_INFO("Depth finder (D3D11): TakeSnapshot call {} from {}, {:X} {}x{} format {}", calls, where,
+                 (size_t) resource, width, height, (int) format);
+
+    ++calls;
+
     DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN, view = DXGI_FORMAT_UNKNOWN;
 
     if (!native::SharedDepthFormats(format, &typeless, &view))
+    {
+        static bool loggedFormatFail = false;
+
+        if (!loggedFormatFail)
+        {
+            loggedFormatFail = true;
+            LOG_WARN("Depth finder (D3D11): format {} does not map to a shareable depth format, no copy", (int) format);
+        }
+
         return;
+    }
 
     std::lock_guard lock(g_mutex);
 
@@ -145,9 +163,13 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
 
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &g_copy)))
+        const HRESULT hr = device->CreateTexture2D(&desc, nullptr, &g_copy);
+
+        if (FAILED(hr))
         {
             g_copy = nullptr;
+            LOG_WARN("Depth finder (D3D11): creating the {}x{} typeless-{} copy texture failed: {:X}", width, height,
+                     (int) typeless, (UINT) hr);
             return;
         }
 
@@ -192,7 +214,7 @@ void OnBound(ID3D11DeviceContext* context, ID3D11DepthStencilView* view)
         {
             tex->GetDesc(&desc);
             tex->Release();
-            TakeSnapshot(context, dev, snapResource, desc.Width, desc.Height, desc.Format);
+            TakeSnapshot(context, dev, snapResource, desc.Width, desc.Height, desc.Format, "unbind");
         }
     }
 
@@ -244,7 +266,7 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D11DeviceContext* This, ID3D11
 
                 if (dev != nullptr)
                 {
-                    TakeSnapshot(This, dev, resource, buffer.width, buffer.height, (DXGI_FORMAT) buffer.format);
+                    TakeSnapshot(This, dev, resource, buffer.width, buffer.height, (DXGI_FORMAT) buffer.format, "clear");
                     dev->Release();
                 }
             }
@@ -441,7 +463,7 @@ void OnPresent(IDXGISwapChain* swapChain)
 
                 if (dev != nullptr)
                 {
-                    TakeSnapshot(g_context, dev, snapResource, texDesc.Width, texDesc.Height, texDesc.Format);
+                    TakeSnapshot(g_context, dev, snapResource, texDesc.Width, texDesc.Height, texDesc.Format, "present");
                     dev->Release();
                 }
             }

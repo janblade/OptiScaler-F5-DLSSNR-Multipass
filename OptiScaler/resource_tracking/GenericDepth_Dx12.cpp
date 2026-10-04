@@ -13,7 +13,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <format>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -129,7 +131,6 @@ std::atomic<uint64_t> g_countDraws { 0 };              // every draw, whatever w
 std::atomic<uint64_t> g_countExecIndirect { 0 };       // every ExecuteIndirect, whatever was bound
 std::atomic<uint64_t> g_countExecBundle { 0 };         // every ExecuteBundle: draws recorded in a bundle are not seen by the
                                                        // direct list's draw hooks if the bundle's functions are other code
-PVOID* g_installTable = nullptr;                          // the vtable the hooks were read from
 std::atomic<uint64_t> g_countDispatch { 0 };           // every Dispatch (a game that renders through compute draws little)
 std::atomic<int> g_bundleSameDraw { -1 };              // 1 the bundle's Draw functions are the direct list's, 0 not, -1 unknown
 
@@ -427,61 +428,9 @@ void STDMETHODCALLTYPE hkCopyDescriptors(ID3D12Device* This, UINT NumDestDescrip
     }
 }
 
-void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT NumRenderTargetDescriptors,
-                                            const D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors,
-                                            BOOL RTsSingleHandleToDescriptorRange,
-                                            const D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
-{
-    static std::atomic<int> logged { 0 };
-
-    if (logged.load(std::memory_order_relaxed) < 4 && logged.fetch_add(1) < 4)
-    {
-        PVOID* table = *(PVOID**) This;
-        LOG_INFO("Depth finder: a game command list {:X} uses vtable {:X} (hooks were read from {:X}, {}); DrawInstanced {:X} "
-                 "(read {:X}), DrawIndexedInstanced {:X} (read {:X}), OMSetRenderTargets {:X} (read {:X})",
-                 (size_t) This, (size_t) table, (size_t) g_installTable, table == g_installTable ? "the same" : "a DIFFERENT one",
-                 (size_t) table[12], g_installTable ? (size_t) g_installTable[12] : 0, (size_t) table[13],
-                 g_installTable ? (size_t) g_installTable[13] : 0, (size_t) table[46],
-                 g_installTable ? (size_t) g_installTable[46] : 0);
-    }
-
-    if (g_active.load(std::memory_order_relaxed))
-    {
-        std::lock_guard lock(g_mutex);
-
-        Stats* bound = nullptr;
-
-        if (pDepthStencilDescriptor != nullptr)
-        {
-            const auto found = g_dsv.find(pDepthStencilDescriptor->ptr);
-
-            if (found != g_dsv.end() && found->second.resource != nullptr)
-            {
-                auto& stats = g_stats[found->second.resource];
-                stats.width = found->second.width;
-                stats.height = found->second.height;
-                stats.format = found->second.format;
-                bound = &stats;
-            }
-        }
-
-        g_lists[This].stats = bound;
-
-        g_countOmSet.fetch_add(1, std::memory_order_relaxed);
-        if (pDepthStencilDescriptor != nullptr)
-        {
-            g_countOmSetWithDepth.fetch_add(1, std::memory_order_relaxed);
-            if (bound == nullptr)
-                g_countOmSetUnknownDepth.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-
-    o_OMSetRenderTargets(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
-                         pDepthStencilDescriptor);
-}
-
-void STDMETHODCALLTYPE hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
-                                        const D3D12_VIEWPORT* pViewports)
+// What each hook does, apart from calling on to the original: shared by the hooks on the runtime's own functions above and
+// by the thunks that go into a game command list's private vtable below.
+void OnViewports(ID3D12GraphicsCommandList* This, UINT NumViewports, const D3D12_VIEWPORT* pViewports)
 {
     // Only the main viewport matters, as in ReShade's add-on.
     if (NumViewports > 0 && pViewports != nullptr && g_active.load(std::memory_order_relaxed))
@@ -489,14 +438,10 @@ void STDMETHODCALLTYPE hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT Nu
         std::lock_guard lock(g_mutex);
         g_lists[This].viewportWidth = pViewports[0].Width;
     }
-
-    o_RSSetViewports(This, NumViewports, pViewports);
 }
 
-void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
-                                               D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView,
-                                               D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil,
-                                               UINT NumRects, const D3D12_RECT* pRects)
+void OnClear(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView, D3D12_CLEAR_FLAGS ClearFlags,
+             FLOAT Depth)
 {
     if ((ClearFlags & D3D12_CLEAR_FLAG_DEPTH) != 0 && g_active.load(std::memory_order_relaxed))
     {
@@ -548,6 +493,262 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
             }
         }
     }
+}
+
+void OnIndirect(ID3D12GraphicsCommandList* This, UINT MaxCommandCount)
+{
+    if (g_active.load(std::memory_order_relaxed))
+    {
+        g_countExecIndirect.fetch_add(1, std::memory_order_relaxed);
+
+        std::lock_guard lock(g_mutex);
+
+        const auto found = g_lists.find(This);
+
+        if (found != g_lists.end() && found->second.stats != nullptr)
+        {
+            auto* stats = found->second.stats;
+            AddDraw(stats->total, 0, MaxCommandCount, true);
+            AddDraw(stats->current, 0, MaxCommandCount, true);
+            stats->current.lastViewportWidth = found->second.viewportWidth;
+        }
+    }
+}
+
+// ---- Game command lists with a vtable of their own ----------------------------------------------------------------------
+// Witcher 3 (2026-10-04): its command lists each carry a copy of the vtable in heap memory whose DrawInstanced and
+// DrawIndexedInstanced point into another module's code, while OMSetRenderTargets is the runtime's own. The hooks on the
+// runtime's functions then never see a draw. So the first time a list is seen, an entry of its table that is not the
+// runtime's own is replaced by a thunk that counts and calls what was there. A table whose entries are the runtime's own is
+// left alone: the hooks above already cover it, and patching it as well would count every draw twice.
+enum Slot
+{
+    kDraw = 0,
+    kDrawIndexed,
+    kViewports,
+    kClear,
+    kIndirect,
+    kSlots
+};
+constexpr int kSlotIndex[kSlots] = { 12, 13, 21, 47, 59 };
+constexpr const char* kSlotName[kSlots] = { "DrawInstanced", "DrawIndexedInstanced", "RSSetViewports",
+                                            "ClearDepthStencilView", "ExecuteIndirect" };
+
+struct TablePatch
+{
+    PVOID previous[kSlots] {};
+};
+
+PVOID* g_installTable = nullptr; // the runtime's own table, read at install
+std::unordered_map<PVOID*, TablePatch> g_patched;
+std::unordered_map<PVOID*, bool> g_examined;
+int g_patchLogs = 0;
+
+PVOID PreviousOf(ID3D12GraphicsCommandList* list, int slot)
+{
+    PVOID* table = *(PVOID**) list;
+    std::lock_guard lock(g_mutex);
+    const auto found = g_patched.find(table);
+    return found != g_patched.end() ? found->second.previous[slot] : nullptr;
+}
+
+void STDMETHODCALLTYPE hkTableDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance,
+                                            UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
+{
+    OnDraw(This, VertexCountPerInstance, InstanceCount);
+
+    if (auto previous = (PFN_DrawInstanced) PreviousOf(This, kDraw))
+        previous(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+}
+
+void STDMETHODCALLTYPE hkTableDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT IndexCountPerInstance,
+                                                   UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
+                                                   UINT StartInstanceLocation)
+{
+    OnDraw(This, IndexCountPerInstance, InstanceCount);
+
+    if (auto previous = (PFN_DrawIndexedInstanced) PreviousOf(This, kDrawIndexed))
+        previous(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
+                 StartInstanceLocation);
+}
+
+void STDMETHODCALLTYPE hkTableRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
+                                             const D3D12_VIEWPORT* pViewports)
+{
+    OnViewports(This, NumViewports, pViewports);
+
+    if (auto previous = (PFN_RSSetViewports) PreviousOf(This, kViewports))
+        previous(This, NumViewports, pViewports);
+}
+
+void STDMETHODCALLTYPE hkTableClearDepthStencilView(ID3D12GraphicsCommandList* This,
+                                                    D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView,
+                                                    D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil,
+                                                    UINT NumRects, const D3D12_RECT* pRects)
+{
+    if (g_active.load(std::memory_order_relaxed))
+        OnClear(This, DepthStencilView, ClearFlags, Depth);
+
+    if (auto previous = (PFN_ClearDepthStencilView) PreviousOf(This, kClear))
+        previous(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+}
+
+void STDMETHODCALLTYPE hkTableExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12CommandSignature* pCommandSignature,
+                                              UINT MaxCommandCount, ID3D12Resource* pArgumentBuffer,
+                                              UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer,
+                                              UINT64 CountBufferOffset)
+{
+    if (g_active.load(std::memory_order_relaxed))
+        OnIndirect(This, MaxCommandCount);
+
+    if (auto previous = (PFN_ExecuteIndirect) PreviousOf(This, kIndirect))
+        previous(This, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer,
+                 CountBufferOffset);
+}
+
+const PVOID kTableHooks[kSlots] = { (PVOID) hkTableDrawInstanced, (PVOID) hkTableDrawIndexedInstanced,
+                                    (PVOID) hkTableRSSetViewports, (PVOID) hkTableClearDepthStencilView,
+                                    (PVOID) hkTableExecuteIndirect };
+
+void PatchListTable(ID3D12GraphicsCommandList* list)
+{
+    PVOID* table = *(PVOID**) list;
+
+    if (table == nullptr || table == g_installTable)
+        return;
+
+    {
+        std::lock_guard lock(g_mutex);
+
+        if (!g_examined.emplace(table, true).second)
+            return;
+    }
+
+    TablePatch patch;
+    bool any = false;
+
+    for (int slot = 0; slot < kSlots; ++slot)
+    {
+        PVOID entry = table[kSlotIndex[slot]];
+
+        if (g_installTable != nullptr && entry != g_installTable[kSlotIndex[slot]] && entry != kTableHooks[slot])
+        {
+            patch.previous[slot] = entry;
+            any = true;
+        }
+    }
+
+    if (!any)
+        return;
+
+    {
+        std::lock_guard lock(g_mutex);
+        g_patched[table] = patch; // before the entries change, so a thunk that runs at once finds what to call
+    }
+
+    int patched = 0;
+
+    for (int slot = 0; slot < kSlots; ++slot)
+    {
+        if (patch.previous[slot] == nullptr)
+            continue;
+
+        PVOID* entry = &table[kSlotIndex[slot]];
+        DWORD old = 0;
+
+        if (VirtualProtect(entry, sizeof(PVOID), PAGE_READWRITE, &old))
+        {
+            InterlockedExchangePointer(entry, kTableHooks[slot]);
+            DWORD ignored = 0;
+            VirtualProtect(entry, sizeof(PVOID), old, &ignored);
+            ++patched;
+        }
+    }
+
+    if (g_patchLogs++ < 6)
+    {
+        std::string which;
+
+        for (int slot = 0; slot < kSlots; ++slot)
+            if (patch.previous[slot] != nullptr)
+                which += std::format(" {}={:X}", kSlotName[slot], (size_t) patch.previous[slot]);
+
+        LOG_INFO("Depth finder: a game command list has a vtable of its own ({:X}); {} entries now count through us, they "
+                 "pointed at:{}",
+                 (size_t) table, patched, which);
+    }
+}
+
+void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT NumRenderTargetDescriptors,
+                                            const D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors,
+                                            BOOL RTsSingleHandleToDescriptorRange,
+                                            const D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
+{
+    static std::atomic<int> logged { 0 };
+
+    if (logged.load(std::memory_order_relaxed) < 4 && logged.fetch_add(1) < 4)
+    {
+        PVOID* table = *(PVOID**) This;
+        LOG_INFO("Depth finder: a game command list {:X} uses vtable {:X} (hooks were read from {:X}, {}); DrawInstanced {:X} "
+                 "(read {:X}), DrawIndexedInstanced {:X} (read {:X}), OMSetRenderTargets {:X} (read {:X})",
+                 (size_t) This, (size_t) table, (size_t) g_installTable, table == g_installTable ? "the same" : "a DIFFERENT one",
+                 (size_t) table[12], g_installTable ? (size_t) g_installTable[12] : 0, (size_t) table[13],
+                 g_installTable ? (size_t) g_installTable[13] : 0, (size_t) table[46],
+                 g_installTable ? (size_t) g_installTable[46] : 0);
+    }
+
+    if (g_active.load(std::memory_order_relaxed))
+        PatchListTable(This);
+
+    if (g_active.load(std::memory_order_relaxed))
+    {
+        std::lock_guard lock(g_mutex);
+
+        Stats* bound = nullptr;
+
+        if (pDepthStencilDescriptor != nullptr)
+        {
+            const auto found = g_dsv.find(pDepthStencilDescriptor->ptr);
+
+            if (found != g_dsv.end() && found->second.resource != nullptr)
+            {
+                auto& stats = g_stats[found->second.resource];
+                stats.width = found->second.width;
+                stats.height = found->second.height;
+                stats.format = found->second.format;
+                bound = &stats;
+            }
+        }
+
+        g_lists[This].stats = bound;
+
+        g_countOmSet.fetch_add(1, std::memory_order_relaxed);
+        if (pDepthStencilDescriptor != nullptr)
+        {
+            g_countOmSetWithDepth.fetch_add(1, std::memory_order_relaxed);
+            if (bound == nullptr)
+                g_countOmSetUnknownDepth.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    o_OMSetRenderTargets(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
+                         pDepthStencilDescriptor);
+}
+
+void STDMETHODCALLTYPE hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
+                                        const D3D12_VIEWPORT* pViewports)
+{
+    OnViewports(This, NumViewports, pViewports);
+
+    o_RSSetViewports(This, NumViewports, pViewports);
+}
+
+void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
+                                               D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView,
+                                               D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil,
+                                               UINT NumRects, const D3D12_RECT* pRects)
+{
+    OnClear(This, DepthStencilView, ClearFlags, Depth);
 
     o_ClearDepthStencilView(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
 }
@@ -576,22 +777,7 @@ void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12
                                          UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer,
                                          UINT64 CountBufferOffset)
 {
-    if (g_active.load(std::memory_order_relaxed))
-    {
-        g_countExecIndirect.fetch_add(1, std::memory_order_relaxed);
-
-        std::lock_guard lock(g_mutex);
-
-        const auto found = g_lists.find(This);
-
-        if (found != g_lists.end() && found->second.stats != nullptr)
-        {
-            auto* stats = found->second.stats;
-            AddDraw(stats->total, 0, MaxCommandCount, true);
-            AddDraw(stats->current, 0, MaxCommandCount, true);
-            stats->current.lastViewportWidth = found->second.viewportWidth;
-        }
-    }
+    OnIndirect(This, MaxCommandCount);
 
     o_ExecuteIndirect(This, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer,
                       CountBufferOffset);

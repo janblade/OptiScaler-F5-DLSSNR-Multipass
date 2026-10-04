@@ -115,7 +115,11 @@ AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
 
     if (!_picture.Matches(desc.Width, desc.Height, pictureFormat))
     {
-        if (!_picture.Create(_device11, desc.Width, desc.Height, pictureFormat, D3D11_BIND_SHADER_RESOURCE) ||
+        // DLSS-NR's compose pass writes its result straight back into `color` through a UAV (the same in-place
+        // pattern as the D3D12 finished-picture path): shader-resource-only here left the D3D12 side unable to
+        // create that view, so the model ran (GPU time, "successful" dispatch) but its write never landed anywhere.
+        if (!_picture.Create(_device11, desc.Width, desc.Height, pictureFormat,
+                             D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS) ||
             !_picture.Open(_device12))
         {
             _error = _picture.Error();

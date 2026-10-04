@@ -119,6 +119,14 @@ AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
             !_picture.Open(_device12))
         {
             _error = _picture.Error();
+            static bool loggedPictureFail = false;
+
+            if (!loggedPictureFail)
+            {
+                loggedPictureFail = true;
+                LOG_WARN("Native motion (D3D11): sharing the picture failed: {}", _error);
+            }
+
             return AcquireStatus::Unavailable;
         }
     }
@@ -141,6 +149,26 @@ AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
             depthReady = true;
             _context11->CopyResource(_depth.Tex11(), depthSnap.resource);
         }
+        else
+        {
+            static bool loggedDepthFail = false;
+
+            if (!loggedDepthFail)
+            {
+                loggedDepthFail = true;
+                LOG_WARN("Native motion (D3D11): sharing the depth copy failed ({}x{}, typeless format {}): {}",
+                         depthSnap.width, depthSnap.height, (int) depthSnap.typelessFormat, _depth.Error());
+            }
+        }
+    }
+    else
+    {
+        static uint64_t noDepthSnapStreak = 0;
+
+        if (++noDepthSnapStreak % 300 == 0)
+            LOG_WARN("Native motion (D3D11): the depth finder has no snapshot for this frame ({} frames running without "
+                     "one)",
+                     noDepthSnapStreak);
     }
 
     const uint64_t signalValue = _fence.Next();

@@ -56,6 +56,8 @@ typedef void(STDMETHODCALLTYPE* PFN_DrawIndexedInstanced)(ID3D12GraphicsCommandL
                                                           INT BaseVertexLocation, UINT StartInstanceLocation);
 typedef void(STDMETHODCALLTYPE* PFN_RSSetViewports)(ID3D12GraphicsCommandList* This, UINT NumViewports,
                                                     const D3D12_VIEWPORT* pViewports);
+typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX, UINT ThreadGroupCountY,
+                                              UINT ThreadGroupCountZ);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteBundle)(ID3D12GraphicsCommandList* This,
                                                    ID3D12GraphicsCommandList* pCommandList);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteIndirect)(ID3D12GraphicsCommandList* This,
@@ -73,6 +75,7 @@ PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
 PFN_RSSetViewports o_RSSetViewports = nullptr;
 PFN_ExecuteIndirect o_ExecuteIndirect = nullptr;
 PFN_ExecuteBundle o_ExecuteBundle = nullptr;
+PFN_Dispatch o_Dispatch = nullptr;
 
 struct DrawStats
 {
@@ -126,6 +129,8 @@ std::atomic<uint64_t> g_countDraws { 0 };              // every draw, whatever w
 std::atomic<uint64_t> g_countExecIndirect { 0 };       // every ExecuteIndirect, whatever was bound
 std::atomic<uint64_t> g_countExecBundle { 0 };         // every ExecuteBundle: draws recorded in a bundle are not seen by the
                                                        // direct list's draw hooks if the bundle's functions are other code
+PVOID* g_installTable = nullptr;                          // the vtable the hooks were read from
+std::atomic<uint64_t> g_countDispatch { 0 };           // every Dispatch (a game that renders through compute draws little)
 std::atomic<int> g_bundleSameDraw { -1 };              // 1 the bundle's Draw functions are the direct list's, 0 not, -1 unknown
 
 // The copy of the picked depth buffer for the overlay (guarded by g_mutex like the rest).
@@ -427,6 +432,19 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
                                             BOOL RTsSingleHandleToDescriptorRange,
                                             const D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
+    static std::atomic<int> logged { 0 };
+
+    if (logged.load(std::memory_order_relaxed) < 4 && logged.fetch_add(1) < 4)
+    {
+        PVOID* table = *(PVOID**) This;
+        LOG_INFO("Depth finder: a game command list {:X} uses vtable {:X} (hooks were read from {:X}, {}); DrawInstanced {:X} "
+                 "(read {:X}), DrawIndexedInstanced {:X} (read {:X}), OMSetRenderTargets {:X} (read {:X})",
+                 (size_t) This, (size_t) table, (size_t) g_installTable, table == g_installTable ? "the same" : "a DIFFERENT one",
+                 (size_t) table[12], g_installTable ? (size_t) g_installTable[12] : 0, (size_t) table[13],
+                 g_installTable ? (size_t) g_installTable[13] : 0, (size_t) table[46],
+                 g_installTable ? (size_t) g_installTable[46] : 0);
+    }
+
     if (g_active.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(g_mutex);
@@ -579,6 +597,15 @@ void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12
                       CountBufferOffset);
 }
 
+void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX, UINT ThreadGroupCountY,
+                                    UINT ThreadGroupCountZ)
+{
+    if (g_active.load(std::memory_order_relaxed))
+        g_countDispatch.fetch_add(1, std::memory_order_relaxed);
+
+    o_Dispatch(This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+}
+
 void STDMETHODCALLTYPE hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12GraphicsCommandList* pCommandList)
 {
     if (g_active.load(std::memory_order_relaxed))
@@ -598,10 +625,11 @@ void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, cons
              pictureHeight, sorted.size(), pick.valid ? "" : ", none qualifies");
     LOG_INFO("Depth finder:   hooks so far: {} depth views created, {} OMSetRenderTargets ({} with a depth descriptor, "
              "{} of those unknown to us), {} draws, {} ExecuteIndirect, {} ExecuteBundle (bundle draw code is the direct "
-             "list's: {})",
+             "list's: {}), {} Dispatch",
              g_countDsvCreated.load(), g_countOmSet.load(), g_countOmSetWithDepth.load(),
              g_countOmSetUnknownDepth.load(), g_countDraws.load(), g_countExecIndirect.load(), g_countExecBundle.load(),
-             g_bundleSameDraw.load() < 0 ? "unknown" : g_bundleSameDraw.load() ? "yes" : "no");
+             g_bundleSameDraw.load() < 0 ? "unknown" : g_bundleSameDraw.load() ? "yes" : "no",
+             g_countDispatch.load());
 
     const size_t shown = std::min<size_t>(sorted.size(), 8);
 
@@ -667,6 +695,8 @@ void Install(ID3D12Device* device)
     o_ClearDepthStencilView = (PFN_ClearDepthStencilView) listTable[47];
     o_ExecuteIndirect = (PFN_ExecuteIndirect) listTable[59];
     o_ExecuteBundle = (PFN_ExecuteBundle) listTable[27];
+    o_Dispatch = (PFN_Dispatch) listTable[14];
+    g_installTable = listTable;
 
     // Is a bundle's DrawInstanced the same code as the direct list's? If not, draws recorded in bundles are invisible to the
     // draw hooks (a bundle inherits the caller's depth buffer, so they would have to be counted at ExecuteBundle).
@@ -709,6 +739,7 @@ void Install(ID3D12Device* device)
     DetourAttach(&(PVOID&) o_ClearDepthStencilView, hkClearDepthStencilView);
     DetourAttach(&(PVOID&) o_ExecuteIndirect, hkExecuteIndirect);
     DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
+    DetourAttach(&(PVOID&) o_Dispatch, hkDispatch);
 
     const auto result = DetourTransactionCommit();
 
@@ -729,6 +760,7 @@ void Install(ID3D12Device* device)
         o_ClearDepthStencilView = nullptr;
         o_ExecuteIndirect = nullptr;
         o_ExecuteBundle = nullptr;
+        o_Dispatch = nullptr;
         return;
     }
 

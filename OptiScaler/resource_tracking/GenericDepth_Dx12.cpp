@@ -1351,6 +1351,14 @@ static bool DrawDepthPreview(float boxWidth, float boxHeight)
 
     draw->AddRectFilled(origin, ImVec2(origin.x + boxWidth, origin.y + boxHeight), IM_COL32(0, 0, 0, 255));
 
+    // What the copy holds changes from frame to frame (the game's lists run in another order each frame, so the last copy
+    // is sometimes the whole scene and sometimes a partial pass). The preview keeps the fullest picture of the last moments:
+    // a new one replaces it when it covers nearly as much, and the kept one slowly gives way so a real change still shows.
+    static uint8_t cells[kRows * kCols] = {};
+    static float keptCoverage = 0.0f;
+    uint8_t fresh[kRows * kCols];
+    int covered = 0;
+
     for (int row = 0; row < kRows; ++row)
     {
         const uint32_t y = std::min<uint32_t>(g_backup.height - 1, (uint32_t) ((row + 0.5f) * g_backup.height / kRows));
@@ -1380,11 +1388,30 @@ static bool DrawDepthPreview(float boxWidth, float boxHeight)
             const float shade = std::log1p(near01 * 5000.0f) / std::log1p(5000.0f);
             const int level = (int) (shade * 255.0f + 0.5f);
 
+            fresh[row * kCols + col] = (uint8_t) level;
+
+            if (near01 > 1e-5f)
+                ++covered;
+        }
+    }
+
+    keptCoverage *= 0.98f;
+
+    if ((float) covered >= 0.85f * keptCoverage)
+    {
+        memcpy(cells, fresh, sizeof(cells));
+        keptCoverage = (float) covered;
+    }
+
+    for (int row = 0; row < kRows; ++row)
+        for (int col = 0; col < kCols; ++col)
+        {
+            const int level = cells[row * kCols + col];
+
             draw->AddRectFilled(ImVec2(origin.x + col * cellW, origin.y + row * cellH),
                                 ImVec2(origin.x + (col + 1) * cellW, origin.y + (row + 1) * cellH),
                                 IM_COL32(level, level, level, 255));
         }
-    }
 
     D3D12_RANGE none { 0, 0 };
     g_backup.readback->Unmap(0, &none);

@@ -56,6 +56,8 @@ typedef void(STDMETHODCALLTYPE* PFN_DrawIndexedInstanced)(ID3D12GraphicsCommandL
                                                           INT BaseVertexLocation, UINT StartInstanceLocation);
 typedef void(STDMETHODCALLTYPE* PFN_RSSetViewports)(ID3D12GraphicsCommandList* This, UINT NumViewports,
                                                     const D3D12_VIEWPORT* pViewports);
+typedef void(STDMETHODCALLTYPE* PFN_ExecuteBundle)(ID3D12GraphicsCommandList* This,
+                                                   ID3D12GraphicsCommandList* pCommandList);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteIndirect)(ID3D12GraphicsCommandList* This,
                                                      ID3D12CommandSignature* pCommandSignature, UINT MaxCommandCount,
                                                      ID3D12Resource* pArgumentBuffer, UINT64 ArgumentBufferOffset,
@@ -70,6 +72,7 @@ PFN_DrawInstanced o_DrawInstanced = nullptr;
 PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
 PFN_RSSetViewports o_RSSetViewports = nullptr;
 PFN_ExecuteIndirect o_ExecuteIndirect = nullptr;
+PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 
 struct DrawStats
 {
@@ -120,6 +123,10 @@ std::atomic<uint64_t> g_countOmSet { 0 };
 std::atomic<uint64_t> g_countOmSetWithDepth { 0 };     // an OMSetRenderTargets that carried a depth descriptor
 std::atomic<uint64_t> g_countOmSetUnknownDepth { 0 };  // ... of which the descriptor was not one the hooks had seen created
 std::atomic<uint64_t> g_countDraws { 0 };              // every draw, whatever was bound
+std::atomic<uint64_t> g_countExecIndirect { 0 };       // every ExecuteIndirect, whatever was bound
+std::atomic<uint64_t> g_countExecBundle { 0 };         // every ExecuteBundle: draws recorded in a bundle are not seen by the
+                                                       // direct list's draw hooks if the bundle's functions are other code
+std::atomic<int> g_bundleSameDraw { -1 };              // 1 the bundle's Draw functions are the direct list's, 0 not, -1 unknown
 
 // The copy of the picked depth buffer for the overlay (guarded by g_mutex like the rest).
 struct Backup
@@ -553,6 +560,8 @@ void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12
 {
     if (g_active.load(std::memory_order_relaxed))
     {
+        g_countExecIndirect.fetch_add(1, std::memory_order_relaxed);
+
         std::lock_guard lock(g_mutex);
 
         const auto found = g_lists.find(This);
@@ -570,6 +579,14 @@ void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12
                       CountBufferOffset);
 }
 
+void STDMETHODCALLTYPE hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12GraphicsCommandList* pCommandList)
+{
+    if (g_active.load(std::memory_order_relaxed))
+        g_countExecBundle.fetch_add(1, std::memory_order_relaxed);
+
+    o_ExecuteBundle(This, pCommandList);
+}
+
 void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, const GenericDepthSelect::Pick& pick,
                    uint32_t pictureWidth, uint32_t pictureHeight)
 {
@@ -580,9 +597,11 @@ void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, cons
     LOG_INFO("Depth finder: frame {}, picture {}x{}, {} depth buffer(s) in use{}", g_frames, pictureWidth,
              pictureHeight, sorted.size(), pick.valid ? "" : ", none qualifies");
     LOG_INFO("Depth finder:   hooks so far: {} depth views created, {} OMSetRenderTargets ({} with a depth descriptor, "
-             "{} of those unknown to us), {} draws",
+             "{} of those unknown to us), {} draws, {} ExecuteIndirect, {} ExecuteBundle (bundle draw code is the direct "
+             "list's: {})",
              g_countDsvCreated.load(), g_countOmSet.load(), g_countOmSetWithDepth.load(),
-             g_countOmSetUnknownDepth.load(), g_countDraws.load());
+             g_countOmSetUnknownDepth.load(), g_countDraws.load(), g_countExecIndirect.load(), g_countExecBundle.load(),
+             g_bundleSameDraw.load() < 0 ? "unknown" : g_bundleSameDraw.load() ? "yes" : "no");
 
     const size_t shown = std::min<size_t>(sorted.size(), 8);
 
@@ -647,6 +666,33 @@ void Install(ID3D12Device* device)
     o_OMSetRenderTargets = (PFN_OMSetRenderTargets) listTable[46];
     o_ClearDepthStencilView = (PFN_ClearDepthStencilView) listTable[47];
     o_ExecuteIndirect = (PFN_ExecuteIndirect) listTable[59];
+    o_ExecuteBundle = (PFN_ExecuteBundle) listTable[27];
+
+    // Is a bundle's DrawInstanced the same code as the direct list's? If not, draws recorded in bundles are invisible to the
+    // draw hooks (a bundle inherits the caller's depth buffer, so they would have to be counted at ExecuteBundle).
+    {
+        ID3D12CommandAllocator* bundleAllocator = nullptr;
+        ID3D12GraphicsCommandList* bundle = nullptr;
+
+        if (SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(&bundleAllocator))) &&
+            SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, bundleAllocator, nullptr,
+                                                IID_PPV_ARGS(&bundle))))
+        {
+            ID3D12GraphicsCommandList* realBundle = nullptr;
+
+            if (!Util::CheckForRealObject(__FUNCTION__, bundle, (IUnknown**) &realBundle))
+                realBundle = bundle;
+
+            PVOID* bundleTable = *(PVOID**) realBundle;
+            g_bundleSameDraw = (bundleTable[12] == listTable[12] && bundleTable[13] == listTable[13]) ? 1 : 0;
+            bundle->Close();
+        }
+
+        if (bundle != nullptr)
+            bundle->Release();
+        if (bundleAllocator != nullptr)
+            bundleAllocator->Release();
+    }
 
     g_dsvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
@@ -662,6 +708,7 @@ void Install(ID3D12Device* device)
     DetourAttach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
     DetourAttach(&(PVOID&) o_ClearDepthStencilView, hkClearDepthStencilView);
     DetourAttach(&(PVOID&) o_ExecuteIndirect, hkExecuteIndirect);
+    DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
 
     const auto result = DetourTransactionCommit();
 
@@ -681,6 +728,7 @@ void Install(ID3D12Device* device)
         o_OMSetRenderTargets = nullptr;
         o_ClearDepthStencilView = nullptr;
         o_ExecuteIndirect = nullptr;
+        o_ExecuteBundle = nullptr;
         return;
     }
 

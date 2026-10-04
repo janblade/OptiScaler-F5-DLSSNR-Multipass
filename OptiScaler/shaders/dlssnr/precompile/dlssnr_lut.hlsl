@@ -13,11 +13,18 @@
 // Decode is deliberately NOT dlssnr.hlsl's DecodeGameColour/EncodeGameColour: those land in the model's own
 // working domain (tone-mapped sRGB OR linear light, depending on gInputEncoding there), not in the
 // gamma-encoded display-referred 0-1 a .cube LUT is defined over. This shader decodes straight to display
-// 0-1 with the same low-level curves dlssnr.hlsl itself is built from (LinearToSrgb/SrgbToLinear from
-// dlssnr_replace_curve.hlsli, DecodePQ/EncodePQ from dlssnr_pq.hlsli), so a gamma 2.2 (and passthrough/
-// tone-mapped-sRGB) frame is already there with nothing to convert, and a PQ frame is tone-mapped through
-// the same ITU-R BT.2408 reference-white convention Finished Picture/PqToReferenceLinear use before the
-// sRGB encode.
+// 0-1 with the same low-level curves dlssnr.hlsl itself is built from (LinearToSrgb/SrgbToLinear and
+// NeutwoEncode/NeutwoDecode from dlssnr_replace_curve.hlsli, DecodePQ/EncodePQ from dlssnr_pq.hlsli), so a
+// gamma 2.2 (and passthrough/tone-mapped-sRGB) frame is already there with nothing to convert, a PQ frame
+// is tone-mapped through the same ITU-R BT.2408 reference-white convention Finished Picture/
+// PqToReferenceLinear use before the sRGB encode, and open-ended scene-linear light (colourIsLinearHdr) is
+// divided by trim and compressed with Neutwo -- the same reversible proxy curve the model's own encode
+// pass uses, not a new one invented for this pass -- before the sRGB encode.
+//
+// Fixed (Review Pass, 2026-10-04): this used to fall through scene-linear HDR to the gamma-2.2 branch
+// (`saturate(c)`), because inputEncoding alone cannot tell "already display-referred" apart from "wide open
+// linear light" -- DlssNrColourEncoding::ShaderConversion collapses both to the same value. A LinearHDR
+// frame (the normal outcome for most HDR games) was being clipped straight to 0-1 with no tonemap at all.
 
 #include "dlssnr_pq.hlsli"          // DecodePQ/EncodePQ, kBt2020To709/kBt709To2020
 #include "dlssnr_replace_curve.hlsli" // LinearToSrgb/SrgbToLinear
@@ -34,6 +41,14 @@ cbuffer Params : register(b0)
     float domainMaxR, domainMaxG, domainMaxB;
     uint lutSize;       // the cube's side length; coordinates are clamped to the domain before sampling
     uint inputEncoding; // DlssNrConstants::InputEncoding's values: 3 gamma 2.2, 4 PQ, else passthrough/sRGB
+    // Fixed (Review Pass, 2026-10-04): inputEncoding's "else" bucket covers BOTH tone-mapped sRGB (already
+    // display 0-1, nothing to do) AND open-ended scene-linear HDR (needs compressing first) -- it cannot
+    // tell them apart (DlssNrColourEncoding::ShaderConversion collapses both to the same value). This
+    // carries the real signal (frame.ColourIsLinearHdr) so the two are no longer treated as one.
+    uint colourIsLinearHdr;
+    // What to divide linear light by before compressing it, matching DLSS-NR's own default exposure trim
+    // (DlssNr::AutoTrimEffective) when nothing more specific has been measured yet for this frame.
+    float trim;
 };
 
 #ifdef VK_MODE
@@ -64,6 +79,15 @@ float3 DecodeToDisplay01(float3 c)
     if (inputEncoding == kInputPq)
         return LinearToSrgb(mul(kBt2020To709, DecodePQ(c)) / kScrgbPerReferenceWhite);
 
+    if (colourIsLinearHdr != 0)
+    {
+        // Open-ended scene-linear light: divide by trim (the same default the model's own exposure uses
+        // absent a better measurement) to land roughly near 1.0, then Neutwo compresses [0, inf) into
+        // [0, 1) with no hard clip -- the same reversible proxy curve dlssnr_replace_curve.hlsli's own
+        // Encode pass uses, so a bright highlight fades toward white instead of being clipped flat there.
+        return NeutwoEncode(max(c, 0.0) / max(trim, 1e-4));
+    }
+
     // Gamma 2.2, passthrough and tone-mapped-sRGB frames are already display-referred: a .cube LUT is
     // defined over exactly this domain, so there is nothing to convert, only to clamp before the sample.
     return saturate(c);
@@ -73,6 +97,9 @@ float3 EncodeFromDisplay01(float3 c)
 {
     if (inputEncoding == kInputPq)
         return EncodePQ(mul(kBt709To2020, SrgbToLinear(c) * kScrgbPerReferenceWhite));
+
+    if (colourIsLinearHdr != 0)
+        return NeutwoDecode(saturate(c)) * max(trim, 1e-4);
 
     return c;
 }

@@ -2318,6 +2318,14 @@ bool DlssNr_Dx12::LutPipelineReady()
     return true;
 }
 
+void DlssNr_Dx12::ReleaseLutTexture()
+{
+    if (_lutTexture != nullptr)
+        ParkNrResource(_lutTexture);
+    _lutTextureSize = 0;
+    _lutTextureSourcePath.clear();
+}
+
 bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
 {
     if (!_lutState.Loaded() || InCmdList == nullptr || _device == nullptr)
@@ -2325,12 +2333,17 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
 
     const int size = _lutState.lut.size;
 
-    if (_lutTexture != nullptr && _lutTextureSize == size)
-        return true; // already uploaded, and the file's own size has not changed
+    // Keyed on the loaded path, not the lattice size: two different .cube files sharing a size (17/33/65
+    // are near-universal) must not read as "nothing changed" just because neither resized the texture --
+    // that was the bug (Review Pass, 2026-10-04): switching between two same-size LUTs silently kept
+    // sampling whichever uploaded first.
+    if (_lutTexture != nullptr && _lutTextureSize == size && _lutTextureSourcePath == _lutState.loadedPath)
+        return true; // already uploaded, and it is still this exact file
 
     if (_lutTexture != nullptr)
         ParkNrResource(_lutTexture);
     _lutTextureSize = 0;
+    _lutTextureSourcePath.clear();
 
     D3D12_HEAP_PROPERTIES heapProps {};
     heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2426,12 +2439,13 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     ParkNrResource(uploadBuffer);
 
     _lutTextureSize = size;
+    _lutTextureSourcePath = _lutState.loadedPath;
     return true;
 }
 
 bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
                               unsigned int Width, unsigned int Height, float Strength, uint32_t InputEncoding,
-                              const std::string& LutPath)
+                              bool ColourIsLinearHdr, float Trim, const std::string& LutPath)
 {
     DlssNr_LutEnsureParsed(&_lutState, LutPath);
 
@@ -2469,6 +2483,8 @@ bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resour
     constants.DomainMaxB = _lutState.lut.domainMax[2];
     constants.LutSize = (uint32_t) _lutState.lut.size;
     constants.InputEncoding = InputEncoding;
+    constants.ColourIsLinearHdr = ColourIsLinearHdr ? 1u : 0u;
+    constants.Trim = Trim;
 
     if (!CreateConstantsBuffer(_device, _lutConstantBuffers[slot], constants, heap.GetCbvCPU(0)))
     {
@@ -3425,9 +3441,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 const D3D12_RESOURCE_STATES priorTargetState = targetState;
                 TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-                const bool graded = DispatchLut(cmdList, target, g_nr.lutScratch, width, height,
-                                                std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f),
-                                                frame.InputEncoding, lutPath);
+                const bool graded =
+                    DispatchLut(cmdList, target, g_nr.lutScratch, width, height,
+                                std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f), frame.InputEncoding,
+                                isHdrBuffer, DlssNr::AutoTrimEffective(cfg), lutPath);
 
                 if (graded)
                 {
@@ -3449,10 +3466,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
         else
         {
-            // LutFile was cleared: the scratch target is not reused by anything else, so there is no reason
-            // to keep holding it -- the same hold-only-while-wanted discipline activeColor's own scratch
-            // follows for cropColor. A no-op once already parked.
+            // LutFile was cleared: neither the scratch target nor the uploaded 3D texture (up to ~16 MB for
+            // a 128^3 lattice) is reused by anything else, so there is no reason to keep holding either --
+            // the same hold-only-while-wanted discipline activeColor's own scratch follows for cropColor.
+            // Fixed (Review Pass, 2026-10-04): this used to park only the scratch target, so _lutTexture
+            // stayed resident for the rest of the session once any LUT had ever loaded. A no-op once
+            // already released/parked.
             ParkNrResource(g_nr.lutScratch);
+            ReleaseLutTexture();
         }
     }
 

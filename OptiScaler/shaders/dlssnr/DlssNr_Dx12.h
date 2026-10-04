@@ -106,15 +106,25 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // parked by NrState's resolution-change handling -- only by a changed/cleared LutFile.
     DlssNr_LutState _lutState;
     ID3D12Resource* _lutTexture = nullptr;
+    // The path _lutTexture's content was actually uploaded from -- the cache key, not _lutTextureSize alone:
+    // two different .cube files sharing a lattice size (17/33/65 are near-universal) must not look like the
+    // same texture just because neither resized it. Size is still tracked (_lutTextureSize) because the
+    // resource itself must be recreated, not merely re-uploaded, when it changes.
+    std::string _lutTextureSourcePath;
     int _lutTextureSize = 0;
 
     // Lazily builds the root signature, PSO and heap ring on first use -- so a game that never sets LutFile
     // never allocates any of it. Not retried once it failed to build, same as the other lazy PSOs here.
     bool LutPipelineReady();
 
-    // Builds/rebuilds _lutTexture from _lutState.lut when the parsed size changed, recording the upload on
-    // InCmdList. False if there is nothing loaded or the texture could not be (re)built.
+    // Builds/rebuilds _lutTexture from _lutState.lut when the loaded file (path, not just size) changed,
+    // recording the upload on InCmdList. False if there is nothing loaded or the texture could not be
+    // (re)built.
     bool EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList);
+
+    // Releases _lutTexture and forgets its source path, so the next EnsureLutTexture call re-uploads from
+    // scratch rather than reading _lutTextureSourcePath against a texture that no longer exists.
+    void ReleaseLutTexture();
 
   public:
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
@@ -181,8 +191,12 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // (caller-owned, same size and format as InSource). Reparses/reuploads only when LutPath differs from
     // what is already loaded. False and OutTarget untouched when LutPath is empty or fails to parse --
     // LutError() then has the reason -- so an empty setting costs nothing beyond this call's own early-out.
+    // ColourIsLinearHdr/Trim (Review Pass, 2026-10-04 fix): InputEncoding alone cannot tell scene-linear
+    // HDR apart from tone-mapped sRGB (both collapse to the same value), so the caller passes
+    // frame.ColourIsLinearHdr directly, and Trim is what to divide linear light by -- DlssNr::AutoTrimEffective,
+    // the same default DLSS-NR's own automatic exposure falls back to.
     bool DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
                      unsigned int Width, unsigned int Height, float Strength, uint32_t InputEncoding,
-                     const std::string& LutPath);
+                     bool ColourIsLinearHdr, float Trim, const std::string& LutPath);
     const std::string& LutError() const { return _lutState.error; }
 };

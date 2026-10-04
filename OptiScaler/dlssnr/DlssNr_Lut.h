@@ -16,12 +16,20 @@ struct DlssNr_LutState
     std::string loadedPath;    // the path currently parsed into `lut`; empty when nothing is loaded
     std::string attemptedPath; // the path last tried, success or not -- a broken file is not re-parsed every frame
     DlssNr::Lut3D lut;
+
+    // Whether `attemptedPath` itself failed to parse, and why -- for the menu's status line (Story 4), not
+    // for Loaded() below. `attemptedPath` and `loadedPath` can differ (a typo tried after a working LUT was
+    // already loaded), so `failed` must not say anything about whether `lut`/`loadedPath` are still usable.
+    // Fixed (Review Pass, 2026-10-04): `Loaded()` used to be `!failed && !loadedPath.empty()`, which broke
+    // the "a typo must not blank out a working LUT" contract this header has always documented -- trying a
+    // second, bad path set `failed` and `Loaded()` went false even though `lut`/`loadedPath` were untouched.
     bool failed = false;
     std::string error;
 
     // True once `lut` is a successfully parsed 3D LUT a backend can upload/sample. Does not say the GPU
     // texture exists yet -- building and uploading it is the caller's job, driven off this turning true.
-    bool Loaded() const { return !failed && !loadedPath.empty(); }
+    // Depends only on whether something is actually loaded, never on a later, possibly-unrelated failure.
+    bool Loaded() const { return !loadedPath.empty(); }
 };
 
 // Reparses `path` into `state` only when it differs from whatever was last tried (loaded or not), so a

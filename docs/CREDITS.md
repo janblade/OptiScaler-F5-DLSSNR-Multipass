@@ -12,6 +12,10 @@ Automatic exposure from the HDR frame, the wider exposure Trim range and the Tri
 
 The rules the native depth finder uses to pick the scene's depth buffer (how draws are weighed, the aspect-ratio test, which frames are ignored, the snapshot taken before a clear) are adapted from the [Generic Depth add-on in ReShade](https://github.com/crosire/reshade/blob/main/examples/09-depth/generic_depth_addon.cpp) by Patrick Mours (BSD-3-Clause). See the [licence](../Licenses/ReShade_GenericDepth_LICENSE.txt).
 
+## Motion and trust mask
+
+The optical flow for the native input producer is our own (a luma pyramid, block matching and a few Lucas-Kanade steps), written from the standard method; the public descriptions of the ReShade optical-flow shaders were read for ideas and none of their code is used. The trust mask follows the checks of the validation in [DLSS5-Feeder](https://github.com/jlrouzies-fr/DLSS5-Feeder)'s DLSS5_Feed.fx (MIT, Copyright (c) 2026 Jean-Laurent ROUZIES): reproject with the motion, and distrust a pixel where the depth, the motion or the luma there disagrees with here. See the [licence](../Licenses/DLSS5Feeder_LICENSE.txt).
+
 ## Shutdown safety
 
 Process-exit hardening (a heap-leaked state singleton, an atomic shutdown flag, an `ExitProcess`-aware

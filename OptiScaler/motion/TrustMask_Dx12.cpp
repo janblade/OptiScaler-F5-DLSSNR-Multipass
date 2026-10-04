@@ -1,0 +1,621 @@
+// Not built with the precompiled header: self-contained so the host GPU test can compile it alone.
+#include "TrustMask_Dx12.h"
+
+#include <d3dcompiler.h>
+#include <algorithm>
+#include <cstring>
+
+namespace
+{
+
+constexpr uint32_t kDescriptorsPerPass = 9; // seven SRVs, two UAVs
+constexpr uint32_t kPassesPerFrame = 4;
+constexpr uint32_t kFramesInFlight = 8;
+constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_R32_FLOAT;
+constexpr DXGI_FORMAT kMaskFormat = DXGI_FORMAT_R8_UNORM;
+
+const char* kSource = R"HLSL(
+cbuffer P : register(b0)
+{
+    uint2 size;          // the flow's size, which the mask and the depth proxy share
+    uint2 depthSize;     // the scene depth's size
+    float depthTolerance;
+    float flowTolerance;
+    float lumaTolerance;
+    float decay;
+    uint reversed;
+    uint hasHistory;
+    float fullPerFlow;
+    float revealTolerance;
+};
+
+SamplerState Linear : register(s0);
+Texture2D<float>  SceneDepth : register(t0);
+Texture2D<float4> Flow : register(t0);
+Texture2D<float4> FlowBefore : register(t1);
+Texture2D<float>  DepthNow : register(t2);
+Texture2D<float>  DepthBefore : register(t3);
+Texture2D<float>  LumaNow : register(t4);
+Texture2D<float>  LumaBefore : register(t5);
+Texture2D<float>  MaskBefore : register(t6);
+RWTexture2D<float>  OutFloat : register(u0);
+RWTexture2D<float4> OutFlow : register(u0);
+RWByteAddressBuffer Counter : register(u1);
+
+static const float kSky = 5e5; // a proxy depth this large is the sky (or nothing drawn)
+
+// A proxy for how far a surface is, from the raw depth: larger is farther. Reversed-Z puts near at 1 and a normal depth buffer
+// puts it at 0; either way the distance goes as one over the nearness for anything well past the near plane, and the checks
+// below only compare ratios, so the unknown near and far planes drop out.
+[numthreads(8, 8, 1)]
+void DepthProxy(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y)
+        return;
+
+    float2 uv = (float2(id.xy) + 0.5) / float2(size);
+    int2 at = min(int2(uv * float2(depthSize)), int2(depthSize) - 1);
+    float d = SceneDepth.Load(int3(at, 0));
+    float nearness = max(reversed != 0 ? d : 1.0 - d, 1e-6);
+    OutFloat[id.xy] = min(1.0 / nearness, 1e6);
+}
+
+[numthreads(1, 1, 1)]
+void ClearCounter()
+{
+    Counter.Store(0, 0);
+}
+
+groupshared uint gDistrusted;
+
+[numthreads(8, 8, 1)]
+void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0)
+        gDistrusted = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    bool inside = id.x < size.x && id.y < size.y;
+    float mask = 1.0;
+
+    if (inside && hasHistory != 0)
+    {
+        int2 p = int2(id.xy);
+        float2 flow = Flow.Load(int3(p, 0)).xy;       // to the previous frame, in picture pixels
+        float2 q = float2(p) + flow / fullPerFlow;    // where this pixel was, in flow pixels
+        float2 uv = (q + 0.5) / float2(size);
+
+        float bad = 0.0;
+
+        if (any(q < -0.5) || any(q > float2(size) - 0.5))
+        {
+            bad = 1.0; // it came from outside the picture
+        }
+        else
+        {
+            int2 qi = clamp(int2(floor(q + 0.5)), 0, int2(size) - 1);
+
+            // Disocclusion: the surface here was at a different distance there.
+            float zNow = DepthNow.Load(int3(p, 0));
+            float zBefore = DepthBefore.Load(int3(qi, 0));
+
+            // Revealed: a surface much nearer than this one was at this very pixel a frame ago and has moved off it. The
+            // flow cannot be relied on for this, it bleeds from the moving surface into what it uncovers, so it looks at
+            // the same pixel instead of the flow's.
+            float zHere = DepthBefore.Load(int3(p, 0));
+
+            if (zHere < zNow)
+                bad = max(bad, saturate(((zNow - zHere) / zNow - revealTolerance) / revealTolerance));
+
+            if (zNow < kSky)
+            {
+                float relative = abs(zBefore - zNow) / zNow;
+                bad = max(bad, saturate((relative - depthTolerance) / depthTolerance));
+            }
+
+            // Consistency: the motion there was not this motion.
+            float2 flowBefore = FlowBefore.SampleLevel(Linear, uv, 0).xy;
+            float allowed = flowTolerance + 0.5 * length(flow);
+            bad = max(bad, saturate((length(flow - flowBefore) - allowed) / allowed));
+
+            // Luma: what was there is outside what is here.
+            float lo = 1e9, hi = -1e9;
+
+            [unroll] for (int j = -1; j <= 1; ++j)
+                [unroll] for (int i = -1; i <= 1; ++i)
+                {
+                    float l = LumaNow.Load(int3(clamp(p + int2(i, j), 0, int2(size) - 1), 0));
+                    lo = min(lo, l);
+                    hi = max(hi, l);
+                }
+
+            float before = LumaBefore.SampleLevel(Linear, uv, 0);
+            float tolerance = lumaTolerance * max(hi, 0.05) + 2.0 / 255.0;
+            float excursion = max(lo - before, before - hi) - tolerance;
+            bad = max(bad, saturate(excursion / (2.0 * tolerance)));
+        }
+
+        // Hysteresis: distrust that was there a frame ago fades, it does not vanish.
+        float remembered = MaskBefore.SampleLevel(Linear, uv, 0);
+        mask = saturate(max(bad, remembered * decay));
+    }
+
+    if (inside)
+        OutFloat[id.xy] = mask;
+
+    if (inside && hasHistory != 0 && mask >= 0.9)
+        InterlockedAdd(gDistrusted, 1);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gi == 0 && gDistrusted != 0)
+        Counter.InterlockedAdd(0, gDistrusted);
+}
+
+[numthreads(8, 8, 1)]
+void CopyFlow(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y)
+        return;
+
+    OutFlow[id.xy] = Flow.Load(int3(id.xy, 0));
+}
+)HLSL";
+
+ID3DBlob* Compile(const char* entry, std::string* error)
+{
+    ID3DBlob* code = nullptr;
+    ID3DBlob* messages = nullptr;
+
+    const HRESULT hr = D3DCompile(kSource, strlen(kSource), "TrustMask", nullptr, nullptr, entry, "cs_5_0",
+                                  D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &messages);
+
+    if (FAILED(hr))
+    {
+        *error = std::string("compiling ") + entry + ": " +
+                 (messages != nullptr ? (const char*) messages->GetBufferPointer() : "no message");
+        if (messages != nullptr)
+            messages->Release();
+        return nullptr;
+    }
+
+    if (messages != nullptr)
+        messages->Release();
+
+    return code;
+}
+
+} // namespace
+
+TrustMaskDx12::~TrustMaskDx12()
+{
+    ReleaseTextures();
+
+    for (ID3D12PipelineState** pso : { &_depthProxy, &_clearCounter, &_trust, &_copyFlow })
+        if (*pso != nullptr)
+            (*pso)->Release();
+
+    if (_rootSignature != nullptr)
+        _rootSignature->Release();
+    if (_heap != nullptr)
+        _heap->Release();
+}
+
+bool TrustMaskDx12::Init(ID3D12Device* device)
+{
+    if (device == nullptr)
+    {
+        _error = "no device";
+        return false;
+    }
+
+    _device = device;
+
+    D3D12_DESCRIPTOR_RANGE ranges[2] {};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 7;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[1].NumDescriptors = 2;
+    ranges[1].BaseShaderRegister = 0;
+    ranges[1].OffsetInDescriptorsFromTableStart = 7;
+
+    D3D12_ROOT_PARAMETER params[2] {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[0].DescriptorTable.NumDescriptorRanges = 2;
+    params[0].DescriptorTable.pDescriptorRanges = ranges;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[1].Constants.ShaderRegister = 0;
+    params[1].Constants.Num32BitValues = sizeof(Constants) / 4;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC rootDesc {};
+    rootDesc.NumParameters = 2;
+    rootDesc.pParameters = params;
+    rootDesc.NumStaticSamplers = 1;
+    rootDesc.pStaticSamplers = &sampler;
+
+    ID3DBlob* serialized = nullptr;
+    ID3DBlob* messages = nullptr;
+
+    if (FAILED(D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &messages)))
+    {
+        _error = "serializing the root signature";
+        if (messages != nullptr)
+            messages->Release();
+        return false;
+    }
+
+    const HRESULT rootResult = device->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                                           serialized->GetBufferSize(), IID_PPV_ARGS(&_rootSignature));
+    serialized->Release();
+
+    if (messages != nullptr)
+        messages->Release();
+
+    if (FAILED(rootResult))
+    {
+        _error = "creating the root signature";
+        return false;
+    }
+
+    struct Entry
+    {
+        const char* name;
+        ID3D12PipelineState** target;
+    };
+
+    for (const Entry& entry : { Entry { "DepthProxy", &_depthProxy }, Entry { "ClearCounter", &_clearCounter },
+                                Entry { "Trust", &_trust }, Entry { "CopyFlow", &_copyFlow } })
+    {
+        ID3DBlob* code = Compile(entry.name, &_error);
+
+        if (code == nullptr)
+            return false;
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pso {};
+        pso.pRootSignature = _rootSignature;
+        pso.CS = { code->GetBufferPointer(), code->GetBufferSize() };
+
+        const HRESULT hr = device->CreateComputePipelineState(&pso, IID_PPV_ARGS(entry.target));
+        code->Release();
+
+        if (FAILED(hr))
+        {
+            _error = std::string("creating the pipeline ") + entry.name;
+            return false;
+        }
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap {};
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap.NumDescriptors = kDescriptorsPerPass * kPassesPerFrame * kFramesInFlight;
+    heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+    if (FAILED(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&_heap))))
+    {
+        _error = "creating the descriptor heap";
+        return false;
+    }
+
+    _descriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    // The counter of fully distrusted pixels, and where it is copied to be read.
+    D3D12_HEAP_PROPERTIES defaultHeap {};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_HEAP_PROPERTIES readHeap {};
+    readHeap.Type = D3D12_HEAP_TYPE_READBACK;
+
+    D3D12_RESOURCE_DESC buffer {};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = 256;
+    buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    if (FAILED(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&_counter))))
+    {
+        _error = "creating the counter";
+        return false;
+    }
+
+    buffer.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    for (auto& readback : _readback)
+        if (FAILED(device->CreateCommittedResource(&readHeap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback))))
+        {
+            _error = "creating a readback buffer";
+            return false;
+        }
+
+    return true;
+}
+
+bool TrustMaskDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name)
+{
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width;
+    desc.Height = height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    tex.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    if (FAILED(_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, tex.state, nullptr,
+                                                IID_PPV_ARGS(&tex.resource))))
+        return false;
+
+    tex.resource->SetName(name);
+    tex.width = width;
+    tex.height = height;
+    return true;
+}
+
+void TrustMaskDx12::ReleaseTextures()
+{
+    for (Tex* tex : { &_depth[0], &_depth[1], &_mask[0], &_mask[1], &_flowBefore })
+    {
+        if (tex->resource != nullptr)
+            tex->resource->Release();
+        *tex = Tex {};
+    }
+
+    if (_counter != nullptr)
+    {
+        _counter->Release();
+        _counter = nullptr;
+    }
+
+    for (auto& readback : _readback)
+        if (readback != nullptr)
+        {
+            readback->Release();
+            readback = nullptr;
+        }
+}
+
+bool TrustMaskDx12::EnsureSize(ID3D12Device*, uint32_t width, uint32_t height)
+{
+    if (width == _width && height == _height && _mask[0].resource != nullptr)
+        return true;
+
+    // The textures are replaced; the owner has waited for the GPU as it does for any size change.
+    for (Tex* tex : { &_depth[0], &_depth[1], &_mask[0], &_mask[1], &_flowBefore })
+    {
+        if (tex->resource != nullptr)
+            tex->resource->Release();
+        *tex = Tex {};
+    }
+
+    _haveHistory = false;
+    _width = width;
+    _height = height;
+    _share = -1.0f;
+    std::fill(std::begin(_readbackFrame), std::end(_readbackFrame), 0ull);
+
+    return CreateTexture(_depth[0], width, height, kDepthFormat, L"TrustMask_Depth0") &&
+           CreateTexture(_depth[1], width, height, kDepthFormat, L"TrustMask_Depth1") &&
+           CreateTexture(_mask[0], width, height, kMaskFormat, L"TrustMask_Mask0") &&
+           CreateTexture(_mask[1], width, height, kMaskFormat, L"TrustMask_Mask1") &&
+           CreateTexture(_flowBefore, width, height, kFlowFormat, L"TrustMask_FlowBefore");
+}
+
+void TrustMaskDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state)
+{
+    if (tex.state == state)
+        return;
+
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = tex.resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = tex.state;
+    barrier.Transition.StateAfter = state;
+    list->ResourceBarrier(1, &barrier);
+    tex.state = state;
+}
+
+void TrustMaskDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* const (&srv)[7],
+                         const DXGI_FORMAT (&formats)[7], Tex& dst, DXGI_FORMAT dstFormat, uint32_t groupsX,
+                         uint32_t groupsY, const Constants& constants)
+{
+    Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    const UINT total = kDescriptorsPerPass * kPassesPerFrame * kFramesInFlight;
+    const UINT first = _heapCursor;
+    _heapCursor = (_heapCursor + kDescriptorsPerPass) % total;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = _heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = _heap->GetGPUDescriptorHandleForHeapStart();
+    cpu.ptr += (SIZE_T) first * _descriptorSize;
+    gpu.ptr += (UINT64) first * _descriptorSize;
+
+    for (int i = 0; i < 7; ++i)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC view {};
+        view.Format = formats[i];
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.Texture2D.MipLevels = 1;
+        _device->CreateShaderResourceView(srv[i], &view, cpu);
+        cpu.ptr += _descriptorSize;
+    }
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav {};
+    uav.Format = dstFormat;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
+    cpu.ptr += _descriptorSize;
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC counter {};
+    counter.Format = DXGI_FORMAT_R32_TYPELESS;
+    counter.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    counter.Buffer.NumElements = 64;
+    counter.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    _device->CreateUnorderedAccessView(_counter, nullptr, &counter, cpu);
+
+    ID3D12DescriptorHeap* heaps[] = { _heap };
+    list->SetDescriptorHeaps(1, heaps);
+    list->SetComputeRootSignature(_rootSignature);
+    list->SetPipelineState(pso);
+    list->SetComputeRootDescriptorTable(0, gpu);
+    list->SetComputeRoot32BitConstants(1, sizeof(Constants) / 4, &constants, 0);
+    list->Dispatch(groupsX, groupsY, 1);
+
+    Transition(list, dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // A pass that reads the counter's result next, or writes it again, sees the previous pass's writes.
+    D3D12_RESOURCE_BARRIER uavBarrier {};
+    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavBarrier.UAV.pResource = _counter;
+    list->ResourceBarrier(1, &uavBarrier);
+}
+
+bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
+{
+    if (_device == nullptr || _trust == nullptr || list == nullptr || in.flow == nullptr || in.lumaNow == nullptr ||
+        in.lumaBefore == nullptr || in.depth == nullptr || in.flowWidth == 0 || in.flowHeight == 0)
+        return false;
+
+    if (!EnsureSize(_device, in.flowWidth, in.flowHeight))
+    {
+        _error = "creating the textures";
+        return false;
+    }
+
+    ++_frame;
+
+    // Counts from frames a few back (the GPU is done with them by now): the newest one is the share to report.
+    uint64_t newest = 0;
+
+    for (int i = 0; i < kReadbacks; ++i)
+    {
+        if (_readbackFrame[i] == 0 || _frame - _readbackFrame[i] < 3 || _readbackFrame[i] < newest)
+            continue;
+
+        D3D12_RANGE range { 0, 4 };
+        uint32_t* data = nullptr;
+
+        if (SUCCEEDED(_readback[i]->Map(0, &range, (void**) &data)) && data != nullptr)
+        {
+            _share = (float) *data / (float) ((uint64_t) _width * _height);
+            D3D12_RANGE none { 0, 0 };
+            _readback[i]->Unmap(0, &none);
+            newest = _readbackFrame[i];
+        }
+    }
+
+    const int write = 1 - _depthIndex;
+    const int maskWrite = 1 - _maskIndex;
+    const DXGI_FORMAT depthIn = kDepthFormat;
+    const uint32_t groupsX = (in.flowWidth + 7) / 8;
+    const uint32_t groupsY = (in.flowHeight + 7) / 8;
+
+    Constants constants {};
+    constants.sizeX = in.flowWidth;
+    constants.sizeY = in.flowHeight;
+    constants.depthX = in.depthWidth != 0 ? in.depthWidth : in.flowWidth;
+    constants.depthY = in.depthHeight != 0 ? in.depthHeight : in.flowHeight;
+    constants.depthTolerance = _settings.depthTolerance;
+    constants.flowTolerance = _settings.flowTolerance;
+    constants.lumaTolerance = _settings.lumaTolerance;
+    constants.decay = _settings.decay;
+    constants.reversed = in.depthReversed ? 1 : 0;
+    constants.hasHistory = _haveHistory ? 1 : 0;
+    constants.fullPerFlow = in.fullPerFlow;
+    constants.revealTolerance = _settings.revealTolerance;
+
+    // 1. the depth proxy at the flow's size
+    {
+        ID3D12Resource* const srv[7] = { in.depth,         _flowBefore.resource, _flowBefore.resource,
+                                         _flowBefore.resource, _flowBefore.resource, _flowBefore.resource,
+                                         _flowBefore.resource };
+        const DXGI_FORMAT formats[7] = { in.depthFormat, kFlowFormat, kFlowFormat, kFlowFormat,
+                                         kFlowFormat,    kFlowFormat, kFlowFormat };
+        Pass(list, _depthProxy, srv, formats, _depth[write], kDepthFormat, groupsX, groupsY, constants);
+    }
+
+    // 2. the counter back to zero
+    {
+        ID3D12Resource* const srv[7] = { _flowBefore.resource, _flowBefore.resource, _flowBefore.resource,
+                                         _flowBefore.resource, _flowBefore.resource, _flowBefore.resource,
+                                         _flowBefore.resource };
+        const DXGI_FORMAT formats[7] = { kFlowFormat, kFlowFormat, kFlowFormat, kFlowFormat,
+                                         kFlowFormat, kFlowFormat, kFlowFormat };
+        Pass(list, _clearCounter, srv, formats, _mask[maskWrite], kMaskFormat, 1, 1, constants);
+    }
+
+    // 3. the mask
+    {
+        ID3D12Resource* const srv[7] = { in.flow,
+                                         _flowBefore.resource,
+                                         _depth[write].resource,
+                                         _depth[_depthIndex].resource,
+                                         in.lumaNow,
+                                         in.lumaBefore,
+                                         _mask[_maskIndex].resource };
+        const DXGI_FORMAT formats[7] = { kFlowFormat, kFlowFormat, kDepthFormat, kDepthFormat,
+                                         DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, kMaskFormat };
+        Pass(list, _trust, srv, formats, _mask[maskWrite], kMaskFormat, groupsX, groupsY, constants);
+    }
+
+    // The counter to a readback slot, to be read a few frames on.
+    {
+        const int slot = (int) (_frame % kReadbacks);
+
+        D3D12_RESOURCE_BARRIER barrier {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = _counter;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        list->ResourceBarrier(1, &barrier);
+        list->CopyBufferRegion(_readback[slot], 0, _counter, 0, 4);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+
+        // Only frames that had a history count toward a scene cut.
+        _readbackFrame[slot] = _haveHistory ? _frame : 0;
+    }
+
+    // 4. this frame's flow, for the next frame's consistency check
+    {
+        ID3D12Resource* const srv[7] = { in.flow,
+                                         _depth[write].resource,
+                                         _depth[write].resource,
+                                         _depth[write].resource,
+                                         _depth[write].resource,
+                                         _depth[write].resource,
+                                         _depth[write].resource };
+        const DXGI_FORMAT formats[7] = { kFlowFormat, kDepthFormat, kDepthFormat, kDepthFormat,
+                                         kDepthFormat, kDepthFormat, kDepthFormat };
+        Pass(list, _copyFlow, srv, formats, _flowBefore, kFlowFormat, groupsX, groupsY, constants);
+    }
+
+    (void) depthIn;
+    _depthIndex = write;
+    _maskIndex = maskWrite;
+    _haveHistory = true;
+    return true;
+}

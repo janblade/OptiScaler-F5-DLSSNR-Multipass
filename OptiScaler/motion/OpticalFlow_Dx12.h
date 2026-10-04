@@ -47,6 +47,11 @@ class OpticalFlowDx12
     bool Visualise(ID3D12GraphicsCommandList* list, float maxSpeed);
     ID3D12Resource* Preview() const { return _preview.resource; }
 
+    // The half-resolution luma (R32_FLOAT, NON_PIXEL_SHADER_RESOURCE) of the frame last passed to Dispatch() and of the one
+    // before it; the trust mask compares them. The previous one is only meaningful when FlowValid().
+    ID3D12Resource* LumaOfLastFrame() const { return _pyramid[1 - _current][0].resource; }
+    ID3D12Resource* LumaOfFrameBefore() const { return _pyramid[_current][0].resource; }
+
     // The flow, in the NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE state between Dispatches.
     ID3D12Resource* Flow() const { return _flow.resource; }
     bool FlowValid() const { return _flowValid; }

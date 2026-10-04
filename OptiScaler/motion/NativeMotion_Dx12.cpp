@@ -11,6 +11,7 @@
 
 #include <imgui/imgui.h>
 
+#include <algorithm>
 #include <memory>
 
 namespace
@@ -284,7 +285,11 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
             in.fullPerFlow = (float) desc.Width / (float) g_flow->FlowWidth();
             in.lumaNow = g_flow->LumaOfLastFrame();
             in.lumaBefore = g_flow->LumaOfFrameBefore();
-            in.depth = depth.resource;
+            in.depthCount = (std::min)(depth.copyCount, (int) TrustMaskDx12::Inputs::kMaxDepths);
+
+            for (int i = 0; i < in.depthCount; ++i)
+                in.depths[i] = depth.copies[i];
+
             in.depthFormat = depth.viewFormat;
             in.depthWidth = depth.width;
             in.depthHeight = depth.height;

@@ -40,7 +40,11 @@ class TrustMaskDx12
         float fullPerFlow = 2.0f;                // picture pixels per flow pixel
         ID3D12Resource* lumaNow = nullptr;       // OpticalFlowDx12::LumaOfLastFrame(), the flow's size
         ID3D12Resource* lumaBefore = nullptr;    // OpticalFlowDx12::LumaOfFrameBefore()
-        ID3D12Resource* depth = nullptr;         // the scene's depth buffer (any size), readable as a texture
+        // The scene's depth: one or more copies of the depth buffer (any size, all the same), readable as textures. With several
+        // each is part of the scene (what one list drew) and the nearest surface over them all is used.
+        static constexpr int kMaxDepths = 6;
+        ID3D12Resource* depths[kMaxDepths] = {};
+        int depthCount = 0;
         DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN; // a typed readable format of it: R32_FLOAT, R16_UNORM, R32_FLOAT_X8X24_TYPELESS...
         uint32_t depthWidth = 0, depthHeight = 0;
         bool depthReversed = true;               // near is 1.0
@@ -96,6 +100,7 @@ class TrustMaskDx12
         float depthTolerance, flowTolerance, lumaTolerance, decay;
         uint32_t reversed, hasHistory;
         float fullPerFlow, revealTolerance;
+        uint32_t depthCount, pad0, pad1, pad2;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);

@@ -1227,6 +1227,10 @@ void OnPresent(IDXGISwapChain* swapChain)
             g_best.height = g_backup.height;
             g_best.reversed = g_pick.reversed;
             g_best.frame = g_presents;
+
+            for (int i = 0; i < g_slotsUsed && i < GenericDepthDx12::Snapshot::kMaxCopies; ++i)
+                if (g_slots[i].resource != nullptr)
+                    g_best.copies[g_best.copyCount++] = g_slots[i].resource;
         }
 
         g_slotsUsed = 0;

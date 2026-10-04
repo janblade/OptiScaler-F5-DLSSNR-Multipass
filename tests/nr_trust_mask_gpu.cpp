@@ -249,13 +249,18 @@ ComPtr<ID3D12Resource> Colour(Gpu& gpu, const Scene& s)
                       });
 }
 
-ComPtr<ID3D12Resource> Depth(Gpu& gpu, const Scene& s)
+ComPtr<ID3D12Resource> Depth(Gpu& gpu, const Scene& s, int mode = 0)
 {
     return gpu.Upload(DXGI_FORMAT_R32_FLOAT, 4,
                       [&](uint32_t x, uint32_t y, uint8_t* px)
                       {
-                          const float z = InSquare(s, x, y, s.depthShift) ? s.squareZ : s.backgroundZ;
-                          const float d = 0.1f / z;
+                          const bool square = InSquare(s, x, y, s.depthShift);
+                          float d = 0.1f / (square ? s.squareZ : s.backgroundZ);
+
+                          // A copy holding only part of the scene has nothing (far, 0 when reversed) elsewhere.
+                          if ((mode == 1 && !square) || (mode == 2 && square))
+                              d = 0.0f;
+
                           memcpy(px, &d, 4);
                       });
 }
@@ -278,10 +283,11 @@ struct Runner
     }
 
     // One frame through both; keeps the mask the pass produced.
-    void Frame(const Scene& s)
+    void Frame(const Scene& s, bool split = false)
     {
         auto colour = Colour(gpu, s);
-        auto depth = Depth(gpu, s);
+        auto depth = Depth(gpu, s, split ? 1 : 0);
+        auto depth2 = split ? Depth(gpu, s, 2) : ComPtr<ID3D12Resource>();
 
         flow.Dispatch(gpu.list.Get(), colour.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
 
@@ -294,7 +300,14 @@ struct Runner
             in.fullPerFlow = 2.0f;
             in.lumaNow = flow.LumaOfLastFrame();
             in.lumaBefore = flow.LumaOfFrameBefore();
-            in.depth = depth.Get();
+            in.depths[0] = depth.Get();
+            in.depthCount = 1;
+
+            if (split)
+            {
+                in.depths[1] = depth2.Get();
+                in.depthCount = 2;
+            }
             in.depthFormat = DXGI_FORMAT_R32_FLOAT;
             in.depthWidth = kWidth;
             in.depthHeight = kHeight;
@@ -427,6 +440,24 @@ int main()
         ok &= Check("whole picture, mean mask", run.Mean(0, 0, kWidth, kHeight), run.Mean(0, 0, kWidth, kHeight) < 0.03);
         ok &= Check("along the square's edges, mean mask", run.Mean(280, 300, 320, 420),
                     run.Mean(280, 300, 320, 420) < 0.1);
+    }
+
+    // 5. nothing moves, and the depth comes in two partial copies on every other frame (the game's lists split the scene
+    //    differently each frame): the nearest surface over the copies is the scene either way
+    {
+        printf("static scene, depth split over two copies on alternate frames\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        for (int k = 0; k < 8; ++k)
+        {
+            const Scene still { 7, 300, 20.0f, 5.0f };
+            run.Frame(still, (k % 2) != 0);
+        }
+
+        ok &= Check("whole picture, mean mask", run.Mean(0, 0, kWidth, kHeight), run.Mean(0, 0, kWidth, kHeight) < 0.03);
+        ok &= Check("the square, mean mask", run.Mean(320, 300, 480, 420), run.Mean(320, 300, 480, 420) < 0.05);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

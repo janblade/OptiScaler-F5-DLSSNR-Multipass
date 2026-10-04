@@ -22,15 +22,20 @@ void OnPresent(IDXGISwapChain* swapChain);
 // The pick as of the last present: valid == false until a buffer qualifies.
 GenericDepthSelect::Pick CurrentPick();
 
-// A copy of the picked depth buffer as the frame that was just presented left it, for the producer's later steps. Of the
-// stretches the game drew into the buffer, the one that drew the most, so it is the same stretch every frame whatever order
-// the game's command lists ran in. It is made only while the debug overlay or [DlssNr] NativeMotion is on, and the copy is
+// Copies of the picked depth buffer from the frame that was just presented, for the producer's later steps. A game that spreads
+// its scene over several command lists, in a different split each frame, leaves each copy holding only part of the scene; the
+// frame's copies are all given (copies[]), and the nearest surface over all of them is the scene whatever the split was.
+// resource is the copy of the stretch that drew the most. It is made only while the debug overlay or [DlssNr] NativeMotion is on, and the copy is
 // recorded into the game's own lists. The texture rests in NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE; it is
 // overwritten by the next frame's copies, which run later on the same queue than anything recorded at present.
 struct Snapshot
 {
+    static constexpr int kMaxCopies = 6;
+
     bool valid = false;
-    ID3D12Resource* resource = nullptr;
+    ID3D12Resource* resource = nullptr;            // the copy of the stretch that drew the most (the menu's preview)
+    ID3D12Resource* copies[kMaxCopies] = {};       // every copy of the frame, in no particular order
+    int copyCount = 0;
     DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN; // a typed format that reads its depth: R32_FLOAT, R16_UNORM, ...
     uint32_t width = 0;
     uint32_t height = 0;

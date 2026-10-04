@@ -28,10 +28,12 @@ cbuffer P : register(b0)
     uint hasHistory;
     float fullPerFlow;
     float revealTolerance;
+    uint depthCount;
+    uint3 pad;
 };
 
 SamplerState Linear : register(s0);
-Texture2D<float>  SceneDepth : register(t0);
+Texture2D<float>  SceneDepths[6] : register(t0);
 Texture2D<float4> Flow : register(t0);
 Texture2D<float4> FlowBefore : register(t1);
 Texture2D<float>  DepthNow : register(t2);
@@ -56,8 +58,17 @@ void DepthProxy(uint3 id : SV_DispatchThreadID)
 
     float2 uv = (float2(id.xy) + 0.5) / float2(size);
     int2 at = min(int2(uv * float2(depthSize)), int2(depthSize) - 1);
-    float d = SceneDepth.Load(int3(at, 0));
-    float nearness = max(reversed != 0 ? d : 1.0 - d, 1e-6);
+
+    // The nearest surface over all the copies: each holds only what its list had drawn, and the split differs per frame.
+    float nearness = 1e-6;
+
+    [unroll] for (int k = 0; k < 6; ++k)
+        if (uint(k) < depthCount)
+        {
+            float d = SceneDepths[k].Load(int3(at, 0));
+            nearness = max(nearness, reversed != 0 ? d : 1.0 - d);
+        }
+
     OutFloat[id.xy] = min(1.0 / nearness, 1e6);
 }
 
@@ -505,7 +516,8 @@ void TrustMaskDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* p
 bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 {
     if (_device == nullptr || _trust == nullptr || list == nullptr || in.flow == nullptr || in.lumaNow == nullptr ||
-        in.lumaBefore == nullptr || in.depth == nullptr || in.flowWidth == 0 || in.flowHeight == 0)
+        in.lumaBefore == nullptr || in.depthCount <= 0 || in.depths[0] == nullptr || in.flowWidth == 0 ||
+        in.flowHeight == 0)
         return false;
 
     if (!EnsureSize(_device, in.flowWidth, in.flowHeight))
@@ -555,14 +567,23 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     constants.hasHistory = _haveHistory ? 1 : 0;
     constants.fullPerFlow = in.fullPerFlow;
     constants.revealTolerance = _settings.revealTolerance;
+    constants.depthCount = (uint32_t) (std::min)(in.depthCount, (int) Inputs::kMaxDepths);
 
     // 1. the depth proxy at the flow's size
     {
-        ID3D12Resource* const srv[7] = { in.depth,         _flowBefore.resource, _flowBefore.resource,
-                                         _flowBefore.resource, _flowBefore.resource, _flowBefore.resource,
-                                         _flowBefore.resource };
-        const DXGI_FORMAT formats[7] = { in.depthFormat, kFlowFormat, kFlowFormat, kFlowFormat,
-                                         kFlowFormat,    kFlowFormat, kFlowFormat };
+        // Six depth slots (t0..t5): the copies given, the first one again for any not given (every slot needs a view), and a
+        // filler in the seventh.
+        ID3D12Resource* srv[7];
+        DXGI_FORMAT formats[7];
+
+        for (int i = 0; i < 6; ++i)
+        {
+            srv[i] = i < in.depthCount ? in.depths[i] : in.depths[0];
+            formats[i] = in.depthFormat;
+        }
+
+        srv[6] = _flowBefore.resource;
+        formats[6] = kFlowFormat;
         Pass(list, _depthProxy, srv, formats, _depth[write], kDepthFormat, groupsX, groupsY, constants);
     }
 

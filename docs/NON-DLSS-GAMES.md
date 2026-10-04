@@ -79,8 +79,10 @@ for you.
 
 `tools/Install-NonDlssGame.ps1` in this repository does Steps 2 and 3 for you, starting from **our**
 zip instead of Feeder's installer. It finds our zip and your `nvngx_dlssnr.dll`, downloads Feeder's
-installer pinned to the exact version it was written against (and refuses it if its SHA256 differs),
-runs it with our zip, then checks our side: the ini keys and the model.
+installer from its **latest GitHub release** (the newest version each time, and it shows the release tag and
+SHA256), checks it still takes the options the script uses, runs it with our zip, then checks our side: the ini
+keys and the model. Because the newest Feeder is not read by us before it runs, `-UseReviewedFeeder` switches to
+the last version we did read (1.17.0, hash-checked) if a new release breaks something.
 
 ```
 powershell.exe -ExecutionPolicy Bypass -File .\Install-NonDlssGame.ps1 "C:\path\to\game.exe" -ModelDll .\nvngx_dlssnr.dll -Plan

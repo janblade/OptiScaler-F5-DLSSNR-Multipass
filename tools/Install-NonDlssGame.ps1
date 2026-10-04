@@ -13,8 +13,8 @@
     and it
       1. finds our release zip (or builds one from the folder this script sits in),
       2. checks it is complete and finds your nvngx_dlssnr.dll,
-      3. fetches Feeder's installer, pinned to the exact version this was written against and checked against its
-         SHA256 before anything runs it,
+      3. fetches Feeder's installer from its LATEST GitHub release (the newest version, not a fixed one), checks it
+         still takes the options we pass, and shows its release tag and SHA256 when it runs it,
       4. runs it with OUR zip as the OptiScaler it installs (it installs ReShade, Feeder, a motion provider and the
          NGX runtimes itself, and puts OptiScaler in as winmm.dll or version.dll, in host64\ for a 32-bit game),
       5. checks our side afterwards: the ini keys and the model.
@@ -37,8 +37,16 @@
     downloads its own, which only runs on RTX 50 cards.
 
 .PARAMETER FeederInstaller
-    A copy of Install-DLSS5Feeder.ps1 you have already read, used instead of the download. Its hash is shown; a
-    version other than the pinned one is only used after you confirm (or with -AllowUnpinnedInstaller).
+    A copy of Install-DLSS5Feeder.ps1 to use instead of fetching the latest: for offline use, or a version you want
+    to try. Its SHA256 is shown.
+
+.PARAMETER UseReviewedFeeder
+    Use the Feeder installer this script was written against (1.17.0, commit 516f86c) instead of the latest. It is
+    downloaded from that commit and checked against its SHA256. For when the newest Feeder breaks something.
+
+.PARAMETER HelperMode
+    Passed to Feeder's installer when it has the option (1.18.0-beta.1 and later): run NGX in the host64 helper for a
+    64-bit game. Default No; only for a game whose own process cannot run NGX.
 
 .PARAMETER Api
     Override render-API detection: D3D, Vulkan, OpenGL, D3D9 or D3D8. Default: Auto.
@@ -86,7 +94,9 @@ param(
 
     [switch] $Plan,
     [switch] $CheckOnly,
-    [switch] $AllowUnpinnedInstaller,
+    [switch] $UseReviewedFeeder,
+    [ValidateSet('No', 'Yes', 'Ask')]
+    [string] $HelperMode = 'No',
     [switch] $Yes,
     [switch] $NoVerify,
     [switch] $NoPause
@@ -97,13 +107,18 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 # ---------------------------------------------------------------------------------------------------------
-# The Feeder installer this was written against: commit 516f86c (1.17.0, main, 2026-09-28), read before it was
-# pinned. A newer upstream (1.18.0-beta.1) exists and has not been read. Bump all three together, after reading it.
+# By default the newest release of DLSS5-Feeder is used, and nobody here has read it before it runs. Its tag and hash
+# are shown. Reviewed is the last version that was read end to end (commit 516f86c, 1.17.0, 2026-09-28), kept for
+# -UseReviewedFeeder.
 # ---------------------------------------------------------------------------------------------------------
 $Feeder = @{
-    Commit = '516f86cfe4162318e21167be2dd54fa10eeed6f2'
-    Sha256 = '3081c147777f6199a4d868a17b557b3fa2bc6a6fc0923f137a6d26f96a35ce8d'
-    Url    = 'https://raw.githubusercontent.com/jlrouzies-fr/DLSS5-Feeder/516f86cfe4162318e21167be2dd54fa10eeed6f2/tools/Install-DLSS5Feeder.ps1'
+    LatestApi = 'https://api.github.com/repos/jlrouzies-fr/DLSS5-Feeder/releases/latest'
+    RawBase   = 'https://raw.githubusercontent.com/jlrouzies-fr/DLSS5-Feeder/'
+    File      = 'tools/Install-DLSS5Feeder.ps1'
+    Reviewed  = @{
+        Commit = '516f86cfe4162318e21167be2dd54fa10eeed6f2'
+        Sha256 = '3081c147777f6199a4d868a17b557b3fa2bc6a6fc0923f137a6d26f96a35ce8d'
+    }
 }
 
 function Say([string]$Status, [string]$Text, [string]$Detail = '')
@@ -121,6 +136,51 @@ function Stop-Here([string]$Text, [string]$Detail = '')
 }
 
 function Get-Sha256([string]$Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
+
+# GitHub's name for the newest release of DLSS5-Feeder, or $null when it cannot be read.
+function Get-LatestFeederTag
+{
+    try
+    {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $r = Invoke-RestMethod -UseBasicParsing -Uri $Feeder.LatestApi -Headers @{ 'User-Agent' = 'OptiScaler-NR-installer' }
+        if ($r.tag_name) { return [string]$r.tag_name }
+    }
+    catch { }
+    return $null
+}
+
+# What a Feeder installer takes: reads its param block without running it. Returns the parameter names, and whether it
+# still offers the choices we rely on (OptiScaler as the consumer, the Dagherbou profile, an explicit zip).
+function Get-InstallerOptions([string]$Path)
+{
+    $e = $null; $t = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$t, [ref]$e)
+    $result = @{ Names = @(); Usable = $false; Why = '' }
+    if ($e -and $e.Count -gt 0) { $result.Why = 'it does not parse as PowerShell'; return $result }
+    if (-not $ast.ParamBlock) { $result.Why = 'it has no parameters'; return $result }
+
+    $byName = @{}
+    foreach ($p in $ast.ParamBlock.Parameters)
+    {
+        $name = $p.Name.VariablePath.UserPath
+        $set = @()
+        foreach ($a in $p.Attributes)
+        {
+            if ($a -is [System.Management.Automation.Language.AttributeAst] -and $a.TypeName.Name -eq 'ValidateSet')
+            { $set = @($a.PositionalArguments | ForEach-Object { $_.SafeGetValue() }) }
+        }
+        $byName[$name] = $set
+    }
+    $result.Names = @($byName.Keys)
+
+    foreach ($need in @('GameExe', 'Consumer', 'OptiScalerFork', 'OptiScalerZip'))
+    { if (-not $byName.ContainsKey($need)) { $result.Why = 'it no longer has -' + $need; return $result } }
+    if ($byName['Consumer'].Count -gt 0 -and $byName['Consumer'] -notcontains 'OptiScaler') { $result.Why = '-Consumer no longer offers OptiScaler'; return $result }
+    if ($byName['OptiScalerFork'].Count -gt 0 -and $byName['OptiScalerFork'] -notcontains 'Dagherbou') { $result.Why = '-OptiScalerFork no longer offers Dagherbou'; return $result }
+    $result.Usable = $true
+    return $result
+}
 
 # 32 or 64, from the PE header's Machine field; $null when it cannot be read.
 function Get-PeBits([string]$Path)
@@ -285,28 +345,35 @@ else
 $cacheDir = if ($Downloads) { $Downloads } else { Join-Path $env:LOCALAPPDATA 'OptiScaler-NR\feeder' }
 $installerPath = $null
 $installerNote = ''
+$installerUrl = $null
+$installerSha = $null     # a hash the download must match; $null for the latest release
+$latestTag = $null
 
 if ($FeederInstaller)
 {
     if (-not (Test-Path -LiteralPath $FeederInstaller)) { Stop-Here ('Installer not found: ' + $FeederInstaller) }
     $installerPath = (Resolve-Path -LiteralPath $FeederInstaller).ProviderPath
-    $h = Get-Sha256 $installerPath
-    if ($h -eq $Feeder.Sha256) { $installerNote = 'matches the pinned version' }
-    else
-    {
-        $installerNote = 'NOT the pinned version (' + $h + ')'
-        if (-not $AllowUnpinnedInstaller -and -not $Plan)
-        {
-            Say 'Warn' 'That installer is not the version this script was written against.' ('Pinned ' + $Feeder.Sha256 + '; yours ' + $h + '. It may behave differently with our build.')
-            if ($Yes -or -not [Environment]::UserInteractive) { Stop-Here 'Refusing an unpinned installer without -AllowUnpinnedInstaller.' }
-            if ((Read-Host '  Use it anyway? (y/N)') -notmatch '^(y|yes)$') { Stop-Here 'Stopped.' }
-        }
-    }
+    $installerNote = 'your copy, SHA256 ' + (Get-Sha256 $installerPath)
+}
+elseif ($UseReviewedFeeder)
+{
+    $rev = $Feeder.Reviewed
+    $installerPath = Join-Path (Join-Path $cacheDir $rev.Commit.Substring(0, 12)) 'Install-DLSS5Feeder.ps1'
+    $installerUrl = $Feeder.RawBase + $rev.Commit + '/' + $Feeder.File
+    $installerSha = $rev.Sha256
+    $installerNote = 'the reviewed version (1.17.0, commit ' + $rev.Commit.Substring(0, 12) + '), hash-checked'
 }
 else
 {
-    $installerPath = Join-Path (Join-Path $cacheDir $Feeder.Commit.Substring(0, 12)) 'Install-DLSS5Feeder.ps1'
-    $installerNote = 'downloaded from the pinned commit ' + $Feeder.Commit.Substring(0, 12) + ' and hash-checked'
+    $latestTag = Get-LatestFeederTag
+    if ($latestTag)
+    {
+        $installerPath = Join-Path (Join-Path $cacheDir $latestTag) 'Install-DLSS5Feeder.ps1'
+        $installerUrl = $Feeder.RawBase + $latestTag + '/' + $Feeder.File
+        $installerNote = 'the latest release, ' + $latestTag + ' (downloaded fresh each run; not read by us beforehand)'
+    }
+    elseif ($Plan) { $installerPath = '(latest release)'; $installerNote = 'could not reach GitHub to see which version that is' }
+    else { Stop-Here 'Could not reach GitHub to find the latest DLSS5-Feeder release.' 'Check the connection, or pass -FeederInstaller <file>, or -UseReviewedFeeder for the version this script was written against.' }
 }
 
 # ---- The plan --------------------------------------------------------------------------------------------------
@@ -319,7 +386,7 @@ Say 'Info' 'Feeder''s installer also fetches ReShade, DLSS5-Feeder, a motion-vec
 Say 'Info' 'It sets [DlssNr] Enabled=true, Dx12Upscaler=dlss and ScanExposure=false in OptiScaler.ini, and leaves any value you set by hand.'
 Say 'Info' 'Existing ReShade and OptiScaler settings in the folder are kept; Feeder backs up what it merges.'
 
-if ($Plan) { Write-Host ''; Say 'Ok' 'Plan only: nothing was downloaded or changed.'; exit 0 }
+if ($Plan) { Write-Host ''; Say 'Ok' 'Plan only: nothing was installed or changed (only GitHub''s name for the latest release was read).'; exit 0 }
 
 if (-not $Yes)
 {
@@ -329,26 +396,36 @@ if (-not $Yes)
 
 # ---- Fetch and verify -----------------------------------------------------------------------------------------
 
-if (-not $FeederInstaller)
+if ($installerUrl)
 {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $installerPath) | Out-Null
-    $needFetch = -not (Test-Path -LiteralPath $installerPath) -or ((Get-Sha256 $installerPath) -ne $Feeder.Sha256)
+    # The latest release is fetched every run; the reviewed one is reused from the cache while its hash still matches.
+    $needFetch = $true
+    if ($installerSha -and (Test-Path -LiteralPath $installerPath) -and ((Get-Sha256 $installerPath) -eq $installerSha)) { $needFetch = $false }
     if ($needFetch)
     {
         try
         {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -UseBasicParsing -Uri $Feeder.Url -OutFile $installerPath
+            Invoke-WebRequest -UseBasicParsing -Uri $installerUrl -OutFile $installerPath
         }
-        catch { Stop-Here 'Could not download Feeder''s installer.' ($_.Exception.Message + '  Download it yourself from ' + $Feeder.Url + ' and pass it with -FeederInstaller.') }
+        catch { Stop-Here 'Could not download Feeder''s installer.' ($_.Exception.Message + '  Download it yourself from ' + $installerUrl + ' and pass it with -FeederInstaller.') }
     }
     $got = Get-Sha256 $installerPath
-    if ($got -ne $Feeder.Sha256)
+    if ($installerSha -and $got -ne $installerSha)
     {
         Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
-        Stop-Here 'The downloaded installer does not match the pinned hash, so it was deleted and not run.' ('Expected ' + $Feeder.Sha256 + ', got ' + $got + '.')
+        Stop-Here 'The downloaded installer does not match the reviewed hash, so it was deleted and not run.' ('Expected ' + $installerSha + ', got ' + $got + '.')
     }
-    Say 'Ok' 'Feeder''s installer downloaded and matches the pinned hash.'
+    if ($latestTag) { Say 'Ok' ('Feeder ' + $latestTag + ' installer downloaded.') ('SHA256 ' + $got) }
+    else { Say 'Ok' 'Feeder''s installer downloaded and matches the reviewed hash.' ('SHA256 ' + $got) }
+}
+else { Say 'Info' ('Using your Feeder installer: ' + $installerPath) }
+
+$opts = Get-InstallerOptions $installerPath
+if (-not $opts.Usable)
+{
+    Stop-Here ('That Feeder installer cannot be driven by this script: ' + $opts.Why + '.') 'Feeder changed its options. Re-run with -UseReviewedFeeder, or ask for this script to be updated.'
 }
 
 if ($builtZip)
@@ -366,12 +443,16 @@ if ($builtZip)
 # and it is what makes it set ScanExposure=false. It is a label for Feeder's own handling, not a claim about our code.
 $installerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installerPath, '-GameExe', $exe,
           '-Consumer', 'OptiScaler', '-OptiScalerFork', 'Dagherbou', '-OptiScalerZip', $OurZip)
-if ($ModelDll) { $installerArgs += @('-DlssNrDll', $ModelDll) }
-if ($Api -ne 'Auto') { $installerArgs += @('-Api', $Api) }
-if ($Downloads) { $installerArgs += @('-Downloads', $Downloads) }
-if ($Yes) { $installerArgs += '-Yes' }
-if ($NoVerify) { $installerArgs += '-NoVerify' }
-$installerArgs += '-NoPause'
+# Options are passed only when this version of the installer has them, so a newer or older one does not fail on an
+# unknown name.
+function Has([string]$n) { return $opts.Names -contains $n }
+if ($ModelDll -and (Has 'DlssNrDll')) { $installerArgs += @('-DlssNrDll', $ModelDll) }
+if ($Api -ne 'Auto' -and (Has 'Api')) { $installerArgs += @('-Api', $Api) }
+if ($Downloads -and (Has 'Downloads')) { $installerArgs += @('-Downloads', $Downloads) }
+if ($Yes -and (Has 'Yes')) { $installerArgs += '-Yes' }
+if ($NoVerify -and (Has 'NoVerify')) { $installerArgs += '-NoVerify' }
+if (Has 'HelperMode') { $installerArgs += @('-HelperMode', $HelperMode) }
+if (Has 'NoPause') { $installerArgs += '-NoPause' }
 
 Write-Host ''
 Write-Host 'Running Feeder''s installer with our zip...' -ForegroundColor White

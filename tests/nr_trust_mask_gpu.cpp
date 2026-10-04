@@ -179,6 +179,48 @@ struct Gpu
         return tex;
     }
 
+    void Change(ID3D12Resource* tex, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    {
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = tex;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = before;
+        b.Transition.StateAfter = after;
+        list->ResourceBarrier(1, &b);
+    }
+
+    // An RGBA8 texture in the given state as bytes, tightly packed (4 per pixel).
+    std::vector<uint8_t> ReadRgba(ID3D12Resource* tex, D3D12_RESOURCE_STATES state)
+    {
+        const auto desc = tex->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+        auto readback = Buffer(total, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+
+        Change(tex, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+        dst.pResource = readback.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = fp;
+        src.pResource = tex;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        Change(tex, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+        Submit();
+
+        std::vector<uint8_t> out((size_t) desc.Width * desc.Height * 4);
+        uint8_t* data = nullptr;
+        readback->Map(0, nullptr, (void**) &data);
+        for (uint32_t y = 0; y < desc.Height; ++y)
+            memcpy(&out[(size_t) y * desc.Width * 4], data + (size_t) y * fp.Footprint.RowPitch, (size_t) desc.Width * 4);
+        readback->Unmap(0, nullptr);
+        return out;
+    }
+
     // The mask (R8) as bytes, tightly packed.
     std::vector<uint8_t> ReadMask(ID3D12Resource* tex)
     {
@@ -458,6 +500,76 @@ int main()
 
         ok &= Check("whole picture, mean mask", run.Mean(0, 0, kWidth, kHeight), run.Mean(0, 0, kWidth, kHeight) < 0.03);
         ok &= Check("the square, mean mask", run.Mean(320, 300, 480, 420), run.Mean(320, 300, 480, 420) < 0.05);
+    }
+
+    // 6. the fallback to the plain picture: the NR result is faded back toward the saved picture by the mask
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        printf(pass == 0 ? "fallback blend where the mask is near 0 (a still scene)\n"
+                         : "fallback blend where the mask is 1 (right after a hard cut)\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        const Scene still { 7, 300, 20.0f, 5.0f };
+        for (int k = 0; k < 8; ++k)
+            run.Frame(still);
+
+        if (pass == 1)
+        {
+            // a frame of another scene: its mask is all distrust
+            const Scene other { 91, -1, 4.0f, 4.0f };
+            run.Frame(other);
+        }
+
+        // the picture (stands in for the back buffer: common state) before and after "NR" changed it
+        auto before = Colour(gpu, Scene { 11, 100, 20.0f, 5.0f });
+        auto after = Colour(gpu, Scene { 23, 100, 20.0f, 5.0f });
+        gpu.Change(before.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        gpu.Change(after.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        gpu.Submit();
+
+        const bool kept = run.trust.CopyPicture(gpu.list.Get(), before.Get());
+
+        // NR's change: the picture becomes "after"
+        gpu.Change(before.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        gpu.Change(after.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        gpu.list->CopyResource(before.Get(), after.Get());
+        gpu.Change(before.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        gpu.Change(after.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+
+        const bool blended = run.trust.BlendWithPicture(gpu.list.Get(), before.Get(), 1.0f);
+        gpu.Submit();
+
+        const auto result = gpu.ReadRgba(before.Get(), D3D12_RESOURCE_STATE_COMMON);
+        // what the original picture (scene 11) and the NR picture (scene 23) look like
+        auto originalTex = Colour(gpu, Scene { 11, 100, 20.0f, 5.0f });
+        auto nrTex = Colour(gpu, Scene { 23, 100, 20.0f, 5.0f });
+        const auto original = gpu.ReadRgba(originalTex.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        const auto nr = gpu.ReadRgba(nrTex.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        double toOriginal = 0, toNr = 0;
+        uint64_t n = 0;
+        for (uint32_t y = 40; y < kHeight - 40; y += 3)
+            for (uint32_t x = 40; x < kWidth - 40; x += 3)
+            {
+                const size_t i = ((size_t) y * kWidth + x) * 4;
+                for (int c = 0; c < 3; ++c)
+                {
+                    toOriginal += std::abs((int) result[i + c] - (int) original[i + c]);
+                    toNr += std::abs((int) result[i + c] - (int) nr[i + c]);
+                    ++n;
+                }
+            }
+
+        toOriginal /= n;
+        toNr /= n;
+        ok &= Check("the picture was kept and blended", (kept && blended) ? 1.0 : 0.0, kept && blended);
+
+        if (pass == 0)
+            ok &= Check("mean distance to the NR picture (of 255)", toNr, toNr < 2.0);
+        else
+            ok &= Check("mean distance to the original picture (of 255)", toOriginal, toOriginal < 2.0);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

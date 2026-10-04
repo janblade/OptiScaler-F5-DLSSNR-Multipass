@@ -581,6 +581,9 @@ class Config
     // depth finder's depth and the optical flow as its depth and motion (Story 4 of the native input producer). Needs
     // FinishedPicture and Enabled on as well. Changes apply at once.
     CustomOptional<bool> DlssNrNativeInput { false };
+    // NativeInputFallback: 0..1. Where the trust mask says the previous frame cannot be trusted (a surface just uncovered, a
+    // cut), the NR result is faded back toward the picture as the game drew it, by this much times the mask. 0 = off.
+    CustomOptional<float> DlssNrNativeInputFallback { 0.0f };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

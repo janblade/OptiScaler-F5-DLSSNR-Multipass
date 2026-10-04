@@ -30,7 +30,8 @@ cbuffer P : register(b0)
     float revealTolerance;
     uint depthCount;
     uint debugView;      // 0 the mask, 1 depth, 2 revealed, 3 flow consistency, 4 luma, 5 out of the picture (no memory)
-    uint2 pad;
+    float blendStrength;
+    uint pad2;
 };
 
 SamplerState Linear : register(s0);
@@ -217,6 +218,23 @@ void GuideMotion(uint3 id : SV_DispatchThreadID)
     OutFlow[id.xy] = float4(Flow.SampleLevel(Linear, uv, 0).xy, 0.0, 0.0);
 }
 
+// What NR made of the picture, faded back toward the picture as it was by the mask (at the flow's size, enlarged) times the
+// strength. The three textures are the picture's size; the mask is the flow's.
+Texture2D<float4> NrPicture : register(t0);
+Texture2D<float4> PrePicture : register(t1);
+Texture2D<float>  TrustTexture : register(t2);
+
+[numthreads(8, 8, 1)]
+void Blend(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= size.x || id.y >= size.y)
+        return;
+
+    float2 uv = (float2(id.xy) + 0.5) / float2(size);
+    float amount = saturate(TrustTexture.SampleLevel(Linear, uv, 0) * blendStrength);
+    OutFlow[id.xy] = lerp(NrPicture.Load(int3(id.xy, 0)), PrePicture.Load(int3(id.xy, 0)), amount);
+}
+
 [numthreads(8, 8, 1)]
 void CopyFlow(uint3 id : SV_DispatchThreadID)
 {
@@ -256,7 +274,8 @@ TrustMaskDx12::~TrustMaskDx12()
 {
     ReleaseTextures();
 
-    for (ID3D12PipelineState** pso : { &_depthProxy, &_clearCounter, &_trust, &_copyFlow, &_guideDepthPso, &_guideMotionPso })
+    for (ID3D12PipelineState** pso :
+         { &_depthProxy, &_clearCounter, &_trust, &_copyFlow, &_guideDepthPso, &_guideMotionPso, &_blendPso })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -342,7 +361,8 @@ bool TrustMaskDx12::Init(ID3D12Device* device)
 
     for (const Entry& entry : { Entry { "DepthProxy", &_depthProxy }, Entry { "ClearCounter", &_clearCounter },
                                 Entry { "Trust", &_trust }, Entry { "CopyFlow", &_copyFlow },
-                                Entry { "GuideDepth", &_guideDepthPso }, Entry { "GuideMotion", &_guideMotionPso } })
+                                Entry { "GuideDepth", &_guideDepthPso }, Entry { "GuideMotion", &_guideMotionPso },
+                                Entry { "Blend", &_blendPso } })
     {
         ID3DBlob* code = Compile(entry.name, &_error);
 
@@ -439,7 +459,8 @@ bool TrustMaskDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXG
 
 void TrustMaskDx12::ReleaseTextures()
 {
-    for (Tex* tex : { &_depth[0], &_depth[1], &_mask[0], &_mask[1], &_flowBefore, &_guideDepth, &_guideMotion })
+    for (Tex* tex : { &_depth[0], &_depth[1], &_mask[0], &_mask[1], &_flowBefore, &_guideDepth, &_guideMotion, &_pre,
+                      &_blendOut })
     {
         if (tex->resource != nullptr)
             tex->resource->Release();
@@ -616,6 +637,7 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     constants.revealTolerance = _settings.revealTolerance;
     constants.depthCount = (uint32_t) (std::min)(in.depthCount, (int) Inputs::kMaxDepths);
     constants.debugView = (uint32_t) _settings.debugView;
+    constants.blendStrength = 0.0f;
 
     // 1. the depth proxy at the flow's size
     {
@@ -754,5 +776,121 @@ bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& i
         Pass(list, _guideMotionPso, srv, formats, _guideMotion, kFlowFormat, groupsX, groupsY, constants);
     }
 
+    return true;
+}
+
+namespace
+{
+// The format a picture is blended in: raw encoded values, so an sRGB view or a typeless buffer is read as plain UNORM (a typed
+// UAV cannot be sRGB, and blending the encoded values is what is wanted anyway).
+DXGI_FORMAT RawFormat(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    default:
+        return format;
+    }
+}
+} // namespace
+
+bool TrustMaskDx12::CopyPicture(ID3D12GraphicsCommandList* list, ID3D12Resource* picture)
+{
+    if (_device == nullptr || _blendPso == nullptr || list == nullptr || picture == nullptr)
+        return false;
+
+    const D3D12_RESOURCE_DESC desc = picture->GetDesc();
+    const DXGI_FORMAT format = RawFormat(desc.Format);
+
+    if (_pre.resource == nullptr || _pre.width != desc.Width || _pre.height != desc.Height ||
+        _pre.resource->GetDesc().Format != format)
+    {
+        // A picture size change: the owner has waited for the GPU as it does for any size change.
+        for (Tex* tex : { &_pre, &_blendOut })
+        {
+            if (tex->resource != nullptr)
+                tex->resource->Release();
+            *tex = Tex {};
+        }
+
+        if (!CreateTexture(_pre, (uint32_t) desc.Width, desc.Height, format, L"TrustMask_Pre") ||
+            !CreateTexture(_blendOut, (uint32_t) desc.Width, desc.Height, format, L"TrustMask_BlendOut"))
+        {
+            _error = "creating the blend textures";
+            return false;
+        }
+    }
+
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = picture;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    list->ResourceBarrier(1, &barrier);
+
+    Transition(list, _pre, D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyResource(_pre.resource, picture);
+    Transition(list, _pre, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    list->ResourceBarrier(1, &barrier);
+    return true;
+}
+
+bool TrustMaskDx12::BlendWithPicture(ID3D12GraphicsCommandList* list, ID3D12Resource* picture, float strength)
+{
+    if (_device == nullptr || _blendPso == nullptr || list == nullptr || picture == nullptr ||
+        _pre.resource == nullptr || _blendOut.resource == nullptr || _mask[_maskIndex].resource == nullptr)
+        return false;
+
+    const D3D12_RESOURCE_DESC desc = picture->GetDesc();
+
+    if (_pre.width != desc.Width || _pre.height != desc.Height)
+        return false;
+
+    const DXGI_FORMAT format = RawFormat(desc.Format);
+
+    Constants constants {};
+    constants.sizeX = (uint32_t) desc.Width;
+    constants.sizeY = desc.Height;
+    constants.blendStrength = strength;
+
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = picture;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    list->ResourceBarrier(1, &barrier);
+
+    ID3D12Resource* const srv[8] = { picture, _pre.resource, _mask[_maskIndex].resource, nullptr, nullptr, nullptr, nullptr,
+                                     nullptr };
+    const DXGI_FORMAT formats[8] = { format, format, kMaskFormat, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN,
+                                     DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN };
+    Pass(list, _blendPso, srv, formats, _blendOut, format, (uint32_t) ((desc.Width + 7) / 8), (desc.Height + 7) / 8,
+         constants);
+
+    // The blended picture over the NR result.
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    list->ResourceBarrier(1, &barrier);
+
+    Transition(list, _blendOut, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->CopyResource(picture, _blendOut.resource);
+    Transition(list, _blendOut, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    list->ResourceBarrier(1, &barrier);
     return true;
 }

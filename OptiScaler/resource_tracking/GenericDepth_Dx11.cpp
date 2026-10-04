@@ -430,10 +430,11 @@ void OnPresent(IDXGISwapChain* swapChain)
     if (FAILED(swapChain->GetDesc(&desc)))
         return;
 
-    {
-        std::lock_guard lock(g_mutex);
-        g_copyTaken = false;
-    }
+    // g_copyTaken is NOT reset here: the mid-frame "unbind" events that call TakeSnapshot happen while the game renders the
+    // frame that is only now finishing (well before this Present call), so resetting it at the top of this same function would
+    // wipe out the very flag they just set, before anything downstream (BestSnapshot, the diagnostic below) ever reads it. It is
+    // instead invalidated below when the finder stands down, and implicitly kept fresh by TakeSnapshot overwriting g_copy on
+    // every successful copy.
 
     // The overlay preview (not yet drawn for D3D11) or the motion step needs the depth copy taken.
     g_core.SetSnapshotsWanted((Config::Instance()->DlssNrNativeDepthOverlay.value_or_default() &&

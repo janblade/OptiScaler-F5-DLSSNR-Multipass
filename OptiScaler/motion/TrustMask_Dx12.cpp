@@ -29,7 +29,8 @@ cbuffer P : register(b0)
     float fullPerFlow;
     float revealTolerance;
     uint depthCount;
-    uint3 pad;
+    uint debugView;      // 0 the mask, 1 depth, 2 revealed, 3 flow consistency, 4 luma, 5 out of the picture (no memory)
+    uint2 pad;
 };
 
 SamplerState Linear : register(s0);
@@ -98,10 +99,11 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
         float2 uv = (q + 0.5) / float2(size);
 
         float bad = 0.0;
+        float badDepth = 0.0, badReveal = 0.0, badFlow = 0.0, badLuma = 0.0, badOutside = 0.0;
 
         if (any(q < -0.5) || any(q > float2(size) - 0.5))
         {
-            bad = 1.0; // it came from outside the picture
+            badOutside = 1.0; // it came from outside the picture
         }
         else
         {
@@ -130,15 +132,15 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
             // flow cannot be relied on for this, it bleeds from the moving surface into what it uncovers, so it looks at
             // the same pixel instead of the flow's.
             if (farthestHere < zNow)
-                bad = max(bad, saturate(((zNow - farthestHere) / zNow - revealTolerance) / revealTolerance));
+                badReveal = saturate(((zNow - farthestHere) / zNow - revealTolerance) / revealTolerance);
 
             if (zNow < kSky)
-                bad = max(bad, saturate((relativeBest - depthTolerance) / depthTolerance));
+                badDepth = saturate((relativeBest - depthTolerance) / depthTolerance);
 
             // Consistency: the motion there was not this motion.
             float2 flowBefore = FlowBefore.SampleLevel(Linear, uv, 0).xy;
             float allowed = flowTolerance + 0.5 * length(flow);
-            bad = max(bad, saturate((length(flow - flowBefore) - allowed) / allowed));
+            badFlow = saturate((length(flow - flowBefore) - allowed) / allowed);
 
             // Luma: what was there is outside what is here.
             float lo = 1e9, hi = -1e9;
@@ -154,12 +156,21 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
             float before = LumaBefore.SampleLevel(Linear, uv, 0);
             float tolerance = lumaTolerance * max(hi, 0.05) + 2.0 / 255.0;
             float excursion = max(lo - before, before - hi) - tolerance;
-            bad = max(bad, saturate(excursion / (2.0 * tolerance)));
+            badLuma = saturate(excursion / (2.0 * tolerance));
         }
+
+        bad = max(max(max(badDepth, badReveal), max(badFlow, badLuma)), badOutside);
 
         // Hysteresis: distrust that was there a frame ago fades, it does not vanish.
         float remembered = MaskBefore.SampleLevel(Linear, uv, 0);
         mask = saturate(max(bad, remembered * decay));
+
+        // A debug view shows one check alone, as it is this frame.
+        if (debugView == 1) mask = badDepth;
+        else if (debugView == 2) mask = badReveal;
+        else if (debugView == 3) mask = badFlow;
+        else if (debugView == 4) mask = badLuma;
+        else if (debugView == 5) mask = badOutside;
     }
 
     if (inside)
@@ -568,6 +579,7 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     constants.fullPerFlow = in.fullPerFlow;
     constants.revealTolerance = _settings.revealTolerance;
     constants.depthCount = (uint32_t) (std::min)(in.depthCount, (int) Inputs::kMaxDepths);
+    constants.debugView = (uint32_t) _settings.debugView;
 
     // 1. the depth proxy at the flow's size
     {

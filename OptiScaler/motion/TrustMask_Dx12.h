@@ -79,6 +79,7 @@ class TrustMaskDx12
         float lumaTolerance = 0.25f;       // relative luma excursion allowed
         float revealTolerance = 0.25f;     // how much farther the surface is now than the one at this pixel a frame ago
         float decay = 0.5f;                // how much of last frame's distrust is kept
+        int debugView = 0;                 // 0 the mask; 1 depth, 2 revealed, 3 flow consistency, 4 luma, 5 outside, one check alone
         float cutShare = 0.95f;            // share of fully distrusted pixels that is called a scene cut (fast camera turns reach 0.9)
     };
 
@@ -100,7 +101,7 @@ class TrustMaskDx12
         float depthTolerance, flowTolerance, lumaTolerance, decay;
         uint32_t reversed, hasHistory;
         float fullPerFlow, revealTolerance;
-        uint32_t depthCount, pad0, pad1, pad2;
+        uint32_t depthCount, debugView, pad1, pad2;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);

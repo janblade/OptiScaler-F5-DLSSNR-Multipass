@@ -43,6 +43,7 @@ uint32_t g_height = 0;
 bool g_previewWanted = false; // the menu node is open
 bool g_previewReady = false;  // a flow preview has been recorded
 bool g_trustRan = false;      // the trust mask was recorded in the last frame
+uint64_t g_trustFrame = 0;    // the last frame it was
 uint64_t g_cuts = 0;          // scene cuts the mask reported
 Status g_status = Status::Off;
 std::string g_failure;
@@ -295,6 +296,20 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
             in.depthHeight = depth.height;
             in.depthReversed = depth.reversed;
             g_trustRan = g_trust->Dispatch(g_list, in);
+
+            if (g_trustRan)
+                g_trustFrame = g_frame;
+        }
+
+        // How often the depth finder has a copy for the mask: the log shows it every 600 frames.
+        static uint64_t seen = 0, ran = 0;
+        ++seen;
+        ran += g_trustRan ? 1 : 0;
+
+        if (seen == 600)
+        {
+            LOG_INFO("Native motion: the trust mask ran in {} of {} frames", ran, seen);
+            seen = ran = 0;
         }
 
         // A hard cut: nothing carried over from before it is worth keeping.
@@ -375,9 +390,12 @@ void DrawDebugUi()
     if (!drawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));
 
+    // A frame can have no depth copy; the picture then keeps the last mask rather than going black for a frame.
+    const bool trustRecent = g_trustFrame != 0 && g_frame - g_trustFrame < 30;
+
     if (g_status == Status::Running)
     {
-        if (g_trustRan)
+        if (trustRecent)
             ImGui::TextDisabled("Trust: white is where the last frame cannot be trusted (%llu cuts seen).",
                                 (unsigned long long) g_cuts);
         else
@@ -386,9 +404,21 @@ void DrawDebugUi()
     else
         ImGui::TextDisabled("Trust: -");
 
+    if (g_trust)
+    {
+        static const char* kViews[] = { "Final mask", "Depth check", "Revealed-surface check", "Flow consistency check",
+                                        "Luma check", "Outside the picture" };
+        int view = g_trust->Tuning().debugView;
+
+        ImGui::SetNextItemWidth(220.0f);
+
+        if (ImGui::Combo("Show##trustview", &view, kViews, IM_ARRAYSIZE(kViews)))
+            g_trust->Tuning().debugView = view;
+    }
+
     bool maskDrawn = false;
 
-    if (g_status == Status::Running && g_trustRan && g_trust)
+    if (g_status == Status::Running && trustRecent && g_trust)
         maskDrawn = ShowTexture(g_maskView, g_trust->Mask(), DXGI_FORMAT_R8_UNORM, true, boxWidth, boxHeight);
 
     if (!maskDrawn)

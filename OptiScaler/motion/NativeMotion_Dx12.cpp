@@ -384,7 +384,9 @@ void DrawDebugUi()
                                 "game with no upscaler. Needs the depth finder, Finished picture and Enable Neural Rendering on.\n"
                                 "SDR and scRGB only for now. Applies at once.");
 
-    if (g_flow && ImGui::TreeNode("Flow tuning (to compare, applies at once)##flowtuning"))
+    const bool debugView = config->DlssNrNativeDebugView.value_or_default();
+
+    if (debugView && g_flow && ImGui::TreeNode("Flow tuning (to compare, applies at once)##flowtuning"))
     {
         auto& tune = g_flow->Tuning();
         ImGui::SetNextItemWidth(160.0f);
@@ -439,6 +441,13 @@ void DrawDebugUi()
     default:
         ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
         break;
+    }
+
+    // The pictures and their controls are debugging aids: off by default, nothing is recorded for them while they are hidden.
+    if (!debugView)
+    {
+        ImGui::TreePop();
+        return;
     }
 
     const float boxWidth = 360.0f;

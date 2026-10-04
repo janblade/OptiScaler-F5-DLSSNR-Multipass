@@ -574,6 +574,10 @@ class Config
     // busiest clear and shows it in the DLSS-NR menu. That copy is recorded into the game's own command list.
     CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
     CustomOptional<bool> DlssNrNativeDepthOverlay { false };
+    // NativeDebugView: show the pictures and debug controls of the depth finder and the motion estimate in the DLSS-NR menu
+    // (the depth preview, the motion and trust pictures, the trust view chooser, the flow tuning). Off, the menu keeps the
+    // switches and one status line each, and the depth overlay's copy is not made. Startup only.
+    CustomOptional<bool> DlssNrNativeDebugView { false };
     // NativeMotion: debug; estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, and shows it in the DLSS-NR menu. Changes apply at once. See motion/NativeMotion_Dx12.h.
     CustomOptional<bool> DlssNrNativeMotion { false };

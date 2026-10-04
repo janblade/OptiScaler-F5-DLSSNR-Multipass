@@ -1125,7 +1125,8 @@ void Install(ID3D12Device* device)
         return;
     }
 
-    g_overlayOn = Config::Instance()->DlssNrNativeDepthOverlay.value_or_default();
+    g_overlayOn = Config::Instance()->DlssNrNativeDepthOverlay.value_or_default() &&
+                  Config::Instance()->DlssNrNativeDebugView.value_or_default();
     g_active = true;
     g_installed = true;
     LOG_INFO("Depth finder: observing the game's depth buffers{}, after {} frames of warm-up; it stands down if the game "
@@ -1495,15 +1496,20 @@ void DrawDebugUi()
         return;
     }
 
-    bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
+    const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
-    if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))
-        config->DlssNrNativeDepthOverlay = overlay;
+    if (debugView)
+    {
+        bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
 
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
-                                "command list, and shows it below. Leave it off unless you are checking the pick.\n"
-                                "Applies at the next start.");
+        if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))
+            config->DlssNrNativeDepthOverlay = overlay;
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
+                                    "command list, and shows it below. Leave it off unless you are checking the pick.\n"
+                                    "Applies at the next start.");
+    }
 
     if (finder != g_installed)
         ImGui::TextDisabled("Takes effect after saving and restarting the game.");
@@ -1530,6 +1536,12 @@ void DrawDebugUi()
                     pick.reversed ? ", reversed-Z" : "");
 
     ImGui::TextDisabled("The log has the candidates (Depth finder lines).");
+
+    if (!debugView)
+    {
+        ImGui::TreePop();
+        return;
+    }
 
     if (!g_overlayOn.load())
     {

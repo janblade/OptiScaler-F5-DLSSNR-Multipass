@@ -317,8 +317,26 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
 // Under g_mutex, from the clear hook, before the clear itself: the buffer is in the depth-write state a clear needs, so
 // it goes to copy-source and back around one copy of its first subresource into the overlay's texture. The overlay's own
 // texture rests in the shader-resource state. A multisampled buffer is skipped (it would need a resolve).
-void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, bool readOnlyDepth)
+void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, bool readOnlyDepth, const char* where = "",
+                    uint64_t stretchVertices = 0)
 {
+    // The first copies of a frame in a few frames, with what they were taken after: which stretch the preview shows.
+    static uint64_t loggedFrames = 0, lastFrame = ~0ull;
+    static int inFrame = 0;
+
+    if (g_presents != lastFrame)
+    {
+        lastFrame = g_presents;
+        inFrame = 0;
+
+        if (g_presents % 200 == 0)
+            loggedFrames = g_presents; // a burst every 200 presents
+    }
+
+    if (g_presents - loggedFrames < 3 && inFrame++ < 8)
+        LOG_INFO("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_presents, where,
+                 (size_t) list, stretchVertices, g_bestSnapshotVertices);
+
     const auto depthState = readOnlyDepth ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
     const auto desc = source->GetDesc();
@@ -556,7 +574,7 @@ void OnClear(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE DepthS
                         // the copy that is left at the end of the frame is the scene's.
                         if (g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid &&
                             g_pick.id == (uint64_t) (size_t) found->second.resource)
-                            RecordSnapshot(This, found->second.resource, false); // a clear needs depth-write
+                            RecordSnapshot(This, found->second.resource, false, "clear", stretch.vertices); // a clear needs depth-write
                     }
 
                     ++stats.clears;
@@ -607,7 +625,7 @@ void OnClose(ID3D12GraphicsCommandList* This)
     {
         if (stats->current.vertices >= g_bestSnapshotVertices)
         {
-            RecordSnapshot(This, stats->resource, stats->readOnlyDepth);
+            RecordSnapshot(This, stats->resource, stats->readOnlyDepth, "close", stats->current.vertices);
         }
 
         stats->current = DrawStats {};
@@ -845,7 +863,7 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
         {
             if (previous->current.vertices >= g_bestSnapshotVertices)
             {
-                RecordSnapshot(This, previous->resource, previous->readOnlyDepth);
+                RecordSnapshot(This, previous->resource, previous->readOnlyDepth, "unbind", previous->current.vertices);
             }
 
             previous->current = DrawStats {};

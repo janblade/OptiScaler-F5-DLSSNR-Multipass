@@ -93,6 +93,8 @@ struct Stats
     uint32_t width = 0;
     uint32_t height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    ID3D12Resource* resource = nullptr;
+    bool readOnlyDepth = false;
     DrawStats total;
     DrawStats current;       // since the last clear
     uint32_t clears = 0;     // clears that came after real work
@@ -106,6 +108,7 @@ struct DsvInfo
     uint32_t width = 0;
     uint32_t height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    bool readOnlyDepth = false; // the view is read-only for depth, so the buffer is in the depth-read state while bound
 };
 
 struct ListState
@@ -272,8 +275,10 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
 // Under g_mutex, from the clear hook, before the clear itself: the buffer is in the depth-write state a clear needs, so
 // it goes to copy-source and back around one copy of its first subresource into the overlay's texture. The overlay's own
 // texture rests in the shader-resource state. A multisampled buffer is skipped (it would need a resolve).
-void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source)
+void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, bool readOnlyDepth)
 {
+    const auto depthState = readOnlyDepth ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE;
+
     const auto desc = source->GetDesc();
 
     if (desc.SampleDesc.Count > 1)
@@ -307,7 +312,7 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source)
     };
 
     D3D12_RESOURCE_BARRIER in[2] = {
-        barrier(source, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE),
+        barrier(source, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE),
         barrier(g_backup.resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST)
     };
     list->ResourceBarrier(2, in);
@@ -325,7 +330,7 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source)
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     D3D12_RESOURCE_BARRIER out[2] = {
-        barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE),
+        barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
         barrier(g_backup.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
     };
     list->ResourceBarrier(2, out);
@@ -350,7 +355,8 @@ void STDMETHODCALLTYPE hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resour
     }
 
     const auto desc = pResource->GetDesc();
-    g_dsv[DestDescriptor.ptr] = DsvInfo { pResource, (uint32_t) desc.Width, desc.Height, desc.Format };
+    const bool readOnly = pDesc != nullptr && (pDesc->Flags & D3D12_DSV_FLAG_READ_ONLY_DEPTH) != 0;
+    g_dsv[DestDescriptor.ptr] = DsvInfo { pResource, (uint32_t) desc.Width, desc.Height, desc.Format, readOnly };
 }
 
 void CopyDsv(SIZE_T dest, SIZE_T source)
@@ -485,7 +491,7 @@ void OnClear(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE DepthS
                         // the copy that is left at the end of the frame is the scene's.
                         if (g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid &&
                             g_pick.id == (uint64_t) (size_t) found->second.resource)
-                            RecordSnapshot(This, found->second.resource);
+                            RecordSnapshot(This, found->second.resource, false); // a clear needs depth-write
                     }
 
                     ++stats.clears;
@@ -716,8 +722,28 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
                 stats.width = found->second.width;
                 stats.height = found->second.height;
                 stats.format = found->second.format;
+                stats.resource = found->second.resource;
+                stats.readOnlyDepth = found->second.readOnlyDepth;
                 bound = &stats;
             }
+        }
+
+        // The picked buffer is often never cleared again in the frame it was drawn (Witcher 3 clears at the start of the
+        // pass), so the clear never offers a snapshot. The moment the list moves off it is the other chance: the busiest
+        // stretch of the frame is copied there, in the state the view says the buffer is in.
+        Stats* previous = g_lists[This].stats;
+
+        if (previous != nullptr && previous != bound && g_overlayOn.load(std::memory_order_relaxed) && g_pick.valid &&
+            previous->resource != nullptr && g_pick.id == (uint64_t) (size_t) previous->resource &&
+            previous->current.drawcalls != 0)
+        {
+            if (previous->current.vertices >= g_bestSnapshotVertices)
+            {
+                g_bestSnapshotVertices = previous->current.vertices;
+                RecordSnapshot(This, previous->resource, previous->readOnlyDepth);
+            }
+
+            previous->current = DrawStats {};
         }
 
         g_lists[This].stats = bound;
@@ -1182,16 +1208,17 @@ void DrawDebugUi()
     const auto pick = CurrentPick();
     const uint32_t warmup = Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default();
 
+    // Every branch writes exactly one short line and the picture has a box of its own size, so nothing below moves when the
+    // pick changes.
     if (g_upscalerSeen.load())
-        ImGui::TextDisabled("The game makes its own upscaler call: the depth finder has stood down.");
+        ImGui::TextDisabled("Stood down: the game has an upscaler of its own.");
     else if (!g_armed.load())
-        ImGui::TextDisabled("Watching the game's depth buffers (%llu of %u frames)...", (unsigned long long) g_presents,
-                            warmup);
+        ImGui::TextDisabled("Watching (%llu of %u frames)...", (unsigned long long) g_presents, warmup);
     else if (!pick.valid)
         ImGui::TextDisabled("No depth buffer qualifies yet.");
     else
-        ImGui::Text("Picked %ux%u, format %u, score %llu%s", pick.width, pick.height, pick.format,
-                    (unsigned long long) pick.score, pick.reversed ? ", reversed-Z" : "");
+        ImGui::Text("Picked %ux%u, format %u%s", pick.width, pick.height, pick.format,
+                    pick.reversed ? ", reversed-Z" : "");
 
     ImGui::TextDisabled("The log has the candidates (Depth finder lines).");
 
@@ -1199,28 +1226,32 @@ void DrawDebugUi()
     {
         ImGui::TextDisabled("Tick the depth checkbox above and restart to see the picked buffer.");
     }
-    else if (Armed() && pick.valid)
+    else
     {
-        std::lock_guard lock(g_mutex);
+        const float boxWidth = 360.0f;
+        const float boxHeight = boxWidth * 9.0f / 16.0f;
+        bool drawn = false;
 
-        if (g_backupFrame == 0 || g_backup.resource == nullptr)
+        if (Armed() && pick.valid)
         {
-            ImGui::TextDisabled("Waiting for the picked buffer's first clear...");
-        }
-        else
-        {
-            EnsureOverlayView();
+            std::lock_guard lock(g_mutex);
 
-            if (g_srvAllocated && !g_srvDirty)
+            if (g_backupFrame != 0 && g_backup.resource != nullptr)
             {
-                const float width = std::min(360.0f, ImGui::GetContentRegionAvail().x);
-                const float height = width * (float) g_backup.height / (float) g_backup.width;
-                ImGui::Image((ImTextureID) g_srvGpu.ptr, ImVec2(width, height));
-                ImGui::TextDisabled("Raw depth: normal depth looks nearly white, reversed-Z shows near as bright.");
+                EnsureOverlayView();
+
+                if (g_srvAllocated && !g_srvDirty)
+                {
+                    ImGui::Image((ImTextureID) g_srvGpu.ptr, ImVec2(boxWidth, boxHeight));
+                    drawn = true;
+                }
             }
-            else
-                ImGui::TextDisabled("The menu could not give the image a descriptor.");
         }
+
+        if (!drawn)
+            ImGui::Dummy(ImVec2(boxWidth, boxHeight));
+
+        ImGui::TextDisabled(drawn ? "Raw depth; reversed-Z shows near as bright." : "Waiting for the picked buffer...");
     }
 
     ImGui::TreePop();

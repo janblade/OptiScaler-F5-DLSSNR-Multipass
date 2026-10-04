@@ -94,17 +94,21 @@ int main()
         CHECK(Score(Make(1, 1, 1, 777, 90, 30)) == 90);    // 30 is not under 30: draw calls
     }
 
-    // Depth at the render resolution, below the picture, still qualifies. ReShade's range is the picture's size divided by
-    // the buffer's from 0.5 to 1.85: a buffer from about 0.54x of the picture up to 2x of it.
+    // Depth at the render resolution, below the picture, still qualifies. The range is the picture's size divided by the
+    // buffer's from 0.5 to 4 (ReShade stops at 1.85): a buffer from a quarter of the picture up to 2x of it.
     {
         Selector s;
         CHECK(Settle(s, { Make(1, 1706, 960, 50000) }, W, H).id == 1);   // two thirds
         s.Reset();
         CHECK(Settle(s, { Make(1, 1400, 788, 50000) }, W, H).valid);     // 1.83: inside
         s.Reset();
-        CHECK(!Settle(s, { Make(1, 1350, 759, 50000) }, W, H).valid);    // 1.90: outside
+        CHECK(Settle(s, { Make(1, 1350, 759, 50000) }, W, H).valid);     // 1.90: inside since the range was widened
         s.Reset();
-        CHECK(!Settle(s, { Make(1, 1280, 720, 50000) }, W, H).valid);    // half the size: outside
+        CHECK(Settle(s, { Make(1, 1280, 720, 50000) }, W, H).valid);     // half the size (Witcher 3): inside
+        s.Reset();
+        CHECK(Settle(s, { Make(1, 700, 394, 50000) }, W, H).valid);      // 3.66: inside
+        s.Reset();
+        CHECK(!Settle(s, { Make(1, 600, 338, 50000) }, W, H).valid);     // 4.27: outside
         s.Reset();
         CHECK(Settle(s, { Make(1, 5120, 2880, 50000) }, W, H).valid);    // 2x supersampled: the edge, inside
         s.Reset();
@@ -140,6 +144,7 @@ int main()
     // The last pick is kept unless another beats it clearly: a pre-pass and the main pass do not trade places.
     {
         Selector s;
+        s.Settings().holdFrames = 0;
         CHECK(Settle(s, { Make(1, 2560, 1440, 100000), Make(2, 2560, 1440, 90000) }, W, H).id == 1);
         // 2 now leads by 10%: 1 stays (90000/100000 is over the 0.75 line).
         CHECK(s.Update({ Make(1, 2560, 1440, 90000), Make(2, 2560, 1440, 100000) }, W, H).id == 1);
@@ -165,6 +170,26 @@ int main()
         Selector s;
         CHECK(Settle(s, { Make(1, 2560, 1440, 90000) }, W, H).valid);
         CHECK(!Settle(s, { Make(1, 2560, 1440, 90000) }, 1920, 1440).valid);
+    }
+
+    // A pick is held while nothing qualifies, for holdFrames frames in a row, then dropped; a buffer that qualifies again
+    // clears the count. The Witcher 3 case: the scene's depth at half the picture, a small full-size buffer, a shadow map.
+    {
+        Selector s;
+        s.Settings().holdFrames = 2;
+        const std::vector<Candidate> scene = { Make(1, 1280, 720, 5500000, 900), Make(2, 2560, 1440, 20000, 100),
+                                               Make(3, 4096, 4096, 5500000, 760) };
+        CHECK(Settle(s, scene, W, H).id == 1);
+        CHECK(s.Update({}, W, H).id == 1);
+        CHECK(s.Update({ Make(9, 100, 100, 5000) }, W, H).id == 1);
+        CHECK(!s.Update({}, W, H).valid);
+        // Once dropped it needs to qualify again, and warm up again.
+        CHECK(Settle(s, scene, W, H).id == 1);
+        CHECK(s.Update({}, W, H).id == 1);
+        CHECK(Settle(s, scene, W, H).id == 1);   // qualified again: the miss count starts over
+        CHECK(s.Update({}, W, H).id == 1);
+        CHECK(s.Update({}, W, H).id == 1);
+        CHECK(!s.Update({}, W, H).valid);
     }
 
     printf(fails == 0 ? "generic depth: ok\n" : "generic depth: %d FAILED\n", fails);

@@ -49,13 +49,16 @@ struct Pick
 struct Rules
 {
     // ReShade's "similar aspect ratio": the shapes differ by at most this (absolute width/height), and both sides are
-    // within this range of the picture's.
+    // within this range of the picture's. ReShade's range stops at 1.85 (a buffer down to 0.54x of the picture); that was
+    // widened to 4 after Witcher 3, whose scene depth is 1280x720 under a 2560x1440 picture (2.0) and whose shadow maps are
+    // square, which the shape test already removes.
     float aspectDelta = 0.1f;
     float minRatio = 0.5f;
-    float maxRatio = 1.85f;
+    float maxRatio = 4.0f;
     uint32_t warmupFrames = 2;       // a buffer must have been in use this many frames before it can win
     uint32_t quietDrawcalls = 8;     // a frame whose only buffer drew this little is not a real frame (emulators present more)
     float keepFraction = 0.75f;      // the previous pick stays unless something beats it by more than this (1/keep)
+    uint32_t holdFrames = 90;        // a pick is kept this many frames in a row while nothing qualifies, then dropped
 };
 
 // The metric a buffer is ranked by: vertices, or draw calls when more than a third of them are indirect (the vertex
@@ -112,6 +115,15 @@ class Selector
 
         ++_frame;
 
+        // A new picture size means the old pick was measured against another one.
+        if (pictureWidth != _lastWidth || pictureHeight != _lastHeight)
+        {
+            _pick = Pick {};
+            _misses = 0;
+            _lastWidth = pictureWidth;
+            _lastHeight = pictureHeight;
+        }
+
         std::unordered_map<uint64_t, uint64_t> seen;
         seen.reserve(frame.size());
 
@@ -147,10 +159,23 @@ class Selector
             chosen = previous;
 
         if (chosen == nullptr)
-            _pick = Pick {};
+        {
+            // Nothing qualifies this frame: a pick that was there stays for a while, so a buffer that drops out for a frame
+            // or two (a menu, a cut) does not make the answer flicker.
+            if (_pick.valid && _misses < _rules.holdFrames)
+                ++_misses;
+            else
+            {
+                _pick = Pick {};
+                _misses = 0;
+            }
+        }
         else
+        {
+            _misses = 0;
             _pick = Pick { true,           chosen->id,        chosen->width,     chosen->height,
                            chosen->format, Score(*chosen),    chosen->bestClear, chosen->reversed };
+        }
 
         return _pick;
     }
@@ -161,6 +186,9 @@ class Selector
         _pick = Pick {};
         _firstSeen.clear();
         _frame = 0;
+        _misses = 0;
+        _lastWidth = 0;
+        _lastHeight = 0;
     }
     Rules& Settings() { return _rules; }
 
@@ -168,6 +196,9 @@ class Selector
     Rules _rules;
     Pick _pick;
     uint64_t _frame = 0;
+    uint32_t _misses = 0;                  // frames in a row the pick was held with nothing qualifying
+    uint32_t _lastWidth = 0;
+    uint32_t _lastHeight = 0;
     std::unordered_map<uint64_t, uint64_t> _firstSeen; // id -> the frame it first appeared
 };
 

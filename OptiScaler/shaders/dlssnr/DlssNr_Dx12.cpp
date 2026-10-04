@@ -3418,75 +3418,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_gpuTime != nullptr)
         g_gpuTime->Start(cmdList);
 
-    // LUT-apply epic (memory/plans/2026-10-04-dlssnr-lut-apply.md), Story 2: grade `target` through a
-    // loaded .cube file before anything else reads it -- including the crop below, so a cropped activeColor
-    // copy is made FROM the already-graded frame. Writes back onto `target` itself (via lutScratch and a
-    // GPU copy) rather than reassigning the pointer, so every stage after this one -- crop, codec, model,
-    // resolve -- runs exactly as it did before the epic existed, LUT loaded or not.
-    {
-        const std::string lutPath = cfg.DlssNrLutFile.value_or_default();
-
-        if (!lutPath.empty())
-        {
-            if (g_nr.lutScratch == nullptr && !g_nr.lutScratchFailed)
-            {
-                g_nr.lutScratch = CreateScratch(device, desc.Format, width, height);
-                g_nr.lutScratchFailed = g_nr.lutScratch == nullptr;
-
-                if (g_nr.lutScratchFailed)
-                    LOG_ERROR("DLSS-NR: could not allocate the LUT pass's scratch target; LutFile is ignored");
-            }
-
-            if (g_nr.lutScratchFailed)
-                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, true,
-                                        "could not allocate the LUT pass's scratch target", lutPath,
-                                        cfg.DlssNrLutStrength.value_or_default());
-
-            if (g_nr.lutScratch != nullptr)
-            {
-                const D3D12_RESOURCE_STATES priorTargetState = targetState;
-                TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-                const float lutStrength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
-                const bool graded =
-                    DispatchLut(cmdList, target, g_nr.lutScratch, width, height, lutStrength, frame.InputEncoding,
-                                isHdrBuffer, DlssNr::AutoTrimEffective(cfg), lutPath);
-
-                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, _lutState.failed,
-                                        _lutState.error, _lutState.attemptedPath, lutStrength);
-
-                if (graded)
-                {
-                    // Copy the graded scratch back onto `target` itself: nothing after this point needs to
-                    // know a LUT ran, including the crop below, which otherwise has no idea its own source
-                    // (`target`) might be aliased to a texture it does not own.
-                    TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
-                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                            D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    DlssNr::CopyActiveColor(cmdList, target, g_nr.lutScratch, DlssNr::ColorExtent { width, height });
-                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                }
-
-                // Parsed-but-unusable (a malformed file) or the pipeline failed to build takes the same path
-                // back: restore exactly the state target was in before this block touched it.
-                TransitionTarget(priorTargetState);
-            }
-        }
-        else
-        {
-            // LutFile was cleared: neither the scratch target nor the uploaded 3D texture (up to ~16 MB for
-            // a 128^3 lattice) is reused by anything else, so there is no reason to keep holding either --
-            // the same hold-only-while-wanted discipline activeColor's own scratch follows for cropColor.
-            // Fixed (Review Pass, 2026-10-04): this used to park only the scratch target, so _lutTexture
-            // stayed resident for the rest of the session once any LUT had ever loaded. A no-op once
-            // already released/parked.
-            ParkNrResource(g_nr.lutScratch);
-            ReleaseLutTexture();
-            DlssNr::ReportLutStatus(false, "", 0, false, "", "", cfg.DlssNrLutStrength.value_or_default());
-        }
-    }
-
     // Copy just the live image, not the stale right/bottom margins. Do this only after model
     // creation/pending-submission early returns, and inside the measured GPU interval. The compact
     // texture lets every existing codec/compare/hold/capture path use unmodified pixel coordinates.
@@ -3703,6 +3634,82 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             Barrier(cmdList, g_nr.autoExposureRaw, D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         ConsumeMeterReadback();
+    }
+
+    // LUT-apply epic (memory/plans/2026-10-04-dlssnr-lut-apply.md), Story 2: grade `target` through a
+    // loaded .cube file before the model sees it. Deliberately placed AFTER the crop above and the
+    // exposure measurement above that, not right after g_gpuTime->Start where Story 2 originally put
+    // it -- that measured the LUT's own graded output as if it were the clean upscaler frame, repeating
+    // (from a different angle) the exact mistake the Automatic-exposure meter's own comment above warns
+    // about ("nothing this pass writes is measured"). A nonlinear grade shifts apparent scene brightness
+    // by a different, content-dependent amount per scene, so the symptom wasn't a fixed bias but
+    // exposure needing a different correction shot to shot (found 2026-10-04, user report). Grading
+    // here instead means the meter and crop both still see the clean frame, exactly as they did before
+    // this epic existed; only the model and everything after it see the grade. Writes back onto
+    // `target` itself (via lutScratch and a GPU copy) rather than reassigning the pointer, so codec,
+    // model and resolve all still run exactly as they did before the epic existed, LUT loaded or not.
+    {
+        const std::string lutPath = cfg.DlssNrLutFile.value_or_default();
+
+        if (!lutPath.empty())
+        {
+            if (g_nr.lutScratch == nullptr && !g_nr.lutScratchFailed)
+            {
+                g_nr.lutScratch = CreateScratch(device, desc.Format, width, height);
+                g_nr.lutScratchFailed = g_nr.lutScratch == nullptr;
+
+                if (g_nr.lutScratchFailed)
+                    LOG_ERROR("DLSS-NR: could not allocate the LUT pass's scratch target; LutFile is ignored");
+            }
+
+            if (g_nr.lutScratchFailed)
+                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, true,
+                                        "could not allocate the LUT pass's scratch target", lutPath,
+                                        cfg.DlssNrLutStrength.value_or_default());
+
+            if (g_nr.lutScratch != nullptr)
+            {
+                const D3D12_RESOURCE_STATES priorTargetState = targetState;
+                TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                const float lutStrength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
+                const bool graded =
+                    DispatchLut(cmdList, target, g_nr.lutScratch, width, height, lutStrength, frame.InputEncoding,
+                                isHdrBuffer, DlssNr::AutoTrimEffective(cfg), lutPath);
+
+                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, _lutState.failed,
+                                        _lutState.error, _lutState.attemptedPath, lutStrength);
+
+                if (graded)
+                {
+                    // Copy the graded scratch back onto `target` itself: nothing after this point needs to
+                    // know a LUT ran, including the model dispatch ahead, which otherwise has no idea its
+                    // own source (`target`) might be aliased to a texture it does not own.
+                    TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
+                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    DlssNr::CopyActiveColor(cmdList, target, g_nr.lutScratch, DlssNr::ColorExtent { width, height });
+                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+
+                // Parsed-but-unusable (a malformed file) or the pipeline failed to build takes the same path
+                // back: restore exactly the state target was in before this block touched it.
+                TransitionTarget(priorTargetState);
+            }
+        }
+        else
+        {
+            // LutFile was cleared: neither the scratch target nor the uploaded 3D texture (up to ~16 MB for
+            // a 128^3 lattice) is reused by anything else, so there is no reason to keep holding either --
+            // the same hold-only-while-wanted discipline activeColor's own scratch follows for cropColor.
+            // Fixed (Review Pass, 2026-10-04): this used to park only the scratch target, so _lutTexture
+            // stayed resident for the rest of the session once any LUT had ever loaded. A no-op once
+            // already released/parked.
+            ParkNrResource(g_nr.lutScratch);
+            ReleaseLutTexture();
+            DlssNr::ReportLutStatus(false, "", 0, false, "", "", cfg.DlssNrLutStrength.value_or_default());
+        }
     }
 
     // Automatic follows the game's own exposure when that is on (DlssNr_GameDefaults.h: a known unexposed game or the

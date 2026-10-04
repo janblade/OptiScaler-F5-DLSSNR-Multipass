@@ -372,6 +372,13 @@ class Config
     // 1 linear HDR, 2 tone-mapped sRGB, 3 tone-mapped gamma 2.2, 4 PQ. Values are DlssNr_ColourEncoding.h's.
     CustomOptional<uint32_t> DlssNrColourEncoding { 0 };
 
+    // LUT-apply epic (memory/plans/2026-10-04-dlssnr-lut-apply.md), Story 2: a .cube file graded onto the
+    // NR input image before the model ever sees it. Empty (the default) is the feature not existing -- no
+    // parse, no GPU texture, no dispatch. Accepts a path outside the bundled LUTs folder too.
+    CustomOptional<std::string> DlssNrLutFile { std::string() };
+    // How much of the LUT's grade reaches the image, 0..1. Default is fully graded once a LutFile is set.
+    CustomOptional<float> DlssNrLutStrength { 1.0f };
+
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
     // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.
     CustomOptional<bool> DlssNrApplyModel { true };

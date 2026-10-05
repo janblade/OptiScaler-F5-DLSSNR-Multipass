@@ -1833,6 +1833,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
         PrepareLogger();
+        InstallCrashHandler();
 
         spdlog::warn("{0} loaded", VER_PRODUCT_NAME);
         spdlog::warn("---------------------------------");

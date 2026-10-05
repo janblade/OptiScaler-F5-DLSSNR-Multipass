@@ -257,6 +257,12 @@ namespace NativeMotionDx12
 
 void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
 {
+    // A D3D11 game's frame generation swap chain is the interop's D3D12 one: its picture is the game's, already handled by
+    // NativeMotionDx11 from Dx11wDx12SC::Present, and this present runs inside frame generation's own present, under the
+    // lock the virtual upscaler's UpscaleStart (-> EvaluateState) takes again: that deadlocked.
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+        return;
+
     const uint64_t presents = ++g_menuPresents;
 
     if (g_fgDriven.load() && presents - g_menuPresentsAtFg.load() <= kFgPresentGrace)

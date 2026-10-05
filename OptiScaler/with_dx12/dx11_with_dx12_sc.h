@@ -81,6 +81,10 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     // Present already put the raw one into, when that option is on. A no-op, not a failure, when it is off or there
     // is nothing to apply this frame; never fails the surrounding Present.
     void _ApplyNativeInputToFGBackBuffer();
+    // Lazily creates _nrCopyAllocators/_nrCopyCommandLists the first time native input actually has a frame to
+    // composite, so D3D11+FG-interop users who never enable native input never pay for this ring or its failure
+    // path.
+    bool _EnsureNativeInputCopyRing();
     bool _WaitForCopyQueueIdle();
     bool _WaitForCopyAllocator(UINT slot, std::vector<UINT64>& fenceValues);
     void _ReleaseInteropBackBuffers();

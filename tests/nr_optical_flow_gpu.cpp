@@ -192,6 +192,60 @@ struct Gpu
         Submit();
         return tex;
     }
+
+    // An R32_FLOAT reversed-Z depth map for Picture's square: the square at distance 5, the rest at 20. scale < 1 makes a
+    // smaller map (a depth buffer at a lower render resolution) covering the same picture.
+    ComPtr<ID3D12Resource> DepthMap(float squareX, float squareY, float squareSize, float scale = 1.0f)
+    {
+        const uint32_t width = (uint32_t) (kWidth * scale), height = (uint32_t) (kHeight * scale);
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(&tex));
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+        auto upload = Buffer(total, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+        uint8_t* data = nullptr;
+        upload->Map(0, nullptr, (void**) &data);
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                const float px = (x + 0.5f) / scale, py = (y + 0.5f) / scale; // in picture pixels
+                const bool in = px >= squareX && px < squareX + squareSize && py >= squareY && py < squareY + squareSize;
+                const float d = 0.1f / (in ? 5.0f : 20.0f);
+                memcpy(data + (size_t) y * fp.Footprint.RowPitch + x * 4, &d, 4);
+            }
+        upload->Unmap(0, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+        dst.pResource = tex.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource = upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = tex.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1, &b);
+        Submit();
+        return tex;
+    }
 };
 
 uint16_t* g_unused = nullptr;
@@ -281,8 +335,14 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // Settings to compare, from the command line (they apply to every case below).
+    OpticalFlowDx12::Settings tuning;
     if (noSmoothing)
-        flow.Tuning().smoothRadius = 0;
+        tuning.smoothRadius = 0;
+    for (int a = 1; a < argc; ++a)
+        if (std::string(argv[a]) == "nodmatch")
+            tuning.depthMatching = false;
+    flow.Tuning() = tuning;
 
     if (perf)
     {
@@ -291,11 +351,20 @@ int main(int argc, char** argv)
         for (int i = 0; i < 6; ++i)
             frames.push_back(gpu.Picture(i * 7.0f, i * -3.0f));
 
+        // With a depth-aware setting on, a depth map of a square to read.
+        const bool withDepth = tuning.depthMatching;
+        auto depthMap = withDepth ? gpu.DepthMap(800.0f, 400.0f, 500.0f) : ComPtr<ID3D12Resource>();
+        auto dispatch = [&](ID3D12Resource* frame)
+        {
+            flow.Dispatch(gpu.list.Get(), frame, DXGI_FORMAT_R8G8B8A8_UNORM, depthMap.Get(),
+                          withDepth ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN, true);
+        };
+
         flow.Reset();
         for (int warm = 0; warm < 3; ++warm)
         {
             for (auto& frame : frames)
-                flow.Dispatch(gpu.list.Get(), frame.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+                dispatch(frame.Get());
             gpu.Submit();
         }
 
@@ -306,7 +375,7 @@ int main(int argc, char** argv)
         for (int batch = 0; batch < batches; ++batch)
         {
             for (auto& frame : frames)
-                flow.Dispatch(gpu.list.Get(), frame.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+                dispatch(frame.Get());
             gpu.Submit();
         }
         QueryPerformanceCounter(&b);
@@ -405,9 +474,9 @@ int main(int argc, char** argv)
                c.minWithinHalf > 0 ? (pass ? "ok" : "FAIL") : "(reported)", c.what);
     }
 
-    // A square moving over a background that moves differently: the flow near its edges, with the coarser level's 4 nearest
-    // cells as candidates and with all 9 of the 3x3. Background content the square uncovered this frame is left out (it was
-    // not in the previous picture).
+    // A square moving over a background that moves differently: the flow near its edges, for each way of making it. Background
+    // content the square uncovered this frame is left out (it was not in the previous picture). Every run is given a depth map
+    // of the square; only the depth-aware settings read it.
     struct EdgeCase
     {
         float squareDx, squareDy, backgroundDx, backgroundDy;
@@ -418,25 +487,53 @@ int main(int argc, char** argv)
         { 24, 10, 0, 0, "square over a still background" },
         { -30, 0, 8, -4, "square against a panning background" },
         { 60, 30, 0, 0, "fast square over a still background" },
+        { 8, 0, 0, 0, "slow square over a still background" },
     };
+
+    struct Variant
+    {
+        const char* what;
+        int cells;
+        bool matching;
+        float depthOffset = 0.0f; // the depth map's square this many pixels right of the picture's (a misaligned depth)
+        float depthScale = 1.0f;  // the depth map's size relative to the picture's
+        bool wrongDepth = false;  // a depth map whose edges are not the picture's (the square 60 px off)
+    };
+
+    const Variant variants[] = {
+        { "4 cells, no depth matching", 4, false },
+        { "9 cells, no depth matching", 9, false },
+        { "depth matching (default)", 9, true },
+        { "depth matching, depth 2 px off", 9, true, 2.0f },
+        { "depth matching, depth 5 px off", 9, true, 5.0f },
+        { "depth matching, half-size depth", 9, true, 0.0f, 0.5f },
+        { "depth matching, wrong depth", 9, true, 0.0f, 1.0f, true },
+    };
+    constexpr int kVariants = (int) (sizeof(variants) / sizeof(variants[0]));
 
     for (const EdgeCase& e : edgeCases)
     {
-        double share[2] = {}, mean[2] = {};
-        const int cells[2] = { 4, 9 };
+        double share[kVariants] = {}, mean[kVariants] = {};
+        printf("edges, %s\n", e.what);
 
-        for (int run = 0; run < 2; ++run)
+        for (int run = 0; run < kVariants; ++run)
         {
             flow.Reset();
-            flow.Tuning().coarseCells = cells[run];
+            flow.Tuning() = tuning;
+            flow.Tuning().coarseCells = variants[run].cells;
+            flow.Tuning().depthMatching = variants[run].matching;
             const int frames = 3;
             const float size = 256.0f, x0 = 400.0f, y0 = 200.0f;
 
             for (int k = 0; k < frames; ++k)
             {
-                auto picture = gpu.Picture(e.backgroundDx * k, e.backgroundDy * k, 1.0f, 0.0f, k, x0 + e.squareDx * k,
-                                           y0 + e.squareDy * k, size);
-                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+                const float qx = x0 + e.squareDx * k, qy = y0 + e.squareDy * k;
+                auto picture = gpu.Picture(e.backgroundDx * k, e.backgroundDy * k, 1.0f, 0.0f, k, qx, qy, size);
+                const Variant& v = variants[run];
+                auto depth = v.wrongDepth ? gpu.DepthMap(qx + 60.0f, qy + 60.0f, size)
+                                          : gpu.DepthMap(qx + v.depthOffset, qy, size, v.depthScale);
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depth.Get(), DXGI_FORMAT_R32_FLOAT,
+                              true);
                 gpu.Submit();
             }
 
@@ -473,16 +570,16 @@ int main(int argc, char** argv)
 
             share[run] = (double) within / n;
             mean[run] = sum / n;
+            printf("  %-32s within 1 px %5.1f%%, mean %5.2f px\n", variants[run].what, 100.0 * share[run], mean[run]);
         }
 
-        flow.Tuning() = OpticalFlowDx12::Settings {};
-        if (noSmoothing)
-            flow.Tuning().smoothRadius = 0;
-
-        const bool pass = share[1] >= share[0] - 0.01;
+        flow.Tuning() = tuning;
+        // 9 cells no worse than 4; depth matching well above none, and no worse than none with misaligned or wrong depth.
+        const bool pass = share[1] >= share[0] - 0.01 && share[2] >= share[1] + 0.25 && share[2] >= 0.85 &&
+                          share[3] >= share[1] && share[4] >= share[1] && share[5] >= share[2] - 0.01 &&
+                          share[6] >= share[1] - 0.03;
         ok = ok && pass;
-        printf("edges, %-38s within 1 px: 4 cells %5.1f%% (mean %5.2f px), 9 cells %5.1f%% (mean %5.2f px)   %s\n", e.what,
-               100.0 * share[0], mean[0], 100.0 * share[1], mean[1], pass ? "ok" : "FAIL");
+        printf("  %s\n", pass ? "ok" : "FAIL");
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

@@ -8,7 +8,7 @@
 namespace
 {
 
-constexpr uint32_t kDescriptorsPerPass = 5; // four SRVs and one UAV
+constexpr uint32_t kDescriptorsPerPass = 6; // five SRVs and one UAV
 constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
@@ -26,6 +26,9 @@ cbuffer P : register(b0)
     uint hasHistory;
     float knee;
     uint coarseCells;
+    uint depthMatching; // the window's samples count by how near their depth is to this pixel's (SceneDepth, t4)
+    uint2 depthSize;
+    uint reversed;
     uint pad;
 };
 
@@ -37,6 +40,7 @@ Texture2D<float4> Prediction : register(t2);
 Texture2D<float4> History : register(t3);
 Texture2D<float>  GuideLuma : register(t1);
 Texture2D<float4> FlowIn : register(t0);
+Texture2D<float>  SceneDepth : register(t4);
 RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
 
@@ -81,13 +85,28 @@ float Sample(float2 position)
     return PrevLuma.SampleLevel(Linear, (position + 0.5) / float2(size), 0);
 }
 
+// How far the surface at uv (0..1 across the picture) is, larger is farther; only the ratio of two is used.
+float Distance(float2 uv)
+{
+    int2 at = min(int2(uv * float2(depthSize)), int2(depthSize) - 1);
+    float d = SceneDepth.Load(int3(at, 0));
+    return 1.0 / max(reversed != 0 ? d : 1.0 - d, 1e-6);
+}
+
+// How much a sample at distance z counts beside one at zc: about 1 on the same surface, little across a depth edge.
+float SameSurface(float z, float zc)
+{
+    float rel = abs(z - zc) / max(min(z, zc), 1e-6);
+    return max(exp(-rel * rel / 0.01), 0.02);
+}
+
 // Sum of absolute differences between the current frame around p and the previous frame around p + d: sixteen samples, two
-// pixels apart, over an 8x8 window. Each window's mean is taken out first, so a picture that got brighter or darker as a
-// whole (eye adaptation, a fade, a flash) still matches where its content went.
-float Cost(int2 p, int2 d)
+// pixels apart, over an 8x8 window, each counted by w. Each window's mean is taken out first, so a picture that got brighter
+// or darker as a whole (eye adaptation, a fade, a flash) still matches where its content went.
+float Cost(int2 p, int2 d, float w[16])
 {
     float diff[16];
-    float mean = 0.0;
+    float mean = 0.0, total = 0.0;
     int2 hi = int2(size) - 1;
 
     [unroll] for (int j = 0; j < 4; ++j)
@@ -97,16 +116,17 @@ float Cost(int2 p, int2 d)
             float c = CurLuma.Load(int3(clamp(p + q, 0, hi), 0));
             float r = PrevLuma.Load(int3(clamp(p + q + d, 0, hi), 0));
             diff[j * 4 + i] = c - r;
-            mean += c - r;
+            mean += w[j * 4 + i] * (c - r);
+            total += w[j * 4 + i];
         }
 
-    mean *= 1.0 / 16.0;
+    mean /= total;
     float s = 0.0;
 
     [unroll] for (int k = 0; k < 16; ++k)
-        s += abs(diff[k] - mean);
+        s += w[k] * abs(diff[k] - mean);
 
-    return s;
+    return s * 16.0 / total;
 }
 
 // Block matching at one level: look around the coarser level's answer (doubled, it is in that level's pixels) for the offset
@@ -119,12 +139,24 @@ void Match(uint3 id : SV_DispatchThreadID)
 
     int2 p = int2(id.xy);
 
+    // How much each sample of the window counts: all alike, or with depth-aware matching only those on this pixel's surface,
+    // so the edge of something nearer does not decide the match of what lies beside it.
+    float w[16];
+    float zc = depthMatching != 0 ? Distance((float2(p) + 0.5) / float2(size)) : 0.0;
+
+    [unroll] for (int wj = 0; wj < 4; ++wj)
+        [unroll] for (int wi = 0; wi < 4; ++wi)
+        {
+            int2 q = clamp(p + int2(2 * wi - 3, 2 * wj - 3), 0, int2(size) - 1);
+            w[wj * 4 + wi] = depthMatching != 0 ? SameSurface(Distance((float2(q) + 0.5) / float2(size)), zc) : 1.0;
+        }
+
     // The candidates for where to search: no motion, the coarser level's answer at the cells around this pixel (doubled, it is
     // in this level's pixels) and the last frame's flow here. The one that matches
     // best is where the search starts, so a steady pan carries over from frame to frame and an edge is not stuck with the
     // answer of a cell that lies across it.
     int2 centre = 0;
-    float start = Cost(p, centre);
+    float start = Cost(p, centre, w);
 
     if (hasPrediction != 0)
     {
@@ -140,7 +172,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         {
             int2 cell = cp + kCells[k] * step;
             int2 d = int2(round(Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0));
-            float c = Cost(p, d);
+            float c = Cost(p, d, w);
 
             if (c < start)
             {
@@ -153,7 +185,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     if (hasHistory != 0)
     {
         int2 d = int2(round(History.Load(int3(p, 0)).xy));
-        float c = Cost(p, d);
+        float c = Cost(p, d, w);
 
         if (c < start)
         {
@@ -169,7 +201,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         for (int dx = -radius; dx <= radius; ++dx)
         {
             int2 d = centre + int2(dx, dy);
-            float c = Cost(p, d) + lambda * length(float2(dx, dy));
+            float c = Cost(p, d, w) + lambda * length(float2(dx, dy));
 
             if (c < best)
             {
@@ -188,7 +220,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     [loop] for (int iteration = 0; iteration < 3; ++iteration)
     {
         float a = 0.0, b = 0.0, c = 0.0, e = 0.0, f = 0.0;
-        float sx = 0.0, sy = 0.0, sr = 0.0;
+        float sx = 0.0, sy = 0.0, sr = 0.0, sw = 0.0;
 
         [unroll] for (int j = -3; j <= 3; j += 2)
             [unroll] for (int i = -3; i <= 3; i += 2)
@@ -199,20 +231,22 @@ void Match(uint3 id : SV_DispatchThreadID)
                 float gx = 0.5 * (Sample(at + float2(1, 0)) - Sample(at - float2(1, 0)));
                 float gy = 0.5 * (Sample(at + float2(0, 1)) - Sample(at - float2(0, 1)));
                 float r = CurLuma.Load(int3(q, 0)) - centre;
+                float wk = w[((j + 3) / 2) * 4 + (i + 3) / 2];
 
-                a += gx * gx;
-                b += gx * gy;
-                c += gy * gy;
-                e += gx * r;
-                f += gy * r;
-                sx += gx;
-                sy += gy;
-                sr += r;
+                a += wk * gx * gx;
+                b += wk * gx * gy;
+                c += wk * gy * gy;
+                e += wk * gx * r;
+                f += wk * gy * r;
+                sx += wk * gx;
+                sy += wk * gy;
+                sr += wk * r;
+                sw += wk;
             }
 
         // Only the difference is taken about its mean: centring the gradients too fits one more unknown to sixteen samples,
         // which costs accuracy in grain.
-        const float meanResidual = sr / 16.0;
+        const float meanResidual = sr / sw;
         e -= sx * meanResidual;
         f -= sy * meanResidual;
 
@@ -250,6 +284,7 @@ float Median9(float v[9])
     Sort(v[2], v[4]); Sort(v[4], v[6]); Sort(v[2], v[4]);
     return v[4];
 }
+
 
 // Hue for the direction, brightness for the speed (scale is the speed that is full brightness).
 [numthreads(8, 8, 1)]
@@ -374,16 +409,16 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
 
     _device = device;
 
-    // One table (four SRVs, one UAV) and the root constants.
+    // One table (five SRVs, one UAV) and the root constants.
     D3D12_DESCRIPTOR_RANGE ranges[2] {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4;
+    ranges[0].NumDescriptors = 5;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[1].NumDescriptors = 1;
     ranges[1].BaseShaderRegister = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 4;
+    ranges[1].OffsetInDescriptorsFromTableStart = 5;
 
     D3D12_ROOT_PARAMETER params[2] {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -580,7 +615,7 @@ void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D1
 void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* src0,
                            DXGI_FORMAT format0, ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2,
                            DXGI_FORMAT format2, Tex& dst, DXGI_FORMAT dstFormat, const Constants& constants,
-                           ID3D12Resource* src3, DXGI_FORMAT format3)
+                           ID3D12Resource* src3, DXGI_FORMAT format3, ID3D12Resource* src4, DXGI_FORMAT format4)
 {
     Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -592,12 +627,12 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     cpu.ptr += (SIZE_T) first * _descriptorSize;
     gpu.ptr += (UINT64) first * _descriptorSize;
 
-    ID3D12Resource* sources[4] = { src0, src1 != nullptr ? src1 : src0, src2 != nullptr ? src2 : src0,
-                                   src3 != nullptr ? src3 : src0 };
-    const DXGI_FORMAT formats[4] = { format0, src1 != nullptr ? format1 : format0, src2 != nullptr ? format2 : format0,
-                                     src3 != nullptr ? format3 : format0 };
+    ID3D12Resource* sources[5] = { src0, src1 != nullptr ? src1 : src0, src2 != nullptr ? src2 : src0,
+                                   src3 != nullptr ? src3 : src0, src4 != nullptr ? src4 : src0 };
+    const DXGI_FORMAT formats[5] = { format0, src1 != nullptr ? format1 : format0, src2 != nullptr ? format2 : format0,
+                                     src3 != nullptr ? format3 : format0, src4 != nullptr ? format4 : format0 };
 
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
         srv.Format = formats[i];
@@ -625,7 +660,8 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     Transition(list, dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
 
-bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat)
+bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
+                               ID3D12Resource* depth, DXGI_FORMAT depthFormat, bool depthReversed)
 {
     if (_device == nullptr || _match == nullptr || list == nullptr || color == nullptr)
         return false;
@@ -665,6 +701,10 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     auto& levelNow = _levelFlow[_current];
     auto& levelBefore = _levelFlow[1 - _current];
 
+    // Depth-aware matching, when there is depth.
+    const bool depthMatching = _settings.depthMatching && depth != nullptr && depthFormat != DXGI_FORMAT_UNKNOWN;
+    const D3D12_RESOURCE_DESC depthDesc = depthMatching ? depth->GetDesc() : D3D12_RESOURCE_DESC {};
+
     if (_havePrevious)
     {
         for (int level = kLevels - 1; level >= 0; --level)
@@ -680,6 +720,10 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.hasHistory = (history && _settings.useHistory) ? 1 : 0;
             constants.coarseCells = (uint32_t) std::clamp(_settings.coarseCells, 1, 9);
             constants.knee = _settings.confidenceKnee;
+            constants.depthMatching = depthMatching ? 1 : 0;
+            constants.depthX = depthMatching ? (uint32_t) depthDesc.Width : 1;
+            constants.depthY = depthMatching ? depthDesc.Height : 1;
+            constants.reversed = depthReversed ? 1 : 0;
 
             if (!coarsest)
             {
@@ -689,7 +733,8 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
             Pass(list, _match, current[level].resource, kLumaFormat, previous[level].resource, kLumaFormat,
                  coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat, constants,
-                 (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat);
+                 (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat,
+                 depthMatching ? depth : nullptr, depthFormat);
         }
 
         constants = Constants {};

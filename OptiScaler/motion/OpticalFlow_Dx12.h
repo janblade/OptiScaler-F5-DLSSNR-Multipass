@@ -4,7 +4,10 @@
 // motion vectors to take from one). Our own implementation of the standard method: a luma pyramid, block matching from the
 // coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade gradient steps for the sub-pixel part, and a 3x3
 // median over the result. At each level the candidates are the coarser level's answer at the nearest cells, the last
-// frame's flow at the same place and no motion; the best of them is refined by a small search. The result is smoothed
+// frame's flow at the same place and no motion; the best of them is refined by a small search. The match compares windows
+// with their mean brightness taken out (a fade or eye adaptation does not move anything), and with depth it counts only the
+// window's samples on the pixel's own surface (a nearer thing's edge does not drag its motion onto what lies beside it,
+// adaptive support weights). The result is smoothed
 // where the matching is not sure (flat or grainy areas) without crossing the edges of moving things: each neighbour counts
 // by how much picture structure its match had, how close its motion is and how close its brightness is. Nothing is taken from any shader of another project.
 //
@@ -41,7 +44,11 @@ class OpticalFlowDx12
     // Records the flow from the previous Dispatch's frame to this one. `color` must be in a shader-readable state
     // (NON_PIXEL_SHADER_RESOURCE) and stays so. After it returns, Flow() is readable and FlowValid() says whether it holds
     // a flow (false on the first frame, after Reset() and after a size change).
-    bool Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat);
+    // depth (optional, any size, readable as depthFormat, NON_PIXEL_SHADER_RESOURCE) shows the match where one surface ends
+    // and another begins, so the edge of a nearer thing does not carry its motion onto what lies beside it.
+    bool Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
+                  ID3D12Resource* depth = nullptr, DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN,
+                  bool depthReversed = true);
 
     // Forget the previous frame (a scene cut, a resolution change): the next Dispatch only stores its picture.
     void Reset() { _havePrevious = false; }
@@ -73,6 +80,7 @@ class OpticalFlowDx12
         int coarseCells = 9;            // how many of the coarser level's nearest cells are candidates (1..9: the 3x3)
         int smoothRadius = 2;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
         float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
+        bool depthMatching = true;      // with depth: the block match counts the window's samples on this pixel's surface
     };
 
     Settings& Tuning() { return _settings; }
@@ -96,7 +104,8 @@ class OpticalFlowDx12
         float scale;
         uint32_t hasHistory;
         float knee;
-        uint32_t coarseCells, pad1;
+        uint32_t coarseCells, depthMatching;
+        uint32_t depthX, depthY, reversed, pad;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -106,7 +115,8 @@ class OpticalFlowDx12
     void Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* src0, DXGI_FORMAT format0,
               ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2, DXGI_FORMAT format2, Tex& dst,
               DXGI_FORMAT dstFormat, const Constants& constants, ID3D12Resource* src3 = nullptr,
-              DXGI_FORMAT format3 = DXGI_FORMAT_UNKNOWN);
+              DXGI_FORMAT format3 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src4 = nullptr,
+              DXGI_FORMAT format4 = DXGI_FORMAT_UNKNOWN);
 
     ID3D12Device* _device = nullptr;
     ID3D12RootSignature* _rootSignature = nullptr;

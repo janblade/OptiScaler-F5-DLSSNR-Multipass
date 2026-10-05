@@ -1587,22 +1587,23 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "LutStrength", GetFloatValue(Instance()->DlssNrLutStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
     ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetOverride",
-                 GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetForAll", GetIntValue(Instance()->RenderPresetForAll.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetDLAA", GetIntValue(Instance()->RenderPresetDLAA.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetUltraQuality",
-                 GetIntValue(Instance()->RenderPresetUltraQuality.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetQuality",
-                 GetIntValue(Instance()->RenderPresetQuality.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetBalanced",
-                 GetIntValue(Instance()->RenderPresetBalanced.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetPerformance",
-                 GetIntValue(Instance()->RenderPresetPerformance.value_for_config()).c_str());
-    ini.SetValue("DLSS", "RenderPresetUltraPerformance",
-                 GetIntValue(Instance()->RenderPresetUltraPerformance.value_for_config()).c_str());
-    ini.SetValue("DLSS", "UseGenericAppIdWithDlss",
-                 GetBoolValue(Instance()->UseGenericAppIdWithDlss.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetOverride",
+                     GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetForAll",
+                     GetIntValue(Instance()->RenderPresetForAll.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetDLAA", GetIntValue(Instance()->RenderPresetDLAA.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetUltraQuality",
+                     GetIntValue(Instance()->RenderPresetUltraQuality.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetQuality",
+                     GetIntValue(Instance()->RenderPresetQuality.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetBalanced",
+                     GetIntValue(Instance()->RenderPresetBalanced.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetPerformance",
+                     GetIntValue(Instance()->RenderPresetPerformance.value_for_config()).c_str());
+        ini.SetValue("DLSS", "RenderPresetUltraPerformance",
+                     GetIntValue(Instance()->RenderPresetUltraPerformance.value_for_config()).c_str());
+        ini.SetValue("DLSS", "UseGenericAppIdWithDlss",
+                     GetBoolValue(Instance()->UseGenericAppIdWithDlss.value_for_config()).c_str());
     }
 
     // DLSSD

@@ -2364,8 +2364,7 @@ static void RenderOutputPage(Config* config, float menuResScale)
                 // path fails (DlssNr_Lut.h's documented contract) -- so this is shown alongside, not
                 // instead of, the line above.
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
-                ImGui::TextWrapped("%s: %s",
-                                   std::filesystem::path(lutStatus.attemptedPath).filename().string().c_str(),
+                ImGui::TextWrapped("%s: %s", std::filesystem::path(lutStatus.attemptedPath).filename().string().c_str(),
                                    lutStatus.error.c_str());
                 ImGui::PopStyleColor();
             }

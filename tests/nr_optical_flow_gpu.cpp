@@ -75,6 +75,19 @@ float SparseScene(float x, float y, int channel)
     return v;
 }
 
+// A flat wall with a few thin dark lines, two pixels wide (cables, window frames): the other hard case for a flow,
+// since the pyramid loses the lines at its coarse levels and the wall between them has nothing to hold on to.
+float LinesScene(float x, float y, int)
+{
+    float v = 0.42f;
+    for (int i = 0; i < 6; ++i)
+    {
+        const float dy = y - (150.0f + 97.0f * i), dx = x - (140.0f + 173.0f * i);
+        v -= 0.3f * std::exp(-dy * dy / 2.0f) + 0.3f * std::exp(-dx * dx / 2.0f);
+    }
+    return v;
+}
+
 struct Gpu
 {
     ComPtr<ID3D12Device> device;
@@ -150,10 +163,9 @@ struct Gpu
     // An RGBA8 texture holding the scene moved by (dx, dy), left in the non-pixel shader resource state.
     // gain darkens it, noise (in 1/255 steps, peak) adds a different grain to every picture (noiseSeed).
     // With squareSize > 0 a square of another texture sits on top with its top-left corner at (squareX, squareY), its
-    // texture moving with it. With sparse the scene is SparseScene instead.
+    // texture moving with it. With scene 1 the scene is SparseScene instead, with 2 LinesScene.
     ComPtr<ID3D12Resource> Picture(float dx, float dy, float gain = 1.0f, float noise = 0.0f, int noiseSeed = 0,
-                                   float squareX = 0.0f, float squareY = 0.0f, float squareSize = 0.0f,
-                                   bool sparse = false)
+                                   float squareX = 0.0f, float squareY = 0.0f, float squareSize = 0.0f, int scene = 0)
     {
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -184,9 +196,10 @@ struct Gpu
                 {
                     const bool inSquare = squareSize > 0.0f && x >= squareX && x < squareX + squareSize && y >= squareY &&
                                           y < squareY + squareSize;
-                    const float base = inSquare ? Scene(x - squareX + 3000.0f, y - squareY + 3000.0f, c)
-                                       : sparse ? SparseScene(x - dx, y - dy, c)
-                                                : Scene(x - dx, y - dy, c);
+                    const float base = inSquare     ? Scene(x - squareX + 3000.0f, y - squareY + 3000.0f, c)
+                                       : scene == 1 ? SparseScene(x - dx, y - dy, c)
+                                       : scene == 2 ? LinesScene(x - dx, y - dy, c)
+                                                    : Scene(x - dx, y - dy, c);
                     float v = base * 255.0f * gain;
                     if (noise > 0.0f)
                         v += (Hash((int) x * 3 + c, (int) y, 1000 + noiseSeed) * 2.0f - 1.0f) * noise;
@@ -525,7 +538,7 @@ int main(int argc, char** argv)
 
             for (int k = 0; k < c.frames; ++k)
             {
-                auto picture = gpu.Picture(c.dx * k, c.dy * k, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, true);
+                auto picture = gpu.Picture(c.dx * k, c.dy * k, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, 1);
                 auto depth = run == 2 ? gpu.DepthMap(0.0f, 0.0f, 0.0f) : ComPtr<ID3D12Resource>();
                 flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depth.Get(),
                               run == 2 ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN, true);
@@ -559,6 +572,49 @@ int main(int argc, char** argv)
         ok = ok && pass;
         printf("  %s\n", pass ? "ok" : "FAIL");
     }
+
+    // Headroom, reported only: a pan over a flat wall with thin lines, as the flow is now (depth matching and the
+    // whole-picture candidate on), with and without the candidate. What is still wrong here is what a camera model
+    // could win.
+    for (const SparseCase& c : { SparseCase { 6, -4, 4 }, SparseCase { 30, -18, 4 }, SparseCase { 90, 20, 4 } })
+        for (int run = 0; run < 2; ++run)
+        {
+            flow.Reset();
+            flow.Tuning() = tuning;
+            flow.Tuning().globalCandidate = run != 0;
+
+            for (int k = 0; k < c.frames; ++k)
+            {
+                auto picture = gpu.Picture(c.dx * k, c.dy * k, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, 2);
+                auto depth = gpu.DepthMap(0.0f, 0.0f, 0.0f);
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depth.Get(),
+                              DXGI_FORMAT_R32_FLOAT, true);
+                gpu.Submit();
+            }
+
+            const auto desc = flow.Flow()->GetDesc();
+            const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+            const int margin = (int) std::ceil(std::max(std::fabs(c.dx), std::fabs(c.dy)) / 2.0f) + 24;
+            uint64_t n = 0, one = 0, wild = 0;
+            double sum = 0;
+
+            for (uint32_t y = margin; y + margin < desc.Height; ++y)
+                for (uint32_t x = margin; x + margin < desc.Width; ++x)
+                {
+                    const size_t i = ((size_t) y * desc.Width + x) * 2;
+                    const float err = std::hypot(field[i] + c.dx, field[i + 1] + c.dy);
+                    sum += err;
+                    one += err <= 1.0f;
+                    wild += err > 3.0f;
+                    ++n;
+                }
+
+            printf("thin lines on a flat wall, shift (%5.1f, %5.1f), %d pictures, %-7s candidate: within 1 px %5.1f%%, "
+                   "off by over 3 px %5.1f%%, mean error %6.3f px (reported)\n",
+                   c.dx, c.dy, c.frames, run ? "with" : "without", 100.0 * one / n, 100.0 * wild / n, sum / n);
+        }
+
+    flow.Tuning() = tuning;
 
     // A square moving over a background that moves differently: the flow near its edges, for each way of making it. Background
     // content the square uncovered this frame is left out (it was not in the previous picture). Every run is given a depth map

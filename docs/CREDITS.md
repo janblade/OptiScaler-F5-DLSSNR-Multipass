@@ -37,6 +37,12 @@ The fix keeping the game's own Streamline plugins (Common, Reflex, PCL) separate
 private DLSS Frame Generation runtime when NVIDIA's override selection would otherwise point both
 at the same already-loaded module is adapted from [wilsjo2's fork](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass), commit [`ae9a50fa`](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/commit/ae9a50fa12b1e81600d0394108d523dad8b7fd23) ("Isolate game Streamline plugins from active DLSSG output").
 
+## Inter font
+
+The menu's Modern style uses [Inter](https://github.com/rsms/inter) by Rasmus Andersson and the Inter Project
+Authors (v4.1, Regular), embedded in the DLL under the SIL Open Font License 1.1. See the
+[licence](../Licenses/Inter_OFL.txt).
+
 ## Highlight guard: brightening only
 
 Bounding the Composed path's Highlight guard to brightening only, leaving darkening uncapped, is

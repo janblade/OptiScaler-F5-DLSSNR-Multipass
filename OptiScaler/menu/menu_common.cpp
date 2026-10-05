@@ -84,6 +84,7 @@ static ImFont* gInterFont = nullptr;
 static ImFont* gClassicFont = nullptr;
 
 bool MenuStyle::IsModern() { return gModernActive; }
+ImFont* MenuStyle::MonoFont() { return gHackFont; }
 const ImVec4& MenuStyle::CardColor() { return gModernPalette.card; }
 const ImVec4& MenuStyle::CardHeaderColor() { return gModernPalette.cardHeader; }
 const ImVec4& MenuStyle::CardHeaderHoverColor() { return gModernPalette.cardHeaderHover; }
@@ -1410,7 +1411,9 @@ void MenuCommon::ApplyThemeStyle()
     if (modern)
     {
         // Layers: window (bgDark) < panes (bgMid) < section cards (bgLight); inputs sit inset in the cards.
-        const ImVec4 card = Mix(BgTint(bgLight, 0.80f), textPrimary, lightTheme ? 0.00f : 0.03f);
+        // Same alpha as ChildBg, so Background Alpha reaches the cards too.
+        const ImVec4 card =
+            Mix(BgTint(bgLight, 0.80f), textPrimary, lightTheme ? 0.00f : 0.03f, std::min(minAlpha + 0.1f, 1.0f));
         const ImVec4 inset = BgTint(bgDark, 0.85f);
         const float insetAlpha = std::min(minAlpha + 0.15f, 1.0f);
 
@@ -1479,25 +1482,6 @@ static void PushMonoFontSize(float size)
     else
         ImGui::PushFontSize(size);
 }
-
-struct ScopedMonoFont
-{
-    ScopedMonoFont()
-    {
-        _pushed = gHackFont != nullptr && ImGui::GetFont() != gHackFont;
-        if (_pushed)
-            ImGui::PushFont(gHackFont, -1.0f);
-    }
-
-    ~ScopedMonoFont()
-    {
-        if (_pushed)
-            ImGui::PopFont();
-    }
-
-  private:
-    bool _pushed = false;
-};
 
 static double lastTime = 0.0;
 static double lastFrameTime = 0.0;
@@ -7661,7 +7645,8 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
     // Navigation pane.
     // Modern borderless panes need the flag to keep their window padding.
     const bool modern = MenuStyle::IsModern();
-    const ImGuiChildFlags paneFlags = ImGuiChildFlags_Borders | (modern ? ImGuiChildFlags_AlwaysUseWindowPadding : 0);
+    const ImGuiChildFlags paneFlags =
+        ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened | (modern ? ImGuiChildFlags_AlwaysUseWindowPadding : 0);
 
     if (ImGui::BeginChild("nav", ImVec2(190.0f * menuResScale, bodyHeight), paneFlags))
     {
@@ -7712,6 +7697,10 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
         if (ImGui::IsItemToggledOpen())
         {
             nrOpen = nrNodeOpen;
+
+            // Keyboard/gamepad activation toggles rather than clicks; opening that way also shows Status & Presets.
+            if (nrNodeOpen && !ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                select(Page::NrStatus);
         }
         else if (ImGui::IsItemClicked())
         {
@@ -7795,8 +7784,16 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             section(RenderLoggingSettings, true);
             section(RenderApiAndTextureSettings, true);
             break;
-        default:
+        case Page::NrStatus:
+        case Page::NrOptions:
+        case Page::NrInput:
+        case Page::NrOutput:
+        case Page::NrPasses:
+        case Page::NrDebug:
             DlssNr::RenderMenu(ctx.config, ctx.menuResScale, page);
+            break;
+        default:
+            IM_ASSERT(false && "page without a case in RenderMainMenuPages");
             break;
         }
     }
@@ -7836,6 +7833,8 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !state.detailedGpuTimes.empty())
             {
                 ImGui::BeginTooltip();
+                std::optional<ScopedMonoFont> monoFont;
+                monoFont.emplace();
 
                 ImGui::TextDisabled("Per shader breakdown:");
                 if (ImGui::BeginTable("ShaderTimes", 2, ImGuiTableFlags_SizingStretchProp))
@@ -7895,6 +7894,7 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                     ImGui::EndTable();
                 }
 
+                monoFont.reset(); // the font must be popped inside the tooltip window
                 ImGui::EndTooltip();
             }
 
@@ -7924,8 +7924,26 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Fixed-width font in a fixed-width slot: the frame counter and frozen state never move the controls.
+    if (!MenuStyle::IsModern())
     {
+        if (currentFeature != nullptr && !currentFeature->IsFrozen())
+        {
+            ImGui::Text("%dx%d -> %dx%d (%.1f) [%dx%d (%.1f)]", currentFeature->RenderWidth(),
+                        currentFeature->RenderHeight(), currentFeature->TargetWidth(), currentFeature->TargetHeight(),
+                        (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth(),
+                        currentFeature->DisplayWidth(), currentFeature->DisplayHeight(),
+                        (float) currentFeature->DisplayWidth() / (float) currentFeature->RenderWidth());
+
+            ImGui::SameLine(0.0f, 4.0f);
+
+            ImGui::Text("%d", currentFeature->FrameCount());
+
+            ImGui::SameLine(0.0f, 10.0f);
+        }
+    }
+    else
+    {
+        // Modern: fixed-width font in a fixed-width slot, so the counter and frozen state never move the controls.
         const float statusX = ImGui::GetCursorPosX();
         ScopedMonoFont monoFont {};
         float slotWidth = ImGui::CalcTextSize("0000x0000 -> 0000x0000 (0.0) [0000x0000 (0.0)] 0000000").x;
@@ -8358,9 +8376,13 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
 
     ImVec2 wantedSize { config->MenuWidth.value_or(960.0f) * menuResScale,
                         config->MenuHeight.value_or(680.0f) * menuResScale };
-    wantedSize.x = std::min(wantedSize.x, ctx.io.DisplaySize.x * 0.95f);
-    wantedSize.y = std::min(wantedSize.y, ctx.io.DisplaySize.y * 0.95f);
-    ImGui::SetNextWindowSizeConstraints({ 640.0f * menuResScale, 420.0f * menuResScale }, { FLT_MAX, FLT_MAX });
+    // The window can't scroll, so every size it takes (first use, rescale, drag, minimum) stays on screen.
+    const ImVec2 maxSize { ctx.io.DisplaySize.x > 0.0f ? ctx.io.DisplaySize.x * 0.95f : FLT_MAX,
+                           ctx.io.DisplaySize.y > 0.0f ? ctx.io.DisplaySize.y * 0.95f : FLT_MAX };
+    const ImVec2 minSize { std::min(640.0f * menuResScale, maxSize.x), std::min(420.0f * menuResScale, maxSize.y) };
+    wantedSize.x = std::clamp(wantedSize.x, minSize.x, maxSize.x);
+    wantedSize.y = std::clamp(wantedSize.y, minSize.y, maxSize.y);
+    ImGui::SetNextWindowSizeConstraints(minSize, maxSize);
     ImGui::SetNextWindowSize(wantedSize, ImGuiCond_FirstUseEver);
 
     if (lastWindowSize.x <= 0.0f)
@@ -8377,8 +8399,8 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         // Keep the window the same size relative to the text.
         if (oldMenuScale > 0.0f)
         {
-            lastWindowSize = { lastWindowSize.x * menuResScale / oldMenuScale,
-                               lastWindowSize.y * menuResScale / oldMenuScale };
+            lastWindowSize = { std::clamp(lastWindowSize.x * menuResScale / oldMenuScale, minSize.x, maxSize.x),
+                               std::clamp(lastWindowSize.y * menuResScale / oldMenuScale, minSize.y, maxSize.y) };
             ImGui::SetNextWindowSize(lastWindowSize, ImGuiCond_Always);
         }
     }
@@ -8512,6 +8534,8 @@ void RenderExposureScanIndicator(float alpha)
 
         ImGui::Dummy(ImVec2(r * 2.0f + 6.0f, ImGui::GetTextLineHeight()));
         ImGui::SameLine();
+
+        ScopedMonoFont monoFont {};
 
         if (reading)
             ImGui::TextColored(lamp, "%3.0f%%  %.5f", lit * 100.0f, now);

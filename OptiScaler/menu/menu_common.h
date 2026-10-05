@@ -24,7 +24,30 @@ const ImVec4& CardColor();
 const ImVec4& CardHeaderColor();
 const ImVec4& CardHeaderHoverColor();
 const ImVec4& CardHeaderActiveColor();
+ImFont* MonoFont(); // Hack; null with a custom TTF or HQ font off
 } // namespace MenuStyle
+
+// Live numbers keep the fixed-width font so digits don't jitter when the default is proportional.
+class ScopedMonoFont
+{
+  public:
+    ScopedMonoFont()
+    {
+        ImFont* mono = MenuStyle::MonoFont();
+        _pushed = mono != nullptr && ImGui::GetFont() != mono;
+        if (_pushed)
+            ImGui::PushFont(mono, -1.0f);
+    }
+
+    ~ScopedMonoFont()
+    {
+        if (_pushed)
+            ImGui::PopFont();
+    }
+
+  private:
+    bool _pushed = false;
+};
 
 class ScopedCollapsingHeader
 {

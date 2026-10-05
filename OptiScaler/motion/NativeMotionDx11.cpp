@@ -187,8 +187,8 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
 
 ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
 {
-    // The only call site that closes the D3D11 depth finder's frame on this path: GenericDepthDx11::OnPresent is
-    // otherwise only reached from MenuOverlayDx::Present, which Dx11wDx12SC::Present never calls.
+    // The one call site that closes the D3D11 depth finder's frame on this path; MenuOverlayDx::Present, which frame
+    // generation's present still reaches, skips its own close under Dx11wDx12SC so this frame is not closed twice.
     GenericDepthDx11::OnPresent(real);
     return RunFrame(real, device);
 }

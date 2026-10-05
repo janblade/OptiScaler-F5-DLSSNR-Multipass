@@ -551,8 +551,11 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
-    // D3D12's finder closes its frame with the native input step (NativeMotionDx12::OnPresent / OnFGPresent).
-    GenericDepthDx11::OnPresent(pSwapChain);
+    // D3D12's finder closes its frame with the native input step (NativeMotionDx12::OnPresent / OnFGPresent). Under
+    // Dx11wDx12SC the D3D11 finder's frame is closed by NativeMotionDx11::OnFGPresent instead: frame generation's present
+    // still reaches here, and a second close in the same frame sees no draws and resets every candidate's warm-up.
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+        GenericDepthDx11::OnPresent(pSwapChain);
 
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {

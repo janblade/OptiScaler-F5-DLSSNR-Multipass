@@ -20,7 +20,7 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device);
 
 // Once per real game frame, from Dx11wDx12SC::Present (with_dx12/dx11_with_dx12_sc.cpp), before frame generation
 // takes the frame: `real` is the hidden D3D11 swap chain carrying the game's own picture (not what is shown). Runs
-// the depth finder's frame close (dead otherwise on this path) and the producer, same as OnPresent. Returns the
+// the depth finder's frame close (MenuOverlayDx::Present skips its own on this path) and the producer. Returns the
 // D3D12-side picture the producer ended up with (native::Dx11FrameSource::ProcessedPicture), or null when the
 // feature is off or nothing could be processed this frame -- the caller copies it into the real D3D12 back buffer
 // itself; this function does not touch frame generation's swap chain.

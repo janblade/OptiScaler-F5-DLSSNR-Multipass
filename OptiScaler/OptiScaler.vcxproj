@@ -443,6 +443,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="dlssnr\DlssNr_ColourEncodingStatus.h" />
+    <ClInclude Include="dlssnr\DlssNr_NativeMode.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_ColourEncoding.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_ProxyCurve.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />

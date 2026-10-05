@@ -46,7 +46,7 @@ that PR and keeps its own, still-symmetric bound for a different reason.
 
 ## Motion and Detail Reuse ideas
 
-Several ideas in the optical flow and in Detail Reuse come from reading [AeonSR](https://github.com/BarbatosAWLS/AeonSR) (MIT, Barbatos AWLS, commit `85a26f8`): a brightness-proof matching cost, matching only within a pixel's own surface, rejecting moved detail where the motion at its source disagrees, and the experiments listed in the git log under the same trailer. They are implemented from the ideas in this fork's own code; no AeonSR code was copied.
+Several ideas in the optical flow and in Detail Reuse come from reading [AeonSR](https://github.com/BarbatosAWLS/AeonSR) (MIT, Barbatos AWLS, commit `85a26f8`): a brightness-proof matching cost, matching only within a pixel's own surface, a whole-picture motion candidate in the flow, rejecting moved detail where the motion at its source disagrees, and rounding away sub-step differences when steadying reused frames. They are implemented from the ideas in this fork's own code; no AeonSR code was copied.
 
 ## OptiScaler contributors
 

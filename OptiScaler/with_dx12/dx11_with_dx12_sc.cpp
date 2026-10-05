@@ -143,6 +143,17 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     _id = ++scCount;
     _lastFlags = flags;
 
+    // Exclusive fullscreen on XeFG's swapchain behind this bridge leaves every following Present failing with
+    // DXGI_ERROR_INVALID_CALL (seen in Prey and Blair Witch, both D3D11 through Dx11wDx12). Default to the existing
+    // borderless override here, same as the per-game ForceBorderlessWhenUsingXeFG quirk does; an explicit
+    // ForceBorderless in the ini still wins. FGHooks::hkSetFullscreenState reads this live, so it applies to the
+    // game's first SetFullscreenState right after this swapchain is handed back.
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && !Config::Instance()->FGXeFGForceBorderless.has_value())
+    {
+        LOG_INFO("XeFG through Dx11wDx12: forcing borderless instead of exclusive fullscreen");
+        Config::Instance()->FGXeFGForceBorderless.set_volatile_value(true);
+    }
+
     if (_real != nullptr)
     {
         _real->AddRef();
@@ -1086,9 +1097,24 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
 
     if (FAILED(result) || _openedDx11BackBuffers[_currentFakeIndex] == nullptr)
     {
-        LOG_ERROR("OpenSharedHandle for backbuffer {} failed: {:X}", _currentFakeIndex, (UINT) result);
+        // A device-removed result here never recovers by itself; log the actual reason once so it's diagnosable
+        // without flooding the log on every subsequent frame (this failure repeats identically otherwise).
+        if (!_deviceRemovedLogged)
+        {
+            _deviceRemovedLogged = true;
+            LOG_ERROR("OpenSharedHandle for backbuffer {} failed: {:X}", _currentFakeIndex, (UINT) result);
+
+            if (_dx12Device != nullptr)
+                LOG_ERROR("dx12 device removed reason: {:X}", (UINT) _dx12Device->GetDeviceRemovedReason());
+
+            if (_dx11Device != nullptr)
+                LOG_ERROR("dx11 device removed reason: {:X}", (UINT) _dx11Device->GetDeviceRemovedReason());
+        }
+
         return false;
     }
+
+    _deviceRemovedLogged = false;
 
     _openedDx11BackBufferStates[_currentFakeIndex] = D3D12_RESOURCE_STATE_COMMON;
     return true;
@@ -1369,13 +1395,22 @@ void Dx11wDx12SC::_ApplyNativeInputToFGBackBuffer()
 
 bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 {
-    if (_fg == nullptr || _copyFence == nullptr)
+    if (_copyFence == nullptr)
         return false;
 
     if (_lastInteropCopyFenceValue == 0)
         return true;
 
-    auto result = _fg->GetCommandQueue()->Wait(_copyFence, _lastInteropCopyFenceValue);
+    // The interop copies are submitted on _dx12CommandQueue. Only an FG backend presenting from a different queue
+    // needs a cross-queue wait; with no backend queue (no FG feature, or the backend's own swapchain creation failed
+    // and DxgiFactoryHooks fell back to a plain DX12 swapchain on _dx12CommandQueue -- seen with XeFG in Prey, where
+    // GetCommandQueue() then stays null for the whole session) the present is already ordered after the copy on
+    // the same queue. Failing here instead turned every Present into DXGI_ERROR_DEVICE_REMOVED for the game.
+    auto* queue = _fg != nullptr ? _fg->GetCommandQueue() : nullptr;
+    if (queue == nullptr || queue == _dx12CommandQueue)
+        return true;
+
+    auto result = queue->Wait(_copyFence, _lastInteropCopyFenceValue);
     if (FAILED(result))
     {
         LOG_ERROR("present queue Wait on interop copy fence failed: {:X}", (UINT) result);

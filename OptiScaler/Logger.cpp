@@ -2,6 +2,8 @@
 #include "Logger.h"
 #include "Config.h"
 #include <iostream>
+#include <filesystem>
+#include <DbgHelp.h>
 
 #include "spdlog/async.h"
 #include "spdlog/sinks/basic_file_sink.h"
@@ -180,4 +182,47 @@ void CloseLogger()
 {
     spdlog::default_logger()->flush();
     spdlog::shutdown();
+}
+
+static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
+{
+    try
+    {
+        auto dumpPath = std::filesystem::path(Config::Instance()->LogFileName.value_or_default()).parent_path() /
+                        L"OptiScaler_crash.dmp";
+
+        spdlog::critical("Unhandled exception {:X} at {:X}, writing {}",
+                         (unsigned long) exceptionInfo->ExceptionRecord->ExceptionCode,
+                         (size_t) exceptionInfo->ExceptionRecord->ExceptionAddress, dumpPath.string());
+        spdlog::default_logger()->flush();
+
+        HANDLE file = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            MINIDUMP_EXCEPTION_INFORMATION mdei {};
+            mdei.ThreadId = GetCurrentThreadId();
+            mdei.ExceptionPointers = exceptionInfo;
+            mdei.ClientPointers = FALSE;
+
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
+                              (MINIDUMP_TYPE) (MiniDumpWithDataSegs | MiniDumpWithUnloadedModules |
+                                               MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
+                              &mdei, nullptr, nullptr);
+
+            CloseHandle(file);
+        }
+    }
+    catch (...)
+    {
+        // Diagnostic aid only: never let this handler itself change how the crash is reported.
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void InstallCrashHandler()
+{
+    SetUnhandledExceptionFilter(CrashDumpHandler);
 }

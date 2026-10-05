@@ -150,5 +150,9 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     DXGI_FORMAT _bufferFormat = DXGI_FORMAT_UNKNOWN;
     bool _interopInitialized = false;
 
+    // Set once OpenSharedHandle first reports the D3D12 device gone; logs the real removed-reason a single time
+    // instead of once per frame forever, since a removed device never recovers on its own.
+    bool _deviceRemovedLogged = false;
+
     HWND _handle = nullptr;
 };

@@ -5,6 +5,9 @@
 void PrepareLogger();
 void CloseLogger();
 void WaitForEnter();
+// Diagnostic only: writes a minidump next to the log on an otherwise-unhandled exception, then lets the
+// crash proceed exactly as it would without this handler installed.
+void InstallCrashHandler();
 
 #ifdef DLSS_PARAM_DUMP
 

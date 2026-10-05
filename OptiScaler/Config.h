@@ -795,6 +795,9 @@ class Config
 
     // Menu
     CustomOptional<float, NoDefault> MenuScale;
+    CustomOptional<float, NoDefault> MenuWidth; // Main window size in pixels at Menu Scale 1.0
+    CustomOptional<float, NoDefault> MenuHeight;
+    CustomOptional<std::string, NoDefault> MenuPage; // Last page open in the main window, see menu/MenuPages.h
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };
     CustomOptional<bool> ExtendedLimits { false };
@@ -816,6 +819,7 @@ class Config
     CustomOptional<std::wstring, NoDefault> TTFFontPath;
     CustomOptional<int> FGShortcutKey { VK_END };
     CustomOptional<bool> LightTheme { false };
+    CustomOptional<bool> ModernTheme { false };
     CustomOptional<bool> OverlaysUseTheme { false };
     CustomOptional<float> MenuAccentColorR { 0.00f };
     CustomOptional<float> MenuAccentColorG { 0.40f };

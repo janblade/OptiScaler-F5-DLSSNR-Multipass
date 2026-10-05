@@ -1,5 +1,6 @@
 ﻿#include "pch.h"
 #include "menu_common.h"
+#include "MenuPages.h"
 #include <framegen/dlssg/MfgUnlock.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
@@ -12,6 +13,7 @@
 #include "input/input_system.h"
 
 #include "font/Hack_Compressed.h"
+#include "font/Inter_Compressed.h"
 
 #include <proxies/XeSS_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
@@ -61,6 +63,32 @@ static ImVec2 overlaySize(0.0f, 0.0f);
 static ImVec2 overlayPosition(-1000.0f, -1000.0f);
 static bool _hdrTonemapApplied = false;
 static ImVec4 SdrColors[ImGuiCol_COUNT];
+
+// Modern style: colours that are drawn outside style.Colors (already tone-mapped for HDR output).
+struct ModernPalette
+{
+    ImVec4 card;
+    ImVec4 cardHeader;
+    ImVec4 cardHeaderHover;
+    ImVec4 cardHeaderActive;
+    ImVec4 navBar;
+    ImVec4 navSelected;
+    ImVec4 navHover;
+    ImVec4 navActive;
+};
+
+static bool gModernActive = false;
+static ModernPalette gModernPalette {};
+static ImFont* gHackFont = nullptr;
+static ImFont* gInterFont = nullptr;
+static ImFont* gClassicFont = nullptr;
+
+bool MenuStyle::IsModern() { return gModernActive; }
+ImFont* MenuStyle::MonoFont() { return gHackFont; }
+const ImVec4& MenuStyle::CardColor() { return gModernPalette.card; }
+const ImVec4& MenuStyle::CardHeaderColor() { return gModernPalette.cardHeader; }
+const ImVec4& MenuStyle::CardHeaderHoverColor() { return gModernPalette.cardHeaderHover; }
+const ImVec4& MenuStyle::CardHeaderActiveColor() { return gModernPalette.cardHeaderActive; }
 
 static bool inputMenu = false;
 static bool inputFG = false;
@@ -1147,21 +1175,53 @@ void MenuCommon::ApplyThemeStyle()
     auto conf = Config::Instance();
     bool lightTheme = conf->LightTheme.value_or_default();
 
-    style.WindowRounding = 2.0f;
-    style.ChildRounding = 1.0f;
-    style.FrameRounding = 2.0f;
-    style.PopupRounding = 2.0f;
-    style.ScrollbarRounding = 2.0f;
-    style.GrabRounding = 2.0f;
-    style.TabRounding = 2.0f;
+    const bool modern = conf->ModernTheme.value_or_default();
+    gModernActive = modern;
+
+    // Base (unscaled) values; RebuildStyle scales them with Menu Scale.
+    if (modern)
+    {
+        style.WindowRounding = 8.0f;
+        style.ChildRounding = 6.0f;
+        style.FrameRounding = 5.0f;
+        style.PopupRounding = 6.0f;
+        style.ScrollbarRounding = 6.0f;
+        style.GrabRounding = 4.0f;
+        style.TabRounding = 5.0f;
+
+        style.WindowPadding = ImVec2(12.0f, 10.0f);
+        style.FramePadding = ImVec2(8.0f, 5.0f);
+        style.ItemSpacing = ImVec2(8.0f, 6.0f);
+        style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+
+        style.ChildBorderSize = 0.0f;
+        style.FrameBorderSize = 0.0f;
+        style.TabBorderSize = 0.0f;
+        style.ScrollbarSize = 8.0f;
+    }
+    else
+    {
+        style.WindowRounding = 2.0f;
+        style.ChildRounding = 1.0f;
+        style.FrameRounding = 2.0f;
+        style.PopupRounding = 2.0f;
+        style.ScrollbarRounding = 2.0f;
+        style.GrabRounding = 2.0f;
+        style.TabRounding = 2.0f;
+
+        style.WindowPadding = ImVec2(8.0f, 8.0f);
+        style.FramePadding = ImVec2(4.0f, 3.0f);
+        style.ItemSpacing = ImVec2(8.0f, 4.0f);
+        style.ItemInnerSpacing = ImVec2(4.0f, 4.0f);
+
+        style.ChildBorderSize = 1.0f;
+        style.FrameBorderSize = lightTheme ? 1.0f : 0.0f;
+        style.TabBorderSize = lightTheme ? 1.0f : 0.0f;
+        style.ScrollbarSize = 10.0f;
+    }
 
     style.WindowBorderSize = 1.0f;
     style.PopupBorderSize = 1.0f;
-
-    style.FrameBorderSize = lightTheme ? 1.0f : 0.0f;
-    style.TabBorderSize = lightTheme ? 1.0f : 0.0f;
-
-    style.ScrollbarSize = 10.0f;
     style.GrabMinSize = 10.0f;
 
     auto Clamp01 = [](float v) { return std::max(0.0f, std::min(v, 1.0f)); };
@@ -1348,8 +1408,79 @@ void MenuCommon::ApplyThemeStyle()
     c[ImGuiCol_NavWindowingDimBg] = dimBg;
     c[ImGuiCol_ModalWindowDimBg] = modalDimBg;
 
+    if (modern)
+    {
+        // Layers: window (bgDark) < panes (bgMid) < section cards (bgLight); inputs sit inset in the cards.
+        // Same alpha as ChildBg, so Background Alpha reaches the cards too.
+        const ImVec4 card =
+            Mix(BgTint(bgLight, 0.80f), textPrimary, lightTheme ? 0.00f : 0.03f, std::min(minAlpha + 0.1f, 1.0f));
+        const ImVec4 inset = BgTint(bgDark, 0.85f);
+        const float insetAlpha = std::min(minAlpha + 0.15f, 1.0f);
+
+        c[ImGuiCol_Border] = Mix(bgDark, textPrimary, 0.16f);
+        c[ImGuiCol_Separator] = Mix(card, textPrimary, 0.14f);
+        c[ImGuiCol_TableBorderStrong] = c[ImGuiCol_Separator];
+        c[ImGuiCol_TableBorderLight] = Mix(card, textPrimary, 0.10f);
+        c[ImGuiCol_ScrollbarBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+        c[ImGuiCol_FrameBg] = ImVec4(inset.x, inset.y, inset.z, insetAlpha);
+        c[ImGuiCol_FrameBgHovered] = Mix(inset, accent, lightTheme ? 0.12f : 0.18f);
+        c[ImGuiCol_FrameBgActive] = Mix(inset, accent, lightTheme ? 0.20f : 0.28f);
+
+        c[ImGuiCol_Header] = Mix(card, accent, lightTheme ? 0.14f : 0.18f, 0.90f);
+        c[ImGuiCol_HeaderHovered] = Mix(card, accent, lightTheme ? 0.24f : 0.30f, 0.95f);
+        c[ImGuiCol_HeaderActive] = Mix(card, accent, lightTheme ? 0.36f : 0.42f);
+
+        gModernPalette.card = toneMapColor(card);
+        gModernPalette.cardHeader = toneMapColor(ImVec4(card.x, card.y, card.z, 0.0f));
+        gModernPalette.cardHeaderHover = toneMapColor(Mix(card, accent, lightTheme ? 0.12f : 0.18f));
+        gModernPalette.cardHeaderActive = toneMapColor(Mix(card, accent, lightTheme ? 0.20f : 0.28f));
+        gModernPalette.navBar = toneMapColor(AccentReadable());
+        gModernPalette.navSelected = toneMapColor(AccentReadable(lightTheme ? 0.18f : 0.22f));
+        gModernPalette.navHover = toneMapColor(AccentReadable(0.26f));
+        gModernPalette.navActive = toneMapColor(AccentReadable(0.34f));
+    }
+
     _hdrTonemapApplied = false;
     MenuHdrCheck(ImGui::GetIO());
+}
+
+// Every theme, font-affecting and Menu Scale change goes through here so none of them drops the scale.
+void MenuCommon::RebuildStyle(float menuScale)
+{
+    if (ImGui::GetCurrentContext() == nullptr)
+        return;
+
+    if (menuScale <= 0.0f)
+        menuScale = lastMenuScale > 0.0f ? lastMenuScale : 1.0f;
+
+    ImGuiStyle& style = ImGui::GetStyle();
+
+    // ScaleAllSizes is lossy and changes the stored sizes, so start from a fresh style.
+    style = ImGuiStyle();
+
+    ApplyThemeStyle();
+
+    style.ScaleAllSizes(menuScale);
+    style.MouseCursorScale = 1.0f;
+}
+
+void MenuCommon::ApplyThemeFont()
+{
+    if (ImGui::GetCurrentContext() == nullptr || gClassicFont == nullptr)
+        return;
+
+    const bool useInter = Config::Instance()->ModernTheme.value_or_default() && gInterFont != nullptr;
+    ImGui::GetIO().FontDefault = useInter ? gInterFont : gClassicFont;
+}
+
+// Live numbers keep the fixed-width font so digits don't jitter when the default is proportional.
+static void PushMonoFontSize(float size)
+{
+    if (gHackFont != nullptr)
+        ImGui::PushFont(gHackFont, size);
+    else
+        ImGui::PushFontSize(size);
 }
 
 static double lastTime = 0.0;
@@ -1525,7 +1656,7 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
 
                 OptiInput::ResetMenuInputTransientState();
 
-                ApplyThemeStyle();
+                RebuildStyle();
 
                 refreshRate = Util::GetActiveRefreshRate(_handle);
 
@@ -2013,7 +2144,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             }
 
             if (config->UseHQFont.value_or_default())
-                ImGui::PushFontSize(std::round(fpsScale * fontSize));
+                PushMonoFontSize(std::round(fpsScale * fontSize));
             else
                 ImGui::SetWindowFontScale(fpsScale);
 
@@ -2454,21 +2585,12 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
         //}
     }
 
-    // No active upscaler message
+    // Upscaler state is one line in every case, so the panes below never move when it changes.
     if (currentFeature == nullptr || !currentFeature->IsInited())
     {
-        ImGui::Spacing();
-
-        if (config->UseHQFont.value_or_default())
-            ImGui::PushFontSize(std::round(fontSize * menuResScale * 2.5f));
-        else
-            ImGui::SetWindowFontScale(menuResScale * 2.5f);
-
         if (state.nvngxExists || state.nvngxReplacement.has_value() ||
             (state.libxessExists || XeSSProxy::Module() != nullptr))
         {
-            ImGui::Spacing();
-
             std::vector<std::string> upscalers;
 
             if (state.fsrHooks)
@@ -2484,71 +2606,62 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 
             std::string joinedUpscalers(joined.begin(), joined.end());
 
-            ImGui::Text("Please select %s as upscaler from game\noptions and load a save game "
-                        "to enable Opti settings.\nUpscalers don't always work in menus.",
-                        joinedUpscalers.c_str());
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                               "Select %s as the game's upscaler and load a save to enable these settings.",
+                               joinedUpscalers.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
 
-            if (config->UseHQFont.value_or_default())
-                ImGui::PopFontSize();
-            else
-                ImGui::SetWindowFontScale(menuResScale);
-
-            ImGui::Spacing();
-
-            if (primaryGpu.dlssCapable)
+            // The file checks are for troubleshooting, so they wait behind the marker.
+            if (ImGui::BeginItemTooltip())
             {
-                ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
+                ImGui::TextUnformatted("Upscalers don't always work in menus.");
+                ImGui::Spacing();
+
+                if (primaryGpu.dlssCapable)
+                {
+                    ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
+                    ImGui::SameLine(0.0f, 16.0f);
+                    ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
+                }
+                else
+                {
+                    ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
+                    ImGui::SameLine(0.0f, 16.0f);
+                    ImGui::Text("nvngx replacement: %s",
+                                state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
+                }
+
+                ImGui::Text("libxess: %s",
+                            (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
+
+                ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
                 ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
-            }
-            else
-            {
-                ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
+                ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
                 ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("nvngx replacement: %s", state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
+                ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
+                ImGui::SameLine(0.0f, 16.0f);
+                ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
+
+                ImGui::EndTooltip();
             }
-
-            ImGui::Text("libxess: %s",
-                        (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
-
-            ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
-            ImGui::SameLine(0.0f, 16.0f);
-            ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
-            ImGui::SameLine(0.0f, 16.0f);
-            ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
-            ImGui::SameLine(0.0f, 16.0f);
-            ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
-
-            ImGui::Spacing();
         }
         else
         {
-            ImGui::Spacing();
-            ImGui::Text("Can't find nvngx.dll and libxess.dll and FSR inputs\nUpscaling support will NOT work.");
-            ImGui::Spacing();
-
-            if (config->UseHQFont.value_or_default())
-                ImGui::PopFont();
-            else
-                ImGui::SetWindowFontScale(menuResScale);
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.35f, 1.f)),
+                               "Can't find nvngx.dll, libxess.dll or FSR inputs. Upscaling support will NOT work.");
         }
     }
-    else if (currentFeature->IsFrozen())
+    else
     {
-        ImGui::Spacing();
-
-        if (config->UseHQFont.value_or_default())
-            ImGui::PushFontSize(std::round(fontSize * menuResScale * 3.0f));
+        // One line, reserved even when empty: frozen flips on and off in menus and loading, and the panes below
+        // must not move with it.
+        if (currentFeature->IsFrozen())
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                               "%s is active, but not currently used by the game. Please enter the game.",
+                               currentFeature->Name().c_str());
         else
-            ImGui::SetWindowFontScale(menuResScale * 3.0f);
-
-        ImGui::Text("%s is active, but not currently used by the game\nPlease enter the game",
-                    currentFeature->Name().c_str());
-
-        if (config->UseHQFont.value_or_default())
-            ImGui::PopFont();
-        else
-            ImGui::SetWindowFontScale(menuResScale);
+            ImGui::NewLine();
     }
 }
 
@@ -6612,8 +6725,23 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("Light Theme", &lightTheme))
         {
             config->LightTheme = lightTheme;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
+
+        bool modernTheme = config->ModernTheme.value_or_default();
+        if (ImGui::Checkbox("Modern style", &modernTheme))
+        {
+            config->ModernTheme = modernTheme;
+            RebuildStyle(ctx.menuResScale);
+            ApplyThemeFont();
+        }
+
+        ImGui::SameLine(0.0f, 6.0f);
+        ShowHelpMarker(
+            "Rounder, roomier layout with Inter text, section cards and an accent bar on the selected page.\n"
+            "The performance overlay keeps the fixed-width font so its numbers stay steady.\n"
+            "A custom TTFFontPath still replaces the text font, and with HQ font off only the layout and "
+            "colors change.");
 
         ImGui::SeparatorText("Accent Colour");
 
@@ -6643,7 +6771,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6664,7 +6792,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6685,7 +6813,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6706,7 +6834,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6727,7 +6855,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6748,7 +6876,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6769,7 +6897,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6790,7 +6918,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = color.x;
             config->MenuAccentColorG = color.y;
             config->MenuAccentColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6806,7 +6934,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR = accentColor[0];
             config->MenuAccentColorG = accentColor[1];
             config->MenuAccentColorB = accentColor[2];
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
 
         ImGui::Spacing();
@@ -6816,7 +6944,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuAccentColorR.reset();
             config->MenuAccentColorG.reset();
             config->MenuAccentColorB.reset();
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
 
         ImGui::Spacing();
@@ -6838,7 +6966,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6859,7 +6987,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6880,7 +7008,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6901,7 +7029,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6922,7 +7050,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6943,7 +7071,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6964,7 +7092,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -6985,7 +7113,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = color.x;
             config->MenuBGColorG = color.y;
             config->MenuBGColorB = color.z;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
         else
         {
@@ -7000,7 +7128,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorR = bgColor[0];
             config->MenuBGColorG = bgColor[1];
             config->MenuBGColorB = bgColor[2];
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
 
         ImGui::Spacing();
@@ -7009,7 +7137,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
         if (ImGui::SliderFloat("Background Alpha", &alpha, 0.0f, 1.0f))
         {
             config->MenuBGColorA = alpha;
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
 
         ImGui::Spacing();
@@ -7020,7 +7148,7 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
             config->MenuBGColorG.reset();
             config->MenuBGColorB.reset();
             config->MenuBGColorA.reset();
-            ApplyThemeStyle();
+            RebuildStyle(ctx.menuResScale);
         }
 
         ImGui::Spacing();
@@ -7477,41 +7605,199 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
     }
 }
 
-void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
+// Height of the graphs and bottom bar, measured last frame so the page view can leave room for them.
+static float mainMenuFooterHeight = 0.0f;
+
+void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
 {
-    if (ImGui::BeginTable("main", 2, ImGuiTableFlags_SizingStretchSame))
+    using MenuPages::Page;
+
+    auto config = ctx.config;
+    const float menuResScale = ctx.menuResScale;
+
+    static Page page = Page::Upscaler;
+    static bool pageLoaded = false;
+    static bool nrOpen = false;
+    static Page lastDrawnPage = Page::Upscaler;
+
+    if (!pageLoaded)
     {
-        ImGui::TableNextColumn();
-
-        // Left column: active upscaler state, frame generation, FSR common, latency and fakenvapi controls.
-        RenderActiveUpscalerSettings(ctx);
-        RenderFrameGenerationSelection(ctx);
-        RenderFrameGenerationRuntimeSettings(ctx);
-        RenderFsrCommonSettings(ctx);
-        RenderFramerateSettings(ctx);
-#ifdef LOW_LATENCY_INPUTS
-        RenderLowLatencySettings(ctx);
-#else
-        RenderFakenvapiSettings(ctx);
-#endif
-
-        ImGui::TableNextColumn();
-
-        // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
-        RenderActiveImageSettings(ctx);
-        DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
-        RenderMagnifierSettings(ctx);
-        RenderQuirksSettings(ctx);
-        RenderAdvancedSettings(ctx);
-        RenderLoggingSettings(ctx);
-        RenderThemeSettings(ctx);
-        RenderFpsOverlaySettings(ctx);
-        RenderUpscalerInputsSettings(ctx);
-        RenderApiAndTextureSettings(ctx);
-        RenderKeybindSettings(ctx);
-
-        ImGui::EndTable();
+        pageLoaded = true;
+        page = MenuPages::PageFromName(config->MenuPage.value_or(""));
+        nrOpen = MenuPages::IsNeuralRendering(page);
+        lastDrawnPage = page;
     }
+
+    const auto select = [&](Page next)
+    {
+        if (next != page)
+        {
+            page = next;
+            config->MenuPage = std::string(MenuPages::Name(next));
+        }
+    };
+
+    const float footerHeight = mainMenuFooterHeight > 0.0f ? mainMenuFooterHeight : 110.0f * menuResScale;
+    const float bodyHeight =
+        std::max(ImGui::GetContentRegionAvail().y - footerHeight - ImGui::GetStyle().ItemSpacing.y - 2.0f,
+                 120.0f * menuResScale);
+
+    // Navigation pane.
+    // Modern borderless panes need the flag to keep their window padding.
+    const bool modern = MenuStyle::IsModern();
+    const ImGuiChildFlags paneFlags =
+        ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened | (modern ? ImGuiChildFlags_AlwaysUseWindowPadding : 0);
+
+    if (ImGui::BeginChild("nav", ImVec2(190.0f * menuResScale, bodyHeight), paneFlags))
+    {
+        // Modern: soft highlight for the selected/hovered row, plus an accent bar drawn at the selected row's edge.
+        if (modern)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Header, gModernPalette.navSelected);
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, gModernPalette.navHover);
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, gModernPalette.navActive);
+        }
+
+        const auto accentBar = [&]()
+        {
+            if (!modern)
+                return;
+
+            const ImVec2 min = ImGui::GetItemRectMin();
+            const ImVec2 max = ImGui::GetItemRectMax();
+            ImGui::GetWindowDrawList()->AddRectFilled(min, ImVec2(min.x + 3.0f * menuResScale, max.y),
+                                                      ImGui::ColorConvertFloat4ToU32(gModernPalette.navBar),
+                                                      1.5f * menuResScale);
+        };
+
+        // Leaf tree rows keep the arrow's slot empty, so every top-level label lines up with Neural Rendering's.
+        const auto navItem = [&](Page target)
+        {
+            ImGui::TreeNodeEx(MenuPages::Label(target), ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                                            ImGuiTreeNodeFlags_SpanAvailWidth |
+                                                            (page == target ? ImGuiTreeNodeFlags_Selected : 0));
+            if (ImGui::IsItemActivated())
+                select(target);
+
+            if (page == target)
+                accentBar();
+        };
+
+        navItem(Page::Upscaler);
+        navItem(Page::FrameGeneration);
+        navItem(Page::Framerate);
+
+        // Clicking the label opens Status & Presets; the arrow only expands.
+        ImGui::SetNextItemOpen(nrOpen);
+        const bool nrSelected = MenuPages::IsNeuralRendering(page);
+        const bool nrShownSelected = nrSelected && !nrOpen;
+        const bool nrNodeOpen =
+            ImGui::TreeNodeEx("Neural Rendering", ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+                                                      (nrShownSelected ? ImGuiTreeNodeFlags_Selected : 0));
+        if (ImGui::IsItemToggledOpen())
+        {
+            nrOpen = nrNodeOpen;
+
+            // Keyboard/gamepad activation toggles rather than clicks; opening that way also shows Status & Presets.
+            if (nrNodeOpen && !ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                select(Page::NrStatus);
+        }
+        else if (ImGui::IsItemClicked())
+        {
+            select(Page::NrStatus);
+            nrOpen = true;
+        }
+
+        if (nrShownSelected)
+            accentBar();
+
+        if (nrNodeOpen)
+        {
+            for (int p = static_cast<int>(Page::NrStatus); p < static_cast<int>(MenuPages::kPageCount); p++)
+                navItem(static_cast<Page>(p));
+
+            ImGui::TreePop();
+        }
+
+        navItem(Page::Image);
+        navItem(Page::OverlayLook);
+        navItem(Page::Input);
+        navItem(Page::Misc);
+
+        if (modern)
+            ImGui::PopStyleColor(3);
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // Page pane, scrolls on its own.
+    if (ImGui::BeginChild("page", ImVec2(0.0f, bodyHeight), paneFlags))
+    {
+        if (lastDrawnPage != page)
+        {
+            lastDrawnPage = page;
+            ImGui::SetScrollY(0.0f);
+        }
+
+        // Each section function is called whole; openFirstHeader makes the header it starts with open by default.
+        const auto section = [&](void (*render)(RenderMenuContext&), bool openFirstHeader = false)
+        {
+            ScopedCollapsingHeader::OpenNextHeader = openFirstHeader;
+            render(ctx);
+            ScopedCollapsingHeader::OpenNextHeader = false;
+        };
+
+        switch (page)
+        {
+        case Page::Upscaler:
+            section(RenderActiveUpscalerSettings);
+            section(RenderUpscalerInputsSettings, true);
+            break;
+        case Page::FrameGeneration:
+            section(RenderFrameGenerationSelection);
+            section(RenderFrameGenerationRuntimeSettings);
+            section(RenderFsrCommonSettings);
+            break;
+        case Page::Image:
+            section(RenderActiveImageSettings);
+            break;
+        case Page::Framerate:
+            section(RenderFramerateSettings);
+#ifdef LOW_LATENCY_INPUTS
+            section(RenderLowLatencySettings);
+#else
+            section(RenderFakenvapiSettings);
+#endif
+            break;
+        case Page::OverlayLook:
+            section(RenderFpsOverlaySettings, true);
+            section(RenderMagnifierSettings, true);
+            section(RenderThemeSettings, true);
+            break;
+        case Page::Input:
+            section(RenderKeybindSettings, true);
+            break;
+        case Page::Misc:
+            section(RenderQuirksSettings, true);
+            section(RenderAdvancedSettings, true);
+            section(RenderLoggingSettings, true);
+            section(RenderApiAndTextureSettings, true);
+            break;
+        case Page::NrStatus:
+        case Page::NrOptions:
+        case Page::NrInput:
+        case Page::NrOutput:
+        case Page::NrPasses:
+        case Page::NrDebug:
+            DlssNr::RenderMenu(ctx.config, ctx.menuResScale, page);
+            break;
+        default:
+            IM_ASSERT(false && "page without a case in RenderMainMenuPages");
+            break;
+        }
+    }
+    ImGui::EndChild();
 }
 
 void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
@@ -7530,9 +7816,12 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
         ImGui::TableNextColumn();
         ImGui::Text("FrameTime");
         auto ft = StrFmt("%7.2f ms / %6.1f fps", frameTime, frameRate);
-        ImGui::PlotLines(
-            ft.c_str(), [](void* rb, int idx) -> float
-            { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); }, &gFrameTimes, plotWidth);
+        {
+            ScopedMonoFont monoFont {};
+            ImGui::PlotLines(
+                ft.c_str(), [](void* rb, int idx) -> float
+                { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); }, &gFrameTimes, plotWidth);
+        }
 
         if (currentFeature != nullptr && !currentFeature->IsFrozen())
         {
@@ -7544,6 +7833,8 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !state.detailedGpuTimes.empty())
             {
                 ImGui::BeginTooltip();
+                std::optional<ScopedMonoFont> monoFont;
+                monoFont.emplace();
 
                 ImGui::TextDisabled("Per shader breakdown:");
                 if (ImGui::BeginTable("ShaderTimes", 2, ImGuiTableFlags_SizingStretchProp))
@@ -7603,13 +7894,17 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                     ImGui::EndTable();
                 }
 
+                monoFont.reset(); // the font must be popped inside the tooltip window
                 ImGui::EndTooltip();
             }
 
             auto ups = StrFmt("%7.2f ms", state.upscaleTimes.back());
-            ImGui::PlotLines(
-                ups.c_str(), [](void* rb, int idx) -> float
-                { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); }, &gUpscalerTimes, plotWidth);
+            {
+                ScopedMonoFont monoFont {};
+                ImGui::PlotLines(
+                    ups.c_str(), [](void* rb, int idx) -> float
+                    { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); }, &gUpscalerTimes, plotWidth);
+            }
         }
 
         ImGui::EndTable();
@@ -7629,19 +7924,49 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (currentFeature != nullptr && !currentFeature->IsFrozen())
+    if (!MenuStyle::IsModern())
     {
-        ImGui::Text("%dx%d -> %dx%d (%.1f) [%dx%d (%.1f)]", currentFeature->RenderWidth(),
-                    currentFeature->RenderHeight(), currentFeature->TargetWidth(), currentFeature->TargetHeight(),
-                    (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth(),
-                    currentFeature->DisplayWidth(), currentFeature->DisplayHeight(),
-                    (float) currentFeature->DisplayWidth() / (float) currentFeature->RenderWidth());
+        if (currentFeature != nullptr && !currentFeature->IsFrozen())
+        {
+            ImGui::Text("%dx%d -> %dx%d (%.1f) [%dx%d (%.1f)]", currentFeature->RenderWidth(),
+                        currentFeature->RenderHeight(), currentFeature->TargetWidth(), currentFeature->TargetHeight(),
+                        (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth(),
+                        currentFeature->DisplayWidth(), currentFeature->DisplayHeight(),
+                        (float) currentFeature->DisplayWidth() / (float) currentFeature->RenderWidth());
 
-        ImGui::SameLine(0.0f, 4.0f);
+            ImGui::SameLine(0.0f, 4.0f);
 
-        ImGui::Text("%d", currentFeature->FrameCount());
+            ImGui::Text("%d", currentFeature->FrameCount());
 
-        ImGui::SameLine(0.0f, 10.0f);
+            ImGui::SameLine(0.0f, 10.0f);
+        }
+    }
+    else
+    {
+        // Modern: fixed-width font in a fixed-width slot, so the counter and frozen state never move the controls.
+        const float statusX = ImGui::GetCursorPosX();
+        ScopedMonoFont monoFont {};
+        float slotWidth = ImGui::CalcTextSize("0000x0000 -> 0000x0000 (0.0) [0000x0000 (0.0)] 0000000").x;
+
+        if (currentFeature != nullptr && !currentFeature->IsFrozen())
+        {
+            const auto status =
+                StrFmt("%dx%d -> %dx%d (%.1f) [%dx%d (%.1f)] %d", currentFeature->RenderWidth(),
+                       currentFeature->RenderHeight(), currentFeature->TargetWidth(), currentFeature->TargetHeight(),
+                       (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth(),
+                       currentFeature->DisplayWidth(), currentFeature->DisplayHeight(),
+                       (float) currentFeature->DisplayWidth() / (float) currentFeature->RenderWidth(),
+                       currentFeature->FrameCount());
+
+            ImGui::TextUnformatted(status.c_str());
+            slotWidth = std::max(slotWidth, ImGui::GetItemRectSize().x);
+        }
+        else
+        {
+            ImGui::Dummy(ImVec2(slotWidth, ImGui::GetTextLineHeight()));
+        }
+
+        ImGui::SameLine(statusX + slotWidth + 10.0f * menuResScale);
     }
 
     ImGui::PushItemWidth(100.0f * menuResScale);
@@ -8037,28 +8362,47 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         frameRate = 1000.0 / frameTime;
     }
 
+    // The detached windows below keep auto-resizing; the main window is resizable and scrolls inside its page pane.
     ImGuiWindowFlags flags = 0;
     flags |= ImGuiWindowFlags_NoSavedSettings;
     flags |= ImGuiWindowFlags_NoCollapse;
     flags |= ImGuiWindowFlags_AlwaysAutoResize;
 
+    ImGuiWindowFlags mainFlags = (flags & ~ImGuiWindowFlags_AlwaysAutoResize) | ImGuiWindowFlags_NoScrollbar |
+                                 ImGuiWindowFlags_NoScrollWithMouse;
+
+    // Last size of the main window in pixels; zero until it has been drawn once.
+    static ImVec2 lastWindowSize {};
+
+    ImVec2 wantedSize { config->MenuWidth.value_or(960.0f) * menuResScale,
+                        config->MenuHeight.value_or(680.0f) * menuResScale };
+    // The window can't scroll, so every size it takes (first use, rescale, drag, minimum) stays on screen.
+    const ImVec2 maxSize { ctx.io.DisplaySize.x > 0.0f ? ctx.io.DisplaySize.x * 0.95f : FLT_MAX,
+                           ctx.io.DisplaySize.y > 0.0f ? ctx.io.DisplaySize.y * 0.95f : FLT_MAX };
+    const ImVec2 minSize { std::min(640.0f * menuResScale, maxSize.x), std::min(420.0f * menuResScale, maxSize.y) };
+    wantedSize.x = std::clamp(wantedSize.x, minSize.x, maxSize.x);
+    wantedSize.y = std::clamp(wantedSize.y, minSize.y, maxSize.y);
+    ImGui::SetNextWindowSizeConstraints(minSize, maxSize);
+    ImGui::SetNextWindowSize(wantedSize, ImGuiCond_FirstUseEver);
+
+    if (lastWindowSize.x <= 0.0f)
+        lastWindowSize = wantedSize;
+
     if (lastMenuScale != menuResScale)
     {
+        const float oldMenuScale = lastMenuScale;
         lastMenuScale = menuResScale;
 
         // if UI scale is changed rescale the style
-        ImGuiStyle& style = ImGui::GetStyle();
-        ImGuiStyle styleold = style; // Backup colors
-        style = ImGuiStyle();        // IMPORTANT: ScaleAllSizes will change the original size,
-                                     // so we should reset all style config
+        RebuildStyle(menuResScale);
 
-        ApplyThemeStyle();
-
-        style.ScaleAllSizes(menuResScale);
-        style.MouseCursorScale = 1.0f;
-        CopyMemory(style.Colors, styleold.Colors, sizeof(style.Colors)); // Restore colors
-
-        ImGui::SetNextWindowSize({ 1.0f, 1.0f });
+        // Keep the window the same size relative to the text.
+        if (oldMenuScale > 0.0f)
+        {
+            lastWindowSize = { std::clamp(lastWindowSize.x * menuResScale / oldMenuScale, minSize.x, maxSize.x),
+                               std::clamp(lastWindowSize.y * menuResScale / oldMenuScale, minSize.y, maxSize.y) };
+            ImGui::SetNextWindowSize(lastWindowSize, ImGuiCond_Always);
+        }
     }
 
     // Main menu window
@@ -8069,17 +8413,28 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
                              (state.detectedQuirks.size() > 0) ? "(Q)" : "", state.isOptiPatcherSucceed ? "(OP)" : "");
     }
 
-    if (ImGui::Begin(windowTitle.c_str(), NULL, flags))
+    if (ImGui::Begin(windowTitle.c_str(), NULL, mainFlags))
     {
-        // Header/status messages shown above the two-column settings table.
+        // Remember the size (relative to Menu Scale) for Save Settings.
+        const ImVec2 windowSize = ImGui::GetWindowSize();
+        if (std::fabs(windowSize.x - lastWindowSize.x) > 0.5f || std::fabs(windowSize.y - lastWindowSize.y) > 0.5f)
+        {
+            lastWindowSize = windowSize;
+            config->MenuWidth = windowSize.x / menuResScale;
+            config->MenuHeight = windowSize.y / menuResScale;
+        }
+
+        // Header/status messages shown above the navigation and page panes.
         RenderMainMenuHeaderMessages(ctx);
 
-        // Main two-column settings content.
-        RenderMainMenuTable(ctx);
+        // Navigation pane and the selected page.
+        RenderMainMenuPages(ctx);
 
-        // Diagnostics and footer actions below the settings table.
+        // Diagnostics and footer actions below the page, full width.
+        const float footerTop = ImGui::GetCursorPosY();
         RenderMainMenuGraphs(ctx);
         RenderMainMenuBottomBar(ctx);
+        mainMenuFooterHeight = ImGui::GetCursorPosY() - footerTop;
 
         ImGui::End();
     }
@@ -8179,6 +8534,8 @@ void RenderExposureScanIndicator(float alpha)
 
         ImGui::Dummy(ImVec2(r * 2.0f + 6.0f, ImGui::GetTextLineHeight()));
         ImGui::SameLine();
+
+        ScopedMonoFont monoFont {};
 
         if (reading)
             ImGui::TextColored(lamp, "%3.0f%%  %.5f", lit * 100.0f, now);
@@ -8285,27 +8642,39 @@ void MenuCommon::Init(HWND InHwnd, bool isUWP)
         }
     }
 
-    if (io.Fonts->Fonts.empty() && Config::Instance()->UseHQFont.value_or_default())
+    if (io.Fonts->Fonts.empty())
     {
-        ImFontAtlas* atlas = io.Fonts;
-        atlas->Clear();
+        gHackFont = gInterFont = gClassicFont = nullptr;
 
-        // This automatically becomes the next default font
-        ImFontConfig fontConfig;
-
-        if (Config::Instance()->FontSize.has_value())
-            fontSize = Config::Instance()->FontSize.value();
-
-        if (Config::Instance()->TTFFontPath.has_value())
+        if (Config::Instance()->UseHQFont.value_or_default())
         {
-            io.FontDefault =
-                atlas->AddFontFromFileTTF(wstring_to_string(Config::Instance()->TTFFontPath.value()).c_str(), fontSize,
-                                          &fontConfig, io.Fonts->GetGlyphRangesDefault());
-        }
-        else
-        {
-            io.FontDefault = atlas->AddFontFromMemoryCompressedBase85TTF(hack_compressed_compressed_data_base85,
+            ImFontAtlas* atlas = io.Fonts;
+            atlas->Clear();
+
+            // This automatically becomes the next default font
+            ImFontConfig fontConfig;
+
+            if (Config::Instance()->FontSize.has_value())
+                fontSize = Config::Instance()->FontSize.value();
+
+            if (Config::Instance()->TTFFontPath.has_value())
+            {
+                gClassicFont =
+                    atlas->AddFontFromFileTTF(wstring_to_string(Config::Instance()->TTFFontPath.value()).c_str(),
+                                              fontSize, &fontConfig, io.Fonts->GetGlyphRangesDefault());
+            }
+            else
+            {
+                gHackFont = atlas->AddFontFromMemoryCompressedBase85TTF(hack_compressed_compressed_data_base85,
+                                                                        fontSize, &fontConfig);
+                gClassicFont = gHackFont;
+
+                // Modern style text; Hack stays loaded for the live numbers.
+                gInterFont = atlas->AddFontFromMemoryCompressedBase85TTF(inter_compressed_compressed_data_base85,
                                                                          fontSize, &fontConfig);
+            }
+
+            io.FontDefault = gClassicFont;
         }
     }
 
@@ -8322,7 +8691,8 @@ void MenuCommon::Init(HWND InHwnd, bool isUWP)
 
     OptiInput::Initialize(_handle, isUWP);
 
-    ApplyThemeStyle();
+    RebuildStyle();
+    ApplyThemeFont();
     _isInited = true;
 }
 

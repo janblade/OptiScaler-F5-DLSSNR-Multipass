@@ -7,6 +7,7 @@
 
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
+#include <menu/MenuPages.h>
 
 // DLSS 5 Neural Rendering, run over the upscaler's output.
 //
@@ -57,7 +58,7 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 
 
 // The settings panel, drawn inside OptiScaler's menu.
-void RenderMenu(::Config* config, float menuResScale);
+void RenderMenu(::Config* config, float menuResScale, MenuPages::Page page);
 
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();

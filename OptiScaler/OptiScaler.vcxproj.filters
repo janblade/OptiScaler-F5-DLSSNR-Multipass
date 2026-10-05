@@ -287,6 +287,9 @@
     <ClInclude Include="menu\font\Hack_Compressed.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="menu\font\Inter_Compressed.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="menu\menu_dx_base.h">
       <Filter>Header Files</Filter>
     </ClInclude>

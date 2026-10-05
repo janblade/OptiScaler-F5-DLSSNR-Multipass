@@ -282,12 +282,14 @@ struct Runner
         }
     }
 
-    // One frame through both; keeps the mask the pass produced.
-    void Frame(const Scene& s, bool split = false)
+    // One frame through both; keeps the mask the pass produced. noDepth: no depth copy this frame (the generic
+    // depth finder found nothing qualifying) -- Dispatch must still run, on flow-consistency and luma alone.
+    bool lastDispatchRan = false;
+    void Frame(const Scene& s, bool split = false, bool noDepth = false)
     {
         auto colour = Colour(gpu, s);
-        auto depth = Depth(gpu, s, split ? 1 : 0);
-        auto depth2 = split ? Depth(gpu, s, 2) : ComPtr<ID3D12Resource>();
+        auto depth = noDepth ? ComPtr<ID3D12Resource>() : Depth(gpu, s, split ? 1 : 0);
+        auto depth2 = (split && !noDepth) ? Depth(gpu, s, 2) : ComPtr<ID3D12Resource>();
 
         flow.Dispatch(gpu.list.Get(), colour.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
 
@@ -300,19 +302,23 @@ struct Runner
             in.fullPerFlow = 2.0f;
             in.lumaNow = flow.LumaOfLastFrame();
             in.lumaBefore = flow.LumaOfFrameBefore();
-            in.depths[0] = depth.Get();
-            in.depthCount = 1;
 
-            if (split)
+            if (!noDepth)
             {
-                in.depths[1] = depth2.Get();
-                in.depthCount = 2;
+                in.depths[0] = depth.Get();
+                in.depthCount = 1;
+
+                if (split)
+                {
+                    in.depths[1] = depth2.Get();
+                    in.depthCount = 2;
+                }
+                in.depthFormat = DXGI_FORMAT_R32_FLOAT;
+                in.depthWidth = kWidth;
+                in.depthHeight = kHeight;
+                in.depthReversed = true;
             }
-            in.depthFormat = DXGI_FORMAT_R32_FLOAT;
-            in.depthWidth = kWidth;
-            in.depthHeight = kHeight;
-            in.depthReversed = true;
-            trust.Dispatch(gpu.list.Get(), in);
+            lastDispatchRan = trust.Dispatch(gpu.list.Get(), in);
         }
 
         gpu.Submit();
@@ -458,6 +464,65 @@ int main()
 
         ok &= Check("whole picture, mean mask", run.Mean(0, 0, kWidth, kHeight), run.Mean(0, 0, kWidth, kHeight) < 0.03);
         ok &= Check("the square, mean mask", run.Mean(320, 300, 480, 420), run.Mean(320, 300, 480, 420) < 0.05);
+    }
+
+    // 6. no depth at all (depthCount == 0, as when the scene's generic depth finder qualifies nothing for this
+    //    camera angle): Dispatch must still run on flow-consistency and luma alone, and BuildGuides must still
+    //    produce a flow-only guide -- a valid GuideMotion() with GuideDepth() left null, not a stale depth guide
+    //    from an earlier frame that did have depth.
+    {
+        printf("no depth at all\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        // A couple of frames with real depth first (the first establishes flow history only), so GuideDepth()
+        // has something stale it could wrongly keep handing out.
+        run.Frame(Scene { 7, 300, 20.0f, 5.0f });
+        run.Frame(Scene { 7, 300, 20.0f, 5.0f });
+        {
+            auto colour = Colour(gpu, Scene { 7, 300, 20.0f, 5.0f });
+            auto depth = Depth(gpu, Scene { 7, 300, 20.0f, 5.0f });
+            TrustMaskDx12::Inputs in;
+            in.flow = run.flow.Flow();
+            in.flowWidth = run.flow.FlowWidth();
+            in.flowHeight = run.flow.FlowHeight();
+            in.fullPerFlow = 2.0f;
+            in.lumaNow = run.flow.LumaOfLastFrame();
+            in.lumaBefore = run.flow.LumaOfFrameBefore();
+            in.depths[0] = depth.Get();
+            in.depthCount = 1;
+            in.depthFormat = DXGI_FORMAT_R32_FLOAT;
+            in.depthWidth = kWidth;
+            in.depthHeight = kHeight;
+            in.depthReversed = true;
+            const bool built = run.trust.BuildGuides(gpu.list.Get(), in, kWidth, kHeight);
+            gpu.Submit();
+            ok &= Check("with depth: BuildGuides succeeds and reports a depth guide", built ? 1.0 : 0.0,
+                        built && run.trust.GuideDepth() != nullptr && run.trust.GuideMotion() != nullptr);
+        }
+
+        // Now a run of frames with no depth at all.
+        for (int k = 0; k < 8; ++k)
+            run.Frame(Scene { 7, 320.0f + 10.0f * k, 20.0f, 5.0f }, false, true);
+
+        ok &= Check("no depth: Dispatch still runs (flow-consistency and luma alone)", run.lastDispatchRan ? 1.0 : 0.0,
+                    run.lastDispatchRan);
+        ok &= Check("no depth: still trusts a static background reasonably", run.Mean(700, 60, 1200, 200),
+                    run.Mean(700, 60, 1200, 200) < 0.25);
+
+        {
+            TrustMaskDx12::Inputs in;
+            in.flow = run.flow.Flow();
+            in.flowWidth = run.flow.FlowWidth();
+            in.flowHeight = run.flow.FlowHeight();
+            const bool built = run.trust.BuildGuides(gpu.list.Get(), in, kWidth, kHeight);
+            gpu.Submit();
+            ok &= Check("no depth: BuildGuides still succeeds, with a motion guide", built ? 1.0 : 0.0,
+                        built && run.trust.GuideMotion() != nullptr);
+            ok &= Check("no depth: GuideDepth() is null, not a stale depth guide from the earlier frame",
+                        run.trust.GuideDepth() == nullptr ? 1.0 : 0.0, run.trust.GuideDepth() == nullptr);
+        }
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

@@ -3,8 +3,11 @@
 // cl /std:c++20 /EHsc /W4 tests/nr_depth_finder_core_smoke.cpp OptiScaler/native/DepthFinderCore.cpp
 #include "../OptiScaler/native/DepthFinderCore.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace native;
@@ -59,6 +62,76 @@ static void SingleContextFrame(DepthFinderCore& core, std::vector<SnapshotReques
 
     core.BeginPresent(W, H);
     core.EndPresent(W, H, kWarmup);
+}
+
+// Runs `body(context)` for each context of a frame: on its own thread each (the way a game records command lists in
+// parallel), or one after the other on this one.
+template <typename Body> static void ForEachContext(int contexts, bool parallel, Body body)
+{
+    if (!parallel)
+    {
+        for (int c = 0; c < contexts; ++c)
+            body(c);
+
+        return;
+    }
+
+    std::vector<std::thread> threads;
+
+    for (int c = 0; c < contexts; ++c)
+        threads.emplace_back(body, c);
+
+    for (auto& t : threads)
+        t.join();
+}
+
+// What a game with several command lists does in a frame: every list binds the shadow map and draws into it, then binds the
+// scene (the first one clears it), draws, makes a fullscreen pass and an indirect draw, and closes. The draws of the lists run
+// on a thread of their own each when `parallel`; the events around them are made in the same order from this thread.
+// `snapshots` collects what the core asked to be copied (buffer, where, stretch), to be compared in sorted order.
+static void MultiContextFrames(DepthFinderCore& core, int contexts, bool parallel, int frames,
+                               std::vector<std::tuple<uint64_t, std::string, uint64_t>>& snapshots)
+{
+    auto take = [&](const SnapshotRequest& r)
+    {
+        if (r.take)
+            snapshots.emplace_back(r.id, r.where, r.stretchVertices);
+    };
+
+    for (int frame = 0; frame < frames; ++frame)
+    {
+        for (int c = 0; c < contexts; ++c)
+            take(core.OnDepthBound(100 + c, true, &kShadow));
+
+        ForEachContext(contexts, parallel,
+                       [&](int c)
+                       {
+                           core.OnViewport(100 + c, 2048.0f);
+                           for (int i = 0; i < 30; ++i)
+                               core.OnDraw(100 + c, 3000 + c, 1);
+                       });
+
+        for (int c = 0; c < contexts; ++c)
+            take(core.OnDepthBound(100 + c, true, &kScene));
+
+        take(core.OnDepthClear(100, kScene, 0.0f));
+
+        ForEachContext(contexts, parallel,
+                       [&](int c)
+                       {
+                           core.OnViewport(100 + c, (float) W);
+                           for (int i = 0; i < 200; ++i)
+                               core.OnDraw(100 + c, 6000, 1 + c % 3);
+                           core.OnDraw(100 + c, 6, 1);
+                           core.OnIndirect(100 + c, 4);
+                       });
+
+        for (int c = 0; c < contexts; ++c)
+            take(core.OnContextEnd(100 + c));
+
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+    }
 }
 
 int main()
@@ -363,6 +436,48 @@ int main()
         core.BeginPresent(W, H);
         CHECK(core.EndPresent(W, H, kWarmup));
         CHECK(core.GameCallsUpscaler());
+    }
+
+    // Lists recorded on several threads at once give the same candidates, pick, copy requests and log as the same events made on
+    // one thread: the per-draw counting takes no lock, and what it counts reaches the buffers at the lists' own events.
+    {
+        constexpr int kContexts = 8;
+        constexpr int kFrames = 10;
+
+        std::vector<std::string> serialLog;
+        std::vector<std::tuple<uint64_t, std::string, uint64_t>> serialSnapshots;
+
+        DepthFinderCore serial;
+        serial.Start([&](const std::string& line) { serialLog.push_back(line); });
+        serial.SetSnapshotsWanted(true);
+        MultiContextFrames(serial, kContexts, false, kFrames, serialSnapshots);
+
+        CHECK(serial.CurrentPick().valid && serial.CurrentPick().id == 0xA);
+        CHECK(!serialSnapshots.empty());
+        CHECK(!serialLog.empty());
+
+        std::sort(serialSnapshots.begin(), serialSnapshots.end());
+
+        for (int run = 0; run < 3; ++run)
+        {
+            std::vector<std::string> parallelLog;
+            std::vector<std::tuple<uint64_t, std::string, uint64_t>> parallelSnapshots;
+
+            DepthFinderCore parallel;
+            parallel.Start([&](const std::string& line) { parallelLog.push_back(line); });
+            parallel.SetSnapshotsWanted(true);
+            MultiContextFrames(parallel, kContexts, true, kFrames, parallelSnapshots);
+
+            std::sort(parallelSnapshots.begin(), parallelSnapshots.end());
+
+            const auto a = serial.CurrentPick();
+            const auto b = parallel.CurrentPick();
+            CHECK(a.valid == b.valid && a.id == b.id && a.width == b.width && a.height == b.height &&
+                  a.reversed == b.reversed);
+            CHECK(serialSnapshots == parallelSnapshots);
+            CHECK(serialLog == parallelLog);
+            CHECK(serial.SnapshotFloor() == parallel.SnapshotFloor());
+        }
     }
 
     printf(fails == 0 ? "all passed\n" : "FAILED (%d)\n", fails);

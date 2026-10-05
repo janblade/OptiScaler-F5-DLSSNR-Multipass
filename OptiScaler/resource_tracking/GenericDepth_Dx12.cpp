@@ -527,16 +527,44 @@ struct TablePatch
 };
 
 PVOID* g_installTable = nullptr; // the runtime's own table, read at install
-std::unordered_map<PVOID*, TablePatch> g_patched;
 std::unordered_map<PVOID*, bool> g_examined;
 int g_patchLogs = 0;
 
+// The tables patched so far, only ever added to: an entry is written whole, then published by raising the count (release), so a
+// thunk reads the table without a lock (acquire) on every call of a patched function. A table that finds it full is left
+// alone: its list is not counted.
+struct PatchedTable
+{
+    PVOID* table = nullptr;
+    TablePatch patch;
+};
+
+constexpr int kMaxPatchedTables = 256;
+PatchedTable g_patchedTables[kMaxPatchedTables];
+std::atomic<int> g_patchedCount { 0 };
+bool g_patchedFullLogged = false;
+
 PVOID PreviousOf(ID3D12GraphicsCommandList* list, int slot)
 {
+    // A thread uses the same few tables in turn, and an entry never changes once published, so the last ones found are kept.
+    static thread_local const PatchedTable* recent[8] {};
+
     PVOID* table = *(PVOID**) list;
-    std::lock_guard lock(g_mutex);
-    const auto found = g_patched.find(table);
-    return found != g_patched.end() ? found->second.previous[slot] : nullptr;
+    const PatchedTable*& cached = recent[(((size_t) table) >> 4) % 8];
+
+    if (cached != nullptr && cached->table == table)
+        return cached->patch.previous[slot];
+
+    const int count = g_patchedCount.load(std::memory_order_acquire);
+
+    for (int i = 0; i < count; ++i)
+        if (g_patchedTables[i].table == table)
+        {
+            cached = &g_patchedTables[i];
+            return cached->patch.previous[slot];
+        }
+
+    return nullptr;
 }
 
 void STDMETHODCALLTYPE hkTableDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance,
@@ -640,7 +668,24 @@ void PatchListTable(ID3D12GraphicsCommandList* list)
 
     {
         std::lock_guard lock(g_mutex);
-        g_patched[table] = patch; // before the entries change, so a thunk that runs at once finds what to call
+        const int count = g_patchedCount.load(std::memory_order_relaxed);
+
+        if (count >= kMaxPatchedTables)
+        {
+            if (!g_patchedFullLogged)
+            {
+                g_patchedFullLogged = true;
+                LOG_WARN("Depth finder: more than {} game command list vtables; the rest are not counted",
+                         kMaxPatchedTables);
+            }
+
+            return;
+        }
+
+        // Before the entries change, so a thunk that runs at once finds what to call.
+        g_patchedTables[count].table = table;
+        g_patchedTables[count].patch = patch;
+        g_patchedCount.store(count + 1, std::memory_order_release);
     }
 
     int patched = 0;

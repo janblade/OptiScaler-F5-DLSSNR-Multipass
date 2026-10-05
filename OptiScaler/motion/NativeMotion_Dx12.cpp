@@ -336,7 +336,7 @@ void DrawAdvancedUi()
     {
         auto& tune = g_producer->Flow()->Tuning();
         ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 3);
+        ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3);
         ImGui::SetNextItemWidth(160.0f);

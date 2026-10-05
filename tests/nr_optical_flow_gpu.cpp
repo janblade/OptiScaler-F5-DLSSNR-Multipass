@@ -347,6 +347,7 @@ std::vector<float> ReadFlow(Gpu& gpu, ID3D12Resource* out)
 int main(int argc, char** argv)
 {
     const bool perf = argc > 1 && std::string(argv[1]) == "perf";
+    bool score = false; // "score": one summary line for the settings given as key=value (radius=2 cells=4 ...)
     const bool noSmoothing = (argc > 1 && std::string(argv[1]) == "nosmooth") || (argc > 2 && std::string(argv[2]) == "nosmooth");
 
     if (perf)
@@ -376,11 +377,54 @@ int main(int argc, char** argv)
     if (noSmoothing)
         tuning.smoothRadius = 0;
     for (int a = 1; a < argc; ++a)
-        if (std::string(argv[a]) == "nodmatch")
+    {
+        const std::string arg = argv[a];
+        const size_t eq = arg.find('=');
+        const std::string key = arg.substr(0, eq);
+        const float value = eq == std::string::npos ? 0.0f : std::stof(arg.substr(eq + 1));
+
+        if (arg == "nodmatch")
             tuning.depthMatching = false;
-        else if (std::string(argv[a]) == "noglobal")
+        else if (arg == "noglobal")
             tuning.globalCandidate = false;
+        else if (arg == "score")
+            score = true;
+        else if (key == "radius")
+            tuning.radius = (int) value;
+        else if (key == "coarse")
+            tuning.coarseRadius = (int) value;
+        else if (key == "lambda")
+            tuning.lambda = value;
+        else if (key == "history")
+            tuning.useHistory = value != 0.0f;
+        else if (key == "cells")
+            tuning.coarseCells = (int) value;
+        else if (key == "smooth")
+            tuning.smoothRadius = (int) value;
+        else if (key == "knee")
+            tuning.confidenceKnee = value;
+        else if (key == "dmatch")
+            tuning.depthMatching = value != 0.0f;
+        else if (key == "global")
+            tuning.globalCandidate = value != 0.0f;
+    }
     flow.Tuning() = tuning;
+
+    // Score mode: the measures under exactly these settings, gathered per kind of scene.
+    struct Tally
+    {
+        double sum = 0, worst = 1;
+        int n = 0;
+        void Add(double v)
+        {
+            sum += v;
+            worst = std::min(worst, v);
+            ++n;
+        }
+        double Mean() const { return n ? sum / n : 0; }
+    };
+    Tally panHalf, panError, grainOne, brightHalf, sparseOne, thinOne, thinAliasError, edgeDepthOne, edgeNoDepthOne,
+        smallDepthOne, smallNoDepthOne;
 
     if (perf)
     {
@@ -505,6 +549,15 @@ int main(int argc, char** argv)
             }
 
         const double shareHalf = (double) half / n;
+        if (c.noise > 0.0f)
+            grainOne.Add((double) one / n);
+        else if (c.fade != 1.0f)
+            brightHalf.Add(shareHalf);
+        else
+        {
+            panHalf.Add(shareHalf);
+            panError.Add(sumErr / n);
+        }
         const bool pass = shareHalf >= c.minWithinHalf;
         ok = ok && (pass || c.minWithinHalf <= 0);
         printf("shift (%6.1f, %6.1f): mean error %7.3f px, within 0.5 px %5.1f%%, within 1 px %5.1f%%, off by over 3 px %5.1f%%   %s  %s\n",
@@ -562,6 +615,8 @@ int main(int argc, char** argv)
                 }
 
             share[run] = (double) one / n;
+            if (run == (tuning.globalCandidate ? 2 : 0))
+                sparseOne.Add(share[run]);
             printf("sparse blobs on a flat picture, shift (%5.1f, %5.1f), %d pictures, %-15s candidate: within 1 px "
                    "%5.1f%%, mean error %6.3f px\n",
                    c.dx, c.dy, c.frames, names[run], 100.0 * share[run], sum / n);
@@ -609,6 +664,13 @@ int main(int argc, char** argv)
                     ++n;
                 }
 
+            if (run == (tuning.globalCandidate ? 1 : 0))
+            {
+                if (c.dx == 90.0f)
+                    thinAliasError.Add(sum / n);
+                else
+                    thinOne.Add((double) one / n);
+            }
             printf("thin lines on a flat wall, shift (%5.1f, %5.1f), %d pictures, %-7s candidate: within 1 px %5.1f%%, "
                    "off by over 3 px %5.1f%%, mean error %6.3f px (reported)\n",
                    c.dx, c.dy, c.frames, run ? "with" : "without", 100.0 * one / n, 100.0 * wild / n, sum / n);
@@ -623,6 +685,7 @@ int main(int argc, char** argv)
     {
         float squareDx, squareDy, backgroundDx, backgroundDy;
         const char* what;
+        float size = 256.0f; // smaller ones are scored only (score mode): a thing smaller than the smoothing's reach
     };
 
     const EdgeCase edgeCases[] = {
@@ -630,6 +693,8 @@ int main(int argc, char** argv)
         { -30, 0, 8, -4, "square against a panning background" },
         { 60, 30, 0, 0, "fast square over a still background" },
         { 8, 0, 0, 0, "slow square over a still background" },
+        { 20, 8, 0, 0, "small square (24 px) over a still background", 24.0f },
+        { 20, 8, 0, 0, "small square (12 px) over a still background", 12.0f },
     };
 
     struct Variant
@@ -650,22 +715,28 @@ int main(int argc, char** argv)
         { "depth matching, depth 5 px off", 9, true, 5.0f },
         { "depth matching, half-size depth", 9, true, 0.0f, 0.5f },
         { "depth matching, wrong depth", 9, true, 0.0f, 1.0f, true },
+        { "as set", 0, true }, // cells 0: the settings' own; depth matching only if the settings have it
+        { "as set, no depth", 0, false },
     };
     constexpr int kVariants = (int) (sizeof(variants) / sizeof(variants[0]));
 
     for (const EdgeCase& e : edgeCases)
     {
+        if (!score && e.size < 256.0f)
+            continue;
+
         double share[kVariants] = {}, mean[kVariants] = {};
         printf("edges, %s\n", e.what);
 
-        for (int run = 0; run < kVariants; ++run)
+        for (int run = score ? 7 : 0; run < kVariants; ++run)
         {
             flow.Reset();
             flow.Tuning() = tuning;
-            flow.Tuning().coarseCells = variants[run].cells;
-            flow.Tuning().depthMatching = variants[run].matching;
+            flow.Tuning().coarseCells = variants[run].cells != 0 ? variants[run].cells : tuning.coarseCells;
+            flow.Tuning().depthMatching = variants[run].cells != 0 ? variants[run].matching
+                                                                   : variants[run].matching && tuning.depthMatching;
             const int frames = 3;
-            const float size = 256.0f, x0 = 400.0f, y0 = 200.0f;
+            const float size = e.size, x0 = 400.0f, y0 = 200.0f;
 
             for (int k = 0; k < frames; ++k)
             {
@@ -713,7 +784,14 @@ int main(int argc, char** argv)
             share[run] = (double) within / n;
             mean[run] = sum / n;
             printf("  %-32s within 1 px %5.1f%%, mean %5.2f px\n", variants[run].what, 100.0 * share[run], mean[run]);
+            if (run == 7)
+                (e.size < 256.0f ? smallDepthOne : edgeDepthOne).Add(share[run]);
+            else if (run == 8)
+                (e.size < 256.0f ? smallNoDepthOne : edgeNoDepthOne).Add(share[run]);
         }
+
+        if (score)
+            continue;
 
         flow.Tuning() = tuning;
         // 9 cells no worse than 4; depth matching well above none, and no worse than none with misaligned or wrong depth.
@@ -722,6 +800,19 @@ int main(int argc, char** argv)
                           share[6] >= share[1] - 0.03;
         ok = ok && pass;
         printf("  %s\n", pass ? "ok" : "FAIL");
+    }
+
+    if (score)
+    {
+        printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d | "
+               "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
+               "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f\n",
+               tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
+               tuning.smoothRadius, tuning.confidenceKnee, tuning.depthMatching ? 1 : 0, tuning.globalCandidate ? 1 : 0,
+               panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(),
+               thinAliasError.Mean(), edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(),
+               smallNoDepthOne.Mean());
+        return 0;
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

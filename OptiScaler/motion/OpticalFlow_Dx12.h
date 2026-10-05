@@ -80,10 +80,10 @@ class OpticalFlowDx12
     {
         int radius = 1;
         int coarseRadius = 4;
-        float lambda = 0.01f;
+        float lambda = 0.03f;
         bool useHistory = true;         // last frame's flow as a candidate
         int coarseCells = 9;            // how many of the coarser level's nearest cells are candidates (1..9: the 3x3)
-        int smoothRadius = 2;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
+        int smoothRadius = 4;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
         float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
         bool depthMatching = true;      // with depth: the block match counts the window's samples on this pixel's surface
         bool globalCandidate = true;    // the last frame's whole-picture motion is a candidate everywhere

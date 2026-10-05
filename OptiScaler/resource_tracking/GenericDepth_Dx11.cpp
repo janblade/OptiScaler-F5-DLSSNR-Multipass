@@ -662,29 +662,34 @@ bool Armed() { return g_installed && g_core.Armed(); }
 
 void DrawStatus()
 {
+    const bool wanted = Config::Instance()->DlssNrNativeDepthFinder.value_or_default();
+
     if (!g_installed)
     {
-        if (Config::Instance()->DlssNrNativeDepthFinder.value_or_default())
-            ImGui::TextDisabled("Depth finder: not installed yet (needs a restart after turning it on).");
-
+        ImGui::TextDisabled("%s",
+                            wanted ? "Depth: the finder needs a restart." : "Depth: none; NR runs on motion only.");
         return;
     }
 
     const auto pick = CurrentPick();
     const uint32_t warmup = Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default();
+    const char* untilRestart = wanted ? "" : " (finder off at next start)";
 
     if (g_core.GameCallsUpscaler())
-        ImGui::TextDisabled("Stood down: the game is calling an upscaler. Turn it off in the game.");
+        ImGui::TextDisabled("Depth: stood down, the game is calling an upscaler. Turn it off in the game.");
     else if (!g_core.Armed())
-        ImGui::TextDisabled("Watching (%llu of %u frames)...",
-                            (unsigned long long) (g_core.Presents() - g_core.WarmupStart()), warmup);
+        ImGui::TextDisabled("Depth: watching (%llu of %u frames)...%s",
+                            (unsigned long long) (g_core.Presents() - g_core.WarmupStart()), warmup, untilRestart);
     else if (!pick.valid)
-        ImGui::TextDisabled("No depth buffer qualifies yet.");
+        ImGui::TextDisabled("Depth: none found yet; NR runs on motion only%s.", untilRestart);
     else
-        ImGui::Text("Picked %ux%u, format %u%s", pick.width, pick.height, pick.format,
-                    pick.reversed ? ", reversed-Z" : "");
+        ImGui::Text("Depth: picked %ux%u%s%s", pick.width, pick.height, pick.reversed ? ", reversed-Z" : "",
+                    untilRestart);
 
-    ImGui::TextDisabled("The log has the candidates (Depth finder lines).");
+    if (ImGui::IsItemHovered() && pick.valid)
+        ImGui::SetTooltip("Format %u. The log has the candidates (Depth finder lines).", pick.format);
+    else if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The log has the candidates (Depth finder lines).");
 }
 
 void DrawAdvancedUi()
@@ -692,13 +697,14 @@ void DrawAdvancedUi()
     auto* config = Config::Instance();
     bool finder = config->DlssNrNativeDepthFinder.value_or_default();
 
-    if (ImGui::Checkbox("Find the scene's depth##depthfinder11", &finder))
+    if (ImGui::Checkbox("Use the game's depth (better quality; needs a restart)##depthfinder11", &finder))
         config->DlssNrNativeDepthFinder = finder;
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Same as the DirectX 12 depth finder, for a Direct3D 11 game: watches the game's immediate\n"
-                                "context and picks the scene's depth buffer. Deferred contexts are not watched yet. Also\n"
-                                "set by the single checkbox above. Applies at the next start: save the settings and\n"
-                                "restart the game.");
+        ImGui::SetTooltip("%s",
+                          "Watches the game's immediate context (Direct3D 11) and picks the scene's depth buffer, so\n"
+                          "NR and the stabiliser get depth as well as motion. Optional: without it they run on motion\n"
+                          "only. Deferred contexts are not watched yet. Choosing a mode above turns it on. Applies at\n"
+                          "the next start: save the settings and restart the game.");
 }
 } // namespace GenericDepthDx11

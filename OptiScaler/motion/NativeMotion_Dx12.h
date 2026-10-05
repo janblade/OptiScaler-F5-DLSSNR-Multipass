@@ -24,15 +24,13 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
 // its lock: the picture is the game's own, `queue` the game's. Frame generation's Upscaler input is fed from here.
 void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device);
 
-// ImGui: status only (Off/Waiting/Failed/running, the virtual upscaler's backend/error, trust/cuts) -- no checkboxes.
-// Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
+// ImGui: one status line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
+// Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp), while NativeMotion
+// is on.
 void DrawStatus();
 
-// ImGui: the three checkboxes (estimate motion, native input, virtual upscaler), their tooltips, and (with
-// NativeDebugView) the flow tuning sliders and flow/trust picture previews. [DlssNr] NativeMotion and NativeUpscaler
-// are also set together by the menu's single native-input checkbox (DlssNr_Menu.cpp's ApplyNativeInputPreset); this
-// is for setting the three independently -- in particular, native input's lower-cost, no-frame-generation path,
-// which the single checkbox does not use. Call inside the menu's Advanced section.
+// ImGui: with NativeDebugView, the flow tuning sliders and flow/trust picture previews. The keys themselves are set by
+// the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();
 
 } // namespace NativeMotionDx12

@@ -48,12 +48,12 @@ void NoteUpscalerCall();
 bool GameCallsUpscaler();
 bool Armed();
 
-// ImGui: status of the finder (stood down / watching / picked), no checkbox. Draws nothing when the finder is not
-// installed. Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
+// ImGui: the menu's one depth line (none, needs a restart, stood down, watching, picked), no checkbox. Call inside the
+// menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
 void DrawStatus();
 
-// ImGui: the "Find the scene's depth" checkbox and its tooltip. [DlssNr] NativeDepthFinder is also set by the menu's
-// single native-input checkbox (DlssNr_Menu.cpp's ApplyNativeInputPreset); this is for setting it on its own. Call
-// inside the menu's Advanced section.
+// ImGui: the "Use the game's depth" checkbox and its tooltip. [DlssNr] NativeDepthFinder is also turned on by the
+// menu's mode selector (dlssnr/DlssNr_NativeMode.h); this is for setting it on its own. Call inside the menu's Advanced
+// section.
 void DrawAdvancedUi();
 } // namespace GenericDepthDx11

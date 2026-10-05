@@ -30,8 +30,7 @@ struct NativeFrame
     ColorSpace space = ColorSpace::Srgb;
     ID3D12Resource* depth = nullptr;  // the guides (TrustMaskDx12::BuildGuides): picture-sized, unjittered, and in
     ID3D12Resource* motion = nullptr; // NON_PIXEL_SHADER_RESOURCE, which the consumer must leave them in. depth
-                                      // is null on a frame with no depth (the generic finder found none) --
-                                      // the consumer must tolerate that, running on motion alone.
+                                      // is null on a frame without depth.
     bool depthReversed = false;
     bool reset = false;               // the frame does not continue the last one
 };

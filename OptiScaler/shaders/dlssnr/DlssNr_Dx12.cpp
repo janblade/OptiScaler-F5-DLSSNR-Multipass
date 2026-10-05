@@ -2486,8 +2486,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool targetSupportsUav =
         cropColor || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
 
-    // No depth this frame: a {0,0} allocation extent, unchanged through GuideSubrect/ResolveGuideRegions,
-    // naturally resolves to an invalid (0-width) depth GuideRegion -- the correct "no depth" signal below.
+    // No depth this frame resolves to an empty depth region.
     const auto guideDesc = depth != nullptr ? depth->GetDesc() : D3D12_RESOURCE_DESC {};
     const auto motionDesc = motion->GetDesc();
     const auto guides = DlssNr::ResolveGuideRegions(
@@ -2501,6 +2500,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         device->Release();
         return;
     }
+    // Depth with an empty subrect is no depth.
+    if (!guides.depth.valid())
+        depth = nullptr;
     const auto guideWidth = guides.depth.width, guideHeight = guides.depth.height;
     const auto motionWidth = guides.motion.width, motionHeight = guides.motion.height;
     const auto depthBaseX = guides.depth.x, depthBaseY = guides.depth.y;
@@ -3643,9 +3645,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Read the exposure scan's candidates on the pass's own command list, once a frame.
     DlssNr::ExposureScan::Tick(device, cmdList);
 
-    // ReadableGuide(device, cmdList, nullptr, ...) returns nullptr immediately (source == nullptr), so an absent
-    // depth naturally comes out as depthIn == nullptr without ever reaching CreateGuideClone -- that is the
-    // intentional "no depth" case below, distinct from a depth that was present but could not be cloned.
+    // No depth gives depthIn == nullptr; only a depth that could not be cloned is a failure.
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
     ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
 
@@ -4389,16 +4389,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
-    // Put any guide clones back where the next frame's copy expects to find them.
-    // A clone left in NON_PIXEL_SHADER_RESOURCE by a frozen frame was never transitioned back to
-    // COPY_DEST, because a frozen frame does not copy. Putting it back unconditionally would be a
-    // barrier from a state it is not in, so the frozen case is skipped here and picked up by the
-    // first live frame after the toggle goes off -- which is a copy, and copies transition it.
-    if (g_nr.depthClone != nullptr)
+    // Put the guide clones this frame copied into back where the next frame's copy expects to find them.
+    // A clone this frame did not use (no depth, or a typed guide) is still in COPY_DEST.
+    if (g_nr.depthClone != nullptr && depthIn == g_nr.depthClone)
         Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
-    if (g_nr.motionClone != nullptr)
+    if (g_nr.motionClone != nullptr && motionIn == g_nr.motionClone)
         Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 

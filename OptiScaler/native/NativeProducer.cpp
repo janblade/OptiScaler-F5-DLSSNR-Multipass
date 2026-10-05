@@ -140,10 +140,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         if (options.flowPreview)
             _previewReady = _flow->Visualise(list, options.previewMaxSpeed) || _previewReady;
 
-        // The trust mask uses the scene's depth as the adapter copied it this frame, when there is any; without
-        // it (the generic depth finder found nothing qualifying for this camera angle), flow-consistency and
-        // luma alone still produce a meaningful mask, and BuildGuides below still produces a flow-only motion
-        // guide -- TrustMaskDx12::Dispatch/BuildGuides degrade gracefully rather than being skipped outright.
+        // The trust mask uses the scene's depth as the adapter copied it this frame; without any it runs on flow and luma.
         TrustMaskDx12::Inputs in;
         in.flow = _flow->Flow();
         in.flowWidth = _flow->FlowWidth();

@@ -4,7 +4,8 @@
 //   - the strip the square uncovers is not (the depth there was the square's),
 //   - the inside of the moving square is trusted (it moves as one, at one depth),
 //   - a hard cut to another scene distrusts nearly everything and is reported a few frames later,
-//   - a scene that does not move at all is trusted everywhere.
+//   - a scene that does not move at all is trusted everywhere,
+//   - depth coming and going is not a scene cut.
 //
 //   vcvars64, then from the repo root:
 //   cl /std:c++20 /EHsc /O2 tests\nr_trust_mask_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
@@ -282,8 +283,7 @@ struct Runner
         }
     }
 
-    // One frame through both; keeps the mask the pass produced. noDepth: no depth copy this frame (the generic
-    // depth finder found nothing qualifying) -- Dispatch must still run, on flow-consistency and luma alone.
+    // One frame through both; keeps the mask the pass produced. noDepth: no depth copy this frame.
     bool lastDispatchRan = false;
     void Frame(const Scene& s, bool split = false, bool noDepth = false)
     {
@@ -466,10 +466,7 @@ int main()
         ok &= Check("the square, mean mask", run.Mean(320, 300, 480, 420), run.Mean(320, 300, 480, 420) < 0.05);
     }
 
-    // 6. no depth at all (depthCount == 0, as when the scene's generic depth finder qualifies nothing for this
-    //    camera angle): Dispatch must still run on flow-consistency and luma alone, and BuildGuides must still
-    //    produce a flow-only guide -- a valid GuideMotion() with GuideDepth() left null, not a stale depth guide
-    //    from an earlier frame that did have depth.
+    // 6. no depth at all: the mask runs on flow and luma, and BuildGuides gives a motion guide and no stale depth guide
     {
         printf("no depth at all\n");
         Runner run(gpu);
@@ -523,6 +520,30 @@ int main()
             ok &= Check("no depth: GuideDepth() is null, not a stale depth guide from the earlier frame",
                         run.trust.GuideDepth() == nullptr ? 1.0 : 0.0, run.trust.GuideDepth() == nullptr);
         }
+    }
+
+    // 7. nothing moves, and depth comes and goes (a camera angle the depth finder finds nothing for): no scene cut
+    {
+        printf("static scene, depth coming and going\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        const Scene still { 7, 300, 20.0f, 5.0f };
+        for (int k = 0; k < 8; ++k)
+            run.Frame(still);
+
+        double worst = 0.0;
+        bool cut = false;
+        for (int k = 0; k < 10; ++k)
+        {
+            run.Frame(still, false, k < 6 && (k % 2) == 0);
+            worst = (std::max)(worst, run.Mean(0, 0, kWidth, kHeight));
+            cut = cut || run.trust.SceneCutSeen();
+        }
+
+        ok &= Check("worst whole-picture mean mask across the switches", worst, worst < 0.05);
+        ok &= Check("no scene cut", run.trust.DistrustedShare(), !cut);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

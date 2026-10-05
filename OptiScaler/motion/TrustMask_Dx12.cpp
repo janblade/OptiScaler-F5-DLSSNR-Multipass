@@ -30,7 +30,8 @@ cbuffer P : register(b0)
     float revealTolerance;
     uint depthCount;
     uint debugView;      // 0 the mask, 1 depth, 2 revealed, 3 flow consistency, 4 luma, 5 out of the picture (no memory)
-    uint2 pad;
+    uint depthBoth;      // this frame and the one before both had depth: the depth checks have two real depths to compare
+    uint pad;
 };
 
 SamplerState Linear : register(s0);
@@ -131,10 +132,10 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
             // Revealed: a surface much nearer than this one was at this very pixel a frame ago and has moved off it. The
             // flow cannot be relied on for this, it bleeds from the moving surface into what it uncovers, so it looks at
             // the same pixel instead of the flow's.
-            if (farthestHere < zNow)
+            if (depthBoth != 0 && farthestHere < zNow)
                 badReveal = saturate(((zNow - farthestHere) / zNow - revealTolerance) / revealTolerance);
 
-            if (zNow < kSky)
+            if (depthBoth != 0 && zNow < kSky)
                 badDepth = saturate((relativeBest - depthTolerance) / depthTolerance);
 
             // Consistency: the motion there was not this motion.
@@ -562,11 +563,7 @@ void TrustMaskDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* p
 
 bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 {
-    // in.depthCount == 0 is "no depth this frame" (the scene's generic depth finder found nothing qualifying),
-    // not a caller error: DepthProxy's and Trust's shader loops over depthCount simply do not execute, so the
-    // depth-based disocclusion/reveal checks degrade to no signal (a constant proxy distance every pixel) and
-    // flow-consistency plus luma still produce a meaningful mask. in.depths[0] is only required when there is
-    // at least one copy to read.
+    // in.depthCount == 0 is a frame without depth: the mask then rests on flow and luma alone.
     if (_device == nullptr || _trust == nullptr || list == nullptr || in.flow == nullptr || in.lumaNow == nullptr ||
         in.lumaBefore == nullptr || in.flowWidth == 0 || in.flowHeight == 0 ||
         (in.depthCount > 0 && in.depths[0] == nullptr))
@@ -621,15 +618,13 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     constants.revealTolerance = _settings.revealTolerance;
     constants.depthCount = (uint32_t) (std::min)(in.depthCount, (int) Inputs::kMaxDepths);
     constants.debugView = (uint32_t) _settings.debugView;
+    // Depth coming or going compares a real depth with the all-far proxy, which would distrust every pixel.
+    constants.depthBoth = in.depthCount > 0 && _hadDepth ? 1 : 0;
 
     // 1. the depth proxy at the flow's size
     {
         // Eight depth slots (t0..t7): the copies given, the first one again for any not given (every slot needs a
-        // view). With depthCount == 0 there is nothing to read -- the shader's own loop over depthCount never
-        // executes, so DepthProxy writes a constant "far" nearness regardless -- but Pass() still needs a real,
-        // typed resource at slot 0 to build a valid view from (in.depths[0] is null and in.depthFormat is
-        // DXGI_FORMAT_UNKNOWN then, which crashed CreateShaderResourceView). Stand the flow in; it is never
-        // actually sampled by DepthProxy in this case.
+        // view). With no depth the flow stands in; the shader reads none.
         ID3D12Resource* srv[8];
         DXGI_FORMAT formats[8];
 
@@ -705,6 +700,7 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     // The newest mask can be read by a pixel shader too (a menu preview).
     Transition(list, _mask[_maskIndex], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     _haveHistory = true;
+    _hadDepth = in.depthCount > 0;
     return true;
 }
 

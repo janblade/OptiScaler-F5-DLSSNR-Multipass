@@ -1,11 +1,8 @@
 // GPU test for native::NativeProducer (OptiScaler/native/NativeProducer.cpp), no game and no model: a fake frame source
 // hands it pictures and depth copies through the FrameContract, and a stand-in for DLSS-NR is passed in as a function.
 // It checks, through the contract only:
-//   - the first frame has no flow, later frames do; the trust mask runs whether or not depth is given, degrading to a
-//     flow-only guide (no depth) when it is not,
-//   - the stand-in for NR is called with the guides (depth included when there was any, null when there was not) and
-//   not
-//     called when apply is off,
+//   - the first frame has no flow, later frames do; the trust mask runs with or without depth,
+//   - the stand-in for NR is called with the guides (depth null when there was none) and not called when apply is off,
 //   - the picture is left exactly as it was (bit for bit) when NR does nothing, whatever state it came in,
 //   - the output's fence point completes, and a hard cut is reported and makes the next NR call a reset,
 //   - a cut hint from the adapter restarts the flow.

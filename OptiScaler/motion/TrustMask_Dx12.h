@@ -57,9 +57,7 @@ class TrustMaskDx12
     // The guides the DLSS-NR seam takes (Story 4), at the picture's size: the depth (raw, in the convention it came in,
     // the nearest over the copies) as R32_FLOAT, and the flow bilinearly enlarged as RGBA16F in picture pixels towards
     // the previous frame. Both rest in NON_PIXEL_SHADER_RESOURCE. The inputs are those of Dispatch(). GuideDepth() is
-    // null after a call with in.depthCount == 0 (no depth this frame): a motion-only guide is still built
-    // (GuideMotion()), but the depth guide texture is left unpublished rather than handing out a stale copy from a
-    // previous frame that did have depth.
+    // null after a call without depth.
     bool BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& in, uint32_t width, uint32_t height);
     ID3D12Resource* GuideDepth() const { return _guideDepthValid ? _guideDepth.resource : nullptr; }
     ID3D12Resource* GuideMotion() const { return _guideMotion.resource; }
@@ -111,7 +109,7 @@ class TrustMaskDx12
         float depthTolerance, flowTolerance, lumaTolerance, decay;
         uint32_t reversed, hasHistory;
         float fullPerFlow, revealTolerance;
-        uint32_t depthCount, debugView, pad1, pad2;
+        uint32_t depthCount, debugView, depthBoth, pad;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -152,6 +150,7 @@ class TrustMaskDx12
     float _share = -1.0f;
 
     bool _haveHistory = false;
+    bool _hadDepth = false; // whether the last Dispatch had depth
     uint32_t _width = 0;
     uint32_t _height = 0;
     Settings _settings;

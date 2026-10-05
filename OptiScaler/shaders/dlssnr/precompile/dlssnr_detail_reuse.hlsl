@@ -350,9 +350,8 @@ void Capture(uint2 p)
     const float3 answer = t1.Load(int3(p, 0)).rgb;
     const float3 detail = answer - input.rgb;
     const bool valid = Finite3(detail) && Finite3(input.rgb) && all(abs(detail) <= 65504.0);
-    // No depth this frame: t2 is not a real depth guide (DispatchDetailReuse stood a null In2 in with t0, the
-    // colour) -- save a constant rather than reading colour data as depth. A later frame with no depth of its own
-    // ignores this saved value anyway (MovedFrom's hasDepth check), so the constant is never acted on.
+    // No depth this frame: t2 stands in with the colour, so save far (0) instead. A next frame with depth then finds
+    // its surface nearer than the saved range and distrusts the moved detail for that one frame.
     const float depth = HasDepth() ? GuideDepth(t2, GuideTexel(WorkUv(p), uint2(depthWidth, depthHeight))) : 0.0;
     u0[p] = float4(valid ? detail : 0.0, valid ? 1.0 : 0.0);
     u1[p] = float4(Finite3(input.rgb) ? input.rgb : 0.0, isfinite(depth) ? depth : 0.0);

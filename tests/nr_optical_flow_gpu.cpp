@@ -417,6 +417,8 @@ int main(int argc, char** argv)
             tuning.depthMatching = value != 0.0f;
         else if (key == "global")
             tuning.globalCandidate = value != 0.0f;
+        else if (key == "inverse")
+            tuning.inverseRefinement = value != 0.0f;
     }
     flow.Tuning() = tuning;
 
@@ -901,12 +903,12 @@ int main(int argc, char** argv)
 
     if (score)
     {
-        printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d | "
+        printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d inverse=%d | "
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
                "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f\n",
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
                tuning.smoothRadius, tuning.confidenceKnee, tuning.depthMatching ? 1 : 0, tuning.globalCandidate ? 1 : 0,
-               panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(),
+               tuning.inverseRefinement ? 1 : 0, panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(),
                thinAliasError.Mean(), edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(),
                smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean());
         return 0;

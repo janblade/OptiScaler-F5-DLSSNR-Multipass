@@ -30,6 +30,7 @@ cbuffer P : register(b0)
     uint2 depthSize;
     uint reversed;
     uint hasGlobal; // Match: the frame-wide candidate (GlobalFlow) is there to be tried
+    uint inverseRefinement; // Match: the sub-pixel steps use the current frame's gradients, found once
 };
 
 SamplerState Linear : register(s0);
@@ -245,6 +246,71 @@ void Match(uint3 id : SV_DispatchThreadID)
     float2 sub = 0.0;
     float confidence = 0.0;
 
+    if (inverseRefinement != 0)
+    {
+        // The same steps with the gradients taken from the current frame at the window's own pixels instead of from the
+        // previous frame at the shifted position: they do not move with the shift, so they and everything built from them
+        // are found once, and each step then needs a single filtered read per sample, not five. It stops once a step is
+        // under a hundredth of a pixel.
+        float a = 0.0, b = 0.0, c = 0.0, sx = 0.0, sy = 0.0, sw = 0.0;
+        float gxs[16], gys[16];
+        int2 hi = int2(size) - 1;
+
+        [unroll] for (int j = 0; j < 4; ++j)
+            [unroll] for (int i = 0; i < 4; ++i)
+            {
+                int2 q = clamp(p + int2(2 * i - 3, 2 * j - 3), 0, hi);
+                float gx = 0.5 * (CurLuma.Load(int3(clamp(q + int2(1, 0), 0, hi), 0)) -
+                                  CurLuma.Load(int3(clamp(q - int2(1, 0), 0, hi), 0)));
+                float gy = 0.5 * (CurLuma.Load(int3(clamp(q + int2(0, 1), 0, hi), 0)) -
+                                  CurLuma.Load(int3(clamp(q - int2(0, 1), 0, hi), 0)));
+                float wk = w[j * 4 + i];
+
+                gxs[j * 4 + i] = gx;
+                gys[j * 4 + i] = gy;
+                a += wk * gx * gx;
+                b += wk * gx * gy;
+                c += wk * gy * gy;
+                sx += wk * gx;
+                sy += wk * gy;
+                sw += wk;
+            }
+
+        const float det = a * c - b * b;
+        const float weak = 0.5 * ((a + c) - sqrt((a - c) * (a - c) + 4.0 * b * b));
+        confidence = weak / (weak + knee);
+
+        [loop] for (int iteration = 0; iteration < 3; ++iteration)
+        {
+            float e = 0.0, f = 0.0, sr = 0.0;
+
+            [unroll] for (int j = 0; j < 4; ++j)
+                [unroll] for (int i = 0; i < 4; ++i)
+                {
+                    int2 q = clamp(p + int2(2 * i - 3, 2 * j - 3), 0, hi);
+                    float r = cur[j * 4 + i] - Sample(float2(q + bestD) + sub);
+                    float wk = w[j * 4 + i];
+
+                    e += wk * gxs[j * 4 + i] * r;
+                    f += wk * gys[j * 4 + i] * r;
+                    sr += wk * r;
+                }
+
+            const float meanResidual = sr / sw;
+            e -= sx * meanResidual;
+            f -= sy * meanResidual;
+
+            if (det <= 1e-9)
+                break;
+
+            const float2 step = float2(c * e - b * f, a * f - b * e) / det;
+            sub = clamp(sub + step, -1.5, 1.5);
+
+            if (max(abs(step.x), abs(step.y)) < 0.01)
+                break;
+        }
+    }
+    else
     [loop] for (int iteration = 0; iteration < 3; ++iteration)
     {
         float a = 0.0, b = 0.0, c = 0.0, e = 0.0, f = 0.0;
@@ -860,6 +926,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.depthY = depthMatching ? depthDesc.Height : 1;
             constants.reversed = depthReversed ? 1 : 0;
             constants.hasGlobal = _globalReady ? 1 : 0;
+            constants.inverseRefinement = _settings.inverseRefinement ? 1 : 0;
             constants.scale = 1.0f / (float) (2 << level); // full-resolution pixels in this level's
 
             if (!coarsest)

@@ -349,6 +349,11 @@ void DrawAdvancedUi()
             ImGui::SetTooltip("%s", "Where nothing in the picture says how it moved (a plain wall, sky), use what the whole\n"
                                     "picture did last frame. It also moves the flat inside of a still HUD panel while the\n"
                                     "camera turns; switch it off to compare.");
+        ImGui::Checkbox("Cheaper sub-pixel refinement##flowinverse", &tune.inverseRefinement);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", "Finds the picture's gradients once from the current frame and stops early. Faster, but\n"
+                                    "less exact on thin lines and grain; switch it on and off to compare.");
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
                            ImGuiSliderFlags_Logarithmic);

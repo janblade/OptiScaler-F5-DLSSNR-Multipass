@@ -88,6 +88,7 @@ class OpticalFlowDx12
         float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
         bool depthMatching = true;      // with depth: the block match counts the window's samples on this pixel's surface
         bool globalCandidate = true;    // the last frame's whole-picture motion is a candidate everywhere
+        bool inverseRefinement = false; // the sub-pixel steps use the current frame's gradients (found once, cheaper)
     };
 
     Settings& Tuning() { return _settings; }
@@ -113,6 +114,7 @@ class OpticalFlowDx12
         float knee;
         uint32_t coarseCells, depthMatching;
         uint32_t depthX, depthY, reversed, hasGlobal;
+        uint32_t inverseRefinement, padding[3]; // the rest of the register
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);

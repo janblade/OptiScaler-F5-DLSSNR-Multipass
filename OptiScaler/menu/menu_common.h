@@ -16,6 +16,16 @@ class ScopedIndent
     float m_indent;
 };
 
+// Modern style state, defined in menu_common.cpp.
+namespace MenuStyle
+{
+bool IsModern();
+const ImVec4& CardColor();
+const ImVec4& CardHeaderColor();
+const ImVec4& CardHeaderHoverColor();
+const ImVec4& CardHeaderActiveColor();
+} // namespace MenuStyle
+
 class ScopedCollapsingHeader
 {
   public:
@@ -30,10 +40,40 @@ class ScopedCollapsingHeader
 
         ImGui::PushID(label);
 
-        ImGui::BeginChild("##CollapsingHeaderChild", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY,
+        // Modern: a top-level section is a rounded card, a header nested in a card stays flat.
+        const bool modern = MenuStyle::IsModern();
+        const bool card = modern && _depth == 0;
+        ImGuiChildFlags childFlags = ImGuiChildFlags_AutoResizeY;
+
+        if (card)
+        {
+            childFlags |= ImGuiChildFlags_AlwaysUseWindowPadding;
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, MenuStyle::CardColor());
+        }
+        else if (modern)
+        {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        }
+
+        ImGui::BeginChild("##CollapsingHeaderChild", ImVec2(0, 0), childFlags,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
+        if (modern)
+            ImGui::PopStyleColor();
+
+        if (card)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Header, MenuStyle::CardHeaderColor());
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuStyle::CardHeaderHoverColor());
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, MenuStyle::CardHeaderActiveColor());
+        }
+
         _headerOpen = ImGui::CollapsingHeader(label, flags);
+
+        if (card)
+            ImGui::PopStyleColor(3);
+
+        _depth++;
         _active = true;
     }
 
@@ -45,12 +85,14 @@ class ScopedCollapsingHeader
     {
         if (_active)
         {
+            _depth--;
             ImGui::EndChild();
             ImGui::PopID();
         }
     }
 
   private:
+    inline static int _depth = 0;
     bool _active = false;
     bool _headerOpen = false;
 };
@@ -208,4 +250,6 @@ class MenuCommon
     static void HideMenu();
     static void Present();
     static void ApplyThemeStyle();
+    static void RebuildStyle(float menuScale = 0.0f);
+    static void ApplyThemeFont();
 };

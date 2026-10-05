@@ -874,55 +874,6 @@ bool Dx11wDx12SC::_InitInteropObjects()
         _copyCommandLists[i]->Close();
     }
 
-    if (_nrCopyAllocators.size() != copyAllocatorCount)
-    {
-        for (auto& allocator : _nrCopyAllocators)
-            SafeRelease(allocator);
-
-        _nrCopyAllocators.assign(copyAllocatorCount, nullptr);
-    }
-
-    if (_nrCopyAllocatorFenceValues.size() != copyAllocatorCount)
-        _nrCopyAllocatorFenceValues.assign(copyAllocatorCount, 0);
-
-    if (_nrCopyCommandLists.size() != copyAllocatorCount)
-    {
-        for (auto& commandList : _nrCopyCommandLists)
-            SafeRelease(commandList);
-
-        _nrCopyCommandLists.assign(copyAllocatorCount, nullptr);
-    }
-
-    for (UINT i = 0; i < copyAllocatorCount; ++i)
-    {
-        if (_nrCopyAllocators[i] != nullptr)
-            continue;
-
-        result =
-            _dx12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_nrCopyAllocators[i]));
-        if (FAILED(result))
-        {
-            LOG_ERROR("CreateCommandAllocator (native input copy)[{}] failed: {:X}", i, (UINT) result);
-            return false;
-        }
-    }
-
-    for (UINT i = 0; i < copyAllocatorCount; ++i)
-    {
-        if (_nrCopyCommandLists[i] != nullptr)
-            continue;
-
-        result = _dx12Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _nrCopyAllocators[i], nullptr,
-                                                IID_PPV_ARGS(&_nrCopyCommandLists[i]));
-        if (FAILED(result))
-        {
-            LOG_ERROR("CreateCommandList (native input copy) failed: {:X}", (UINT) result);
-            return false;
-        }
-
-        _nrCopyCommandLists[i]->Close();
-    }
-
     if (_copyFence == nullptr)
     {
         result = _dx12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_copyFence));
@@ -987,6 +938,68 @@ bool Dx11wDx12SC::_InitInteropObjects()
     _openedDx11BackBufferStates.assign(_bufferCount, D3D12_RESOURCE_STATE_COMMON);
 
     _interopInitialized = true;
+    return true;
+}
+
+bool Dx11wDx12SC::_EnsureNativeInputCopyRing()
+{
+    // Lazy and separate from _InitInteropObjects: every D3D11+FG-interop user pays for that ring, but
+    // this one is only worth creating -- and only worth the extra GPU objects and failure surface -- once
+    // native input has actually produced a frame to composite.
+    if (_dx12Device == nullptr || _bufferCount == 0)
+        return false;
+
+    const UINT copyAllocatorCount = std::max<UINT>(_bufferCount, 3);
+
+    if (_nrCopyAllocators.size() != copyAllocatorCount)
+    {
+        for (auto& allocator : _nrCopyAllocators)
+            SafeRelease(allocator);
+
+        _nrCopyAllocators.assign(copyAllocatorCount, nullptr);
+    }
+
+    if (_nrCopyAllocatorFenceValues.size() != copyAllocatorCount)
+        _nrCopyAllocatorFenceValues.assign(copyAllocatorCount, 0);
+
+    if (_nrCopyCommandLists.size() != copyAllocatorCount)
+    {
+        for (auto& commandList : _nrCopyCommandLists)
+            SafeRelease(commandList);
+
+        _nrCopyCommandLists.assign(copyAllocatorCount, nullptr);
+    }
+
+    for (UINT i = 0; i < copyAllocatorCount; ++i)
+    {
+        if (_nrCopyAllocators[i] != nullptr)
+            continue;
+
+        auto result =
+            _dx12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_nrCopyAllocators[i]));
+        if (FAILED(result))
+        {
+            LOG_ERROR("CreateCommandAllocator (native input copy)[{}] failed: {:X}", i, (UINT) result);
+            return false;
+        }
+    }
+
+    for (UINT i = 0; i < copyAllocatorCount; ++i)
+    {
+        if (_nrCopyCommandLists[i] != nullptr)
+            continue;
+
+        auto result = _dx12Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _nrCopyAllocators[i],
+                                                      nullptr, IID_PPV_ARGS(&_nrCopyCommandLists[i]));
+        if (FAILED(result))
+        {
+            LOG_ERROR("CreateCommandList (native input copy) failed: {:X}", (UINT) result);
+            return false;
+        }
+
+        _nrCopyCommandLists[i]->Close();
+    }
+
     return true;
 }
 
@@ -1273,6 +1286,12 @@ void Dx11wDx12SC::_ApplyNativeInputToFGBackBuffer()
 
     if (processed == nullptr)
         return;
+
+    if (_nrCopyAllocators.empty() && !_EnsureNativeInputCopyRing())
+    {
+        LOG_WARN("native input ready but its copy ring could not be created: dropping this frame's result");
+        return;
+    }
 
     if (_nrCopyAllocators.empty() || _nrCopyCommandLists.empty() || _dx12CommandQueue == nullptr ||
         _copyFence == nullptr || _fgSwapChain == nullptr || _currentFakeIndex >= _nrCopyAllocators.size())

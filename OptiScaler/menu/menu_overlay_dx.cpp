@@ -559,6 +559,16 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {
+        // Normally this step runs inside RenderImGui_DX11, as part of the overlay's own device capture; with the
+        // overlay off that capture never happens, so grab the device just for this call -- it does nothing unless
+        // native input (no frame generation) is actually on.
+        ID3D11Device* device = nullptr;
+        if (pDevice->QueryInterface(IID_PPV_ARGS(&device)) == S_OK)
+        {
+            NativeMotionDx11::OnPresent(pSwapChain, device);
+            device->Release();
+        }
+
         MenuOverlayBase::Present();
         return;
     }

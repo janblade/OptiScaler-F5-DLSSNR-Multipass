@@ -2,13 +2,14 @@
 // Checks each mode on small synthetic images: detail follows the motion (at the motion texture's own size, subrect and
 // scale), dropped where depth or colour disagree, kept at still edges, the better of the pixel's own and the nearer
 // surface's motion, no ringing, composed vectors across a render-size change (and with a subrect, half size and game
-// scale), padded depth guides, invalid saved detail, fill (including partial trust), steadiness, NaN safety; the coverage
-// grid that says how much of a frame had no detail to move; and the Replace modes, which land a moved change so that
-// it cannot blow up near white.
-// cl /std:c++20 /EHsc /W4 /wd4324 tests/nr_detail_reuse_shader_smoke.cpp d3d11.lib d3dcompiler.lib
-// nr_detail_reuse_shader_smoke.exe OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl [reference.hlsl]
-// With a reference (the shader before the Replace change: git show c62aae96:<that path> > reference.hlsl), every run
-// that is not a Replace one must give bit-identical output on both.
+// scale), padded depth guides, invalid saved detail, fill (including partial trust), steadiness, NaN safety; the
+// coverage grid that says how much of a frame had no detail to move; the Replace modes, which land a moved change so
+// that it cannot blow up near white; and a depth-less frame (DepthWidth/DepthHeight == 0), which falls back to
+// colour-only trust instead of reading the colour that stands in for depth's descriptor slot. cl /std:c++20 /EHsc /W4
+// /wd4324 tests/nr_detail_reuse_shader_smoke.cpp d3d11.lib d3dcompiler.lib nr_detail_reuse_shader_smoke.exe
+// OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl [reference.hlsl] With a reference (the shader before
+// the Replace change: git show c62aae96:<that path> > reference.hlsl), every run that is not a Replace one must give
+// bit-identical output on both.
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
@@ -368,6 +369,31 @@ try
         const auto close = Fill([](unsigned, unsigned) { return Px { 0.5f, 0.5f, 0.5f, 0.3f * 0.99f }; });
         out = gpu.Run(Base(DlssNrDetailReuse_Reproject), { grey, detail, close, still, depth });
         expect(Near3(out.at(5, 3), withDetail(grey, 5, 3)), "Reproject: detail kept within the depth tolerance");
+    }
+
+    // No depth this frame (DepthWidth/DepthHeight == 0, the signal DlssNr_Dx12::Dispatch's guide resolution
+    // produces when the game -- or the native producer's generic depth finder -- supplied none): the depth
+    // guide (t4/t2 in this mode) is not read for trust at all, so the same depth disagreement that dropped
+    // detail above is now ignored and trust falls back to colour alone.
+    {
+        DlssNrDetailReuseConstants c = Base(DlssNrDetailReuse_Reproject);
+        c.DepthWidth = 0;
+        c.DepthHeight = 0;
+        const auto farther = Fill([](unsigned, unsigned) { return Px { 0.5f, 0.5f, 0.5f, 0.15f }; });
+        const auto out = gpu.Run(c, { grey, detail, farther, still, depth });
+        expect(Near3(out.at(5, 3), withDetail(grey, 5, 3)),
+               "Reproject: no depth this frame keeps detail on colour trust alone");
+
+        DlssNrDetailReuseConstants capture = Base(DlssNrDetailReuse_Capture);
+        capture.DepthWidth = 0;
+        capture.DepthHeight = 0;
+        const auto answer = Fill([](unsigned x, unsigned y) { return Plus(Grey(0.5f), Detail(x, y)); });
+        Img colourDepth;
+        gpu.Run(capture, { grey, answer, depth }, &colourDepth);
+        bool savedZero = true;
+        for (const Px& px : colourDepth.px)
+            savedZero = savedZero && Near(px.a, 0.0f);
+        expect(savedZero, "Capture: no depth this frame saves a constant placeholder, not colour read as depth");
     }
 
     // Standard Z: the depth guide holds 1 - (far is zero); saved values are far-is-zero.

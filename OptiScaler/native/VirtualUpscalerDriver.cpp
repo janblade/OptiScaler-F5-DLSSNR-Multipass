@@ -107,6 +107,11 @@ VirtualUpscalerDriver::~VirtualUpscalerDriver()
     Release();
     ReleaseTexture(_output);
     ReleaseTexture(_input);
+    ReleaseTexture(_neutralDepth);
+
+    if (_rtvHeap != nullptr)
+        _rtvHeap->Release();
+
     delete _params;
 }
 
@@ -271,9 +276,55 @@ bool VirtualUpscalerDriver::EnsureTexture(ID3D12Resource*& texture, Key& made, c
     return true;
 }
 
+ID3D12Resource* VirtualUpscalerDriver::NeutralDepth(ID3D12GraphicsCommandList* cmd, const Key& key)
+{
+    constexpr auto kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    Key wanted = key;
+    wanted.format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Resource* before = _neutralDepth;
+
+    if (!EnsureTexture(_neutralDepth, _neutralKey, wanted, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET, "neutral depth"))
+        return nullptr;
+
+    if (_neutralDepth != before)
+        _neutralFilled = false;
+
+    if (_neutralFilled && _neutralReversed == key.depthReversed)
+        return _neutralDepth;
+
+    if (_rtvHeap == nullptr)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC heap {};
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        heap.NumDescriptors = 1;
+
+        if (FAILED(_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&_rtvHeap))))
+        {
+            _rtvHeap = nullptr;
+            _error = "creating the neutral depth's descriptor heap failed";
+            return nullptr;
+        }
+    }
+
+    if (_neutralFilled)
+        Transition(cmd, _neutralDepth, kRead, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    const auto rtv = _rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    _device->CreateRenderTargetView(_neutralDepth, nullptr, rtv);
+    const float farDepth[4] = { key.depthReversed ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+    cmd->ClearRenderTargetView(rtv, farDepth, 0, nullptr);
+    Transition(cmd, _neutralDepth, D3D12_RESOURCE_STATE_RENDER_TARGET, kRead);
+
+    _neutralFilled = true;
+    _neutralReversed = key.depthReversed;
+    return _neutralDepth;
+}
+
 bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame)
 {
-    if (cmd == nullptr || frame.color == nullptr || frame.depth == nullptr || frame.motion == nullptr)
+    if (cmd == nullptr || frame.color == nullptr || frame.motion == nullptr)
         return false;
 
     if (_device == nullptr)
@@ -298,7 +349,8 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     key.width = (uint32_t) colorDesc.Width;
     key.height = colorDesc.Height;
     key.format = UavFormat(frame.colorFormat != DXGI_FORMAT_UNKNOWN ? frame.colorFormat : colorDesc.Format);
-    key.depthReversed = frame.depthReversed;
+    // A frame with no depth keeps the convention the backend was built with, so it is not rebuilt for it.
+    key.depthReversed = frame.depth != nullptr || _feature == nullptr ? frame.depthReversed : _featureKey.depthReversed;
     key.hdr = frame.space == ColorSpace::ScRgb; // PQ is a perceptual encoding, as sRGB is: passed as it comes
     key.backend = (int) WantedBackend();
 
@@ -335,6 +387,12 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         return false;
 
     if (copyIn && !EnsureTexture(_input, _inputKey, key, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, "input"))
+        return false;
+
+    // The backend and frame generation need depth, NR does not: with none, they get an all-far depth and NR gets none.
+    ID3D12Resource* depth = frame.depth != nullptr ? frame.depth : NeutralDepth(cmd, key);
+
+    if (depth == nullptr)
         return false;
 
     // Frame generation's Upscaler input only has a device once NVSDK_NGX_D3D12_Init gave it one, which a game with no upscaler
@@ -399,15 +457,16 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
 
     // From here the resources are where a game's would be at its call: in the states the backend takes them in.
     Transition(cmd, frame.motion, kRead, inMotion);
-    Transition(cmd, frame.depth, kRead, inDepth);
+    Transition(cmd, depth, kRead, inDepth);
     Transition(cmd, _output, kWrite, inOutput);
 
     // DLSS-NR hangs off NVSDK_NGX_D3D12_EvaluateFeature around the upscaler, not off the feature: before it (Run before SR,
     // or the finished-picture capture of depth and motion) and after it (over Output).
     DlssNr::EvaluateBeforeUpscale(cmd, _params);
+    _params->Set(NVSDK_NGX_Parameter_Depth, depth);
 
     Transition(cmd, frame.motion, inMotion, fgMotion);
-    Transition(cmd, frame.depth, inDepth, fgDepth);
+    Transition(cmd, depth, inDepth, fgDepth);
     Transition(cmd, _output, inOutput, fgOutput);
 
     state.currentFeature = _feature.get();
@@ -416,7 +475,7 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     UpscalerInputsDx12::UpscaleEnd(cmd, _params, _feature.get());
 
     Transition(cmd, frame.motion, fgMotion, inMotion);
-    Transition(cmd, frame.depth, fgDepth, inDepth);
+    Transition(cmd, depth, fgDepth, inDepth);
     Transition(cmd, _output, fgOutput, inOutput);
 
     bool evaluated = false;
@@ -424,6 +483,8 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         ScopedSkipHeapCapture skip {};
         evaluated = _feature->Evaluate(cmd, _params);
     }
+
+    _params->Set(NVSDK_NGX_Parameter_Depth, frame.depth);
 
     if (evaluated)
         DlssNr::EvaluateAfterUpscale(cmd, _params);
@@ -437,7 +498,7 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
 
     // The backend hands its inputs back in the states it took them in.
     Transition(cmd, frame.motion, inMotion, kRead);
-    Transition(cmd, frame.depth, inDepth, kRead);
+    Transition(cmd, depth, inDepth, kRead);
 
     if (copyIn)
         Transition(cmd, _input, inColor, D3D12_RESOURCE_STATE_COPY_DEST);

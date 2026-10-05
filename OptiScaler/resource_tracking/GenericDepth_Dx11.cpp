@@ -80,6 +80,12 @@ uint64_t g_contextId = 0;
 ID3D11Texture2D* g_copy = nullptr;
 uint32_t g_copyWidth = 0, g_copyHeight = 0;
 bool g_copyTaken = false; // a copy was recorded for the frame just closed
+// The views the linearize pass reads and writes through, kept between copies: the write view goes with g_copy, the read view
+// with the buffer and format it looks at (it holds a reference to that buffer until it is replaced).
+ID3D11UnorderedAccessView* g_copyUav = nullptr;
+ID3D11ShaderResourceView* g_sourceSrv = nullptr;
+ID3D11Resource* g_sourceSrvResource = nullptr;
+DXGI_FORMAT g_sourceSrvFormat = DXGI_FORMAT_UNKNOWN;
 bool g_installed = false;
 bool g_installFailed = false;
 
@@ -214,6 +220,12 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
 
     if (g_copy == nullptr || g_copyWidth != width || g_copyHeight != height)
     {
+        if (g_copyUav != nullptr)
+        {
+            g_copyUav->Release();
+            g_copyUav = nullptr;
+        }
+
         if (g_copy != nullptr)
         {
             g_copy->Release();
@@ -244,58 +256,98 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         g_copyHeight = height;
     }
 
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
-    srvDesc.Format = view;
-    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
-    ID3D11ShaderResourceView* srv = nullptr;
-
-    if (FAILED(device->CreateShaderResourceView(resource, &srvDesc, &srv)))
+    if (g_sourceSrv == nullptr || g_sourceSrvResource != resource || g_sourceSrvFormat != view)
     {
-        static bool loggedSrvFail = false;
-
-        if (!loggedSrvFail)
+        if (g_sourceSrv != nullptr)
         {
-            loggedSrvFail = true;
-            LOG_WARN("Depth finder (D3D11): creating the read view (format {}) on the picked buffer failed", (int) view);
+            g_sourceSrv->Release();
+            g_sourceSrv = nullptr;
         }
 
-        return;
-    }
-
-    D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc {};
-    uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
-    uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-    ID3D11UnorderedAccessView* uav = nullptr;
-    const HRESULT uavResult = device->CreateUnorderedAccessView(g_copy, &uavDesc, &uav);
-
-    if (FAILED(uavResult))
-    {
-        srv->Release();
-        static bool loggedUavFail = false;
-
-        if (!loggedUavFail)
+        if (g_sourceSrvResource != nullptr)
         {
-            loggedUavFail = true;
-            LOG_WARN("Depth finder (D3D11): creating the write view on the copy texture failed: {:X}", (UINT) uavResult);
+            g_sourceSrvResource->Release();
+            g_sourceSrvResource = nullptr;
         }
 
-        return;
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
+        srvDesc.Format = view;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+
+        if (FAILED(device->CreateShaderResourceView(resource, &srvDesc, &g_sourceSrv)))
+        {
+            g_sourceSrv = nullptr;
+            static bool loggedSrvFail = false;
+
+            if (!loggedSrvFail)
+            {
+                loggedSrvFail = true;
+                LOG_WARN("Depth finder (D3D11): creating the read view (format {}) on the picked buffer failed", (int) view);
+            }
+
+            return;
+        }
+
+        resource->AddRef();
+        g_sourceSrvResource = resource;
+        g_sourceSrvFormat = view;
     }
+
+    if (g_copyUav == nullptr)
+    {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc {};
+        uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        const HRESULT uavResult = device->CreateUnorderedAccessView(g_copy, &uavDesc, &g_copyUav);
+
+        if (FAILED(uavResult))
+        {
+            g_copyUav = nullptr;
+            static bool loggedUavFail = false;
+
+            if (!loggedUavFail)
+            {
+                loggedUavFail = true;
+                LOG_WARN("Depth finder (D3D11): creating the write view on the copy texture failed: {:X}",
+                         (UINT) uavResult);
+            }
+
+            return;
+        }
+    }
+
+    // The game's own compute state: this runs in the middle of its frame, so what it had bound at slot 0 is put back after.
+    ID3D11ComputeShader* gameShader = nullptr;
+    ID3D11ClassInstance* gameInstances[D3D11_SHADER_MAX_INTERFACES] {};
+    UINT gameInstanceCount = D3D11_SHADER_MAX_INTERFACES;
+    ID3D11ShaderResourceView* gameSrv = nullptr;
+    ID3D11UnorderedAccessView* gameUav = nullptr;
+    context->CSGetShader(&gameShader, gameInstances, &gameInstanceCount);
+    context->CSGetShaderResources(0, 1, &gameSrv);
+    context->CSGetUnorderedAccessViews(0, 1, &gameUav);
 
     context->CSSetShader(shader, nullptr, 0);
-    context->CSSetShaderResources(0, 1, &srv);
-    context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+    context->CSSetShaderResources(0, 1, &g_sourceSrv);
+    context->CSSetUnorderedAccessViews(0, 1, &g_copyUav, nullptr);
     context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 
-    ID3D11ShaderResourceView* noSrv = nullptr;
-    ID3D11UnorderedAccessView* noUav = nullptr;
-    context->CSSetShaderResources(0, 1, &noSrv);
-    context->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
-    context->CSSetShader(nullptr, nullptr, 0);
+    context->CSSetShaderResources(0, 1, &gameSrv);
+    context->CSSetUnorderedAccessViews(0, 1, &gameUav, nullptr);
+    context->CSSetShader(gameShader, gameInstances, gameInstanceCount);
 
-    srv->Release();
-    uav->Release();
+    if (gameShader != nullptr)
+        gameShader->Release();
+
+    for (UINT i = 0; i < gameInstanceCount; ++i)
+        if (gameInstances[i] != nullptr)
+            gameInstances[i]->Release();
+
+    if (gameSrv != nullptr)
+        gameSrv->Release();
+
+    if (gameUav != nullptr)
+        gameUav->Release();
 
     g_copyTaken = true;
 

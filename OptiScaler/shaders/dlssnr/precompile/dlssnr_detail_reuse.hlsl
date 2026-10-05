@@ -132,6 +132,12 @@ float3 LandReplaceDetail(float3 input, float3 detail, float3 source, float stren
 float2 WorkSize() { return float2(workWidth, workHeight); }
 float2 WorkUv(uint2 p) { return (float2(p) + 0.5) / WorkSize(); }
 
+// depthWidth/depthHeight are 0 on a frame the game (or the native producer) supplied no depth for -- the same
+// signal DlssNr_Dx12::Dispatch's guide resolution already produces for "no depth" (DlssNr_Guides.h). t2/t4 are
+// not valid depth data in that case (DispatchDetailReuse stands t0 in for any null guide so every descriptor
+// slot stays bound), so nothing below may read them for trust.
+bool HasDepth() { return depthWidth != 0 && depthHeight != 0; }
+
 float FarIsZero(float d) { return depthInverted != 0 ? d : 1.0 - d; }
 
 int2 GuideTexel(float2 uv, uint2 size)
@@ -213,7 +219,10 @@ float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma, o
 {
     source = 0.0;
     const float2 work = WorkSize();
-    if (!all(isfinite(previousUv)) || any(previousUv < 0.0) || any(previousUv > 1.0) || !isfinite(depthNow))
+    const bool hasDepth = HasDepth();
+    // depthNow is only meaningful (and only finite by construction) when hasDepth; a depth-less frame passes a
+    // placeholder that must not reject the sample.
+    if (!all(isfinite(previousUv)) || any(previousUv < 0.0) || any(previousUv > 1.0) || (hasDepth && !isfinite(depthNow)))
         return 0.0;
 
     // The 2x2 footprint the moved sample is built from: detail range, validity, depth range. Only texels with a
@@ -245,10 +254,15 @@ float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma, o
 
     const float3 moved = clamp(SampleCatmullRom(t1, previousUv, work).rgb, detailLo, detailHi);
 
-    // Depth: how far this surface lies outside the saved range, relative to the nearer of the two.
-    const float outside = max(max(depthLo - depthNow, depthNow - depthHi), 0.0);
-    const float relativeDepth = outside / max(max(depthNow, depthHi), 1e-6);
-    const float depthTrust = 1.0 - smoothstep(depthTolerance, 2.0 * depthTolerance, relativeDepth);
+    // Depth: how far this surface lies outside the saved range, relative to the nearer of the two. With no depth
+    // this frame (hasDepth false) there is nothing to compare depthNow against, so trust falls back to colour alone.
+    float depthTrust = 1.0;
+    if (hasDepth)
+    {
+        const float outside = max(max(depthLo - depthNow, depthNow - depthHi), 0.0);
+        const float relativeDepth = outside / max(max(depthNow, depthHi), 1e-6);
+        depthTrust = 1.0 - smoothstep(depthTolerance, 2.0 * depthTolerance, relativeDepth);
+    }
 
     // Colour: the saved input colour against the current input's variance box, in standard deviations.
     source = t2.SampleLevel(gLinear, previousUv, 0).rgb;
@@ -265,7 +279,18 @@ float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma, o
 // t0 input, t1 saved detail, t2 saved colour + depth, t3 motion guide, t4 depth guide.
 float4 MovedDetailFrom(uint2 p, out float3 source)
 {
+    source = 0.0; // matches MovedFrom's own convention; keeps every exit, including the one below, defined
     const float2 uv = WorkUv(p);
+
+    float3 mean, sigma;
+    ColourBox(p, mean, sigma);
+
+    // No depth this frame: t4 is not a real depth guide (DispatchDetailReuse stood a null In4 in with t0, the
+    // colour), so there is no "closest surface in the 3x3" to find -- one motion candidate, trusted by colour alone
+    // (MovedFrom's hasDepth check ignores the placeholder depth below).
+    if (!HasDepth())
+        return MovedFrom(uv + UvDisplacement(RawMotion(uv)), 0.0, mean, sigma, source);
+
     const uint2 depthSize = uint2(depthWidth, depthHeight);
     const int2 centre = GuideTexel(uv, depthSize);
 
@@ -286,9 +311,6 @@ float4 MovedDetailFrom(uint2 p, out float3 source)
             }
         }
     }
-
-    float3 mean, sigma;
-    ColourBox(p, mean, sigma);
 
     // Own motion with own depth. The closest surface's motion is read at this pixel's position shifted by the
     // depth-texel offset (motion may be finer than depth), and tested with that surface's depth.
@@ -328,7 +350,10 @@ void Capture(uint2 p)
     const float3 answer = t1.Load(int3(p, 0)).rgb;
     const float3 detail = answer - input.rgb;
     const bool valid = Finite3(detail) && Finite3(input.rgb) && all(abs(detail) <= 65504.0);
-    const float depth = GuideDepth(t2, GuideTexel(WorkUv(p), uint2(depthWidth, depthHeight)));
+    // No depth this frame: t2 is not a real depth guide (DispatchDetailReuse stood a null In2 in with t0, the
+    // colour) -- save a constant rather than reading colour data as depth. A later frame with no depth of its own
+    // ignores this saved value anyway (MovedFrom's hasDepth check), so the constant is never acted on.
+    const float depth = HasDepth() ? GuideDepth(t2, GuideTexel(WorkUv(p), uint2(depthWidth, depthHeight))) : 0.0;
     u0[p] = float4(valid ? detail : 0.0, valid ? 1.0 : 0.0);
     u1[p] = float4(Finite3(input.rgb) ? input.rgb : 0.0, isfinite(depth) ? depth : 0.0);
 }

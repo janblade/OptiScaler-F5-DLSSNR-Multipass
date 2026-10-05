@@ -363,6 +363,7 @@ int main()
     };
 
     bool ok = true;
+    int extraCopies = 0; // more copies of the depth than the one: a game that splits the scene over several lists
 
     // One frame through the contract: a picture of the scene (in the state given), with or without depth.
     auto frame = [&](const Scene& s, D3D12_RESOURCE_STATES state, bool withDepth, bool applyOn, bool cutHint,
@@ -393,7 +394,9 @@ int main()
         if (withDepth)
         {
             input.depth[0] = depth.Get();
-            input.depthCount = 1;
+            input.depthCount = 1 + extraCopies;
+            for (int i = 1; i < input.depthCount; ++i)
+                input.depth[i] = depth.Get();
             input.depthView = DXGI_FORMAT_R32_FLOAT;
             input.depthWidth = kWidth;
             input.depthHeight = kHeight;
@@ -463,6 +466,21 @@ int main()
         r = frame(Scene { 7, 584, 20.0f, 5.0f }, kRead, true, false, false, output, nullptr, nullptr);
         ok &= Check("NR off: mask runs, NR not called",
                     r.flowValid && r.trustRan && !r.nativeRan && nr.count == calls + 1);
+    }
+
+    printf("depth for the flow\n");
+    {
+        // The flow matches with depth only when it is one copy of the whole scene: one of several copies holds part of it.
+        frame(Scene { 7, 300, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
+        ok &= Check("one depth copy: the flow matches with it", producer.Flow()->UsedDepth());
+
+        extraCopies = 1;
+        frame(Scene { 7, 312, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
+        extraCopies = 0;
+        ok &= Check("two copies: the flow matches without depth", !producer.Flow()->UsedDepth());
+
+        frame(Scene { 7, 324, 20.0f, 5.0f }, kRead, false, true, false, output, nullptr, nullptr);
+        ok &= Check("no depth: the flow matches without depth", !producer.Flow()->UsedDepth());
     }
 
     printf("a hard cut\n");

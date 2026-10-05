@@ -8,7 +8,8 @@
 // colour-only trust instead of reading the colour that stands in for depth's descriptor slot. cl /std:c++20 /EHsc /W4
 // /wd4324 tests/nr_detail_reuse_shader_smoke.cpp d3d11.lib d3dcompiler.lib nr_detail_reuse_shader_smoke.exe
 // OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl [reference.hlsl] With a reference (the shader before
-// the Replace change: git show c62aae96:<that path> > reference.hlsl), every run that is not a Replace one must give
+// the Replace change: git show c62aae96:<that path> > reference.hlsl), every run that is not a Replace one, and not one
+// of the checks of behaviour added since (depth-less frames, the motion check, the Steady dead zone), must give
 // bit-identical output on both.
 #define NOMINMAX
 #include <windows.h>
@@ -75,6 +76,7 @@ struct Gpu
     ComPtr<ID3D11ComputeShader> shader;
     ComPtr<ID3D11ComputeShader> reference; // optional: the shader before the Replace change
     int identityRuns = 0, identityDiffs = 0;
+    bool newer = false; // the runs check a behaviour added after the reference shader: not compared with it
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11SamplerState> sampler;
 
@@ -118,7 +120,7 @@ struct Gpu
         Img u1;
         Img u0 = RunOn(shader.Get(), c, inputs, u1, outW, outH);
         // Coverage is newer than the reference shader, which has no such mode to compare with.
-        if (reference && c.ReplaceCurve == DlssNrReplaceCurve_None && c.Mode != DlssNrDetailReuse_Coverage)
+        if (reference && !newer && c.ReplaceCurve == DlssNrReplaceCurve_None && c.Mode != DlssNrDetailReuse_Coverage)
         {
             Img r1;
             const Img r0 = RunOn(reference.Get(), c, inputs, r1, outW, outH);
@@ -384,6 +386,7 @@ try
     // guide (t4/t2 in this mode) is not read for trust at all, so the same depth disagreement that dropped
     // detail above is now ignored and trust falls back to colour alone.
     {
+        gpu.newer = true;
         DlssNrDetailReuseConstants c = Base(DlssNrDetailReuse_Reproject);
         c.DepthWidth = 0;
         c.DepthHeight = 0;
@@ -402,6 +405,7 @@ try
         for (const Px& px : colourDepth.px)
             savedZero = savedZero && Near(px.a, 0.0f);
         expect(savedZero, "Capture: no depth this frame saves a constant placeholder, not colour read as depth");
+        gpu.newer = false;
     }
 
     // Standard Z: the depth guide holds 1 - (far is zero); saved values are far-is-zero.
@@ -483,6 +487,7 @@ try
     // where the current vectors are the background's: the place they came from moves differently now, so their moved
     // detail is dropped. The leading pixels (x 8, 9) point inside the square and follow it; the background is still.
     {
+        gpu.newer = true;
         const auto squareMotion =
             Fill([](unsigned x, unsigned) { return x >= 8 && x < 12 ? Px { 2, 0, 0, 0 } : Px { 0, 0, 0, 0 }; });
         const auto out =
@@ -522,6 +527,7 @@ try
         const auto farther = Fill([](unsigned, unsigned) { return Px { 0.5f, 0.5f, 0.5f, 0.15f }; });
         const auto byDepth = gpu.Run(debug, { grey, detail, farther, still, depth });
         expect(Near3(byDepth.at(5, 3), { 1, 0, 1, 1 }), "Reproject debug view: dropped by depth stays magenta");
+        gpu.newer = false;
     }
 
     // NaN in the saved detail: finite output, and no trust in the estimate there.
@@ -582,6 +588,7 @@ try
     // result. Counted: pixels whose 8-bit value differs between the steadied full frame and the frame made by reuse
     // alone, and the worst distance the steadied frame ends up from the model's own answer.
     {
+        gpu.newer = true;
         constexpr unsigned N = 64;
         const auto flat = Fill([](unsigned, unsigned) { return Grey(0.5f); }, N, N);
         const auto moved =
@@ -620,6 +627,7 @@ try
                "Steady dead zone: sub-step differences between the frames stop showing in 8 bits");
         expect(worst[1] <= 1.0f / 255.0f + 1e-6f,
                "Steady dead zone: the steadied frame stays within one step of the model's answer");
+        gpu.newer = false;
     }
 
     // SaveMotion keeps this frame's vectors as work-image uv displacement (independent of the render size); Compose

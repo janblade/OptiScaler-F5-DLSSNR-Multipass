@@ -42,8 +42,8 @@ review for its change type below, against the specs here.**
    `dlssnr_detail_reuse_Shader.cso` / `.h` are dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL, the header made from
    the `.cso` with `create_header.py` (array `dlssnr_detail_reuse_cso`; not `-Fh`, which adds a disassembly comment and
    is not what is committed); its SPIR-V uses the dlssnr recipe (`dlssnr_detail_reuse_spv`). Both rebuild
-   byte-identically from the committed source with dxc 1.9. Run from `precompile/`: it and `dlssnr.hlsl` share `dlssnr_replace_curve.hlsli` (sRGB, Neutwo, the hybrid, `kRatioFloor`), so a
-   change there means rebuilding both.
+   byte-identically from the committed source with dxc 1.9. Run from `precompile/`: it and `dlssnr.hlsl` share
+   `dlssnr_replace_curve.hlsli` (sRGB, Neutwo, the hybrid, `kRatioFloor`), so a change there means rebuilding both.
    `dlssnr_detail_stats_Shader.cso` / `.h` (Tune's statistics) are dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL (the
    header with `-Fh -Vn dlssnr_detail_stats_cso`), which reproduces the committed binary byte-identically; its SPIR-V
    uses the dlssnr recipe (`dlssnr_detail_stats_spv`).

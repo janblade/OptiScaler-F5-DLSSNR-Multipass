@@ -232,8 +232,8 @@ void Match(uint3 id : SV_DispatchThreadID)
 
     // The part of a pixel: a few Lucas-Kanade steps. With the previous frame sampled at the matched offset, the remaining
     // difference is explained by the picture's gradient there; solve that for the shift. A match that is already exact has no
-    // difference left and is not moved, which a fit through the costs either side cannot promise. A brightness change over the
-    // window is solved for alongside the shift (the sums are taken about their means), as the matching above does.
+    // difference left and is not moved, which a fit through the costs either side cannot promise. The difference's mean over
+    // the window is taken out first, so a brightness change does not read as a shift (the gradients are not centred).
     float2 sub = 0.0;
     float confidence = 0.0;
 
@@ -308,29 +308,46 @@ float Median9(float v[9])
 
 // What the whole frame did: the middle of the finished flow on a coarse grid, each answer counted by how sure its match was
 // (each component on its own, so one moving thing does not drag it), skipping sky when there is depth. A flat picture's answers
-// carry no weight, so a few things on it speak for the rest. Written to a 1x1 texture, z = 1 when there was enough weight to say.
-// One group, a thread per grid sample: each finds its weight below its own value (ties by position), and the sample whose
-// weight straddles half of the total is the middle.
+// carry no weight, so a few things on it speak for the rest. Written to a 1x1 texture, z = 1 only when most of that weight
+// agrees with the middle: then the picture moved as one (the camera); when it did not (one thing moving over a still
+// scene), there is no whole-picture motion to offer. One group, a thread per grid sample: each finds its weight below its
+// own value (ties by position), and the sample whose weight straddles half of the total is the middle.
 groupshared float3 gSample[128]; // x, y, weight
 groupshared float2 gMiddle;
 
 [numthreads(128, 1, 1)]
 void Global(uint3 id : SV_DispatchThreadID)
 {
+    // This thread's cell of a 16x8 grid, represented by its most structured answer of an 8x8 spread: a point sample would
+    // mostly land on flat ground and miss the few things that say how the scene moved.
     uint t = id.x;
-    float2 uv = float2((t % 16 + 0.5) / 16.0, (t / 16 + 0.5) / 8.0);
-    float4 f = FlowIn.Load(int3(min(int2(uv * float2(aux)), int2(aux) - 1), 0));
-    float weight = f.z;
+    float4 f = 0.0;
+    float weight = -1.0;
 
-    if (depthMatching != 0)
+    for (uint s = 0; s < 64; ++s)
     {
-        float d = SceneDepth.Load(int3(min(int2(uv * float2(depthSize)), int2(depthSize) - 1), 0));
+        float2 uv = float2((t % 16 + (s % 8 + 0.5) / 8.0) / 16.0, (t / 16 + (s / 8 + 0.5) / 8.0) / 8.0);
+        float4 here = FlowIn.Load(int3(min(int2(uv * float2(aux)), int2(aux) - 1), 0));
+        float w = here.z;
 
-        if (reversed != 0 ? d <= 1e-6 : d >= 0.999999)
-            weight = 0.0;
+        if (depthMatching != 0)
+        {
+            float d = SceneDepth.Load(int3(min(int2(uv * float2(depthSize)), int2(depthSize) - 1), 0));
+
+            if (reversed != 0 ? d <= 1e-6 : d >= 0.999999)
+                w = 0.0;
+        }
+
+        if (w > weight)
+        {
+            weight = w;
+            f = here;
+        }
     }
 
     gSample[t] = float3(f.xy, weight);
+    if (t == 0)
+        gMiddle = 0.0; // in case rounding leaves no sample straddling the half
     GroupMemoryBarrierWithGroupSync();
 
     float total = 0.0;
@@ -355,7 +372,17 @@ void Global(uint3 id : SV_DispatchThreadID)
     GroupMemoryBarrierWithGroupSync();
 
     if (t == 0)
-        OutFlow[uint2(0, 0)] = total >= 0.1 ? float4(gMiddle, 1.0, total) : float4(0.0, 0.0, 0.0, total);
+    {
+        // The weight within a pixel and a half (and a tenth of the motion) of the middle.
+        float agree = 0.0;
+        float allowed = 1.5 + 0.1 * length(gMiddle);
+
+        for (uint k = 0; k < 128; ++k)
+            agree += length(gSample[k].xy - gMiddle) <= allowed ? gSample[k].z : 0.0;
+
+        const bool camera = total >= 0.1 && agree >= 0.75 * total;
+        OutFlow[uint2(0, 0)] = camera ? float4(gMiddle, 1.0, total) : float4(0.0, 0.0, 0.0, total);
+    }
 }
 
 // Hue for the direction, brightness for the speed (scale is the speed that is full brightness).
@@ -781,6 +808,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
     // Depth-aware matching, when there is depth.
     const bool depthMatching = _settings.depthMatching && depth != nullptr && depthFormat != DXGI_FORMAT_UNKNOWN;
+    _usedDepth = depthMatching;
     const D3D12_RESOURCE_DESC depthDesc = depthMatching ? depth->GetDesc() : D3D12_RESOURCE_DESC {};
 
     if (_havePrevious)

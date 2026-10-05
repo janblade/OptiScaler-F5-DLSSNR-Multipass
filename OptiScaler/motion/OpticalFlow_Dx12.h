@@ -2,15 +2,15 @@
 
 // Dense optical flow on the GPU for the native input producer (DLSS-NR in a game that makes no upscaler call, so there are no
 // motion vectors to take from one). Our own implementation of the standard method: a luma pyramid, block matching from the
-// coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade gradient steps for the sub-pixel part, and a 3x3
-// median over the result. At each level the candidates are the coarser level's answer at the nearest cells, the last
-// frame's flow at the same place, what the whole picture moved by last frame and no motion; the best of them is refined by a
-// small search. The match compares windows
-// with their mean brightness taken out (a fade or eye adaptation does not move anything), and with depth it counts only the
-// window's samples on the pixel's own surface (a nearer thing's edge does not drag its motion onto what lies beside it,
-// adaptive support weights). The result is smoothed
-// where the matching is not sure (flat or grainy areas) without crossing the edges of moving things: each neighbour counts
-// by how much picture structure its match had, how close its motion is and how close its brightness is. Nothing is taken from any shader of another project.
+// coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade gradient steps for the
+// sub-pixel part, and a 3x3 median over the result. At each level the candidates are the coarser level's answer at the
+// nearest cells, the last frame's flow at the same place, what the whole picture moved by last frame (when it moved as one)
+// and no motion; the best of them is refined by a small search. The match compares windows with their mean brightness taken
+// out (a fade or eye adaptation does not move anything), and with depth it counts only the window's samples on the pixel's
+// own surface (a nearer thing's edge does not drag its motion onto what lies beside it: adaptive support weights). The
+// result is smoothed where the matching is not sure (flat or grainy areas) without crossing the edges of moving things: each
+// neighbour counts by how much picture structure its match had, how close its motion is and how close its brightness is.
+// Nothing is taken from any shader of another project; some ideas are credited in docs/CREDITS.md.
 //
 // Self-contained: it needs only D3D12 and the HLSL compiler, so tests/nr_optical_flow_gpu.cpp drives it with synthetic images
 // and known motion, with no game.
@@ -71,6 +71,7 @@ class OpticalFlowDx12
     // The flow, in the NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE state between Dispatches.
     ID3D12Resource* Flow() const { return _flow.resource; }
     bool FlowValid() const { return _flowValid; }
+    bool UsedDepth() const { return _usedDepth; } // the last Dispatch matched with depth
     uint32_t FlowWidth() const { return _flow.width; }
     uint32_t FlowHeight() const { return _flow.height; }
 
@@ -147,6 +148,7 @@ class OpticalFlowDx12
     int _current = 0;
     bool _havePrevious = false;
     bool _flowValid = false;
+    bool _usedDepth = false;
     bool _globalReady = false; // _globalFlow holds the last frame's whole-frame motion
     uint32_t _width = 0;
     uint32_t _height = 0;

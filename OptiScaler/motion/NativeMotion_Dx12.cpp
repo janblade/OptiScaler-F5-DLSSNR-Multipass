@@ -343,6 +343,12 @@ void DrawAdvancedUi()
         ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
         ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
         ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
+        ImGui::Checkbox("Camera motion where the picture is flat##flowglobal", &tune.globalCandidate);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", "Where nothing in the picture says how it moved (a plain wall, sky), use what the whole\n"
+                                    "picture did last frame. It also moves the flat inside of a still HUD panel while the\n"
+                                    "camera turns; switch it off to compare.");
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
                            ImGuiSliderFlags_Logarithmic);

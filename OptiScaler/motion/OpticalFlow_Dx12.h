@@ -70,7 +70,7 @@ class OpticalFlowDx12
         int coarseRadius = 4;
         float lambda = 0.01f;
         bool useHistory = true;         // last frame's flow as a candidate
-        int coarseCells = 4;            // how many of the coarser level's nearest cells are candidates (1..4)
+        int coarseCells = 9;            // how many of the coarser level's nearest cells are candidates (1..9: the 3x3)
         int smoothRadius = 2;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
         float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
     };

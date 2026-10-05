@@ -129,7 +129,10 @@ struct Gpu
 
     // An RGBA8 texture holding the scene moved by (dx, dy), left in the non-pixel shader resource state.
     // gain darkens it, noise (in 1/255 steps, peak) adds a different grain to every picture (noiseSeed).
-    ComPtr<ID3D12Resource> Picture(float dx, float dy, float gain = 1.0f, float noise = 0.0f, int noiseSeed = 0)
+    // With squareSize > 0 a square of another texture sits on top with its top-left corner at (squareX, squareY), its texture
+    // moving with it.
+    ComPtr<ID3D12Resource> Picture(float dx, float dy, float gain = 1.0f, float noise = 0.0f, int noiseSeed = 0,
+                                   float squareX = 0.0f, float squareY = 0.0f, float squareSize = 0.0f)
     {
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -158,7 +161,10 @@ struct Gpu
                 uint8_t* px = data + (size_t) y * fp.Footprint.RowPitch + x * 4;
                 for (int c = 0; c < 3; ++c)
                 {
-                    float v = Scene(x - dx, y - dy, c) * 255.0f * gain;
+                    const bool inSquare = squareSize > 0.0f && x >= squareX && x < squareX + squareSize && y >= squareY &&
+                                          y < squareY + squareSize;
+                    float v = (inSquare ? Scene(x - squareX + 3000.0f, y - squareY + 3000.0f, c) : Scene(x - dx, y - dy, c)) *
+                              255.0f * gain;
                     if (noise > 0.0f)
                         v += (Hash((int) x * 3 + c, (int) y, 1000 + noiseSeed) * 2.0f - 1.0f) * noise;
                     px[c] = (uint8_t) std::clamp(v + 0.5f, 0.0f, 255.0f);
@@ -201,6 +207,49 @@ float Half(uint16_t h)
     else
         v = std::ldexp((float) (mant + 1024), (int) exp - 25);
     return sign ? -v : v;
+}
+
+// The flow (RGBA16F, in its resting read state) as x, y pairs, row by row.
+std::vector<float> ReadFlow(Gpu& gpu, ID3D12Resource* out)
+{
+    const auto desc = out->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+    UINT64 total = 0;
+    gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+    auto readback = gpu.Buffer(total, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    D3D12_RESOURCE_BARRIER b {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = out;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    gpu.list->ResourceBarrier(1, &b);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+    dst.pResource = readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = out;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+    gpu.list->ResourceBarrier(1, &b);
+    gpu.Submit();
+
+    std::vector<float> flow((size_t) desc.Width * desc.Height * 2);
+    uint8_t* data = nullptr;
+    readback->Map(0, nullptr, (void**) &data);
+    for (uint32_t y = 0; y < desc.Height; ++y)
+        for (uint32_t x = 0; x < desc.Width; ++x)
+        {
+            const uint16_t* px = (const uint16_t*) (data + (size_t) y * fp.Footprint.RowPitch + x * 8);
+            flow[((size_t) y * desc.Width + x) * 2] = Half(px[0]);
+            flow[((size_t) y * desc.Width + x) * 2 + 1] = Half(px[1]);
+        }
+    readback->Unmap(0, nullptr);
+    return flow;
 }
 
 } // namespace
@@ -274,6 +323,7 @@ int main(int argc, char** argv)
         float noise = 0.0f;   // grain peak, in 1/255 steps, different on every picture
         int frames = 2;       // pictures in the pan (constant velocity); the last pair is measured
         const char* what = "";
+        float fade = 1.0f;    // brightness of each picture relative to the one before (eye adaptation, a fade)
     };
 
     const Case cases[] = {
@@ -294,6 +344,11 @@ int main(int argc, char** argv)
         // dark and grainy: flat areas where block matching has little to hold on to
         { 3, -2, 0, 0.08f, 3.0f, 2, "dark and grainy" },
         { 12, 5, 0, 0.08f, 3.0f, 4, "dark and grainy, 4 pictures" },
+        // the brightness changes between the pictures
+        { 3, -2, 0.95, 1.0f, 0.0f, 2, "darker by 15%", 0.85f },
+        { 21, -14, 0.95, 1.0f, 0.0f, 2, "darker by 15%", 0.85f },
+        { 11, 7, 0.95, 0.9f, 0.0f, 2, "brighter by 10%", 1.1f },
+        { 30, -18, 0.95, 1.0f, 0.0f, 4, "steady pan darkening 10% a picture", 0.9f },
     };
     bool ok = true;
 
@@ -304,7 +359,7 @@ int main(int argc, char** argv)
         // pictures 0..frames-1, picture k shifted by k times the velocity; every one but the last is submitted
         std::vector<ComPtr<ID3D12Resource>> pictures;
         for (int k = 0; k < c.frames; ++k)
-            pictures.push_back(gpu.Picture(c.dx * k, c.dy * k, c.gain, c.noise, k));
+            pictures.push_back(gpu.Picture(c.dx * k, c.dy * k, c.gain * std::pow(c.fade, (float) k), c.noise, k));
 
         for (int k = 0; k + 1 < c.frames; ++k)
         {
@@ -320,36 +375,8 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        // read the flow back
-        ID3D12Resource* out = flow.Flow();
-        const auto desc = out->GetDesc();
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
-        UINT64 total = 0;
-        gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
-        auto readback = gpu.Buffer(total, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
-
-        D3D12_RESOURCE_BARRIER b {};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = out;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        gpu.list->ResourceBarrier(1, &b);
-
-        D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
-        dst.pResource = readback.Get();
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint = fp;
-        src.pResource = out;
-        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-        std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
-        gpu.list->ResourceBarrier(1, &b);
-        gpu.Submit();
-
-        uint8_t* data = nullptr;
-        readback->Map(0, nullptr, (void**) &data);
+        const auto desc = flow.Flow()->GetDesc();
+        const std::vector<float> field = ReadFlow(gpu, flow.Flow());
 
         // Content that moved by +d was at p - d before: the flow is -d. Away from the border, where the shift brings in
         // content that was not in the previous picture.
@@ -360,8 +387,8 @@ int main(int argc, char** argv)
         for (uint32_t y = margin; y + margin < desc.Height; ++y)
             for (uint32_t x = margin; x + margin < desc.Width; ++x)
             {
-                const uint16_t* px = (const uint16_t*) (data + (size_t) y * fp.Footprint.RowPitch + x * 8);
-                const float ex = Half(px[0]) - (-c.dx), ey = Half(px[1]) - (-c.dy);
+                const size_t i = ((size_t) y * desc.Width + x) * 2;
+                const float ex = field[i] - (-c.dx), ey = field[i + 1] - (-c.dy);
                 const float err = std::sqrt(ex * ex + ey * ey);
                 sumErr += err;
                 ++n;
@@ -370,14 +397,92 @@ int main(int argc, char** argv)
                 wild += err > 3.0f;
             }
 
-        readback->Unmap(0, nullptr);
-
         const double shareHalf = (double) half / n;
         const bool pass = shareHalf >= c.minWithinHalf;
         ok = ok && (pass || c.minWithinHalf <= 0);
         printf("shift (%6.1f, %6.1f): mean error %7.3f px, within 0.5 px %5.1f%%, within 1 px %5.1f%%, off by over 3 px %5.1f%%   %s  %s\n",
                c.dx, c.dy, sumErr / n, 100.0 * shareHalf, 100.0 * one / n, 100.0 * wild / n,
                c.minWithinHalf > 0 ? (pass ? "ok" : "FAIL") : "(reported)", c.what);
+    }
+
+    // A square moving over a background that moves differently: the flow near its edges, with the coarser level's 4 nearest
+    // cells as candidates and with all 9 of the 3x3. Background content the square uncovered this frame is left out (it was
+    // not in the previous picture).
+    struct EdgeCase
+    {
+        float squareDx, squareDy, backgroundDx, backgroundDy;
+        const char* what;
+    };
+
+    const EdgeCase edgeCases[] = {
+        { 24, 10, 0, 0, "square over a still background" },
+        { -30, 0, 8, -4, "square against a panning background" },
+        { 60, 30, 0, 0, "fast square over a still background" },
+    };
+
+    for (const EdgeCase& e : edgeCases)
+    {
+        double share[2] = {}, mean[2] = {};
+        const int cells[2] = { 4, 9 };
+
+        for (int run = 0; run < 2; ++run)
+        {
+            flow.Reset();
+            flow.Tuning().coarseCells = cells[run];
+            const int frames = 3;
+            const float size = 256.0f, x0 = 400.0f, y0 = 200.0f;
+
+            for (int k = 0; k < frames; ++k)
+            {
+                auto picture = gpu.Picture(e.backgroundDx * k, e.backgroundDy * k, 1.0f, 0.0f, k, x0 + e.squareDx * k,
+                                           y0 + e.squareDy * k, size);
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+                gpu.Submit();
+            }
+
+            const auto desc = flow.Flow()->GetDesc();
+            const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+            const float sx = x0 + e.squareDx * (frames - 1), sy = y0 + e.squareDy * (frames - 1);
+            const float px = sx - e.squareDx, py = sy - e.squareDy;
+            auto inside = [&](float x, float y, float ax, float ay)
+            { return x >= ax && x < ax + size && y >= ay && y < ay + size; };
+
+            uint64_t n = 0, within = 0;
+            double sum = 0;
+
+            for (uint32_t y = 0; y < desc.Height; ++y)
+                for (uint32_t x = 0; x < desc.Width; ++x)
+                {
+                    const float fx = 2.0f * x + 1.0f, fy = 2.0f * y + 1.0f; // the flow pixel's centre, in picture pixels
+                    const float edge = std::min(std::min(std::fabs(fx - sx), std::fabs(fx - (sx + size))),
+                                                std::min(std::fabs(fy - sy), std::fabs(fy - (sy + size))));
+                    const bool nearEdge = edge <= 8.0f && fx > sx - 8.0f && fx < sx + size + 8.0f && fy > sy - 8.0f &&
+                                          fy < sy + size + 8.0f;
+                    const bool now = inside(fx, fy, sx, sy);
+
+                    if (!nearEdge || (!now && inside(fx, fy, px, py)))
+                        continue;
+
+                    const float tx = now ? -e.squareDx : -e.backgroundDx, ty = now ? -e.squareDy : -e.backgroundDy;
+                    const size_t i = ((size_t) y * desc.Width + x) * 2;
+                    const float err = std::hypot(field[i] - tx, field[i + 1] - ty);
+                    sum += err;
+                    within += err <= 1.0f;
+                    ++n;
+                }
+
+            share[run] = (double) within / n;
+            mean[run] = sum / n;
+        }
+
+        flow.Tuning() = OpticalFlowDx12::Settings {};
+        if (noSmoothing)
+            flow.Tuning().smoothRadius = 0;
+
+        const bool pass = share[1] >= share[0] - 0.01;
+        ok = ok && pass;
+        printf("edges, %-38s within 1 px: 4 cells %5.1f%% (mean %5.2f px), 9 cells %5.1f%% (mean %5.2f px)   %s\n", e.what,
+               100.0 * share[0], mean[0], 100.0 * share[1], mean[1], pass ? "ok" : "FAIL");
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

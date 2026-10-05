@@ -340,7 +340,7 @@ void DrawAdvancedUi()
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3);
         ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 4);
+        ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
         ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",

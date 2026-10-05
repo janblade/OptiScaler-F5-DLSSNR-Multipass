@@ -75,27 +75,36 @@ void Down(uint3 id : SV_DispatchThreadID)
     OutLuma[id.xy] = sum * 0.25;
 }
 
-// Sum of absolute differences between the current frame around p and the previous frame around p + d: sixteen samples, two
-// pixels apart, over an 8x8 window.
 // The previous frame at a fractional pixel position, filtered.
 float Sample(float2 position)
 {
     return PrevLuma.SampleLevel(Linear, (position + 0.5) / float2(size), 0);
 }
 
+// Sum of absolute differences between the current frame around p and the previous frame around p + d: sixteen samples, two
+// pixels apart, over an 8x8 window. Each window's mean is taken out first, so a picture that got brighter or darker as a
+// whole (eye adaptation, a fade, a flash) still matches where its content went.
 float Cost(int2 p, int2 d)
 {
-    float s = 0.0;
+    float diff[16];
+    float mean = 0.0;
     int2 hi = int2(size) - 1;
 
-    [unroll] for (int j = -3; j <= 3; j += 2)
-        [unroll] for (int i = -3; i <= 3; i += 2)
+    [unroll] for (int j = 0; j < 4; ++j)
+        [unroll] for (int i = 0; i < 4; ++i)
         {
-            int2 q = int2(i, j);
+            int2 q = int2(2 * i - 3, 2 * j - 3);
             float c = CurLuma.Load(int3(clamp(p + q, 0, hi), 0));
             float r = PrevLuma.Load(int3(clamp(p + q + d, 0, hi), 0));
-            s += abs(c - r);
+            diff[j * 4 + i] = c - r;
+            mean += c - r;
         }
+
+    mean *= 1.0 / 16.0;
+    float s = 0.0;
+
+    [unroll] for (int k = 0; k < 16; ++k)
+        s += abs(diff[k] - mean);
 
     return s;
 }
@@ -110,8 +119,8 @@ void Match(uint3 id : SV_DispatchThreadID)
 
     int2 p = int2(id.xy);
 
-    // The candidates for where to search: no motion, the coarser level's answer at the four cells nearest this pixel (what a
-    // bilinear read would use; doubled, it is in this level's pixels) and the last frame's flow here. The one that matches
+    // The candidates for where to search: no motion, the coarser level's answer at the cells around this pixel (doubled, it is
+    // in this level's pixels) and the last frame's flow here. The one that matches
     // best is where the search starts, so a steady pan carries over from frame to frame and an edge is not stuck with the
     // answer of a cell that lies across it.
     int2 centre = 0;
@@ -123,9 +132,13 @@ void Match(uint3 id : SV_DispatchThreadID)
         int2 cp = min(p >> 1, coarseHi);
         int2 step = int2((p.x & 1) != 0 ? 1 : -1, (p.y & 1) != 0 ? 1 : -1);
 
+        // Nearest first: the four a bilinear read would use, then the rest of the 3x3, the far side last.
+        static const int2 kCells[9] = { int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1), int2(-1, 0),
+                                        int2(0, -1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
+
         [loop] for (int k = 0; k < (int) coarseCells; ++k)
         {
-            int2 cell = cp + int2((k & 1) != 0 ? step.x : 0, (k & 2) != 0 ? step.y : 0);
+            int2 cell = cp + kCells[k] * step;
             int2 d = int2(round(Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0));
             float c = Cost(p, d);
 
@@ -167,13 +180,15 @@ void Match(uint3 id : SV_DispatchThreadID)
 
     // The part of a pixel: a few Lucas-Kanade steps. With the previous frame sampled at the matched offset, the remaining
     // difference is explained by the picture's gradient there; solve that for the shift. A match that is already exact has no
-    // difference left and is not moved, which a fit through the costs either side cannot promise.
+    // difference left and is not moved, which a fit through the costs either side cannot promise. A brightness change over the
+    // window is solved for alongside the shift (the sums are taken about their means), as the matching above does.
     float2 sub = 0.0;
     float confidence = 0.0;
 
     [loop] for (int iteration = 0; iteration < 3; ++iteration)
     {
         float a = 0.0, b = 0.0, c = 0.0, e = 0.0, f = 0.0;
+        float sx = 0.0, sy = 0.0, sr = 0.0;
 
         [unroll] for (int j = -3; j <= 3; j += 2)
             [unroll] for (int i = -3; i <= 3; i += 2)
@@ -190,7 +205,16 @@ void Match(uint3 id : SV_DispatchThreadID)
                 c += gy * gy;
                 e += gx * r;
                 f += gy * r;
+                sx += gx;
+                sy += gy;
+                sr += r;
             }
+
+        // Only the difference is taken about its mean: centring the gradients too fits one more unknown to sixteen samples,
+        // which costs accuracy in grain.
+        const float meanResidual = sr / 16.0;
+        e -= sx * meanResidual;
+        f -= sy * meanResidual;
 
         float det = a * c - b * b;
 
@@ -654,7 +678,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.hasPrediction = coarsest ? 0 : 1;
             constants.lambda = _settings.lambda;
             constants.hasHistory = (history && _settings.useHistory) ? 1 : 0;
-            constants.coarseCells = (uint32_t) std::clamp(_settings.coarseCells, 1, 4);
+            constants.coarseCells = (uint32_t) std::clamp(_settings.coarseCells, 1, 9);
             constants.knee = _settings.confidenceKnee;
 
             if (!coarsest)

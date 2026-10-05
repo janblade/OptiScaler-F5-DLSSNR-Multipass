@@ -797,52 +797,6 @@ void RenderMenu(Config* config, float menuResScale)
         ScopedIndent indent {};
         ImGui::Spacing();
 
-        if (ImGui::TreeNode("NR without a game upscaler (experimental)##nativeinputpreset"))
-        {
-            bool nativeOn = NativeInputPresetActive(config);
-
-            if (ImGui::Checkbox("Run Neural Rendering / frame generation on this (DX11, DX12)", &nativeOn))
-                ApplyNativeInputPreset(config, nativeOn);
-
-            HelpMarker(
-                "For a game with no upscaler of its own. Watches the game's depth buffers and estimates motion on its\n"
-                "own, then presents them to OptiScaler's own upscaler as if the game had called it -- which is also what\n"
-                "lets frame generation (FGInput=Upscaler) work here. Also switches NR Pass at: off Finished Picture\n"
-                "(which cannot run this way) if it was on. The depth finder needs a restart the first time this is\n"
-                "turned on. See Advanced below for the lower-cost, no-frame-generation alternative this does not use.");
-
-            // Status only -- the same dispatch this tree used for the checkboxes before the split, now just for the
-            // read-only report each side already had.
-            if (State::Instance().currentD3D11Device != nullptr)
-            {
-                GenericDepthDx11::DrawStatus();
-                NativeMotionDx11::DrawStatus();
-            }
-            else
-            {
-                GenericDepthDx12::DrawStatus();
-                NativeMotionDx12::DrawStatus();
-            }
-
-            if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
-            {
-                if (State::Instance().currentD3D11Device != nullptr)
-                {
-                    GenericDepthDx11::DrawAdvancedUi();
-                    NativeMotionDx11::DrawAdvancedUi();
-                }
-                else
-                {
-                    GenericDepthDx12::DrawAdvancedUi();
-                    NativeMotionDx12::DrawAdvancedUi();
-                }
-
-                ImGui::TreePop();
-            }
-
-            ImGui::TreePop();
-        }
-
         // Moved up here (out of its original spot just above the Model-resolution slider) so
         // the "Optimized Defaults" preset button, which sits earlier in the panel, can clear
         // an in-flight drag when it overwrites the setting. Same static-local lifetime either
@@ -942,6 +896,52 @@ void RenderMenu(Config* config, float menuResScale)
 
             if (!vulkan && DlssNr::BackendName()[0] != 0)
                 ImGui::TextDisabled("Model backend: %s", DlssNr::BackendName());
+        }
+
+        if (ImGui::TreeNode("NR without a game upscaler (experimental)##nativeinputpreset"))
+        {
+            bool nativeOn = NativeInputPresetActive(config);
+
+            if (ImGui::Checkbox("Run Neural Rendering / frame generation on this (DX11, DX12)", &nativeOn))
+                ApplyNativeInputPreset(config, nativeOn);
+
+            HelpMarker(
+                "For a game with no upscaler of its own. Watches the game's depth buffers and estimates motion on its\n"
+                "own, then presents them to OptiScaler's own upscaler as if the game had called it -- which is also what\n"
+                "lets frame generation (FGInput=Upscaler) work here. Also switches NR Pass at: off Finished Picture\n"
+                "(which cannot run this way) if it was on. The depth finder needs a restart the first time this is\n"
+                "turned on. See Advanced below for the lower-cost, no-frame-generation alternative this does not use.");
+
+            // Status only -- the same dispatch this tree used for the checkboxes before the split, now just for the
+            // read-only report each side already had.
+            if (State::Instance().currentD3D11Device != nullptr)
+            {
+                GenericDepthDx11::DrawStatus();
+                NativeMotionDx11::DrawStatus();
+            }
+            else
+            {
+                GenericDepthDx12::DrawStatus();
+                NativeMotionDx12::DrawStatus();
+            }
+
+            if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
+            {
+                if (State::Instance().currentD3D11Device != nullptr)
+                {
+                    GenericDepthDx11::DrawAdvancedUi();
+                    NativeMotionDx11::DrawAdvancedUi();
+                }
+                else
+                {
+                    GenericDepthDx12::DrawAdvancedUi();
+                    NativeMotionDx12::DrawAdvancedUi();
+                }
+
+                ImGui::TreePop();
+            }
+
+            ImGui::TreePop();
         }
 
         ImGui::SeparatorText("Multipass Presets");

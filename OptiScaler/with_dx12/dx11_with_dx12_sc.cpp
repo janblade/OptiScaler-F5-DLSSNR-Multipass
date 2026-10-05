@@ -1084,9 +1084,24 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
 
     if (FAILED(result) || _openedDx11BackBuffers[_currentFakeIndex] == nullptr)
     {
-        LOG_ERROR("OpenSharedHandle for backbuffer {} failed: {:X}", _currentFakeIndex, (UINT) result);
+        // A device-removed result here never recovers by itself; log the actual reason once so it's diagnosable
+        // without flooding the log on every subsequent frame (this failure repeats identically otherwise).
+        if (!_deviceRemovedLogged)
+        {
+            _deviceRemovedLogged = true;
+            LOG_ERROR("OpenSharedHandle for backbuffer {} failed: {:X}", _currentFakeIndex, (UINT) result);
+
+            if (_dx12Device != nullptr)
+                LOG_ERROR("dx12 device removed reason: {:X}", (UINT) _dx12Device->GetDeviceRemovedReason());
+
+            if (_dx11Device != nullptr)
+                LOG_ERROR("dx11 device removed reason: {:X}", (UINT) _dx11Device->GetDeviceRemovedReason());
+        }
+
         return false;
     }
+
+    _deviceRemovedLogged = false;
 
     _openedDx11BackBufferStates[_currentFakeIndex] = D3D12_RESOURCE_STATE_COMMON;
     return true;

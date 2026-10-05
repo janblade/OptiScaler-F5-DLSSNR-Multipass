@@ -801,7 +801,7 @@ void RenderMenu(Config* config, float menuResScale)
         {
             bool nativeOn = NativeInputPresetActive(config);
 
-            if (ImGui::Checkbox("Run Neural Rendering / frame generation on this", &nativeOn))
+            if (ImGui::Checkbox("Run Neural Rendering / frame generation on this (DX11, DX12)", &nativeOn))
                 ApplyNativeInputPreset(config, nativeOn);
 
             HelpMarker(

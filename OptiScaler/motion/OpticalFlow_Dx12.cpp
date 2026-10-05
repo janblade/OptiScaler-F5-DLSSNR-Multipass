@@ -434,32 +434,51 @@ void Median(uint3 id : SV_DispatchThreadID)
 
 // Edge-aware smoothing: the average of the neighbours' motion, each counted by how sure its match was, how close its motion
 // is to this pixel's and how close its brightness is, so noise in a flat area is averaged out and the edge of something that
-// moves differently is not.
+// moves differently is not. The group's 8x8 pixels and the radius (at most 4) around them are read once into a 16x16 tile that
+// the group's threads share, with the picture's edge repeated outward.
+groupshared float4 gTile[256]; // x, y and confidence of the flow, and the guide's luma
+
 [numthreads(8, 8, 1)]
-void Smooth(uint3 id : SV_DispatchThreadID)
+void Smooth(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
 {
+    int2 hi = int2(size) - 1;
+    int2 origin = int2(group.xy) * 8 - 4;
+    uint t = local.y * 8 + local.x;
+
+    // Every thread loads four of the tile's entries, including those outside the picture, which must still reach the barrier.
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        uint e = t + k * 64;
+        int2 tile = int2(e % 16, e / 16);
+        int2 q = clamp(origin + tile, 0, hi);
+        gTile[e] = float4(FlowIn.Load(int3(q, 0)).xyz, GuideLuma.Load(int3(q, 0)));
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
     if (id.x >= size.x || id.y >= size.y)
         return;
 
-    int2 hi = int2(size) - 1;
-    float4 centre = FlowIn.Load(int3(id.xy, 0));
-    float lumaCentre = GuideLuma.Load(int3(id.xy, 0));
+    int2 at = int2(local.xy) + 4;
+    float4 here = gTile[at.y * 16 + at.x];
+    float3 centre = here.xyz;
+    float lumaCentre = here.w;
 
     float2 sum = centre.xy * (centre.z + 0.05);
     float total = centre.z + 0.05;
     float motionRange = 1.0 + 0.02 * dot(centre.xy, centre.xy);
     float lumaRange = 0.15 * (lumaCentre + 0.05);
 
-    for (int j = -radius; j <= radius; ++j)
-        for (int i = -radius; i <= radius; ++i)
+    [unroll] for (int j = -4; j <= 4; ++j)
+        [unroll] for (int i = -4; i <= 4; ++i)
         {
-            if (i == 0 && j == 0)
+            if ((i == 0 && j == 0) || abs(i) > radius || abs(j) > radius)
                 continue;
 
-            int2 q = clamp(int2(id.xy) + int2(i, j), 0, hi);
-            float4 other = FlowIn.Load(int3(q, 0));
+            int2 q = at + int2(i, j);
+            float4 other = gTile[q.y * 16 + q.x];
             float2 df = other.xy - centre.xy;
-            float dl = (GuideLuma.Load(int3(q, 0)) - lumaCentre) / lumaRange;
+            float dl = (other.w - lumaCentre) / lumaRange;
             float w = (other.z + 0.05) * exp(-dot(df, df) / motionRange - dl * dl);
             sum += other.xy * w;
             total += w;
@@ -865,7 +884,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         constants = Constants {};
         constants.sizeX = _flow.width;
         constants.sizeY = _flow.height;
-        constants.radius = _settings.smoothRadius;
+        constants.radius = std::clamp(_settings.smoothRadius, 0, 4); // the shader's tile holds at most four pixels around a group
         Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, nullptr,
              DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
 

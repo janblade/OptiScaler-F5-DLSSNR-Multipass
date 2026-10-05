@@ -781,13 +781,17 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         if (ImGui::GetCursorScreenPos().x + width > rowRight)
             ImGui::NewLine();
 
-        if (ImGui::RadioButton(choice.label, shown == choice.shown) && shown != choice.shown)
+        if (ImGui::RadioButton(choice.label, shown == choice.shown))
         {
-            const Change change = ForMode(choice.mode, finishedPicture);
-            config->DlssNrNativeDepthFinder = change.keys.depthFinder;
-            config->DlssNrNativeMotion = change.keys.motion;
-            config->DlssNrNativeInput = change.keys.input;
-            config->DlssNrNativeUpscaler = change.keys.upscaler;
+            const Change change = ForClick(choice.mode, shown, finishedPicture);
+
+            if (change.keys.has_value())
+            {
+                config->DlssNrNativeDepthFinder = change.keys->depthFinder;
+                config->DlssNrNativeMotion = change.keys->motion;
+                config->DlssNrNativeInput = change.keys->input;
+                config->DlssNrNativeUpscaler = change.keys->upscaler;
+            }
 
             if (change.retryAfterFailure)
                 DlssNr::RetryAfterFailure();
@@ -808,23 +812,27 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                "the picture at the same size, as a stabiliser, so frame generation with FGInput=Upscaler works; NR "
                "runs around that call. Higher GPU cost. Moves NR Pass at: off Finished Picture.\n"
                "Both use the game's depth when it is found (Advanced): it improves quality but is optional, and "
-               "without it NR runs on motion only. Choosing a mode turns it on; the first time, it needs a restart.\n"
+               "without it NR runs on motion only. Choosing a mode turns it on (Off turns it off); it needs a restart "
+               "whenever it was not running at this start.\n"
                "NR runs only with Enable Neural Rendering on. Applies at once.");
 
     if (shown == Shown::Off)
         return;
 
-    const auto& state = State::Instance();
-    const bool swapChainReplaced =
-        dx11 && (state.swapchainInteropApi != SwapchainInteropApi::None || state.activeFgInput == FGInput::Upscaler);
-    const Warning warning = WarningFor(shown, nrEnabled, finishedPicture, swapChainReplaced);
+    const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
+    const Finder finder =
+        dx11 ? FinderFor(depthWanted, GenericDepthDx11::Installed(), GenericDepthDx11::InstallFailed())
+             : FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
+    const bool depthRestart = DepthRestartWarning(shown, finder);
+    const Warning warning =
+        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop());
     const char* warningText = nullptr;
 
     switch (warning)
     {
     case Warning::Dx11FrameGeneration:
-        warningText = "NR only does nothing in a D3D11 game while OptiScaler's frame generation (FGInput=Upscaler) "
-                      "replaces its swap chain. Choose NR + frame generation.";
+        warningText = "NR only does nothing while OptiScaler's frame generation has replaced this D3D11 game's swap "
+                      "chain. Choose NR + frame generation.";
         break;
     case Warning::NrDisabled:
         warningText = shown == Shown::NrOnly ? "Enable Neural Rendering (above) is off, so NR does not run."
@@ -832,23 +840,32 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                                                "use this, but NR does not run.";
         break;
     case Warning::NeedsFinishedPicture:
-        warningText = "NR only needs NR Pass at: Finished Picture (under NR Options). Choosing NR only sets it.";
+        warningText = "NR only needs NR Pass at: Finished Picture (under NR Options). Click NR only again to set it.";
         break;
     case Warning::None:
         break;
     }
 
-    if (warningText != nullptr)
-    {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
-        ImGui::TextWrapped("%s", warningText);
-        ImGui::PopStyleColor();
-    }
+    // Enough for a wrapped warning of each kind; the usual two status lines leave the rest blank.
+    const float slot = StatusSlotBegin();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
 
-    if (dx11)
-        GenericDepthDx11::DrawStatus();
-    else
-        GenericDepthDx12::DrawStatus();
+    if (warningText != nullptr)
+        ImGui::TextWrapped("%s", warningText);
+
+    if (depthRestart)
+        ImGui::TextWrapped("Save the settings and restart the game to use its depth (NR runs on motion only until "
+                           "then).");
+
+    ImGui::PopStyleColor();
+
+    if (!depthRestart)
+    {
+        if (dx11)
+            GenericDepthDx11::DrawStatus();
+        else
+            GenericDepthDx12::DrawStatus();
+    }
 
     if (shown == Shown::MotionOnly)
         ImGui::TextDisabled("Estimating motion only; nothing uses it.");
@@ -859,6 +876,8 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         else
             NativeMotionDx12::DrawStatus();
     }
+
+    StatusSlotEnd(slot, 4);
 }
 
 void RenderMenu(Config* config, float menuResScale)

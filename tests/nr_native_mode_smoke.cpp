@@ -70,7 +70,7 @@ int main()
             CHECK(shown == Shown::MotionOnly);
     }
 
-    // The cases the old single checkbox got wrong, spelled out.
+    // Inconsistent key sets, spelled out.
     CHECK(FromKeys(K(true, true, true, true)) == Shown::NrAndFrameGeneration);
     CHECK(FromKeys(K(false, true, false, true)) ==
           Shown::NrAndFrameGeneration); // depth unticked afterwards: mode stays

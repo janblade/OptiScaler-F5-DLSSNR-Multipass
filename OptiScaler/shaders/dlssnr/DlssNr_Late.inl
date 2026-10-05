@@ -149,23 +149,48 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     auto* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
     auto* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
     auto* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
-    if (!depth || !motion || !output)
-    { Cancel(); Say("Waiting for the game's depth and movement data."); return; }
+    // Depth is optional here too (DlssNr_Dx12::Dispatch tolerates a null depth guide); motion and output are not.
+    if (!motion || !output)
+    {
+        Cancel();
+        Say("Waiting for the game's movement data.");
+        return;
+    }
     auto* next = Acquire(cmd);
-    if (!next) return;
+    if (!next)
+        return;
     auto& slot = *next;
-    if (!Clone(slot.depth, depth) || !Clone(slot.motion, motion))
-    { Say("The game's depth or movement data is not supported."); return; }
+    if (depth != nullptr)
+    {
+        if (!Clone(slot.depth, depth))
+        {
+            Say("The game's depth data is not supported.");
+            return;
+        }
+    }
+    else
+    {
+        // Drop any previous frame's depth clone rather than silently reusing stale depth this frame.
+        slot.depth.Reset();
+    }
+    if (!Clone(slot.motion, motion))
+    {
+        Say("The game's movement data is not supported.");
+        return;
+    }
     slot.residualOnly = false;
     // Copy at the NGX seam, where guide states and lifetimes are defined. Keep typed,
     // shader-readable copies until both the producing queue and NR have finished.
-    for (auto pair : { std::pair { depth, slot.depth.Get() }, std::pair { motion, slot.motion.Get() } })
+    if (depth != nullptr)
     {
-        Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cmd->CopyResource(pair.second, pair.first);
-        Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        // The copy returns to COPY_DEST after the late dispatch.
+        Barrier(cmd, depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmd->CopyResource(slot.depth.Get(), depth);
+        Barrier(cmd, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
+    Barrier(cmd, motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmd->CopyResource(slot.motion.Get(), motion);
+    Barrier(cmd, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    // The copy (or copies) return to COPY_DEST after the late dispatch.
     slot.frame = {};
     auto& frame = slot.frame;
     unsigned flags = 0, gameReset = 0;
@@ -444,7 +469,10 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         frame.WhitePointOverride = (pq || scrgb) ? 203.0f / 80.0f : 0.0f;
         frame.Reset |= Late::reset;
         frame.SubmissionEpoch = epoch;
-        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        // slot.depth is null on a capture with no depth this frame (Late::Capture) -- nothing to transition.
+        if (slot.depth)
+            Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         DlssNrNative::SetPrecision(Config::Instance()->DlssNrPrecision.value_or_default());
         ID3D12Resource* nrColor = color.Get();
@@ -492,7 +520,9 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
             Barrier(cmd, slot.linear.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        if (slot.depth)
+            Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
     }
     if (FAILED(cmd->Close()))
     {
@@ -543,8 +573,8 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
         Late::Say("Native input needs Finished picture and Enable Neural Rendering on.");
         return false;
     }
-    if (!queue || !cmd || !color || !depth || !motion ||
-        State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+    // depth is optional (DlssNr_Dx12::Dispatch tolerates a null depth guide); colour and motion are not.
+    if (!queue || !cmd || !color || !motion || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         return false;
     if (Late::PausedForGameFrameGeneration())
     {

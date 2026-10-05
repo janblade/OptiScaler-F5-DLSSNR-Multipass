@@ -746,6 +746,47 @@ static bool ResolutionTierActive(Config* config, const ResolutionTier& tier, boo
            config->DlssNrReversibleMode.value_or_default() == tier.composition;
 }
 
+// Whether the native-input preset (depth finder + motion estimate, driven through OptiScaler's own upscaler so frame
+// generation with the Upscaler input also works) is the single thing currently turned on for a game with no upscaler.
+// Derived from config, same rule as ResolutionTierActive above: never claims a state the settings have since drifted
+// from, and survives a restart. NativeInput is excluded on purpose -- with the preset's NativeUpscaler already taking
+// priority over it in code, a stray NativeInput=true left over from the Advanced section would otherwise still show
+// the checkbox as checked even though the lower-cost path, not this preset, is what is actually inert underneath it.
+static bool NativeInputPresetActive(Config* config)
+{
+    return config->DlssNrNativeDepthFinder.value_or_default() && config->DlssNrNativeMotion.value_or_default() &&
+           config->DlssNrNativeUpscaler.value_or_default() && !config->DlssNrNativeInput.value_or_default();
+}
+
+static void ApplyNativeInputPreset(Config* config, bool on)
+{
+    if (on)
+    {
+        config->DlssNrNativeDepthFinder = true;
+        config->DlssNrNativeMotion = true;
+        config->DlssNrNativeUpscaler = true;
+        config->DlssNrNativeInput = false;
+
+        // Finished Picture cannot run through the virtual upscaler (DlssNr_Late.inl requires swapchainInteropApi ==
+        // None, which a D3D11 game under frame generation never is); After Super Resolution is also where Automatic
+        // exposure gets a chance to run. Same one-shot "leaving Finished Picture clears a session failure" rule the
+        // NR Pass combo and the tier/pass presets above already follow.
+        if (config->DlssNrFinishedPicture.value_or_default())
+        {
+            DlssNr::RetryAfterFailure();
+            config->DlssNrFinishedPicture = false;
+        }
+    }
+    else
+    {
+        // Depth finder's hooks, once installed, stay resident until a restart (observation only, same as turning its
+        // own checkbox off always has) -- this just stops anything consuming what they observe.
+        config->DlssNrNativeDepthFinder = false;
+        config->DlssNrNativeMotion = false;
+        config->DlssNrNativeUpscaler = false;
+    }
+}
+
 void RenderMenu(Config* config, float menuResScale)
 {
 
@@ -756,17 +797,50 @@ void RenderMenu(Config* config, float menuResScale)
         ScopedIndent indent {};
         ImGui::Spacing();
 
-        // Shows nothing unless [DlssNr] NativeDepthFinder is on. The D3D11 sections only appear for a D3D11 game, so they are
-        // not shown twice for the (far more common) D3D12 case.
-        if (State::Instance().currentD3D11Device != nullptr)
+        if (ImGui::TreeNode("NR without a game upscaler (experimental)##nativeinputpreset"))
         {
-            GenericDepthDx11::DrawDebugUi();
-            NativeMotionDx11::DrawDebugUi();
-        }
-        else
-        {
-            GenericDepthDx12::DrawDebugUi();
-            NativeMotionDx12::DrawDebugUi();
+            bool nativeOn = NativeInputPresetActive(config);
+
+            if (ImGui::Checkbox("Run Neural Rendering / frame generation on this", &nativeOn))
+                ApplyNativeInputPreset(config, nativeOn);
+
+            HelpMarker(
+                "For a game with no upscaler of its own. Watches the game's depth buffers and estimates motion on its\n"
+                "own, then presents them to OptiScaler's own upscaler as if the game had called it -- which is also what\n"
+                "lets frame generation (FGInput=Upscaler) work here. Also switches NR Pass at: off Finished Picture\n"
+                "(which cannot run this way) if it was on. The depth finder needs a restart the first time this is\n"
+                "turned on. See Advanced below for the lower-cost, no-frame-generation alternative this does not use.");
+
+            // Status only -- the same dispatch this tree used for the checkboxes before the split, now just for the
+            // read-only report each side already had.
+            if (State::Instance().currentD3D11Device != nullptr)
+            {
+                GenericDepthDx11::DrawStatus();
+                NativeMotionDx11::DrawStatus();
+            }
+            else
+            {
+                GenericDepthDx12::DrawStatus();
+                NativeMotionDx12::DrawStatus();
+            }
+
+            if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
+            {
+                if (State::Instance().currentD3D11Device != nullptr)
+                {
+                    GenericDepthDx11::DrawAdvancedUi();
+                    NativeMotionDx11::DrawAdvancedUi();
+                }
+                else
+                {
+                    GenericDepthDx12::DrawAdvancedUi();
+                    NativeMotionDx12::DrawAdvancedUi();
+                }
+
+                ImGui::TreePop();
+            }
+
+            ImGui::TreePop();
         }
 
         // Moved up here (out of its original spot just above the Model-resolution slider) so

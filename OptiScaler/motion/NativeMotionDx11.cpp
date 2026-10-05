@@ -193,46 +193,9 @@ ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
     return RunFrame(real, device);
 }
 
-void DrawDebugUi()
+void DrawStatus()
 {
-    auto* config = Config::Instance();
-
-    if (!ImGui::TreeNode("Motion estimate, D3D11 (experimental)##nativemotion11"))
-        return;
-
-    bool on = config->DlssNrNativeMotion.value_or_default();
-
-    if (ImGui::Checkbox("Estimate motion of the picture##nativemotion11", &on))
-        config->DlssNrNativeMotion = on;
-
-    bool feed = config->DlssNrNativeInput.value_or_default();
-
-    if (ImGui::Checkbox("Run Neural Rendering on this (native input)##nativeinput11", &feed))
-        config->DlssNrNativeInput = feed;
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Same as the DirectX 12 native input, for a Direct3D 11 game: the picture and depth are shared\n"
-                                "to a private D3D12 device, processed there, and shared back. Needs the D3D11 depth finder,\n"
-                                "Finished picture and Enable Neural Rendering on. No live preview yet. Does nothing with\n"
-                                "FGInput=Upscaler selected (frame generation replaces this game's swap chain; use the option\n"
-                                "below instead). Applies at once.");
-
-    bool virtualUpscaler = config->DlssNrNativeUpscaler.value_or_default();
-
-    if (ImGui::Checkbox("Present this to OptiScaler as an upscaler (experimental)##nativeupscaler11", &virtualUpscaler))
-        config->DlssNrNativeUpscaler = virtualUpscaler;
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "%s", "Experimental. Instead of feeding DLSS-NR directly, presents the depth finder's depth and the\n"
-                  "estimated motion to OptiScaler's upscaler (the one chosen in the menu, FSR when none is) as if\n"
-                  "the game had called it. Render size equals output size and jitter is zero, so it works as a\n"
-                  "stabiliser, not a reconstruction; it makes frame generation with the Upscaler input work in a\n"
-                  "D3D11 game with no upscaler, including with FGInput=Upscaler selected (unlike the checkbox\n"
-                  "above, this one is read from Dx11wDx12SC::Present when that applies). Takes priority over Run\n"
-                  "Neural Rendering on this. Applies at once.");
-
-    if (virtualUpscaler)
+    if (Config::Instance()->DlssNrNativeUpscaler.value_or_default())
     {
         if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
             ImGui::TextDisabled("%s is running on this picture.", g_virtualUpscaler->BackendName().c_str());
@@ -267,8 +230,48 @@ void DrawDebugUi()
     if (g_status == Status::Running)
         ImGui::TextDisabled("%s", g_nativeRan ? "Native input: NR is running on this picture."
                                               : DlssNr::FinishedPictureStatus().c_str());
+}
 
-    ImGui::TreePop();
+void DrawAdvancedUi()
+{
+    auto* config = Config::Instance();
+
+    bool on = config->DlssNrNativeMotion.value_or_default();
+
+    if (ImGui::Checkbox("Estimate motion of the picture##nativemotion11", &on))
+        config->DlssNrNativeMotion = on;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Also set by the single checkbox above. On its own, with neither checkbox below on, this\n"
+                                "estimates the motion but feeds nothing with it. Applies at once.");
+
+    bool feed = config->DlssNrNativeInput.value_or_default();
+
+    if (ImGui::Checkbox("Run Neural Rendering on this (native input)##nativeinput11", &feed))
+        config->DlssNrNativeInput = feed;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Same as the DirectX 12 native input, for a Direct3D 11 game: the picture and depth are shared\n"
+                                "to a private D3D12 device, processed there, and shared back. Needs the D3D11 depth finder,\n"
+                                "Finished picture and Enable Neural Rendering on. No live preview yet. Does nothing with\n"
+                                "FGInput=Upscaler selected (frame generation replaces this game's swap chain; use the option\n"
+                                "below instead). Lower GPU cost than it, with no frame generation: the single checkbox\n"
+                                "above does not use this. Applies at once.");
+
+    bool virtualUpscaler = config->DlssNrNativeUpscaler.value_or_default();
+
+    if (ImGui::Checkbox("Present this to OptiScaler as an upscaler (experimental)##nativeupscaler11", &virtualUpscaler))
+        config->DlssNrNativeUpscaler = virtualUpscaler;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "%s", "Experimental. Instead of feeding DLSS-NR directly, presents the depth finder's depth and the\n"
+                  "estimated motion to OptiScaler's upscaler (the one chosen in the menu, FSR when none is) as if\n"
+                  "the game had called it. Render size equals output size and jitter is zero, so it works as a\n"
+                  "stabiliser, not a reconstruction; it makes frame generation with the Upscaler input work in a\n"
+                  "D3D11 game with no upscaler, including with FGInput=Upscaler selected (unlike the checkbox\n"
+                  "above, this one is read from Dx11wDx12SC::Present when that applies). Takes priority over Run\n"
+                  "Neural Rendering on this. Also set by the single checkbox above. Applies at once.");
 }
 
 } // namespace NativeMotionDx11

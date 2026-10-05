@@ -1161,12 +1161,40 @@ static bool DrawDepthPreview(float boxWidth, float boxHeight)
     return true;
 }
 
-void DrawDebugUi()
+void DrawStatus()
 {
     auto* config = Config::Instance();
 
-    if (!ImGui::TreeNode("Depth finder (experimental)##depthfinder"))
+    if (!g_installed)
+    {
+        if (config->DlssNrNativeDepthFinder.value_or_default())
+            ImGui::TextDisabled("Depth finder: not installed yet (needs a restart after turning it on).");
+
         return;
+    }
+
+    const auto pick = CurrentPick();
+    const uint32_t warmup = config->DlssNrNativeDepthWarmupFrames.value_or_default();
+
+    // Every branch writes exactly one short line and the picture has a box of its own size, so nothing below moves when the
+    // pick changes.
+    if (g_core.GameCallsUpscaler())
+        ImGui::TextDisabled("Stood down: the game is calling an upscaler. Turn it off in the game.");
+    else if (!g_core.Armed())
+        ImGui::TextDisabled("Watching (%llu of %u frames)...",
+                            (unsigned long long) (g_core.Presents() - g_core.WarmupStart()), warmup);
+    else if (!pick.valid)
+        ImGui::TextDisabled("No depth buffer qualifies yet.");
+    else
+        ImGui::Text("Picked %ux%u, format %u%s", pick.width, pick.height, pick.format,
+                    pick.reversed ? ", reversed-Z" : "");
+
+    ImGui::TextDisabled("The log has the candidates (Depth finder lines).");
+}
+
+void DrawAdvancedUi()
+{
+    auto* config = Config::Instance();
 
     // Both switches are read when the game's device is created, so a change here is saved with the rest and applies at the
     // next start.
@@ -1178,14 +1206,8 @@ void DrawDebugUi()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "First step toward DLSS-NR in a game with no DLSS, FSR or XeSS: watches the game's depth\n"
                                 "buffers (DirectX 12) and picks the scene's. It only observes, and it stands down for good if\n"
-                                "the game makes an upscaler call of its own. The log lists the candidates.\n"
-                                "Applies at the next start: save the settings and restart the game.");
-
-    if (!finder && !g_installed)
-    {
-        ImGui::TreePop();
-        return;
-    }
+                                "the game makes an upscaler call of its own. The log lists the candidates. Also set by the\n"
+                                "single checkbox above. Applies at the next start: save the settings and restart the game.");
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
@@ -1205,35 +1227,10 @@ void DrawDebugUi()
     if (finder != g_installed)
         ImGui::TextDisabled("Takes effect after saving and restarting the game.");
 
-    if (!g_installed)
-    {
-        ImGui::TreePop();
+    if (!debugView || !g_installed)
         return;
-    }
 
     const auto pick = CurrentPick();
-    const uint32_t warmup = Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default();
-
-    // Every branch writes exactly one short line and the picture has a box of its own size, so nothing below moves when the
-    // pick changes.
-    if (g_core.GameCallsUpscaler())
-        ImGui::TextDisabled("Stood down: the game is calling an upscaler. Turn it off in the game.");
-    else if (!g_core.Armed())
-        ImGui::TextDisabled("Watching (%llu of %u frames)...",
-                            (unsigned long long) (g_core.Presents() - g_core.WarmupStart()), warmup);
-    else if (!pick.valid)
-        ImGui::TextDisabled("No depth buffer qualifies yet.");
-    else
-        ImGui::Text("Picked %ux%u, format %u%s", pick.width, pick.height, pick.format,
-                    pick.reversed ? ", reversed-Z" : "");
-
-    ImGui::TextDisabled("The log has the candidates (Depth finder lines).");
-
-    if (!debugView)
-    {
-        ImGui::TreePop();
-        return;
-    }
 
     if (!g_overlayOn.load())
     {
@@ -1260,7 +1257,5 @@ void DrawDebugUi()
 
         ImGui::TextDisabled(drawn ? "Nearer is brighter (log scale)." : "Waiting for the picked buffer...");
     }
-
-    ImGui::TreePop();
 }
 } // namespace GenericDepthDx12

@@ -282,17 +282,52 @@ void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Dev
     RunFrame(swapChain, queue, device);
 }
 
-void DrawDebugUi()
+void DrawStatus()
+{
+    if (Config::Instance()->DlssNrNativeUpscaler.value_or_default())
+    {
+        if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
+            ImGui::TextDisabled("%s is running on this picture.", g_virtualUpscaler->BackendName().c_str());
+        else if (g_virtualUpscaler != nullptr && !g_virtualUpscaler->Error().empty())
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Upscaler: %s", g_virtualUpscaler->Error().c_str());
+        else
+            ImGui::TextDisabled("Upscaler: waiting for the first frame with depth.");
+    }
+
+    // Every branch writes one line and each picture has a box of its own size, so nothing below moves.
+    switch (g_status)
+    {
+    case Status::Off:
+        ImGui::TextDisabled("Off.");
+        break;
+    case Status::Waiting:
+        ImGui::TextDisabled("Waiting: the game is calling an upscaler.");
+        break;
+    case Status::Failed:
+        ImGui::TextDisabled("Could not start (see the log).");
+        break;
+    default:
+        ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
+        break;
+    }
+
+    if (Config::Instance()->DlssNrNativeInput.value_or_default())
+        ImGui::TextDisabled("%s", g_nativeRan ? "Native input: NR is running on this picture."
+                                              : DlssNr::FinishedPictureStatus().c_str());
+}
+
+void DrawAdvancedUi()
 {
     auto* config = Config::Instance();
-
-    if (!ImGui::TreeNode("Motion estimate (experimental)##nativemotion"))
-        return;
 
     bool on = config->DlssNrNativeMotion.value_or_default();
 
     if (ImGui::Checkbox("Estimate motion of the picture##nativemotion", &on))
         config->DlssNrNativeMotion = on;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Also set by the single checkbox above. On its own, with neither checkbox below on, this\n"
+                                "estimates the motion but feeds nothing with it. Applies at once.");
 
     bool feed = config->DlssNrNativeInput.value_or_default();
 
@@ -302,7 +337,8 @@ void DrawDebugUi()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "Experimental. Feeds DLSS-NR the depth finder's depth and the estimated motion, so it runs in a\n"
                                 "game with no upscaler. Needs the depth finder, Finished picture and Enable Neural Rendering on.\n"
-                                "SDR and scRGB only for now. Applies at once.");
+                                "SDR and scRGB only for now. Lower GPU cost than the checkbox below, with no frame generation:\n"
+                                "the single checkbox above does not use this. Applies at once.");
 
     bool virtualUpscaler = config->DlssNrNativeUpscaler.value_or_default();
 
@@ -315,17 +351,8 @@ void DrawDebugUi()
                   "estimated motion to OptiScaler's upscaler (the one chosen in the menu, FSR when none is) as if\n"
                   "the game had called it. Render size equals output size and jitter is zero, so it works as a\n"
                   "stabiliser, not a reconstruction; it makes frame generation with the Upscaler input work in a\n"
-                  "game with no upscaler. Takes priority over Run Neural Rendering on this. Applies at once.");
-
-    if (virtualUpscaler)
-    {
-        if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
-            ImGui::TextDisabled("%s is running on this picture.", g_virtualUpscaler->BackendName().c_str());
-        else if (g_virtualUpscaler != nullptr && !g_virtualUpscaler->Error().empty())
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Upscaler: %s", g_virtualUpscaler->Error().c_str());
-        else
-            ImGui::TextDisabled("Upscaler: waiting for the first frame with depth.");
-    }
+                  "game with no upscaler. Takes priority over Run Neural Rendering on this. Also set by the single\n"
+                  "checkbox above. Applies at once.");
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
@@ -359,39 +386,9 @@ void DrawDebugUi()
         ImGui::TreePop();
     }
 
-    if (feed)
-        ImGui::TextDisabled("%s", g_nativeRan ? "Native input: NR is running on this picture."
-                                              : DlssNr::FinishedPictureStatus().c_str());
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Second step toward DLSS-NR in a game with no DLSS, FSR or XeSS: estimates how the picture\n"
-                                "moves from one frame to the next on the GPU (optical flow), and with the depth finder's\n"
-                                "depth which pixels the previous frame cannot be trusted at. The depth copy is recorded\n"
-                                "into the game's own command list. It waits while the game calls an upscaler. Applies at once.");
-
-    // Every branch writes one line and each picture has a box of its own size, so nothing below moves.
-    switch (g_status)
-    {
-    case Status::Off:
-        ImGui::TextDisabled("Off.");
-        break;
-    case Status::Waiting:
-        ImGui::TextDisabled("Waiting: the game is calling an upscaler.");
-        break;
-    case Status::Failed:
-        ImGui::TextDisabled("Could not start (see the log).");
-        break;
-    default:
-        ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
-        break;
-    }
-
     // The pictures and their controls are debugging aids: off by default, nothing is recorded for them while they are hidden.
     if (!debugView)
-    {
-        ImGui::TreePop();
         return;
-    }
 
     const float boxWidth = 360.0f;
     const float boxHeight = boxWidth * 9.0f / 16.0f;
@@ -441,8 +438,6 @@ void DrawDebugUi()
 
     if (!maskDrawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));
-
-    ImGui::TreePop();
 }
 
 } // namespace NativeMotionDx12

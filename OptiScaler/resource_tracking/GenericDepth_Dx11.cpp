@@ -660,26 +660,13 @@ void NoteUpscalerCall()
 bool GameCallsUpscaler() { return g_installed && g_core.GameCallsUpscaler(); }
 bool Armed() { return g_installed && g_core.Armed(); }
 
-void DrawDebugUi()
+void DrawStatus()
 {
-    if (!ImGui::TreeNode("Depth finder, D3D11 (experimental)##depthfinder11"))
-        return;
-
-    auto* config = Config::Instance();
-    bool finder = config->DlssNrNativeDepthFinder.value_or_default();
-
-    if (ImGui::Checkbox("Find the scene's depth##depthfinder11", &finder))
-        config->DlssNrNativeDepthFinder = finder;
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Same as the DirectX 12 depth finder, for a Direct3D 11 game: watches the game's immediate\n"
-                                "context and picks the scene's depth buffer. Deferred contexts are not watched yet.\n"
-                                "Applies at the next start: save the settings and restart the game.");
-
     if (!g_installed)
     {
-        ImGui::TextDisabled("Not installed yet (needs a restart after turning it on).");
-        ImGui::TreePop();
+        if (Config::Instance()->DlssNrNativeDepthFinder.value_or_default())
+            ImGui::TextDisabled("Depth finder: not installed yet (needs a restart after turning it on).");
+
         return;
     }
 
@@ -698,6 +685,20 @@ void DrawDebugUi()
                     pick.reversed ? ", reversed-Z" : "");
 
     ImGui::TextDisabled("The log has the candidates (Depth finder lines).");
-    ImGui::TreePop();
+}
+
+void DrawAdvancedUi()
+{
+    auto* config = Config::Instance();
+    bool finder = config->DlssNrNativeDepthFinder.value_or_default();
+
+    if (ImGui::Checkbox("Find the scene's depth##depthfinder11", &finder))
+        config->DlssNrNativeDepthFinder = finder;
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Same as the DirectX 12 depth finder, for a Direct3D 11 game: watches the game's immediate\n"
+                                "context and picks the scene's depth buffer. Deferred contexts are not watched yet. Also\n"
+                                "set by the single checkbox above. Applies at the next start: save the settings and\n"
+                                "restart the game.");
 }
 } // namespace GenericDepthDx11

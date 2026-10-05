@@ -143,6 +143,17 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     _id = ++scCount;
     _lastFlags = flags;
 
+    // Exclusive fullscreen on XeFG's swapchain behind this bridge leaves every following Present failing with
+    // DXGI_ERROR_INVALID_CALL (seen in Prey and Blair Witch, both D3D11 through Dx11wDx12). Default to the existing
+    // borderless override here, same as the per-game ForceBorderlessWhenUsingXeFG quirk does; an explicit
+    // ForceBorderless in the ini still wins. FGHooks::hkSetFullscreenState reads this live, so it applies to the
+    // game's first SetFullscreenState right after this swapchain is handed back.
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && !Config::Instance()->FGXeFGForceBorderless.has_value())
+    {
+        LOG_INFO("XeFG through Dx11wDx12: forcing borderless instead of exclusive fullscreen");
+        Config::Instance()->FGXeFGForceBorderless.set_volatile_value(true);
+    }
+
     if (_real != nullptr)
     {
         _real->AddRef();

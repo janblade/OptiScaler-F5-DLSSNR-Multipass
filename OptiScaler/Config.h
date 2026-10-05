@@ -793,6 +793,9 @@ class Config
 
     // Menu
     CustomOptional<float, NoDefault> MenuScale;
+    CustomOptional<float, NoDefault> MenuWidth; // Main window size in pixels at Menu Scale 1.0
+    CustomOptional<float, NoDefault> MenuHeight;
+    CustomOptional<std::string, NoDefault> MenuPage; // Last page open in the main window, see menu/MenuPages.h
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };
     CustomOptional<bool> ExtendedLimits { false };

@@ -21,6 +21,13 @@ class ScopedCollapsingHeader
   public:
     explicit ScopedCollapsingHeader(const char* label, ImGuiTreeNodeFlags flags = 0)
     {
+        // The page view asks for the next header to start open (one shot).
+        if (OpenNextHeader)
+        {
+            flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            OpenNextHeader = false;
+        }
+
         ImGui::PushID(label);
 
         ImGui::BeginChild("##CollapsingHeaderChild", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY,
@@ -31,6 +38,8 @@ class ScopedCollapsingHeader
     }
 
     bool IsHeaderOpen() const { return _headerOpen; }
+
+    inline static bool OpenNextHeader = false;
 
     ~ScopedCollapsingHeader()
     {
@@ -160,7 +169,7 @@ class MenuCommon
     // RenderMainMenuWindow section helpers. These keep the main window flow readable
     // without changing the existing ImGui layout, labels, or setting side effects.
     static void RenderMainMenuHeaderMessages(RenderMenuContext& ctx);
-    static void RenderMainMenuTable(RenderMenuContext& ctx);
+    static void RenderMainMenuPages(RenderMenuContext& ctx);
     static void RenderActiveUpscalerSettings(RenderMenuContext& ctx);
     static void RenderFrameGenerationSelection(RenderMenuContext& ctx);
     static void RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx);

@@ -1212,7 +1212,20 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         {
             std::optional<double> upscalerTimeOpt {};
 
-            if (state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 && state.currentD3D11Device != nullptr)
+            // ReadUpscalerTime takes a void*: a plain D3D12 feature casts it to ID3D12CommandQueue*, so it must never get
+            // the D3D11 context. Under Dx11wDx12 that feature is native::VirtualUpscalerDriver's, recorded on the queue
+            // gameQueue names (WithDx12's paired one).
+            const bool pureDx12Feature = currentFeature->Api() == API::DX12 && !currentFeature->IsWithDx12();
+
+            if (pureDx12Feature && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
+            {
+                if (gameQueue != nullptr)
+                {
+                    if (upscalerTimeOpt = currentFeature->ReadUpscalerTime(gameQueue); upscalerTimeOpt.has_value())
+                        currentFeature->ReadDetailedGpuTimes(gameQueue, state.detailedGpuTimes);
+                }
+            }
+            else if (state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 && state.currentD3D11Device != nullptr)
             {
                 ID3D11DeviceContext* context = nullptr;
                 state.currentD3D11Device->GetImmediateContext(&context);

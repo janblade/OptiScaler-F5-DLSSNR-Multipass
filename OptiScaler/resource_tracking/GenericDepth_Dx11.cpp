@@ -4,6 +4,7 @@
 
 #include <Config.h>
 #include <Util.h>
+#include <dlssnr/DlssNr_NativeMode.h>
 
 #include <native/DepthFinderCore.h>
 #include <native/SharedFrame.h>
@@ -80,6 +81,7 @@ ID3D11Texture2D* g_copy = nullptr;
 uint32_t g_copyWidth = 0, g_copyHeight = 0;
 bool g_copyTaken = false; // a copy was recorded for the frame just closed
 bool g_installed = false;
+bool g_installFailed = false;
 
 // Reads the picked depth buffer (whatever its own typeless/depth-stencil format) through a single-channel view and writes a
 // plain R32_FLOAT copy, compiled once on first use. A typeless depth-stencil format (R32G8X24_TYPELESS and the like) can fail
@@ -463,6 +465,7 @@ void STDMETHODCALLTYPE hkDispatch(ID3D11DeviceContext* This, UINT X, UINT Y, UIN
 namespace GenericDepthDx11
 {
 bool Installed() { return g_installed; }
+bool InstallFailed() { return g_installFailed; }
 
 void Install(ID3D11Device* device)
 {
@@ -475,6 +478,7 @@ void Install(ID3D11Device* device)
     if (context == nullptr)
     {
         LOG_WARN("Depth finder (D3D11): could not get the immediate context, not installed");
+        g_installFailed = true;
         return;
     }
 
@@ -524,9 +528,11 @@ void Install(ID3D11Device* device)
         LOG_ERROR("Depth finder (D3D11): hooking failed ({:X}), not installed", (UINT) result);
         context->Release();
         g_context = nullptr;
+        g_installFailed = true;
         return;
     }
 
+    g_installFailed = false;
     g_core.Start([](const std::string& line) { LOG_INFO("{}", line); });
     g_installed = true;
     LOG_INFO("Depth finder (D3D11): observing the game's depth buffers (immediate context only), after {} frames of "
@@ -664,11 +670,19 @@ void DrawStatus()
 {
     const bool wanted = Config::Instance()->DlssNrNativeDepthFinder.value_or_default();
 
-    if (!g_installed)
+    switch (DlssNrNativeMode::FinderFor(wanted, g_installed, g_installFailed))
     {
-        ImGui::TextDisabled("%s",
-                            wanted ? "Depth: the finder needs a restart." : "Depth: none; NR runs on motion only.");
+    case DlssNrNativeMode::Finder::Off:
+        ImGui::TextDisabled("Depth: off; NR runs on motion only and does not stand aside for a game upscaler.");
         return;
+    case DlssNrNativeMode::Finder::NeedsRestart:
+        ImGui::TextDisabled("Depth: the finder needs a restart.");
+        return;
+    case DlssNrNativeMode::Finder::CouldNotStart:
+        ImGui::TextDisabled("Depth: the finder could not start (see the log); NR runs on motion only.");
+        return;
+    case DlssNrNativeMode::Finder::Installed:
+        break;
     }
 
     const auto pick = CurrentPick();
@@ -701,10 +715,11 @@ void DrawAdvancedUi()
         config->DlssNrNativeDepthFinder = finder;
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s",
-                          "Watches the game's immediate context (Direct3D 11) and picks the scene's depth buffer, so\n"
-                          "NR and the stabiliser get depth as well as motion. Optional: without it they run on motion\n"
-                          "only. Deferred contexts are not watched yet. Choosing a mode above turns it on. Applies at\n"
-                          "the next start: save the settings and restart the game.");
+        ImGui::SetTooltip(
+            "%s", "Watches the game's immediate context (Direct3D 11) and picks the scene's depth buffer, so\n"
+                  "NR and the stabiliser get depth as well as motion. Optional: without it they run on motion\n"
+                  "only. It is also what notices the game calling its own upscaler: without it, nothing here\n"
+                  "stands aside for that. Deferred contexts are not watched yet. Choosing a mode above turns\n"
+                  "it on, Off turns it off. Applies at the next start: save the settings and restart the game.");
 }
 } // namespace GenericDepthDx11

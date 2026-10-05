@@ -42,18 +42,21 @@ Snapshot BestSnapshot();
 
 bool Installed();
 
+// The key was on at this start but Install() gave up (the log says why).
+bool InstallFailed();
+
 // Called when the game creates an upscaler feature of its own: a game with one needs no depth finder, so it stands down for
 // good (the same rule and wake-up as the D3D12 finder).
 void NoteUpscalerCall();
 bool GameCallsUpscaler();
 bool Armed();
 
-// ImGui: the menu's one depth line (none, needs a restart, stood down, watching, picked), no checkbox. Call inside the
-// menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
+// ImGui: the menu's one depth line (off, needs a restart, could not start, stood down, watching, picked), no checkbox.
+// Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
 void DrawStatus();
 
-// ImGui: the "Use the game's depth" checkbox and its tooltip. [DlssNr] NativeDepthFinder is also turned on by the
-// menu's mode selector (dlssnr/DlssNr_NativeMode.h); this is for setting it on its own. Call inside the menu's Advanced
-// section.
+// ImGui: the "Use the game's depth" checkbox and its tooltip. [DlssNr] NativeDepthFinder is also turned on and off by
+// the menu's mode selector (dlssnr/DlssNr_NativeMode.h); this is for setting it on its own. Call inside the menu's
+// Advanced section.
 void DrawAdvancedUi();
 } // namespace GenericDepthDx11

@@ -6,6 +6,7 @@
 
 #include <Config.h>
 #include <Util.h>
+#include <dlssnr/DlssNr_NativeMode.h>
 
 #include <detours/detours.h>
 
@@ -131,6 +132,7 @@ GenericDepthDx12::Snapshot g_best;   // the frame just closed's choice
 std::vector<std::pair<ID3D12Resource*, uint64_t>> g_retired; // replaced copies, released a few frames later
 UINT g_dsvIncrement = 0;
 bool g_installed = false;
+bool g_installFailed = false;
 
 void OnDraw(ID3D12GraphicsCommandList* list, uint64_t vertices, uint32_t instances)
 {
@@ -802,6 +804,7 @@ void STDMETHODCALLTYPE hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12Gr
 namespace GenericDepthDx12
 {
 bool Installed() { return g_installed; }
+bool InstallFailed() { return g_installFailed; }
 
 void Install(ID3D12Device* device)
 {
@@ -814,6 +817,7 @@ void Install(ID3D12Device* device)
     if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
     {
         LOG_WARN("Depth finder: could not make a command allocator, not installed");
+        g_installFailed = true;
         return;
     }
 
@@ -821,6 +825,7 @@ void Install(ID3D12Device* device)
     {
         allocator->Release();
         LOG_WARN("Depth finder: could not make a command list, not installed");
+        g_installFailed = true;
         return;
     }
 
@@ -919,9 +924,11 @@ void Install(ID3D12Device* device)
         o_ExecuteBundle = nullptr;
         o_Dispatch = nullptr;
         o_Close = nullptr;
+        g_installFailed = true;
         return;
     }
 
+    g_installFailed = false;
     g_overlayOn = Config::Instance()->DlssNrNativeDepthOverlay.value_or_default() &&
                   Config::Instance()->DlssNrNativeDebugView.value_or_default();
     g_core.Start([](const std::string& line) { LOG_INFO("{}", line); });
@@ -1166,11 +1173,19 @@ void DrawStatus()
     auto* config = Config::Instance();
     const bool wanted = config->DlssNrNativeDepthFinder.value_or_default();
 
-    if (!g_installed)
+    switch (DlssNrNativeMode::FinderFor(wanted, g_installed, g_installFailed))
     {
-        ImGui::TextDisabled("%s",
-                            wanted ? "Depth: the finder needs a restart." : "Depth: none; NR runs on motion only.");
+    case DlssNrNativeMode::Finder::Off:
+        ImGui::TextDisabled("Depth: off; NR runs on motion only and does not stand aside for a game upscaler.");
         return;
+    case DlssNrNativeMode::Finder::NeedsRestart:
+        ImGui::TextDisabled("Depth: the finder needs a restart.");
+        return;
+    case DlssNrNativeMode::Finder::CouldNotStart:
+        ImGui::TextDisabled("Depth: the finder could not start (see the log); NR runs on motion only.");
+        return;
+    case DlssNrNativeMode::Finder::Installed:
+        break;
     }
 
     const auto pick = CurrentPick();
@@ -1212,8 +1227,9 @@ void DrawAdvancedUi()
             "%s", "Watches the game's depth buffers (DirectX 12) and picks the scene's, so NR and the\n"
                   "stabiliser get depth as well as motion. Optional: without it they run on motion only. It\n"
                   "only observes, and it stands down for good if the game makes an upscaler call of its own.\n"
-                  "The log lists the candidates. Choosing a mode above turns it on. Applies at the next start:\n"
-                  "save the settings and restart the game.");
+                  "It is also what notices that call: without it, nothing here stands aside for the game's own\n"
+                  "upscaler. The log lists the candidates. Choosing a mode above turns it on, Off turns it off.\n"
+                  "Applies at the next start: save the settings and restart the game.");
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 

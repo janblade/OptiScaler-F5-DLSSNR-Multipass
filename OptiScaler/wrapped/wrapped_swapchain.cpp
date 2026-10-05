@@ -10,8 +10,10 @@
 #include <hooks/Reflex_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
 #include <with_dx12/dx11_with_dx12_sync.h>
+#include <with_dx12/with_dx12.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <motion/NativeMotion_Dx12.h>
 
 #include <misc/FrameLimit.h>
 
@@ -382,10 +384,20 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         {
             std::optional<double> upscalerTimeOpt {};
 
-            if (cq != nullptr && currentFeature->Api() == API::DX12 && !currentFeature->IsWithDx12())
+            // ReadUpscalerTime takes a void*: a plain D3D12 feature casts it to ID3D12CommandQueue*, so it must never be
+            // handed a D3D11 context. A D3D11 game can own one (native::VirtualUpscalerDriver, run on the paired D3D12
+            // queue) with no D3D12 queue on this swap chain; its timers live on that paired queue.
+            const bool pureDx12Feature = currentFeature->Api() == API::DX12 && !currentFeature->IsWithDx12();
+
+            if (pureDx12Feature)
             {
-                if (upscalerTimeOpt = currentFeature->ReadUpscalerTime(cq); upscalerTimeOpt.has_value())
-                    currentFeature->ReadDetailedGpuTimes(cq, State::Instance().detailedGpuTimes);
+                auto timingQueue = cq != nullptr ? cq : WithDx12::GetD3D12CommandQueue();
+
+                if (timingQueue != nullptr)
+                {
+                    if (upscalerTimeOpt = currentFeature->ReadUpscalerTime(timingQueue); upscalerTimeOpt.has_value())
+                        currentFeature->ReadDetailedGpuTimes(timingQueue, State::Instance().detailedGpuTimes);
+                }
             }
             else if (device != nullptr)
             {
@@ -397,7 +409,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
                 context->Release();
             }
-            if (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
+            if (!pureDx12Feature && State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
                 State::Instance().currentD3D11Device != nullptr)
             {
                 ID3D11DeviceContext* context = nullptr;
@@ -507,6 +519,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             else
                 currentFeature->TickFrozenCheck();
         }
+
+        // Before the finished-picture pass, which composes from what the virtual upscaler's call captured this frame.
+        if (cq && device12)
+            NativeMotionDx12::OnPresent(pSwapChain, cq, device12);
 
         if (cq && (fg == nullptr || !fg->IsActive() || fg->IsPaused()))
             DlssNr::ApplyToFinishedPicture(pSwapChain, cq);

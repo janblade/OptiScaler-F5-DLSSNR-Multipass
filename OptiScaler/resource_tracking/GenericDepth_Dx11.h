@@ -1,0 +1,59 @@
+#pragma once
+
+#include "pch.h"
+
+#include "GenericDepth_Select.h"
+
+// Finds the scene's depth buffer in a Direct3D 11 game by watching how the game uses its depth-stencil views, with no ReShade
+// and no help from an upscaler call: the D3D11 adapter of the native input producer (see docs/NATIVE-INPUT-ADAPTERS.md), built on
+// the same native::DepthFinderCore as the D3D12 one (resource_tracking/GenericDepth_Dx12.h).
+//
+// D3D11 makes this simpler than D3D12 in two ways this file relies on: a depth-stencil view answers GetResource() directly (no
+// descriptor tracking is needed), and almost every game draws through one context (the immediate context; deferred contexts are
+// not watched yet, so a game that draws its scene only through one is not seen -- a per-game limitation, recorded as such).
+//
+// Off unless [DlssNr] NativeDepthFinder is set (checked at the device's first use, since OptiScaler attaches to a D3D11 game
+// later than it does a D3D12 one). When on, the hooks only observe: ClearDepthStencilView, OMSetRenderTargets(AndUnorderedAccessViews),
+// RSSetViewports and the draw calls on the immediate context. Nothing is changed.
+namespace GenericDepthDx11
+{
+// Hooks the immediate context once a D3D11 device is known; a no-op when the key is off or it has run already.
+void Install(ID3D11Device* device);
+
+// Once per presented frame: closes the frame's counts, picks, and logs. The swap chain gives the picture's size.
+void OnPresent(IDXGISwapChain* swapChain);
+
+GenericDepthSelect::Pick CurrentPick();
+
+// Copies of the picked depth buffer from the frame just presented, for the producer's adapter. One context means one copy (no
+// split-scene case as D3D12 has across many command lists), so this always has at most one entry when it has any.
+struct Snapshot
+{
+    bool valid = false;
+    ID3D11Resource* resource = nullptr; // a plain (non-shared) D3D11 copy; the adapter shares it across to D3D12 itself
+    DXGI_FORMAT typelessFormat = DXGI_FORMAT_UNKNOWN; // the copy's own (typeless) format, for making a shared copy of it
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN; // a typed format that reads its depth
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool reversed = false; // near is 1.0
+};
+
+Snapshot BestSnapshot();
+
+bool Installed();
+
+// Called when the game creates an upscaler feature of its own: a game with one needs no depth finder, so it stands down for
+// good (the same rule and wake-up as the D3D12 finder).
+void NoteUpscalerCall();
+bool GameCallsUpscaler();
+bool Armed();
+
+// ImGui: status of the finder (stood down / watching / picked), no checkbox. Draws nothing when the finder is not
+// installed. Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
+void DrawStatus();
+
+// ImGui: the "Find the scene's depth" checkbox and its tooltip. [DlssNr] NativeDepthFinder is also set by the menu's
+// single native-input checkbox (DlssNr_Menu.cpp's ApplyNativeInputPreset); this is for setting it on its own. Call
+// inside the menu's Advanced section.
+void DrawAdvancedUi();
+} // namespace GenericDepthDx11

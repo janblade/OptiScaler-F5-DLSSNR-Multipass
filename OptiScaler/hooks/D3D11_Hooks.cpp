@@ -6,6 +6,8 @@
 
 #include <proxies/KernelBase_Proxy.h>
 
+#include <resource_tracking/GenericDepth_Dx11.h>
+
 #include <wrapped/wrapped_swapchain.h>
 
 #include <detours/detours.h>
@@ -88,6 +90,10 @@ static inline D3D11_FILTER UpgradeToAF(D3D11_FILTER f)
 
 static void HookToDeviceLocal(ID3D11Device* InDevice)
 {
+    // The depth finder hooks the immediate context the first time any D3D11 device is captured, whether or not this device's
+    // own sampler hooks are already in (a second call with the same device is a no-op inside Install()).
+    GenericDepthDx11::Install(InDevice);
+
     if (o_CreateSamplerState != nullptr || InDevice == nullptr)
         return;
 

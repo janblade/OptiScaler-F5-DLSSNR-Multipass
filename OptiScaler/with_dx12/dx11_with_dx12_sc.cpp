@@ -6,6 +6,7 @@
 
 #include <hooks/FG_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+#include <motion/NativeMotionDx11.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -371,6 +372,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (!_CopyDx11SharedToDx12FGBackBuffer(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    // Overwrites the raw copy just made above with native input's processed picture, when that option is on; a no-op
+    // otherwise. Runs here, before FG takes the frame: this is the only present this game gets once Dx11wDx12SC
+    // exists, so it is also where the D3D11 depth finder's own frame close has to happen (NativeMotionDx11::
+    // OnFGPresent does that), same placement rule Story F used on the D3D12 side.
+    _ApplyNativeInputToFGBackBuffer();
 
     if (!_WaitForInteropCopyOnPresentQueue())
         return DXGI_ERROR_DEVICE_REMOVED;
@@ -867,6 +874,55 @@ bool Dx11wDx12SC::_InitInteropObjects()
         _copyCommandLists[i]->Close();
     }
 
+    if (_nrCopyAllocators.size() != copyAllocatorCount)
+    {
+        for (auto& allocator : _nrCopyAllocators)
+            SafeRelease(allocator);
+
+        _nrCopyAllocators.assign(copyAllocatorCount, nullptr);
+    }
+
+    if (_nrCopyAllocatorFenceValues.size() != copyAllocatorCount)
+        _nrCopyAllocatorFenceValues.assign(copyAllocatorCount, 0);
+
+    if (_nrCopyCommandLists.size() != copyAllocatorCount)
+    {
+        for (auto& commandList : _nrCopyCommandLists)
+            SafeRelease(commandList);
+
+        _nrCopyCommandLists.assign(copyAllocatorCount, nullptr);
+    }
+
+    for (UINT i = 0; i < copyAllocatorCount; ++i)
+    {
+        if (_nrCopyAllocators[i] != nullptr)
+            continue;
+
+        result =
+            _dx12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_nrCopyAllocators[i]));
+        if (FAILED(result))
+        {
+            LOG_ERROR("CreateCommandAllocator (native input copy)[{}] failed: {:X}", i, (UINT) result);
+            return false;
+        }
+    }
+
+    for (UINT i = 0; i < copyAllocatorCount; ++i)
+    {
+        if (_nrCopyCommandLists[i] != nullptr)
+            continue;
+
+        result = _dx12Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _nrCopyAllocators[i], nullptr,
+                                                IID_PPV_ARGS(&_nrCopyCommandLists[i]));
+        if (FAILED(result))
+        {
+            LOG_ERROR("CreateCommandList (native input copy) failed: {:X}", (UINT) result);
+            return false;
+        }
+
+        _nrCopyCommandLists[i]->Close();
+    }
+
     if (_copyFence == nullptr)
     {
         result = _dx12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_copyFence));
@@ -1082,18 +1138,18 @@ bool Dx11wDx12SC::_WaitDx11ThenDx12()
     return true;
 }
 
-bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
+bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot, std::vector<UINT64>& fenceValues)
 {
     if (_copyFence == nullptr || _copyFenceEvent == nullptr)
         return true;
 
-    if (slot >= _copyAllocatorFenceValues.size())
+    if (slot >= fenceValues.size())
     {
-        LOG_ERROR("copy allocator slot {} out of range {}", slot, _copyAllocatorFenceValues.size());
+        LOG_ERROR("copy allocator slot {} out of range {}", slot, fenceValues.size());
         return false;
     }
 
-    const auto fenceValue = _copyAllocatorFenceValues[slot];
+    const auto fenceValue = fenceValues[slot];
 
     if (fenceValue == 0)
         return true;
@@ -1136,7 +1192,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     if (allocator == nullptr)
         return false;
 
-    if (!_WaitForCopyAllocator(copySlot))
+    if (!_WaitForCopyAllocator(copySlot, _copyAllocatorFenceValues))
         return false;
 
     auto result = allocator->Reset();
@@ -1208,6 +1264,90 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     return true;
 }
 
+void Dx11wDx12SC::_ApplyNativeInputToFGBackBuffer()
+{
+    // Runs the D3D11 depth finder's frame close and the native input producer (NativeMotionDx11::OnFGPresent); null
+    // when the option is off, the game is calling its own upscaler, or nothing was ready this frame -- all of those
+    // are the ordinary case, not a failure.
+    ID3D12Resource* processed = NativeMotionDx11::OnFGPresent(_real, _dx11Device);
+
+    if (processed == nullptr)
+        return;
+
+    if (_nrCopyAllocators.empty() || _nrCopyCommandLists.empty() || _dx12CommandQueue == nullptr ||
+        _copyFence == nullptr || _fgSwapChain == nullptr || _currentFakeIndex >= _nrCopyAllocators.size())
+    {
+        LOG_WARN("native input ready but the FG copy ring is not: dropping this frame's result");
+        return;
+    }
+
+    const UINT slot = _currentFakeIndex;
+    auto allocator = _nrCopyAllocators[slot];
+
+    if (allocator == nullptr || !_WaitForCopyAllocator(slot, _nrCopyAllocatorFenceValues))
+        return;
+
+    auto result = allocator->Reset();
+    if (FAILED(result))
+    {
+        LOG_ERROR("native input copy allocator[{}] reset failed: {:X}", slot, (UINT) result);
+        return;
+    }
+
+    auto* list = _nrCopyCommandLists[slot];
+
+    result = list->Reset(allocator, nullptr);
+    if (FAILED(result))
+    {
+        LOG_ERROR("native input copy command list reset failed: {:X}", (UINT) result);
+        return;
+    }
+
+    UINT fgIndex = _fgSwapChain->GetCurrentBackBufferIndex();
+    ID3D12Resource* fgBackBuffer = nullptr;
+    result = _fgSwapChain->GetBuffer(fgIndex, IID_PPV_ARGS(&fgBackBuffer));
+    if (FAILED(result) || fgBackBuffer == nullptr)
+    {
+        LOG_ERROR("native input copy FG GetBuffer({}) failed: {:X}", fgIndex, (UINT) result);
+        list->Close();
+        return;
+    }
+
+    // `processed` rests in COMMON (native::NativeProducer's own contract); fgBackBuffer was already put back in
+    // PRESENT by _CopyDx11SharedToDx12FGBackBuffer just before this runs.
+    TransitionResource(list, processed, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    TransitionResource(list, fgBackBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    list->CopyResource(fgBackBuffer, processed);
+
+    TransitionResource(list, fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    TransitionResource(list, processed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+
+    fgBackBuffer->Release();
+
+    result = list->Close();
+    if (FAILED(result))
+    {
+        LOG_ERROR("native input copy command list close failed: {:X}", (UINT) result);
+        return;
+    }
+
+    ID3D12CommandList* lists[] = { list };
+    _dx12CommandQueue->ExecuteCommandLists(1, lists);
+
+    const auto signalValue = ++_copyFenceValue;
+
+    result = _dx12CommandQueue->Signal(_copyFence, signalValue);
+    if (FAILED(result))
+    {
+        LOG_ERROR("native input copy fence signal failed: {:X}", (UINT) result);
+        return;
+    }
+
+    _nrCopyAllocatorFenceValues[slot] = signalValue;
+    _lastInteropCopyFenceValue = signalValue;
+}
+
 bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 {
     if (_fg == nullptr || _copyFence == nullptr)
@@ -1236,6 +1376,9 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
     for (const auto fenceValue : _copyAllocatorFenceValues)
         waitValue = std::max(waitValue, fenceValue);
 
+    for (const auto fenceValue : _nrCopyAllocatorFenceValues)
+        waitValue = std::max(waitValue, fenceValue);
+
     if (waitValue == 0)
         return true;
 
@@ -1260,6 +1403,9 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
     }
 
     for (auto& fenceValue : _copyAllocatorFenceValues)
+        fenceValue = 0;
+
+    for (auto& fenceValue : _nrCopyAllocatorFenceValues)
         fenceValue = 0;
 
     _lastInteropCopyFenceValue = 0;
@@ -1308,6 +1454,17 @@ void Dx11wDx12SC::_ReleaseInteropObjects()
 
     _copyAllocators.clear();
     _copyAllocatorFenceValues.clear();
+
+    for (auto& cmdList : _nrCopyCommandLists)
+        SafeRelease(cmdList);
+
+    _nrCopyCommandLists.clear();
+
+    for (auto& allocator : _nrCopyAllocators)
+        SafeRelease(allocator);
+
+    _nrCopyAllocators.clear();
+    _nrCopyAllocatorFenceValues.clear();
 
     SafeRelease(_copyFence);
     SafeCloseHandle(_copyFenceEvent);

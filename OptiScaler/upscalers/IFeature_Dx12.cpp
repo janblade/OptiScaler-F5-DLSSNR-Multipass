@@ -5,6 +5,7 @@
 
 #include "IFeature_Dx12.h"
 #include "State.h"
+#include <resource_tracking/GenericDepth_Dx12.h>
 
 void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                     D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState) const
@@ -46,6 +47,9 @@ bool IFeature_Dx12::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCo
 
 bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
+    // The depth finder only runs while the game is not calling an upscaler.
+    GenericDepthDx12::NoteUpscalerCall();
+
     if (!IsInited())
     {
         LOG_ERROR("Not inited!");

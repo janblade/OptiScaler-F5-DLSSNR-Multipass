@@ -77,8 +77,12 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _CopyDx11BackBufferToShared(UINT index);
     bool _WaitDx11ThenDx12();
     bool _CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index);
+    // Copies native input's processed picture (NativeMotionDx11::OnFGPresent) over the FG back buffer this same
+    // Present already put the raw one into, when that option is on. A no-op, not a failure, when it is off or there
+    // is nothing to apply this frame; never fails the surrounding Present.
+    void _ApplyNativeInputToFGBackBuffer();
     bool _WaitForCopyQueueIdle();
-    bool _WaitForCopyAllocator(UINT slot);
+    bool _WaitForCopyAllocator(UINT slot, std::vector<UINT64>& fenceValues);
     void _ReleaseInteropBackBuffers();
     void _ReleaseInteropObjects();
     void _RefreshCachedSwapchainDesc();
@@ -109,6 +113,14 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     ID3D12CommandQueue* _dx12CommandQueue = nullptr;
     std::vector<ID3D12CommandAllocator*> _copyAllocators;
     std::vector<ID3D12GraphicsCommandList*> _copyCommandLists;
+
+    // A second ring, same sizing/lifetime as the one above, for _ApplyNativeInputToFGBackBuffer's copy: it runs after
+    // _CopyDx11SharedToDx12FGBackBuffer's own command list has already closed and been submitted for this frame, so it
+    // cannot reuse that one's allocator (not safe to Reset while still in flight) -- shares _copyFence/_copyFenceEvent,
+    // a plain monotonic counter either ring can bump.
+    std::vector<ID3D12CommandAllocator*> _nrCopyAllocators;
+    std::vector<ID3D12GraphicsCommandList*> _nrCopyCommandLists;
+    std::vector<UINT64> _nrCopyAllocatorFenceValues;
 
     UINT64 _lastInteropCopyFenceValue = 0;
 

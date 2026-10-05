@@ -67,6 +67,18 @@ bool WaitForFinishedPicture();
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd);
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
+
+// The native input producer's entry: runs DLSS-NR on the picture `color` (a back buffer in the PRESENT state, or any resource) with a depth and a motion
+// texture of the picture's size made from the depth finder and the optical flow (both NON_PIXEL_SHADER_RESOURCE, motion in
+// full-resolution pixels towards the previous frame). Records onto `cmd`, a list of the caller's own, and leaves `color` in
+// PRESENT. False when it did not run (the reason is in FinishedPictureStatus()).
+// `colorSpace` is what the picture's values mean (NativeInputColourSpace() reads it off a swap chain); `pictureState` is the
+// state `color` is in on entry and is left in.
+bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
+                      ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
+                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState);
+// The colour space of a swap chain's picture, from what the game set (SDR when it set nothing), for a native-input frame.
+DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);
 
 

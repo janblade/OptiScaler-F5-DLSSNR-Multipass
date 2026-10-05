@@ -87,7 +87,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12PipelineState* _detailReusePipelineState = nullptr;
     bool _detailReusePipelineFailed = false;
 
-    // The LUT pass (dlssnr_lut.hlsl, LUT-apply epic Story 2: memory/plans/2026-10-04-dlssnr-lut-apply.md).
+    // The LUT pass (dlssnr_lut.hlsl, LUT-apply epic Story 2: dlssnr-lut-apply).
     // Its own root signature, PSO and small descriptor-heap ring -- not the shared table above -- because it
     // is the first pass here to sample a 3D texture, and keeping it separate means DispatchPass/
     // DispatchDetailReuse/DispatchExposureAdapt/DispatchResidualPass and their compiled bytecode need no
@@ -186,7 +186,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                              ID3D12Resource* OutSecond);
 
     // The LUT pass (dlssnr_lut.hlsl, DlssNr_Lut.h, LUT-apply epic Story 2:
-    // memory/plans/2026-10-04-dlssnr-lut-apply.md). Grades InSource (Width x Height, already in the colour
+    // dlssnr-lut-apply). Grades InSource (Width x Height, already in the colour
     // encoding InputEncoding names) through the .cube file at LutPath, scaled by Strength, into OutTarget
     // (caller-owned, same size and format as InSource). Reparses/reuploads only when LutPath differs from
     // what is already loaded. False and OutTarget untouched when LutPath is empty or fails to parse --

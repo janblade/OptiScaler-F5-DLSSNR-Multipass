@@ -372,7 +372,7 @@ class Config
     // 1 linear HDR, 2 tone-mapped sRGB, 3 tone-mapped gamma 2.2, 4 PQ. Values are DlssNr_ColourEncoding.h's.
     CustomOptional<uint32_t> DlssNrColourEncoding { 0 };
 
-    // LUT-apply epic (memory/plans/2026-10-04-dlssnr-lut-apply.md), Story 2: a .cube file graded onto the
+    // LUT-apply epic (dlssnr-lut-apply), Story 2: a .cube file graded onto the
     // NR input image before the model ever sees it. Empty (the default) is the feature not existing -- no
     // parse, no GPU texture, no dispatch. Accepts a path outside the bundled LUTs folder too.
     CustomOptional<std::string> DlssNrLutFile { std::string() };

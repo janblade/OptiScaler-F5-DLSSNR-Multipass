@@ -1,7 +1,7 @@
 #pragma once
 
 // Constants of precompile/dlssnr_lut.hlsl (Story 2 of the LUT-apply epic,
-// memory/plans/2026-10-04-dlssnr-lut-apply.md). Its own 256-byte slot in DlssNr_Dx12's dedicated
+// dlssnr-lut-apply). Its own 256-byte slot in DlssNr_Dx12's dedicated
 // _lutConstantBuffers ring -- the LUT pass has its own root signature and descriptor table, not the shared
 // one DlssNrConstants/DlssNrDetailReuseConstants go through, so this does not need to match either's layout.
 // Still one ordered list of 4-byte scalars matching the HLSL Params cbuffer field for field, append only,

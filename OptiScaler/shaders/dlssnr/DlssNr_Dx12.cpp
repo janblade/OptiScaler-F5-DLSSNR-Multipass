@@ -281,7 +281,7 @@ struct NrState
     // hold and capture paths then see the real raster. UAV at rest, retired with the scratch set.
     ID3D12Resource* activeColor = nullptr;
 
-    // LUT-apply epic (memory/plans/2026-10-04-dlssnr-lut-apply.md), Story 2: the LUT pass's graded copy of
+    // LUT-apply epic (dlssnr-lut-apply), Story 2: the LUT pass's graded copy of
     // `target`, same size/format, only allocated while a LUT is actually loaded. UAV at rest, like
     // activeColor -- the graded result is copied back onto `target` itself (DlssNr_Dx12::DispatchLut's
     // caller), so every later stage reads the same resource it always did with no extra indirection.
@@ -3636,7 +3636,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ConsumeMeterReadback();
     }
 
-    // LUT-apply epic (memory/plans/2026-10-04-dlssnr-lut-apply.md), Story 2: grade `target` through a
+    // LUT-apply epic (dlssnr-lut-apply), Story 2: grade `target` through a
     // loaded .cube file before the model sees it. Deliberately placed AFTER the crop above and the
     // exposure measurement above that, not right after g_gpuTime->Start where Story 2 originally put
     // it -- that measured the LUT's own graded output as if it were the clean upscaler frame, repeating

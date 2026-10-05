@@ -1,7 +1,7 @@
 #pragma once
 
 // The CPU-side state of a loaded 3D LUT (Story 2 of the LUT-apply epic,
-// memory/plans/2026-10-04-dlssnr-lut-apply.md): which file is loaded and its parsed lattice
+// dlssnr-lut-apply): which file is loaded and its parsed lattice
 // (DlssNr_LutFile.h, Story 1). Backend-agnostic on purpose -- DX12's NrState (shaders/dlssnr/DlssNr_Dx12.cpp)
 // and a future Vulkan equivalent (Story 3) each keep their own GPU texture handle next to one of these, so
 // this struct never becomes a dumping ground for resource lifetimes only a graphics backend can free safely.

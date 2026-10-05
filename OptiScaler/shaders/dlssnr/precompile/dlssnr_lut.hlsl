@@ -1,4 +1,4 @@
-// Story 2 of the LUT-apply epic (memory/plans/2026-10-04-dlssnr-lut-apply.md): grades the NR input image
+// Story 2 of the LUT-apply epic (dlssnr-lut-apply): grades the NR input image
 // through a loaded 3D LUT (DlssNr_LutFile.h's Lut3D, uploaded by DlssNr_Dx12's DispatchLut) before the model
 // ever sees it.
 //

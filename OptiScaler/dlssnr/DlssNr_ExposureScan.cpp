@@ -305,7 +305,8 @@ void Adopt(ID3D12Resource* resource, const std::string& shape, unsigned int byte
 
 void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource)
 {
-    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+    // Gated on the scan being wanted, not just NR being on -- see NoteUav for why.
+    if (!Config::Instance()->DlssNrEnabled.value_or_default() || !Wanted())
         return;
 
     if (desc == nullptr || resource == nullptr)
@@ -349,17 +350,21 @@ unsigned int Examined()
 
 void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc)
 {
-    // Deliberately NOT gated on the scan setting, and that was a real bug rather than a nicety.
+    // Gated on the scan being wanted (WhitePointSource 2 or ScanExposure), not just on NR being on.
     //
-    // An engine creates its eye adaptation view once, when it builds its render targets, which is
-    // long before anybody opens a menu and ticks a box. Gating the recording meant every candidate
-    // was thrown away before the scan could want it, and the readout then said "nothing matched
-    // yet -- play for a few seconds", which is advice that could never come true no matter how long
-    // anyone played.
+    // This was once deliberately ungated, so a scan switched on mid-game would still have the eye
+    // adaptation view the engine created at load. That reasoning assumed recording was only a
+    // description and a pointer; it is not -- Adopt AddRef's every candidate, so with the scan off
+    // (the default) NR still pinned up to 64 buffers the game or DLSS owns. Pinning foreign resources
+    // past their owner's teardown is what removed the device in Cyberpunk, and ReleaseTrackedResources
+    // only drops them at an NGX feature release, not when the game frees its own. Starfield re-adopted
+    // 64 such buffers after each of 241 DLSS-G recreations in one session, for a scan nobody asked for.
     //
-    // Recording is a resource description and a pointer. What is genuinely risky -- reading a buffer
-    // the game owns, on an assumption about its state -- lives in Tick, and that is still gated.
-    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+    // The early capture also bought less than it looked: every feature release clears the list, and
+    // candidates only come back as the game creates new resources. So a scan set in the ini works from
+    // launch as before; one switched on mid-game finds candidates at the next loading screen or
+    // resolution change (Tick's status says so).
+    if (!Config::Instance()->DlssNrEnabled.value_or_default() || !Wanted())
         return;
 
     if (resource == nullptr)
@@ -400,7 +405,10 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
 
     if (g_scan.tracked.empty())
     {
-        g_scan.status = "no buffer in this game is shaped like an exposure";
+        // Candidates are picked up as the game creates them, so an empty list also means the scan was
+        // switched on after they were made, or a feature was just released and cleared them.
+        g_scan.status = "no exposure-shaped buffer seen yet -- one turns up when the game creates its buffers "
+                        "(a loading screen or a resolution change)";
         return;
     }
 
@@ -949,9 +957,8 @@ std::string SerializeAnchors()
 // nvwgf2umx). Calling this at feature release drops our references first, so nothing we hold outlives
 // the heap. Only the candidates (foreign resources) are released here -- NOT the readback ring, which
 // is ours and may have GPU copies in flight; freeing that here would be a new hazard. Capture is gated
-// on NR being ENABLED (not on the scan source), so this releases whatever was captured whenever NR is
-// on -- scan selected or not; it is a no-op only when NR is off (nothing captured), so FSR/XeSS users
-// with NR off pay nothing. The scan re-adopts candidates next frame.
+// on NR being enabled AND the scan being wanted (NoteUav), so this is a no-op whenever the scan is off
+// (nothing captured). The scan re-adopts candidates as the game creates new resources.
 void ReleaseTrackedResources()
 {
     std::lock_guard<std::mutex> lock(g_scanMutex);

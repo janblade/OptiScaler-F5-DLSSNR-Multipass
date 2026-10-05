@@ -700,6 +700,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (auto setting = readFloat("Menu", "Scale"); setting.has_value())
                 MenuScale.set_from_config(std::clamp(setting.value(), 0.5f, 2.0f));
 
+            if (auto setting = readFloat("Menu", "MenuWidth"); setting.has_value())
+                MenuWidth.set_from_config(std::clamp(setting.value(), 100.0f, 8000.0f));
+
+            if (auto setting = readFloat("Menu", "MenuHeight"); setting.has_value())
+                MenuHeight.set_from_config(std::clamp(setting.value(), 100.0f, 8000.0f));
+
+            MenuPage.set_from_config(readString("Menu", "MenuPage", true));
+
             // Don't enable again if set false because of Linux issue
             OverlayMenu.set_from_config(readBool("Menu", "OverlayMenu"));
             ShortcutKey.set_from_config(readInt("Menu", "ShortcutKey"));
@@ -1678,6 +1686,9 @@ bool Config::SaveIni()
     // Menu
     {
         ini.SetValue("Menu", "Scale", GetFloatValue(Instance()->MenuScale).c_str());
+        ini.SetValue("Menu", "MenuWidth", GetFloatValue(Instance()->MenuWidth.value_for_config()).c_str());
+        ini.SetValue("Menu", "MenuHeight", GetFloatValue(Instance()->MenuHeight.value_for_config()).c_str());
+        ini.SetValue("Menu", "MenuPage", Instance()->MenuPage.value_for_config_or("auto").c_str());
         ini.SetValue("Menu", "OverlayMenu", GetBoolValue(Instance()->OverlayMenu.value_for_config()).c_str());
 
         auto setting = Instance()->ShortcutKey.value_for_config();

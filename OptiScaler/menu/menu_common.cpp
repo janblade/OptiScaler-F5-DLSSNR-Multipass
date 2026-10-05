@@ -1,5 +1,6 @@
 ﻿#include "pch.h"
 #include "menu_common.h"
+#include "MenuPages.h"
 #include <framegen/dlssg/MfgUnlock.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
@@ -2454,21 +2455,12 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
         //}
     }
 
-    // No active upscaler message
+    // Upscaler state is one line in every case, so the panes below never move when it changes.
     if (currentFeature == nullptr || !currentFeature->IsInited())
     {
-        ImGui::Spacing();
-
-        if (config->UseHQFont.value_or_default())
-            ImGui::PushFontSize(std::round(fontSize * menuResScale * 2.5f));
-        else
-            ImGui::SetWindowFontScale(menuResScale * 2.5f);
-
         if (state.nvngxExists || state.nvngxReplacement.has_value() ||
             (state.libxessExists || XeSSProxy::Module() != nullptr))
         {
-            ImGui::Spacing();
-
             std::vector<std::string> upscalers;
 
             if (state.fsrHooks)
@@ -2484,71 +2476,62 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 
             std::string joinedUpscalers(joined.begin(), joined.end());
 
-            ImGui::Text("Please select %s as upscaler from game\noptions and load a save game "
-                        "to enable Opti settings.\nUpscalers don't always work in menus.",
-                        joinedUpscalers.c_str());
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                               "Select %s as the game's upscaler and load a save to enable these settings.",
+                               joinedUpscalers.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
 
-            if (config->UseHQFont.value_or_default())
-                ImGui::PopFontSize();
-            else
-                ImGui::SetWindowFontScale(menuResScale);
-
-            ImGui::Spacing();
-
-            if (primaryGpu.dlssCapable)
+            // The file checks are for troubleshooting, so they wait behind the marker.
+            if (ImGui::BeginItemTooltip())
             {
-                ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
+                ImGui::TextUnformatted("Upscalers don't always work in menus.");
+                ImGui::Spacing();
+
+                if (primaryGpu.dlssCapable)
+                {
+                    ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
+                    ImGui::SameLine(0.0f, 16.0f);
+                    ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
+                }
+                else
+                {
+                    ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
+                    ImGui::SameLine(0.0f, 16.0f);
+                    ImGui::Text("nvngx replacement: %s",
+                                state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
+                }
+
+                ImGui::Text("libxess: %s",
+                            (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
+
+                ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
                 ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
-            }
-            else
-            {
-                ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
+                ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
                 ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("nvngx replacement: %s", state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
+                ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
+                ImGui::SameLine(0.0f, 16.0f);
+                ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
+
+                ImGui::EndTooltip();
             }
-
-            ImGui::Text("libxess: %s",
-                        (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
-
-            ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
-            ImGui::SameLine(0.0f, 16.0f);
-            ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
-            ImGui::SameLine(0.0f, 16.0f);
-            ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
-            ImGui::SameLine(0.0f, 16.0f);
-            ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
-
-            ImGui::Spacing();
         }
         else
         {
-            ImGui::Spacing();
-            ImGui::Text("Can't find nvngx.dll and libxess.dll and FSR inputs\nUpscaling support will NOT work.");
-            ImGui::Spacing();
-
-            if (config->UseHQFont.value_or_default())
-                ImGui::PopFont();
-            else
-                ImGui::SetWindowFontScale(menuResScale);
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.35f, 1.f)),
+                               "Can't find nvngx.dll, libxess.dll or FSR inputs. Upscaling support will NOT work.");
         }
     }
-    else if (currentFeature->IsFrozen())
+    else
     {
-        ImGui::Spacing();
-
-        if (config->UseHQFont.value_or_default())
-            ImGui::PushFontSize(std::round(fontSize * menuResScale * 3.0f));
+        // One line, reserved even when empty: frozen flips on and off in menus and loading, and the panes below
+        // must not move with it.
+        if (currentFeature->IsFrozen())
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                               "%s is active, but not currently used by the game. Please enter the game.",
+                               currentFeature->Name().c_str());
         else
-            ImGui::SetWindowFontScale(menuResScale * 3.0f);
-
-        ImGui::Text("%s is active, but not currently used by the game\nPlease enter the game",
-                    currentFeature->Name().c_str());
-
-        if (config->UseHQFont.value_or_default())
-            ImGui::PopFont();
-        else
-            ImGui::SetWindowFontScale(menuResScale);
+            ImGui::NewLine();
     }
 }
 
@@ -7477,41 +7460,152 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
     }
 }
 
-void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
+// Height of the graphs and bottom bar, measured last frame so the page view can leave room for them.
+static float mainMenuFooterHeight = 0.0f;
+
+void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
 {
-    if (ImGui::BeginTable("main", 2, ImGuiTableFlags_SizingStretchSame))
+    using MenuPages::Page;
+
+    auto config = ctx.config;
+    const float menuResScale = ctx.menuResScale;
+
+    static Page page = Page::Upscaler;
+    static bool pageLoaded = false;
+    static bool nrOpen = false;
+    static Page lastDrawnPage = Page::Upscaler;
+
+    if (!pageLoaded)
     {
-        ImGui::TableNextColumn();
-
-        // Left column: active upscaler state, frame generation, FSR common, latency and fakenvapi controls.
-        RenderActiveUpscalerSettings(ctx);
-        RenderFrameGenerationSelection(ctx);
-        RenderFrameGenerationRuntimeSettings(ctx);
-        RenderFsrCommonSettings(ctx);
-        RenderFramerateSettings(ctx);
-#ifdef LOW_LATENCY_INPUTS
-        RenderLowLatencySettings(ctx);
-#else
-        RenderFakenvapiSettings(ctx);
-#endif
-
-        ImGui::TableNextColumn();
-
-        // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
-        RenderActiveImageSettings(ctx);
-        DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
-        RenderMagnifierSettings(ctx);
-        RenderQuirksSettings(ctx);
-        RenderAdvancedSettings(ctx);
-        RenderLoggingSettings(ctx);
-        RenderThemeSettings(ctx);
-        RenderFpsOverlaySettings(ctx);
-        RenderUpscalerInputsSettings(ctx);
-        RenderApiAndTextureSettings(ctx);
-        RenderKeybindSettings(ctx);
-
-        ImGui::EndTable();
+        pageLoaded = true;
+        page = MenuPages::PageFromName(config->MenuPage.value_or(""));
+        nrOpen = MenuPages::IsNeuralRendering(page);
+        lastDrawnPage = page;
     }
+
+    const auto select = [&](Page next)
+    {
+        if (next != page)
+        {
+            page = next;
+            config->MenuPage = std::string(MenuPages::Name(next));
+        }
+    };
+
+    const float footerHeight = mainMenuFooterHeight > 0.0f ? mainMenuFooterHeight : 110.0f * menuResScale;
+    const float bodyHeight =
+        std::max(ImGui::GetContentRegionAvail().y - footerHeight - ImGui::GetStyle().ItemSpacing.y - 2.0f,
+                 120.0f * menuResScale);
+
+    // Navigation pane.
+    if (ImGui::BeginChild("nav", ImVec2(190.0f * menuResScale, bodyHeight), ImGuiChildFlags_Borders))
+    {
+        // Leaf tree rows keep the arrow's slot empty, so every top-level label lines up with Neural Rendering's.
+        const auto navItem = [&](Page target)
+        {
+            ImGui::TreeNodeEx(MenuPages::Label(target), ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                                            ImGuiTreeNodeFlags_SpanAvailWidth |
+                                                            (page == target ? ImGuiTreeNodeFlags_Selected : 0));
+            if (ImGui::IsItemActivated())
+                select(target);
+        };
+
+        navItem(Page::Upscaler);
+        navItem(Page::FrameGeneration);
+        navItem(Page::Framerate);
+
+        // Clicking the label opens Status & Presets; the arrow only expands.
+        ImGui::SetNextItemOpen(nrOpen);
+        const bool nrSelected = MenuPages::IsNeuralRendering(page);
+        const bool nrNodeOpen =
+            ImGui::TreeNodeEx("Neural Rendering", ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+                                                      (nrSelected && !nrOpen ? ImGuiTreeNodeFlags_Selected : 0));
+        if (ImGui::IsItemToggledOpen())
+        {
+            nrOpen = nrNodeOpen;
+        }
+        else if (ImGui::IsItemClicked())
+        {
+            select(Page::NrStatus);
+            nrOpen = true;
+        }
+
+        if (nrNodeOpen)
+        {
+            for (int p = static_cast<int>(Page::NrStatus); p < static_cast<int>(MenuPages::kPageCount); p++)
+                navItem(static_cast<Page>(p));
+
+            ImGui::TreePop();
+        }
+
+        navItem(Page::Image);
+        navItem(Page::OverlayLook);
+        navItem(Page::Input);
+        navItem(Page::Misc);
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // Page pane, scrolls on its own.
+    if (ImGui::BeginChild("page", ImVec2(0.0f, bodyHeight), ImGuiChildFlags_Borders))
+    {
+        if (lastDrawnPage != page)
+        {
+            lastDrawnPage = page;
+            ImGui::SetScrollY(0.0f);
+        }
+
+        // Each section function is called whole; openFirstHeader makes the header it starts with open by default.
+        const auto section = [&](void (*render)(RenderMenuContext&), bool openFirstHeader = false)
+        {
+            ScopedCollapsingHeader::OpenNextHeader = openFirstHeader;
+            render(ctx);
+            ScopedCollapsingHeader::OpenNextHeader = false;
+        };
+
+        switch (page)
+        {
+        case Page::Upscaler:
+            section(RenderActiveUpscalerSettings);
+            section(RenderUpscalerInputsSettings, true);
+            break;
+        case Page::FrameGeneration:
+            section(RenderFrameGenerationSelection);
+            section(RenderFrameGenerationRuntimeSettings);
+            section(RenderFsrCommonSettings);
+            break;
+        case Page::Image:
+            section(RenderActiveImageSettings);
+            break;
+        case Page::Framerate:
+            section(RenderFramerateSettings);
+#ifdef LOW_LATENCY_INPUTS
+            section(RenderLowLatencySettings);
+#else
+            section(RenderFakenvapiSettings);
+#endif
+            break;
+        case Page::OverlayLook:
+            section(RenderFpsOverlaySettings, true);
+            section(RenderMagnifierSettings, true);
+            section(RenderThemeSettings, true);
+            break;
+        case Page::Input:
+            section(RenderKeybindSettings, true);
+            break;
+        case Page::Misc:
+            section(RenderQuirksSettings, true);
+            section(RenderAdvancedSettings, true);
+            section(RenderLoggingSettings, true);
+            section(RenderApiAndTextureSettings, true);
+            break;
+        default:
+            DlssNr::RenderMenu(ctx.config, ctx.menuResScale, page);
+            break;
+        }
+    }
+    ImGui::EndChild();
 }
 
 void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
@@ -8037,13 +8131,31 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         frameRate = 1000.0 / frameTime;
     }
 
+    // The detached windows below keep auto-resizing; the main window is resizable and scrolls inside its page pane.
     ImGuiWindowFlags flags = 0;
     flags |= ImGuiWindowFlags_NoSavedSettings;
     flags |= ImGuiWindowFlags_NoCollapse;
     flags |= ImGuiWindowFlags_AlwaysAutoResize;
 
+    ImGuiWindowFlags mainFlags = (flags & ~ImGuiWindowFlags_AlwaysAutoResize) | ImGuiWindowFlags_NoScrollbar |
+                                 ImGuiWindowFlags_NoScrollWithMouse;
+
+    // Last size of the main window in pixels; zero until it has been drawn once.
+    static ImVec2 lastWindowSize {};
+
+    ImVec2 wantedSize { config->MenuWidth.value_or(960.0f) * menuResScale,
+                        config->MenuHeight.value_or(680.0f) * menuResScale };
+    wantedSize.x = std::min(wantedSize.x, ctx.io.DisplaySize.x * 0.95f);
+    wantedSize.y = std::min(wantedSize.y, ctx.io.DisplaySize.y * 0.95f);
+    ImGui::SetNextWindowSizeConstraints({ 640.0f * menuResScale, 420.0f * menuResScale }, { FLT_MAX, FLT_MAX });
+    ImGui::SetNextWindowSize(wantedSize, ImGuiCond_FirstUseEver);
+
+    if (lastWindowSize.x <= 0.0f)
+        lastWindowSize = wantedSize;
+
     if (lastMenuScale != menuResScale)
     {
+        const float oldMenuScale = lastMenuScale;
         lastMenuScale = menuResScale;
 
         // if UI scale is changed rescale the style
@@ -8058,7 +8170,13 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         style.MouseCursorScale = 1.0f;
         CopyMemory(style.Colors, styleold.Colors, sizeof(style.Colors)); // Restore colors
 
-        ImGui::SetNextWindowSize({ 1.0f, 1.0f });
+        // Keep the window the same size relative to the text.
+        if (oldMenuScale > 0.0f)
+        {
+            lastWindowSize = { lastWindowSize.x * menuResScale / oldMenuScale,
+                               lastWindowSize.y * menuResScale / oldMenuScale };
+            ImGui::SetNextWindowSize(lastWindowSize, ImGuiCond_Always);
+        }
     }
 
     // Main menu window
@@ -8069,17 +8187,28 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
                              (state.detectedQuirks.size() > 0) ? "(Q)" : "", state.isOptiPatcherSucceed ? "(OP)" : "");
     }
 
-    if (ImGui::Begin(windowTitle.c_str(), NULL, flags))
+    if (ImGui::Begin(windowTitle.c_str(), NULL, mainFlags))
     {
-        // Header/status messages shown above the two-column settings table.
+        // Remember the size (relative to Menu Scale) for Save Settings.
+        const ImVec2 windowSize = ImGui::GetWindowSize();
+        if (std::fabs(windowSize.x - lastWindowSize.x) > 0.5f || std::fabs(windowSize.y - lastWindowSize.y) > 0.5f)
+        {
+            lastWindowSize = windowSize;
+            config->MenuWidth = windowSize.x / menuResScale;
+            config->MenuHeight = windowSize.y / menuResScale;
+        }
+
+        // Header/status messages shown above the navigation and page panes.
         RenderMainMenuHeaderMessages(ctx);
 
-        // Main two-column settings content.
-        RenderMainMenuTable(ctx);
+        // Navigation pane and the selected page.
+        RenderMainMenuPages(ctx);
 
-        // Diagnostics and footer actions below the settings table.
+        // Diagnostics and footer actions below the page, full width.
+        const float footerTop = ImGui::GetCursorPosY();
         RenderMainMenuGraphs(ctx);
         RenderMainMenuBottomBar(ctx);
+        mainMenuFooterHeight = ImGui::GetCursorPosY() - footerTop;
 
         ImGui::End();
     }

@@ -55,6 +55,26 @@ float Scene(float x, float y, int channel)
            0.18f * ValueNoise(x, y, 9, 37 + channel) + 0.12f * ValueNoise(x, y, 4, 51 + channel);
 }
 
+// A mostly flat picture with a few textured blobs (a wall with a few things on it): across the flat part a block match
+// has nothing to hold on to, and only what moves everything alike can say where it went. The blobs are placed by hash,
+// away from the border so a pan of a few tens of pixels keeps them in the picture.
+float SparseScene(float x, float y, int channel)
+{
+    float v = 0.42f;
+    for (int i = 0; i < 12; ++i)
+    {
+        const float cx = 160.0f + Hash(i, 1, 71) * (1280.0f - 320.0f), cy = 120.0f + Hash(i, 2, 71) * (720.0f - 240.0f);
+        const float radius = 26.0f + Hash(i, 3, 71) * 22.0f;
+        const float d = std::hypot(x - cx, y - cy) / radius;
+        if (d < 1.0f)
+        {
+            const float window = (1.0f - d * d) * (1.0f - d * d);
+            v += (Scene(x - cx + 3000.0f, y - cy + 3000.0f, channel) - 0.5f) * 1.2f * window;
+        }
+    }
+    return v;
+}
+
 struct Gpu
 {
     ComPtr<ID3D12Device> device;
@@ -129,10 +149,11 @@ struct Gpu
 
     // An RGBA8 texture holding the scene moved by (dx, dy), left in the non-pixel shader resource state.
     // gain darkens it, noise (in 1/255 steps, peak) adds a different grain to every picture (noiseSeed).
-    // With squareSize > 0 a square of another texture sits on top with its top-left corner at (squareX, squareY), its texture
-    // moving with it.
+    // With squareSize > 0 a square of another texture sits on top with its top-left corner at (squareX, squareY), its
+    // texture moving with it. With sparse the scene is SparseScene instead.
     ComPtr<ID3D12Resource> Picture(float dx, float dy, float gain = 1.0f, float noise = 0.0f, int noiseSeed = 0,
-                                   float squareX = 0.0f, float squareY = 0.0f, float squareSize = 0.0f)
+                                   float squareX = 0.0f, float squareY = 0.0f, float squareSize = 0.0f,
+                                   bool sparse = false)
     {
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -163,8 +184,10 @@ struct Gpu
                 {
                     const bool inSquare = squareSize > 0.0f && x >= squareX && x < squareX + squareSize && y >= squareY &&
                                           y < squareY + squareSize;
-                    float v = (inSquare ? Scene(x - squareX + 3000.0f, y - squareY + 3000.0f, c) : Scene(x - dx, y - dy, c)) *
-                              255.0f * gain;
+                    const float base = inSquare ? Scene(x - squareX + 3000.0f, y - squareY + 3000.0f, c)
+                                       : sparse ? SparseScene(x - dx, y - dy, c)
+                                                : Scene(x - dx, y - dy, c);
+                    float v = base * 255.0f * gain;
                     if (noise > 0.0f)
                         v += (Hash((int) x * 3 + c, (int) y, 1000 + noiseSeed) * 2.0f - 1.0f) * noise;
                     px[c] = (uint8_t) std::clamp(v + 0.5f, 0.0f, 255.0f);
@@ -342,6 +365,8 @@ int main(int argc, char** argv)
     for (int a = 1; a < argc; ++a)
         if (std::string(argv[a]) == "nodmatch")
             tuning.depthMatching = false;
+        else if (std::string(argv[a]) == "noglobal")
+            tuning.globalCandidate = false;
     flow.Tuning() = tuning;
 
     if (perf)
@@ -472,6 +497,67 @@ int main(int argc, char** argv)
         printf("shift (%6.1f, %6.1f): mean error %7.3f px, within 0.5 px %5.1f%%, within 1 px %5.1f%%, off by over 3 px %5.1f%%   %s  %s\n",
                c.dx, c.dy, sumErr / n, 100.0 * shareHalf, 100.0 * one / n, 100.0 * wild / n,
                c.minWithinHalf > 0 ? (pass ? "ok" : "FAIL") : "(reported)", c.what);
+    }
+
+    // A pan over a mostly flat picture with a few textured blobs: the share of the whole picture (flat part included)
+    // that gets the pan's flow, without and with the whole-picture candidate, and with it given depth (one flat
+    // surface). A flat part is a tie between every offset, so only what the picture as a whole did can say where it
+    // went. The candidate must lift the share by at least kSparseGain, and to at least kSparseNeed.
+    struct SparseCase
+    {
+        float dx, dy;
+        int frames;
+    };
+
+    const SparseCase sparseCases[] = { { 6, -4, 3 }, { 30, -18, 3 }, { 12, 5, 4 }, { 90, 20, 4 } };
+    const double kSparseGain = 0.5, kSparseNeed = 0.9;
+
+    for (const SparseCase& c : sparseCases)
+    {
+        double share[3] = {};
+        const char* names[3] = { "without", "with", "with, and depth" };
+
+        for (int run = 0; run < 3; ++run)
+        {
+            flow.Reset();
+            flow.Tuning() = tuning;
+            flow.Tuning().globalCandidate = run != 0;
+
+            for (int k = 0; k < c.frames; ++k)
+            {
+                auto picture = gpu.Picture(c.dx * k, c.dy * k, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, true);
+                auto depth = run == 2 ? gpu.DepthMap(0.0f, 0.0f, 0.0f) : ComPtr<ID3D12Resource>();
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depth.Get(),
+                              run == 2 ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN, true);
+                gpu.Submit();
+            }
+
+            const auto desc = flow.Flow()->GetDesc();
+            const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+            const int margin = (int) std::ceil(std::max(std::fabs(c.dx), std::fabs(c.dy)) / 2.0f) + 24;
+            uint64_t n = 0, one = 0;
+            double sum = 0;
+
+            for (uint32_t y = margin; y + margin < desc.Height; ++y)
+                for (uint32_t x = margin; x + margin < desc.Width; ++x)
+                {
+                    const size_t i = ((size_t) y * desc.Width + x) * 2;
+                    const float err = std::hypot(field[i] + c.dx, field[i + 1] + c.dy);
+                    sum += err;
+                    one += err <= 1.0f;
+                    ++n;
+                }
+
+            share[run] = (double) one / n;
+            printf("sparse blobs on a flat picture, shift (%5.1f, %5.1f), %d pictures, %-15s candidate: within 1 px "
+                   "%5.1f%%, mean error %6.3f px\n",
+                   c.dx, c.dy, c.frames, names[run], 100.0 * share[run], sum / n);
+        }
+
+        flow.Tuning() = tuning;
+        const bool pass = share[1] >= share[0] + kSparseGain && share[1] >= kSparseNeed && share[2] >= kSparseNeed;
+        ok = ok && pass;
+        printf("  %s\n", pass ? "ok" : "FAIL");
     }
 
     // A square moving over a background that moves differently: the flow near its edges, for each way of making it. Background

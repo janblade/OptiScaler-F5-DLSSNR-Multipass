@@ -8,8 +8,8 @@
 namespace
 {
 
-constexpr uint32_t kDescriptorsPerPass = 6; // five SRVs and one UAV
-constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1;
+constexpr uint32_t kDescriptorsPerPass = 7; // six SRVs and one UAV
+constexpr uint32_t kPassesPerFrame = 1 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
@@ -29,7 +29,7 @@ cbuffer P : register(b0)
     uint depthMatching; // the window's samples count by how near their depth is to this pixel's (SceneDepth, t4)
     uint2 depthSize;
     uint reversed;
-    uint pad;
+    uint hasGlobal; // Match: the frame-wide candidate (GlobalFlow) is there to be tried
 };
 
 SamplerState Linear : register(s0);
@@ -41,6 +41,7 @@ Texture2D<float4> History : register(t3);
 Texture2D<float>  GuideLuma : register(t1);
 Texture2D<float4> FlowIn : register(t0);
 Texture2D<float>  SceneDepth : register(t4);
+Texture2D<float4> GlobalFlow : register(t5);
 RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
 
@@ -157,6 +158,25 @@ void Match(uint3 id : SV_DispatchThreadID)
     // answer of a cell that lies across it.
     int2 centre = 0;
     float start = Cost(p, centre, w);
+
+    // What the whole picture did last frame (the camera): where nothing in the window says otherwise it wins the tie with no
+    // motion, so a flat wall moves with the picture. `scale` here is this level's pixels per full-resolution pixel.
+    if (hasGlobal != 0)
+    {
+        float4 g = GlobalFlow.Load(int3(0, 0, 0));
+
+        if (g.z > 0.5)
+        {
+            int2 d = int2(round(g.xy * scale));
+            float c = Cost(p, d, w);
+
+            if (c <= start)
+            {
+                start = c;
+                centre = d;
+            }
+        }
+    }
 
     if (hasPrediction != 0)
     {
@@ -286,6 +306,58 @@ float Median9(float v[9])
 }
 
 
+// What the whole frame did: the middle of the finished flow on a coarse grid, each answer counted by how sure its match was
+// (each component on its own, so one moving thing does not drag it), skipping sky when there is depth. A flat picture's answers
+// carry no weight, so a few things on it speak for the rest. Written to a 1x1 texture, z = 1 when there was enough weight to say.
+// One group, a thread per grid sample: each finds its weight below its own value (ties by position), and the sample whose
+// weight straddles half of the total is the middle.
+groupshared float3 gSample[128]; // x, y, weight
+groupshared float2 gMiddle;
+
+[numthreads(128, 1, 1)]
+void Global(uint3 id : SV_DispatchThreadID)
+{
+    uint t = id.x;
+    float2 uv = float2((t % 16 + 0.5) / 16.0, (t / 16 + 0.5) / 8.0);
+    float4 f = FlowIn.Load(int3(min(int2(uv * float2(aux)), int2(aux) - 1), 0));
+    float weight = f.z;
+
+    if (depthMatching != 0)
+    {
+        float d = SceneDepth.Load(int3(min(int2(uv * float2(depthSize)), int2(depthSize) - 1), 0));
+
+        if (reversed != 0 ? d <= 1e-6 : d >= 0.999999)
+            weight = 0.0;
+    }
+
+    gSample[t] = float3(f.xy, weight);
+    GroupMemoryBarrierWithGroupSync();
+
+    float total = 0.0;
+    float2 below = 0.0;
+
+    for (uint k = 0; k < 128; ++k)
+    {
+        float3 other = gSample[k];
+        total += other.z;
+        below.x += (other.x < f.x || (other.x == f.x && k < t)) ? other.z : 0.0;
+        below.y += (other.y < f.y || (other.y == f.y && k < t)) ? other.z : 0.0;
+    }
+
+    float middle = 0.5 * total;
+
+    if (below.x < middle && middle <= below.x + weight)
+        gMiddle.x = f.x;
+
+    if (below.y < middle && middle <= below.y + weight)
+        gMiddle.y = f.y;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (t == 0)
+        OutFlow[uint2(0, 0)] = total >= 0.1 ? float4(gMiddle, 1.0, total) : float4(0.0, 0.0, 0.0, total);
+}
+
 // Hue for the direction, brightness for the speed (scale is the speed that is full brightness).
 [numthreads(8, 8, 1)]
 void Visualise(uint3 id : SV_DispatchThreadID)
@@ -389,7 +461,7 @@ OpticalFlowDx12::~OpticalFlowDx12()
 {
     ReleaseTextures();
 
-    for (ID3D12PipelineState** pso : { &_luma, &_down, &_match, &_median, &_smooth, &_visualise })
+    for (ID3D12PipelineState** pso : { &_luma, &_down, &_match, &_median, &_smooth, &_visualise, &_global })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -409,16 +481,16 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
 
     _device = device;
 
-    // One table (five SRVs, one UAV) and the root constants.
+    // One table (six SRVs, one UAV) and the root constants.
     D3D12_DESCRIPTOR_RANGE ranges[2] {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 5;
+    ranges[0].NumDescriptors = 6;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[1].NumDescriptors = 1;
     ranges[1].BaseShaderRegister = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 5;
+    ranges[1].OffsetInDescriptorsFromTableStart = 6;
 
     D3D12_ROOT_PARAMETER params[2] {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -476,7 +548,7 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
 
     for (const Entry& entry : { Entry { "Luma", &_luma }, Entry { "Down", &_down }, Entry { "Match", &_match },
                                 Entry { "Median", &_median }, Entry { "Smooth", &_smooth },
-                                Entry { "Visualise", &_visualise } })
+                                Entry { "Visualise", &_visualise }, Entry { "Global", &_global } })
     {
         ID3DBlob* code = Compile(entry.name, &_error);
 
@@ -558,6 +630,7 @@ void OpticalFlowDx12::ReleaseTextures()
             release(tex);
 
     release(_flowMedian);
+    release(_globalFlow);
     release(_flow);
     release(_preview);
 }
@@ -571,6 +644,7 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
     // to have waited, as it does before replacing its own targets.
     ReleaseTextures();
     _havePrevious = false;
+    _globalReady = false;
     _flowValid = false;
     _width = width;
     _height = height;
@@ -593,6 +667,7 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
     }
 
     return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
+           CreateTexture(_globalFlow, 1, 1, kFlowFormat, L"OpticalFlow_Global") &&
            CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
            CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM, L"OpticalFlow_Preview");
 }
@@ -615,7 +690,8 @@ void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D1
 void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* src0,
                            DXGI_FORMAT format0, ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2,
                            DXGI_FORMAT format2, Tex& dst, DXGI_FORMAT dstFormat, const Constants& constants,
-                           ID3D12Resource* src3, DXGI_FORMAT format3, ID3D12Resource* src4, DXGI_FORMAT format4)
+                           ID3D12Resource* src3, DXGI_FORMAT format3, ID3D12Resource* src4, DXGI_FORMAT format4,
+                           ID3D12Resource* src5, DXGI_FORMAT format5)
 {
     Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -627,12 +703,14 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     cpu.ptr += (SIZE_T) first * _descriptorSize;
     gpu.ptr += (UINT64) first * _descriptorSize;
 
-    ID3D12Resource* sources[5] = { src0, src1 != nullptr ? src1 : src0, src2 != nullptr ? src2 : src0,
-                                   src3 != nullptr ? src3 : src0, src4 != nullptr ? src4 : src0 };
-    const DXGI_FORMAT formats[5] = { format0, src1 != nullptr ? format1 : format0, src2 != nullptr ? format2 : format0,
-                                     src3 != nullptr ? format3 : format0, src4 != nullptr ? format4 : format0 };
+    ID3D12Resource* sources[6] = { src0, src1 != nullptr ? src1 : src0, src2 != nullptr ? src2 : src0,
+                                   src3 != nullptr ? src3 : src0, src4 != nullptr ? src4 : src0,
+                                   src5 != nullptr ? src5 : src0 };
+    const DXGI_FORMAT formats[6] = { format0, src1 != nullptr ? format1 : format0, src2 != nullptr ? format2 : format0,
+                                     src3 != nullptr ? format3 : format0, src4 != nullptr ? format4 : format0,
+                                     src5 != nullptr ? format5 : format0 };
 
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 6; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
         srv.Format = formats[i];
@@ -724,6 +802,8 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.depthX = depthMatching ? (uint32_t) depthDesc.Width : 1;
             constants.depthY = depthMatching ? depthDesc.Height : 1;
             constants.reversed = depthReversed ? 1 : 0;
+            constants.hasGlobal = _globalReady ? 1 : 0;
+            constants.scale = 1.0f / (float) (2 << level); // full-resolution pixels in this level's
 
             if (!coarsest)
             {
@@ -734,7 +814,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             Pass(list, _match, current[level].resource, kLumaFormat, previous[level].resource, kLumaFormat,
                  coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat, constants,
                  (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat,
-                 depthMatching ? depth : nullptr, depthFormat);
+                 depthMatching ? depth : nullptr, depthFormat, _globalReady ? _globalFlow.resource : nullptr, kFlowFormat);
         }
 
         constants = Constants {};
@@ -751,6 +831,24 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, nullptr,
              DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
 
+        if (_settings.globalCandidate)
+        {
+            // What the whole frame did, for the next one to try everywhere (see Global).
+            constants = Constants {};
+            constants.sizeX = 1;
+            constants.sizeY = 1;
+            constants.auxX = _flow.width;
+            constants.auxY = _flow.height;
+            constants.depthMatching = depthMatching ? 1 : 0;
+            constants.depthX = depthMatching ? (uint32_t) depthDesc.Width : 1;
+            constants.depthY = depthMatching ? depthDesc.Height : 1;
+            constants.reversed = depthReversed ? 1 : 0;
+            Pass(list, _global, _flow.resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN,
+                 _globalFlow, kFlowFormat, constants, nullptr, DXGI_FORMAT_UNKNOWN, depthMatching ? depth : nullptr,
+                 depthFormat);
+        }
+
+        _globalReady = _settings.globalCandidate;
         _flowValid = true;
     }
 

@@ -4,7 +4,8 @@
 // motion vectors to take from one). Our own implementation of the standard method: a luma pyramid, block matching from the
 // coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade gradient steps for the sub-pixel part, and a 3x3
 // median over the result. At each level the candidates are the coarser level's answer at the nearest cells, the last
-// frame's flow at the same place and no motion; the best of them is refined by a small search. The match compares windows
+// frame's flow at the same place, what the whole picture moved by last frame and no motion; the best of them is refined by a
+// small search. The match compares windows
 // with their mean brightness taken out (a fade or eye adaptation does not move anything), and with depth it counts only the
 // window's samples on the pixel's own surface (a nearer thing's edge does not drag its motion onto what lies beside it,
 // adaptive support weights). The result is smoothed
@@ -51,7 +52,11 @@ class OpticalFlowDx12
                   bool depthReversed = true);
 
     // Forget the previous frame (a scene cut, a resolution change): the next Dispatch only stores its picture.
-    void Reset() { _havePrevious = false; }
+    void Reset()
+    {
+        _havePrevious = false;
+        _globalReady = false;
+    }
 
     // A picture of the flow for a menu: hue is the direction, brightness the speed up to maxSpeed pixels, black is still.
     // R8G8B8A8_UNORM at the flow's size, left in the PIXEL_SHADER_RESOURCE state. Call after Dispatch() when FlowValid().
@@ -81,6 +86,7 @@ class OpticalFlowDx12
         int smoothRadius = 2;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
         float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
         bool depthMatching = true;      // with depth: the block match counts the window's samples on this pixel's surface
+        bool globalCandidate = true;    // the last frame's whole-picture motion is a candidate everywhere
     };
 
     Settings& Tuning() { return _settings; }
@@ -105,7 +111,7 @@ class OpticalFlowDx12
         uint32_t hasHistory;
         float knee;
         uint32_t coarseCells, depthMatching;
-        uint32_t depthX, depthY, reversed, pad;
+        uint32_t depthX, depthY, reversed, hasGlobal;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -116,7 +122,8 @@ class OpticalFlowDx12
               ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2, DXGI_FORMAT format2, Tex& dst,
               DXGI_FORMAT dstFormat, const Constants& constants, ID3D12Resource* src3 = nullptr,
               DXGI_FORMAT format3 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src4 = nullptr,
-              DXGI_FORMAT format4 = DXGI_FORMAT_UNKNOWN);
+              DXGI_FORMAT format4 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src5 = nullptr,
+              DXGI_FORMAT format5 = DXGI_FORMAT_UNKNOWN);
 
     ID3D12Device* _device = nullptr;
     ID3D12RootSignature* _rootSignature = nullptr;
@@ -126,6 +133,7 @@ class OpticalFlowDx12
     ID3D12PipelineState* _median = nullptr;
     ID3D12PipelineState* _smooth = nullptr;
     ID3D12PipelineState* _visualise = nullptr;
+    ID3D12PipelineState* _global = nullptr;
     ID3D12DescriptorHeap* _heap = nullptr;
     UINT _descriptorSize = 0;
     UINT _heapCursor = 0;
@@ -133,11 +141,13 @@ class OpticalFlowDx12
     Tex _pyramid[2][kLevels]; // luma, 1/2 .. 1/64 of the colour; one set is the current frame, the other the previous
     Tex _levelFlow[2][kLevels]; // this frame's flow at each level, and the last frame's (a candidate for this one)
     Tex _flowMedian; // the median's result, which the smoothing reads
+    Tex _globalFlow; // 1x1: the whole picture's motion in full-resolution pixels, z = 1 when there was enough to say
     Tex _flow;
     Tex _preview;
     int _current = 0;
     bool _havePrevious = false;
     bool _flowValid = false;
+    bool _globalReady = false; // _globalFlow holds the last frame's whole-frame motion
     uint32_t _width = 0;
     uint32_t _height = 0;
 

@@ -29,7 +29,9 @@ struct NativeFrame
     D3D12_RESOURCE_STATES pictureState = D3D12_RESOURCE_STATE_COMMON;
     ColorSpace space = ColorSpace::Srgb;
     ID3D12Resource* depth = nullptr;  // the guides (TrustMaskDx12::BuildGuides): picture-sized, unjittered, and in
-    ID3D12Resource* motion = nullptr; // NON_PIXEL_SHADER_RESOURCE, which the consumer must leave them in
+    ID3D12Resource* motion = nullptr; // NON_PIXEL_SHADER_RESOURCE, which the consumer must leave them in. depth
+                                      // is null on a frame with no depth (the generic finder found none) --
+                                      // the consumer must tolerate that, running on motion alone.
     bool depthReversed = false;
     bool reset = false;               // the frame does not continue the last one
 };
@@ -42,7 +44,7 @@ class NativeProducer
 
     struct Options
     {
-        bool apply = false;           // run the consumer (needs depth); off: flow and trust mask only
+        bool apply = false;           // run the consumer (needs flow; depth is optional); off: flow and trust mask only
         bool flowPreview = false;     // also draw the flow picture for the menu
         float previewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
     };
@@ -51,7 +53,7 @@ class NativeProducer
     {
         bool submitted = false;  // the work was recorded and sent to the queue (the output is then valid)
         bool flowValid = false;
-        bool trustRan = false;   // the trust mask ran in this frame (there was depth)
+        bool trustRan = false;   // the trust mask ran in this frame (depth or not; it degrades gracefully with none)
         bool sceneCut = false;   // the mask saw a hard cut: the histories were reset
         float distrustedShare = 0.0f;
         bool nativeRan = false;  // the consumer ran on the picture

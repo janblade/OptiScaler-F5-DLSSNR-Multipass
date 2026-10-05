@@ -140,16 +140,20 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         if (options.flowPreview)
             _previewReady = _flow->Visualise(list, options.previewMaxSpeed) || _previewReady;
 
-        // The trust mask needs the scene's depth as the adapter copied it this frame.
+        // The trust mask uses the scene's depth as the adapter copied it this frame, when there is any; without
+        // it (the generic depth finder found nothing qualifying for this camera angle), flow-consistency and
+        // luma alone still produce a meaningful mask, and BuildGuides below still produces a flow-only motion
+        // guide -- TrustMaskDx12::Dispatch/BuildGuides degrade gracefully rather than being skipped outright.
+        TrustMaskDx12::Inputs in;
+        in.flow = _flow->Flow();
+        in.flowWidth = _flow->FlowWidth();
+        in.flowHeight = _flow->FlowHeight();
+        in.fullPerFlow = (float) input.width / (float) _flow->FlowWidth();
+        in.lumaNow = _flow->LumaOfLastFrame();
+        in.lumaBefore = _flow->LumaOfFrameBefore();
+
         if (input.depthCount > 0 && input.depthView != DXGI_FORMAT_UNKNOWN)
         {
-            TrustMaskDx12::Inputs in;
-            in.flow = _flow->Flow();
-            in.flowWidth = _flow->FlowWidth();
-            in.flowHeight = _flow->FlowHeight();
-            in.fullPerFlow = (float) input.width / (float) _flow->FlowWidth();
-            in.lumaNow = _flow->LumaOfLastFrame();
-            in.lumaBefore = _flow->LumaOfFrameBefore();
             in.depthCount = (std::min)(input.depthCount, (int) TrustMaskDx12::Inputs::kMaxDepths);
 
             for (int i = 0; i < in.depthCount; ++i)
@@ -159,10 +163,11 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
             in.depthWidth = input.depthWidth;
             in.depthHeight = input.depthHeight;
             in.depthReversed = input.depthReversed;
-            result.trustRan = _trust->Dispatch(list, in);
-            nativeInputs = in;
-            nativeReady = result.trustRan;
         }
+
+        result.trustRan = _trust->Dispatch(list, in);
+        nativeInputs = in;
+        nativeReady = result.trustRan;
 
         // A hard cut: nothing carried over from before it is worth keeping.
         if (_trust->SceneCutSeen())

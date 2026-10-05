@@ -562,9 +562,14 @@ void TrustMaskDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* p
 
 bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 {
+    // in.depthCount == 0 is "no depth this frame" (the scene's generic depth finder found nothing qualifying),
+    // not a caller error: DepthProxy's and Trust's shader loops over depthCount simply do not execute, so the
+    // depth-based disocclusion/reveal checks degrade to no signal (a constant proxy distance every pixel) and
+    // flow-consistency plus luma still produce a meaningful mask. in.depths[0] is only required when there is
+    // at least one copy to read.
     if (_device == nullptr || _trust == nullptr || list == nullptr || in.flow == nullptr || in.lumaNow == nullptr ||
-        in.lumaBefore == nullptr || in.depthCount <= 0 || in.depths[0] == nullptr || in.flowWidth == 0 ||
-        in.flowHeight == 0)
+        in.lumaBefore == nullptr || in.flowWidth == 0 || in.flowHeight == 0 ||
+        (in.depthCount > 0 && in.depths[0] == nullptr))
         return false;
 
     if (!EnsureSize(_device, in.flowWidth, in.flowHeight))
@@ -619,14 +624,19 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 
     // 1. the depth proxy at the flow's size
     {
-        // Eight depth slots (t0..t7): the copies given, the first one again for any not given (every slot needs a view).
+        // Eight depth slots (t0..t7): the copies given, the first one again for any not given (every slot needs a
+        // view). With depthCount == 0 there is nothing to read -- the shader's own loop over depthCount never
+        // executes, so DepthProxy writes a constant "far" nearness regardless -- but Pass() still needs a real,
+        // typed resource at slot 0 to build a valid view from (in.depths[0] is null and in.depthFormat is
+        // DXGI_FORMAT_UNKNOWN then, which crashed CreateShaderResourceView). Stand the flow in; it is never
+        // actually sampled by DepthProxy in this case.
         ID3D12Resource* srv[8];
         DXGI_FORMAT formats[8];
 
         for (int i = 0; i < 8; ++i)
         {
-            srv[i] = i < in.depthCount ? in.depths[i] : in.depths[0];
-            formats[i] = in.depthFormat;
+            srv[i] = i < in.depthCount ? in.depths[i] : (in.depthCount > 0 ? in.depths[0] : in.flow);
+            formats[i] = in.depthCount > 0 ? in.depthFormat : kFlowFormat;
         }
         Pass(list, _depthProxy, srv, formats, _depth[write], kDepthFormat, groupsX, groupsY, constants);
     }
@@ -700,8 +710,10 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 
 bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& in, uint32_t width, uint32_t height)
 {
-    if (_device == nullptr || _guideDepthPso == nullptr || list == nullptr || in.flow == nullptr || in.depthCount <= 0 ||
-        in.depths[0] == nullptr || width == 0 || height == 0)
+    // in.depthCount == 0 still builds a motion-only guide (GuideMotion(), from the flow alone); the depth guide
+    // pass is skipped below and GuideDepth() reports null rather than a previous frame's depth.
+    if (_device == nullptr || _guideDepthPso == nullptr || list == nullptr || in.flow == nullptr || width == 0 ||
+        height == 0 || (in.depthCount > 0 && in.depths[0] == nullptr))
         return false;
 
     if (_guideDepth.resource == nullptr || _guideDepth.width != width || _guideDepth.height != height)
@@ -733,6 +745,7 @@ bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& i
     const uint32_t groupsX = (width + 7) / 8;
     const uint32_t groupsY = (height + 7) / 8;
 
+    if (in.depthCount > 0)
     {
         ID3D12Resource* srv[8];
         DXGI_FORMAT formats[8];
@@ -744,6 +757,13 @@ bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& i
         }
 
         Pass(list, _guideDepthPso, srv, formats, _guideDepth, kDepthFormat, groupsX, groupsY, constants);
+        _guideDepthValid = true;
+    }
+    else
+    {
+        // Nothing written this call: leave the texture as it was (same rest state, no barrier needed) and do
+        // not publish it -- GuideDepth() returns null until a frame with depth runs this again.
+        _guideDepthValid = false;
     }
 
     {

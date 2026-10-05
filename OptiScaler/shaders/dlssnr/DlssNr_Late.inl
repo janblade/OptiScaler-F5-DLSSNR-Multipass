@@ -562,6 +562,11 @@ DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FOR
     return colorSpace;
 }
 
+bool NativeInputBlockedBySwapChainInterop()
+{
+    return State::Instance().swapchainInteropApi != SwapchainInteropApi::None;
+}
+
 bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
                       ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
                       DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState)
@@ -574,7 +579,7 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
         return false;
     }
     // depth is optional (DlssNr_Dx12::Dispatch tolerates a null depth guide); colour and motion are not.
-    if (!queue || !cmd || !color || !motion || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+    if (!queue || !cmd || !color || !motion || NativeInputBlockedBySwapChainInterop())
         return false;
     if (Late::PausedForGameFrameGeneration())
     {

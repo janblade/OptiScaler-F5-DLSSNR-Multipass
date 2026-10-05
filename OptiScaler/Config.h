@@ -374,7 +374,7 @@ class Config
 
     // LUT-apply epic (dlssnr-lut-apply), Story 2: a .cube file graded onto the
     // NR input image before the model ever sees it. Empty (the default) is the feature not existing -- no
-    // parse, no GPU texture, no dispatch. Accepts a path outside the bundled LUTs folder too.
+    // parse, no GPU texture, no dispatch. Accepts a path outside OptiScaler\LUTs too.
     CustomOptional<std::string> DlssNrLutFile { std::string() };
     // How much of the LUT's grade reaches the image, 0..1. Default is fully graded once a LutFile is set.
     CustomOptional<float> DlssNrLutStrength { 1.0f };

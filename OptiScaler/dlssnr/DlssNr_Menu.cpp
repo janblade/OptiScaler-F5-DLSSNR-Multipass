@@ -72,15 +72,22 @@ static void StatusSlotEnd(float begin, int lines)
         ImGui::Dummy(ImVec2(0.0f, gap));
 }
 
-// `*.cube` files in `LUTs` beside OptiScaler.dll, for the LUT combo below. Scanned once (first menu
-// render) and on demand (the Rescan button) rather than every frame -- a directory listing is not
-// worth paying for on every one of a menu's many redraws, and the folder only changes when the user
-// drops a new file in.
+// `*.cube` files in `LUTs` inside the OptiScaler folder (MainDllPath: `OptiScaler` beside the game exe, or
+// [Libraries] OptiDllPath -- where the bundled streamline/plugins folders live too), for the LUT combo below.
+// Scanned once (first menu render) and on demand (the Rescan button) rather than every frame -- a directory
+// listing is not worth paying for on every one of a menu's many redraws, and the folder only changes when the
+// user drops a new file in.
+static std::filesystem::path LutFolder()
+{
+    return std::filesystem::path(Config::Instance()->MainDllPath.value_or(Util::DllPath().parent_path().wstring())) /
+           L"LUTs";
+}
+
 static std::vector<std::filesystem::path> ScanLutFolder()
 {
     std::vector<std::filesystem::path> found;
     std::error_code ec;
-    const std::filesystem::path lutsDir = Util::DllPath().parent_path() / "LUTs";
+    const std::filesystem::path lutsDir = LutFolder();
 
     if (!std::filesystem::exists(lutsDir, ec) || ec)
         return found;
@@ -2287,7 +2294,7 @@ static void RenderOutputPage(Config* config, float menuResScale)
     }
 
     // A 3D LUT (.cube) graded onto the NR input image before the model sees it (dlssnr-lut-apply epic,
-    // Story 4). Scanned from a LUTs folder beside OptiScaler.dll; LutFile also accepts any path typed
+    // Story 4). Scanned from the LUTs folder inside the OptiScaler folder; LutFile also accepts any path typed
     // into the ini directly, so the combo's preview shows the current selection's filename even when it
     // is not one of the scanned entries.
     {
@@ -2321,8 +2328,9 @@ static void RenderOutputPage(Config* config, float menuResScale)
             lutFiles = ScanLutFolder();
 
         HelpMarker("A 3D LUT (.cube file -- Adobe/DaVinci/ReShade format) graded onto the NR input image "
-                   "before the model ever sees it. Drop files into a LUTs folder beside OptiScaler.dll and "
-                   "press Rescan to list them here, or set LutFile in the ini to any path directly.\nThis "
+                   "before the model ever sees it. Drop files into OptiScaler\\LUTs (the OptiScaler folder "
+                   "beside the game's exe) and press Rescan to list them here, or set LutFile in the ini to "
+                   "any path directly.\nThis "
                    "grades the image NR works from, not the final picture -- a strong or unusual grade can "
                    "affect auto-exposure, skin-tone masking and detail reuse the same way an unusual game "
                    "colour grade would.");

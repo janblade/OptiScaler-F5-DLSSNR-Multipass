@@ -248,6 +248,7 @@ class Host
                                        0.5f, 2.0f);
         params.DebugView = f.cfg->DlssNrDetailReuseDebug.value_or_default() ? 1u : 0u;
         params.ReplaceCurve = replaceCurve;
+        params.MotionReject = kDlssNrDetailReuseMotionReject;
     }
 
     // The end of the frame's decision. Returns whether the model's history must start over: it last ran two frames ago

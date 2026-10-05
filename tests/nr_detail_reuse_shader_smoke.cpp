@@ -188,6 +188,7 @@ static DlssNrDetailReuseConstants Base(DlssNrDetailReuseMode mode)
     c.ClipGamma = kDlssNrDetailReuseClipGamma;
     c.ClipFalloff = kDlssNrDetailReuseClipFalloff;
     c.SigmaFloor = kDlssNrDetailReuseSigmaFloor;
+    c.MotionReject = kDlssNrDetailReuseMotionReject;
     return c;
 }
 
@@ -468,6 +469,52 @@ try
         const auto edgeSaved = Fill([](unsigned x, unsigned) { return Px { 0.5f, 0.5f, 0.5f, x >= 8 ? 0.5f : 0.1f }; });
         const auto out = gpu.Run(Base(DlssNrDetailReuse_Reproject), { grey, detail, edgeSaved, edgeMotion, edgeDepth });
         expect(Near3(out.at(7, 2), Plus(Grey(0.5f), Detail(9, 2))), "Reproject: a tie keeps the nearer surface's motion");
+    }
+
+    // A square (x 8..11, moving so previous = current + 2) over a still background, one surface and one colour, so
+    // neither depth nor colour can tell anything apart. The square's trailing pixels (x 10, 11) point at x 12, 13,
+    // where the current vectors are the background's: the place they came from moves differently now, so their moved
+    // detail is dropped. The leading pixels (x 8, 9) point inside the square and follow it; the background is still.
+    {
+        const auto squareMotion =
+            Fill([](unsigned x, unsigned) { return x >= 8 && x < 12 ? Px { 2, 0, 0, 0 } : Px { 0, 0, 0, 0 }; });
+        const auto out =
+            gpu.Run(Base(DlssNrDetailReuse_Reproject), { grey, detail, savedColourDepth, squareMotion, depth });
+        bool follows = true, dropped = true, stays = true;
+        for (unsigned y = 0; y < H; ++y)
+        {
+            for (unsigned x = 8; x < 10; ++x)
+                follows = follows && Near3(out.at(x, y), Plus(Grey(0.5f), Detail(x + 2, y)));
+            for (unsigned x = 10; x < 12; ++x)
+                dropped = dropped && Near3(out.at(x, y), Grey(0.5f));
+            for (unsigned x = 0; x < W; ++x)
+                stays = stays && (x >= 8 && x < 12 || Near3(out.at(x, y), withDetail(grey, x, y)));
+        }
+        expect(follows, "Reproject: pixels whose source moves with them keep their moved detail");
+        expect(dropped, "Reproject: moved detail dropped where the vectors at its source disagree");
+        expect(stays, "Reproject: still background beside a moving square keeps its detail");
+
+        DlssNrDetailReuseConstants off = Base(DlssNrDetailReuse_Reproject);
+        off.MotionReject = 0.0f;
+        const auto unchecked = gpu.Run(off, { grey, detail, savedColourDepth, squareMotion, depth });
+        expect(Near3(unchecked.at(10, 3), Plus(Grey(0.5f), Detail(12, 3))),
+               "Reproject: MotionReject 0 switches the check off");
+
+        // The same square seen with a small difference (sub-pixel noise between neighbours) is not a disagreement.
+        const auto jitter = Fill([](unsigned x, unsigned) { return Px { x >= 8 && x < 12 ? 2.0f : 1.8f, 0, 0, 0 }; });
+        const auto soft = gpu.Run(Base(DlssNrDetailReuse_Reproject), { grey, detail, savedColourDepth, jitter, depth });
+        expect(Near3(soft.at(10, 3), Plus(Grey(0.5f), Detail(12, 3)), 0.02f) &&
+                   Near3(soft.at(3, 3), Plus(Grey(0.5f), Detail(5, 3)), 0.02f),
+               "Reproject: a small difference between neighbouring vectors keeps the moved detail");
+
+        // Debug view: dropped by motion is yellow, not the magenta of the other drops.
+        DlssNrDetailReuseConstants debug = Base(DlssNrDetailReuse_Reproject);
+        debug.DebugView = 1;
+        const auto painted = gpu.Run(debug, { grey, detail, savedColourDepth, squareMotion, depth });
+        expect(Near3(painted.at(10, 3), { 1, 1, 0, 1 }), "Reproject debug view: dropped by motion is yellow");
+        const auto farther = Fill([](unsigned, unsigned) { return Px { 0.5f, 0.5f, 0.5f, 0.15f }; });
+        const auto byDepth = gpu.Run(debug, { grey, detail, farther, still, depth });
+        expect(Near3(byDepth.at(5, 3), { 1, 0, 1, 1 }), "Reproject debug view: dropped by depth stays magenta");
     }
 
     // NaN in the saved detail: finite output, and no trust in the estimate there.

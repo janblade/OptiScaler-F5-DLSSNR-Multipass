@@ -480,6 +480,108 @@ int main()
         }
     }
 
+    // Lists that interleave their events: whatever any list drew into a buffer counts at a clear or an unbind made by another,
+    // as when every draw was added to the buffer at once. The expected values are the locked core's (the test passes on it).
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored); // the floor is 2% of 1.2M vertices: 24000
+
+        // List 200 draws the scene and stays open; list 201, bound to the shadow map, clears the scene buffer.
+        core.OnDepthBound(200, true, &kScene);
+        core.OnViewport(200, (float) W);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(200, 6000, 1);
+
+        core.OnDepthBound(201, true, &kShadow);
+        const auto cleared = core.OnDepthClear(201, kScene, 0.0f);
+        CHECK(cleared.take && cleared.id == 0xA && std::string(cleared.where) == "clear");
+        CHECK(cleared.stretchVertices == 200 * 6000);
+
+        core.OnContextEnd(200);
+        core.OnContextEnd(201);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+
+        // Lists 300 and 301 both draw into the scene; 301 moves off it first, with only together enough to be copied.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(300, (float) W);
+        core.OnViewport(301, (float) W);
+        for (int i = 0; i < 3; ++i)
+            core.OnDraw(300, 6000, 1);
+        for (int i = 0; i < 2; ++i)
+            core.OnDraw(301, 6000, 1);
+
+        const auto left = core.OnDepthBound(301, false, nullptr);
+        CHECK(left.take && left.id == 0xA && std::string(left.where) == "unbind");
+        CHECK(left.stretchVertices == 5 * 6000);
+
+        // The stretch was taken whole at the unbind: the other list's close has nothing left to copy.
+        CHECK(!core.OnContextEnd(300).take);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+    }
+
+    // An adapter whose one context id is drawn on from several threads (D3D11's deferred contexts go through the immediate
+    // context's hooks): with shared contexts every draw counts.
+    {
+        DepthFinderCore core;
+        core.SetSharedContexts(true);
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored);
+
+        core.OnDepthBound(1, true, &kScene);
+        core.OnViewport(1, (float) W);
+        ForEachContext(4, true,
+                       [&](int)
+                       {
+                           for (int i = 0; i < 20000; ++i)
+                               core.OnDraw(1, 100, 1);
+                       });
+
+        const auto left = core.OnDepthBound(1, false, nullptr);
+        CHECK(left.take && left.stretchVertices == 4ull * 20000 * 100);
+    }
+
+    // Lists a game makes once and lets go are retired after a while, and the finder keeps working: a list id seen again later
+    // (a new list at a reused address) counts as before.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int list = 0; list < 64; ++list)
+        {
+            core.OnDepthBound(1000 + list, true, &kShadow);
+            core.OnDraw(1000 + list, 3000, 1);
+            core.OnContextEnd(1000 + list);
+        }
+
+        for (int frame = 0; frame < 1400; ++frame)
+            SingleContextFrame(core, ignored);
+
+        CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+
+        core.OnDepthBound(1000, true, &kScene);
+        for (int i = 0; i < 50; ++i)
+            core.OnDraw(1000, 9000, 1);
+        const auto closed = core.OnContextEnd(1000);
+        CHECK(closed.take && closed.stretchVertices == 50 * 9000);
+    }
+
     printf(fails == 0 ? "all passed\n" : "FAILED (%d)\n", fails);
     return fails == 0 ? 0 : 1;
 }

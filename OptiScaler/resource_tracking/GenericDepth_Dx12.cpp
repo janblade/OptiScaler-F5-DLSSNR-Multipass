@@ -531,18 +531,21 @@ std::unordered_map<PVOID*, bool> g_examined;
 int g_patchLogs = 0;
 
 // The tables patched so far, only ever added to: an entry is written whole, then published by raising the count (release), so a
-// thunk reads the table without a lock (acquire) on every call of a patched function. A table that finds it full is left
-// alone: its list is not counted.
+// thunk reads the table without a lock (acquire) on every call of a patched function. The entries live in blocks that are made
+// as they are needed and never freed, so a published entry never moves.
 struct PatchedTable
 {
     PVOID* table = nullptr;
     TablePatch patch;
 };
 
-constexpr int kMaxPatchedTables = 256;
-PatchedTable g_patchedTables[kMaxPatchedTables];
+constexpr int kPatchedBlock = 256;
+constexpr int kPatchedBlocks = 256;
+PatchedTable* g_patchedBlocks[kPatchedBlocks] {};
 std::atomic<int> g_patchedCount { 0 };
 bool g_patchedFullLogged = false;
+
+const PatchedTable& PatchedAt(int i) { return g_patchedBlocks[i / kPatchedBlock][i % kPatchedBlock]; }
 
 PVOID PreviousOf(ID3D12GraphicsCommandList* list, int slot)
 {
@@ -558,9 +561,9 @@ PVOID PreviousOf(ID3D12GraphicsCommandList* list, int slot)
     const int count = g_patchedCount.load(std::memory_order_acquire);
 
     for (int i = 0; i < count; ++i)
-        if (g_patchedTables[i].table == table)
+        if (PatchedAt(i).table == table)
         {
-            cached = &g_patchedTables[i];
+            cached = &PatchedAt(i);
             return cached->patch.previous[slot];
         }
 
@@ -670,21 +673,25 @@ void PatchListTable(ID3D12GraphicsCommandList* list)
         std::lock_guard lock(g_mutex);
         const int count = g_patchedCount.load(std::memory_order_relaxed);
 
-        if (count >= kMaxPatchedTables)
+        if (count >= kPatchedBlock * kPatchedBlocks)
         {
             if (!g_patchedFullLogged)
             {
                 g_patchedFullLogged = true;
                 LOG_WARN("Depth finder: more than {} game command list vtables; the rest are not counted",
-                         kMaxPatchedTables);
+                         kPatchedBlock * kPatchedBlocks);
             }
 
             return;
         }
 
+        if (g_patchedBlocks[count / kPatchedBlock] == nullptr)
+            g_patchedBlocks[count / kPatchedBlock] = new PatchedTable[kPatchedBlock];
+
         // Before the entries change, so a thunk that runs at once finds what to call.
-        g_patchedTables[count].table = table;
-        g_patchedTables[count].patch = patch;
+        PatchedTable& entry = g_patchedBlocks[count / kPatchedBlock][count % kPatchedBlock];
+        entry.table = table;
+        entry.patch = patch;
         g_patchedCount.store(count + 1, std::memory_order_release);
     }
 

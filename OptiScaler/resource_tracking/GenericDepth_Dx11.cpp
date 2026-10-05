@@ -183,6 +183,24 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
     return true;
 }
 
+// Under g_mutex. Lets go of the cached read view and the reference it keeps on the game's depth buffer.
+void ReleaseSourceView()
+{
+    if (g_sourceSrv != nullptr)
+    {
+        g_sourceSrv->Release();
+        g_sourceSrv = nullptr;
+    }
+
+    if (g_sourceSrvResource != nullptr)
+    {
+        g_sourceSrvResource->Release();
+        g_sourceSrvResource = nullptr;
+    }
+
+    g_sourceSrvFormat = DXGI_FORMAT_UNKNOWN;
+}
+
 // Reads `resource` (the picked buffer, in whatever format the game made it) through the linearize shader into the frame's
 // D3D11-side slot, recreating it if the size changed.
 void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Resource* resource, uint32_t width,
@@ -258,17 +276,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
 
     if (g_sourceSrv == nullptr || g_sourceSrvResource != resource || g_sourceSrvFormat != view)
     {
-        if (g_sourceSrv != nullptr)
-        {
-            g_sourceSrv->Release();
-            g_sourceSrv = nullptr;
-        }
-
-        if (g_sourceSrvResource != nullptr)
-        {
-            g_sourceSrvResource->Release();
-            g_sourceSrvResource = nullptr;
-        }
+        ReleaseSourceView();
 
         D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
         srvDesc.Format = view;
@@ -585,6 +593,8 @@ void Install(ID3D11Device* device)
     }
 
     g_installFailed = false;
+    // Every draw counts on the immediate context's id, whichever context makes it, so draws count under the core's lock.
+    g_core.SetSharedContexts(true);
     g_core.Start([](const std::string& line) { LOG_INFO("{}", line); });
     g_installed = true;
     LOG_INFO("Depth finder (D3D11): observing the game's depth buffers (immediate context only), after {} frames of "
@@ -683,6 +693,16 @@ void OnPresent(IDXGISwapChain* swapChain)
     {
         std::lock_guard lock(g_mutex);
         g_copyTaken = false;
+    }
+
+    // The cached read view keeps the buffer it reads alive: once that buffer is no longer the pick (a resolution change made
+    // a new one, or the finder stood down), it goes, so the game's own release frees the old buffer.
+    {
+        const auto pick = g_core.CurrentPick();
+        std::lock_guard lock(g_mutex);
+
+        if (g_sourceSrvResource != nullptr && (!pick.valid || pick.id != (uint64_t) (size_t) g_sourceSrvResource))
+            ReleaseSourceView();
     }
 }
 

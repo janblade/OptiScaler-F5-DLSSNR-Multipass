@@ -89,6 +89,11 @@ class DepthFinderCore
     // Whether the adapter should copy the picked depth at all (the overlay or the motion step wants it).
     void SetSnapshotsWanted(bool wanted) { _snapshotsWanted = wanted; }
 
+    // For an adapter whose context ids are not one per recording thread (D3D11 counts every draw on the immediate context's
+    // id, whichever context made it): draws then count under the lock, as one context may be written by several threads.
+    // Call before Start.
+    void SetSharedContexts(bool shared) { _sharedContexts = shared; }
+
     // ---- the game's upscaler: a game that has one needs no finder ---------------------------------------------------------
     // One relaxed store, callable from anywhere on every upscaler call. OnPresent decides what it means. A no-op inside a
     // SyntheticUpscalerCallScope on this thread.
@@ -154,9 +159,15 @@ class DepthFinderCore
         float lastViewportWidth = 0.0f;
     };
 
+    struct ContextState;
+
     // One depth buffer's counts for the frame being recorded.
     struct Stats
     {
+        // The contexts bound to it now. What they drew since their last fold is added before anything is decided about this
+        // buffer, so its counts hold every draw made into it so far, whichever context made it, as when each draw was added at
+        // once.
+        std::vector<ContextState*> bound;
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t format = 0;
@@ -174,8 +185,8 @@ class DepthFinderCore
 
     // What one context has done. The first group is written only by the thread recording the context, with a relaxed load and
     // store (no lock, no read-modify-write), and only ever grows; the folding side reads it under _mutex and never resets it.
-    // The second group is under _mutex. Nodes of _contexts are never freed while the hooks can run, so the draw path keeps
-    // pointers to them.
+    // The second group is under _mutex. The draw path keeps pointers to nodes of _contexts, so a node is freed only well after
+    // every thread's cache has stopped pointing at it (see _retired).
     struct ContextState
     {
         std::atomic<uint64_t> vertices { 0 };      // vertices of every draw (instances counted) since the start
@@ -187,8 +198,9 @@ class DepthFinderCore
         std::atomic<float> viewportWidth { 0.0f }; // its main viewport
         std::atomic<float> lastRealViewport { 0.0f }; // the viewport at its last real draw
 
-        Stats* stats = nullptr; // the depth buffer this context draws into now
+        Stats* stats = nullptr; // the depth buffer this context draws into now (it is in that buffer's `bound`)
         uint64_t epoch = 0;     // the _epoch its viewport was last valid in (a stand-down forgets viewports)
+        uint64_t lastSeen = 0;  // the present count at its last bind, clear, close or flush
         uint64_t foldedVertices = 0; // how much of the above is already in the buffer's counts
         uint64_t foldedDrawcalls = 0;
         uint64_t foldedIndirectCalls = 0;
@@ -202,6 +214,13 @@ class DepthFinderCore
     // Under _mutex. Adds what the context drew since the last fold to the counts of the buffer it is bound to (or drops it if
     // it is bound to none), so those counts are as if every draw had been added at once.
     void Fold(ContextState& context);
+    // Under _mutex. Folds every context bound to the buffer: before a decision about it.
+    void FoldBuffer(Stats& stats);
+    // Under _mutex. Moves the context to another buffer (or none), keeping both buffers' `bound` right.
+    void Bind(ContextState& context, Stats* stats);
+    // Under _mutex, from BeginPresent. Contexts not seen for a long time (lists a game made once and let go) leave the map,
+    // and are freed a while later.
+    void RetireIdleContexts();
     // Under _mutex. What Fold would add, without changing anything.
     void Pending(const ContextState& context, DrawStats& total) const;
     static void Bump(std::atomic<uint64_t>& counter, uint64_t by)
@@ -235,10 +254,18 @@ class DepthFinderCore
     // Another core's id must never match this one's in a thread's cache, even at the same address.
     static uint64_t NextInstanceId();
     const uint64_t _instanceId = NextInstanceId();
-    // Changes when the tracking is dropped (a stand-down): threads look their contexts up again.
+    // Changes when the tracking is dropped (a stand-down): contexts forget their viewports.
     std::atomic<uint64_t> _epoch { 1 };
+    // Changes on a stand-down and when contexts are retired: threads look their contexts up again.
+    std::atomic<uint64_t> _cacheEpoch { 1 };
+    bool _sharedContexts = false;
 
-    std::unordered_map<uint64_t, ContextState> _contexts; // node-stable, and never cleared: see ContextState
+    std::unordered_map<uint64_t, ContextState> _contexts; // node-stable: see ContextState
+    // Contexts taken out of the map, with the present count they left at. A thread's cache can still point at one until it
+    // sees the new _cacheEpoch, which it does on its next draw; the node is freed only kRetireGrace presents later.
+    std::vector<std::pair<uint64_t, std::unordered_map<uint64_t, ContextState>::node_type>> _retired;
+    uint64_t _retiredDraws = 0;    // the retired contexts' share of the log's counts
+    uint64_t _retiredIndirect = 0;
     std::unordered_map<uint64_t, Stats> _stats; // node-stable: _contexts holds pointers into it
     std::vector<GenericDepthSelect::Candidate> _frameCandidates;
     uint64_t _snapshotFloor = 0;
@@ -252,6 +279,9 @@ class DepthFinderCore
     GenericDepthSelect::Pick _pick;
 
     static constexpr uint64_t kLogEveryFrames = 600;
+    // A context unseen for this many presents is retired (looked at every kLogEveryFrames), and freed kRetireGrace later.
+    static constexpr uint64_t kRetireAfter = 600;
+    static constexpr uint64_t kRetireGrace = 120;
     // The finder stands down while the game is calling an upscaler and wakes again once it has stopped for this many presents
     // (a game's settings menu turning its upscaler off: Cyberpunk creates its Ray Reconstruction feature at startup, long
     // before anyone reaches the setting). About two seconds at 60 fps.

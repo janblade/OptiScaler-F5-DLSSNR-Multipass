@@ -907,7 +907,7 @@ int main(int argc, char** argv)
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
                "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f\n",
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
-               tuning.smoothRadius, tuning.confidenceKnee, tuning.depthMatching ? 1 : 0, tuning.globalCandidate ? 1 : 0,
+               std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0, tuning.globalCandidate ? 1 : 0,
                tuning.inverseRefinement ? 1 : 0, panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(),
                thinAliasError.Mean(), edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(),
                smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean());

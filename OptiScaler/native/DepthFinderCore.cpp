@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <format>
+#include <iterator>
 
 namespace native
 {
@@ -65,6 +66,7 @@ thread_local CachedContext g_contextCache[kContextCacheSize];
 DepthFinderCore::ContextState& DepthFinderCore::ContextLocked(uint64_t context)
 {
     auto& state = _contexts[context];
+    state.lastSeen = _presents;
     const uint64_t epoch = _epoch.load(std::memory_order_relaxed);
 
     // A stand-down forgets what a context knew of its viewport, as dropping its entry used to.
@@ -83,7 +85,7 @@ DepthFinderCore::ContextState& DepthFinderCore::ContextForDraw(uint64_t context)
     CachedContext& entry = g_contextCache[((context >> 4) ^ (context >> 9)) % kContextCacheSize];
 
     if (entry.instance == _instanceId && entry.context == context &&
-        entry.epoch == _epoch.load(std::memory_order_relaxed))
+        entry.epoch == _cacheEpoch.load(std::memory_order_acquire))
         return *static_cast<ContextState*>(entry.state);
 
     std::lock_guard lock(_mutex);
@@ -91,9 +93,69 @@ DepthFinderCore::ContextState& DepthFinderCore::ContextForDraw(uint64_t context)
     ContextState& state = ContextLocked(context);
     entry.instance = _instanceId;
     entry.context = context;
-    entry.epoch = _epoch.load(std::memory_order_relaxed);
+    entry.epoch = _cacheEpoch.load(std::memory_order_relaxed);
     entry.state = &state;
     return state;
+}
+
+void DepthFinderCore::Bind(ContextState& context, Stats* stats)
+{
+    if (context.stats == stats)
+        return;
+
+    if (context.stats != nullptr)
+    {
+        auto& bound = context.stats->bound;
+        const auto found = std::find(bound.begin(), bound.end(), &context);
+
+        if (found != bound.end())
+        {
+            *found = bound.back();
+            bound.pop_back();
+        }
+    }
+
+    context.stats = stats;
+
+    if (stats != nullptr)
+        stats->bound.push_back(&context);
+}
+
+void DepthFinderCore::FoldBuffer(Stats& stats)
+{
+    for (ContextState* context : stats.bound)
+        Fold(*context);
+}
+
+void DepthFinderCore::RetireIdleContexts()
+{
+    // Free what was retired long enough ago that no thread can still be inside a draw on it.
+    std::erase_if(_retired, [this](const auto& retired) { return _presents - retired.first > kRetireGrace; });
+
+    bool any = false;
+
+    for (auto it = _contexts.begin(); it != _contexts.end();)
+    {
+        const ContextState& state = it->second;
+
+        if (state.stats != nullptr || _presents - state.lastSeen <= kRetireAfter)
+        {
+            ++it;
+            continue;
+        }
+
+        _retiredDraws += state.drawcalls.load(std::memory_order_relaxed) - state.indirectCalls.load(std::memory_order_relaxed);
+        _retiredIndirect += state.indirectEvents.load(std::memory_order_relaxed);
+
+        auto next = std::next(it);
+        _retired.emplace_back(_presents, _contexts.extract(it));
+        it = next;
+        any = true;
+    }
+
+    // Threads find their contexts through the map again, never through a cached pointer to a retired one.
+    if (any)
+        _cacheEpoch.fetch_add(1, std::memory_order_release);
 }
 
 void DepthFinderCore::Fold(ContextState& context)
@@ -138,8 +200,8 @@ void DepthFinderCore::Pending(const ContextState& context, DrawStats& pending) c
 void DepthFinderCore::CountEvents(uint64_t& draws, uint64_t& indirect) const
 {
     std::lock_guard lock(_mutex);
-    draws = 0;
-    indirect = 0;
+    draws = _retiredDraws;
+    indirect = _retiredIndirect;
 
     for (const auto& context : _contexts)
     {
@@ -154,16 +216,27 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
     if (!_active.load(std::memory_order_relaxed))
         return;
 
-    ContextState& state = ContextForDraw(context);
-
-    Bump(state.vertices, vertices * instances);
-    Bump(state.drawcalls, 1);
-
-    // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
-    if (!(vertices == 6 && instances == 1))
+    const auto count = [vertices, instances](ContextState& state)
     {
-        Bump(state.realDraws, 1);
-        state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        Bump(state.vertices, vertices * instances);
+        Bump(state.drawcalls, 1);
+
+        // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
+        if (!(vertices == 6 && instances == 1))
+        {
+            Bump(state.realDraws, 1);
+            state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+    };
+
+    if (_sharedContexts)
+    {
+        std::lock_guard lock(_mutex);
+        count(ContextLocked(context));
+    }
+    else
+    {
+        count(ContextForDraw(context));
     }
 }
 
@@ -172,13 +245,24 @@ void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
     if (!_active.load(std::memory_order_relaxed))
         return;
 
-    ContextState& state = ContextForDraw(context);
+    const auto count = [maxCount](ContextState& state)
+    {
+        Bump(state.indirectEvents, 1);
+        Bump(state.drawcalls, maxCount);
+        Bump(state.indirectCalls, maxCount);
+        Bump(state.realDraws, 1);
+        state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    };
 
-    Bump(state.indirectEvents, 1);
-    Bump(state.drawcalls, maxCount);
-    Bump(state.indirectCalls, maxCount);
-    Bump(state.realDraws, 1);
-    state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    if (_sharedContexts)
+    {
+        std::lock_guard lock(_mutex);
+        count(ContextLocked(context));
+    }
+    else
+    {
+        count(ContextForDraw(context));
+    }
 }
 
 void DepthFinderCore::OnViewport(uint64_t context, float width)
@@ -187,7 +271,15 @@ void DepthFinderCore::OnViewport(uint64_t context, float width)
     if (!_active.load(std::memory_order_relaxed))
         return;
 
-    ContextForDraw(context).viewportWidth.store(width, std::memory_order_relaxed);
+    if (_sharedContexts)
+    {
+        std::lock_guard lock(_mutex);
+        ContextLocked(context).viewportWidth.store(width, std::memory_order_relaxed);
+    }
+    else
+    {
+        ContextForDraw(context).viewportWidth.store(width, std::memory_order_relaxed);
+    }
 }
 
 SnapshotRequest DepthFinderCore::OnDepthBound(uint64_t context, bool hadDepth, const DepthBuffer* bound)
@@ -216,8 +308,13 @@ SnapshotRequest DepthFinderCore::OnDepthBound(uint64_t context, bool hadDepth, c
     // the clear never offers a snapshot. The moment the context moves off it is the other chance: the busiest stretch of the
     // frame is copied there, in the state the view says the buffer is in.
     ContextState& state = ContextLocked(context);
-    Fold(state);
     Stats* previous = state.stats;
+
+    // Every draw into the buffer it leaves, from any context, is in its counts before they are judged.
+    if (previous != nullptr)
+        FoldBuffer(*previous);
+    else
+        Fold(state);
 
     if (previous != nullptr && previous != boundStats && _snapshotsWanted.load(std::memory_order_relaxed) &&
         _pick.valid && previous->resource != 0 && _pick.id == previous->resource && previous->current.drawcalls != 0)
@@ -234,7 +331,7 @@ SnapshotRequest DepthFinderCore::OnDepthBound(uint64_t context, bool hadDepth, c
         previous->current = DrawStats {};
     }
 
-    state.stats = boundStats;
+    Bind(state, boundStats);
 
     _counters.binds.fetch_add(1, std::memory_order_relaxed);
 
@@ -258,10 +355,12 @@ SnapshotRequest DepthFinderCore::OnDepthClear(uint64_t context, const DepthBuffe
 
     std::lock_guard lock(_mutex);
 
-    // What this context drew so far counts before the clear (draws on other contexts count from their own next event).
-    Fold(ContextLocked(context));
+    ContextLocked(context);
 
     auto& stats = _stats[buffer.id];
+
+    // Every draw into the buffer so far, from any context bound to it, counts before the clear.
+    FoldBuffer(stats);
     stats.width = buffer.width;
     stats.height = buffer.height;
     stats.format = buffer.format;
@@ -326,12 +425,16 @@ SnapshotRequest DepthFinderCore::OnContextEnd(uint64_t context)
     if (found == _contexts.end())
         return request;
 
-    Fold(found->second);
+    found->second.lastSeen = _presents;
 
     if (found->second.stats == nullptr)
+    {
+        Fold(found->second);
         return request;
+    }
 
     Stats* stats = found->second.stats;
+    FoldBuffer(*stats);
 
     if (_snapshotsWanted.load(std::memory_order_relaxed) && _pick.valid && stats->resource != 0 &&
         _pick.id == stats->resource && stats->current.drawcalls != 0)
@@ -348,7 +451,7 @@ SnapshotRequest DepthFinderCore::OnContextEnd(uint64_t context)
         stats->current = DrawStats {};
     }
 
-    found->second.stats = nullptr;
+    Bind(found->second, nullptr);
     return request;
 }
 
@@ -366,12 +469,16 @@ SnapshotRequest DepthFinderCore::FlushForPresent(uint64_t context)
     if (found == _contexts.end())
         return request;
 
-    Fold(found->second);
+    found->second.lastSeen = _presents;
 
     if (found->second.stats == nullptr)
+    {
+        Fold(found->second);
         return request;
+    }
 
     Stats* stats = found->second.stats;
+    FoldBuffer(*stats);
 
     if (_snapshotsWanted.load(std::memory_order_relaxed) && _pick.valid && stats->resource != 0 &&
         _pick.id == stats->resource && stats->current.drawcalls != 0 && stats->current.vertices >= _snapshotFloor)
@@ -395,9 +502,10 @@ uint64_t DepthFinderCore::BeginPresent(uint32_t pictureWidth, uint32_t pictureHe
 
     _pictureWidth = (float) pictureWidth;
 
-    // What every context drew since its last event counts in this frame.
-    for (auto& context : _contexts)
-        Fold(context.second);
+    // What every bound context drew since its last event counts in this frame (an unbound one's draws count nowhere, and are
+    // dropped at its next bind).
+    for (auto& stats : _stats)
+        FoldBuffer(stats.second);
 
     // Lists are recorded in no fixed order, so "the busiest stretch so far" picked a different copy from frame to frame (the
     // world one, or the first-person weapon's) and the preview flickered. Every stretch that draws a fair share of what the
@@ -422,9 +530,8 @@ uint64_t DepthFinderCore::BeginPresent(uint32_t pictureWidth, uint32_t pictureHe
         if (stats.total.drawcalls == 0 && stats.clears == 0)
         {
             // Not touched this frame: forget it, and any context still pointing at it.
-            for (auto& context : _contexts)
-                if (context.second.stats == &stats)
-                    context.second.stats = nullptr;
+            for (ContextState* context : stats.bound)
+                context->stats = nullptr;
 
             it = _stats.erase(it);
             continue;
@@ -451,6 +558,9 @@ uint64_t DepthFinderCore::BeginPresent(uint32_t pictureWidth, uint32_t pictureHe
         stats.clearedThisFrame = false;
         ++it;
     }
+
+    if (_presents % kLogEveryFrames == 0)
+        RetireIdleContexts();
 
     ++_frames;
     return _presents;
@@ -493,6 +603,7 @@ bool DepthFinderCore::EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, 
             }
 
             _epoch.fetch_add(1, std::memory_order_relaxed);
+            _cacheEpoch.fetch_add(1, std::memory_order_release);
             _stats.clear();
             _pick = GenericDepthSelect::Pick {};
             _selector.Reset();
@@ -549,10 +660,17 @@ DepthFinderCore::Diagnostic DepthFinderCore::Diagnose(uint64_t context) const
     d.hasBoundBuffer = true;
     d.boundResource = found->second.stats->resource;
 
-    DrawStats pending;
-    Pending(found->second, pending);
-    d.currentVertices = found->second.stats->current.vertices + pending.vertices;
-    d.currentDrawcalls = found->second.stats->current.drawcalls + pending.drawcalls;
+    d.currentVertices = found->second.stats->current.vertices;
+    d.currentDrawcalls = found->second.stats->current.drawcalls;
+
+    for (const ContextState* context : found->second.stats->bound)
+    {
+        DrawStats pending;
+        Pending(*context, pending);
+        d.currentVertices += pending.vertices;
+        d.currentDrawcalls += pending.drawcalls;
+    }
+
     return d;
 }
 

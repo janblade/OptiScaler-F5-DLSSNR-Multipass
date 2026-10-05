@@ -280,7 +280,8 @@ void Match(uint3 id : SV_DispatchThreadID)
         const float weak = 0.5 * ((a + c) - sqrt((a - c) * (a - c) + 4.0 * b * b));
         confidence = weak / (weak + knee);
 
-        [loop] for (int iteration = 0; iteration < 3; ++iteration)
+        // A window with no structure across (flat, or one straight edge) gives no step: its reads are skipped.
+        [loop] for (int iteration = 0; iteration < 3 && det > 1e-9; ++iteration)
         {
             float e = 0.0, f = 0.0, sr = 0.0;
 
@@ -299,9 +300,6 @@ void Match(uint3 id : SV_DispatchThreadID)
             const float meanResidual = sr / sw;
             e -= sx * meanResidual;
             f -= sy * meanResidual;
-
-            if (det <= 1e-9)
-                break;
 
             const float2 step = float2(c * e - b * f, a * f - b * e) / det;
             sub = clamp(sub + step, -1.5, 1.5);
@@ -507,6 +505,22 @@ groupshared float4 gTile[256]; // x, y and confidence of the flow, and the guide
 [numthreads(8, 8, 1)]
 void Smooth(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
 {
+    // Off: only the centre counts, so the tile is not filled (the radius is the same for the whole group, so every thread
+    // leaves here or none does).
+    if (radius == 0)
+    {
+        if (id.x < size.x && id.y < size.y)
+        {
+            // Rounded as the full pass rounds it (precise keeps the compiler from folding the weight away).
+            float3 only = FlowIn.Load(int3(id.xy, 0)).xyz;
+            precise float weight = only.z + 0.05;
+            precise float2 weighted = only.xy * weight;
+            OutFlow[id.xy] = float4(weighted / weight, only.z, 1.0);
+        }
+
+        return;
+    }
+
     int2 hi = int2(size) - 1;
     int2 origin = int2(group.xy) * 8 - 4;
     uint t = local.y * 8 + local.x;

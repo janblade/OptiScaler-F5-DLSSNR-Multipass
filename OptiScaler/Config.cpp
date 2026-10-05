@@ -743,6 +743,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGShortcutKey.set_from_config(readInt("Menu", "FGShortcutKey"));
 
             LightTheme.set_from_config(readBool("Menu", "LightTheme"));
+            ModernTheme.set_from_config(readBool("Menu", "ModernTheme"));
             OverlaysUseTheme.set_from_config(readBool("Menu", "OverlaysUseTheme"));
             MenuAccentColorR.set_from_config(readFloat("Menu", "AccentColorR"));
             MenuAccentColorG.set_from_config(readFloat("Menu", "AccentColorG"));
@@ -1723,6 +1724,7 @@ bool Config::SaveIni()
                      wstring_to_string(Instance()->TTFFontPath.value_for_config_or(L"auto")).c_str());
 
         ini.SetValue("Menu", "LightTheme", GetBoolValue(Instance()->LightTheme.value_for_config()).c_str());
+        ini.SetValue("Menu", "ModernTheme", GetBoolValue(Instance()->ModernTheme.value_for_config()).c_str());
         ini.SetValue("Menu", "OverlaysUseTheme", GetBoolValue(Instance()->OverlaysUseTheme.value_for_config()).c_str());
         ini.SetValue("Menu", "AccentColorR", GetFloatValue(Instance()->MenuAccentColorR.value_for_config()).c_str());
         ini.SetValue("Menu", "AccentColorG", GetFloatValue(Instance()->MenuAccentColorG.value_for_config()).c_str());

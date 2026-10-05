@@ -255,6 +255,7 @@ copy "$(SolutionDir)Licenses\RenoDX_ATTRIBUTION.txt" $(SolutionDir)x64\Release\a
 copy "$(SolutionDir)Licenses\MFGUnlock_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 copy "$(SolutionDir)Licenses\ReShade_GenericDepth_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 copy "$(SolutionDir)Licenses\DLSS5Feeder_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
+copy "$(SolutionDir)Licenses\Inter_OFL.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 md $(SolutionDir)x64\Release\a\OptiScaler
 copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
@@ -499,6 +500,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="inputs\XeSS_Proxy.h" />
     <ClInclude Include="inputs\XeSS_Vulkan.h" />
     <ClInclude Include="menu\font\Hack_Compressed.h" />
+    <ClInclude Include="menu\font\Inter_Compressed.h" />
     <ClInclude Include="misc\FrameLimit.h" />
     <ClInclude Include="misc\Quirks.h" />
     <ClInclude Include="OwnedMutex.h" />

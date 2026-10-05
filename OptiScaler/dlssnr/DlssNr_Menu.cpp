@@ -881,19 +881,23 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
         const auto detailReuse = !config->DlssNrDetailReuse.value_or_default() ? DlssNr::DetailReuseInfo {}
                                  : vulkan                                     ? DlssNr::DetailReuseStatusVk()
                                                                               : DlssNr::DetailReuseStatus();
-        if (detailReuse.active && detailReuse.averageMs > 0.0)
-            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
-                               "Running - %.2f ms elapsed per frame on average (%.2f to %.2f)%s",
-                               detailReuse.averageMs, detailReuse.lightMs, detailReuse.heavyMs, runSuffix);
-        else if (ms.has_value())
-            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running%s - %.2f ms elapsed%s",
-                               vulkan ? " natively on Vulkan" : "", ms.value(), runSuffix);
-        else if (vulkan)
-            // Measured but not yet read: the first few frames are still in the query ring.
-            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running natively on Vulkan - %llu frames%s",
-                               DlssNr::FramesVk(), runSuffix);
-        else
-            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.%s", runSuffix);
+        {
+            ScopedMonoFont monoFont {};
+
+            if (detailReuse.active && detailReuse.averageMs > 0.0)
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                   "Running - %.2f ms elapsed per frame on average (%.2f to %.2f)%s",
+                                   detailReuse.averageMs, detailReuse.lightMs, detailReuse.heavyMs, runSuffix);
+            else if (ms.has_value())
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running%s - %.2f ms elapsed%s",
+                                   vulkan ? " natively on Vulkan" : "", ms.value(), runSuffix);
+            else if (vulkan)
+                // Measured but not yet read: the first few frames are still in the query ring.
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running natively on Vulkan - %llu frames%s",
+                                   DlssNr::FramesVk(), runSuffix);
+            else
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.%s", runSuffix);
+        }
 
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
@@ -911,6 +915,7 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
 static void RenderStatusLine(const NrCommon& nr)
 {
     const auto ms = nr.vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime();
+    ScopedMonoFont monoFont {};
 
     if (!nr.enabled)
         ImGui::TextDisabled("NR off.");
@@ -985,18 +990,17 @@ static void RenderStatusPage(Config* config, float menuResScale)
                "precision and game-exposure white point. "
                "Upscale Method, Upscale Mode and Final Image Composition are left alone; use the Pre-SR or "
                "Post-SR presets for those. 2 Pass also sets Pass "
-               "2's overrides; 3 Pass sets Pass 2 and Pass 3's overrides. Overwrites the settings "
-               "below; anything not listed here, including NR Pass at:, is left as you have it.\n"
+               "2's overrides; 3 Pass sets Pass 2 and Pass 3's overrides. Overwrites those settings on the "
+               "other Neural Rendering pages; anything not listed here, including NR Pass at:, is left as you "
+               "have it.\n"
                "The green button is the pass count currently in effect; changing the pass count "
                "or a pass's Style, Intensity, Local structure, Local tone or Skin structure clears it.");
 
-    // Directly under the pass presets, since those buttons set this slider's value. The
-    // panel-wide item width is pushed further down (after NR Options), so this block pushes
-    // its own to keep the slider the same width it had before it moved.
+    // Directly under the pass presets, since those buttons set this slider's value. This page
+    // has no page-wide item width, so this block pushes its own to keep the slider's width.
     ImGui::PushItemWidth(220.0f * menuResScale);
 
-    // The checkbox that sets this lives under "Apply the model" (NR Options); it is read here
-    // from config, so toggling it takes effect on the next frame.
+    // The checkbox that sets this lives under "Apply the model" on the NR Options page; read from config.
     bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
     const unsigned int passLimit = unlockPasses ? MaxPassCount : DefaultMaxPassCount;
 
@@ -2168,7 +2172,7 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 }
 
 // NR Output, including Effect strength.
-static void RenderOutputPage(Config* config, float menuResScale, const NrCommon& nr)
+static void RenderOutputPage(Config* config, float menuResScale)
 {
     ImGui::PushItemWidth(220.0f * menuResScale);
 
@@ -2560,7 +2564,7 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
         RenderInputPage(config, menuResScale, nr);
         break;
     case Page::NrOutput:
-        RenderOutputPage(config, menuResScale, nr);
+        RenderOutputPage(config, menuResScale);
         break;
     case Page::NrPasses:
         RenderPassesPage(config, menuResScale);
@@ -2568,8 +2572,11 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
     case Page::NrDebug:
         RenderDebugPage(config, menuResScale);
         break;
-    default:
+    case Page::NrStatus:
         RenderStatusPage(config, menuResScale);
+        break;
+    default:
+        IM_ASSERT(false && "not a Neural Rendering page");
         break;
     }
 }

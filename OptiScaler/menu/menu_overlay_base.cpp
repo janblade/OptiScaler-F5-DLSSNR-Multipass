@@ -44,4 +44,4 @@ void MenuOverlayBase::Shutdown() { MenuCommon::Shutdown(); }
 
 void MenuOverlayBase::HideMenu() { MenuCommon::HideMenu(); }
 
-void MenuOverlayBase::ApplyThemeStyle() { MenuCommon::ApplyThemeStyle(); }
+void MenuOverlayBase::ApplyThemeStyle() { MenuCommon::RebuildStyle(); }

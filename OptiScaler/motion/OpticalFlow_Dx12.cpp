@@ -103,8 +103,9 @@ float SameSurface(float z, float zc)
 
 // Sum of absolute differences between the current frame around p and the previous frame around p + d: sixteen samples, two
 // pixels apart, over an 8x8 window, each counted by w. Each window's mean is taken out first, so a picture that got brighter
-// or darker as a whole (eye adaptation, a fade, a flash) still matches where its content went.
-float Cost(int2 p, int2 d, float w[16])
+// or darker as a whole (eye adaptation, a fade, a flash) still matches where its content went. cur is the current frame's
+// sixteen samples around p, which are the same for every offset, so the caller loads them once.
+float Cost(int2 p, int2 d, float w[16], float cur[16])
 {
     float diff[16];
     float mean = 0.0, total = 0.0;
@@ -114,7 +115,7 @@ float Cost(int2 p, int2 d, float w[16])
         [unroll] for (int i = 0; i < 4; ++i)
         {
             int2 q = int2(2 * i - 3, 2 * j - 3);
-            float c = CurLuma.Load(int3(clamp(p + q, 0, hi), 0));
+            float c = cur[j * 4 + i];
             float r = PrevLuma.Load(int3(clamp(p + q + d, 0, hi), 0));
             diff[j * 4 + i] = c - r;
             mean += w[j * 4 + i] * (c - r);
@@ -152,12 +153,19 @@ void Match(uint3 id : SV_DispatchThreadID)
             w[wj * 4 + wi] = depthMatching != 0 ? SameSurface(Distance((float2(q) + 0.5) / float2(size)), zc) : 1.0;
         }
 
+    // The current frame's window, loaded once for every candidate and search offset below.
+    float cur[16];
+
+    [unroll] for (int cj = 0; cj < 4; ++cj)
+        [unroll] for (int ci = 0; ci < 4; ++ci)
+            cur[cj * 4 + ci] = CurLuma.Load(int3(clamp(p + int2(2 * ci - 3, 2 * cj - 3), 0, int2(size) - 1), 0));
+
     // The candidates for where to search: no motion, the coarser level's answer at the cells around this pixel (doubled, it is
     // in this level's pixels) and the last frame's flow here. The one that matches
     // best is where the search starts, so a steady pan carries over from frame to frame and an edge is not stuck with the
     // answer of a cell that lies across it.
     int2 centre = 0;
-    float start = Cost(p, centre, w);
+    float start = Cost(p, centre, w, cur);
 
     // What the whole picture did last frame (the camera): where nothing in the window says otherwise it wins the tie with no
     // motion, so a flat wall moves with the picture. `scale` here is this level's pixels per full-resolution pixel.
@@ -168,7 +176,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         if (g.z > 0.5)
         {
             int2 d = int2(round(g.xy * scale));
-            float c = Cost(p, d, w);
+            float c = Cost(p, d, w, cur);
 
             if (c <= start)
             {
@@ -192,7 +200,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         {
             int2 cell = cp + kCells[k] * step;
             int2 d = int2(round(Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0));
-            float c = Cost(p, d, w);
+            float c = Cost(p, d, w, cur);
 
             if (c < start)
             {
@@ -205,7 +213,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     if (hasHistory != 0)
     {
         int2 d = int2(round(History.Load(int3(p, 0)).xy));
-        float c = Cost(p, d, w);
+        float c = Cost(p, d, w, cur);
 
         if (c < start)
         {
@@ -221,7 +229,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         for (int dx = -radius; dx <= radius; ++dx)
         {
             int2 d = centre + int2(dx, dy);
-            float c = Cost(p, d, w) + lambda * length(float2(dx, dy));
+            float c = Cost(p, d, w, cur) + lambda * length(float2(dx, dy));
 
             if (c < best)
             {
@@ -284,6 +292,8 @@ void Match(uint3 id : SV_DispatchThreadID)
     OutFlow[id.xy] = float4(float2(bestD) + sub, confidence, 1.0);
 }
 
+)HLSL" // the compiler limits one string literal to 16 KB; the source goes on in a second one
+R"HLSL(
 // A 3x3 median of each component, which removes the odd wrong block, scaled to full-resolution pixels.
 void Sort(inout float a, inout float b)
 {

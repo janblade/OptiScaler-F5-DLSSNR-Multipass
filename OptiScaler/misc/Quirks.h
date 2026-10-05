@@ -558,6 +558,11 @@ static const QuirkEntry quirkTable[] = {
     // Hudfix incompatible
     QUIRK_ENTRY("rottr.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
+    // Call to Arms - Gates of Hell
+    // Picks its shader profile from the device feature level and has no entry for 11_1, so with the elevation every
+    // shader fails to compile ('ps_unknown') and the renderer then crashes on a null shader
+    QUIRK_ENTRY("call_to_arms.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+
     // Shadow of the Tomb Raider
     // Hudfix incompatible
     QUIRK_ENTRY("sottr.exe", GameQuirk::DisableHudfix),

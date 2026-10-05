@@ -32,7 +32,7 @@ struct Keys
 
 struct Change
 {
-    Keys keys;
+    std::optional<Keys> keys;            // nullopt: the keys are left as they are
     std::optional<bool> finishedPicture; // set only when it changes
     bool retryAfterFailure = false; // the NR Pass at: combo's rule: changing Finished Picture clears a session failure
 };
@@ -45,6 +45,7 @@ inline Change ForMode(Mode mode, bool finishedPictureNow)
     switch (mode)
     {
     case Mode::Off:
+        change.keys = Keys {};
         break;
     case Mode::NrOnly:
         change.keys = { true, true, true, false };
@@ -77,6 +78,55 @@ inline Shown FromKeys(const Keys& keys)
     return keys.input ? Shown::NrOnly : Shown::MotionOnly;
 }
 
+inline Shown ShownFor(Mode mode)
+{
+    switch (mode)
+    {
+    case Mode::NrOnly:
+        return Shown::NrOnly;
+    case Mode::NrAndFrameGeneration:
+        return Shown::NrAndFrameGeneration;
+    default:
+        return Shown::Off;
+    }
+}
+
+// A click on the mode already in effect keeps the keys (an unticked depth stays so) but still puts NR Pass at: right.
+inline Change ForClick(Mode clicked, Shown shown, bool finishedPictureNow)
+{
+    Change change = ForMode(clicked, finishedPictureNow);
+
+    if (ShownFor(clicked) == shown)
+        change.keys.reset();
+
+    return change;
+}
+
+// The depth finder at this start: Installed whatever the key says now, since its hooks stay until a restart.
+enum class Finder
+{
+    Off,
+    NeedsRestart,
+    CouldNotStart,
+    Installed
+};
+
+inline Finder FinderFor(bool wanted, bool installed, bool installFailed)
+{
+    if (installed)
+        return Finder::Installed;
+
+    if (!wanted)
+        return Finder::Off;
+
+    return installFailed ? Finder::CouldNotStart : Finder::NeedsRestart;
+}
+
+inline bool DepthRestartWarning(Shown shown, Finder finder)
+{
+    return shown != Shown::Off && finder == Finder::NeedsRestart;
+}
+
 enum class Warning
 {
     None,
@@ -85,11 +135,12 @@ enum class Warning
     NeedsFinishedPicture // NR only, with NR Pass at: not on Finished Picture
 };
 
-inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool dx11SwapChainReplaced)
+// nativeInputBlocked: DlssNr::NativeInputBlockedBySwapChainInterop(), the condition native input itself refuses on.
+inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool nativeInputBlocked)
 {
     if (shown == Shown::NrOnly)
     {
-        if (dx11SwapChainReplaced)
+        if (nativeInputBlocked)
             return Warning::Dx11FrameGeneration;
 
         if (!nrEnabled)

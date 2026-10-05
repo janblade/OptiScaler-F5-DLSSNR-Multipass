@@ -17,9 +17,10 @@ static int fails = 0;
         }                                                                                                              \
     } while (0)
 
-static bool Same(const Keys& a, const Keys& b)
+static bool Same(const std::optional<Keys>& a, const Keys& b)
 {
-    return a.depthFinder == b.depthFinder && a.motion == b.motion && a.input == b.input && a.upscaler == b.upscaler;
+    return a.has_value() && a->depthFinder == b.depthFinder && a->motion == b.motion && a->input == b.input &&
+           a->upscaler == b.upscaler;
 }
 
 static Keys K(bool depthFinder, bool motion, bool input, bool upscaler)
@@ -82,9 +83,59 @@ int main()
     // A mode reads back as itself.
     for (bool fp : { false, true })
     {
-        CHECK(FromKeys(ForMode(Mode::Off, fp).keys) == Shown::Off);
-        CHECK(FromKeys(ForMode(Mode::NrOnly, fp).keys) == Shown::NrOnly);
-        CHECK(FromKeys(ForMode(Mode::NrAndFrameGeneration, fp).keys) == Shown::NrAndFrameGeneration);
+        CHECK(FromKeys(ForMode(Mode::Off, fp).keys.value()) == Shown::Off);
+        CHECK(FromKeys(ForMode(Mode::NrOnly, fp).keys.value()) == Shown::NrOnly);
+        CHECK(FromKeys(ForMode(Mode::NrAndFrameGeneration, fp).keys.value()) == Shown::NrAndFrameGeneration);
+    }
+
+    // A click on a different mode (or from motion-only) writes that mode's keys.
+    for (bool fp : { false, true })
+    {
+        CHECK(Same(ForClick(Mode::NrOnly, Shown::Off, fp).keys, K(true, true, true, false)));
+        CHECK(Same(ForClick(Mode::NrOnly, Shown::NrAndFrameGeneration, fp).keys, K(true, true, true, false)));
+        CHECK(Same(ForClick(Mode::NrAndFrameGeneration, Shown::NrOnly, fp).keys, K(true, true, false, true)));
+        CHECK(Same(ForClick(Mode::Off, Shown::MotionOnly, fp).keys, K(false, false, false, false)));
+        CHECK(Same(ForClick(Mode::NrOnly, Shown::MotionOnly, fp).keys, K(true, true, true, false)));
+    }
+
+    // A click on the mode already in effect keeps the keys but still puts Finished Picture right, with the retry.
+    {
+        const auto again = ForClick(Mode::NrOnly, Shown::NrOnly, false);
+        CHECK(!again.keys.has_value());
+        CHECK(again.finishedPicture == std::optional<bool>(true) && again.retryAfterFailure);
+
+        const auto againSet = ForClick(Mode::NrOnly, Shown::NrOnly, true);
+        CHECK(!againSet.keys.has_value() && !againSet.finishedPicture.has_value() && !againSet.retryAfterFailure);
+
+        const auto fgAgain = ForClick(Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, true);
+        CHECK(!fgAgain.keys.has_value());
+        CHECK(fgAgain.finishedPicture == std::optional<bool>(false) && fgAgain.retryAfterFailure);
+
+        for (bool fp : { false, true })
+        {
+            const auto offAgain = ForClick(Mode::Off, Shown::Off, fp);
+            CHECK(!offAgain.keys.has_value() && !offAgain.finishedPicture.has_value() && !offAgain.retryAfterFailure);
+        }
+    }
+
+    // The depth finder's state at this start, and when the selector asks for a restart.
+    {
+        CHECK(FinderFor(false, false, false) == Finder::Off);
+        CHECK(FinderFor(false, false, true) == Finder::Off);
+        CHECK(FinderFor(true, false, false) == Finder::NeedsRestart);
+        CHECK(FinderFor(true, false, true) == Finder::CouldNotStart);
+        CHECK(FinderFor(true, true, false) == Finder::Installed);
+        CHECK(FinderFor(false, true, false) == Finder::Installed); // unticked: its hooks stay until a restart
+
+        for (Shown shown : { Shown::NrOnly, Shown::NrAndFrameGeneration, Shown::MotionOnly })
+        {
+            CHECK(DepthRestartWarning(shown, Finder::NeedsRestart));
+            CHECK(!DepthRestartWarning(shown, Finder::CouldNotStart));
+            CHECK(!DepthRestartWarning(shown, Finder::Installed));
+            CHECK(!DepthRestartWarning(shown, Finder::Off));
+        }
+
+        CHECK(!DepthRestartWarning(Shown::Off, Finder::NeedsRestart));
     }
 
     // Warnings.

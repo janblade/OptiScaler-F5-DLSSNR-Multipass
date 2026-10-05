@@ -568,9 +568,11 @@ class Config
     CustomOptional<float> DlssNrAutoExposureMeterHighPercent { 90.0f };
     // NativeDepthFinder: watch the game's depth buffers and pick the scene's, the first stage of DLSS-NR without a game
     // upscaler call (D3D11 and D3D12; one key for both, which API runs is decided by which device the game creates).
-    // Observes only. Startup only. Optional: without it NativeInput/NativeUpscaler run on motion only. Turned on by
-    // the menu's mode selector (dlssnr/DlssNr_NativeMode.h), and set on its own by "Use the game's depth" under the
-    // menu's Advanced section. See resource_tracking/GenericDepth_Dx12.h and GenericDepth_Dx11.h.
+    // Observes only. Startup only. Optional: without it NativeInput/NativeUpscaler run on motion only. It is also
+    // what notices the game calling its own upscaler (GameCallsUpscaler); without it nothing stands aside for that.
+    // Turned on and off by the menu's mode selector (dlssnr/DlssNr_NativeMode.h), and set on its own by "Use the
+    // game's depth" under the menu's Advanced section. See resource_tracking/GenericDepth_Dx12.h and
+    // GenericDepth_Dx11.h.
     CustomOptional<bool> DlssNrNativeDepthFinder { false };
     // NativeDepthWarmupFrames: presented frames to watch before the finder trusts that the game makes no upscaler call of its
     // own (it stands down for good the moment one is seen). NativeDepthOverlay: debug; copies the picked depth buffer at its

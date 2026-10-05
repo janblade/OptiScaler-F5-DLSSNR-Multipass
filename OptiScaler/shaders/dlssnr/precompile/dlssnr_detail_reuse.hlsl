@@ -71,6 +71,7 @@ cbuffer Params : register(b0)
     float fillRadius;
     uint replaceCurve; // DlssNrReplaceCurve: 0 none, 1 Neutwo, 2 hybrid (see the header)
     float motionReject;
+    float steadyDeadZone;
 };
 
 #ifdef VK_MODE
@@ -414,7 +415,17 @@ void Steady(uint2 p)
     const float4 answer = t1.Load(int3(p, 0));
     const float4 estimate = t2.Load(int3(p, 0));
     const float amount = saturate(steady) * saturate(estimate.a);
-    const float3 steadied = input.rgb + lerp(answer.rgb - input.rgb, estimate.rgb, amount);
+    const float3 fresh = answer.rgb - input.rgb;
+    // A difference below the dead zone (about one 8-bit step) is no difference: the full frame takes the moved detail there
+    // (as far as it is trusted), so rounding does not show the two frames apart. Fades out between one and two dead zones,
+    // and only where steadiness is on.
+    float3 pull = amount;
+    if (steadyDeadZone > 0.0 && amount > 0.0)
+    {
+        const float3 apart = smoothstep(steadyDeadZone, 2.0 * steadyDeadZone, abs(estimate.rgb - fresh));
+        pull = lerp(saturate(estimate.a), amount, apart);
+    }
+    const float3 steadied = input.rgb + lerp(fresh, estimate.rgb, pull);
     u0[p] = float4(Finite3(steadied) ? steadied : answer.rgb, answer.a);
 }
 

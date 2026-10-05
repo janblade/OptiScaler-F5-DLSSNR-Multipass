@@ -172,6 +172,13 @@ struct Gpu
 };
 
 static Px Grey(float v) { return { v, v, v, 1 }; }
+static float Hash01(unsigned x, unsigned y)
+{
+    unsigned h = x * 374761393u + y * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return (h & 0xFFFFFF) / 16777215.0f;
+}
 static bool Near(float a, float b, float e = 1e-4f) { return std::abs(a - b) < e; }
 static bool Near3(Px a, Px b, float e = 1e-4f) { return Near(a.r, b.r, e) && Near(a.g, b.g, e) && Near(a.b, b.b, e); }
 static bool Finite(Px p) { return std::isfinite(p.r) && std::isfinite(p.g) && std::isfinite(p.b) && std::isfinite(p.a); }
@@ -568,6 +575,51 @@ try
         c.Steady = 1;
         out = gpu.Run(c, { grey, answer, nanEstimate });
         expect(Finite(out.at(4, 4)), "Steady: a NaN estimate never reaches the output");
+    }
+
+    // Steady's dead zone. A still scene whose model output differs from frame to frame by less than one 8-bit step
+    // (noise in the network's answer): the full frame is steadied toward the moved detail, and what shows is the 8-bit
+    // result. Counted: pixels whose 8-bit value differs between the steadied full frame and the frame made by reuse
+    // alone, and the worst distance the steadied frame ends up from the model's own answer.
+    {
+        constexpr unsigned N = 64;
+        const auto flat = Fill([](unsigned, unsigned) { return Grey(0.5f); }, N, N);
+        const auto moved =
+            Fill([](unsigned x, unsigned y)
+                 { return Px { 0.02f * (Hash01(x, y) - 0.5f), 0.02f * (Hash01(y, x) - 0.5f), 0.0f, 1.0f }; }, N, N);
+        const auto noisyAnswer = Fill(
+            [&](unsigned x, unsigned y)
+            {
+                const Px e = moved.at(x, y);
+                const float n = (Hash01(x + 91, y + 17) - 0.5f) * 1.4f / 255.0f; // under one step, peak
+                return Px { 0.5f + e.r + n, 0.5f + e.g + n, 0.5f + n, 1.0f };
+            },
+            N, N);
+        const auto quantised = [](float v) { return std::round(std::clamp(v, 0.0f, 1.0f) * 255.0f); };
+        double flips[2] = {}, worst[2] = {};
+        for (int on = 0; on < 2; ++on)
+        {
+            DlssNrDetailReuseConstants c = Base(DlssNrDetailReuse_Steady);
+            c.WorkWidth = c.WorkHeight = N;
+            c.Steady = 0.5f;
+            c.SteadyDeadZone = on ? kDlssNrDetailReuseSteadyDeadZone : 0.0f;
+            const auto out = gpu.Run(c, { flat, noisyAnswer, moved }, nullptr, N, N);
+            for (unsigned y = 0; y < N; ++y)
+                for (unsigned x = 0; x < N; ++x)
+                {
+                    const Px o = out.at(x, y), e = moved.at(x, y), a = noisyAnswer.at(x, y);
+                    flips[on] += quantised(o.r) != quantised(0.5f + e.r);
+                    worst[on] = std::max<double>(worst[on], std::abs(o.r - a.r));
+                }
+        }
+        std::printf(
+            "Steady dead zone: 8-bit differences from the reuse frame %.0f of %u off, %.0f on; worst distance from the "
+            "model's answer %.5f off, %.5f on\n",
+            flips[0], N * N, flips[1], worst[0], worst[1]);
+        expect(flips[1] <= 0.6 * flips[0],
+               "Steady dead zone: sub-step differences between the frames stop showing in 8 bits");
+        expect(worst[1] <= 1.0f / 255.0f + 1e-6f,
+               "Steady dead zone: the steadied frame stays within one step of the model's answer");
     }
 
     // SaveMotion keeps this frame's vectors as work-image uv displacement (independent of the render size); Compose

@@ -77,8 +77,16 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     bool _CopyDx11BackBufferToShared(UINT index);
     bool _WaitDx11ThenDx12();
     bool _CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index);
+    // Copies native input's processed picture (NativeMotionDx11::OnFGPresent) over the FG back buffer this same
+    // Present already put the raw one into, when that option is on. A no-op, not a failure, when it is off or there
+    // is nothing to apply this frame; never fails the surrounding Present.
+    void _ApplyNativeInputToFGBackBuffer();
+    // Lazily creates _nrCopyAllocators/_nrCopyCommandLists the first time native input actually has a frame to
+    // composite, so D3D11+FG-interop users who never enable native input never pay for this ring or its failure
+    // path.
+    bool _EnsureNativeInputCopyRing();
     bool _WaitForCopyQueueIdle();
-    bool _WaitForCopyAllocator(UINT slot);
+    bool _WaitForCopyAllocator(UINT slot, std::vector<UINT64>& fenceValues);
     void _ReleaseInteropBackBuffers();
     void _ReleaseInteropObjects();
     void _RefreshCachedSwapchainDesc();
@@ -110,6 +118,14 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     std::vector<ID3D12CommandAllocator*> _copyAllocators;
     std::vector<ID3D12GraphicsCommandList*> _copyCommandLists;
 
+    // A second ring, same sizing/lifetime as the one above, for _ApplyNativeInputToFGBackBuffer's copy: it runs after
+    // _CopyDx11SharedToDx12FGBackBuffer's own command list has already closed and been submitted for this frame, so it
+    // cannot reuse that one's allocator (not safe to Reset while still in flight) -- shares _copyFence/_copyFenceEvent,
+    // a plain monotonic counter either ring can bump.
+    std::vector<ID3D12CommandAllocator*> _nrCopyAllocators;
+    std::vector<ID3D12GraphicsCommandList*> _nrCopyCommandLists;
+    std::vector<UINT64> _nrCopyAllocatorFenceValues;
+
     UINT64 _lastInteropCopyFenceValue = 0;
 
     std::vector<UINT64> _copyAllocatorFenceValues;
@@ -133,6 +149,10 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     UINT _currentFakeIndex = 0;
     DXGI_FORMAT _bufferFormat = DXGI_FORMAT_UNKNOWN;
     bool _interopInitialized = false;
+
+    // Set once OpenSharedHandle first reports the D3D12 device gone; logs the real removed-reason a single time
+    // instead of once per frame forever, since a removed device never recovers on its own.
+    bool _deviceRemovedLogged = false;
 
     HWND _handle = nullptr;
 };

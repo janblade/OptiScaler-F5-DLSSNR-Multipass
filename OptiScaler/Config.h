@@ -372,6 +372,13 @@ class Config
     // 1 linear HDR, 2 tone-mapped sRGB, 3 tone-mapped gamma 2.2, 4 PQ. Values are DlssNr_ColourEncoding.h's.
     CustomOptional<uint32_t> DlssNrColourEncoding { 0 };
 
+    // LUT-apply epic (dlssnr-lut-apply), Story 2: a .cube file graded onto the
+    // NR input image before the model ever sees it. Empty (the default) is the feature not existing -- no
+    // parse, no GPU texture, no dispatch. Accepts a path outside OptiScaler\LUTs too.
+    CustomOptional<std::string> DlssNrLutFile { std::string() };
+    // How much of the LUT's grade reaches the image, 0..1. Default is fully graded once a LutFile is set.
+    CustomOptional<float> DlssNrLutStrength { 1.0f };
+
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
     // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.
     CustomOptional<bool> DlssNrApplyModel { true };
@@ -566,6 +573,47 @@ class Config
     CustomOptional<uint32_t> DlssNrAutoExposureMeter { 1 };
     CustomOptional<float> DlssNrAutoExposureMeterLowPercent { 10.0f };
     CustomOptional<float> DlssNrAutoExposureMeterHighPercent { 90.0f };
+    // NativeDepthFinder: watch the game's depth buffers and pick the scene's, the first stage of DLSS-NR without a game
+    // upscaler call (D3D11 and D3D12; one key for both, which API runs is decided by which device the game creates).
+    // Observes only. Startup only. Optional: without it NativeInput/NativeUpscaler run on motion only. It is also
+    // what notices the game calling its own upscaler (GameCallsUpscaler); without it nothing stands aside for that.
+    // Turned on and off by the menu's mode selector (dlssnr/DlssNr_NativeMode.h), and set on its own by "Use the
+    // game's depth" under the menu's Advanced section. See resource_tracking/GenericDepth_Dx12.h and
+    // GenericDepth_Dx11.h.
+    CustomOptional<bool> DlssNrNativeDepthFinder { false };
+    // NativeDepthWarmupFrames: presented frames to watch before the finder trusts that the game makes no upscaler call of its
+    // own (it stands down for good the moment one is seen). NativeDepthOverlay: debug; copies the picked depth buffer at its
+    // busiest clear and shows it in the DLSS-NR menu (D3D12 only; no preview round-trip exists for D3D11 yet). That copy is
+    // recorded into the game's own command list.
+    CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
+    CustomOptional<bool> DlssNrNativeDepthOverlay { false };
+    // NativeDebugView: show the pictures and debug controls of the depth finder and the motion estimate in the DLSS-NR menu
+    // (the depth preview, the motion and trust pictures, the trust view chooser, the flow tuning; D3D12 only). Off, the menu
+    // keeps the switches and one status line each, and the depth overlay's copy is not made. Startup only.
+    CustomOptional<bool> DlssNrNativeDebugView { false };
+    // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
+    // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at
+    // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See motion/NativeMotion_Dx12.h and
+    // NativeMotionDx11.h.
+    CustomOptional<bool> DlssNrNativeMotion { false };
+    // NativeInput: with NativeMotion on and the game making no upscaler call, runs DLSS-NR on the finished picture with
+    // the optical flow as its motion and the depth finder's depth when it has one (Story 4 of the native input
+    // producer). Needs FinishedPicture and Enabled on as well. Lower GPU cost than NativeUpscaler below, with no frame
+    // generation; inert once FGInput=Upscaler replaces a D3D11 game's swap chain (see NativeUpscaler). The menu's "NR
+    // only" mode. Changes apply at once.
+    CustomOptional<bool> DlssNrNativeInput { false };
+    // NativeUpscaler: experimental. With NativeMotion on and the game making no upscaler call, presents the picture,
+    // the finder's depth (all far when it has none) and the optical flow to OptiScaler's upscaler (Dx12Upscaler, FFX
+    // when unset) as a synthetic upscaler call (render size == output size, no jitter: a stabiliser, not a
+    // reconstruction), so frame generation with the Upscaler input works in a game that never calls an upscaler. Takes
+    // priority over NativeInput. Changes apply at once. For a D3D11 game, this is also the only one of the three
+    // native-input options (this, NativeInput, Finished Picture NR) that still works once FGInput=Upscaler is selected:
+    // that replaces the game's swap chain with with_dx12::Dx11wDx12SC, which the other two require not to be in play
+    // (see motion/NativeMotionDx11.cpp's OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's
+    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + frame generation" mode: it sets NativeDepthFinder,
+    // NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished Picture if it was on
+    // (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
+    CustomOptional<bool> DlssNrNativeUpscaler { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.
@@ -754,6 +802,9 @@ class Config
 
     // Menu
     CustomOptional<float, NoDefault> MenuScale;
+    CustomOptional<float, NoDefault> MenuWidth; // Main window size in pixels at Menu Scale 1.0
+    CustomOptional<float, NoDefault> MenuHeight;
+    CustomOptional<std::string, NoDefault> MenuPage; // Last page open in the main window, see menu/MenuPages.h
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };
     CustomOptional<bool> ExtendedLimits { false };
@@ -775,6 +826,7 @@ class Config
     CustomOptional<std::wstring, NoDefault> TTFFontPath;
     CustomOptional<int> FGShortcutKey { VK_END };
     CustomOptional<bool> LightTheme { false };
+    CustomOptional<bool> ModernTheme { false };
     CustomOptional<bool> OverlaysUseTheme { false };
     CustomOptional<float> MenuAccentColorR { 0.00f };
     CustomOptional<float> MenuAccentColorG { 0.40f };

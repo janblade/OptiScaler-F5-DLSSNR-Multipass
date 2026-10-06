@@ -475,6 +475,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrAutoExposureMeter.set_from_config(readUInt("DlssNr", "AutoExposureMeter"));
             DlssNrAutoExposureMeterLowPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterLowPercent"));
             DlssNrAutoExposureMeterHighPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterHighPercent"));
+            DlssNrNativeDepthFinder.set_from_config(readBool("DlssNr", "NativeDepthFinder"));
+            DlssNrNativeDepthWarmupFrames.set_from_config(readUInt("DlssNr", "NativeDepthWarmupFrames"));
+            DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
+            DlssNrNativeDebugView.set_from_config(readBool("DlssNr", "NativeDebugView"));
+            DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
+            DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
+            DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
             DlssNrAutoExposureAdaptBrighterSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptBrighterSeconds"));
             DlssNrAutoExposureAdaptDarkerSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptDarkerSeconds"));
             DlssNrAutoExposureAdaptSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptSeconds"));
@@ -551,6 +558,12 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrColourEncoding.set_from_config(readUInt("DlssNr", "ColourEncoding"));
             if (DlssNrColourEncoding.value_or_default() > 4u) // not a Colour encoding: back to Auto, saved as auto
                 DlssNrColourEncoding.reset();
+            DlssNrLutFile.set_from_config(readString("DlssNr", "LutFile"));
+            DlssNrLutStrength.set_from_config(readFloat("DlssNr", "LutStrength"));
+            if (DlssNrLutStrength.has_value() && (!std::isfinite(DlssNrLutStrength.value()) ||
+                                                  DlssNrLutStrength.value() < 0.0f || DlssNrLutStrength.value() > 1.0f))
+                DlssNrLutStrength =
+                    std::isfinite(DlssNrLutStrength.value()) ? std::clamp(DlssNrLutStrength.value(), 0.0f, 1.0f) : 1.0f;
             DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
             DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -693,6 +706,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (auto setting = readFloat("Menu", "Scale"); setting.has_value())
                 MenuScale.set_from_config(std::clamp(setting.value(), 0.5f, 2.0f));
 
+            if (auto setting = readFloat("Menu", "MenuWidth"); setting.has_value())
+                MenuWidth.set_from_config(std::clamp(setting.value(), 100.0f, 8000.0f));
+
+            if (auto setting = readFloat("Menu", "MenuHeight"); setting.has_value())
+                MenuHeight.set_from_config(std::clamp(setting.value(), 100.0f, 8000.0f));
+
+            MenuPage.set_from_config(readString("Menu", "MenuPage", true));
+
             // Don't enable again if set false because of Linux issue
             OverlayMenu.set_from_config(readBool("Menu", "OverlayMenu"));
             ShortcutKey.set_from_config(readInt("Menu", "ShortcutKey"));
@@ -728,6 +749,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGShortcutKey.set_from_config(readInt("Menu", "FGShortcutKey"));
 
             LightTheme.set_from_config(readBool("Menu", "LightTheme"));
+            ModernTheme.set_from_config(readBool("Menu", "ModernTheme"));
             OverlaysUseTheme.set_from_config(readBool("Menu", "OverlaysUseTheme"));
             MenuAccentColorR.set_from_config(readFloat("Menu", "AccentColorR"));
             MenuAccentColorG.set_from_config(readFloat("Menu", "AccentColorG"));
@@ -1478,6 +1500,18 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrAutoExposureMeterLowPercent.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureMeterHighPercent",
                  GetFloatValue(Instance()->DlssNrAutoExposureMeterHighPercent.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthFinder",
+                 GetBoolValue(Instance()->DlssNrNativeDepthFinder.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthWarmupFrames",
+                 GetIntValue(Instance()->DlssNrNativeDepthWarmupFrames.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthOverlay",
+                 GetBoolValue(Instance()->DlssNrNativeDepthOverlay.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDebugView",
+                 GetBoolValue(Instance()->DlssNrNativeDebugView.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeMotion", GetBoolValue(Instance()->DlssNrNativeMotion.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeUpscaler",
+                 GetBoolValue(Instance()->DlssNrNativeUpscaler.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureAdaptBrighterSeconds",
                  GetFloatValue(Instance()->DlssNrAutoExposureAdaptBrighterSeconds.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureAdaptDarkerSeconds",
@@ -1549,6 +1583,8 @@ bool Config::SaveIni()
     }
     ini.SetValue("DlssNr", "ReversibleMode", GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ColourEncoding", GetIntValue(Instance()->DlssNrColourEncoding.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "LutFile", Instance()->DlssNrLutFile.value_for_config_or("").c_str());
+    ini.SetValue("DlssNr", "LutStrength", GetFloatValue(Instance()->DlssNrLutStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
     ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",
@@ -1659,6 +1695,9 @@ bool Config::SaveIni()
     // Menu
     {
         ini.SetValue("Menu", "Scale", GetFloatValue(Instance()->MenuScale).c_str());
+        ini.SetValue("Menu", "MenuWidth", GetFloatValue(Instance()->MenuWidth.value_for_config()).c_str());
+        ini.SetValue("Menu", "MenuHeight", GetFloatValue(Instance()->MenuHeight.value_for_config()).c_str());
+        ini.SetValue("Menu", "MenuPage", Instance()->MenuPage.value_for_config_or("auto").c_str());
         ini.SetValue("Menu", "OverlayMenu", GetBoolValue(Instance()->OverlayMenu.value_for_config()).c_str());
 
         auto setting = Instance()->ShortcutKey.value_for_config();
@@ -1693,6 +1732,7 @@ bool Config::SaveIni()
                      wstring_to_string(Instance()->TTFFontPath.value_for_config_or(L"auto")).c_str());
 
         ini.SetValue("Menu", "LightTheme", GetBoolValue(Instance()->LightTheme.value_for_config()).c_str());
+        ini.SetValue("Menu", "ModernTheme", GetBoolValue(Instance()->ModernTheme.value_for_config()).c_str());
         ini.SetValue("Menu", "OverlaysUseTheme", GetBoolValue(Instance()->OverlaysUseTheme.value_for_config()).c_str());
         ini.SetValue("Menu", "AccentColorR", GetFloatValue(Instance()->MenuAccentColorR.value_for_config()).c_str());
         ini.SetValue("Menu", "AccentColorG", GetFloatValue(Instance()->MenuAccentColorG.value_for_config()).c_str());

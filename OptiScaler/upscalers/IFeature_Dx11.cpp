@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "IFeature_Dx11.h"
 #include <State.h>
+#include <resource_tracking/GenericDepth_Dx11.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -41,6 +42,9 @@ bool IFeature_Dx11::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InContext,
 
 bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Parameter* InParameters)
 {
+    // The D3D11 depth finder only runs while the game is not calling an upscaler.
+    GenericDepthDx11::NoteUpscalerCall();
+
     auto result = true;
 
     ComPtr<ID3D11ShaderResourceView> restoreSRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};

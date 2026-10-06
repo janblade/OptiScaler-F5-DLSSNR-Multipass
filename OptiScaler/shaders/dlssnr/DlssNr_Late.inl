@@ -149,18 +149,21 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     auto* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
     auto* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
     auto* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
-    if (!depth || !motion || !output)
-    { Cancel(); Say("Waiting for the game's depth and movement data."); return; }
+    // Depth is optional: NR runs without it.
+    if (!motion || !output)
+    { Cancel(); Say("Waiting for the game's movement data."); return; }
     auto* next = Acquire(cmd);
     if (!next) return;
     auto& slot = *next;
-    if (!Clone(slot.depth, depth) || !Clone(slot.motion, motion))
+    if (!depth) slot.depth.Reset(); // no stale depth from an earlier frame
+    if ((depth && !Clone(slot.depth, depth)) || !Clone(slot.motion, motion))
     { Say("The game's depth or movement data is not supported."); return; }
     slot.residualOnly = false;
     // Copy at the NGX seam, where guide states and lifetimes are defined. Keep typed,
     // shader-readable copies until both the producing queue and NR have finished.
     for (auto pair : { std::pair { depth, slot.depth.Get() }, std::pair { motion, slot.motion.Get() } })
     {
+        if (!pair.first) continue;
         Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
         cmd->CopyResource(pair.second, pair.first);
         Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -444,7 +447,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         frame.WhitePointOverride = (pq || scrgb) ? 203.0f / 80.0f : 0.0f;
         frame.Reset |= Late::reset;
         frame.SubmissionEpoch = epoch;
-        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (slot.depth) Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         DlssNrNative::SetPrecision(Config::Instance()->DlssNrPrecision.value_or_default());
         ID3D12Resource* nrColor = color.Get();
@@ -492,7 +495,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
             Barrier(cmd, slot.linear.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        if (slot.depth) Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     }
     if (FAILED(cmd->Close()))
     {
@@ -518,4 +521,104 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         LOG_INFO("DLSS-NR finished picture: {} frames, {}x{}, FG {}", Late::successes,
                  desc.Width, desc.Height, State::Instance().currentFG &&
                  State::Instance().currentFG->IsActive() && !State::Instance().currentFG->IsPaused());
+}
+
+DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format)
+{
+    auto colorSpace = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
+                                                                : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    UINT colorSpaceSize = sizeof(colorSpace);
+
+    if (swapchain != nullptr)
+        swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
+
+    return colorSpace;
+}
+
+bool NativeInputBlockedBySwapChainInterop()
+{
+    return State::Instance().swapchainInteropApi != SwapchainInteropApi::None;
+}
+
+bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
+                      ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
+                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
+        !Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        Late::Say("Native input needs Finished picture and Enable Neural Rendering on.");
+        return false;
+    }
+    // Depth is optional: NR runs without it.
+    if (!queue || !cmd || !color || !motion || NativeInputBlockedBySwapChainInterop())
+        return false;
+    if (Late::PausedForGameFrameGeneration())
+    {
+        Late::Say(Late::pausedForGameFg);
+        return false;
+    }
+    Late::ComPtr<ID3D12Device> currentDevice;
+    if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&currentDevice))))
+        return false;
+    if (Late::device && Late::device != currentDevice)
+    {
+        Late::Say("The graphics device changed. Restart the game to use this option.");
+        return false;
+    }
+    Late::device = currentDevice;
+    const auto desc = color->GetDesc();
+    const bool screenPq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    const bool screenScrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+    const bool screenSdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    using DlssNrColourEncoding::Screen;
+    const auto screenChoice = DlssNrColourEncoding::ResolveFinished(
+        Config::Instance()->DlssNrColourEncoding.value_or_default(), screenPq || screenScrgb || screenSdr,
+        screenPq ? Screen::Pq : screenScrgb ? Screen::Scrgb : Screen::Sdr,
+        desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
+        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+    DlssNr::ReportColourEncoding(screenChoice.choice, DiagFormatName(desc.Format), "native input");
+    if (!screenChoice.supported)
+    {
+        Late::Say("This screen colour format is not supported.");
+        return false;
+    }
+    // HDR10 (PQ) needs the conversion passes the game-input path records; not done for native input yet.
+    if (screenChoice.screen == Screen::Pq)
+    {
+        Late::Say("Native input does not support HDR10 output yet.");
+        return false;
+    }
+    const bool scrgb = screenChoice.screen == Screen::Scrgb;
+    if (!g_compose)
+        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", Late::device.Get());
+
+    DlssNrFrameInfo frame {};
+    frame.DepthInverted = depthReversed;
+    frame.MvScaleX = 1.0f;
+    frame.MvScaleY = 1.0f;
+    frame.ColourIsLinearHdr = scrgb;
+    frame.InputEncoding = screenChoice.shaderConversion;
+    frame.ColourEncoding = (uint32_t) screenChoice.choice.encoding;
+    frame.ColourEncodingForced = !screenChoice.choice.automatic;
+    frame.WhitePointOverride = scrgb ? 203.0f / 80.0f : 0.0f;
+    frame.Reset = reset || Late::reset;
+    frame.OutputWidth = (unsigned) desc.Width;
+    frame.OutputHeight = desc.Height;
+    frame.FinishedPicture = true;
+    frame.IndependentCommands = true;
+    frame.OutputArrivalState = pictureState;
+    frame.SubmissionEpoch = State::Instance().frameCount;
+
+    DlssNrNative::SetPrecision(Config::Instance()->DlssNrPrecision.value_or_default());
+    const auto before = g_nr.successfulDispatches;
+    g_compose->Dispatch(cmd, color, depth, motion, color, frame, queue);
+    const bool ran = g_nr.successfulDispatches > before;
+    Late::reset = !ran;
+    Late::Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden." :
+        ran ? "Applying NR to the finished picture (native input)." : "Preparing NR for the finished picture (native input).");
+    if (ran && (++Late::successes == 1 || Late::successes % 300 == 0))
+        LOG_INFO("DLSS-NR native input: {} frames, {}x{}", Late::successes, desc.Width, desc.Height);
+    return ran;
 }

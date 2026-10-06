@@ -16,32 +16,106 @@ class ScopedIndent
     float m_indent;
 };
 
+// Modern style state, defined in menu_common.cpp.
+namespace MenuStyle
+{
+bool IsModern();
+const ImVec4& CardColor();
+const ImVec4& CardHeaderColor();
+const ImVec4& CardHeaderHoverColor();
+const ImVec4& CardHeaderActiveColor();
+ImFont* MonoFont(); // Hack; null with a custom TTF or HQ font off
+} // namespace MenuStyle
+
+// Live numbers keep the fixed-width font so digits don't jitter when the default is proportional.
+class ScopedMonoFont
+{
+  public:
+    ScopedMonoFont()
+    {
+        ImFont* mono = MenuStyle::MonoFont();
+        _pushed = mono != nullptr && ImGui::GetFont() != mono;
+        if (_pushed)
+            ImGui::PushFont(mono, -1.0f);
+    }
+
+    ~ScopedMonoFont()
+    {
+        if (_pushed)
+            ImGui::PopFont();
+    }
+
+  private:
+    bool _pushed = false;
+};
+
 class ScopedCollapsingHeader
 {
   public:
     explicit ScopedCollapsingHeader(const char* label, ImGuiTreeNodeFlags flags = 0)
     {
+        // The page view asks for the next header to start open (one shot).
+        if (OpenNextHeader)
+        {
+            flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            OpenNextHeader = false;
+        }
+
         ImGui::PushID(label);
 
-        ImGui::BeginChild("##CollapsingHeaderChild", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY,
+        // Modern: a top-level section is a rounded card, a header nested in a card stays flat.
+        const bool modern = MenuStyle::IsModern();
+        const bool card = modern && _depth == 0;
+        ImGuiChildFlags childFlags = ImGuiChildFlags_AutoResizeY;
+
+        if (card)
+        {
+            childFlags |= ImGuiChildFlags_AlwaysUseWindowPadding;
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, MenuStyle::CardColor());
+        }
+        else if (modern)
+        {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        }
+
+        ImGui::BeginChild("##CollapsingHeaderChild", ImVec2(0, 0), childFlags,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
+        if (modern)
+            ImGui::PopStyleColor();
+
+        if (card)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Header, MenuStyle::CardHeaderColor());
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuStyle::CardHeaderHoverColor());
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, MenuStyle::CardHeaderActiveColor());
+        }
+
         _headerOpen = ImGui::CollapsingHeader(label, flags);
+
+        if (card)
+            ImGui::PopStyleColor(3);
+
+        _depth++;
         _active = true;
     }
 
     bool IsHeaderOpen() const { return _headerOpen; }
 
+    inline static bool OpenNextHeader = false;
+
     ~ScopedCollapsingHeader()
     {
         if (_active)
         {
+            _depth--;
             ImGui::EndChild();
             ImGui::PopID();
         }
     }
 
   private:
+    inline static int _depth = 0;
     bool _active = false;
     bool _headerOpen = false;
 };
@@ -160,7 +234,7 @@ class MenuCommon
     // RenderMainMenuWindow section helpers. These keep the main window flow readable
     // without changing the existing ImGui layout, labels, or setting side effects.
     static void RenderMainMenuHeaderMessages(RenderMenuContext& ctx);
-    static void RenderMainMenuTable(RenderMenuContext& ctx);
+    static void RenderMainMenuPages(RenderMenuContext& ctx);
     static void RenderActiveUpscalerSettings(RenderMenuContext& ctx);
     static void RenderFrameGenerationSelection(RenderMenuContext& ctx);
     static void RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx);
@@ -199,4 +273,6 @@ class MenuCommon
     static void HideMenu();
     static void Present();
     static void ApplyThemeStyle();
+    static void RebuildStyle(float menuScale = 0.0f);
+    static void ApplyThemeFont();
 };

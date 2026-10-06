@@ -5,6 +5,10 @@
 #include <Util.h>
 #include <Logger.h>
 #include <Config.h>
+#include <resource_tracking/GenericDepth_Dx12.h>
+#include <resource_tracking/GenericDepth_Dx11.h>
+#include <motion/NativeMotion_Dx12.h>
+#include <motion/NativeMotionDx11.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -220,6 +224,9 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
     }
 
     LOG_FUNC();
+
+    // The motion step reads the finished picture before the menu is drawn onto it (does nothing unless it is on).
+    NativeMotionDx11::OnPresent(pSwapChain, g_pd3dDevice);
 
     ImGuiIO& io = ImGui::GetIO();
     (void) io;
@@ -465,6 +472,9 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                     return;
                 }
 
+                // The depth finder's preview reads back its copy on this list.
+                GenericDepthDx12::RecordPreviewCopy(g_pd3dCommandList);
+
                 g_pd3dCommandList->ResourceBarrier(1, &barrier);
                 g_pd3dCommandList->OMSetRenderTargets(1, &g_mainRenderTargetDescriptor[backBufferIdx], FALSE, NULL);
                 g_pd3dCommandList->SetDescriptorHeaps(1, &g_pd3dSrvDescHeap);
@@ -503,6 +513,23 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
 
 ID3D12GraphicsCommandList* MenuOverlayDx::MenuCommandList() { return g_pd3dCommandList; }
 
+ID3D12DescriptorHeap* MenuOverlayDx::SrvHeap() { return g_pd3dSrvDescHeap; }
+
+bool MenuOverlayDx::AllocSrv(D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu)
+{
+    if (g_pd3dSrvDescHeap == nullptr || g_pd3dSrvDescHeapAlloc.FreeIndices.Size <= 0)
+        return false;
+
+    g_pd3dSrvDescHeapAlloc.Alloc(cpu, gpu);
+    return true;
+}
+
+void MenuOverlayDx::FreeSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu)
+{
+    if (g_pd3dSrvDescHeap != nullptr)
+        g_pd3dSrvDescHeapAlloc.Free(cpu, gpu);
+}
+
 void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 {
     LOG_FUNC();
@@ -524,8 +551,24 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
+    // D3D12's finder closes its frame with the native input step (NativeMotionDx12::OnPresent / OnFGPresent). Under
+    // Dx11wDx12SC the D3D11 finder's frame is closed by NativeMotionDx11::OnFGPresent instead: frame generation's present
+    // still reaches here, and a second close in the same frame sees no draws and resets every candidate's warm-up.
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+        GenericDepthDx11::OnPresent(pSwapChain);
+
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {
+        // Normally this step runs inside RenderImGui_DX11, as part of the overlay's own device capture; with the
+        // overlay off that capture never happens, so grab the device just for this call -- it does nothing unless
+        // native input (no frame generation) is actually on.
+        ID3D11Device* device = nullptr;
+        if (pDevice->QueryInterface(IID_PPV_ARGS(&device)) == S_OK)
+        {
+            NativeMotionDx11::OnPresent(pSwapChain, device);
+            device->Release();
+        }
+
         MenuOverlayBase::Present();
         return;
     }

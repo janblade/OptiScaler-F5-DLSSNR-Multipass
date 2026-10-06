@@ -28,5 +28,11 @@ int main()
     g = ResolveGuideRegions({1920, 1080}, {3840, 2160}, {1920, 1080}, {3840, 2160},
                             false, UINT_MAX, 0, 0, UINT_MAX);
     assert(!g.depth.valid() && !g.motion.valid());
-    std::puts("PASS: NR guide regions (pre/post SR, MVLowRes, offsets, clipping, missing/invalid metadata)");
+    // No depth this frame (DlssNr_Dx12::Dispatch passes a {0,0} allocation extent rather than calling
+    // GetDesc() on a null depth resource): the depth region comes out invalid on its own, unchanged math,
+    // while a real motion allocation still resolves to a valid region.
+    g = ResolveGuideRegions({ 0, 0 }, { 3840, 2160 }, { 1920, 1080 }, { 3840, 2160 }, false, 0, 0, 0, 0);
+    assert(!g.depth.valid() && g.motion.valid());
+    assert(g.motion.width == 3840 && g.motion.height == 2160);
+    std::puts("PASS: NR guide regions (pre/post SR, MVLowRes, offsets, clipping, missing/invalid metadata, no depth)");
 }

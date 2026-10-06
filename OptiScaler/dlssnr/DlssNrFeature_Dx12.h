@@ -7,6 +7,7 @@
 
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
+#include <menu/MenuPages.h>
 
 // DLSS 5 Neural Rendering, run over the upscaler's output.
 //
@@ -57,7 +58,7 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 
 
 // The settings panel, drawn inside OptiScaler's menu.
-void RenderMenu(::Config* config, float menuResScale);
+void RenderMenu(::Config* config, float menuResScale, MenuPages::Page page);
 
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
@@ -67,6 +68,22 @@ bool WaitForFinishedPicture();
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd);
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
+
+// True while a swap-chain interop (a D3D11 game's frame generation swap chain) is in play: ApplyNativeInput refuses
+// then.
+bool NativeInputBlockedBySwapChainInterop();
+
+// The native input producer's entry: runs DLSS-NR on the picture `color` (a back buffer in the PRESENT state, or any resource) with a depth and a motion
+// texture of the picture's size made from the depth finder and the optical flow (both NON_PIXEL_SHADER_RESOURCE, motion in
+// full-resolution pixels towards the previous frame). Records onto `cmd`, a list of the caller's own, and leaves `color` in
+// PRESENT. False when it did not run (the reason is in FinishedPictureStatus()).
+// `colorSpace` is what the picture's values mean (NativeInputColourSpace() reads it off a swap chain); `pictureState` is the
+// state `color` is in on entry and is left in.
+bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
+                      ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
+                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState);
+// The colour space of a swap chain's picture, from what the game set (SDR when it set nothing), for a native-input frame.
+DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);
 
 

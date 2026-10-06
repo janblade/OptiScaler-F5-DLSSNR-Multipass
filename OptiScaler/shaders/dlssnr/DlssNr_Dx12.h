@@ -19,9 +19,11 @@
 
 #include "DlssNr_Common.h"
 #include "DlssNr_DetailReuseConstants.h"
+#include "DlssNr_LutConstants.h"
 
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
+#include <dlssnr/DlssNr_Lut.h>
 #include <shaders/Shader_Dx12.h>
 #include <shaders/Shader_Dx12Utils.h>
 
@@ -85,6 +87,45 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12PipelineState* _detailReusePipelineState = nullptr;
     bool _detailReusePipelineFailed = false;
 
+    // The LUT pass (dlssnr_lut.hlsl, LUT-apply epic Story 2: dlssnr-lut-apply).
+    // Its own root signature, PSO and small descriptor-heap ring -- not the shared table above -- because it
+    // is the first pass here to sample a 3D texture, and keeping it separate means DispatchPass/
+    // DispatchDetailReuse/DispatchExposureAdapt/DispatchResidualPass and their compiled bytecode need no
+    // changes at all. Eight heap/constant-buffer slots: this dispatches at most once a frame, unlike the 64
+    // the shared ring budgets for several passes deep in flight.
+    static constexpr uint32_t kLutHeapCount = 8;
+    ID3D12RootSignature* _lutRootSignature = nullptr;
+    ID3D12PipelineState* _lutPipelineState = nullptr;
+    bool _lutPipelineFailed = false;
+    FrameDescriptorHeap _lutHeaps[kLutHeapCount];
+    ID3D12Resource* _lutConstantBuffers[kLutHeapCount] = {};
+    uint32_t _lutHeapIndex = 0;
+
+    // What is currently loaded (DlssNr_Lut.h's CPU half) and the GPU texture it was uploaded into (DEFAULT
+    // heap, TEXTURE3D, R16G16B16A16_FLOAT, size^3). Neither depends on render resolution, so neither is
+    // parked by NrState's resolution-change handling -- only by a changed/cleared LutFile.
+    DlssNr_LutState _lutState;
+    ID3D12Resource* _lutTexture = nullptr;
+    // The path _lutTexture's content was actually uploaded from -- the cache key, not _lutTextureSize alone:
+    // two different .cube files sharing a lattice size (17/33/65 are near-universal) must not look like the
+    // same texture just because neither resized it. Size is still tracked (_lutTextureSize) because the
+    // resource itself must be recreated, not merely re-uploaded, when it changes.
+    std::string _lutTextureSourcePath;
+    int _lutTextureSize = 0;
+
+    // Lazily builds the root signature, PSO and heap ring on first use -- so a game that never sets LutFile
+    // never allocates any of it. Not retried once it failed to build, same as the other lazy PSOs here.
+    bool LutPipelineReady();
+
+    // Builds/rebuilds _lutTexture from _lutState.lut when the loaded file (path, not just size) changed,
+    // recording the upload on InCmdList. False if there is nothing loaded or the texture could not be
+    // (re)built.
+    bool EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList);
+
+    // Releases _lutTexture and forgets its source path, so the next EnsureLutTexture call re-uploads from
+    // scratch rather than reading _lutTextureSourcePath against a texture that no longer exists.
+    void ReleaseLutTexture();
+
   public:
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
     ~DlssNr_Dx12();
@@ -143,4 +184,19 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                              unsigned int Width, unsigned int Height, ID3D12Resource* In0, ID3D12Resource* In1,
                              ID3D12Resource* In2, ID3D12Resource* In3, ID3D12Resource* In4, ID3D12Resource* OutTarget,
                              ID3D12Resource* OutSecond);
+
+    // The LUT pass (dlssnr_lut.hlsl, DlssNr_Lut.h, LUT-apply epic Story 2:
+    // dlssnr-lut-apply). Grades InSource (Width x Height, already in the colour
+    // encoding InputEncoding names) through the .cube file at LutPath, scaled by Strength, into OutTarget
+    // (caller-owned, same size and format as InSource). Reparses/reuploads only when LutPath differs from
+    // what is already loaded. False and OutTarget untouched when LutPath is empty or fails to parse --
+    // LutError() then has the reason -- so an empty setting costs nothing beyond this call's own early-out.
+    // ColourIsLinearHdr/Trim (Review Pass, 2026-10-04 fix): InputEncoding alone cannot tell scene-linear
+    // HDR apart from tone-mapped sRGB (both collapse to the same value), so the caller passes
+    // frame.ColourIsLinearHdr directly, and Trim is what to divide linear light by -- the white point the encode
+    // uses for this frame (ResolveWhitePoint), not the Trim on top of it.
+    bool DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
+                     unsigned int Width, unsigned int Height, float Strength, uint32_t InputEncoding,
+                     bool ColourIsLinearHdr, float Trim, const std::string& LutPath);
+    const std::string& LutError() const { return _lutState.error; }
 };

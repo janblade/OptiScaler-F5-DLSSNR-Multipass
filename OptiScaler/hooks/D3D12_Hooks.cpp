@@ -8,6 +8,7 @@
 #include <magic_enum.hpp>
 
 #include <resource_tracking/ResTrack_Dx12.h>
+#include <resource_tracking/GenericDepth_Dx12.h>
 
 #include <proxies/D3D12_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
@@ -2334,6 +2335,9 @@ static void HookToDevice(ID3D12Device* InDevice)
     }
 
     HookToCommandList(InDevice);
+
+    // Observes the depth buffers for the native input producer; nothing is hooked unless [DlssNr] NativeDepthFinder is on.
+    GenericDepthDx12::Install(InDevice);
 
     if (State::Instance().activeFgInput == FGInput::Upscaler &&
         !Config::Instance()->FGDisableHUDFix.value_or_default() &&

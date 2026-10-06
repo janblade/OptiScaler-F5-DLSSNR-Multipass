@@ -849,8 +849,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* 
     // Before any feature's resources are freed, drop the exposure scan's references to whatever it
     // captured. The scan AddRef's candidates and never released them; a Streamline/DLSS-D resource it
     // pinned would otherwise be used after its heap is freed here -- the Cyberpunk device-removal.
-    // Capture is gated on NR being enabled (not the scan source), so this drops whatever was captured
-    // whenever NR is on; a no-op only when NR is off.
+    // Capture is gated on NR being enabled and the exposure scan being wanted, so this is a no-op
+    // whenever the scan is off.
     DlssNr::ExposureScan::ReleaseTrackedResources();
 
     auto handleId = InHandle->Id;

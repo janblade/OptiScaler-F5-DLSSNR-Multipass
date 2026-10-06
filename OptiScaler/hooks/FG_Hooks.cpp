@@ -18,6 +18,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+#include <motion/NativeMotion_Dx12.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -1177,6 +1178,32 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 #endif
     }
 
+    // Work on the game's picture before frame generation takes it must go on the queue frame generation takes it on.
+    ID3D12CommandQueue* gameQueue = state.currentCommandQueue;
+
+    if (auto* fg12 = dynamic_cast<IFGFeature_Dx12*>(state.currentFG); fg12 != nullptr && fg12->GameCommandQueue() != nullptr)
+    {
+        static bool logged = false;
+
+        if (!logged && fg12->GameCommandQueue() != state.currentCommandQueue)
+        {
+            logged = true;
+            LOG_INFO("FGPresent: frame generation's game queue {:X} is not State::currentCommandQueue {:X}; native input "
+                     "and the finished-picture pass use frame generation's",
+                     (size_t) fg12->GameCommandQueue(), (size_t) state.currentCommandQueue);
+        }
+
+        gameQueue = fg12->GameCommandQueue();
+    }
+
+    // Native input runs here, on the game's picture and queue, ahead of frame generation and before its lock below: when it
+    // presents to the virtual upscaler, that call feeds frame generation (UpscaleStart takes the same lock).
+    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && gameQueue != nullptr &&
+        state.currentD3D12Device != nullptr)
+    {
+        NativeMotionDx12::OnFGPresent(This, gameQueue, state.currentD3D12Device);
+    }
+
     IFGFeature* fg = state.currentFG;
 
     if (fg != nullptr && willPresent && fg->IsActive() && !fg->IsPaused())
@@ -1185,7 +1212,20 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         {
             std::optional<double> upscalerTimeOpt {};
 
-            if (state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 && state.currentD3D11Device != nullptr)
+            // ReadUpscalerTime takes a void*: a plain D3D12 feature casts it to ID3D12CommandQueue*, so it must never get
+            // the D3D11 context. Under Dx11wDx12 that feature is native::VirtualUpscalerDriver's, recorded on the queue
+            // gameQueue names (WithDx12's paired one).
+            const bool pureDx12Feature = currentFeature->Api() == API::DX12 && !currentFeature->IsWithDx12();
+
+            if (pureDx12Feature && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
+            {
+                if (gameQueue != nullptr)
+                {
+                    if (upscalerTimeOpt = currentFeature->ReadUpscalerTime(gameQueue); upscalerTimeOpt.has_value())
+                        currentFeature->ReadDetailedGpuTimes(gameQueue, state.detailedGpuTimes);
+                }
+            }
+            else if (state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 && state.currentD3D11Device != nullptr)
             {
                 ID3D11DeviceContext* context = nullptr;
                 state.currentD3D11Device->GetImmediateContext(&context);
@@ -1259,7 +1299,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
-        DlssNr::ApplyToFinishedPicture(This, state.currentCommandQueue);
+        DlssNr::ApplyToFinishedPicture(This, gameQueue);
         fg->Present();
     }
     else if (willPresent && fg != nullptr)

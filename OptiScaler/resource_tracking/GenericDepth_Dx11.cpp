@@ -6,16 +6,16 @@
 #include <Util.h>
 #include <dlssnr/DlssNr_NativeMode.h>
 
+#include <native/DepthCopyDx11.h>
 #include <native/DepthFinderCore.h>
-#include <native/SharedFrame.h>
 
 #include <detours/detours.h>
 
 #include <imgui/imgui.h>
 
 #include <d3d11_4.h>
-#include <d3dcompiler.h>
 
+#include <atomic>
 #include <mutex>
 
 // See GenericDepth_Dx11.h. Reuses native::DepthFinderCore (resource_tracking/GenericDepth_Dx12.cpp is the D3D12 sibling of this
@@ -72,102 +72,66 @@ constexpr int kDrawIndexed = 12, kDraw = 13, kDrawIndexedInstanced = 20, kDrawIn
 
 std::mutex g_mutex;
 native::DepthFinderCore g_core;
-ID3D11DeviceContext* g_context = nullptr; // the immediate context, hooked once
-uint64_t g_contextId = 0;
 
-// A plain (non-shared) D3D11 copy of the picked depth buffer for the frame, always R32_FLOAT (see LinearizeDepth): one context
-// means one copy, unlike the D3D12 finder's several command lists. Made again when the size or the device changes, and let go
-// at stand-down.
-ID3D11Texture2D* g_copy = nullptr;
-uint32_t g_copyWidth = 0, g_copyHeight = 0;
-bool g_copyTaken = false; // a copy was recorded for the frame just closed
-// The view the linearize pass writes through, kept with g_copy (made again when g_copy is).
-ID3D11UnorderedAccessView* g_copyUav = nullptr;
-// The picked buffer copied as it is, in its own format family, and the view the linearize pass reads it through.
-ID3D11Texture2D* g_stage = nullptr;
-ID3D11ShaderResourceView* g_stageSrv = nullptr;
-uint32_t g_stageWidth = 0, g_stageHeight = 0;
-DXGI_FORMAT g_stageFormat = DXGI_FORMAT_UNKNOWN;
-ID3D11Device* g_copyDevice = nullptr; // what all of the above and the linearize shader were made on (a reference is held)
+// The context the game draws its frames through: its device's immediate context, unwrapped from a wrapping layer's proxy
+// (Streamline's), a reference held. The hooks patch the functions themselves, so every context of the same kind runs them (a
+// deferred context under the debug layer, another device's immediate context): only this one's calls are counted. Followed to
+// the device the game presents with (FollowPresentDevice), so a device the game makes again is watched too. Set at Install and
+// on the present thread only.
+ID3D11DeviceContext* g_context = nullptr;
+std::atomic<uint64_t> g_contextId = 0; // g_context, as the core's id for it; read by the hooks on the game's threads
+PVOID g_hookedOMSetRenderTargets = nullptr; // the function hooked, to tell whether a context runs the hooks at all
+// The watched context set render targets since the last present (it is still the one the game draws through).
+std::atomic<bool> g_watchedBound = false;
+
+// The device of g_context, and the real device behind it when that is a proxy; a buffer of either can be copied on g_context.
+// Not held (g_context holds its device). Under g_mutex.
+ID3D11Device* g_contextDevice = nullptr;
+ID3D11Device* g_contextRealDevice = nullptr;
+
+// The copy of the picked buffer for the frame: one context means one copy, unlike the D3D12 finder's several command lists.
+// Under g_mutex. Let go at stand-down and when the context changes. Never destroyed (no COM release at process exit).
+native::DepthCopyDx11& g_copy = *new native::DepthCopyDx11();
+
+// The finder's own pass is being recorded on this thread: its Dispatch is not the game's.
+thread_local bool t_copying = false;
+
 bool g_installed = false;
 bool g_installFailed = false;
 
-// Reads the picked depth buffer (whatever its own typeless/depth-stencil format) through a single-channel view and writes a
-// plain R32_FLOAT copy, compiled once on first use. A typeless depth-stencil format (R32G8X24_TYPELESS and the like) can fail
-// to make a cross-API (D3D11<->D3D12) shared NT handle outright (seen in practice: CreateTexture2D returns E_INVALIDARG for
-// such a format with D3D11_RESOURCE_MISC_SHARED_NTHANDLE, even though the same device shares an ordinary colour texture of
-// that size without trouble), where a plain float texture shares without issue; linearizing before sharing sidesteps the
-// restriction rather than depending on it being lifted.
-const char* kLinearizeSource = R"HLSL(
-Texture2D<float> Src : register(t0);
-RWTexture2D<float> Dst : register(u0);
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
+// Only the game's own context is watched (see g_context).
+bool Watched(ID3D11DeviceContext* context)
 {
-    uint w, h;
-    Dst.GetDimensions(w, h);
-
-    if (id.x >= w || id.y >= h)
-        return;
-
-    Dst[id.xy] = Src.Load(int3(id.xy, 0));
-}
-)HLSL";
-
-ID3D11ComputeShader* g_linearizeCs = nullptr; // made on g_copyDevice
-bool g_linearizeFailed = false;               // making it on g_copyDevice failed
-ID3DBlob* g_linearizeCode = nullptr;          // compiled once, for every device
-bool g_compileFailed = false;
-
-ID3D11ComputeShader* LinearizeShader(ID3D11Device* device)
-{
-    if (g_linearizeCs != nullptr || g_linearizeFailed || g_compileFailed)
-        return g_linearizeCs;
-
-    if (g_linearizeCode == nullptr)
-    {
-        ID3DBlob* messages = nullptr;
-        const HRESULT hr = D3DCompile(kLinearizeSource, strlen(kLinearizeSource), "DepthLinearize", nullptr, nullptr,
-                                      "CSMain", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &g_linearizeCode, &messages);
-
-        if (FAILED(hr))
-        {
-            LOG_ERROR("Depth finder (D3D11): compiling the linearize shader failed: {}",
-                      messages != nullptr ? (const char*) messages->GetBufferPointer() : "no message");
-            if (messages != nullptr)
-                messages->Release();
-            SAFE_RELEASE(g_linearizeCode);
-            g_compileFailed = true;
-            return nullptr;
-        }
-
-        if (messages != nullptr)
-            messages->Release();
-    }
-
-    if (FAILED(device->CreateComputeShader(g_linearizeCode->GetBufferPointer(), g_linearizeCode->GetBufferSize(), nullptr,
-                                           &g_linearizeCs)))
-    {
-        LOG_ERROR("Depth finder (D3D11): creating the linearize compute shader failed");
-        g_linearizeCs = nullptr;
-        g_linearizeFailed = true;
-    }
-
-    return g_linearizeCs;
+    return (uint64_t) (size_t) context == g_contextId.load(std::memory_order_relaxed);
 }
 
-// Under g_mutex. Lets go of everything kept between copies, and of the device it was made on.
-void ReleaseCopies()
+// Watches `context` (already unwrapped) from now on, and lets go of the copy made for the one before.
+void UseContext(ID3D11DeviceContext* context)
 {
-    SAFE_RELEASE(g_copyUav);
-    SAFE_RELEASE(g_copy);
-    SAFE_RELEASE(g_stageSrv);
-    SAFE_RELEASE(g_stage);
-    SAFE_RELEASE(g_linearizeCs);
-    SAFE_RELEASE(g_copyDevice);
-    g_linearizeFailed = false; // the compiled code is kept: only making it on a device is done again
-    g_copyTaken = false;
+    context->AddRef();
+
+    if (g_context != nullptr)
+        g_context->Release();
+
+    g_context = context;
+
+    std::lock_guard lock(g_mutex);
+
+    ID3D11Device* device = nullptr;
+    context->GetDevice(&device);
+    g_contextDevice = device;
+    g_contextRealDevice = device;
+
+    IUnknown* real = nullptr;
+
+    if (device != nullptr && Util::CheckForRealObject(__FUNCTION__, device, &real))
+        g_contextRealDevice = (ID3D11Device*) real;
+
+    if (device != nullptr)
+        device->Release(); // the context holds it
+
+    g_copy.Release();
+    g_contextId.store((uint64_t) (size_t) context, std::memory_order_relaxed);
 }
 
 // The depth buffer a depth-stencil view points at, as a DepthBuffer (plain data for the core). `*outResource` gets an
@@ -205,260 +169,49 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
     return true;
 }
 
-// Whether `context` can copy `resource`: they are of the same device, a wrapping layer's proxy of it (Streamline's) counting
-// as it. The answer for the last pair is kept, so the proxy check, which logs, runs once per pair.
-bool SameDevice(ID3D11DeviceContext* context, ID3D11Device* resourceDevice)
-{
-    Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
-    context->GetDevice(&contextDevice);
-
-    if (contextDevice.Get() == resourceDevice)
-        return true;
-
-    static ID3D11Device* lastContextDevice = nullptr;
-    static ID3D11Device* lastResourceDevice = nullptr;
-    static bool lastSame = false;
-
-    if (contextDevice.Get() != lastContextDevice || resourceDevice != lastResourceDevice)
-    {
-        IUnknown* real = nullptr;
-        lastSame = contextDevice != nullptr && Util::CheckForRealObject(__FUNCTION__, contextDevice.Get(), &real) &&
-                   real == resourceDevice;
-        lastContextDevice = contextDevice.Get();
-        lastResourceDevice = resourceDevice;
-
-        if (!lastSame)
-            LOG_WARN("Depth finder (D3D11): the picked buffer is of another device than the context that would copy it; no copy");
-    }
-
-    return lastSame;
-}
-
-// Reads `resource` (the picked buffer, in whatever format the game made it) through a copy of it and, unless it already is one,
-// the linearize shader into the frame's D3D11-side slot, making again what it keeps when the size, format or device changes.
+// Copies `resource` (the picked buffer) into the frame's copy on `context` (g_context, from a hook or Present). A buffer that
+// is not copied leaves no copy for the frame: the copy of an earlier one is not offered for it.
 void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Resource* resource, const char* where)
 {
-    // A deferred context only records: a copy made there runs when the game executes its list, if it does, so none is taken.
-    if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
-        return;
-
-    D3D11_TEXTURE2D_DESC sourceDesc {};
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> sourceTex;
-
-    if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&sourceTex))))
-        return;
-
-    sourceTex->GetDesc(&sourceDesc);
-    const uint32_t width = sourceDesc.Width;
-    const uint32_t height = sourceDesc.Height;
-    const DXGI_FORMAT format = sourceDesc.Format;
-
-    // A buffer that cannot be copied is not the frame's copy: the copy of an earlier one is not offered for it.
-    auto noCopy = [](const char* why)
-    {
-        {
-            std::lock_guard lock(g_mutex);
-            g_copyTaken = false;
-        }
-
-        static const char* logged = nullptr;
-
-        if (logged != why)
-        {
-            logged = why;
-            LOG_WARN("Depth finder (D3D11): {}; no copy", why);
-        }
-    };
+    std::lock_guard lock(g_mutex);
 
     static int calls = 0;
 
     if (calls < 8 || calls % 200 == 0)
-        LOG_INFO("Depth finder (D3D11): TakeSnapshot call {} from {}, {:X} {}x{} format {}", calls, where,
-                 (size_t) resource, width, height, (int) format);
+        LOG_INFO("Depth finder (D3D11): TakeSnapshot call {} from {}, {:X}", calls, where, (size_t) resource);
 
     ++calls;
 
-    DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN, view = DXGI_FORMAT_UNKNOWN;
-
-    if (!native::SharedDepthFormats(format, &typeless, &view))
-    {
-        noCopy("the picked buffer's format does not map to a shareable depth format");
-        return;
-    }
-
-    // A multisampled buffer would need a resolve.
-    if (sourceDesc.SampleDesc.Count > 1)
-    {
-        noCopy("the picked buffer is multisampled");
-        return;
-    }
-
-    // The device the buffer was made on, not the one the caller holds (that can be a wrapper of it): what is kept between copies
-    // is made on it, and made again when the game makes a new one.
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     resource->GetDevice(&device);
+    const char* failed = nullptr;
 
-    if (device == nullptr || !SameDevice(context, device.Get()))
+    if (device == nullptr || (device.Get() != g_contextDevice && device.Get() != g_contextRealDevice))
     {
-        noCopy("the picked buffer is of another device");
-        return;
+        g_copy.Forget();
+        failed = "the picked buffer is of another device than the context watched";
+    }
+    else
+    {
+        t_copying = true;
+        failed = g_copy.Take(context, resource);
+        t_copying = false;
     }
 
-    // An R32 depth (D32_FLOAT, R32_TYPELESS: the most common) is already the copy's format family: it is copied straight into
-    // the copy, with no read copy and no pass.
-    const bool direct = typeless == DXGI_FORMAT_R32_TYPELESS;
+    static const char* logged = nullptr;
 
-    std::lock_guard lock(g_mutex);
+    if (failed != nullptr && failed != logged)
+        LOG_WARN("Depth finder (D3D11): {}; no copy", failed);
 
-    if (g_copyDevice != device.Get())
-    {
-        ReleaseCopies();
-        g_copyDevice = device.Get();
-        g_copyDevice->AddRef();
-    }
-
-    ID3D11ComputeShader* shader = direct ? nullptr : LinearizeShader(device.Get());
-
-    if (!direct && shader == nullptr)
-        return;
-
-    if (g_copy == nullptr || g_copyWidth != width || g_copyHeight != height)
-    {
-        SAFE_RELEASE(g_copyUav);
-        SAFE_RELEASE(g_copy);
-
-        // A new texture holds nothing until the pass below has run into it.
-        g_copyTaken = false;
-
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-
-        const HRESULT hr = device->CreateTexture2D(&desc, nullptr, &g_copy);
-
-        if (FAILED(hr))
-        {
-            g_copy = nullptr;
-            LOG_WARN("Depth finder (D3D11): creating the {}x{} R32_FLOAT copy texture failed: {:X}", width, height,
-                     (UINT) hr);
-            return;
-        }
-
-        g_copyWidth = width;
-        g_copyHeight = height;
-
-        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc {};
-        uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
-        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-        const HRESULT uavResult = device->CreateUnorderedAccessView(g_copy, &uavDesc, &g_copyUav);
-
-        if (FAILED(uavResult))
-        {
-            g_copyUav = nullptr;
-            SAFE_RELEASE(g_copy);
-            LOG_WARN("Depth finder (D3D11): creating the write view on the copy texture failed: {:X}", (UINT) uavResult);
-            return;
-        }
-    }
-
-    // Only the first subresource (the top mip of the first slice) is copied: a whole-resource copy of a buffer with mips or
-    // slices into one with neither would be dropped by the runtime without a word.
-    if (direct)
-    {
-        context->CopySubresourceRegion(g_copy, 0, 0, 0, 0, resource, 0, nullptr);
-        g_copyTaken = true;
-        return;
-    }
-
-    // The buffer is most often still bound for depth writes here (a copy is taken before the game moves off it, clears it or
-    // presents), and a resource bound for writing cannot also be read: the runtime would quietly bind no read view and the
-    // pass would read nothing. It is copied as it is first (a copy may read a bound depth buffer) into a texture of its own
-    // format family that can be read, so the game's bindings are never touched. That also reads a buffer made with a typed
-    // depth format, which no read view can be made on.
-    if (g_stage == nullptr || g_stageWidth != width || g_stageHeight != height || g_stageFormat != typeless)
-    {
-        SAFE_RELEASE(g_stageSrv);
-        SAFE_RELEASE(g_stage);
-
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = typeless;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
-        srvDesc.Format = view;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = 1;
-
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &g_stage)) ||
-            FAILED(device->CreateShaderResourceView(g_stage, &srvDesc, &g_stageSrv)))
-        {
-            SAFE_RELEASE(g_stageSrv);
-            SAFE_RELEASE(g_stage);
-            static bool loggedStageFail = false;
-
-            if (!loggedStageFail)
-            {
-                loggedStageFail = true;
-                LOG_WARN("Depth finder (D3D11): making the {}x{} read copy (format {}) failed", width, height,
-                         (int) typeless);
-            }
-
-            g_copyTaken = false;
-            return;
-        }
-
-        g_stageWidth = width;
-        g_stageHeight = height;
-        g_stageFormat = typeless;
-    }
-
-    context->CopySubresourceRegion(g_stage, 0, 0, 0, 0, resource, 0, nullptr);
-
-    // The game's own compute state: this runs in the middle of its frame, so what it had bound at slot 0 is put back after.
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> gameShader;
-    ID3D11ClassInstance* gameInstances[D3D11_SHADER_MAX_INTERFACES] {};
-    UINT gameInstanceCount = D3D11_SHADER_MAX_INTERFACES;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gameSrv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> gameUav;
-    context->CSGetShader(&gameShader, gameInstances, &gameInstanceCount);
-    context->CSGetShaderResources(0, 1, &gameSrv);
-    context->CSGetUnorderedAccessViews(0, 1, &gameUav);
-
-    // -1 keeps an append or counter UAV's hidden count as it is.
-    const UINT keepCount = (UINT) -1;
-
-    context->CSSetShader(shader, nullptr, 0);
-    context->CSSetShaderResources(0, 1, &g_stageSrv);
-    context->CSSetUnorderedAccessViews(0, 1, &g_copyUav, &keepCount);
-    context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
-
-    context->CSSetShaderResources(0, 1, gameSrv.GetAddressOf());
-    context->CSSetUnorderedAccessViews(0, 1, gameUav.GetAddressOf(), &keepCount);
-    context->CSSetShader(gameShader.Get(), gameInstances, gameInstanceCount);
-
-    for (UINT i = 0; i < gameInstanceCount; ++i)
-        SAFE_RELEASE(gameInstances[i]);
-
-    g_copyTaken = true;
+    logged = failed;
 
     static bool loggedFirst = false;
 
-    if (!loggedFirst)
+    if (failed == nullptr && !loggedFirst)
     {
         loggedFirst = true;
-        LOG_INFO("Depth finder (D3D11): first depth copy taken, {}x{}, linearized to R32_FLOAT", g_copyWidth, g_copyHeight);
+        LOG_INFO("Depth finder (D3D11): first depth copy taken, {}x{}, {} R32_FLOAT", g_copy.Width(), g_copy.Height(),
+                 g_copy.Converted() ? "converted to" : "copied straight into");
     }
 }
 
@@ -469,7 +222,7 @@ void OnBound(ID3D11DeviceContext* context, ID3D11DepthStencilView* view)
     const bool hadDepth = view != nullptr;
     const bool have = hadDepth && Describe(view, &buffer, &resource);
 
-    const auto request = g_core.OnDepthBound(g_contextId, hadDepth, have ? &buffer : nullptr);
+    const auto request = g_core.OnDepthBound((uint64_t) (size_t) context, hadDepth, have ? &buffer : nullptr);
 
     if (request.take)
         TakeSnapshot(context, (ID3D11Resource*) (size_t) request.id, "unbind");
@@ -482,8 +235,13 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D11DeviceContext* This, UINT NumV
                                             ID3D11RenderTargetView* const* ppRenderTargetViews,
                                             ID3D11DepthStencilView* pDepthStencilView)
 {
-    if (g_core.Active())
-        OnBound(This, pDepthStencilView);
+    if (Watched(This))
+    {
+        g_watchedBound.store(true, std::memory_order_relaxed);
+
+        if (g_core.Active())
+            OnBound(This, pDepthStencilView);
+    }
 
     o_OMSetRenderTargets(This, NumViews, ppRenderTargetViews, pDepthStencilView);
 }
@@ -494,9 +252,14 @@ void STDMETHODCALLTYPE hkOMSetRenderTargetsAndUAV(ID3D11DeviceContext* This, UIN
                                                   UINT NumUAVs, ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
                                                   const UINT* pUAVInitialCounts)
 {
-    // KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL changes only the UAVs: the depth buffer bound stays bound.
-    if (g_core.Active() && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
-        OnBound(This, pDepthStencilView);
+    if (Watched(This))
+    {
+        g_watchedBound.store(true, std::memory_order_relaxed);
+
+        // KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL changes only the UAVs: the depth buffer bound stays bound.
+        if (g_core.Active() && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+            OnBound(This, pDepthStencilView);
+    }
 
     o_OMSetRenderTargetsAndUAV(This, NumRTVs, ppRenderTargetViews, pDepthStencilView, UAVStartSlot, NumUAVs,
                               ppUnorderedAccessViews, pUAVInitialCounts);
@@ -505,14 +268,14 @@ void STDMETHODCALLTYPE hkOMSetRenderTargetsAndUAV(ID3D11DeviceContext* This, UIN
 void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D11DeviceContext* This, ID3D11DepthStencilView* pView,
                                                UINT ClearFlags, FLOAT Depth, UINT8 Stencil)
 {
-    if (g_core.Active() && (ClearFlags & D3D11_CLEAR_DEPTH) != 0)
+    if (g_core.Active() && (ClearFlags & D3D11_CLEAR_DEPTH) != 0 && Watched(This))
     {
         native::DepthBuffer buffer;
         ID3D11Resource* resource = nullptr;
 
         if (Describe(pView, &buffer, &resource))
         {
-            const auto request = g_core.OnDepthClear(g_contextId, buffer, Depth);
+            const auto request = g_core.OnDepthClear((uint64_t) (size_t) This, buffer, Depth);
 
             if (request.take)
                 TakeSnapshot(This, resource, "clear");
@@ -526,29 +289,35 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D11DeviceContext* This, ID3D11
 
 void STDMETHODCALLTYPE hkRSSetViewports(ID3D11DeviceContext* This, UINT NumViewports, const D3D11_VIEWPORT* pViewports)
 {
-    if (g_core.Active() && NumViewports > 0 && pViewports != nullptr)
-        g_core.OnViewport(g_contextId, pViewports[0].Width);
+    if (g_core.Active() && NumViewports > 0 && pViewports != nullptr && Watched(This))
+        g_core.OnViewport((uint64_t) (size_t) This, pViewports[0].Width);
 
     o_RSSetViewports(This, NumViewports, pViewports);
 }
 
 void STDMETHODCALLTYPE hkDraw(ID3D11DeviceContext* This, UINT VertexCount, UINT StartVertexLocation)
 {
-    g_core.OnDraw(g_contextId, VertexCount, 1);
+    if (Watched(This))
+        g_core.OnDraw((uint64_t) (size_t) This, VertexCount, 1);
+
     o_Draw(This, VertexCount, StartVertexLocation);
 }
 
 void STDMETHODCALLTYPE hkDrawIndexed(ID3D11DeviceContext* This, UINT IndexCount, UINT StartIndexLocation,
                                      INT BaseVertexLocation)
 {
-    g_core.OnDraw(g_contextId, IndexCount, 1);
+    if (Watched(This))
+        g_core.OnDraw((uint64_t) (size_t) This, IndexCount, 1);
+
     o_DrawIndexed(This, IndexCount, StartIndexLocation, BaseVertexLocation);
 }
 
 void STDMETHODCALLTYPE hkDrawInstanced(ID3D11DeviceContext* This, UINT VertexCountPerInstance, UINT InstanceCount,
                                        UINT StartVertexLocation, UINT StartInstanceLocation)
 {
-    g_core.OnDraw(g_contextId, VertexCountPerInstance, InstanceCount);
+    if (Watched(This))
+        g_core.OnDraw((uint64_t) (size_t) This, VertexCountPerInstance, InstanceCount);
+
     o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
 
@@ -556,7 +325,9 @@ void STDMETHODCALLTYPE hkDrawIndexedInstanced(ID3D11DeviceContext* This, UINT In
                                               UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
                                               UINT StartInstanceLocation)
 {
-    g_core.OnDraw(g_contextId, IndexCountPerInstance, InstanceCount);
+    if (Watched(This))
+        g_core.OnDraw((uint64_t) (size_t) This, IndexCountPerInstance, InstanceCount);
+
     o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
                           StartInstanceLocation);
 }
@@ -564,30 +335,110 @@ void STDMETHODCALLTYPE hkDrawIndexedInstanced(ID3D11DeviceContext* This, UINT In
 void STDMETHODCALLTYPE hkDrawAuto(ID3D11DeviceContext* This)
 {
     // The vertex count is in a GPU buffer (from a stream-output pass): unknown here, so it is counted like an indirect draw.
-    g_core.OnIndirect(g_contextId, 1);
+    if (Watched(This))
+        g_core.OnIndirect((uint64_t) (size_t) This, 1);
+
     o_DrawAuto(This);
 }
 
 void STDMETHODCALLTYPE hkDrawIndexedInstancedIndirect(ID3D11DeviceContext* This, ID3D11Buffer* pBufferForArgs,
                                                       UINT AlignedByteOffsetForArgs)
 {
-    g_core.OnIndirect(g_contextId, 1);
+    if (Watched(This))
+        g_core.OnIndirect((uint64_t) (size_t) This, 1);
+
     o_DrawIndexedInstancedIndirect(This, pBufferForArgs, AlignedByteOffsetForArgs);
 }
 
 void STDMETHODCALLTYPE hkDrawInstancedIndirect(ID3D11DeviceContext* This, ID3D11Buffer* pBufferForArgs,
                                                UINT AlignedByteOffsetForArgs)
 {
-    g_core.OnIndirect(g_contextId, 1);
+    if (Watched(This))
+        g_core.OnIndirect((uint64_t) (size_t) This, 1);
+
     o_DrawInstancedIndirect(This, pBufferForArgs, AlignedByteOffsetForArgs);
 }
 
 void STDMETHODCALLTYPE hkDispatch(ID3D11DeviceContext* This, UINT X, UINT Y, UINT Z)
 {
-    if (g_core.Active())
+    if (g_core.Active() && !t_copying && Watched(This))
         g_core.Counters().dispatches.fetch_add(1, std::memory_order_relaxed);
 
     o_Dispatch(This, X, Y, Z);
+}
+
+// The game can make its device again (after a device loss, a settings change); the device it presents with says which one it
+// draws with now. Another device's context is followed only once the watched one has set no render targets for 3 presents in a
+// row (a game still drawing through it is not left for a second swap chain's device, or for a wrapping layer's device the swap
+// chain answers with), and only if its calls run the hooks at all. A swap chain of another API (D3D12, frame generation's under
+// Dx11wDx12) says nothing: the context from Install is kept. Present thread only.
+void FollowPresentDevice(IDXGISwapChain* swapChain)
+{
+    static ID3D11Device* presentDevice = nullptr;         // the device presented with last, a reference held
+    static ID3D11DeviceContext* presentContext = nullptr; // its immediate context, unwrapped, a reference held
+    static int streak = 0;
+
+    ID3D11Device* device = nullptr;
+
+    if (FAILED(swapChain->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return;
+
+    if (device != presentDevice)
+    {
+        SAFE_RELEASE(presentContext);
+        SAFE_RELEASE(presentDevice);
+        presentDevice = device;
+        presentDevice->AddRef();
+
+        ID3D11DeviceContext* context = nullptr;
+        device->GetImmediateContext(&context);
+
+        if (context != nullptr)
+        {
+            ID3D11DeviceContext* real = nullptr;
+
+            if (!Util::CheckForRealObject(__FUNCTION__, context, (IUnknown**) &real))
+                real = context;
+
+            presentContext = real;
+            presentContext->AddRef();
+            context->Release();
+        }
+    }
+
+    device->Release();
+
+    const bool watchedBusy = g_watchedBound.exchange(false, std::memory_order_relaxed);
+
+    if (presentContext == nullptr || presentContext == g_context || watchedBusy)
+    {
+        streak = 0;
+        return;
+    }
+
+    if (++streak < 3)
+        return;
+
+    streak = 0;
+
+    // A context whose functions are not the ones hooked is never seen: watching it would see nothing at all.
+    if ((*(PVOID**) presentContext)[kOMSetRenderTargets] != g_hookedOMSetRenderTargets)
+    {
+        static bool loggedUnhooked = false;
+
+        if (!loggedUnhooked)
+        {
+            loggedUnhooked = true;
+            LOG_WARN("Depth finder (D3D11): the game presents with another device, whose immediate context runs other "
+                     "functions than the ones hooked; it is not watched");
+        }
+
+        return;
+    }
+
+    LOG_INFO("Depth finder (D3D11): the game presents with another device now and draws nothing through the one watched; "
+             "watching the new one's immediate context");
+    UseContext(presentContext);
 }
 
 } // namespace
@@ -631,6 +482,7 @@ void Install(ID3D11Device* device)
     o_Dispatch = (PFN_Dispatch) table[kDispatch];
     o_RSSetViewports = (PFN_RSSetViewports) table[kRSSetViewports];
     o_ClearDepthStencilView = (PFN_ClearDepthStencilView) table[kClearDepthStencilView];
+    g_hookedOMSetRenderTargets = table[kOMSetRenderTargets];
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -650,17 +502,16 @@ void Install(ID3D11Device* device)
 
     const auto result = DetourTransactionCommit();
 
-    g_context = context; // keep the ref: the hooks run as long as the game uses this context
-    g_contextId = (uint64_t) (size_t) realContext;
-
     if (result != NO_ERROR)
     {
         LOG_ERROR("Depth finder (D3D11): hooking failed ({:X}), not installed", (UINT) result);
         context->Release();
-        g_context = nullptr;
         g_installFailed = true;
         return;
     }
+
+    UseContext(realContext); // holds its own reference
+    context->Release();
 
     g_installFailed = false;
     g_core.Start([](const std::string& line) { LOG_INFO("{}", line); });
@@ -680,11 +531,13 @@ void OnPresent(IDXGISwapChain* swapChain)
     if (FAILED(swapChain->GetDesc(&desc)))
         return;
 
-    // g_copyTaken is NOT reset here: the mid-frame "unbind" events that call TakeSnapshot happen while the game renders the
-    // frame that is only now finishing (well before this Present call), so resetting it at the top of this same function would
-    // wipe out the very flag they just set, before anything downstream (BestSnapshot, the diagnostic below) ever reads it. It is
-    // instead invalidated below when the finder stands down, and implicitly kept fresh by TakeSnapshot overwriting g_copy on
-    // every successful copy.
+    FollowPresentDevice(swapChain);
+
+    // The copy taken is NOT forgotten here: the mid-frame "unbind" events that call TakeSnapshot happen while the game renders
+    // the frame that is only now finishing (well before this Present call), so forgetting it at the top of this same function
+    // would wipe out the copy they just took, before anything downstream (BestSnapshot, the diagnostic below) ever reads it. It
+    // is instead let go below when the finder stands down, and kept fresh by every TakeSnapshot (a buffer not copied leaves no
+    // copy).
 
     // The overlay preview (not yet drawn for D3D11) or the motion step needs the depth copy taken.
     g_core.SetSnapshotsWanted((Config::Instance()->DlssNrNativeDepthOverlay.value_or_default() &&
@@ -696,7 +549,7 @@ void OnPresent(IDXGISwapChain* swapChain)
     // is its equivalent, once per presented frame.
     if (g_context != nullptr)
     {
-        const auto request = g_core.FlushForPresent(g_contextId);
+        const auto request = g_core.FlushForPresent((uint64_t) (size_t) g_context);
 
         if (request.take)
             TakeSnapshot(g_context, (ID3D11Resource*) (size_t) request.id, "present");
@@ -713,7 +566,7 @@ void OnPresent(IDXGISwapChain* swapChain)
     bool copyTakenNow = false;
     {
         std::lock_guard lock(g_mutex);
-        copyTakenNow = g_copyTaken;
+        copyTakenNow = g_copy.Taken();
     }
     const bool stillNoCopy = g_core.Armed() && g_core.CurrentPick().valid && !copyTakenNow &&
                             (Config::Instance()->DlssNrNativeMotion.value_or_default() ||
@@ -725,7 +578,7 @@ void OnPresent(IDXGISwapChain* swapChain)
         if (++noCopyStreak % 300 == 0)
         {
             const auto pick = g_core.CurrentPick();
-            const auto diag = g_core.Diagnose(g_contextId);
+            const auto diag = g_core.Diagnose((uint64_t) (size_t) g_context);
             LOG_WARN("Depth finder (D3D11): {} frames wanting a copy with no copy taken. Picked {:X}. Context: {}, {}, "
                      "bound to {:X}, this stretch {} vertices / {} draws (floor {}), wanted={}",
                      noCopyStreak, pick.id, diag.hasContext ? "known" : "UNKNOWN",
@@ -743,7 +596,7 @@ void OnPresent(IDXGISwapChain* swapChain)
     if (stoodDown)
     {
         std::lock_guard lock(g_mutex);
-        ReleaseCopies();
+        g_copy.Release();
     }
 }
 
@@ -756,14 +609,14 @@ Snapshot BestSnapshot()
 
     Snapshot snap;
 
-    if (g_copyTaken && g_copy != nullptr && pick.valid)
+    if (g_copy.Taken() && pick.valid)
     {
         snap.valid = true;
-        snap.resource = g_copy;
+        snap.resource = g_copy.Copy();
         snap.typelessFormat = DXGI_FORMAT_R32_FLOAT;
         snap.viewFormat = DXGI_FORMAT_R32_FLOAT;
-        snap.width = g_copyWidth;
-        snap.height = g_copyHeight;
+        snap.width = g_copy.Width();
+        snap.height = g_copy.Height();
         snap.reversed = pick.reversed;
     }
 

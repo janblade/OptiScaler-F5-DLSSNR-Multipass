@@ -15,13 +15,16 @@
 // Off unless [DlssNr] NativeDepthFinder is set (checked at the device's first use, since OptiScaler attaches to a D3D11 game
 // later than it does a D3D12 one). When on, the hooks observe ClearDepthStencilView, OMSetRenderTargets(AndUnorderedAccessViews),
 // RSSetViewports and the draw calls on the immediate context, and copy the picked buffer into the finder's own textures there
-// (the game's compute bindings it uses for that are put back; nothing else of the game's is changed).
+// (native/DepthCopyDx11.h: the game's compute bindings it uses for that are put back; nothing else of the game's is changed).
+// The hooks patch the functions, which every context of the kind shares: only the watched context's calls are counted.
 namespace GenericDepthDx11
 {
 // Hooks the immediate context once a D3D11 device is known; a no-op when the key is off or it has run already.
 void Install(ID3D11Device* device);
 
-// Once per presented frame: closes the frame's counts, picks, and logs. The swap chain gives the picture's size.
+// Once per presented frame: closes the frame's counts, picks, and logs. The swap chain gives the picture's size, and its
+// device the context watched: a device the game makes again is followed once it presents (a D3D12 swap chain, as under
+// Dx11wDx12, says nothing, and the context Install found is kept).
 void OnPresent(IDXGISwapChain* swapChain);
 
 GenericDepthSelect::Pick CurrentPick();

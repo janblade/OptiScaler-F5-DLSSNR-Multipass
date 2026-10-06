@@ -2,6 +2,7 @@
 
 #include "Dx11FrameSource.h"
 
+#include <Util.h>
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <with_dx12/with_dx12.h>
@@ -32,6 +33,13 @@ void Dx11FrameSource::SetPresent(IDXGISwapChain* swapChain, ID3D11Device* device
     if (device11 != _device11)
     {
         _device11 = device11;
+        _realDevice11 = device11;
+
+        IUnknown* real = nullptr;
+
+        if (device11 != nullptr && Util::CheckForRealObject(__FUNCTION__, device11, &real))
+            _realDevice11 = (ID3D11Device*) real;
+
         _context11.Reset();
         _context4.Reset();
         _device12 = nullptr;
@@ -140,7 +148,24 @@ AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
     const auto depthSnap = GenericDepthDx11::BestSnapshot();
     bool depthReady = false;
 
+    // The finder follows the device the game presents with, a frame or more after a new one appears: until then its copy can be
+    // of the old device, which this device's context cannot copy from (the runtime drops the copy).
+    Microsoft::WRL::ComPtr<ID3D11Device> snapDevice;
+
     if (depthSnap.valid)
+        depthSnap.resource->GetDevice(&snapDevice);
+
+    if (depthSnap.valid && snapDevice.Get() != _device11 && snapDevice.Get() != _realDevice11)
+    {
+        static bool loggedOtherDevice = false;
+
+        if (!loggedOtherDevice)
+        {
+            loggedOtherDevice = true;
+            LOG_WARN("Native motion (D3D11): the depth copy is of another device than the picture's; no depth this frame");
+        }
+    }
+    else if (depthSnap.valid)
     {
         bool haveTexture = _depth.Matches(depthSnap.width, depthSnap.height, depthSnap.typelessFormat);
 

@@ -41,6 +41,7 @@ class Dx11FrameSource : public IFrameSource
 
     IDXGISwapChain* _swapChain = nullptr;
     ID3D11Device* _device11 = nullptr;
+    ID3D11Device* _realDevice11 = nullptr; // the device behind _device11 when that is a proxy (Streamline's), else it
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> _context11;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext4> _context4;
     ID3D12Device* _device12 = nullptr;    // owned by WithDx12, not released here

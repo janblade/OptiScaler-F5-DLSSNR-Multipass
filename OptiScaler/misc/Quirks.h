@@ -563,6 +563,10 @@ static const QuirkEntry quirkTable[] = {
     // shader fails to compile ('ps_unknown') and the renderer then crashes on a null shader
     QUIRK_ENTRY("call_to_arms.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
+    // Assassin's Creed Odyssey
+    // "Unable to create a DX11 D3D Device with the required features" at startup with the elevation to 11_1
+    QUIRK_ENTRY("acodyssey.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+
     // Shadow of the Tomb Raider
     // Hudfix incompatible
     QUIRK_ENTRY("sottr.exe", GameQuirk::DisableHudfix),

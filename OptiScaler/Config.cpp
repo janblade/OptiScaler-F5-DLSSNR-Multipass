@@ -764,6 +764,7 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             HookOriginalNvngxOnly.set_from_config(readBool("Hooks", "HookOriginalNvngxOnly"));
             EarlyHooking.set_from_config(readBool("Hooks", "EarlyHooking"));
+            D3D11FeatureLevelElevation.set_from_config(readBool("Hooks", "D3D11FeatureLevelElevation"));
             UseNtdllHooks.set_from_config(readBool("Hooks", "UseNtdllHooks"));
         }
 
@@ -1748,6 +1749,8 @@ bool Config::SaveIni()
         ini.SetValue("Hooks", "HookOriginalNvngxOnly",
                      GetBoolValue(Instance()->HookOriginalNvngxOnly.value_for_config()).c_str());
         ini.SetValue("Hooks", "EarlyHooking", GetBoolValue(Instance()->EarlyHooking.value_for_config()).c_str());
+        ini.SetValue("Hooks", "D3D11FeatureLevelElevation",
+                     GetBoolValue(Instance()->D3D11FeatureLevelElevation.value_for_config()).c_str());
         ini.SetValue("Hooks", "UseNtdllHooks", GetBoolValue(Instance()->UseNtdllHooks.value_for_config()).c_str());
     }
 

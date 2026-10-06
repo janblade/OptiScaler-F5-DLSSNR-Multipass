@@ -193,6 +193,9 @@ struct ExposureCalibrationStatus
     bool rawAgreed = false; // both passes picked the same raw best (within a step): "Apply raw instead" is honest
     float bestRawEv = 0.0f;
     float bestBandEv = 0.0f;
+    // Tune target Natural (DlssNr TuneTarget 1): asked for; its floor applied (the game gave its exposure) and where.
+    bool naturalWanted = false, hasFloor = false;
+    float floorEv = 0.0f;
     std::vector<float> ev, scoreRaw, scoreBand; // measured steps
     // What the model did at the step nearest the result: saturation (0.1 = 10% more chroma than the game's), warmth
     // (OkLab b, + warmer), shadows darkened (0.1 = 10% darker) and the share of the picture crushed toward black.

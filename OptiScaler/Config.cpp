@@ -470,6 +470,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
+            DlssNrTuneTarget.set_from_config(readUInt("DlssNr", "TuneTarget"));
             DlssNrAutoExposureTrim.set_from_config(readFloat("DlssNr", "AutoExposureTrim"));
             DlssNrAutoExposureShadowProtection.set_from_config(readFloat("DlssNr", "AutoExposureShadowProtection"));
             DlssNrAutoExposureMeter.set_from_config(readUInt("DlssNr", "AutoExposureMeter"));
@@ -1489,6 +1490,7 @@ bool Config::SaveIni()
     // restart -- the white-point source, both trims, the anchor, the pass count and the rest all
     // reset to default on the next run.
     ini.SetValue("DlssNr", "WhitePointSource", GetIntValue(Instance()->DlssNrWhitePointSource.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "TuneTarget", GetIntValue(Instance()->DlssNrTuneTarget.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointTrim", GetFloatValue(Instance()->DlssNrWhitePointTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureShadowProtection",

@@ -46,8 +46,11 @@ void BeginFrameNow(Backend& gpu, const ::Config& cfg, unsigned int width, unsign
             LOG_INFO("DLSS-NR measure: started, {} evaluations at the current settings, measuring at white point {:.4g}",
                      run.sweep.Config().measure, run.measureWhitePoint);
         else
+        {
             LOG_INFO("DLSS-NR calibrate: started at {:+.2f} EV, {} steps, measuring at white point {:.4g}",
                      Tidy(run.sweep.CurrentEv()), run.sweep.StepCount(), run.measureWhitePoint);
+            LOG_INFO("{}", TargetText(run.sweep));
+        }
         if (events.afterSr)
             LOG_INFO("DLSS-NR calibrate: Before SR is set; this run measures after SR and NR goes back before SR when "
                      "it ends");
@@ -166,6 +169,9 @@ ExposureCalibrationStatus ExposureCalibration()
         s.bestRawEv = Cal::Tidy(sweep.BestEv(Cal::Detail::Raw));
         s.rawAgreed = sweep.RawAgreed();
         s.bestBandEv = Cal::Tidy(sweep.BestEv(Cal::Detail::BandPass));
+        s.naturalWanted = sweep.NaturalWanted();
+        s.hasFloor = sweep.HasFloor();
+        s.floorEv = sweep.HasFloor() ? Cal::Tidy(sweep.FloorEv()) : 0.0f;
     }
 
     const auto& steps = sweep.Steps();

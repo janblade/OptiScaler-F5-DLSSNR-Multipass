@@ -299,6 +299,19 @@ inline std::string CompareWords(const StepResult& now, const StepResult& before)
 }
 
 // The log of a run that ended: the abort, one line per measured step, the result.
+// The Tune target a run had, for the log: Max detail, Natural with its floor, or Natural with nothing to put it on.
+inline std::string TargetText(const Sweep& s)
+{
+    if (!s.NaturalWanted())
+        return "DLSS-NR calibrate: target Max detail";
+    if (!s.HasFloor())
+        return "DLSS-NR calibrate: target Natural, but the game gives no exposure to set its floor by: tuned as Max "
+               "detail";
+    return std::format("DLSS-NR calibrate: target Natural, no darker than {:+.2f} EV ({:.1f} EV under the game's own "
+                       "exposure)",
+                       Tidy(s.FloorEv()), s.Config().floorBelowGameEv);
+}
+
 inline std::vector<std::string> ResultLines(const Sweep& s)
 {
     std::vector<std::string> lines;
@@ -368,6 +381,9 @@ inline std::vector<std::string> ResultLines(const Sweep& s)
             : s.Changed()    ? (s.AtLimit() ? " (the best step is the end of the range; offered anyway)" : "")
                              : " (flat: keeps the current value)"));
 
+    if (s.Finished())
+        lines.push_back(TargetText(s));
+
     return lines;
 }
 
@@ -422,7 +438,7 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
         }
     }
 
-    const Context ctx { width, height, situation.source, true, baseWhitePoint, blocker };
+    const Context ctx { width, height, situation.source, true, baseWhitePoint, blocker, situation.gameBaseWhitePoint };
 
     // A Tune with Before SR set runs after SR: the request itself moved NR there (TuneRunsAfterSr), and the run waits
     // until NR has settled at the new size.
@@ -460,11 +476,16 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
             run.source = situation.source;
             const float current = situation.source == 1 ? start.gameExposure : start.automatic;
             if (run.measuring)
+            {
                 run.sweep.Start(current, MeasureSettings(situation.source), ctx);
-            else if (situation.source == 1)
-                run.sweep.Start(current, GameExposureSettings(), ctx);
+            }
             else
-                run.sweep.Start(current, Settings {}, ctx);
+            {
+                Settings settings = situation.source == 1 ? GameExposureSettings() : Settings {};
+                if (situation.naturalTarget)
+                    settings.floorBelowGameEv = kNaturalFloorEv;
+                run.sweep.Start(current, settings, ctx);
+            }
             // One scale for every step and every run, whatever the slider was at (Sweep::MeasureWhitePoint).
             run.measureWhitePoint = run.sweep.MeasureWhitePoint();
             run.logged = false;

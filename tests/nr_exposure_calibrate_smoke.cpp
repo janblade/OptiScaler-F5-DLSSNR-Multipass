@@ -48,6 +48,16 @@ static Stats Peaked(float ev, float peakEv)
     return s;
 }
 
+// A still scene whose added detail rises at every darker step, as Tune's score does when nothing clips (offline tests
+// on a Witcher 3 frame): the best is always the darkest step swept.
+static Stats DarkFavoured(float ev)
+{
+    Stats s {};
+    s.detailRaw = s.detailBand = 0.2f + 0.02f * (4.0f - ev);
+    s.inputBand = 0.1f;
+    return s;
+}
+
 // Drives a whole run: every evaluation asks the sweep what to do, and a measured one's stats come back `lag` evaluations
 // later, as they would from the readback ring. Returns the number of evaluations it took.
 static int Run(Sweep& sweep, const std::function<Stats(float ev)>& scene, int lag = 4, const Context& ctx = kCtx,
@@ -1985,6 +1995,105 @@ int main()
         });
         CHECK(sawPass2 && backToPass1);
         CHECK(s.Finished() && Near(s.ResultEv(), -1.0f));
+    }
+
+    // Tune target Natural (Settings::floorBelowGameEv): no step darker than 1.5 EV under the game's own exposure is
+    // swept or offered, on a scene whose detail keeps rising toward the dark end (what the score does when nothing
+    // clips).
+    {
+
+        // Game exposure: its slider's 0 EV is the game's exposure, so the floor is -1.5 EV. A current value under it
+        // (NBA 2K27's tuned -3.5 EV) is moved up to the best step allowed.
+        Settings g = GameExposureSettings();
+        g.passes = 1;
+        g.floorBelowGameEv = kNaturalFloorEv;
+        const Context game { 2560, 1440, 1, true, 0.75f, Blocker::None, 0.75f };
+        Sweep s;
+        s.Start(-3.5f, g, game);
+        CHECK(s.HasFloor() && Near(s.FloorEv(), -1.5f));
+        CHECK(s.StepCount() == 8 && Near(s.Steps().front().ev, -1.5f));
+        Run(s, DarkFavoured, 4, game);
+        CHECK(s.Finished() && s.Changed() && Near(s.ResultEv(), -1.5f));
+        CHECK(ResultLines(s).back().find("target Natural, no darker than -1.50 EV") != std::string::npos);
+
+        // Max detail on the same scene: no floor, the dark end as before.
+        g.floorBelowGameEv = 0.0f;
+        Sweep m;
+        m.Start(-3.5f, g, game);
+        CHECK(!m.HasFloor() && m.StepCount() == 16);
+        Run(m, DarkFavoured, 4, game);
+        CHECK(m.Finished() && Near(m.ResultEv(), -5.5f));
+
+        // Two passes, the shipped default: both land on the floor and agree.
+        g.floorBelowGameEv = kNaturalFloorEv;
+        g.passes = 2;
+        Sweep two;
+        two.Start(-3.5f, g, game);
+        Run(two, DarkFavoured, 4, game);
+        CHECK(two.Finished() && !two.Unrepeated() && Near(two.ResultEv(), -1.5f));
+    }
+    {
+        // Automatic: the floor goes on its slider through the two bases. Game white point 2, Automatic's 1 at its 5x
+        // neutral: the game's exposure sits at -log2(2 / 5) = +1.32 EV there, the floor at -0.18 EV, so the first
+        // step on the usual grid is 0.0 EV.
+        Settings a = OnePass();
+        a.floorBelowGameEv = kNaturalFloorEv;
+        const Context autoCtx { 2560, 1440, 3, true, 1.0f, Blocker::None, 2.0f };
+        Sweep s;
+        s.Start(1.5f, a, autoCtx);
+        CHECK(s.HasFloor() && Near(s.FloorEv(), -std::log2(2.0f / 5.0f) - 1.5f));
+        CHECK(Near(s.Steps().front().ev, 0.0f) && s.StepCount() == 9);
+        Run(s, DarkFavoured, 4, autoCtx);
+        CHECK(s.Finished() && Near(s.ResultEv(), 0.0f));
+
+        // A best above the floor is not touched by it.
+        Sweep above;
+        above.Start(1.5f, a, autoCtx);
+        Run(above, [](float ev) { return Peaked(ev, 2.0f); }, 4, autoCtx);
+        CHECK(above.Finished() && Near(above.ResultEv(), 2.0f));
+
+        // The game gives no exposure: Natural has nothing to put the floor on and sweeps like Max detail.
+        Context none = autoCtx;
+        none.gameBaseWhitePoint = 0.0f;
+        Sweep n;
+        n.Start(1.5f, a, none);
+        CHECK(!n.HasFloor() && n.StepCount() == 15);
+        Run(n, DarkFavoured, 4, none);
+        CHECK(n.Finished() && Near(n.ResultEv(), -3.0f));
+        CHECK(n.NaturalWanted() && ResultLines(n).back().find("tuned as Max detail") != std::string::npos);
+
+        // A game exposure far brighter than Automatic's would put the floor past the range: two steps are left.
+        Context bright = autoCtx;
+        bright.gameBaseWhitePoint = 0.1f;
+        Sweep b;
+        b.Start(1.5f, a, bright);
+        CHECK(b.HasFloor() && b.StepCount() == 2 && Near(b.Steps().front().ev, 3.5f));
+
+        // A run that gives no result keeps the current value, even under the floor: only a result moves it.
+        Settings g = GameExposureSettings();
+        g.passes = 1;
+        g.floorBelowGameEv = kNaturalFloorEv;
+        const Context game { 2560, 1440, 1, true, 0.75f, Blocker::None, 0.75f };
+        Sweep flat;
+        flat.Start(-3.5f, g, game);
+        Run(
+            flat,
+            [](float)
+            {
+                Stats st {};
+                st.detailRaw = st.detailBand = 0.5f;
+                st.inputBand = 0.1f;
+                return st;
+            },
+            4, game);
+        CHECK(flat.Finished() && flat.Unsure() && !flat.Changed() && Near(flat.ResultEv(), -3.5f));
+
+        // Measure detail ignores the floor: it measures the current value as it is.
+        Settings ms = MeasureSettings(1);
+        ms.floorBelowGameEv = kNaturalFloorEv;
+        Sweep me;
+        me.Start(-3.5f, ms, game);
+        CHECK(!me.HasFloor() && me.StepCount() == 1 && Near(me.Steps().front().ev, -3.5f));
     }
 
     if (fails == 0)

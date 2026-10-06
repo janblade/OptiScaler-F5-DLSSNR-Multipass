@@ -556,6 +556,12 @@ class Config
     // Default 3 (Automatic, at +1.5 EV): it needs nothing from the game; Game exposure left NBA 2K27 far too dark.
     CustomOptional<uint32_t> DlssNrWhitePointSource { 3 };
 
+    // What "Tune for this scene" aims for. 0 Max detail: the step with the most detail without flicker or clipping.
+    // 1 Natural: the same, but never darker than 1.5 EV under the game's own exposure, which keeps the result close to
+    // NVIDIA's own integration of the model (DlssNrExposureCalibrate::Settings::floorBelowGameEv has the numbers).
+    // Needs the game's exposure; without it Natural tunes as Max detail. Default 0 until Natural is A/B'd in game.
+    CustomOptional<uint32_t> DlssNrTuneTarget { 0 };
+
     // OptiScaler-owned automatic exposure controls. When active, automatic exposure uses the
     // linear-HDR NR input. Finished-picture mode bypasses this calculation and keeps its own
     // display white-point override.

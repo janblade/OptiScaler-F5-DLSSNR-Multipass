@@ -187,6 +187,10 @@ struct Situation
     float followDisagreementEv = 0.0f; // while following: its base against Automatic's own, in EV (for the log)
     bool gameExposureNow = false;
     bool gameExposureReading = false;
+    // The game's own exposure as a white point (PreExposure / exposure), 0 without one: Natural's floor is put on the
+    // tuned slider through it (Context::gameBaseWhitePoint). Read whatever the source.
+    float gameBaseWhitePoint = 0.0f;
+    bool naturalTarget = false;   // DlssNr TuneTarget 1: Natural (Settings::floorBelowGameEv)
     bool colourConverted = false; // DlssNrColourEncoding::ShaderConverts for this frame
     bool beforeSrSet = false;     // RunBeforeSR is on: a Tune runs after SR instead (TuneRunsAfterSr), so it waits
                                   // for NR to settle there before its first step
@@ -237,6 +241,14 @@ struct Settings
     float minEv = -3.0f;
     float maxEv = 4.0f;
     float stepEv = 0.5f;
+    // Tune target Natural (DlssNr TuneTarget 1): no step darker than this many EV below the game's own exposure
+    // (Context::gameBaseWhitePoint) is swept or offered; 0 is Max detail, no floor. Why: the detail score rises at
+    // every darker step whenever nothing clips, so it runs to the dark end. In offline tests on captured game frames
+    // (2026-10-06) the pick sat 6.3 dB from the step closest to the model fed the game's linear colour as is, the way
+    // the game integrations hand it over, in The Witcher 3; with a floor 1.5 EV under the game's exposure every scene
+    // landed within 0.1 dB of it, 0.4 dB in all (1 EV: 2.4, 2 EV: 2.3). Measures of fidelity to the game's frame did not do it: NVIDIA's own output moves the coarse
+    // tone as much as our steps do. A choice, not the rule: NBA 2K27's tuned -3.5 EV, preferred by eye, sits under it.
+    float floorBelowGameEv = 0.0f;
     unsigned settle = 8;
     // The first step jumps from the current value to the bottom of the sweep (4.5 EV from the +1.5 default); after 8
     // evaluations the model's history still flickered 5x the rest in NBA 2K27.
@@ -312,6 +324,9 @@ inline Settings GameExposureSettings()
     return s;
 }
 
+// Tune target Natural's floor (Settings::floorBelowGameEv).
+constexpr float kNaturalFloorEv = 1.5f;
+
 // "Measure detail" on the white point source `source` (its neutral is the scale detail is measured at, as in a sweep):
 // 8 evaluations for the copies to fill, then 60 measured, about a second at 60 fps. Even, like a sweep's step.
 constexpr unsigned kMeasureEvaluations = 60;
@@ -339,6 +354,9 @@ struct Context
     float baseWhitePoint = 0.0f;
     // Why the run could not go on this evaluation (None when it can). Tolerated briefly; see unavailableTolerance.
     Blocker blocker = Blocker::None;
+    // The game's own exposure as a white point (PreExposure / exposure), 0 when the game gives none. Whatever the
+    // source: Natural's floor is put on the tuned slider through it. Frozen at Start like the base.
+    float gameBaseWhitePoint = 0.0f;
 };
 
 // One measured evaluation, reduced over the whole frame. Detail and change are display-encoded luma.
@@ -597,6 +615,18 @@ class Sweep
         const float hi = std::min(settings.maxEv, EvForTrim(DlssNrTrim::kMinTrim, settings.neutralTrim));
         const float step = settings.stepEv > 0.01f ? settings.stepEv : 0.5f;
 
+        // Natural's floor on this slider: the step whose white point is the game's own, floorBelowGameEv darker. Its
+        // trim is gameBase / base (Game exposure: 1, so the floor is -floorBelowGameEv). Never above the second-last
+        // step, so a sweep is left. Steps keep the usual grid; the first one swept is the first at or above it.
+        floorEv_ = -std::numeric_limits<float>::infinity();
+        if (!settings.measureOnly && settings.floorBelowGameEv > 0.0f && context.gameBaseWhitePoint > 0.0f &&
+            context.baseWhitePoint > 0.0f)
+        {
+            const float gameEv = -std::log2(context.gameBaseWhitePoint / context.baseWhitePoint / settings.neutralTrim);
+            floorEv_ = std::min(gameEv - settings.floorBelowGameEv, hi - step);
+        }
+        anchorEv_ = std::max(currentEv, floorEv_);
+
         if (settings.measureOnly)
         {
             StepResult r;
@@ -607,6 +637,8 @@ class Sweep
         {
             for (int i = 0; lo + i * step <= hi + 1e-4f; ++i)
             {
+                if (lo + i * step < floorEv_ - 1e-4f)
+                    continue;
                 StepResult r;
                 r.ev = lo + i * step;
                 steps_.push_back(r);
@@ -767,6 +799,11 @@ class Sweep
     const std::vector<StepResult>& Steps() const { return steps_; }
     const Settings& Config() const { return settings_; }
     float CurrentEv() const { return currentEv_; }
+    // Natural's floor on the tuned slider, when it applied to this run (Settings::floorBelowGameEv). NaturalWanted
+    // without HasFloor: Natural was asked for but the game gave no exposure to put it on, so the run was Max detail.
+    bool NaturalWanted() const { return settings_.floorBelowGameEv > 0.0f && !settings_.measureOnly; }
+    bool HasFloor() const { return std::isfinite(floorEv_); }
+    float FloorEv() const { return floorEv_; }
 
     // The base white point frozen at Start (0 when it was unknown), and the white point a step is shown with.
     float FrozenBase() const { return context_.baseWhitePoint; }
@@ -953,6 +990,9 @@ class Sweep
         Rewind(0);
     }
 
+    // Finish and Judge stand the current value in for "keep what you have" through anchorEv_: the current value, or
+    // Natural's floor when it sits under it, so a result never keeps a value the floor rules out. A run that gives no
+    // result (unsure, unrepeated, aborted) still keeps the current value itself.
     void Finish()
     {
         result_ = currentEv_;
@@ -997,8 +1037,8 @@ class Sweep
         if (pass_ == 0)
         {
             first_ = second_;
-            result_ = second_.result;
             unsure_ = second_.unsure;
+            result_ = unsure_ ? currentEv_ : second_.result;
             atLimit_ = AtEndOfRange(result_);
             return;
 
@@ -1020,7 +1060,7 @@ class Sweep
         const float lo = std::max(first_.topLo, second_.topLo), hi = std::min(first_.topHi, second_.topHi);
         const bool close = std::fabs(first_.result - second_.result) <= step + 1e-3f;
         const bool bothMoved =
-            std::fabs(first_.result - currentEv_) > 1e-4f && std::fabs(second_.result - currentEv_) > 1e-4f;
+            std::fabs(first_.result - anchorEv_) > 1e-4f && std::fabs(second_.result - anchorEv_) > 1e-4f;
         if (!close && (!bothMoved || lo > hi + 1e-3f))
         {
             unrepeated_ = true;
@@ -1028,10 +1068,10 @@ class Sweep
         }
 
         if (close)
-            result_ = std::fabs(first_.result - currentEv_) <= std::fabs(second_.result - currentEv_) ? first_.result
+            result_ = std::fabs(first_.result - anchorEv_) <= std::fabs(second_.result - anchorEv_) ? first_.result
                                                                                                     : second_.result;
         else
-            result_ = std::clamp(currentEv_, lo, hi);
+            result_ = std::clamp(anchorEv_, lo, hi);
         atLimit_ = AtEndOfRange(result_);
     }
 
@@ -1049,7 +1089,7 @@ class Sweep
                 lo = &r;
             hi = &r;
         }
-        if (lo == nullptr || std::fabs(ev - currentEv_) <= 1e-4f)
+        if (lo == nullptr || std::fabs(ev - anchorEv_) <= 1e-4f)
             return false;
         return std::fabs(ev - lo->ev) <= 1e-4f || std::fabs(ev - hi->ev) <= 1e-4f;
     }
@@ -1059,7 +1099,7 @@ class Sweep
     PassVerdict Judge(const std::vector<StepResult>& steps) const
     {
         PassVerdict v;
-        v.result = currentEv_;
+        v.result = anchorEv_;
         v.bestRaw = BestEvIn(steps, Detail::Raw);
         v.bestBand = BestEvIn(steps, Detail::BandPass);
 
@@ -1082,7 +1122,7 @@ class Sweep
         int nearest = -1;
         for (size_t i = 0; i < steps.size(); ++i)
             if (steps[i].samples > 0 &&
-                (nearest < 0 || std::fabs(steps[i].ev - currentEv_) < std::fabs(steps[(size_t) nearest].ev - currentEv_)))
+                (nearest < 0 || std::fabs(steps[i].ev - anchorEv_) < std::fabs(steps[(size_t) nearest].ev - anchorEv_)))
                 nearest = (int) i;
 
         float detailLo = std::numeric_limits<float>::infinity(), detailHi = -std::numeric_limits<float>::infinity();
@@ -1141,6 +1181,8 @@ class Sweep
     Context context_ {};
     std::vector<StepResult> steps_;
     float currentEv_ = 0.0f;
+    float floorEv_ = -std::numeric_limits<float>::infinity(); // Natural's floor on the slider, -inf without one
+    float anchorEv_ = 0.0f;                                   // max(currentEv_, floorEv_): Finish has why
     float result_ = 0.0f;
     uint32_t run_ = 0;
     size_t step_ = 0;

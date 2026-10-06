@@ -328,6 +328,16 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         if (!pointNote.empty())
             warning(pointNote.c_str());
 
+        // Natural (DlssNr TuneTarget 1): what its floor did on this run. On its own line, so the buttons follow it.
+        if (cal.naturalWanted && !cal.unsure && !cal.unrepeated)
+        {
+            if (cal.hasFloor)
+                ImGui::TextDisabled("Natural: no darker than %+.1f EV.", cal.floorEv);
+            else
+                ImGui::TextDisabled("Natural: the game gives no exposure, so this was tuned for Max detail.");
+            ownLine = true;
+        }
+
         if (!ownLine)
             ImGui::SameLine();
 
@@ -397,6 +407,22 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                    "\nown exposure and learns Follow again during the run, so the result holds once Follow takes over."
                    "\nWith NR before Super Resolution, the run itself happens after SR (the picture changes for a"
                    "\nmoment) and NR goes back before SR when it ends; the setting is not changed.");
+
+        // What the next run aims for (DlssNr TuneTarget). Only between runs: a result belongs to the target it ran
+        // with.
+        Config* config = Config::Instance();
+        static const char* const targetNames[] = { "Max detail", "Natural" };
+        int target = std::min<int>((int) config->DlssNrTuneTarget.value_or_default(), 1);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+
+        if (ImGui::Combo("Tune aims for##tune", &target, targetNames, IM_ARRAYSIZE(targetNames)))
+            config->DlssNrTuneTarget = (uint32_t) target;
+
+        HelpMarker("Max detail: the brightness where NR shows the most detail without flicker or clipping. In scenes"
+                   "\nwhere nothing clips this keeps going darker, often to the end of the range."
+                   "\nNatural: the same, but never darker than 1.5 EV under the game's own exposure. In tests this"
+                   "\nlands close to how NVIDIA's own integration of the model looks. Needs the exposure the game"
+                   "\nsupplies; without it, Natural tunes as Max detail.");
 
         if (!cal.available && !cal.unavailable.empty())
             ImGui::TextDisabled("Not available: %s", cal.unavailable.c_str());

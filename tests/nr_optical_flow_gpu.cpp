@@ -598,6 +598,10 @@ int main(int argc, char** argv)
             tuning.sceneCutDetector = value != 0.0f;
         else if (key == "scenethr")
             tuning.sceneCutThreshold = value;
+        else if (key == "zero")
+            tuning.zeroMargin = value;
+        else if (key == "zeroreach")
+            tuning.zeroReach = (int) value;
         else if (key == "lumaperc")
             tuning.perceptualLuma = value != 0.0f;
         else if (key == "white")

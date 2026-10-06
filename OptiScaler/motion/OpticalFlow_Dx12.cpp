@@ -35,6 +35,8 @@ cbuffer P : register(b0)
     uint inverseRefinement; // Match: the sub-pixel steps use the current frame's gradients, found once
     uint sceneCutEnabled;   // Match: the scene-cut flag (CutFlag, t6) is there to be read
     float whiteNits;        // Luma: what an HDR picture's white is, in nits (scRGB 1.0 is 80 nits)
+    float zeroMargin;       // Match, finest level: no motion wins when its cost is within this of the best (0 = off)
+    uint zeroReach;         // Match: ... but only over a best offset no larger than this many pixels (0 = any)
 };
 
 SamplerState Linear : register(s0);
@@ -274,20 +276,29 @@ void Match(uint3 id : SV_DispatchThreadID)
     }
 
     float best = 1e30;
+    float bestCost = 0.0;
     int2 bestD = centre;
 
     for (int dy = -radius; dy <= radius; ++dy)
         for (int dx = -radius; dx <= radius; ++dx)
         {
             int2 d = centre + int2(dx, dy);
-            float c = Cost(p, d, w, cur) + lambda * length(float2(dx, dy));
+            float cost = Cost(p, d, w, cur);
+            float c = cost + lambda * length(float2(dx, dy));
 
             if (c < best)
             {
                 best = c;
+                bestCost = cost;
                 bestD = d;
             }
         }
+
+    // Zero wins a near tie on the finest level: in flat or grainy ground the best match is a small offset picked on noise, and
+    // the picture did not move there. Only an offset within zeroReach is overruled (a real pan is far from it).
+    if (zeroMargin > 0.0 && any(bestD != 0) && (zeroReach == 0 || max(abs(bestD.x), abs(bestD.y)) <= (int) zeroReach))
+        if (Cost(p, int2(0, 0), w, cur) <= bestCost + zeroMargin)
+            bestD = int2(0, 0);
 
     // The part of a pixel: a few Lucas-Kanade steps. With the previous frame sampled at the matched offset, the remaining
     // difference is explained by the picture's gradient there; solve that for the shift. A match that is already exact has no
@@ -1393,6 +1404,8 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.hasGlobal = _globalReady ? 1 : 0;
             constants.inverseRefinement = _settings.inverseRefinement ? 1 : 0;
             constants.sceneCutEnabled = _sceneCutRan ? 1 : 0;
+            constants.zeroMargin = level == 0 ? _settings.zeroMargin : 0.0f;
+            constants.zeroReach = (uint32_t) std::clamp(_settings.zeroReach, 0, 64);
             constants.scale = 1.0f / (float) (2 << level); // full-resolution pixels in this level's
 
             if (!coarsest)

@@ -361,6 +361,16 @@ void DrawAdvancedUi()
                 "%s", "Matches on a lightness that follows how the eye sees it: an SDR picture as it is, an HDR\n"
                       "one (scRGB, PQ) after dividing by a white of 203 nits and a lightness curve, so dark\n"
                       "detail counts like bright. Off: the older tone-mapped luma.");
+        bool preferStill = tune.zeroMargin > 0.0f;
+
+        if (ImGui::Checkbox("Prefer no motion in flat ground (experimental)##flowzero", &preferStill))
+            tune.zeroMargin = preferStill ? 0.001f : 0.0f;
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s", "Where no motion matches almost as well as the best offset, keep the flow at zero. Holds a\n"
+                      "still HUD panel still while the picture pans behind it, but also stops a plain wall\n"
+                      "from moving with the pan; off by default.");
         ImGui::Checkbox("Find a hard cut on its own frame##flowscene", &tune.sceneCutDetector);
 
         if (ImGui::IsItemHovered())

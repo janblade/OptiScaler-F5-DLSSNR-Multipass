@@ -125,6 +125,12 @@ class OpticalFlowDx12
         // whatever they mean.
         bool perceptualLuma = true;
         float hdrWhiteNits = 203.0f; // the reference white of BT.2408 (HDR graphics white)
+
+        // Zero preference on the finest level: where the best offset is within zeroReach pixels (0: any) of no motion
+        // and no motion costs no more than zeroMargin above it (luma units; 0 = off), the flow is no motion, so flat
+        // and grainy ground that matched on noise stays still.
+        float zeroMargin = 0.0f;
+        int zeroReach = 0;
     };
 
     Settings& Tuning() { return _settings; }
@@ -164,8 +170,9 @@ class OpticalFlowDx12
         uint32_t coarseCells, depthMatching;
         uint32_t depthX, depthY, reversed, hasGlobal;
         uint32_t inverseRefinement, sceneCutEnabled;
-        float whiteNits; // Luma: the white of an HDR picture, in nits
-        uint32_t padding;
+        float whiteNits;  // Luma: the white of an HDR picture, in nits
+        float zeroMargin; // Match, finest level: no motion wins a near tie
+        uint32_t zeroReach, padding[3];
     };
 
     // The scene-cut passes have a root signature of their own: the luma, the histogram state and the flag.

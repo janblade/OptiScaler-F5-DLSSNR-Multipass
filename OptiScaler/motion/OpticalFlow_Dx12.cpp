@@ -280,8 +280,9 @@ void Match(uint3 id : SV_DispatchThreadID)
         const float weak = 0.5 * ((a + c) - sqrt((a - c) * (a - c) + 4.0 * b * b));
         confidence = weak / (weak + knee);
 
-        // A window with no structure across (flat, or one straight edge) gives no step: its reads are skipped.
-        [loop] for (int iteration = 0; iteration < 3 && det > 1e-9; ++iteration)
+        // A window with no structure across (flat, or one straight edge) gives no step: its reads are skipped. Written as the
+        // negation so a NaN determinant runs the steps, as the break on `det <= 1e-9` it replaces did.
+        [loop] for (int iteration = 0; iteration < 3 && !(det <= 1e-9); ++iteration)
         {
             float e = 0.0, f = 0.0, sr = 0.0;
 

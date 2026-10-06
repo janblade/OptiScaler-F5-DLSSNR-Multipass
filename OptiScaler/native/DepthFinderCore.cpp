@@ -142,8 +142,9 @@ void DepthFinderCore::RetireIdleContexts()
     for (auto it = _contexts.begin(); it != _contexts.end();)
     {
         const ContextState& state = it->second;
+        const uint64_t lastUsed = std::max(state.lastSeen, state.lastDrawPresent.load(std::memory_order_relaxed));
 
-        if (state.stats != nullptr || _presents - state.lastSeen <= kRetireAfter)
+        if (state.stats != nullptr || _presents - lastUsed <= kRetireAfter)
         {
             ++it;
             continue;
@@ -230,10 +231,11 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
     if (!_active.load(std::memory_order_relaxed))
         return;
 
-    const auto count = [vertices, instances](ContextState& state)
+    const auto count = [this, vertices, instances](ContextState& state)
     {
         Bump(state.vertices, vertices * instances);
         Bump(state.drawcalls, 1);
+        state.lastDrawPresent.store(_presentsNow.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
         // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
         if (!(vertices == 6 && instances == 1))
@@ -260,8 +262,9 @@ void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
     if (!_active.load(std::memory_order_relaxed))
         return;
 
-    const auto count = [maxCount](ContextState& state)
+    const auto count = [this, maxCount](ContextState& state)
     {
+        state.lastDrawPresent.store(_presentsNow.load(std::memory_order_relaxed), std::memory_order_relaxed);
         Bump(state.indirectEvents, 1);
         Bump(state.drawcalls, maxCount);
         Bump(state.indirectCalls, maxCount);

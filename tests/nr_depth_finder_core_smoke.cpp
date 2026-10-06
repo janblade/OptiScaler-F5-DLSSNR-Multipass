@@ -631,6 +631,51 @@ int main()
         CHECK(closed.take && closed.stretchVertices == 50 * 9000);
     }
 
+    // A list that only draws (bound once, never closed or rebound: the draw path takes no lock, so nothing refreshes the time
+    // it was last seen) is still in use, and is not retired however long that goes on. 500 draws with no buffer bound (one the
+    // adapter does not know) after setting a 512 viewport, 520 into the scene; both draw in every frame for well over two retire
+    // periods. A retired list would come back with no viewport, so 500 then binds the scene and its clear still sees the mirror.
+    // (The ids are picked to sit in different slots of a thread's context cache: two that share one look each other up through
+    // the lock on every draw, which refreshes the time they were seen.)
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        core.OnDepthBound(500, true, nullptr);
+        core.OnViewport(500, 512.0f);
+        core.OnDepthBound(520, true, &kScene);
+        core.OnViewport(520, (float) W);
+
+        for (int frame = 0; frame < 1300; ++frame)
+        {
+            core.OnDraw(500, 100, 1);
+            core.OnDraw(520, 6000, 1);
+            SingleContextFrame(core, ignored);
+        }
+
+        CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+        CHECK(core.Diagnose(500).hasContext);
+        CHECK(core.Diagnose(520).hasContext && core.Diagnose(520).hasBoundBuffer);
+
+        // 500 still knows its mirror viewport: its draws into the scene were the last real ones, so its clear is not of the scene.
+        core.OnDepthBound(500, true, &kScene);
+        for (int i = 0; i < 100; ++i)
+            core.OnDraw(500, 6000, 1);
+
+        CHECK(!core.OnDepthClear(500, kScene, 0.0f).take);
+
+        // Still the same list: leaving the scene asks for the whole stretch it drew since the last present.
+        for (int i = 0; i < 100; ++i)
+            core.OnDraw(520, 6000, 1);
+
+        const auto left = core.OnDepthBound(520, false, nullptr);
+        CHECK(left.take && left.id == 0xA && std::string(left.where) == "unbind");
+        CHECK(left.stretchVertices == 100 * 6000);
+    }
+
     printf(fails == 0 ? "all passed\n" : "FAILED (%d)\n", fails);
     return fails == 0 ? 0 : 1;
 }

@@ -402,10 +402,15 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     const auto backend = _feature->GetUpscalerType();
     const bool usesSettings = UsesBarrierSettings(backend);
 
+    // The picture is a render target in a D3D12 Unreal game; a D3D11 game's shared picture is not (no
+    // ALLOW_RENDER_TARGET), and moving it to that state makes the list invalid.
     if (usesSettings && IsUnrealGame())
     {
+        // Set either way: the FSR backends add the render-target state themselves for an Unreal game when it is unset.
         if (!cfg.ColorResourceBarrier.has_value())
-            cfg.ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cfg.ColorResourceBarrier.set_volatile_value((colorDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0
+                                                            ? D3D12_RESOURCE_STATE_RENDER_TARGET
+                                                            : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         if (!cfg.MVResourceBarrier.has_value())
             cfg.MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

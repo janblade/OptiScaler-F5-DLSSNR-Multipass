@@ -61,12 +61,14 @@ struct Rules
     uint32_t holdFrames = 90;        // a pick is kept this many frames in a row while nothing qualifies, then dropped
 };
 
-// The metric a buffer is ranked by: vertices, or draw calls when more than a third of them are indirect (the vertex
-// count is then not accurate).
-inline uint64_t Score(const Candidate& c)
-{
-    return c.drawcallsIndirect < c.drawcalls / 3 ? c.vertices : (uint64_t) c.drawcalls;
-}
+// More than a third of the draws indirect: the vertex count is then not accurate, so draw calls are compared instead.
+inline bool IndirectHeavy(const Candidate& c) { return c.drawcallsIndirect >= c.drawcalls / 3; }
+
+inline uint64_t CountOf(const Candidate& c, bool drawcalls) { return drawcalls ? (uint64_t) c.drawcalls : c.vertices; }
+
+// The count a buffer is reported with; ranking compares two buffers on one count, never one's vertices with the other's
+// draws.
+inline uint64_t Score(const Candidate& c) { return CountOf(c, IndirectHeavy(c)); }
 
 inline bool SimilarAspect(float w, float h, float pictureW, float pictureH, const Rules& rules)
 {
@@ -99,6 +101,15 @@ inline double SizeGap(const Candidate& c, uint32_t pictureWidth, uint32_t pictur
     const double pictureArea = (double) pictureWidth * (double) pictureHeight;
     const double area = (double) c.width * (double) c.height;
     return std::fabs(std::log(area / pictureArea));
+}
+
+// As ReShade does: the challenger's own draws pick the count, and both buffers are compared on it.
+inline bool Outranks(const Candidate& a, const Candidate& b, uint32_t pictureWidth, uint32_t pictureHeight)
+{
+    const bool drawcalls = IndirectHeavy(a);
+    const uint64_t countA = CountOf(a, drawcalls), countB = CountOf(b, drawcalls);
+    return countA > countB ||
+           (countA == countB && SizeGap(a, pictureWidth, pictureHeight) < SizeGap(b, pictureWidth, pictureHeight));
 }
 
 // Keeps the last pick between frames, so two buffers with similar counts (a depth pre-pass and the main pass) do not trade
@@ -145,9 +156,7 @@ class Selector
             if (_pick.valid && c.id == _pick.id)
                 previous = &c;
 
-            if (best == nullptr || Score(c) > Score(*best) ||
-                (Score(c) == Score(*best) &&
-                 SizeGap(c, pictureWidth, pictureHeight) < SizeGap(*best, pictureWidth, pictureHeight)))
+            if (best == nullptr || Outranks(c, *best, pictureWidth, pictureHeight))
                 best = &c;
         }
 
@@ -155,8 +164,13 @@ class Selector
 
         const Candidate* chosen = best;
 
-        if (previous != nullptr && best != nullptr && (float) Score(*previous) >= _rules.keepFraction * (float) Score(*best))
-            chosen = previous;
+        if (previous != nullptr && best != nullptr)
+        {
+            const bool drawcalls = IndirectHeavy(*best);
+
+            if ((float) CountOf(*previous, drawcalls) >= _rules.keepFraction * (float) CountOf(*best, drawcalls))
+                chosen = previous;
+        }
 
         if (chosen == nullptr)
         {

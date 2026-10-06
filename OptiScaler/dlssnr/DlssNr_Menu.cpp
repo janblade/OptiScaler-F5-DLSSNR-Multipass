@@ -27,6 +27,7 @@
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 #include "DlssNr_ColourEncodingStatus.h"
 #include "DlssNr_GameDefaults.h"
+#include "DlssNr_NativeMode.h"
 #include "DlssNr_LutStatus.h"
 
 #include <string>
@@ -788,45 +789,137 @@ static bool ResolutionTierActive(Config* config, const ResolutionTier& tier, boo
            config->DlssNrReversibleMode.value_or_default() == tier.composition;
 }
 
-// Whether the native-input preset (depth finder + motion estimate, driven through OptiScaler's own upscaler so frame
-// generation with the Upscaler input also works) is the single thing currently turned on for a game with no upscaler.
-// Derived from config, same rule as ResolutionTierActive above: never claims a state the settings have since drifted
-// from, and survives a restart. NativeInput is excluded on purpose -- with the preset's NativeUpscaler already taking
-// priority over it in code, a stray NativeInput=true left over from the Advanced section would otherwise still show
-// the checkbox as checked even though the lower-cost path, not this preset, is what is actually inert underneath it.
-static bool NativeInputPresetActive(Config* config)
+static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPicture)
 {
-    return config->DlssNrNativeDepthFinder.value_or_default() && config->DlssNrNativeMotion.value_or_default() &&
-           config->DlssNrNativeUpscaler.value_or_default() && !config->DlssNrNativeInput.value_or_default();
-}
+    using namespace DlssNrNativeMode;
 
-static void ApplyNativeInputPreset(Config* config, bool on)
-{
-    if (on)
+    const bool dx11 = State::Instance().currentD3D11Device != nullptr;
+    const Shown shown =
+        FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+
+    struct ModeChoice
     {
-        config->DlssNrNativeDepthFinder = true;
-        config->DlssNrNativeMotion = true;
-        config->DlssNrNativeUpscaler = true;
-        config->DlssNrNativeInput = false;
+        Mode mode;
+        Shown shown;
+        const char* label;
+    };
 
-        // Finished Picture cannot run through the virtual upscaler (DlssNr_Late.inl requires swapchainInteropApi ==
-        // None, which a D3D11 game under frame generation never is); After Super Resolution is also where Automatic
-        // exposure gets a chance to run. Same one-shot "leaving Finished Picture clears a session failure" rule the
-        // NR Pass combo and the tier/pass presets above already follow.
-        if (config->DlssNrFinishedPicture.value_or_default())
+    static constexpr ModeChoice kModes[] = {
+        { Mode::Off, Shown::Off, "Off##nativemode" },
+        { Mode::NrOnly, Shown::NrOnly, "NR only##nativemode" },
+        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + frame generation##nativemode" },
+    };
+
+    const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    ImGui::TextUnformatted("Mode:");
+
+    for (const auto& choice : kModes)
+    {
+        const float width = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
+                            ImGui::CalcTextSize(choice.label, nullptr, true).x;
+        ImGui::SameLine();
+
+        if (ImGui::GetCursorScreenPos().x + width > rowRight)
+            ImGui::NewLine();
+
+        if (ImGui::RadioButton(choice.label, shown == choice.shown))
         {
-            DlssNr::RetryAfterFailure();
-            config->DlssNrFinishedPicture = false;
+            const Change change = ForClick(choice.mode, shown, finishedPicture);
+
+            if (change.keys.has_value())
+            {
+                config->DlssNrNativeDepthFinder = change.keys->depthFinder;
+                config->DlssNrNativeMotion = change.keys->motion;
+                config->DlssNrNativeInput = change.keys->input;
+                config->DlssNrNativeUpscaler = change.keys->upscaler;
+            }
+
+            if (change.retryAfterFailure)
+                DlssNr::RetryAfterFailure();
+
+            if (change.finishedPicture.has_value())
+            {
+                finishedPicture = change.finishedPicture.value();
+                config->DlssNrFinishedPicture = finishedPicture;
+            }
         }
     }
-    else
+
+    HelpMarker("For a game that makes no upscaler call of its own: OptiScaler estimates the motion of the finished "
+               "picture itself.\n"
+               "NR only: runs NR on the finished picture. Lower GPU cost, no frame generation. Sets NR Pass at: to "
+               "Finished Picture.\n"
+               "NR + frame generation: runs OptiScaler's upscaler (the one chosen in the menu, FSR when none is) on "
+               "the picture at the same size, as a stabiliser, so frame generation with FGInput=Upscaler works; NR "
+               "runs around that call. Higher GPU cost. Moves NR Pass at: off Finished Picture.\n"
+               "Both use the game's depth when it is found (Advanced): it improves quality but is optional, and "
+               "without it NR runs on motion only. Choosing a mode turns it on (Off turns it off); it needs a restart "
+               "whenever it was not running at this start.\n"
+               "NR runs only with Enable Neural Rendering on. Applies at once.");
+
+    if (shown == Shown::Off)
+        return;
+
+    const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
+    const Finder finder =
+        dx11 ? FinderFor(depthWanted, GenericDepthDx11::Installed(), GenericDepthDx11::InstallFailed())
+             : FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
+    const bool depthRestart = DepthRestartWarning(shown, finder);
+    const Warning warning =
+        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop());
+    const char* warningText = nullptr;
+
+    switch (warning)
     {
-        // Depth finder's hooks, once installed, stay resident until a restart (observation only, same as turning its
-        // own checkbox off always has) -- this just stops anything consuming what they observe.
-        config->DlssNrNativeDepthFinder = false;
-        config->DlssNrNativeMotion = false;
-        config->DlssNrNativeUpscaler = false;
+    case Warning::Dx11FrameGeneration:
+        warningText = "NR only does nothing while OptiScaler's frame generation has replaced this D3D11 game's swap "
+                      "chain. Choose NR + frame generation.";
+        break;
+    case Warning::NrDisabled:
+        warningText = shown == Shown::NrOnly ? "Enable Neural Rendering (above) is off, so NR does not run."
+                                             : "Enable Neural Rendering (above) is off: frame generation can still "
+                                               "use this, but NR does not run.";
+        break;
+    case Warning::NeedsFinishedPicture:
+        warningText = "NR only needs NR Pass at: Finished Picture (under NR Options). Click NR only again to set it.";
+        break;
+    case Warning::None:
+        break;
     }
+
+    // Enough for a wrapped warning of each kind; the usual two status lines leave the rest blank.
+    const float slot = StatusSlotBegin();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+
+    if (warningText != nullptr)
+        ImGui::TextWrapped("%s", warningText);
+
+    if (depthRestart)
+        ImGui::TextWrapped("Save the settings and restart the game to use its depth (NR runs on motion only until "
+                           "then).");
+
+    ImGui::PopStyleColor();
+
+    if (!depthRestart)
+    {
+        if (dx11)
+            GenericDepthDx11::DrawStatus();
+        else
+            GenericDepthDx12::DrawStatus();
+    }
+
+    if (shown == Shown::MotionOnly)
+        ImGui::TextDisabled("Estimating motion only; nothing uses it.");
+    else if (shown == Shown::NrAndFrameGeneration || warning == Warning::None)
+    {
+        if (dx11)
+            NativeMotionDx11::DrawStatus();
+        else
+            NativeMotionDx12::DrawStatus();
+    }
+
+    StatusSlotEnd(slot, 4);
 }
 
 // Model-resolution drag in flight, shared by the tier presets (which clear it) and the Model resolution slider.
@@ -969,35 +1062,13 @@ static void RenderStatusLine(const NrCommon& nr)
         ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.");
 }
 
-// Status & Presets: the native-input preset and the pass-count and quality-tier presets.
-static void RenderStatusPage(Config* config, float menuResScale)
+// Status & Presets: NR without a game upscaler (its mode selector) and the pass-count and quality-tier presets.
+static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
 {
     if (ImGui::TreeNode("NR without a game upscaler (experimental)##nativeinputpreset"))
     {
-        bool nativeOn = NativeInputPresetActive(config);
-
-        if (ImGui::Checkbox("Run Neural Rendering / frame generation on this (DX11, DX12)", &nativeOn))
-            ApplyNativeInputPreset(config, nativeOn);
-
-        HelpMarker(
-            "For a game with no upscaler of its own. Watches the game's depth buffers and estimates motion on its\n"
-            "own, then presents them to OptiScaler's own upscaler as if the game had called it -- which is also what\n"
-            "lets frame generation (FGInput=Upscaler) work here. Also switches NR Pass at: off Finished Picture\n"
-            "(which cannot run this way) if it was on. The depth finder needs a restart the first time this is\n"
-            "turned on. See Advanced below for the lower-cost, no-frame-generation alternative this does not use.");
-
-        // Status only -- the same dispatch this tree used for the checkboxes before the split, now just for the
-        // read-only report each side already had.
-        if (State::Instance().currentD3D11Device != nullptr)
-        {
-            GenericDepthDx11::DrawStatus();
-            NativeMotionDx11::DrawStatus();
-        }
-        else
-        {
-            GenericDepthDx12::DrawStatus();
-            NativeMotionDx12::DrawStatus();
-        }
+        bool finishedPicture = nr.finishedPicture;
+        RenderNativeMode(config, nr.enabled, finishedPicture);
 
         if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
         {
@@ -2704,7 +2775,7 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
         RenderDebugPage(config, menuResScale);
         break;
     case Page::NrStatus:
-        RenderStatusPage(config, menuResScale);
+        RenderStatusPage(config, menuResScale, nr);
         break;
     default:
         IM_ASSERT(false && "not a Neural Rendering page");

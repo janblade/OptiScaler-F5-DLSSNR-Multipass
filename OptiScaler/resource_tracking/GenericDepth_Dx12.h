@@ -51,6 +51,9 @@ void RecordPreviewCopy(ID3D12GraphicsCommandList* list);
 
 bool Installed();
 
+// The key was on at this start but Install() gave up (the log says why).
+bool InstallFailed();
+
 // Called when the game creates an upscaler feature (every D3D12 input goes through FeatureProvider_Dx12::GetFeature): a game
 // with an upscaler of its own needs no depth finder, so it stands down for good.
 void NoteUpscalerCall();
@@ -61,13 +64,12 @@ bool GameCallsUpscaler();
 // The warm-up is over and no upscaler call was seen: the finder is allowed to pick and report.
 bool Armed();
 
-// ImGui: status of the finder, and with [DlssNr] NativeDepthOverlay the picked depth buffer as a grayscale image. No
-// checkbox. Draws nothing when the finder is not installed. Call inside the menu, under the shared "NR without a game
-// upscaler" tree (dlssnr/DlssNr_Menu.cpp).
+// ImGui: the menu's one depth line (off, needs a restart, could not start, stood down, watching, picked). No checkbox.
+// Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
 void DrawStatus();
 
-// ImGui: the "Find the scene's depth" and "Show the picked depth here" checkboxes and their tooltips. [DlssNr]
-// NativeDepthFinder is also set by the menu's single native-input checkbox (DlssNr_Menu.cpp's
-// ApplyNativeInputPreset); this is for setting it on its own. Call inside the menu's Advanced section.
+// ImGui: the "Use the game's depth" and "Show the picked depth here" checkboxes, and with [DlssNr] NativeDepthOverlay
+// the picked depth buffer as a grayscale image. [DlssNr] NativeDepthFinder is also turned on and off by the menu's mode
+// selector (dlssnr/DlssNr_NativeMode.h); this is for setting it on its own. Call inside the menu's Advanced section.
 void DrawAdvancedUi();
 } // namespace GenericDepthDx12

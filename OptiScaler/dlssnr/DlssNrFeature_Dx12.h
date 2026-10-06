@@ -69,6 +69,10 @@ void FinishedPictureResetCommandList(ID3D12CommandList* cmd);
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
 
+// True while a swap-chain interop (a D3D11 game's frame generation swap chain) is in play: ApplyNativeInput refuses
+// then.
+bool NativeInputBlockedBySwapChainInterop();
+
 // The native input producer's entry: runs DLSS-NR on the picture `color` (a back buffer in the PRESENT state, or any resource) with a depth and a motion
 // texture of the picture's size made from the depth finder and the optical flow (both NON_PIXEL_SHADER_RESOURCE, motion in
 // full-resolution pixels towards the previous frame). Records onto `cmd`, a list of the caller's own, and leaves `color` in

@@ -94,6 +94,25 @@ int main()
         CHECK(Score(Make(1, 1, 1, 777, 90, 30)) == 90);    // 30 is not under 30: draw calls
     }
 
+    // NBA 2K27: a GPU-driven scene (most draws indirect, few vertices counted) against a 6-draw overlay of the same
+    // size. Each is compared on the same count, not the scene's draw calls against the overlay's vertices.
+    {
+        const Candidate scene = Make(1, 2560, 1440, 29442, 225, 162);
+        const Candidate overlay = Make(2, 2560, 1440, 1686, 6, 0);
+        Selector s;
+        CHECK(Settle(s, { scene, overlay }, W, H).id == 1);
+        s.Reset();
+        CHECK(Settle(s, { overlay, scene }, W, H).id == 1);
+        s.Reset();
+        CHECK(Settle(s, { Make(1, 2560, 1440, 54865608, 4463, 1975), Make(2, 2560, 1440, 5418, 7, 0) }, W, H).id == 1);
+
+        // An overlay that held the pick while the scene was away loses it once the scene is back.
+        const Candidate shadow = Make(3, 4096, 4096, 300000);
+        s.Reset();
+        CHECK(Settle(s, { overlay, shadow }, W, H).id == 2);
+        CHECK(Settle(s, { overlay, scene, shadow }, W, H).id == 1);
+    }
+
     // Depth at the render resolution, below the picture, still qualifies. The range is the picture's size divided by the
     // buffer's from 0.5 to 4 (ReShade stops at 1.85): a buffer from a quarter of the picture up to 2x of it.
     {

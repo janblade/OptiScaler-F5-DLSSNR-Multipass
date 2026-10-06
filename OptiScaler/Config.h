@@ -575,9 +575,11 @@ class Config
     CustomOptional<float> DlssNrAutoExposureMeterHighPercent { 90.0f };
     // NativeDepthFinder: watch the game's depth buffers and pick the scene's, the first stage of DLSS-NR without a game
     // upscaler call (D3D11 and D3D12; one key for both, which API runs is decided by which device the game creates).
-    // Observes only. Startup only. Also set, together with NativeMotion and NativeUpscaler, by the menu's single "Run
-    // Neural Rendering / frame generation on this" checkbox -- this key is for setting it on its own. See
-    // resource_tracking/GenericDepth_Dx12.h and GenericDepth_Dx11.h.
+    // Observes only. Startup only. Optional: without it NativeInput/NativeUpscaler run on motion only. It is also
+    // what notices the game calling its own upscaler (GameCallsUpscaler); without it nothing stands aside for that.
+    // Turned on and off by the menu's mode selector (dlssnr/DlssNr_NativeMode.h), and set on its own by "Use the
+    // game's depth" under the menu's Advanced section. See resource_tracking/GenericDepth_Dx12.h and
+    // GenericDepth_Dx11.h.
     CustomOptional<bool> DlssNrNativeDepthFinder { false };
     // NativeDepthWarmupFrames: presented frames to watch before the finder trusts that the game makes no upscaler call of its
     // own (it stands down for good the moment one is seen). NativeDepthOverlay: debug; copies the picked depth buffer at its
@@ -589,28 +591,28 @@ class Config
     // (the depth preview, the motion and trust pictures, the trust view chooser, the flow tuning; D3D12 only). Off, the menu
     // keeps the switches and one status line each, and the depth overlay's copy is not made. Startup only.
     CustomOptional<bool> DlssNrNativeDebugView { false };
-    // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler call,
-    // feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at once. Also set
-    // by the menu's single checkbox, see NativeDepthFinder above. See motion/NativeMotion_Dx12.h and NativeMotionDx11.h.
+    // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
+    // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at
+    // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See motion/NativeMotion_Dx12.h and
+    // NativeMotionDx11.h.
     CustomOptional<bool> DlssNrNativeMotion { false };
-    // NativeInput: with NativeMotion on and the game making no upscaler call, runs DLSS-NR on the finished picture with the
-    // depth finder's depth and the optical flow as its depth and motion (Story 4 of the native input producer). Needs
-    // FinishedPicture and Enabled on as well. Lower GPU cost than NativeUpscaler below, with no frame generation; inert
-    // once FGInput=Upscaler replaces a D3D11 game's swap chain (see NativeUpscaler). The menu's single checkbox does not use
-    // this -- it is for the lower-cost path on its own, set independently under the menu's Advanced section. Changes apply
-    // at once.
+    // NativeInput: with NativeMotion on and the game making no upscaler call, runs DLSS-NR on the finished picture with
+    // the optical flow as its motion and the depth finder's depth when it has one (Story 4 of the native input
+    // producer). Needs FinishedPicture and Enabled on as well. Lower GPU cost than NativeUpscaler below, with no frame
+    // generation; inert once FGInput=Upscaler replaces a D3D11 game's swap chain (see NativeUpscaler). The menu's "NR
+    // only" mode. Changes apply at once.
     CustomOptional<bool> DlssNrNativeInput { false };
-    // NativeUpscaler: experimental. With NativeMotion on and the game making no upscaler call, presents the picture, the
-    // finder's depth and the optical flow to OptiScaler's upscaler (Dx12Upscaler, FFX when unset) as a synthetic upscaler
-    // call (render size == output size, no jitter: a stabiliser, not a reconstruction), so frame generation with the
-    // Upscaler input works in a game that never calls an upscaler. Takes priority over NativeInput. Changes apply at once.
-    // For a D3D11 game, this is also the only one of the three native-input options (this, NativeInput, Finished
-    // Picture NR) that still works once FGInput=Upscaler is selected: that replaces the game's swap chain with
-    // with_dx12::Dx11wDx12SC, which the other two require not to be in play (see motion/NativeMotionDx11.cpp's
-    // OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's _ApplyNativeInputToFGBackBuffer). This is the one the menu's
-    // single checkbox uses: turning it on sets NativeDepthFinder, NativeMotion and this together, clears NativeInput,
-    // and switches NR Pass at: off Finished Picture if it was on (see dlssnr/DlssNr_Menu.cpp's ApplyNativeInputPreset).
-    // See native/VirtualUpscalerDriver.h.
+    // NativeUpscaler: experimental. With NativeMotion on and the game making no upscaler call, presents the picture,
+    // the finder's depth (all far when it has none) and the optical flow to OptiScaler's upscaler (Dx12Upscaler, FFX
+    // when unset) as a synthetic upscaler call (render size == output size, no jitter: a stabiliser, not a
+    // reconstruction), so frame generation with the Upscaler input works in a game that never calls an upscaler. Takes
+    // priority over NativeInput. Changes apply at once. For a D3D11 game, this is also the only one of the three
+    // native-input options (this, NativeInput, Finished Picture NR) that still works once FGInput=Upscaler is selected:
+    // that replaces the game's swap chain with with_dx12::Dx11wDx12SC, which the other two require not to be in play
+    // (see motion/NativeMotionDx11.cpp's OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's
+    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + frame generation" mode: it sets NativeDepthFinder,
+    // NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished Picture if it was on
+    // (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to

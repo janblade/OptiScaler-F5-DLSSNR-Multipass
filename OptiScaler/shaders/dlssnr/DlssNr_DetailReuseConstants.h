@@ -61,6 +61,12 @@ struct alignas(256) DlssNrDetailReuseConstants
     // the ratio of light it made at its source, whichever moves the pixel less, since the decode's inverse amplifies a
     // moved difference of proxy values without bound near white.
     uint32_t ReplaceCurve;
+    // A moved sample is distrusted where the current vectors at the place it came from differ from this pixel's own by
+    // more than this share of (its length + 1), in working-size pixels: something else moves there now. 0 is off.
+    float MotionReject;
+    // Steady: a difference between the full frame and the moved detail smaller than this (proxy units; about one 8-bit step) is
+    // taken as none, so rounding does not show the two apart. 0 is off.
+    float SteadyDeadZone;
 };
 static_assert(sizeof(DlssNrDetailReuseConstants) == 256);
 
@@ -84,6 +90,8 @@ constexpr float kDlssNrDetailReuseClipGamma = 1.25f;
 constexpr float kDlssNrDetailReuseClipFalloff = 1.0f;
 constexpr float kDlssNrDetailReuseSigmaFloor = 0.01f;
 constexpr float kDlssNrDetailReuseFillRadius1080p = 24.0f; // scaled with the working size
+constexpr float kDlssNrDetailReuseMotionReject = 0.5f;
+constexpr float kDlssNrDetailReuseSteadyDeadZone = 1.0f / 255.0f;
 
 // The Coverage grid: one texel per tile, kept small because it is read back to the CPU every measured frame. 32x32
 // tiles are enough for a share of the frame, and let the host see where the picture was dropped if that is ever wanted.

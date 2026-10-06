@@ -2693,8 +2693,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
 
-    if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
-        motion == nullptr || output == nullptr)
+    // Depth is the one input the model can run without: NVIDIA's own retail DLL treats it as an optional
+    // refinement of motion-vector dilation at object edges (it is null in every known capture, including
+    // NVIDIA's own native integration), while colour, motion and output are unconditional. A frame with no
+    // depth loses that edge refinement and depth-based reuse/trust discrimination, not NR itself.
+    if (g_nr.failed || cmdList == nullptr || colour == nullptr || motion == nullptr || output == nullptr)
     {
         ReportSkipOnce(g_nr.failed ? "it already failed this session" : "a resource was missing");
         return;
@@ -2757,21 +2760,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool targetSupportsUav =
         cropColor || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
 
-    const auto guideDesc = depth->GetDesc();
+    // No depth this frame resolves to an empty depth region.
+    const auto guideDesc = depth != nullptr ? depth->GetDesc() : D3D12_RESOURCE_DESC {};
     const auto motionDesc = motion->GetDesc();
     const auto guides = DlssNr::ResolveGuideRegions(
-        { (unsigned int) guideDesc.Width, guideDesc.Height },
-        { (unsigned int) motionDesc.Width, motionDesc.Height },
-        { frame.RenderSubrectWidth, frame.RenderSubrectHeight },
-        { frame.OutputWidth, frame.OutputHeight }, frame.MotionVectorsLowResolution,
-        frame.DepthSubrectBaseX, frame.DepthSubrectBaseY,
-        frame.MotionSubrectBaseX, frame.MotionSubrectBaseY);
-    if (!guides.depth.valid() || !guides.motion.valid())
+        { depth != nullptr ? (unsigned int) guideDesc.Width : 0u, depth != nullptr ? guideDesc.Height : 0u },
+        { (unsigned int) motionDesc.Width, motionDesc.Height }, { frame.RenderSubrectWidth, frame.RenderSubrectHeight },
+        { frame.OutputWidth, frame.OutputHeight }, frame.MotionVectorsLowResolution, frame.DepthSubrectBaseX,
+        frame.DepthSubrectBaseY, frame.MotionSubrectBaseX, frame.MotionSubrectBaseY);
+    if (!guides.motion.valid())
     {
-        ReportSkipOnce("depth or motion-vector subrect is empty");
+        ReportSkipOnce("the motion-vector subrect is empty");
         device->Release();
         return;
     }
+    // Depth with an empty subrect is no depth.
+    if (!guides.depth.valid())
+        depth = nullptr;
     const auto guideWidth = guides.depth.width, guideHeight = guides.depth.height;
     const auto motionWidth = guides.motion.width, motionHeight = guides.motion.height;
     const auto depthBaseX = guides.depth.x, depthBaseY = guides.depth.y;
@@ -3998,13 +4003,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Read the exposure scan's candidates on the pass's own command list, once a frame.
     DlssNr::ExposureScan::Tick(device, cmdList);
 
+    // No depth gives depthIn == nullptr; only a depth that could not be cloned is a failure.
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
     ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
 
-    if (depthIn == nullptr || motionIn == nullptr)
+    if (motionIn == nullptr || (depth != nullptr && depthIn == nullptr))
     {
         g_nr.failed = true;
-        g_nr.reason = "the game's depth or motion vectors could not be made readable";
+        g_nr.reason = motionIn == nullptr ? "the game's motion vectors could not be made readable"
+                                          : "the game's depth could not be made readable";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         FinishColor(false);
         device->Release();
@@ -4740,16 +4747,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
-    // Put any guide clones back where the next frame's copy expects to find them.
-    // A clone left in NON_PIXEL_SHADER_RESOURCE by a frozen frame was never transitioned back to
-    // COPY_DEST, because a frozen frame does not copy. Putting it back unconditionally would be a
-    // barrier from a state it is not in, so the frozen case is skipped here and picked up by the
-    // first live frame after the toggle goes off -- which is a copy, and copies transition it.
-    if (g_nr.depthClone != nullptr)
+    // Put the guide clones this frame copied into back where the next frame's copy expects to find them.
+    // A clone this frame did not use (no depth, or a typed guide) is still in COPY_DEST.
+    if (g_nr.depthClone != nullptr && depthIn == g_nr.depthClone)
         Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
-    if (g_nr.motionClone != nullptr)
+    if (g_nr.motionClone != nullptr && motionIn == g_nr.motionClone)
         Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
@@ -4996,14 +5000,15 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
     ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
 
-    // Without all three there is nothing to run on. This is not a failure -- some evaluates legitimately
-    // carry none of it -- so it stays quiet and tries again next frame.
-    if (target == nullptr || depth == nullptr || motion == nullptr)
+    // Depth is optional -- NVIDIA's own retail DLL treats it as a refinement of motion-vector dilation at
+    // object edges, not a required input, and it is null in every known capture including NVIDIA's own
+    // native integration. Without colour/output or motion there is nothing to run on; that is not a
+    // failure -- some evaluates legitimately carry none of it -- so it stays quiet and tries again next frame.
+    if (target == nullptr || motion == nullptr)
     {
-        ReportSkipOnce(target == nullptr    ? (beforeUpscale ? "the parameters carried no color texture"
-                                                              : "the parameters carried no output texture")
-                       : depth == nullptr   ? "the parameters carried no depth"
-                                            : "the parameters carried no motion vectors");
+        ReportSkipOnce(target == nullptr ? (beforeUpscale ? "the parameters carried no color texture"
+                                                          : "the parameters carried no output texture")
+                                         : "the parameters carried no motion vectors");
         return;
     }
 

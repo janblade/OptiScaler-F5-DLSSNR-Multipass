@@ -1,15 +1,15 @@
-// GPU test for native::NativeProducer (OptiScaler/native/NativeProducer.cpp), no game and no model: a fake frame source hands it
-// pictures and depth copies through the FrameContract, and a stand-in for DLSS-NR is passed in as a function. It checks, through
-// the contract only:
-//   - the first frame has no flow, later frames do; the trust mask runs when depth is given and not when it is not,
-//   - the stand-in for NR is called with the guides, the reversed-Z flag, the colour space and the picture's state, and not
-//     called when it is off or there is no depth,
+// GPU test for native::NativeProducer (OptiScaler/native/NativeProducer.cpp), no game and no model: a fake frame source
+// hands it pictures and depth copies through the FrameContract, and a stand-in for DLSS-NR is passed in as a function.
+// It checks, through the contract only:
+//   - the first frame has no flow, later frames do; the trust mask runs with or without depth,
+//   - the stand-in for NR is called with the guides (depth null when there was none) and not called when apply is off,
 //   - the picture is left exactly as it was (bit for bit) when NR does nothing, whatever state it came in,
 //   - the output's fence point completes, and a hard cut is reported and makes the next NR call a reset,
 //   - a cut hint from the adapter restarts the flow.
 //
 //   vcvars64, then from the repo root:
-//   cl /std:c++20 /EHsc /O2 tests\nr_native_producer_gpu.cpp OptiScaler\native\NativeProducer.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
+//   cl /std:c++20 /EHsc /O2 tests\nr_native_producer_gpu.cpp OptiScaler\native\NativeProducer.cpp
+//   OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -324,7 +324,8 @@ struct NrCalls
     native::ColorSpace space = native::ColorSpace::Srgb;
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    bool guidesSeen = false;
+    bool guidesSeen = false;       // depth and motion both present
+    bool motionOnlyGuides = false; // motion present, depth null (no depth this frame)
 };
 
 } // namespace
@@ -357,10 +358,12 @@ int main()
         nr.state = f.pictureState;
         nr.format = f.colorFormat;
         nr.guidesSeen = f.depth != nullptr && f.motion != nullptr;
+        nr.motionOnlyGuides = f.depth == nullptr && f.motion != nullptr;
         return true;
     };
 
     bool ok = true;
+    int extraCopies = 0; // more copies of the depth than the one: a game that splits the scene over several lists
 
     // One frame through the contract: a picture of the scene (in the state given), with or without depth.
     auto frame = [&](const Scene& s, D3D12_RESOURCE_STATES state, bool withDepth, bool applyOn, bool cutHint,
@@ -391,7 +394,9 @@ int main()
         if (withDepth)
         {
             input.depth[0] = depth.Get();
-            input.depthCount = 1;
+            input.depthCount = 1 + extraCopies;
+            for (int i = 1; i < input.depthCount; ++i)
+                input.depth[i] = depth.Get();
             input.depthView = DXGI_FORMAT_R32_FLOAT;
             input.depthWidth = kWidth;
             input.depthHeight = kHeight;
@@ -449,12 +454,33 @@ int main()
 
     printf("no depth, or NR off\n");
     {
+        // No depth this frame (the generic depth finder found nothing qualifying, say): the whole frame used to be
+        // dropped (trustRan/nativeRan both false). It now still runs on motion alone -- a flow-only guide -- and NR
+        // is still called, just without a depth guide.
         const int calls = nr.count;
         auto r = frame(Scene { 7, 572, 20.0f, 5.0f }, kRead, false, true, false, output, nullptr, nullptr);
-        ok &= Check("no depth: flow runs, no mask, no NR", r.flowValid && !r.trustRan && !r.nativeRan && nr.count == calls);
+        ok &= Check("no depth: flow runs, the mask still runs, NR still called with motion only",
+                    r.flowValid && r.trustRan && r.nativeRan && nr.count == calls + 1);
+        ok &= Check("... with a motion guide and no depth guide", nr.motionOnlyGuides);
 
         r = frame(Scene { 7, 584, 20.0f, 5.0f }, kRead, true, false, false, output, nullptr, nullptr);
-        ok &= Check("NR off: mask runs, NR not called", r.flowValid && r.trustRan && !r.nativeRan && nr.count == calls);
+        ok &= Check("NR off: mask runs, NR not called",
+                    r.flowValid && r.trustRan && !r.nativeRan && nr.count == calls + 1);
+    }
+
+    printf("depth for the flow\n");
+    {
+        // The flow matches with depth only when it is one copy of the whole scene: one of several copies holds part of it.
+        frame(Scene { 7, 300, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
+        ok &= Check("one depth copy: the flow matches with it", producer.Flow()->UsedDepth());
+
+        extraCopies = 1;
+        frame(Scene { 7, 312, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
+        extraCopies = 0;
+        ok &= Check("two copies: the flow matches without depth", !producer.Flow()->UsedDepth());
+
+        frame(Scene { 7, 324, 20.0f, 5.0f }, kRead, false, true, false, output, nullptr, nullptr);
+        ok &= Check("no depth: the flow matches without depth", !producer.Flow()->UsedDepth());
     }
 
     printf("a hard cut\n");

@@ -3,8 +3,11 @@
 // cl /std:c++20 /EHsc /W4 tests/nr_depth_finder_core_smoke.cpp OptiScaler/native/DepthFinderCore.cpp
 #include "../OptiScaler/native/DepthFinderCore.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace native;
@@ -59,6 +62,76 @@ static void SingleContextFrame(DepthFinderCore& core, std::vector<SnapshotReques
 
     core.BeginPresent(W, H);
     core.EndPresent(W, H, kWarmup);
+}
+
+// Runs `body(context)` for each context of a frame: on its own thread each (the way a game records command lists in
+// parallel), or one after the other on this one.
+template <typename Body> static void ForEachContext(int contexts, bool parallel, Body body)
+{
+    if (!parallel)
+    {
+        for (int c = 0; c < contexts; ++c)
+            body(c);
+
+        return;
+    }
+
+    std::vector<std::thread> threads;
+
+    for (int c = 0; c < contexts; ++c)
+        threads.emplace_back(body, c);
+
+    for (auto& t : threads)
+        t.join();
+}
+
+// What a game with several command lists does in a frame: every list binds the shadow map and draws into it, then binds the
+// scene (the first one clears it), draws, makes a fullscreen pass and an indirect draw, and closes. The draws of the lists run
+// on a thread of their own each when `parallel`; the events around them are made in the same order from this thread.
+// `snapshots` collects what the core asked to be copied (buffer, where, stretch), to be compared in sorted order.
+static void MultiContextFrames(DepthFinderCore& core, int contexts, bool parallel, int frames,
+                               std::vector<std::tuple<uint64_t, std::string, uint64_t>>& snapshots)
+{
+    auto take = [&](const SnapshotRequest& r)
+    {
+        if (r.take)
+            snapshots.emplace_back(r.id, r.where, r.stretchVertices);
+    };
+
+    for (int frame = 0; frame < frames; ++frame)
+    {
+        for (int c = 0; c < contexts; ++c)
+            take(core.OnDepthBound(100 + c, true, &kShadow));
+
+        ForEachContext(contexts, parallel,
+                       [&](int c)
+                       {
+                           core.OnViewport(100 + c, 2048.0f);
+                           for (int i = 0; i < 30; ++i)
+                               core.OnDraw(100 + c, 3000 + c, 1);
+                       });
+
+        for (int c = 0; c < contexts; ++c)
+            take(core.OnDepthBound(100 + c, true, &kScene));
+
+        take(core.OnDepthClear(100, kScene, 0.0f));
+
+        ForEachContext(contexts, parallel,
+                       [&](int c)
+                       {
+                           core.OnViewport(100 + c, (float) W);
+                           for (int i = 0; i < 200; ++i)
+                               core.OnDraw(100 + c, 6000, 1 + c % 3);
+                           core.OnDraw(100 + c, 6, 1);
+                           core.OnIndirect(100 + c, 4);
+                       });
+
+        for (int c = 0; c < contexts; ++c)
+            take(core.OnContextEnd(100 + c));
+
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+    }
 }
 
 int main()
@@ -363,6 +436,259 @@ int main()
         core.BeginPresent(W, H);
         CHECK(core.EndPresent(W, H, kWarmup));
         CHECK(core.GameCallsUpscaler());
+    }
+
+    // Lists recorded on several threads at once give the same candidates, pick, copy requests and log as the same events made on
+    // one thread.
+    {
+        constexpr int kContexts = 8;
+        constexpr int kFrames = 10;
+
+        std::vector<std::string> serialLog;
+        std::vector<std::tuple<uint64_t, std::string, uint64_t>> serialSnapshots;
+
+        DepthFinderCore serial;
+        serial.Start([&](const std::string& line) { serialLog.push_back(line); });
+        serial.SetSnapshotsWanted(true);
+        MultiContextFrames(serial, kContexts, false, kFrames, serialSnapshots);
+
+        CHECK(serial.CurrentPick().valid && serial.CurrentPick().id == 0xA);
+        CHECK(!serialSnapshots.empty());
+        CHECK(!serialLog.empty());
+
+        std::sort(serialSnapshots.begin(), serialSnapshots.end());
+
+        for (int run = 0; run < 3; ++run)
+        {
+            std::vector<std::string> parallelLog;
+            std::vector<std::tuple<uint64_t, std::string, uint64_t>> parallelSnapshots;
+
+            DepthFinderCore parallel;
+            parallel.Start([&](const std::string& line) { parallelLog.push_back(line); });
+            parallel.SetSnapshotsWanted(true);
+            MultiContextFrames(parallel, kContexts, true, kFrames, parallelSnapshots);
+
+            std::sort(parallelSnapshots.begin(), parallelSnapshots.end());
+
+            const auto a = serial.CurrentPick();
+            const auto b = parallel.CurrentPick();
+            CHECK(a.valid == b.valid && a.id == b.id && a.width == b.width && a.height == b.height &&
+                  a.reversed == b.reversed);
+            CHECK(serialSnapshots == parallelSnapshots);
+            CHECK(serialLog == parallelLog);
+            CHECK(serial.SnapshotFloor() == parallel.SnapshotFloor());
+        }
+    }
+
+    // Lists that interleave their events: whatever any list drew into a buffer counts at a clear or an unbind made by another,
+    // as when every draw was added to the buffer at once. The expected values are the locked core's (the test passes on it).
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored); // the floor is 2% of 1.2M vertices: 24000
+
+        // List 200 draws the scene and stays open; list 201, bound to the shadow map, clears the scene buffer.
+        core.OnDepthBound(200, true, &kScene);
+        core.OnViewport(200, (float) W);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(200, 6000, 1);
+
+        core.OnDepthBound(201, true, &kShadow);
+        const auto cleared = core.OnDepthClear(201, kScene, 0.0f);
+        CHECK(cleared.take && cleared.id == 0xA && std::string(cleared.where) == "clear");
+        CHECK(cleared.stretchVertices == 200 * 6000);
+
+        core.OnContextEnd(200);
+        core.OnContextEnd(201);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+
+        // Lists 300 and 301 both draw into the scene; 301 moves off it first, with only together enough to be copied.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(300, (float) W);
+        core.OnViewport(301, (float) W);
+        for (int i = 0; i < 3; ++i)
+            core.OnDraw(300, 6000, 1);
+        for (int i = 0; i < 2; ++i)
+            core.OnDraw(301, 6000, 1);
+
+        const auto left = core.OnDepthBound(301, false, nullptr);
+        CHECK(left.take && left.id == 0xA && std::string(left.where) == "unbind");
+        CHECK(left.stretchVertices == 5 * 6000);
+
+        // The stretch was taken whole at the unbind: the other list's close has nothing left to copy.
+        CHECK(!core.OnContextEnd(300).take);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+    }
+
+    // Two lists bound to the same buffer, one drawing at the picture's size and one into a small mirror: the viewport the clear
+    // judges is the newest real draw's, whichever list made it.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored);
+
+        // 300 and 301 both bind the scene; 301 draws it at 2560, then 300 draws a 512 mirror into it: the mirror is the last
+        // real draw, so 301's clear is not of the scene and asks for nothing.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(301, 2560.0f);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(301, 6000, 1);
+        core.OnViewport(300, 512.0f);
+        for (int i = 0; i < 10; ++i)
+            core.OnDraw(300, 100, 1);
+
+        CHECK(!core.OnDepthClear(301, kScene, 0.0f).take);
+        core.OnContextEnd(300);
+        core.OnContextEnd(301);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+
+        // The other way round: the mirror first, the scene after it. The last real draw is the scene's, and the clear copies.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(301, 512.0f);
+        for (int i = 0; i < 10; ++i)
+            core.OnDraw(301, 100, 1);
+        core.OnViewport(300, 2560.0f);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(300, 6000, 1);
+
+        const auto cleared = core.OnDepthClear(301, kScene, 0.0f);
+        CHECK(cleared.take && cleared.id == 0xA && std::string(cleared.where) == "clear");
+        CHECK(cleared.stretchVertices == 200 * 6000 + 10 * 100);
+        core.OnContextEnd(300);
+        core.OnContextEnd(301);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+
+        // The mirror's list leaves the buffer, and the one left on it (alone now) draws at 2560 after that: those are the newest
+        // draws.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(301, 512.0f);
+        for (int i = 0; i < 10; ++i)
+            core.OnDraw(301, 100, 1);
+        core.SetSnapshotsWanted(false); // so the stretch is not taken at the unbind, and the viewport held stays the mirror's
+        core.OnDepthBound(301, false, nullptr);
+        core.SetSnapshotsWanted(true);
+
+        core.OnViewport(300, 2560.0f);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(300, 6000, 1);
+
+        const auto alone = core.OnDepthClear(300, kScene, 0.0f);
+        CHECK(alone.take && alone.id == 0xA && std::string(alone.where) == "clear");
+        core.OnContextEnd(300);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+    }
+
+    // One context id drawn on from several threads at once: every draw counts.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored);
+
+        core.OnDepthBound(1, true, &kScene);
+        core.OnViewport(1, (float) W);
+        ForEachContext(4, true,
+                       [&](int)
+                       {
+                           for (int i = 0; i < 20000; ++i)
+                               core.OnDraw(1, 100, 1);
+                       });
+
+        const auto left = core.OnDepthBound(1, false, nullptr);
+        CHECK(left.take && left.stretchVertices == 4ull * 20000 * 100);
+    }
+
+    // Many lists a game makes once and lets go, and the finder keeps working: a list id seen again later (a new list at a
+    // reused address) counts as before.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int list = 0; list < 64; ++list)
+        {
+            core.OnDepthBound(1000 + list, true, &kShadow);
+            core.OnDraw(1000 + list, 3000, 1);
+            core.OnContextEnd(1000 + list);
+        }
+
+        for (int frame = 0; frame < 650; ++frame)
+            SingleContextFrame(core, ignored);
+
+        CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+
+        core.OnDepthBound(1000, true, &kScene);
+        for (int i = 0; i < 50; ++i)
+            core.OnDraw(1000, 9000, 1);
+        const auto closed = core.OnContextEnd(1000);
+        CHECK(closed.take && closed.stretchVertices == 50 * 9000);
+    }
+
+    // A list that only draws (bound once, never closed or rebound) keeps what it knows however long that goes on. 500 draws
+    // with no buffer bound (one the adapter does not know) after setting a 512 viewport, 520 into the scene; both draw in every
+    // frame for many frames. 500 then binds the scene and its clear still sees the mirror's viewport.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        core.OnDepthBound(500, true, nullptr);
+        core.OnViewport(500, 512.0f);
+        core.OnDepthBound(520, true, &kScene);
+        core.OnViewport(520, (float) W);
+
+        for (int frame = 0; frame < 650; ++frame)
+        {
+            core.OnDraw(500, 100, 1);
+            core.OnDraw(520, 6000, 1);
+            SingleContextFrame(core, ignored);
+        }
+
+        CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+        CHECK(core.Diagnose(500).hasContext);
+        CHECK(core.Diagnose(520).hasContext && core.Diagnose(520).hasBoundBuffer);
+
+        // 500 still knows its mirror viewport: its draws into the scene were the last real ones, so its clear is not of the scene.
+        core.OnDepthBound(500, true, &kScene);
+        for (int i = 0; i < 100; ++i)
+            core.OnDraw(500, 6000, 1);
+
+        CHECK(!core.OnDepthClear(500, kScene, 0.0f).take);
+
+        // Still the same list: leaving the scene asks for the whole stretch it drew since the last present.
+        for (int i = 0; i < 100; ++i)
+            core.OnDraw(520, 6000, 1);
+
+        const auto left = core.OnDepthBound(520, false, nullptr);
+        CHECK(left.take && left.id == 0xA && std::string(left.where) == "unbind");
+        CHECK(left.stretchVertices == 100 * 6000);
     }
 
     printf(fails == 0 ? "all passed\n" : "FAILED (%d)\n", fails);

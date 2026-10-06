@@ -257,6 +257,12 @@ namespace NativeMotionDx12
 
 void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
 {
+    // A D3D11 game's frame generation swap chain is the interop's D3D12 one: its picture is the game's, already handled by
+    // NativeMotionDx11 from Dx11wDx12SC::Present, and this present runs inside frame generation's own present, under the
+    // lock the virtual upscaler's UpscaleStart (-> EvaluateState) takes again: that deadlocked.
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+        return;
+
     const uint64_t presents = ++g_menuPresents;
 
     if (g_fgDriven.load() && presents - g_menuPresentsAtFg.load() <= kFgPresentGrace)
@@ -284,75 +290,45 @@ void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Dev
 
 void DrawStatus()
 {
-    if (Config::Instance()->DlssNrNativeUpscaler.value_or_default())
-    {
-        if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
-            ImGui::TextDisabled("%s is running on this picture.", g_virtualUpscaler->BackendName().c_str());
-        else if (g_virtualUpscaler != nullptr && !g_virtualUpscaler->Error().empty())
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Upscaler: %s", g_virtualUpscaler->Error().c_str());
-        else
-            ImGui::TextDisabled("Upscaler: waiting for the first frame with depth.");
-    }
-
-    // Every branch writes one line and each picture has a box of its own size, so nothing below moves.
     switch (g_status)
     {
     case Status::Off:
-        ImGui::TextDisabled("Off.");
-        break;
+        ImGui::TextDisabled("Waiting for the first frame.");
+        return;
     case Status::Waiting:
-        ImGui::TextDisabled("Waiting: the game is calling an upscaler.");
-        break;
+        ImGui::TextDisabled("Standing aside: the game is calling an upscaler.");
+        return;
     case Status::Failed:
         ImGui::TextDisabled("Could not start (see the log).");
-        break;
+        return;
     default:
-        ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
         break;
     }
 
-    if (Config::Instance()->DlssNrNativeInput.value_or_default())
-        ImGui::TextDisabled("%s", g_nativeRan ? "Native input: NR is running on this picture."
-                                              : DlssNr::FinishedPictureStatus().c_str());
+    if (Config::Instance()->DlssNrNativeUpscaler.value_or_default())
+    {
+        if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
+            ImGui::TextDisabled("%s is running as a stabiliser on this picture.",
+                                g_virtualUpscaler->BackendName().c_str());
+        else if (g_virtualUpscaler != nullptr && !g_virtualUpscaler->Error().empty())
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Stabiliser: %s", g_virtualUpscaler->Error().c_str());
+        else
+            ImGui::TextDisabled("Stabiliser: waiting for the motion estimate.");
+    }
+    else if (g_nativeRan)
+    {
+        ImGui::TextDisabled("NR running on this picture.");
+    }
+    else
+    {
+        const std::string reason = DlssNr::FinishedPictureStatus();
+        ImGui::TextDisabled("%s", reason.empty() ? "NR: waiting for the motion estimate." : reason.c_str());
+    }
 }
 
 void DrawAdvancedUi()
 {
     auto* config = Config::Instance();
-
-    bool on = config->DlssNrNativeMotion.value_or_default();
-
-    if (ImGui::Checkbox("Estimate motion of the picture##nativemotion", &on))
-        config->DlssNrNativeMotion = on;
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Also set by the single checkbox above. On its own, with neither checkbox below on, this\n"
-                                "estimates the motion but feeds nothing with it. Applies at once.");
-
-    bool feed = config->DlssNrNativeInput.value_or_default();
-
-    if (ImGui::Checkbox("Run Neural Rendering on this (native input)##nativeinput", &feed))
-        config->DlssNrNativeInput = feed;
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Experimental. Feeds DLSS-NR the depth finder's depth and the estimated motion, so it runs in a\n"
-                                "game with no upscaler. Needs the depth finder, Finished picture and Enable Neural Rendering on.\n"
-                                "SDR and scRGB only for now. Lower GPU cost than the checkbox below, with no frame generation:\n"
-                                "the single checkbox above does not use this. Applies at once.");
-
-    bool virtualUpscaler = config->DlssNrNativeUpscaler.value_or_default();
-
-    if (ImGui::Checkbox("Present this to OptiScaler as an upscaler (experimental)##nativeupscaler", &virtualUpscaler))
-        config->DlssNrNativeUpscaler = virtualUpscaler;
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "%s", "Experimental. Instead of feeding DLSS-NR directly, presents the depth finder's depth and the\n"
-                  "estimated motion to OptiScaler's upscaler (the one chosen in the menu, FSR when none is) as if\n"
-                  "the game had called it. Render size equals output size and jitter is zero, so it works as a\n"
-                  "stabiliser, not a reconstruction; it makes frame generation with the Upscaler input work in a\n"
-                  "game with no upscaler. Takes priority over Run Neural Rendering on this. Also set by the single\n"
-                  "checkbox above. Applies at once.");
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
@@ -360,12 +336,24 @@ void DrawAdvancedUi()
     {
         auto& tune = g_producer->Flow()->Tuning();
         ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 3);
+        ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3);
         ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 4);
+        ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
         ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
+        ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
+        ImGui::Checkbox("Camera motion where the picture is flat##flowglobal", &tune.globalCandidate);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", "Where nothing in the picture says how it moved (a plain wall, sky), use what the whole\n"
+                                    "picture did last frame. It also moves the flat inside of a still HUD panel while the\n"
+                                    "camera turns; switch it off to compare.");
+        ImGui::Checkbox("Cheaper sub-pixel refinement##flowinverse", &tune.inverseRefinement);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", "Finds the picture's gradients once from the current frame and stops early. Faster, but\n"
+                                    "less exact on thin lines and grain; switch it on and off to compare.");
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
                            ImGuiSliderFlags_Logarithmic);
@@ -394,6 +382,8 @@ void DrawAdvancedUi()
     const float boxHeight = boxWidth * 9.0f / 16.0f;
     bool drawn = false;
 
+    ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
+
     if (g_status == Status::Running)
     {
         g_previewWanted = true;
@@ -405,7 +395,7 @@ void DrawAdvancedUi()
     if (!drawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));
 
-    // A frame can have no depth copy; the picture then keeps the last mask rather than going black for a frame.
+    // A frame can have no mask (no motion estimate yet); the picture then keeps the last one rather than going black.
     const bool trustRecent = g_trustFrame != 0 && g_frame - g_trustFrame < 30;
 
     if (g_status == Status::Running)
@@ -414,7 +404,7 @@ void DrawAdvancedUi()
             ImGui::TextDisabled("Trust: white is where the last frame cannot be trusted (%llu cuts seen).",
                                 (unsigned long long) g_cuts);
         else
-            ImGui::TextDisabled("Trust: waiting for the depth finder's copy of the depth.");
+            ImGui::TextDisabled("Trust: waiting for the motion estimate.");
     }
     else
         ImGui::TextDisabled("Trust: -");

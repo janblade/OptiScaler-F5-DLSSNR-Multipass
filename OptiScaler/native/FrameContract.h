@@ -40,7 +40,7 @@ struct SyncPoint
 };
 
 // Whether the adapter could read the game's depth at all (D3D9 depth is often not readable). The producer shows it as a
-// status line and does not run without depth.
+// status line; without depth it runs on motion only.
 enum class DepthReadability
 {
     Readable,

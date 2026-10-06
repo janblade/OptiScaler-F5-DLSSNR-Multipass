@@ -5,6 +5,8 @@
 //   - two motion candidates per pixel: its own, and the closest surface's in the 3x3 neighbourhood so edges can move
 //     with the foreground (Karis 2014); each is tested with the depth of its own surface, the better one is kept;
 //   - a depth test against the saved 2x2 footprint the reprojected sample is read from;
+//   - a motion test: the current vectors at the place it came from must be close to the pixel's own, or something
+//     else moves there now (relative to the vector's length, so fast motion does not reject);
 //   - a colour test against the current 3x3 neighbourhood's variance box (Salvi 2016), measured in standard
 //     deviations, so noise does not reject and a real change does;
 //   - Catmull-Rom for the moved detail, clamped to its 2x2 footprint (sharp, no ringing).
@@ -68,6 +70,8 @@ cbuffer Params : register(b0)
     float fillStrength;
     float fillRadius;
     uint replaceCurve; // DlssNrReplaceCurve: 0 none, 1 Neutwo, 2 hybrid (see the header)
+    float motionReject;
+    float steadyDeadZone;
 };
 
 #ifdef VK_MODE
@@ -131,6 +135,12 @@ float3 LandReplaceDetail(float3 input, float3 detail, float3 source, float stren
 
 float2 WorkSize() { return float2(workWidth, workHeight); }
 float2 WorkUv(uint2 p) { return (float2(p) + 0.5) / WorkSize(); }
+
+// depthWidth/depthHeight are 0 on a frame the game (or the native producer) supplied no depth for -- the same
+// signal DlssNr_Dx12::Dispatch's guide resolution already produces for "no depth" (DlssNr_Guides.h). t2/t4 are
+// not valid depth data in that case (DispatchDetailReuse stands t0 in for any null guide so every descriptor
+// slot stays bound), so nothing below may read them for trust.
+bool HasDepth() { return depthWidth != 0 && depthHeight != 0; }
 
 float FarIsZero(float d) { return depthInverted != 0 ? d : 1.0 - d; }
 
@@ -207,13 +217,36 @@ void ColourBox(uint2 p, out float3 mean, out float3 sigma)
     sigma = max(sqrt(max(sumSquares / 9.0 - mean * mean, 0.0)), max(sigmaFloor, 1e-5));
 }
 
+// How far the vector `raw` a pixel moved by is trusted, given the current vectors where it points (0..1). A pixel and
+// the place it came from should move alike; where they do not, something else moves there now (an edge crossing it, a
+// surface that was behind) and what was saved there is not this pixel's. The difference is measured in working-size
+// pixels against the vector's length plus one, so fast motion and its small errors do not reject, and fades out
+// between half and the whole of motionReject times that.
+float MotionTrust(float2 previousUv, float2 raw)
+{
+    if (motionReject <= 0.0)
+        return 1.0;
+    const float2 here = UvDisplacement(raw) * WorkSize();
+    const float2 there = UvDisplacement(RawMotion(previousUv)) * WorkSize();
+    const float difference = length(here - there);
+    if (!isfinite(difference))
+        return 1.0; // a vector that is not a number says nothing about the source
+    return 1.0 - smoothstep(0.5, 1.0, difference / (motionReject * (length(here) + 1.0)));
+}
+
 // The saved detail moved from previousUv (rgb) and how far it is trusted (a, 0..1), for a pixel whose surface has
-// far-is-zero depth depthNow. Reads t1 saved detail, t2 saved colour + depth.
-float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma, out float3 source)
+// far-is-zero depth depthNow and which moved by the raw vector `raw`. Reads t1 saved detail, t2 saved colour + depth.
+// byMotion is the share of trust the vectors' disagreement took away (only the debug view reads it).
+float4 MovedFrom(float2 previousUv, float2 raw, float depthNow, float3 mean, float3 sigma, out float3 source,
+                 out float byMotion)
 {
     source = 0.0;
+    byMotion = 0.0;
     const float2 work = WorkSize();
-    if (!all(isfinite(previousUv)) || any(previousUv < 0.0) || any(previousUv > 1.0) || !isfinite(depthNow))
+    const bool hasDepth = HasDepth();
+    // depthNow is only meaningful (and only finite by construction) when hasDepth; a depth-less frame passes a
+    // placeholder that must not reject the sample.
+    if (!all(isfinite(previousUv)) || any(previousUv < 0.0) || any(previousUv > 1.0) || (hasDepth && !isfinite(depthNow)))
         return 0.0;
 
     // The 2x2 footprint the moved sample is built from: detail range, validity, depth range. Only texels with a
@@ -245,10 +278,15 @@ float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma, o
 
     const float3 moved = clamp(SampleCatmullRom(t1, previousUv, work).rgb, detailLo, detailHi);
 
-    // Depth: how far this surface lies outside the saved range, relative to the nearer of the two.
-    const float outside = max(max(depthLo - depthNow, depthNow - depthHi), 0.0);
-    const float relativeDepth = outside / max(max(depthNow, depthHi), 1e-6);
-    const float depthTrust = 1.0 - smoothstep(depthTolerance, 2.0 * depthTolerance, relativeDepth);
+    // Depth: how far this surface lies outside the saved range, relative to the nearer of the two. With no depth
+    // this frame (hasDepth false) there is nothing to compare depthNow against, so trust falls back to colour alone.
+    float depthTrust = 1.0;
+    if (hasDepth)
+    {
+        const float outside = max(max(depthLo - depthNow, depthNow - depthHi), 0.0);
+        const float relativeDepth = outside / max(max(depthNow, depthHi), 1e-6);
+        depthTrust = 1.0 - smoothstep(depthTolerance, 2.0 * depthTolerance, relativeDepth);
+    }
 
     // Colour: the saved input colour against the current input's variance box, in standard deviations.
     source = t2.SampleLevel(gLinear, previousUv, 0).rgb;
@@ -258,14 +296,31 @@ float4 MovedFrom(float2 previousUv, float depthNow, float3 mean, float3 sigma, o
 
     if (!Finite3(moved) || !Finite3(saved))
         return 0.0;
-    return float4(moved, saturate(depthTrust * colourTrust));
+    const float motionTrust = MotionTrust(previousUv, raw);
+    byMotion = 1.0 - motionTrust;
+    return float4(moved, saturate(depthTrust * colourTrust * motionTrust));
 }
 
 // The moved detail for work pixel p (rgb), how far it is trusted (a, 0..1), and the saved picture it came from. Reads
 // t0 input, t1 saved detail, t2 saved colour + depth, t3 motion guide, t4 depth guide.
-float4 MovedDetailFrom(uint2 p, out float3 source)
+float4 MovedDetailFrom(uint2 p, out float3 source, out float byMotion)
 {
+    source = 0.0; // matches MovedFrom's own convention; keeps every exit, including the one below, defined
+    byMotion = 0.0;
     const float2 uv = WorkUv(p);
+
+    float3 mean, sigma;
+    ColourBox(p, mean, sigma);
+
+    // No depth this frame: t4 is not a real depth guide (DispatchDetailReuse stood a null In4 in with t0, the
+    // colour), so there is no "closest surface in the 3x3" to find -- one motion candidate, trusted by colour alone
+    // (MovedFrom's hasDepth check ignores the placeholder depth below).
+    if (!HasDepth())
+    {
+        const float2 raw = RawMotion(uv);
+        return MovedFrom(uv + UvDisplacement(raw), raw, 0.0, mean, sigma, source, byMotion);
+    }
+
     const uint2 depthSize = uint2(depthWidth, depthHeight);
     const int2 centre = GuideTexel(uv, depthSize);
 
@@ -287,22 +342,25 @@ float4 MovedDetailFrom(uint2 p, out float3 source)
         }
     }
 
-    float3 mean, sigma;
-    ColourBox(p, mean, sigma);
-
     // Own motion with own depth. The closest surface's motion is read at this pixel's position shifted by the
     // depth-texel offset (motion may be finer than depth), and tested with that surface's depth.
     float3 ownSource, nearSource;
-    const float4 own = MovedFrom(uv + UvDisplacement(RawMotion(uv)), ownDepth, mean, sigma, ownSource);
+    float ownByMotion, nearByMotion;
+    const float2 ownRaw = RawMotion(uv);
+    const float4 own = MovedFrom(uv + UvDisplacement(ownRaw), ownRaw, ownDepth, mean, sigma, ownSource, ownByMotion);
     source = ownSource;
+    byMotion = ownByMotion;
     if (all(closest == centre))
         return own;
     const float2 closestUv = uv + float2(closest - centre) / float2(depthSize);
-    const float4 near = MovedFrom(uv + UvDisplacement(RawMotion(closestUv)), closestDepth, mean, sigma, nearSource);
+    const float2 nearRaw = RawMotion(closestUv);
+    const float4 near =
+        MovedFrom(uv + UvDisplacement(nearRaw), nearRaw, closestDepth, mean, sigma, nearSource, nearByMotion);
     // On a tie the closer surface's motion wins, so edges move with the foreground.
     if (near.a >= own.a)
     {
         source = nearSource;
+        byMotion = nearByMotion;
         return near;
     }
     return own;
@@ -310,10 +368,10 @@ float4 MovedDetailFrom(uint2 p, out float3 source)
 
 // MovedDetailFrom, landed on this pixel's input in Replace modes (see the header), so everything that adds it --
 // Reproject, Steady, Fill -- adds a change that is safe here.
-float4 MovedDetail(uint2 p)
+float4 MovedDetail(uint2 p, out float byMotion)
 {
     float3 source;
-    float4 moved = MovedDetailFrom(p, source);
+    float4 moved = MovedDetailFrom(p, source, byMotion);
     if (replaceCurve != 0u && moved.a > 0.0)
     {
         const float3 landed = LandReplaceDetail(t0.Load(int3(p, 0)).rgb, moved.rgb, source, moved.a);
@@ -328,7 +386,9 @@ void Capture(uint2 p)
     const float3 answer = t1.Load(int3(p, 0)).rgb;
     const float3 detail = answer - input.rgb;
     const bool valid = Finite3(detail) && Finite3(input.rgb) && all(abs(detail) <= 65504.0);
-    const float depth = GuideDepth(t2, GuideTexel(WorkUv(p), uint2(depthWidth, depthHeight)));
+    // No depth this frame: t2 stands in with the colour, so save far (0) instead. A next frame with depth then finds
+    // its surface nearer than the saved range and distrusts the moved detail for that one frame.
+    const float depth = HasDepth() ? GuideDepth(t2, GuideTexel(WorkUv(p), uint2(depthWidth, depthHeight))) : 0.0;
     u0[p] = float4(valid ? detail : 0.0, valid ? 1.0 : 0.0);
     u1[p] = float4(Finite3(input.rgb) ? input.rgb : 0.0, isfinite(depth) ? depth : 0.0);
 }
@@ -336,14 +396,15 @@ void Capture(uint2 p)
 void Reproject(uint2 p)
 {
     const float4 input = t0.Load(int3(p, 0));
-    const float4 moved = MovedDetail(p);
+    float byMotion;
+    const float4 moved = MovedDetail(p, byMotion);
     float4 result = input;
     const float3 reconstructed = input.rgb + moved.rgb * moved.a;
     if (Finite3(reconstructed) && all(abs(reconstructed) <= 65504.0))
         result.rgb = reconstructed;
 
     if (debugView != 0)
-        result.rgb = lerp(float3(1.0, 0.0, 1.0), result.rgb, moved.a);
+        result.rgb = lerp(lerp(float3(1.0, 0.0, 1.0), float3(1.0, 1.0, 0.0), byMotion), result.rgb, moved.a);
 
     u0[p] = result;
 }
@@ -354,7 +415,17 @@ void Steady(uint2 p)
     const float4 answer = t1.Load(int3(p, 0));
     const float4 estimate = t2.Load(int3(p, 0));
     const float amount = saturate(steady) * saturate(estimate.a);
-    const float3 steadied = input.rgb + lerp(answer.rgb - input.rgb, estimate.rgb, amount);
+    const float3 fresh = answer.rgb - input.rgb;
+    // A difference below the dead zone (about one 8-bit step) is no difference: the full frame takes the moved detail there
+    // (as far as it is trusted), so rounding does not show the two frames apart. Fades out between one and two dead zones,
+    // and only where steadiness is on.
+    float3 pull = amount;
+    if (steadyDeadZone > 0.0 && amount > 0.0)
+    {
+        const float3 apart = smoothstep(steadyDeadZone, 2.0 * steadyDeadZone, abs(estimate.rgb - fresh));
+        pull = lerp(saturate(estimate.a), amount, apart);
+    }
+    const float3 steadied = input.rgb + lerp(fresh, estimate.rgb, pull);
     u0[p] = float4(Finite3(steadied) ? steadied : answer.rgb, answer.a);
 }
 
@@ -542,5 +613,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     else if (mode == 6)
         Fill(p);
     else
-        u0[p] = MovedDetail(p);
+    {
+        float byMotion;
+        u0[p] = MovedDetail(p, byMotion);
+    }
 }

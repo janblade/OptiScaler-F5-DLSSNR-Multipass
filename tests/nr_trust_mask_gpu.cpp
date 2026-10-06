@@ -4,7 +4,8 @@
 //   - the strip the square uncovers is not (the depth there was the square's),
 //   - the inside of the moving square is trusted (it moves as one, at one depth),
 //   - a hard cut to another scene distrusts nearly everything and is reported a few frames later,
-//   - a scene that does not move at all is trusted everywhere.
+//   - a scene that does not move at all is trusted everywhere,
+//   - depth coming and going is not a scene cut.
 //
 //   vcvars64, then from the repo root:
 //   cl /std:c++20 /EHsc /O2 tests\nr_trust_mask_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
@@ -282,12 +283,13 @@ struct Runner
         }
     }
 
-    // One frame through both; keeps the mask the pass produced.
-    void Frame(const Scene& s, bool split = false)
+    // One frame through both; keeps the mask the pass produced. noDepth: no depth copy this frame.
+    bool lastDispatchRan = false;
+    void Frame(const Scene& s, bool split = false, bool noDepth = false)
     {
         auto colour = Colour(gpu, s);
-        auto depth = Depth(gpu, s, split ? 1 : 0);
-        auto depth2 = split ? Depth(gpu, s, 2) : ComPtr<ID3D12Resource>();
+        auto depth = noDepth ? ComPtr<ID3D12Resource>() : Depth(gpu, s, split ? 1 : 0);
+        auto depth2 = (split && !noDepth) ? Depth(gpu, s, 2) : ComPtr<ID3D12Resource>();
 
         flow.Dispatch(gpu.list.Get(), colour.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
 
@@ -300,19 +302,23 @@ struct Runner
             in.fullPerFlow = 2.0f;
             in.lumaNow = flow.LumaOfLastFrame();
             in.lumaBefore = flow.LumaOfFrameBefore();
-            in.depths[0] = depth.Get();
-            in.depthCount = 1;
 
-            if (split)
+            if (!noDepth)
             {
-                in.depths[1] = depth2.Get();
-                in.depthCount = 2;
+                in.depths[0] = depth.Get();
+                in.depthCount = 1;
+
+                if (split)
+                {
+                    in.depths[1] = depth2.Get();
+                    in.depthCount = 2;
+                }
+                in.depthFormat = DXGI_FORMAT_R32_FLOAT;
+                in.depthWidth = kWidth;
+                in.depthHeight = kHeight;
+                in.depthReversed = true;
             }
-            in.depthFormat = DXGI_FORMAT_R32_FLOAT;
-            in.depthWidth = kWidth;
-            in.depthHeight = kHeight;
-            in.depthReversed = true;
-            trust.Dispatch(gpu.list.Get(), in);
+            lastDispatchRan = trust.Dispatch(gpu.list.Get(), in);
         }
 
         gpu.Submit();
@@ -458,6 +464,86 @@ int main()
 
         ok &= Check("whole picture, mean mask", run.Mean(0, 0, kWidth, kHeight), run.Mean(0, 0, kWidth, kHeight) < 0.03);
         ok &= Check("the square, mean mask", run.Mean(320, 300, 480, 420), run.Mean(320, 300, 480, 420) < 0.05);
+    }
+
+    // 6. no depth at all: the mask runs on flow and luma, and BuildGuides gives a motion guide and no stale depth guide
+    {
+        printf("no depth at all\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        // A couple of frames with real depth first (the first establishes flow history only), so GuideDepth()
+        // has something stale it could wrongly keep handing out.
+        run.Frame(Scene { 7, 300, 20.0f, 5.0f });
+        run.Frame(Scene { 7, 300, 20.0f, 5.0f });
+        {
+            auto colour = Colour(gpu, Scene { 7, 300, 20.0f, 5.0f });
+            auto depth = Depth(gpu, Scene { 7, 300, 20.0f, 5.0f });
+            TrustMaskDx12::Inputs in;
+            in.flow = run.flow.Flow();
+            in.flowWidth = run.flow.FlowWidth();
+            in.flowHeight = run.flow.FlowHeight();
+            in.fullPerFlow = 2.0f;
+            in.lumaNow = run.flow.LumaOfLastFrame();
+            in.lumaBefore = run.flow.LumaOfFrameBefore();
+            in.depths[0] = depth.Get();
+            in.depthCount = 1;
+            in.depthFormat = DXGI_FORMAT_R32_FLOAT;
+            in.depthWidth = kWidth;
+            in.depthHeight = kHeight;
+            in.depthReversed = true;
+            const bool built = run.trust.BuildGuides(gpu.list.Get(), in, kWidth, kHeight);
+            gpu.Submit();
+            ok &= Check("with depth: BuildGuides succeeds and reports a depth guide", built ? 1.0 : 0.0,
+                        built && run.trust.GuideDepth() != nullptr && run.trust.GuideMotion() != nullptr);
+        }
+
+        // Now a run of frames with no depth at all.
+        for (int k = 0; k < 8; ++k)
+            run.Frame(Scene { 7, 320.0f + 10.0f * k, 20.0f, 5.0f }, false, true);
+
+        ok &= Check("no depth: Dispatch still runs (flow-consistency and luma alone)", run.lastDispatchRan ? 1.0 : 0.0,
+                    run.lastDispatchRan);
+        ok &= Check("no depth: still trusts a static background reasonably", run.Mean(700, 60, 1200, 200),
+                    run.Mean(700, 60, 1200, 200) < 0.25);
+
+        {
+            TrustMaskDx12::Inputs in;
+            in.flow = run.flow.Flow();
+            in.flowWidth = run.flow.FlowWidth();
+            in.flowHeight = run.flow.FlowHeight();
+            const bool built = run.trust.BuildGuides(gpu.list.Get(), in, kWidth, kHeight);
+            gpu.Submit();
+            ok &= Check("no depth: BuildGuides still succeeds, with a motion guide", built ? 1.0 : 0.0,
+                        built && run.trust.GuideMotion() != nullptr);
+            ok &= Check("no depth: GuideDepth() is null, not a stale depth guide from the earlier frame",
+                        run.trust.GuideDepth() == nullptr ? 1.0 : 0.0, run.trust.GuideDepth() == nullptr);
+        }
+    }
+
+    // 7. nothing moves, and depth comes and goes (a camera angle the depth finder finds nothing for): no scene cut
+    {
+        printf("static scene, depth coming and going\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        const Scene still { 7, 300, 20.0f, 5.0f };
+        for (int k = 0; k < 8; ++k)
+            run.Frame(still);
+
+        double worst = 0.0;
+        bool cut = false;
+        for (int k = 0; k < 10; ++k)
+        {
+            run.Frame(still, false, k < 6 && (k % 2) == 0);
+            worst = (std::max)(worst, run.Mean(0, 0, kWidth, kHeight));
+            cut = cut || run.trust.SceneCutSeen();
+        }
+
+        ok &= Check("worst whole-picture mean mask across the switches", worst, worst < 0.05);
+        ok &= Check("no scene cut", run.trust.DistrustedShare(), !cut);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

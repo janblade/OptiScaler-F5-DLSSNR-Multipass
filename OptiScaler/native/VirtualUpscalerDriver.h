@@ -71,6 +71,7 @@ class VirtualUpscalerDriver
     void DropFeature(bool destroyFgContext);
     bool EnsureTexture(ID3D12Resource*& texture, Key& made, const Key& key, D3D12_RESOURCE_FLAGS flags,
                        D3D12_RESOURCE_STATES restState, const char* what);
+    ID3D12Resource* NeutralDepth(ID3D12GraphicsCommandList* cmd, const Key& key);
 
     ID3D12Device* _device = nullptr;
     NVNGX_Parameters* _params = nullptr; // one block for the driver's life: features read it at Init only
@@ -84,6 +85,11 @@ class VirtualUpscalerDriver
     Key _outputKey;
     ID3D12Resource* _input = nullptr; // a typed copy of the picture when the picture itself is typeless; rests in COPY_DEST
     Key _inputKey;
+    ID3D12Resource* _neutralDepth = nullptr; // all far, for frames with no depth; rests in NON_PIXEL_SHADER_RESOURCE
+    Key _neutralKey;
+    bool _neutralFilled = false;
+    bool _neutralReversed = false;
+    ID3D12DescriptorHeap* _rtvHeap = nullptr;
 
     uint64_t _evaluations = 0;
     std::string _error;

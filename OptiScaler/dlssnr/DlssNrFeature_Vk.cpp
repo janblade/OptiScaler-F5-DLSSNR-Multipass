@@ -1729,7 +1729,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                         lutConstants.LutSize = (uint32_t) g_vk.lut.lut.size;
                         lutConstants.InputEncoding = shaderConversion;
                         lutConstants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
-                        lutConstants.Trim = DlssNr::AutoTrimEffective(cfg);
+                        // The white point the encode below uses (Tune's pinned value included), so linear HDR lands
+                        // in the LUT's 0-1 domain where the model's proxy puts it; the Trim alone would leave a game
+                        // whose frame is scaled by its exposure far above white.
+                        lutConstants.Trim = encode.WhitePoint;
 
                         graded = g_vk.lutPass->Dispatch(cmdBuffer, colour->Resource.ImageViewInfo.ImageView,
                                                         encodeSourceLayout, g_vk.lutScratch.view, lutConstants);

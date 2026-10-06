@@ -157,6 +157,7 @@ class DepthFinderCore
         uint32_t drawcalls = 0;
         uint32_t drawcallsIndirect = 0;
         float lastViewportWidth = 0.0f;
+        uint64_t viewportStamp = 0; // the time stamp of the real draw lastViewportWidth is from (the newest folded so far wins)
     };
 
     struct ContextState;
@@ -197,6 +198,9 @@ class DepthFinderCore
         std::atomic<uint64_t> indirectEvents { 0 };
         std::atomic<float> viewportWidth { 0.0f }; // its main viewport
         std::atomic<float> lastRealViewport { 0.0f }; // the viewport at its last real draw
+        // The processor's time stamp counter at that draw: contexts are folded in no fixed order, and the viewport the buffer
+        // keeps must be the newest real draw's among them, as when each draw set it at once.
+        std::atomic<uint64_t> lastRealDrawStamp { 0 };
 
         Stats* stats = nullptr; // the depth buffer this context draws into now (it is in that buffer's `bound`)
         uint64_t epoch = 0;     // the _epoch its viewport was last valid in (a stand-down forgets viewports)

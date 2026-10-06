@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <format>
+#include <intrin.h>
 #include <iterator>
 
 namespace native
@@ -179,8 +180,17 @@ void DepthFinderCore::Fold(ContextState& context)
             s->drawcallsIndirect += addIndirect;
         }
 
+        // The viewport is the newest real draw's among every context that drew into the buffer, whichever folds first.
         if (realDraws != context.foldedRealDraws)
-            stats->current.lastViewportWidth = context.lastRealViewport.load(std::memory_order_relaxed);
+        {
+            const uint64_t stamp = context.lastRealDrawStamp.load(std::memory_order_relaxed);
+
+            if (stamp >= stats->current.viewportStamp)
+            {
+                stats->current.lastViewportWidth = context.lastRealViewport.load(std::memory_order_relaxed);
+                stats->current.viewportStamp = stamp;
+            }
+        }
     }
 
     context.foldedVertices = vertices;
@@ -226,6 +236,7 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
         {
             Bump(state.realDraws, 1);
             state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
         }
     };
 
@@ -252,6 +263,7 @@ void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
         Bump(state.indirectCalls, maxCount);
         Bump(state.realDraws, 1);
         state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
     };
 
     if (_sharedContexts)

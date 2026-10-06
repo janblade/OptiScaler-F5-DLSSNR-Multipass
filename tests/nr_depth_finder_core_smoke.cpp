@@ -528,6 +528,55 @@ int main()
         core.EndPresent(W, H, kWarmup);
     }
 
+    // Two lists bound to the same buffer, one drawing at the picture's size and one into a small mirror: the viewport the clear
+    // judges is the newest real draw's, not the one of the list that happens to be folded last (the lists fold in bind order,
+    // and list 301 binds after list 300). The expected values are the locked core's, where each draw set the viewport at once.
+    {
+        DepthFinderCore core;
+        core.Start({});
+        core.SetSnapshotsWanted(true);
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored);
+
+        // 300 and 301 both bind the scene; 301 draws it at 2560, then 300 draws a 512 mirror into it: the mirror is the last
+        // real draw, so 301's clear is not of the scene and asks for nothing.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(301, 2560.0f);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(301, 6000, 1);
+        core.OnViewport(300, 512.0f);
+        for (int i = 0; i < 10; ++i)
+            core.OnDraw(300, 100, 1);
+
+        CHECK(!core.OnDepthClear(301, kScene, 0.0f).take);
+        core.OnContextEnd(300);
+        core.OnContextEnd(301);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+
+        // The other way round: the mirror first, the scene after it. The last real draw is the scene's, and the clear copies.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(301, 512.0f);
+        for (int i = 0; i < 10; ++i)
+            core.OnDraw(301, 100, 1);
+        core.OnViewport(300, 2560.0f);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(300, 6000, 1);
+
+        const auto cleared = core.OnDepthClear(301, kScene, 0.0f);
+        CHECK(cleared.take && cleared.id == 0xA && std::string(cleared.where) == "clear");
+        CHECK(cleared.stretchVertices == 200 * 6000 + 10 * 100);
+        core.OnContextEnd(300);
+        core.OnContextEnd(301);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+    }
+
     // An adapter whose one context id is drawn on from several threads (D3D11's deferred contexts go through the immediate
     // context's hooks): with shared contexts every draw counts.
     {

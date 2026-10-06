@@ -82,6 +82,7 @@ uint32_t g_copyWidth = 0, g_copyHeight = 0;
 bool g_copyTaken = false; // a copy was recorded for the frame just closed
 // The view the linearize pass writes through, kept with g_copy (made again when g_copy is).
 ID3D11UnorderedAccessView* g_copyUav = nullptr;
+ID3D11Device* g_copyDevice = nullptr; // what g_copy, g_copyUav and the linearize shader were made on (held alive by g_copy)
 bool g_installed = false;
 bool g_installFailed = false;
 
@@ -207,26 +208,32 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         return;
     }
 
+    std::lock_guard lock(g_mutex);
+
+    // Everything kept between copies belongs to the device it was made on: a game that makes its device again gets it all made
+    // again on the new one.
+    if (g_copyDevice != device)
+    {
+        SAFE_RELEASE(g_copyUav);
+        SAFE_RELEASE(g_copy);
+        SAFE_RELEASE(g_linearizeCs);
+        g_linearizeFailed = false;
+        g_copyTaken = false;
+        g_copyDevice = device;
+    }
+
     ID3D11ComputeShader* shader = LinearizeShader(device);
 
     if (shader == nullptr)
         return;
 
-    std::lock_guard lock(g_mutex);
-
     if (g_copy == nullptr || g_copyWidth != width || g_copyHeight != height)
     {
-        if (g_copyUav != nullptr)
-        {
-            g_copyUav->Release();
-            g_copyUav = nullptr;
-        }
+        SAFE_RELEASE(g_copyUav);
+        SAFE_RELEASE(g_copy);
 
-        if (g_copy != nullptr)
-        {
-            g_copy->Release();
-            g_copy = nullptr;
-        }
+        // A new texture holds nothing until the pass below has run into it.
+        g_copyTaken = false;
 
         D3D11_TEXTURE2D_DESC desc {};
         desc.Width = width;
@@ -258,7 +265,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
     srvDesc.Format = view;
     srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Texture2D.MipLevels = 1;
-    ID3D11ShaderResourceView* srv = nullptr;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
 
     if (FAILED(device->CreateShaderResourceView(resource, &srvDesc, &srv)))
     {
@@ -283,7 +290,6 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         if (FAILED(uavResult))
         {
             g_copyUav = nullptr;
-            srv->Release();
             static bool loggedUavFail = false;
 
             if (!loggedUavFail)
@@ -297,39 +303,64 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         }
     }
 
+    // The buffer is most often still bound for depth writes here (a copy is taken before the game moves off it, clears it or
+    // presents): a resource bound for writing cannot be read at the same time, and the runtime would quietly bind no read view
+    // at all, so the pass would copy nothing. The depth view comes off for the pass and goes back after, through the original
+    // functions so the finder does not see it as the game's.
+    ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] {};
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> gameDepth;
+    context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &gameDepth);
+
+    bool depthOff = false;
+    UINT targetCount = 0;
+
+    if (gameDepth != nullptr)
+    {
+        Microsoft::WRL::ComPtr<ID3D11Resource> bound;
+        gameDepth->GetResource(&bound);
+        depthOff = bound.Get() == resource;
+    }
+
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+        if (targets[i] != nullptr)
+            targetCount = i + 1;
+
+    // The pixel shader's UAVs stay as they are.
+    if (depthOff)
+        o_OMSetRenderTargetsAndUAV(context, targetCount, targets, nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr,
+                                   nullptr);
+
     // The game's own compute state: this runs in the middle of its frame, so what it had bound at slot 0 is put back after.
-    ID3D11ComputeShader* gameShader = nullptr;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> gameShader;
     ID3D11ClassInstance* gameInstances[D3D11_SHADER_MAX_INTERFACES] {};
     UINT gameInstanceCount = D3D11_SHADER_MAX_INTERFACES;
-    ID3D11ShaderResourceView* gameSrv = nullptr;
-    ID3D11UnorderedAccessView* gameUav = nullptr;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gameSrv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> gameUav;
     context->CSGetShader(&gameShader, gameInstances, &gameInstanceCount);
     context->CSGetShaderResources(0, 1, &gameSrv);
     context->CSGetUnorderedAccessViews(0, 1, &gameUav);
 
+    // -1 keeps an append or counter UAV's hidden count as it is.
+    const UINT keepCount = (UINT) -1;
+
     context->CSSetShader(shader, nullptr, 0);
-    context->CSSetShaderResources(0, 1, &srv);
-    context->CSSetUnorderedAccessViews(0, 1, &g_copyUav, nullptr);
+    context->CSSetShaderResources(0, 1, srv.GetAddressOf());
+    context->CSSetUnorderedAccessViews(0, 1, &g_copyUav, &keepCount);
     context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 
-    context->CSSetShaderResources(0, 1, &gameSrv);
-    context->CSSetUnorderedAccessViews(0, 1, &gameUav, nullptr);
-    context->CSSetShader(gameShader, gameInstances, gameInstanceCount);
-
-    srv->Release();
-
-    if (gameShader != nullptr)
-        gameShader->Release();
+    context->CSSetShaderResources(0, 1, gameSrv.GetAddressOf());
+    context->CSSetUnorderedAccessViews(0, 1, gameUav.GetAddressOf(), &keepCount);
+    context->CSSetShader(gameShader.Get(), gameInstances, gameInstanceCount);
 
     for (UINT i = 0; i < gameInstanceCount; ++i)
-        if (gameInstances[i] != nullptr)
-            gameInstances[i]->Release();
+        SAFE_RELEASE(gameInstances[i]);
 
-    if (gameSrv != nullptr)
-        gameSrv->Release();
+    if (depthOff)
+        o_OMSetRenderTargetsAndUAV(context, targetCount, targets, gameDepth.Get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+                                   nullptr, nullptr);
 
-    if (gameUav != nullptr)
-        gameUav->Release();
+    for (auto*& target : targets)
+        SAFE_RELEASE(target);
 
     g_copyTaken = true;
 
@@ -390,7 +421,8 @@ void STDMETHODCALLTYPE hkOMSetRenderTargetsAndUAV(ID3D11DeviceContext* This, UIN
                                                   UINT NumUAVs, ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
                                                   const UINT* pUAVInitialCounts)
 {
-    if (g_core.Active())
+    // KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL changes only the UAVs: the depth buffer bound stays bound.
+    if (g_core.Active() && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
         OnBound(This, pDepthStencilView);
 
     o_OMSetRenderTargetsAndUAV(This, NumRTVs, ppRenderTargetViews, pDepthStencilView, UAVStartSlot, NumUAVs,

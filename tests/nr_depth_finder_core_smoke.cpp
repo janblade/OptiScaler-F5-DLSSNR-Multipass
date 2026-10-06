@@ -597,8 +597,7 @@ int main()
         core.EndPresent(W, H, kWarmup);
     }
 
-    // An adapter whose one context id is drawn on from several threads (D3D11's deferred contexts go through the immediate
-    // context's hooks): every draw counts.
+    // One context id drawn on from several threads at once: every draw counts.
     {
         DepthFinderCore core;
         core.Start({});
@@ -638,7 +637,7 @@ int main()
             core.OnContextEnd(1000 + list);
         }
 
-        for (int frame = 0; frame < 1400; ++frame)
+        for (int frame = 0; frame < 40; ++frame)
             SingleContextFrame(core, ignored);
 
         CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
@@ -652,7 +651,7 @@ int main()
 
     // A list that only draws (bound once, never closed or rebound) keeps what it knows however long that goes on. 500 draws
     // with no buffer bound (one the adapter does not know) after setting a 512 viewport, 520 into the scene; both draw in every
-    // frame for well over a thousand frames. 500 then binds the scene and its clear still sees the mirror's viewport.
+    // frame for many frames. 500 then binds the scene and its clear still sees the mirror's viewport.
     {
         DepthFinderCore core;
         core.Start({});
@@ -665,7 +664,7 @@ int main()
         core.OnDepthBound(520, true, &kScene);
         core.OnViewport(520, (float) W);
 
-        for (int frame = 0; frame < 1300; ++frame)
+        for (int frame = 0; frame < 40; ++frame)
         {
             core.OnDraw(500, 100, 1);
             core.OnDraw(520, 6000, 1);

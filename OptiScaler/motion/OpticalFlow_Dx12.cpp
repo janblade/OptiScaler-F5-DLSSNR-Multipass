@@ -60,14 +60,16 @@ float3 PqToLinear(float3 v)
     return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
 }
 
-static const float kLumaScale = 1.0; // the size the match's thresholds were set for (the old luma went from 0 to a half)
-
 // The luma of one colour for the match, in one of four ways (LUMA_MODE, a different pipeline for each). 0, the old one: Rec.601
 // weights and l / (1 + l) on the values as they are. 1, a gamma-encoded SDR colour: already a perceptual one, so it is
 // used as it is (the same weights, without the compression). 2 and 3, a linear scRGB or a PQ colour: made linear light
 // relative to the white (its Rec.709 or Rec.2020 luminance over whiteNits) and put through the CIE lightness curve, 0..1
 // from black to white and above 1 for highlights. Equal steps of it look alike, so the match weighs a dark detail like a
 // bright one.
+// The match's thresholds (lambda, the confidence knee) are in these units, and 1, 2 and 3 reach white at 1.0, twice the
+// old one's 0.5. Much of what the newer ones gain comes from that: the old luma doubled matches as well on a dark HDR
+// pan, and mode 1 halved loses nearly all of the grain tally. Mode 1's gain on thin bright lines is its own (no
+// compression).
 #ifndef LUMA_MODE
 #define LUMA_MODE 0
 #endif

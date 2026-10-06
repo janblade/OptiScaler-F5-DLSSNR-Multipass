@@ -80,12 +80,8 @@ uint64_t g_contextId = 0;
 ID3D11Texture2D* g_copy = nullptr;
 uint32_t g_copyWidth = 0, g_copyHeight = 0;
 bool g_copyTaken = false; // a copy was recorded for the frame just closed
-// The views the linearize pass reads and writes through, kept between copies: the write view goes with g_copy, the read view
-// with the buffer and format it looks at (it holds a reference to that buffer until it is replaced).
+// The view the linearize pass writes through, kept with g_copy (made again when g_copy is).
 ID3D11UnorderedAccessView* g_copyUav = nullptr;
-ID3D11ShaderResourceView* g_sourceSrv = nullptr;
-ID3D11Resource* g_sourceSrvResource = nullptr;
-DXGI_FORMAT g_sourceSrvFormat = DXGI_FORMAT_UNKNOWN;
 bool g_installed = false;
 bool g_installFailed = false;
 
@@ -183,14 +179,6 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
     return true;
 }
 
-// Under g_mutex. Lets go of the cached read view and the reference it keeps on the game's depth buffer.
-void ReleaseSourceView()
-{
-    SAFE_RELEASE(g_sourceSrv);
-    SAFE_RELEASE(g_sourceSrvResource);
-    g_sourceSrvFormat = DXGI_FORMAT_UNKNOWN;
-}
-
 // Reads `resource` (the picked buffer, in whatever format the game made it) through the linearize shader into the frame's
 // D3D11-side slot, recreating it if the size changed.
 void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Resource* resource, uint32_t width,
@@ -264,32 +252,25 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         g_copyHeight = height;
     }
 
-    if (g_sourceSrv == nullptr || g_sourceSrvResource != resource || g_sourceSrvFormat != view)
+    // The read view is made for each copy and let go after it: kept, it would hold the game's depth buffer alive after the game
+    // let go of it (a resolution change), and a copy or two a frame is cheap.
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
+    srvDesc.Format = view;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* srv = nullptr;
+
+    if (FAILED(device->CreateShaderResourceView(resource, &srvDesc, &srv)))
     {
-        ReleaseSourceView();
+        static bool loggedSrvFail = false;
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
-        srvDesc.Format = view;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = 1;
-
-        if (FAILED(device->CreateShaderResourceView(resource, &srvDesc, &g_sourceSrv)))
+        if (!loggedSrvFail)
         {
-            g_sourceSrv = nullptr;
-            static bool loggedSrvFail = false;
-
-            if (!loggedSrvFail)
-            {
-                loggedSrvFail = true;
-                LOG_WARN("Depth finder (D3D11): creating the read view (format {}) on the picked buffer failed", (int) view);
-            }
-
-            return;
+            loggedSrvFail = true;
+            LOG_WARN("Depth finder (D3D11): creating the read view (format {}) on the picked buffer failed", (int) view);
         }
 
-        resource->AddRef();
-        g_sourceSrvResource = resource;
-        g_sourceSrvFormat = view;
+        return;
     }
 
     if (g_copyUav == nullptr)
@@ -302,6 +283,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         if (FAILED(uavResult))
         {
             g_copyUav = nullptr;
+            srv->Release();
             static bool loggedUavFail = false;
 
             if (!loggedUavFail)
@@ -326,13 +308,15 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
     context->CSGetUnorderedAccessViews(0, 1, &gameUav);
 
     context->CSSetShader(shader, nullptr, 0);
-    context->CSSetShaderResources(0, 1, &g_sourceSrv);
+    context->CSSetShaderResources(0, 1, &srv);
     context->CSSetUnorderedAccessViews(0, 1, &g_copyUav, nullptr);
     context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 
     context->CSSetShaderResources(0, 1, &gameSrv);
     context->CSSetUnorderedAccessViews(0, 1, &gameUav, nullptr);
     context->CSSetShader(gameShader, gameInstances, gameInstanceCount);
+
+    srv->Release();
 
     if (gameShader != nullptr)
         gameShader->Release();
@@ -552,10 +536,6 @@ void Install(ID3D11Device* device)
     o_RSSetViewports = (PFN_RSSetViewports) table[kRSSetViewports];
     o_ClearDepthStencilView = (PFN_ClearDepthStencilView) table[kClearDepthStencilView];
 
-    // Every draw counts on the immediate context's id, whichever context makes it, so draws count under the core's lock. Set
-    // before the hooks go live: a draw on another thread must never see the lock-free path.
-    g_core.SetSharedContexts(true);
-
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -685,19 +665,6 @@ void OnPresent(IDXGISwapChain* swapChain)
     {
         std::lock_guard lock(g_mutex);
         g_copyTaken = false;
-    }
-
-    // The cached read view keeps the buffer it reads alive: once that buffer is no longer the pick (a resolution change made
-    // a new one, or the finder stood down), or the pick is held but its buffer drew nothing this frame (the game let it go and
-    // the Selector has not dropped it yet), it goes, so the game's own release frees the old buffer.
-    {
-        const auto pick = g_core.CurrentPick();
-        const bool seen = g_core.PickSeenThisFrame();
-        std::lock_guard lock(g_mutex);
-
-        if (g_sourceSrvResource != nullptr &&
-            (!pick.valid || pick.id != (uint64_t) (size_t) g_sourceSrvResource || !seen))
-            ReleaseSourceView();
     }
 }
 

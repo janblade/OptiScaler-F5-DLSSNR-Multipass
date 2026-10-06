@@ -134,47 +134,6 @@ static void MultiContextFrames(DepthFinderCore& core, int contexts, bool paralle
     }
 }
 
-// Whether the core has PickSeenThisFrame: the case below is skipped when this test is built against an older core.
-template <typename Core> constexpr bool kHasPickSeen = requires(const Core& c) { c.PickSeenThisFrame(); };
-
-// The pick is kept for a while when its buffer drops out of the frame: PickSeenThisFrame says whether the picked buffer was
-// drawn into in the frame that just closed, which a valid pick does not.
-template <typename Core> static void PickSeenCase()
-{
-    Core core;
-    core.Start({});
-
-    std::vector<SnapshotRequest> ignored;
-
-    for (int frame = 0; frame < 6; ++frame)
-        SingleContextFrame(core, ignored);
-
-    CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
-    CHECK(core.PickSeenThisFrame());
-
-    // A frame in which only the shadow map is drawn (the scene's buffer is gone for now): the Selector still holds the pick.
-    core.OnDepthBound(1, true, &kShadow);
-    core.OnViewport(1, 2048.0f);
-    for (int i = 0; i < 30; ++i)
-        core.OnDraw(1, 3000, 1);
-    core.OnDepthBound(1, false, nullptr);
-    core.BeginPresent(W, H);
-    core.EndPresent(W, H, kWarmup);
-
-    CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
-    CHECK(!core.PickSeenThisFrame());
-
-    // And it is seen again as soon as the scene draws.
-    SingleContextFrame(core, ignored);
-    CHECK(core.CurrentPick().valid && core.PickSeenThisFrame());
-
-    // A stood-down finder has no pick to have seen.
-    core.NoteUpscalerCall();
-    core.BeginPresent(W, H);
-    CHECK(core.EndPresent(W, H, kWarmup));
-    CHECK(!core.PickSeenThisFrame());
-}
-
 int main()
 {
     std::vector<std::string> log;
@@ -480,7 +439,7 @@ int main()
     }
 
     // Lists recorded on several threads at once give the same candidates, pick, copy requests and log as the same events made on
-    // one thread: the per-draw counting takes no lock, and what it counts reaches the buffers at the lists' own events.
+    // one thread.
     {
         constexpr int kContexts = 8;
         constexpr int kFrames = 10;
@@ -570,8 +529,7 @@ int main()
     }
 
     // Two lists bound to the same buffer, one drawing at the picture's size and one into a small mirror: the viewport the clear
-    // judges is the newest real draw's, not the one of the list that happens to be folded last (the lists fold in bind order,
-    // and list 301 binds after list 300). The expected values are the locked core's, where each draw set the viewport at once.
+    // judges is the newest real draw's, whichever list made it.
     {
         DepthFinderCore core;
         core.Start({});
@@ -618,7 +576,7 @@ int main()
         core.EndPresent(W, H, kWarmup);
 
         // The mirror's list leaves the buffer, and the one left on it (alone now) draws at 2560 after that: those are the newest
-        // draws, whatever stamps the other list's draws carried.
+        // draws.
         core.OnDepthBound(300, true, &kScene);
         core.OnDepthBound(301, true, &kScene);
         core.OnViewport(301, 512.0f);
@@ -639,14 +597,10 @@ int main()
         core.EndPresent(W, H, kWarmup);
     }
 
-    if constexpr (kHasPickSeen<DepthFinderCore>)
-        PickSeenCase<DepthFinderCore>();
-
     // An adapter whose one context id is drawn on from several threads (D3D11's deferred contexts go through the immediate
-    // context's hooks): with shared contexts every draw counts.
+    // context's hooks): every draw counts.
     {
         DepthFinderCore core;
-        core.SetSharedContexts(true);
         core.Start({});
         core.SetSnapshotsWanted(true);
 
@@ -668,8 +622,8 @@ int main()
         CHECK(left.take && left.stretchVertices == 4ull * 20000 * 100);
     }
 
-    // Lists a game makes once and lets go are retired after a while, and the finder keeps working: a list id seen again later
-    // (a new list at a reused address) counts as before.
+    // Many lists a game makes once and lets go, and the finder keeps working: a list id seen again later (a new list at a
+    // reused address) counts as before.
     {
         DepthFinderCore core;
         core.Start({});
@@ -696,12 +650,9 @@ int main()
         CHECK(closed.take && closed.stretchVertices == 50 * 9000);
     }
 
-    // A list that only draws (bound once, never closed or rebound: the draw path takes no lock, so nothing refreshes the time
-    // it was last seen) is still in use, and is not retired however long that goes on. 500 draws with no buffer bound (one the
-    // adapter does not know) after setting a 512 viewport, 520 into the scene; both draw in every frame for well over two retire
-    // periods. A retired list would come back with no viewport, so 500 then binds the scene and its clear still sees the mirror.
-    // (The ids are picked to sit in different slots of a thread's context cache: two that share one look each other up through
-    // the lock on every draw, which refreshes the time they were seen.)
+    // A list that only draws (bound once, never closed or rebound) keeps what it knows however long that goes on. 500 draws
+    // with no buffer bound (one the adapter does not know) after setting a 512 viewport, 520 into the scene; both draw in every
+    // frame for well over a thousand frames. 500 then binds the scene and its clear still sees the mirror's viewport.
     {
         DepthFinderCore core;
         core.Start({});

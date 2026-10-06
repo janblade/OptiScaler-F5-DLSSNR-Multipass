@@ -2,8 +2,6 @@
 
 #include "GenericDepth_Dx12.h"
 
-#include "VtableIndex.h"
-
 #include <native/DepthFinderCore.h>
 
 #include <Config.h>
@@ -529,46 +527,16 @@ struct TablePatch
 };
 
 PVOID* g_installTable = nullptr; // the runtime's own table, read at install
+std::unordered_map<PVOID*, TablePatch> g_patched;
 std::unordered_map<PVOID*, bool> g_examined;
 int g_patchLogs = 0;
 
-// The tables patched so far, only ever added to: an entry is written whole, then published in the index (release), so a thunk
-// finds the table without a lock (acquire) on every call of a patched function. The entries live in blocks that are made as
-// they are needed and never freed, so a published entry never moves.
-struct PatchedTable
-{
-    PVOID* table = nullptr;
-    TablePatch patch;
-};
-
-constexpr int kPatchedBlock = 256;
-constexpr int kPatchedBlocks = 256;
-PatchedTable* g_patchedBlocks[kPatchedBlocks] {};
-int g_patchedCount = 0; // under g_mutex
-native::VtableIndex<kPatchedBlock * kPatchedBlocks> g_patchedIndex; // table address -> its entry's number
-bool g_patchedFullLogged = false;
-
-const PatchedTable& PatchedAt(int i) { return g_patchedBlocks[i / kPatchedBlock][i % kPatchedBlock]; }
-
 PVOID PreviousOf(ID3D12GraphicsCommandList* list, int slot)
 {
-    // A thread uses the same few tables in turn, and an entry never changes once published, so the last ones found are kept.
-    static thread_local const PatchedTable* recent[8] {};
-
     PVOID* table = *(PVOID**) list;
-    const PatchedTable*& cached = recent[(((size_t) table) >> 4) % 8];
-
-    if (cached != nullptr && cached->table == table)
-        return cached->patch.previous[slot];
-
-    // Not one of this thread's recent ones: the index, without a lock.
-    const int found = g_patchedIndex.Find(table);
-
-    if (found < 0)
-        return nullptr;
-
-    cached = &PatchedAt(found);
-    return cached->patch.previous[slot];
+    std::lock_guard lock(g_mutex);
+    const auto found = g_patched.find(table);
+    return found != g_patched.end() ? found->second.previous[slot] : nullptr;
 }
 
 void STDMETHODCALLTYPE hkTableDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance,
@@ -672,29 +640,7 @@ void PatchListTable(ID3D12GraphicsCommandList* list)
 
     {
         std::lock_guard lock(g_mutex);
-        const int count = g_patchedCount;
-
-        if (count >= kPatchedBlock * kPatchedBlocks)
-        {
-            if (!g_patchedFullLogged)
-            {
-                g_patchedFullLogged = true;
-                LOG_WARN("Depth finder: more than {} game command list vtables; the rest are not counted",
-                         kPatchedBlock * kPatchedBlocks);
-            }
-
-            return;
-        }
-
-        if (g_patchedBlocks[count / kPatchedBlock] == nullptr)
-            g_patchedBlocks[count / kPatchedBlock] = new PatchedTable[kPatchedBlock];
-
-        // Before the entries change, so a thunk that runs at once finds what to call.
-        PatchedTable& entry = g_patchedBlocks[count / kPatchedBlock][count % kPatchedBlock];
-        entry.table = table;
-        entry.patch = patch;
-        g_patchedIndex.Insert(table, count); // publishes it
-        g_patchedCount = count + 1;
+        g_patched[table] = patch; // before the entries change, so a thunk that runs at once finds what to call
     }
 
     int patched = 0;

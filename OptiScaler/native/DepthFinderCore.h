@@ -14,14 +14,11 @@
 // the immediate context of D3D11, D3D10 and D3D9 (one context for the whole game). The adapter identifies it with a number.
 //
 // Threads: every event may come from any game thread; the class locks inside. The adapter must not call it while holding a
-// lock that a snapshot copy also takes. The three per-draw events (OnDraw, OnIndirect, OnViewport) take no lock: each context
-// keeps its own running counts, which only the thread recording that context writes, and the other events fold them into the
-// shared counts of the buffer it is bound to. A context is recorded by one thread at a time, as D3D12 requires of a command list.
+// lock that a snapshot copy also takes.
 
 #include "../resource_tracking/GenericDepth_Select.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -72,7 +69,8 @@ struct HookCounters
     std::atomic<uint64_t> binds { 0 };           // every bind of render targets
     std::atomic<uint64_t> bindsWithDepth { 0 };  // ... that carried a depth buffer
     std::atomic<uint64_t> bindsUnknownDepth { 0 }; // ... of which the depth buffer was not one the adapter knew
-    // (the draws and indirect draws, whatever was bound, are counted per context and summed for the log)
+    std::atomic<uint64_t> draws { 0 };           // every draw, whatever was bound
+    std::atomic<uint64_t> indirect { 0 };        // every indirect draw, whatever was bound
     std::atomic<uint64_t> bundles { 0 };         // every bundle execution (D3D12): draws recorded in a bundle may be unseen
     std::atomic<uint64_t> dispatches { 0 };      // every compute dispatch
     std::atomic<int> bundleSameDraw { -1 };      // 1 the bundle's draw functions are the direct list's, 0 not, -1 unknown
@@ -89,11 +87,6 @@ class DepthFinderCore
 
     // Whether the adapter should copy the picked depth at all (the overlay or the motion step wants it).
     void SetSnapshotsWanted(bool wanted) { _snapshotsWanted = wanted; }
-
-    // For an adapter whose context ids are not one per recording thread (D3D11 counts every draw on the immediate context's
-    // id, whichever context made it): draws then count under the lock, as one context may be written by several threads.
-    // Call before the hooks go live (the draw hooks read it on every draw).
-    void SetSharedContexts(bool shared) { _sharedContexts.store(shared, std::memory_order_relaxed); }
 
     // ---- the game's upscaler: a game that has one needs no finder ---------------------------------------------------------
     // One relaxed store, callable from anywhere on every upscaler call. OnPresent decides what it means. A no-op inside a
@@ -133,10 +126,6 @@ class DepthFinderCore
 
     // The pick as of the last present.
     GenericDepthSelect::Pick CurrentPick() const;
-    // Whether the picked buffer was among the buffers drawn into or cleared in the frame that last closed. The Selector keeps a
-    // pick for a while after its buffer drops out (a menu, a resolution change leaving the old buffer behind), so a valid pick
-    // does not say the buffer is still in use; an adapter holding a reference to it can let go when this is false.
-    bool PickSeenThisFrame() const;
     uint64_t Presents() const { return _presentsNow.load(std::memory_order_relaxed); }
     uint64_t WarmupStart() const;                     // the present count the current warm-up began at
     uint64_t SnapshotFloor() const;                   // the least a stretch must draw to be copied
@@ -162,18 +151,11 @@ class DepthFinderCore
         uint32_t drawcalls = 0;
         uint32_t drawcallsIndirect = 0;
         float lastViewportWidth = 0.0f;
-        uint64_t viewportStamp = 0; // the time stamp of the real draw lastViewportWidth is from (the newest folded so far wins)
     };
-
-    struct ContextState;
 
     // One depth buffer's counts for the frame being recorded.
     struct Stats
     {
-        // The contexts bound to it now. What they drew since their last fold is added before anything is decided about this
-        // buffer, so its counts hold every draw made into it so far, whichever context made it, as when each draw was added at
-        // once.
-        std::vector<ContextState*> bound;
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t format = 0;
@@ -189,66 +171,13 @@ class DepthFinderCore
         bool clearedThisFrame = false;
     };
 
-    // What one context has done. The first group is written only by the thread recording the context, with a relaxed load and
-    // store (no lock, no read-modify-write), and only ever grows; the folding side reads it under _mutex and never resets it.
-    // The second group is under _mutex. The draw path keeps pointers to nodes of _contexts, so a node is freed only well after
-    // every thread's cache has stopped pointing at it (see _retired).
     struct ContextState
     {
-        std::atomic<uint64_t> vertices { 0 };      // vertices of every draw (instances counted) since the start
-        std::atomic<uint64_t> drawcalls { 0 };     // draw calls, an indirect one counting its maximum
-        std::atomic<uint64_t> indirectCalls { 0 }; // ... of which indirect
-        std::atomic<uint64_t> realDraws { 0 };     // draws that update the viewport the last real draw used
-        // OnIndirect calls, for the log (the OnDraw calls are drawcalls - indirectCalls)
-        std::atomic<uint64_t> indirectEvents { 0 };
-        std::atomic<float> viewportWidth { 0.0f }; // its main viewport
-        std::atomic<float> lastRealViewport { 0.0f }; // the viewport at its last real draw
-        // The processor's time stamp counter at that draw: contexts are folded in no fixed order, and the viewport the buffer
-        // keeps must be the newest real draw's among them, as when each draw set it at once. Reading the counter costs more
-        // than the rest of a draw, so only a context that shares its buffer with another takes it (stampDraws, kept by Bind);
-        // one that is alone on its buffer has nothing to be ordered against, and is the newest when it is folded.
-        std::atomic<uint64_t> lastRealDrawStamp { 0 };
-        std::atomic<bool> stampDraws { false };
-        // The present count at its last draw: the draw path takes no lock, so lastSeen below does not move while a context only
-        // draws, and a context still in use must not look idle to RetireIdleContexts.
-        std::atomic<uint64_t> lastDrawPresent { 0 };
-
-        Stats* stats = nullptr; // the depth buffer this context draws into now (it is in that buffer's `bound`)
-        uint64_t epoch = 0;     // the _epoch its viewport was last valid in (a stand-down forgets viewports)
-        uint64_t lastSeen = 0;  // the present count at its last bind, clear, close or flush
-        uint64_t foldedVertices = 0; // how much of the above is already in the buffer's counts
-        uint64_t foldedDrawcalls = 0;
-        uint64_t foldedIndirectCalls = 0;
-        uint64_t foldedRealDraws = 0;
+        Stats* stats = nullptr;     // the depth buffer this context draws into now
+        float viewportWidth = 0.0f; // its main viewport
     };
 
-    // The draw path's way to a context: this thread's small cache, then (once per context and epoch) the map under the lock.
-    ContextState& ContextForDraw(uint64_t context);
-    // Under _mutex. The context's entry, made if it is new, with a stand-down's forgetting applied to it.
-    ContextState& ContextLocked(uint64_t context);
-    // Runs `count` on the context's state: the draw events' one dispatch between the locked and the lock-free way to it.
-    template <typename Count> void WithContext(uint64_t context, Count&& count);
-    // Under _mutex. Adds what the context drew since the last fold to the counts of the buffer it is bound to (or drops it if
-    // it is bound to none), so those counts are as if every draw had been added at once.
-    void Fold(ContextState& context);
-    // Under _mutex. Folds every context bound to the buffer: before a decision about it.
-    void FoldBuffer(Stats& stats);
-    // Under _mutex. Moves the context to another buffer (or none), keeping both buffers' `bound` right.
-    void Bind(ContextState& context, Stats* stats);
-    // Under _mutex. Tells the contexts bound to the buffer whether they must stamp their draws (two or more of them do).
-    static void UpdateStamping(Stats& stats);
-    // Under _mutex, from BeginPresent. Contexts not seen for a long time (lists a game made once and let go) leave the map,
-    // and are freed a while later.
-    void RetireIdleContexts();
-    // Under _mutex. What Fold would add, without changing anything.
-    void Pending(const ContextState& context, DrawStats& total) const;
-    static void Bump(std::atomic<uint64_t>& counter, uint64_t by)
-    {
-        counter.store(counter.load(std::memory_order_relaxed) + by, std::memory_order_relaxed);
-    }
-    // The OnDraw and OnIndirect calls so far, over all contexts, for the log.
-    void CountEvents(uint64_t& draws, uint64_t& indirect) const;
-
+    static void AddDraw(DrawStats& s, uint64_t vertices, uint32_t drawcalls, bool indirect);
     void LogCandidates(const std::vector<GenericDepthSelect::Candidate>& frame, const GenericDepthSelect::Pick& pick,
                        uint32_t pictureWidth, uint32_t pictureHeight);
     void Say(const std::string& line) const
@@ -270,29 +199,7 @@ class DepthFinderCore
     std::atomic<bool> _armed { false };
     std::atomic<bool> _snapshotsWanted { false };
 
-    // Another core's id must never match this one's in a thread's cache, even at the same address.
-    static uint64_t NextInstanceId();
-    const uint64_t _instanceId = NextInstanceId();
-    // Changes when the tracking is dropped (a stand-down): contexts forget their viewports.
-    std::atomic<uint64_t> _epoch { 1 };
-    // Changes on a stand-down and when contexts are retired: threads look their contexts up again.
-    std::atomic<uint64_t> _cacheEpoch { 1 };
-    std::atomic<bool> _sharedContexts { false };
-
-    std::unordered_map<uint64_t, ContextState> _contexts; // node-stable: see ContextState
-    // Contexts taken out of the map, with the present count and the time they left at. A thread's cache can still point at one
-    // until it sees the new _cacheEpoch, which it does on its next draw (a thread that records for a while without drawing on
-    // it, or one that is slow to be scheduled, takes longer); the node is freed only kRetireGrace presents and kRetireGraceTime
-    // later, so a game that presents very fast does not shorten the wait.
-    struct RetiredContext
-    {
-        uint64_t present = 0;
-        std::chrono::steady_clock::time_point when;
-        std::unordered_map<uint64_t, ContextState>::node_type node;
-    };
-    std::vector<RetiredContext> _retired;
-    uint64_t _retiredDraws = 0;    // the retired contexts' share of the log's counts
-    uint64_t _retiredIndirect = 0;
+    std::unordered_map<uint64_t, ContextState> _contexts;
     std::unordered_map<uint64_t, Stats> _stats; // node-stable: _contexts holds pointers into it
     std::vector<GenericDepthSelect::Candidate> _frameCandidates;
     uint64_t _snapshotFloor = 0;
@@ -304,13 +211,8 @@ class DepthFinderCore
     uint64_t _lastLoggedPick = 0;
     GenericDepthSelect::Selector _selector;
     GenericDepthSelect::Pick _pick;
-    bool _pickSeen = false; // _pick's buffer was among the last frame's candidates
 
     static constexpr uint64_t kLogEveryFrames = 600;
-    // A context unseen for this many presents is retired (looked at every kLogEveryFrames), and freed kRetireGrace later.
-    static constexpr uint64_t kRetireAfter = 600;
-    static constexpr uint64_t kRetireGrace = 120;
-    static constexpr std::chrono::seconds kRetireGraceTime { 2 };
     // The finder stands down while the game is calling an upscaler and wakes again once it has stopped for this many presents
     // (a game's settings menu turning its upscaler off: Cyberpunk creates its Ray Reconstruction feature at startup, long
     // before anyone reaches the setting). About two seconds at 60 fps.

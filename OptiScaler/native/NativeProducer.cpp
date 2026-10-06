@@ -93,7 +93,13 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     output = FrameOutput {};
 
     if (!Ready() || queue == nullptr || input.picture == nullptr || _list == nullptr)
+    {
+        result.stoppedAt = !Ready()                   ? "not ready"
+                           : queue == nullptr         ? "no queue"
+                           : input.picture == nullptr ? "no picture"
+                                                      : "no list";
         return result;
+    }
 
     // The previous work may still be reading the textures a new size replaces.
     if (input.width != _width || input.height != _height)
@@ -111,8 +117,16 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     const UINT slot = (UINT) (_frame % kRing);
     WaitFor(_values[slot]);
 
-    if (FAILED(_allocators[slot]->Reset()) || FAILED(_list->Reset(_allocators[slot], nullptr)))
+    const HRESULT allocatorHr = _allocators[slot]->Reset();
+    const HRESULT listHr = FAILED(allocatorHr) ? allocatorHr : _list->Reset(_allocators[slot], nullptr);
+
+    if (FAILED(listHr))
+    {
+        result.stoppedAt = FAILED(allocatorHr) ? "allocator reset" : "list reset";
+        result.stoppedHr = (long) listHr;
+        result.deviceRemoved = _device != nullptr ? (long) _device->GetDeviceRemovedReason() : 0;
         return result;
+    }
 
     ID3D12GraphicsCommandList* list = _list;
 
@@ -205,7 +219,9 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         }
     }
 
-    if (SUCCEEDED(list->Close()))
+    const HRESULT closeHr = list->Close();
+
+    if (SUCCEEDED(closeHr))
     {
         if (input.ready.fence != nullptr)
             queue->Wait(input.ready.fence, input.ready.value);
@@ -219,6 +235,24 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         output.done = SyncPoint { _fence, _signalled };
         output.processed = result.nativeRan;
         result.submitted = true;
+    }
+
+    if (!result.submitted && result.stoppedAt == nullptr)
+    {
+        result.stoppedAt = "close";
+        result.stoppedHr = (long) closeHr;
+        result.deviceRemoved = _device != nullptr ? (long) _device->GetDeviceRemovedReason() : 0;
+
+        // A list whose recording failed stays open, and every later Reset of it fails: make a fresh one so the next
+        // frame can try again.
+        _list->Release();
+        _list = nullptr;
+
+        const HRESULT freshHr = _device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _allocators[slot],
+                                                           nullptr, IID_PPV_ARGS(&_list));
+
+        if (SUCCEEDED(freshHr))
+            _list->Close();
     }
 
     return result;

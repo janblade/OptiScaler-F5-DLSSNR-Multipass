@@ -467,6 +467,9 @@
     <ClInclude Include="resource_tracking\GenericDepth_Select.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="resource_tracking\VtableIndex.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="resource_tracking\ResTrack_dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>

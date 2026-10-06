@@ -2,6 +2,8 @@
 
 #include "GenericDepth_Dx12.h"
 
+#include "VtableIndex.h"
+
 #include <native/DepthFinderCore.h>
 
 #include <Config.h>
@@ -530,9 +532,9 @@ PVOID* g_installTable = nullptr; // the runtime's own table, read at install
 std::unordered_map<PVOID*, bool> g_examined;
 int g_patchLogs = 0;
 
-// The tables patched so far, only ever added to: an entry is written whole, then published by raising the count (release), so a
-// thunk reads the table without a lock (acquire) on every call of a patched function. The entries live in blocks that are made
-// as they are needed and never freed, so a published entry never moves.
+// The tables patched so far, only ever added to: an entry is written whole, then published in the index (release), so a thunk
+// finds the table without a lock (acquire) on every call of a patched function. The entries live in blocks that are made as
+// they are needed and never freed, so a published entry never moves.
 struct PatchedTable
 {
     PVOID* table = nullptr;
@@ -542,7 +544,8 @@ struct PatchedTable
 constexpr int kPatchedBlock = 256;
 constexpr int kPatchedBlocks = 256;
 PatchedTable* g_patchedBlocks[kPatchedBlocks] {};
-std::atomic<int> g_patchedCount { 0 };
+int g_patchedCount = 0; // under g_mutex
+native::VtableIndex<kPatchedBlock * kPatchedBlocks> g_patchedIndex; // table address -> its entry's number
 bool g_patchedFullLogged = false;
 
 const PatchedTable& PatchedAt(int i) { return g_patchedBlocks[i / kPatchedBlock][i % kPatchedBlock]; }
@@ -558,16 +561,14 @@ PVOID PreviousOf(ID3D12GraphicsCommandList* list, int slot)
     if (cached != nullptr && cached->table == table)
         return cached->patch.previous[slot];
 
-    const int count = g_patchedCount.load(std::memory_order_acquire);
+    // Not one of this thread's recent ones: the index, without a lock.
+    const int found = g_patchedIndex.Find(table);
 
-    for (int i = 0; i < count; ++i)
-        if (PatchedAt(i).table == table)
-        {
-            cached = &PatchedAt(i);
-            return cached->patch.previous[slot];
-        }
+    if (found < 0)
+        return nullptr;
 
-    return nullptr;
+    cached = &PatchedAt(found);
+    return cached->patch.previous[slot];
 }
 
 void STDMETHODCALLTYPE hkTableDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance,
@@ -671,7 +672,7 @@ void PatchListTable(ID3D12GraphicsCommandList* list)
 
     {
         std::lock_guard lock(g_mutex);
-        const int count = g_patchedCount.load(std::memory_order_relaxed);
+        const int count = g_patchedCount;
 
         if (count >= kPatchedBlock * kPatchedBlocks)
         {
@@ -692,7 +693,8 @@ void PatchListTable(ID3D12GraphicsCommandList* list)
         PatchedTable& entry = g_patchedBlocks[count / kPatchedBlock][count % kPatchedBlock];
         entry.table = table;
         entry.patch = patch;
-        g_patchedCount.store(count + 1, std::memory_order_release);
+        g_patchedIndex.Insert(table, count); // publishes it
+        g_patchedCount = count + 1;
     }
 
     int patched = 0;

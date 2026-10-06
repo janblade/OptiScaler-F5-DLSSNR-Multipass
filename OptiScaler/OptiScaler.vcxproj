@@ -527,6 +527,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h" />
     <ClInclude Include="resource_tracking\GenericDepth_Dx11.h" />
     <ClInclude Include="resource_tracking\GenericDepth_Select.h" />
+    <ClInclude Include="resource_tracking\VtableIndex.h" />
     <ClInclude Include="resource_tracking\ResTrack_dx12.h" />
     <ClInclude Include="shaders\hudless_compare\HC_Common.h" />
     <ClInclude Include="shaders\hudless_compare\HC_Dx12.h" />

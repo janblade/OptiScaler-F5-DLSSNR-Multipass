@@ -129,6 +129,32 @@ float HeavyHud(float x, float y)
     return -1.0f;
 }
 
+// A float as a half, rounded to nearest (values in the range a picture holds; very small ones flush to zero).
+uint16_t ToHalf(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, 4);
+    const uint32_t sign = (bits >> 16) & 0x8000;
+    const int exponent = (int) ((bits >> 23) & 0xFF) - 127 + 15;
+    const uint32_t mantissa = bits & 0x7FFFFF;
+
+    if (exponent <= 0)
+        return (uint16_t) sign;
+    if (exponent >= 31)
+        return (uint16_t) (sign | 0x7BFF);
+
+    uint32_t half = ((uint32_t) exponent << 10) | (mantissa >> 13);
+    half += (mantissa >> 12) & 1; // round to nearest
+    return (uint16_t) (sign | half);
+}
+
+// The PQ (SMPTE ST 2084) encoding of a luminance in nits.
+float PqEncode(float nits)
+{
+    const float y = std::pow(std::clamp(nits / 10000.0f, 0.0f, 1.0f), 0.1593017578125f);
+    return std::pow((0.8359375f + 18.8515625f * y) / (1.0f + 18.6875f * y), 78.84375f);
+}
+
 struct Gpu
 {
     ComPtr<ID3D12Device> device;
@@ -255,6 +281,70 @@ struct Gpu
                     px[c] = (uint8_t) std::clamp(v + 0.5f, 0.0f, 255.0f);
                 }
                 px[3] = 255;
+            }
+
+        upload->Unmap(0, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+        dst.pResource = tex.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource = upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = tex.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1, &b);
+        Submit();
+        return tex;
+    }
+
+    // An R16G16B16A16_FLOAT picture of a dark HDR scene moved by (dx, dy), left in the non-pixel shader resource state:
+    // the scene's value s (0..1) becomes the linear light 0.01 * 20^s (0.01 .. 0.2, in scRGB units, 1.0 = 80 nits),
+    // with grain (shot-noise like: its size goes with the square root of the light, grain is the factor, a new one
+    // every picture). With pq the same light is stored as PQ.
+    ComPtr<ID3D12Resource> HdrPicture(float dx, float dy, float grain, int noiseSeed, bool pq)
+    {
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = kWidth;
+        desc.Height = kHeight;
+        desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(&tex));
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+        auto upload = Buffer(total, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+        uint8_t* data = nullptr;
+        upload->Map(0, nullptr, (void**) &data);
+
+        for (uint32_t y = 0; y < kHeight; ++y)
+            for (uint32_t x = 0; x < kWidth; ++x)
+            {
+                uint16_t* px = (uint16_t*) (data + (size_t) y * fp.Footprint.RowPitch + x * 8);
+                for (int c = 0; c < 3; ++c)
+                {
+                    float v = 0.01f * std::pow(20.0f, Scene(x - dx, y - dy, c));
+                    if (grain > 0.0f)
+                        v = std::max(v + (Hash((int) x * 3 + c, (int) y, 2000 + noiseSeed) * 2.0f - 1.0f) * grain *
+                                             std::sqrt(v),
+                                     0.0f);
+                    px[c] = ToHalf(pq ? PqEncode(v * 80.0f) : v);
+                }
+                px[3] = ToHalf(1.0f);
             }
 
         upload->Unmap(0, nullptr);
@@ -508,6 +598,10 @@ int main(int argc, char** argv)
             tuning.sceneCutDetector = value != 0.0f;
         else if (key == "scenethr")
             tuning.sceneCutThreshold = value;
+        else if (key == "lumaperc")
+            tuning.perceptualLuma = value != 0.0f;
+        else if (key == "white")
+            tuning.hdrWhiteNits = value;
     }
     flow.Tuning() = tuning;
 
@@ -1056,6 +1150,111 @@ int main(int argc, char** argv)
         printf("  %s\n", pass ? "ok" : "FAIL");
     }
 
+    // Dark HDR pictures (scRGB, and the same light as PQ; the scene between 0.01 and 0.2 of 80 nits): the pans and the
+    // grain of the cases above, with the luma the flow matches on as the settings give it. The perceptual luma (a
+    // lightness curve after dividing by a white point) spreads the dark end that a tone-mapped linear luma squeezes, so
+    // it must not do worse here.
+    struct HdrScore
+    {
+        double panErr = 0, panHalf = 1, grainOne = 0, grainErr = 0;
+    };
+
+    auto hdrScore = [&](bool pq, bool perceptual) -> HdrScore
+    {
+        struct HdrCase
+        {
+            float dx, dy;
+            int frames;
+            float grain;
+        };
+
+        const HdrCase hdrCases[] = { { 3, -2, 2, 0 }, { 11, 7, 2, 0 },     { 21, -14, 2, 0 },
+                                     { 60, 0, 2, 0 }, { 3, -2, 2, 0.06f }, { 12, 5, 4, 0.06f } };
+        Tally err, half, grainShare, grainError;
+
+        for (const HdrCase& c : hdrCases)
+        {
+            flow.Tuning() = tuning;
+            flow.Tuning().perceptualLuma = perceptual;
+            flow.Reset();
+
+            for (int k = 0; k < c.frames; ++k)
+            {
+                auto picture = gpu.HdrPicture(c.dx * k, c.dy * k, c.grain, k, pq);
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, nullptr,
+                              DXGI_FORMAT_UNKNOWN, true,
+                              pq ? OpticalFlowDx12::Encoding::Pq : OpticalFlowDx12::Encoding::ScRgb);
+                gpu.Submit();
+            }
+
+            const auto desc = flow.Flow()->GetDesc();
+            const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+            const int margin = (int) std::ceil(std::max(std::fabs(c.dx), std::fabs(c.dy)) / 2.0f) + 24;
+            uint64_t n = 0, within = 0, one = 0;
+            double sum = 0;
+
+            for (uint32_t y = margin; y + margin < desc.Height; ++y)
+                for (uint32_t x = margin; x + margin < desc.Width; ++x)
+                {
+                    const size_t i = ((size_t) y * desc.Width + x) * 2;
+                    const float e = std::hypot(field[i] + c.dx, field[i + 1] + c.dy);
+                    sum += e;
+                    within += e <= 0.5f;
+                    one += e <= 1.0f;
+                    ++n;
+                }
+
+            if (c.grain > 0.0f)
+            {
+                grainShare.Add((double) one / n);
+                grainError.Add(sum / n);
+            }
+            else
+            {
+                err.Add(sum / n);
+                half.Add((double) within / n);
+            }
+        }
+
+        flow.Tuning() = tuning;
+        HdrScore score;
+        score.panErr = err.Mean();
+        score.panHalf = half.worst;
+        score.grainOne = grainShare.Mean();
+        score.grainErr = grainError.Mean();
+        return score;
+    };
+
+    HdrScore hdrNow;
+
+    {
+        printf("dark HDR pictures, the match's luma: legacy (tone-mapped) and perceptual (white %.0f nits)\n",
+               tuning.hdrWhiteNits);
+
+        for (int pq = 0; pq < 2; ++pq)
+        {
+            const HdrScore legacy = hdrScore(pq != 0, false);
+            const HdrScore perceptual = hdrScore(pq != 0, true);
+            // The pans must be no worse (they are well better) and the grain no worse by more than a hundredth of the
+            // share within a pixel or five percent of the error: the grain here is flat dark noise, which neither luma
+            // helps.
+            const bool improves = perceptual.panErr <= legacy.panErr && perceptual.grainOne >= legacy.grainOne - 0.01 &&
+                                  perceptual.grainErr <= legacy.grainErr * 1.05;
+            printf(
+                "  %-6s legacy: pan error %.4f px, worst within 0.5 px %5.1f%%, grain within 1 px %5.1f%%, grain error "
+                "%.3f px\n"
+                "         perceptual: pan error %.4f px, worst within 0.5 px %5.1f%%, grain within 1 px %5.1f%%, grain "
+                "error %.3f px   %s\n",
+                pq ? "PQ" : "scRGB", legacy.panErr, 100.0 * legacy.panHalf, 100.0 * legacy.grainOne, legacy.grainErr,
+                perceptual.panErr, 100.0 * perceptual.panHalf, 100.0 * perceptual.grainOne, perceptual.grainErr,
+                improves ? "ok" : "FAIL");
+            ok = ok && (improves || !tuning.perceptualLuma);
+
+            if (!pq)
+                hdrNow = tuning.perceptualLuma ? perceptual : legacy;
+        }
+    }
+
     // The same-frame scene-cut detector. Each sequence is a few pictures; the flag the detector left after each frame
     // is read back. A real cut must be flagged on its own frame and on none before it (and the flow must be zero on
     // it); a fade, an exposure step, a fast pan and a HUD-heavy picture must be flagged on no frame. `value` is the
@@ -1215,13 +1414,14 @@ int main(int argc, char** argv)
                "inverse=%d | "
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
                "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f "
-               "cutHit %d/%d cutFalse %d/%d weakestCut %.3f worstQuiet %.3f\n",
+               "cutHit %d/%d cutFalse %d/%d weakestCut %.3f worstQuiet %.3f hdrPanErr %.4f hdrGrain1 %.4f\n",
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
                std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0,
                tuning.globalCandidate ? 1 : 0, tuning.inverseRefinement ? 1 : 0, panHalf.worst, panError.Mean(),
                brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(),
                edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(), smallNoDepthOne.Mean(),
-               hudStill.Mean(), wallStill.Mean(), cutHit, cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet);
+               hudStill.Mean(), wallStill.Mean(), cutHit, cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet,
+               hdrNow.panErr, hdrNow.grainOne);
         return 0;
     }
 

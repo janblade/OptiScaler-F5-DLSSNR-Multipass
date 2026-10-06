@@ -144,8 +144,12 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     // The flow's match sees where surfaces end through the depth, when it is one copy of the whole scene (several copies each
     // hold part of it, and one alone would show edges that are not there).
     const bool flowDepth = input.depthCount == 1 && input.depth[0] != nullptr && input.depthView != DXGI_FORMAT_UNKNOWN;
-    const bool recorded = _flow->Dispatch(list, input.picture, input.pictureFormat, flowDepth ? input.depth[0] : nullptr,
-                                          flowDepth ? input.depthView : DXGI_FORMAT_UNKNOWN, input.depthReversed);
+    const OpticalFlowDx12::Encoding encoding = input.colorSpace == ColorSpace::ScRgb ? OpticalFlowDx12::Encoding::ScRgb
+                                               : input.colorSpace == ColorSpace::Pq  ? OpticalFlowDx12::Encoding::Pq
+                                                                                     : OpticalFlowDx12::Encoding::Srgb;
+    const bool recorded =
+        _flow->Dispatch(list, input.picture, input.pictureFormat, flowDepth ? input.depth[0] : nullptr,
+                        flowDepth ? input.depthView : DXGI_FORMAT_UNKNOWN, input.depthReversed, encoding);
 
     TrustMaskDx12::Inputs nativeInputs;
     bool nativeReady = false;

@@ -38,6 +38,15 @@ class OpticalFlowDx12
   public:
     static constexpr int kLevels = 6; // pyramid levels (1/2 .. 1/64); the coarsest reaches about 250 pixels of motion
 
+    // What the picture's values mean, for the luma the match works on: gamma-encoded SDR (used as it is), linear scRGB
+    // (1.0 = 80 nits) or PQ (HDR10).
+    enum class Encoding
+    {
+        Srgb,
+        ScRgb,
+        Pq
+    };
+
     OpticalFlowDx12() = default;
     ~OpticalFlowDx12();
 
@@ -48,13 +57,14 @@ class OpticalFlowDx12
     bool Init(ID3D12Device* device);
 
     // Records the flow from the previous Dispatch's frame to this one. `color` must be in a shader-readable state
-    // (NON_PIXEL_SHADER_RESOURCE) and stays so. After it returns, Flow() is readable and FlowValid() says whether it holds
-    // a flow (false on the first frame, after Reset() and after a size change).
-    // depth (optional, any size, readable as depthFormat, NON_PIXEL_SHADER_RESOURCE) shows the match where one surface ends
-    // and another begins, so the edge of a nearer thing does not carry its motion onto what lies beside it.
+    // (NON_PIXEL_SHADER_RESOURCE) and stays so. After it returns, Flow() is readable and FlowValid() says whether it
+    // holds a flow (false on the first frame, after Reset() and after a size change). depth (optional, any size,
+    // readable as depthFormat, NON_PIXEL_SHADER_RESOURCE) shows the match where one surface ends and another begins, so
+    // the edge of a nearer thing does not carry its motion onto what lies beside it. encoding says what the colour's
+    // values mean (see Settings::perceptualLuma).
     bool Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
                   ID3D12Resource* depth = nullptr, DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN,
-                  bool depthReversed = true);
+                  bool depthReversed = true, Encoding encoding = Encoding::Srgb);
 
     // Forget the previous frame (a scene cut, a resolution change): the next Dispatch only stores its picture.
     void Reset()
@@ -107,6 +117,14 @@ class OpticalFlowDx12
         // (0 alike .. 1 nothing alike).
         bool sceneCutDetector = true;
         float sceneCutThreshold = 0.45f;
+
+        // The luma the match works on. Perceptual: a gamma-encoded SDR picture is used as it is (it already is
+        // perceptual), a linear (scRGB) or PQ picture is turned into linear light, divided by hdrWhiteNits (the white
+        // of the picture; scRGB 1.0 is 80 nits) and put through the CIE lightness curve, so a dark HDR scene is not
+        // squeezed into the bottom of the range. Off: the Rec.601 weights on the values as they are, then l / (1 + l),
+        // whatever they mean.
+        bool perceptualLuma = true;
+        float hdrWhiteNits = 203.0f; // the reference white of BT.2408 (HDR graphics white)
     };
 
     Settings& Tuning() { return _settings; }
@@ -145,7 +163,9 @@ class OpticalFlowDx12
         float knee;
         uint32_t coarseCells, depthMatching;
         uint32_t depthX, depthY, reversed, hasGlobal;
-        uint32_t inverseRefinement, sceneCutEnabled, padding[2]; // the rest of the register
+        uint32_t inverseRefinement, sceneCutEnabled;
+        float whiteNits; // Luma: the white of an HDR picture, in nits
+        uint32_t padding;
     };
 
     // The scene-cut passes have a root signature of their own: the luma, the histogram state and the flag.
@@ -174,7 +194,10 @@ class OpticalFlowDx12
 
     ID3D12Device* _device = nullptr;
     ID3D12RootSignature* _rootSignature = nullptr;
-    ID3D12PipelineState* _luma = nullptr;
+    ID3D12PipelineState* _luma = nullptr; // the old luma
+    ID3D12PipelineState* _lumaSdr = nullptr;
+    ID3D12PipelineState* _lumaScRgb = nullptr;
+    ID3D12PipelineState* _lumaPq = nullptr;
     ID3D12PipelineState* _down = nullptr;
     ID3D12PipelineState* _match = nullptr;
     ID3D12PipelineState* _median = nullptr;

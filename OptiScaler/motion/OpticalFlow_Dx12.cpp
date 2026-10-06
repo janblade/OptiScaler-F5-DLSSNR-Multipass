@@ -34,6 +34,7 @@ cbuffer P : register(b0)
     uint hasGlobal; // Match: the frame-wide candidate (GlobalFlow) is there to be tried
     uint inverseRefinement; // Match: the sub-pixel steps use the current frame's gradients, found once
     uint sceneCutEnabled;   // Match: the scene-cut flag (CutFlag, t6) is there to be read
+    float whiteNits;        // Luma: what an HDR picture's white is, in nits (scRGB 1.0 is 80 nits)
 };
 
 SamplerState Linear : register(s0);
@@ -50,7 +51,46 @@ Texture2D<uint>   CutFlag : register(t6);
 RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
 
-// Luma of the colour, tone-mapped so an HDR picture matches as well as an SDR one, averaged over 2x2 into the first level.
+// PQ (SMPTE ST 2084) to linear light, 1.0 being 10000 nits.
+float3 PqToLinear(float3 v)
+{
+    const float3 p = pow(saturate(v), 1.0 / 78.84375);
+    return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
+}
+
+static const float kLumaScale = 1.0; // the size the match's thresholds were set for (the old luma went from 0 to a half)
+
+// The luma of one colour for the match, in one of four ways (LUMA_MODE, a different pipeline for each). 0, the old one: Rec.601
+// weights and l / (1 + l) on the values as they are. 1, a gamma-encoded SDR colour: already a perceptual one, so it is
+// used as it is (the same weights, without the compression). 2 and 3, a linear scRGB or a PQ colour: made linear light
+// relative to the white (its Rec.709 or Rec.2020 luminance over whiteNits) and put through the CIE lightness curve, 0..1
+// from black to white and above 1 for highlights. Equal steps of it look alike, so the match weighs a dark detail like a
+// bright one.
+#ifndef LUMA_MODE
+#define LUMA_MODE 0
+#endif
+
+float LumaOf(float3 c)
+{
+    c = max(c, 0.0);
+
+#if LUMA_MODE == 0
+    const float l = dot(c, float3(0.299, 0.587, 0.114));
+    return l / (1.0 + l);
+#elif LUMA_MODE == 1
+    return dot(min(c, 4.0), float3(0.299, 0.587, 0.114));
+#else
+#if LUMA_MODE == 2
+    const float y = dot(c, float3(0.2126, 0.7152, 0.0722)) * (80.0 / whiteNits);
+#else
+    const float y = dot(PqToLinear(c), float3(0.2627, 0.6780, 0.0593)) * (10000.0 / whiteNits);
+#endif
+    const float yc = min(y, 64.0);
+    return 0.01 * (yc <= 216.0 / 24389.0 ? yc * (24389.0 / 27.0) : 116.0 * pow(yc, 1.0 / 3.0) - 16.0);
+#endif
+}
+
+// Luma of the colour, averaged over 2x2 into the first level.
 [numthreads(8, 8, 1)]
 void Luma(uint3 id : SV_DispatchThreadID)
 {
@@ -62,9 +102,7 @@ void Luma(uint3 id : SV_DispatchThreadID)
         [unroll] for (int i = 0; i < 2; ++i)
         {
             int2 p = min(int2(id.xy) * 2 + int2(i, j), int2(aux) - 1);
-            float3 c = max(Color.Load(int3(p, 0)).rgb, 0.0);
-            float l = dot(c, float3(0.299, 0.587, 0.114));
-            sum += l / (1.0 + l);
+            sum += LumaOf(Color.Load(int3(p, 0)).rgb);
         }
 
     OutLuma[id.xy] = sum * 0.25;
@@ -370,7 +408,7 @@ void Match(uint3 id : SV_DispatchThreadID)
 }
 
 )HLSL" // the compiler limits one string literal to 16 KB; the source goes on in a second one
-R"HLSL(
+                      R"HLSL(
 // A 3x3 median of each component, which removes the odd wrong block, scaled to full-resolution pixels.
 void Sort(inout float a, inout float b)
 {
@@ -752,12 +790,13 @@ void SceneDiverge(uint3 group : SV_GroupID, uint i : SV_GroupIndex)
 }
 )HLSL";
 
-ID3DBlob* Compile(const char* entry, std::string* error, const char* source = kSource)
+ID3DBlob* Compile(const char* entry, std::string* error, const char* source = kSource,
+                  const D3D_SHADER_MACRO* macros = nullptr)
 {
     ID3DBlob* code = nullptr;
     ID3DBlob* messages = nullptr;
 
-    const HRESULT hr = D3DCompile(source, strlen(source), "OpticalFlow", nullptr, nullptr, entry, "cs_5_0",
+    const HRESULT hr = D3DCompile(source, strlen(source), "OpticalFlow", macros, nullptr, entry, "cs_5_0",
                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &messages);
 
     if (FAILED(hr))
@@ -781,8 +820,8 @@ OpticalFlowDx12::~OpticalFlowDx12()
 {
     ReleaseTextures();
 
-    for (ID3D12PipelineState** pso :
-         { &_luma, &_down, &_match, &_median, &_smooth, &_visualise, &_global, &_sceneHist, &_sceneDiverge })
+    for (ID3D12PipelineState** pso : { &_luma, &_lumaSdr, &_lumaScRgb, &_lumaPq, &_down, &_match, &_median, &_smooth,
+                                       &_visualise, &_global, &_sceneHist, &_sceneDiverge })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -889,6 +928,38 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
         {
             _error = std::string("creating the pipeline ") + entry.name;
             return false;
+        }
+    }
+
+    // The luma in the three other ways (see LumaOf): the same entry point built with another LUMA_MODE.
+    {
+        struct Variant
+        {
+            const char* mode;
+            ID3D12PipelineState** target;
+        };
+
+        for (const Variant& variant :
+             { Variant { "1", &_lumaSdr }, Variant { "2", &_lumaScRgb }, Variant { "3", &_lumaPq } })
+        {
+            const D3D_SHADER_MACRO macros[] = { { "LUMA_MODE", variant.mode }, { nullptr, nullptr } };
+            ID3DBlob* code = Compile("Luma", &_error, kSource, macros);
+
+            if (code == nullptr)
+                return false;
+
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pso {};
+            pso.pRootSignature = _rootSignature;
+            pso.CS = { code->GetBufferPointer(), code->GetBufferSize() };
+
+            const HRESULT hr = device->CreateComputePipelineState(&pso, IID_PPV_ARGS(variant.target));
+            code->Release();
+
+            if (FAILED(hr))
+            {
+                _error = "creating the pipeline Luma";
+                return false;
+            }
         }
     }
 
@@ -1165,15 +1236,15 @@ void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineSt
         return;
 
     list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
-    _timeNames[_timeCount++] = pso == _luma           ? "luma"
-                               : pso == _down         ? "down"
-                               : pso == _match        ? "match"
-                               : pso == _median       ? "median"
-                               : pso == _smooth       ? "smooth"
-                               : pso == _global       ? "global"
-                               : pso == _sceneHist    ? "scenehist"
-                               : pso == _sceneDiverge ? "scenecut"
-                                                      : "other";
+    _timeNames[_timeCount++] = pso == _luma || pso == _lumaSdr || pso == _lumaScRgb || pso == _lumaPq ? "luma"
+                               : pso == _down                                                         ? "down"
+                               : pso == _match                                                        ? "match"
+                               : pso == _median                                                       ? "median"
+                               : pso == _smooth                                                       ? "smooth"
+                               : pso == _global                                                       ? "global"
+                               : pso == _sceneHist                                                    ? "scenehist"
+                               : pso == _sceneDiverge                                                 ? "scenecut"
+                                                                                                      : "other";
 }
 
 void OpticalFlowDx12::ScenePass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* luma,
@@ -1229,7 +1300,7 @@ void OpticalFlowDx12::ScenePass(ID3D12GraphicsCommandList* list, ID3D12PipelineS
 }
 
 bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
-                               ID3D12Resource* depth, DXGI_FORMAT depthFormat, bool depthReversed)
+                               ID3D12Resource* depth, DXGI_FORMAT depthFormat, bool depthReversed, Encoding encoding)
 {
     if (_device == nullptr || _match == nullptr || list == nullptr || color == nullptr)
         return false;
@@ -1251,8 +1322,14 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     constants.sizeY = current[0].height;
     constants.auxX = (uint32_t) colorDesc.Width;
     constants.auxY = colorDesc.Height;
-    Pass(list, _luma, color, colorFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN, current[0],
-         kLumaFormat, constants);
+    constants.whiteNits = (std::max)(_settings.hdrWhiteNits, 1.0f);
+    Pass(list,
+         !_settings.perceptualLuma     ? _luma
+         : encoding == Encoding::ScRgb ? _lumaScRgb
+         : encoding == Encoding::Pq    ? _lumaPq
+                                       : _lumaSdr,
+         color, colorFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN, current[0], kLumaFormat,
+         constants);
 
     // Is this frame a hard cut from the last one? Decided here, on the GPU, so the match and the trust mask can act on
     // it in this very frame.

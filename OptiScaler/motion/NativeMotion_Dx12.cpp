@@ -354,6 +354,13 @@ void DrawAdvancedUi()
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", "Finds the picture's gradients once from the current frame and stops early. Faster, but\n"
                                     "less exact on thin lines and grain; switch it on and off to compare.");
+        ImGui::Checkbox("Perceptual luma (HDR and SDR)##flowluma", &tune.perceptualLuma);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s", "Matches on a lightness that follows how the eye sees it: an SDR picture as it is, an HDR\n"
+                      "one (scRGB, PQ) after dividing by a white of 203 nits and a lightness curve, so dark\n"
+                      "detail counts like bright. Off: the older tone-mapped luma.");
         ImGui::Checkbox("Find a hard cut on its own frame##flowscene", &tune.sceneCutDetector);
 
         if (ImGui::IsItemHovered())

@@ -13,6 +13,10 @@ NativeProducer::~NativeProducer()
         if (allocator != nullptr)
             allocator->Release();
 
+    for (auto& readback : _cutReadback)
+        if (readback != nullptr)
+            readback->Release();
+
     if (_list != nullptr)
         _list->Release();
     if (_fence != nullptr)
@@ -73,6 +77,26 @@ bool NativeProducer::Init(ID3D12Device* device)
         return false;
     }
 
+    // One row of the scene-cut flag per ring slot (a texture copy's rows are 256 bytes apart).
+    D3D12_HEAP_PROPERTIES readbackHeap {};
+    readbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC readbackDesc {};
+    readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    readbackDesc.Width = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+    readbackDesc.Height = 1;
+    readbackDesc.DepthOrArraySize = 1;
+    readbackDesc.MipLevels = 1;
+    readbackDesc.SampleDesc.Count = 1;
+    readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    for (auto& readback : _cutReadback)
+        if (FAILED(device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &readbackDesc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback))))
+        {
+            _error = "creating the scene-cut readback";
+            return false;
+        }
+
     _event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     _device = device;
     return true;
@@ -117,6 +141,34 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     const UINT slot = (UINT) (_frame % kRing);
     WaitFor(_values[slot]);
 
+    // The flow's own cut flag of the frames the GPU has finished since (usually the last one): a cut found there resets
+    // the consumer's history now, a couple of frames before the trust mask's count could say so. Until the consumer has
+    // run with the reset it stays asked for.
+    for (UINT s = 0; s < kRing; ++s)
+    {
+        if (!_cutPending[s] || _fence->GetCompletedValue() < _values[s])
+            continue;
+
+        _cutPending[s] = false;
+        const D3D12_RANGE range { 0, sizeof(uint32_t) };
+        uint32_t* data = nullptr;
+
+        if (SUCCEEDED(_cutReadback[s]->Map(0, &range, (void**) &data)) && data != nullptr)
+        {
+            const bool cut = *data != 0;
+            const D3D12_RANGE none { 0, 0 };
+            _cutReadback[s]->Unmap(0, &none);
+
+            if (cut && _frame >= _cutQuietUntil)
+            {
+                result.sceneCut = true;
+                result.distrustedShare = 1.0f;
+                _consumerResetPending = true;
+                _cutQuietUntil = _frame + kRing + 2;
+            }
+        }
+    }
+
     const HRESULT allocatorHr = _allocators[slot]->Reset();
     const HRESULT listHr = FAILED(allocatorHr) ? allocatorHr : _list->Reset(_allocators[slot], nullptr);
 
@@ -141,8 +193,8 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     if (needsBarrier)
         list->ResourceBarrier(1, &barrier);
 
-    // The flow's match sees where surfaces end through the depth, when it is one copy of the whole scene (several copies each
-    // hold part of it, and one alone would show edges that are not there).
+    // The flow's match sees where surfaces end through the depth, when it is one copy of the whole scene (several
+    // copies each hold part of it, and one alone would show edges that are not there).
     const bool flowDepth = input.depthCount == 1 && input.depth[0] != nullptr && input.depthView != DXGI_FORMAT_UNKNOWN;
     const OpticalFlowDx12::Encoding encoding = input.colorSpace == ColorSpace::ScRgb ? OpticalFlowDx12::Encoding::ScRgb
                                                : input.colorSpace == ColorSpace::Pq  ? OpticalFlowDx12::Encoding::Pq
@@ -150,6 +202,35 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     const bool recorded =
         _flow->Dispatch(list, input.picture, input.pictureFormat, flowDepth ? input.depth[0] : nullptr,
                         flowDepth ? input.depthView : DXGI_FORMAT_UNKNOWN, input.depthReversed, encoding);
+
+    // This frame's cut flag out to the readback, read once the GPU is done with the frame.
+    bool cutCopied = false;
+
+    if (ID3D12Resource* flag = recorded ? _flow->SceneCutFlag() : nullptr)
+    {
+        D3D12_RESOURCE_BARRIER toCopy {};
+        toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toCopy.Transition.pResource = flag;
+        toCopy.Transition.Subresource = 0;
+        toCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        list->ResourceBarrier(1, &toCopy);
+
+        D3D12_TEXTURE_COPY_LOCATION dst {};
+        dst.pResource = _cutReadback[slot];
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT };
+        D3D12_TEXTURE_COPY_LOCATION src {};
+        src.pResource = flag;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+        const D3D12_BOX texel0 { 0, 0, 0, 1, 1, 1 };
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, &texel0);
+
+        std::swap(toCopy.Transition.StateBefore, toCopy.Transition.StateAfter);
+        list->ResourceBarrier(1, &toCopy);
+        cutCopied = true;
+    }
 
     TrustMaskDx12::Inputs nativeInputs;
     bool nativeReady = false;
@@ -189,14 +270,24 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         nativeInputs = in;
         nativeReady = result.trustRan;
 
-        // A hard cut: nothing carried over from before it is worth keeping.
-        if (_trust->SceneCutSeen())
+        // A hard cut seen by the trust mask's count, a few frames after it: the consumer's history is reset, unless the
+        // flow's own flag already asked for that for this cut. With the flow's detector on, the flow and the mask carry
+        // on (the cut frame had no motion, and the frames since match the new scene) and the consumer runs on this
+        // frame too: skipping it showed one frame without it, a flash over the whole picture. Without the detector, as
+        // before: the flow and the mask start over.
+        if (_trust->SceneCutSeen() && _frame >= _cutQuietUntil)
         {
             result.sceneCut = true;
             result.distrustedShare = _trust->DistrustedShare();
-            Reset();
-            nativeReady = false;
             nativeReset = true;
+
+            if (_flow->Tuning().sceneCutDetector)
+                _cutQuietUntil = _frame + kRing + 2;
+            else
+            {
+                Reset();
+                nativeReady = false;
+            }
         }
     }
 
@@ -219,8 +310,11 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
             frame.depth = _trust->GuideDepth();
             frame.motion = _trust->GuideMotion();
             frame.depthReversed = nativeInputs.depthReversed;
-            frame.reset = nativeReset;
+            frame.reset = nativeReset || _consumerResetPending;
             result.nativeRan = apply(list, frame);
+
+            if (result.nativeRan)
+                _consumerResetPending = false;
         }
     }
 
@@ -235,6 +329,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         queue->ExecuteCommandLists(1, lists);
         queue->Signal(_fence, ++_signalled);
         _values[slot] = _signalled;
+        _cutPending[slot] = cutCopied;
         ++_frame;
 
         output.done = SyncPoint { _fence, _signalled };

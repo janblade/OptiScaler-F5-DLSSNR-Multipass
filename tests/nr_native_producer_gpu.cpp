@@ -226,7 +226,8 @@ struct Scene
     float squareX;       // the square's left edge; negative: none
     float backgroundZ;
     float squareZ;
-    float depthShift = 0;   // the depth map's square is this many pixels off the picture's (a jittered depth buffer)
+    float depthShift = 0; // the depth map's square is this many pixels off the picture's (a jittered depth buffer)
+    bool darkTop = false; // the top half is dark: another layout of light, which the flow's cut detector can tell
 };
 
 bool InSquare(const Scene& s, uint32_t x, uint32_t y, float shift = 0)
@@ -242,8 +243,9 @@ ComPtr<ID3D12Resource> Colour(Gpu& gpu, const Scene& s)
                           const bool in = InSquare(s, x, y);
                           for (int c = 0; c < 3; ++c)
                           {
-                              const float v = in ? Texture(x - s.squareX, (float) y, c, s.seed + 500)
-                                                 : Texture((float) x, (float) y, c, s.seed);
+                              const float v = (in ? Texture(x - s.squareX, (float) y, c, s.seed + 500)
+                                                  : Texture((float) x, (float) y, c, s.seed)) *
+                                              (s.darkTop && y < kHeight / 2 ? 0.15f : 1.0f);
                               px[c] = (uint8_t) std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f);
                           }
                           px[3] = 255;
@@ -483,27 +485,72 @@ int main()
         ok &= Check("no depth: the flow matches without depth", !producer.Flow()->UsedDepth());
     }
 
-    printf("a hard cut\n");
+    printf("a hard cut, found by the flow's own detector\n");
     {
         // Settle on a still scene, then change to another one entirely.
         for (int k = 0; k < 4; ++k)
             frame(Scene { 7, 300, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
 
+        int reportedAt = -1, resets = 0, nrSkipped = 0, cuts = 0;
+
+        for (int k = 0; k < 10; ++k)
+        {
+            Scene next { 91, -1, 4.0f, 4.0f };
+            next.darkTop = true; // another layout of light: the detector sees it on the cut frame
+
+            const int before = nr.count;
+            const auto r = frame(next, kRead, true, true, false, output, nullptr, nullptr);
+            nrSkipped += nr.count == before ? 1 : 0;
+            resets += nr.count != before && nr.reset ? 1 : 0;
+            cuts += r.sceneCut ? 1 : 0;
+
+            if (r.sceneCut && reportedAt < 0)
+                reportedAt = k;
+        }
+
+        ok &= Check("the cut is reported on the frame after it", reportedAt == 1);
+        ok &= Check("one report and one reset of NR for the cut", cuts == 1 && resets == 1);
+        ok &= Check("NR runs on every frame through the cut (no frame without it)", nrSkipped == 0);
+    }
+
+    printf("a hard cut the detector cannot see (the same layout of light)\n");
+    {
+        for (int k = 0; k < 8; ++k)
+            frame(Scene { 7, 300, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
+
+        int cuts = 0, resets = 0, nrSkipped = 0;
+
+        for (int k = 0; k < 10; ++k)
+        {
+            const int before = nr.count;
+            cuts += frame(Scene { 91, -1, 4.0f, 4.0f }, kRead, true, true, false, output, nullptr, nullptr).sceneCut;
+            nrSkipped += nr.count == before ? 1 : 0;
+            resets += nr.count != before && nr.reset ? 1 : 0;
+        }
+
+        ok &= Check("the trust mask's count reports it, once, and NR is reset", cuts == 1 && resets == 1);
+        ok &= Check("NR runs on every frame through it", nrSkipped == 0);
+    }
+
+    printf("a hard cut, without the detector (the trust mask's count only)\n");
+    {
+        producer.Flow()->Tuning().sceneCutDetector = false;
+
+        // Long enough for the change back to this scene (itself a cut) to be counted and over.
+        for (int k = 0; k < 8; ++k)
+            frame(Scene { 7, 300, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
+
         bool cut = false;
-        bool resetSeen = false;
 
         for (int k = 0; k < 8 && !cut; ++k)
-        {
-            const auto r = frame(Scene { 91, -1, 4.0f, 4.0f }, kRead, true, true, false, output, nullptr, nullptr);
-            cut = r.sceneCut;
-            resetSeen = resetSeen || nr.reset;
-        }
+            cut = frame(Scene { 91, -1, 4.0f, 4.0f }, kRead, true, true, false, output, nullptr, nullptr).sceneCut;
 
         ok &= Check("the cut is reported within a few frames", cut);
 
         // The frame after the report starts over.
         const auto r = frame(Scene { 91, -1, 4.0f, 4.0f }, kRead, true, true, false, output, nullptr, nullptr);
         ok &= Check("the frame after it has no flow yet (the histories were reset)", !r.flowValid);
+        producer.Flow()->Tuning().sceneCutDetector = true;
     }
 
     printf("a cut hint from the adapter\n");

@@ -566,6 +566,8 @@ static const QuirkEntry quirkTable[] = {
     // Assassin's Creed Odyssey
     // "Unable to create a DX11 D3D Device with the required features" at startup with the elevation to 11_1
     QUIRK_ENTRY("acodyssey.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+    // The Game Pass build runs this exe instead (its log shows the elevation still firing under this name)
+    QUIRK_ENTRY("acodyssey_plus.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
     // Shadow of the Tomb Raider
     // Hudfix incompatible

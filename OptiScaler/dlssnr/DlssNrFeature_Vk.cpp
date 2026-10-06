@@ -10,6 +10,9 @@
 #include <NVNGX_Parameter.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
+#include <shaders/dlssnr/DlssNr_LutVk.h>
+#include <dlssnr/DlssNr_Lut.h>
+#include <dlssnr/DlssNr_LutStatus.h>
 #include <shaders/dlssnr/DlssNr_Guides.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
@@ -144,6 +147,14 @@ struct VkState
     std::unique_ptr<SGSR1_Vk> sgsr1UpAnswer;
 
     std::unique_ptr<DlssNr_Vk> pass;
+
+    // The LUT-apply epic: [DlssNr] LutFile grades the frame the encode reads, into lutScratch, so the model sees the
+    // grade while the meter above it and the untouched game frame in `keep` do not. Nothing here exists until a
+    // LutFile is set -- the pass is built on first use and the scratch is freed again when the file is cleared.
+    DlssNr_LutState lut;
+    std::unique_ptr<DlssNr_LutVk> lutPass;
+    OwnedImage lutScratch;
+    bool lutScratchFailed = false;
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -1138,6 +1149,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             feature = nullptr;
         }
         DestroyImage(g_vk.scratch);
+        DestroyImage(g_vk.lutScratch); // recreated at the new size when a LutFile still wants it
+        g_vk.lutScratchFailed = false;
 
         const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
 
@@ -1654,6 +1667,109 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         encode.UseExposureWhitePoint = 0u;
     }
 
+    // The LUT-apply epic: grade the frame through a loaded .cube file before the model sees it. Placed after the
+    // Automatic meter above, which must keep reading the clean frame (a grade shifts apparent brightness by a
+    // content-dependent amount, so metering it made exposure drift on D3D12), and right before the encode, which is
+    // the only other reader of the game's colour ahead of the model. The encode writes `keep` from the same source it
+    // reads, so handing it the graded image makes `keep` carry the grade too, and the game's resource is never
+    // transitioned or written here -- only read, in the layout it arrived in. Skipped entirely without a LutFile.
+    VkImageView encodeSource = colour->Resource.ImageViewInfo.ImageView;
+    VkImageLayout encodeSourceLayout = beforeSr ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+    {
+        const std::string lutPath = cfg.DlssNrLutFile.value_or_default();
+
+        if (!lutPath.empty())
+        {
+            const float lutStrength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
+
+            if (!g_vk.lutScratch.Valid() && !g_vk.lutScratchFailed)
+            {
+                g_vk.lutScratchFailed = !CreateImage(g_vk.lutScratch, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, true);
+
+                if (g_vk.lutScratchFailed)
+                    LOG_ERROR("DLSS-NR Vulkan: could not allocate the LUT pass's scratch target; LutFile is ignored");
+            }
+
+            if (g_vk.lutScratchFailed)
+            {
+                DlssNr::ReportLutStatus(true, g_vk.lut.loadedPath, g_vk.lut.lut.size, true,
+                                        "could not allocate the LUT pass's scratch target", lutPath,
+                                        cfg.DlssNrLutStrength.value_or_default());
+            }
+            else
+            {
+                bool graded = false;
+                DlssNr_LutEnsureParsed(&g_vk.lut, lutPath);
+
+                if (g_vk.lut.Loaded())
+                {
+                    if (!g_vk.lutPass)
+                        g_vk.lutPass = std::make_unique<DlssNr_LutVk>(device, physicalDevice);
+
+                    // Replacing the 3D image (another file, or another size) while earlier frames still sample the
+                    // old one would free it under them; a rare, user-initiated change, so a drain is fine.
+                    if (g_vk.lutPass->Ready() && g_vk.lutPass->NeedsDrainFor(g_vk.lut.lut.size, g_vk.lut.loadedPath))
+                        vkDeviceWaitIdle(device);
+
+                    if (g_vk.lutPass->Ready() && g_vk.lutPass->EnsureLutImage(cmdBuffer, g_vk.lut.lut.rgb.data(),
+                                                                              g_vk.lut.lut.size, g_vk.lut.loadedPath))
+                    {
+                        Transition(cmdBuffer, g_vk.lutScratch, VK_IMAGE_LAYOUT_GENERAL);
+
+                        DlssNrLutConstants lutConstants {};
+                        lutConstants.Width = width;
+                        lutConstants.Height = height;
+                        lutConstants.Strength = lutStrength;
+                        lutConstants.DomainMinR = g_vk.lut.lut.domainMin[0];
+                        lutConstants.DomainMinG = g_vk.lut.lut.domainMin[1];
+                        lutConstants.DomainMinB = g_vk.lut.lut.domainMin[2];
+                        lutConstants.DomainMaxR = g_vk.lut.lut.domainMax[0];
+                        lutConstants.DomainMaxG = g_vk.lut.lut.domainMax[1];
+                        lutConstants.DomainMaxB = g_vk.lut.lut.domainMax[2];
+                        lutConstants.LutSize = (uint32_t) g_vk.lut.lut.size;
+                        lutConstants.InputEncoding = shaderConversion;
+                        lutConstants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
+                        // The white point the encode below uses (Tune's pinned value included), so linear HDR lands
+                        // in the LUT's 0-1 domain where the model's proxy puts it; the Trim alone would leave a game
+                        // whose frame is scaled by its exposure far above white.
+                        lutConstants.Trim = encode.WhitePoint;
+
+                        graded = g_vk.lutPass->Dispatch(cmdBuffer, colour->Resource.ImageViewInfo.ImageView,
+                                                        encodeSourceLayout, g_vk.lutScratch.view, lutConstants);
+                    }
+                }
+
+                DlssNr::ReportLutStatus(true, g_vk.lut.loadedPath, g_vk.lut.lut.size, g_vk.lut.failed, g_vk.lut.error,
+                                        g_vk.lut.attemptedPath, lutStrength);
+
+                // A file that did not parse, or a pass that did not build, leaves the frame ungraded -- never a failure
+                // of the whole pass.
+                if (graded)
+                {
+                    encodeSource = g_vk.lutScratch.view;
+                    encodeSourceLayout = VK_IMAGE_LAYOUT_GENERAL;
+                }
+            }
+        }
+        else
+        {
+            if (g_vk.lutScratch.Valid() || (g_vk.lutPass && g_vk.lutPass->HoldsImage()))
+            {
+                // LutFile was cleared: neither the scratch nor the 3D image (up to ~16 MB for a 128^3 lattice) is
+                // wanted by anything else. Earlier frames may still read them, so drain once; one hitch, and every
+                // later frame without a LutFile costs nothing.
+                vkDeviceWaitIdle(device);
+                DestroyImage(g_vk.lutScratch);
+
+                if (g_vk.lutPass)
+                    g_vk.lutPass->ReleaseLutImage();
+            }
+
+            g_vk.lutScratchFailed = false;
+            DlssNr::ReportLutStatus(false, "", 0, false, "", "", cfg.DlssNrLutStrength.value_or_default());
+        }
+    }
+
     // Read in GENERAL, which is the layout it is actually in.
     //
     // This slot used to take the default and declare SHADER_READ_ONLY_OPTIMAL, which disagreed with
@@ -1661,11 +1777,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // storage image, which is only legal in GENERAL, and nothing transitions it in between. It is the
     // upscaler's output, a storage image the upscaler has just written, so GENERAL is what it is.
     // Inert on the only hardware this model runs on, wrong everywhere it is read.
-    if (!g_vk.pass->Dispatch(cmdBuffer, encode, width, height, colour->Resource.ImageViewInfo.ImageView,
-                             VK_NULL_HANDLE, VK_NULL_HANDLE,
+    if (!g_vk.pass->Dispatch(cmdBuffer, encode, width, height, encodeSource, VK_NULL_HANDLE, VK_NULL_HANDLE,
                              g_vk.autoExposureActive ? g_vk.autoExposure.view : VK_NULL_HANDLE,
-                             g_vk.proxy.view, g_vk.keep.view,
-                             beforeSr ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL))
+                             g_vk.proxy.view, g_vk.keep.view, encodeSourceLayout))
     {
         Fail("the encode dispatch failed");
         return;
@@ -2166,6 +2280,7 @@ void ShutdownVk(bool deviceAlive)
         // OwnedImage/meter handles matters: the resize path gates on `.Valid()`, so a stale non-null
         // handle from the dead device would be reused on the NEW device and crash.
         g_vk.pass.release();
+        g_vk.lutPass.release(); // same reason: its destructor would vkDestroy on the dead device
         g_vk.superUp.release();
         g_vk.superDown.release();
         g_vk.sgsr1UpAnswer.release();
@@ -2188,6 +2303,8 @@ void ShutdownVk(bool deviceAlive)
         g_vk.meter = OwnedImage {};
         g_vk.autoExposure = OwnedImage {};
         g_vk.autoExposureRaw = OwnedImage {};
+        g_vk.lutScratch = OwnedImage {};
+        g_vk.lutScratchFailed = false;
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
         DetailReuseVk::Release(false);
@@ -2256,10 +2373,13 @@ void ShutdownVk(bool deviceAlive)
     DestroyImage(g_vk.meter);
     DestroyImage(g_vk.autoExposure);
     DestroyImage(g_vk.autoExposureRaw);
+    DestroyImage(g_vk.lutScratch);
+    g_vk.lutScratchFailed = false;
     g_vk.autoExposureAdapter.Invalidate();
     DestroyMeterReadback();
 
     g_vk.pass.reset();
+    g_vk.lutPass.reset(); // frees the 3D image, its staging buffer and the pass's own rings
     g_vk.superUp.reset();
     g_vk.superDown.reset();
     g_vk.sgsr1UpAnswer.reset();

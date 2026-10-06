@@ -43,6 +43,18 @@ The menu's Modern style uses [Inter](https://github.com/rsms/inter) by Rasmus An
 Authors (v4.1, Regular), embedded in the DLL under the SIL Open Font License 1.1. See the
 [licence](../Licenses/Inter_OFL.txt).
 
+## LUT looks
+
+The files in `OptiScaler\LUTs` are baked for the DLSS-NR LUT feature from the [PixelManager OCIO config by Joe Genco](https://github.com/Joegenco/PixelManager), which bundles these projects. Each file names its source in its header.
+
+- `AgX-Blender*.cube`: [Eary Chow's AgX](https://github.com/EaryChow/AgX), after [Troy James Sobotka's AgX](https://github.com/sobotka/AgX).
+- `AgX-Kraken*.cube`: [Troy James Sobotka's AgX](https://github.com/sobotka/AgX).
+- `AgX-Resolve*.cube`: [Troy James Sobotka's AgX Resolve](https://github.com/sobotka/AgX-Resolve).
+- `JP2499DRT*.cube`: [Juan Pablo Zambrano's DRT DCTLs](https://github.com/JuanPabloZambrano/DCTL).
+- `identity_33.cube`, `shift_33.cube`: made for this project.
+
+None of these repositories states a licence, so they are included with credit only, as PixelManager itself does. If an author would rather they were not distributed, open an issue and the file will be removed. The GPL-3.0 and AGPL-3.0 projects PixelManager also bundles (OpenDRT and JzDT, flim) are deliberately not included.
+
 ## Highlight guard: brightening only
 
 Bounding the Composed path's Highlight guard to brightening only, leaving darkening uncapped, is

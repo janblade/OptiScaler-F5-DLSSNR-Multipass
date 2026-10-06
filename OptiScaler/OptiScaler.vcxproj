@@ -264,6 +264,8 @@ copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fide
 copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_upscaler_dx12.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_framegeneration_dx12.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK-v2\docs\license.md $(SolutionDir)x64\Release\a\Licenses\FidelityFX_v2_LICENSE.md /Y
+md $(SolutionDir)x64\Release\a\OptiScaler\LUTs
+copy "$(SolutionDir)LUTs\*.*" $(SolutionDir)x64\Release\a\OptiScaler\LUTs\ /Y
 copy $(SolutionDir)OptiScaler.ini $(SolutionDir)x64\Release\a\ /Y
 copy $(SolutionDir)setup_windows.bat $(SolutionDir)x64\Release\a\ /Y
 copy $(SolutionDir)setup_linux.sh $(SolutionDir)x64\Release\a\ /Y
@@ -439,11 +441,14 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\output_scaling\precompile\bcus_Shader_Vk.h" />
     <ClInclude Include="shaders\rcas\RCAS_Vk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_Vk.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNr_LutVk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNrDetailReuse_Vk.h" />
     <ClInclude Include="shaders\dlssnr\precompile\dlssnr_detail_reuse_Shader_Vk.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="dlssnr\DlssNr_ColourEncodingStatus.h" />
+    <ClInclude Include="dlssnr\DlssNr_LutStatus.h" />
+    <ClInclude Include="dlssnr\DlssNr_LutPack.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_ColourEncoding.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_ProxyCurve.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
@@ -909,10 +914,12 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_ExposureCalibrate.cpp" />
     <ClInclude Include="shaders\dlssnr\DlssNr_ActiveColor.h" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
+    <ClCompile Include="shaders\dlssnr\DlssNr_LutVk.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNrDetailReuse_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_LutStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Menu.cpp" />
     <ClCompile Include="dlssnr\DlssNrNative.cpp">

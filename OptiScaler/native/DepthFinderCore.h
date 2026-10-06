@@ -92,8 +92,8 @@ class DepthFinderCore
 
     // For an adapter whose context ids are not one per recording thread (D3D11 counts every draw on the immediate context's
     // id, whichever context made it): draws then count under the lock, as one context may be written by several threads.
-    // Call before Start.
-    void SetSharedContexts(bool shared) { _sharedContexts = shared; }
+    // Call before the hooks go live (the draw hooks read it on every draw).
+    void SetSharedContexts(bool shared) { _sharedContexts.store(shared, std::memory_order_relaxed); }
 
     // ---- the game's upscaler: a game that has one needs no finder ---------------------------------------------------------
     // One relaxed store, callable from anywhere on every upscaler call. OnPresent decides what it means. A no-op inside a
@@ -271,7 +271,7 @@ class DepthFinderCore
     std::atomic<uint64_t> _epoch { 1 };
     // Changes on a stand-down and when contexts are retired: threads look their contexts up again.
     std::atomic<uint64_t> _cacheEpoch { 1 };
-    bool _sharedContexts = false;
+    std::atomic<bool> _sharedContexts { false };
 
     std::unordered_map<uint64_t, ContextState> _contexts; // node-stable: see ContextState
     // Contexts taken out of the map, with the present count and the time they left at. A thread's cache can still point at one

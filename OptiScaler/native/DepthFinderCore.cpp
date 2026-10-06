@@ -246,7 +246,9 @@ void DepthFinderCore::CountEvents(uint64_t& draws, uint64_t& indirect) const
 
 void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t instances)
 {
-    if (!_active.load(std::memory_order_relaxed))
+    // Acquire pairs with the release of whatever made the finder active: the hook then sees the settings made before it
+    // (_sharedContexts). Free on x86.
+    if (!_active.load(std::memory_order_acquire))
         return;
 
     const auto count = [this, vertices, instances](ContextState& state)
@@ -266,7 +268,7 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
         }
     };
 
-    if (_sharedContexts)
+    if (_sharedContexts.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(_mutex);
         count(ContextLocked(context));
@@ -279,7 +281,7 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
 
 void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
 {
-    if (!_active.load(std::memory_order_relaxed))
+    if (!_active.load(std::memory_order_acquire))
         return;
 
     const auto count = [this, maxCount](ContextState& state)
@@ -295,7 +297,7 @@ void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
             state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
     };
 
-    if (_sharedContexts)
+    if (_sharedContexts.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(_mutex);
         count(ContextLocked(context));
@@ -309,10 +311,10 @@ void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
 void DepthFinderCore::OnViewport(uint64_t context, float width)
 {
     // Only the main viewport matters, as in ReShade's add-on.
-    if (!_active.load(std::memory_order_relaxed))
+    if (!_active.load(std::memory_order_acquire))
         return;
 
-    if (_sharedContexts)
+    if (_sharedContexts.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(_mutex);
         ContextLocked(context).viewportWidth.store(width, std::memory_order_relaxed);

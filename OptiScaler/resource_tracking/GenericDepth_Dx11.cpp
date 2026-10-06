@@ -562,6 +562,10 @@ void Install(ID3D11Device* device)
     o_RSSetViewports = (PFN_RSSetViewports) table[kRSSetViewports];
     o_ClearDepthStencilView = (PFN_ClearDepthStencilView) table[kClearDepthStencilView];
 
+    // Every draw counts on the immediate context's id, whichever context makes it, so draws count under the core's lock. Set
+    // before the hooks go live: a draw on another thread must never see the lock-free path.
+    g_core.SetSharedContexts(true);
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -593,8 +597,6 @@ void Install(ID3D11Device* device)
     }
 
     g_installFailed = false;
-    // Every draw counts on the immediate context's id, whichever context makes it, so draws count under the core's lock.
-    g_core.SetSharedContexts(true);
     g_core.Start([](const std::string& line) { LOG_INFO("{}", line); });
     g_installed = true;
     LOG_INFO("Depth finder (D3D11): observing the game's depth buffers (immediate context only), after {} frames of "

@@ -193,8 +193,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // LutError() then has the reason -- so an empty setting costs nothing beyond this call's own early-out.
     // ColourIsLinearHdr/Trim (Review Pass, 2026-10-04 fix): InputEncoding alone cannot tell scene-linear
     // HDR apart from tone-mapped sRGB (both collapse to the same value), so the caller passes
-    // frame.ColourIsLinearHdr directly, and Trim is what to divide linear light by -- DlssNr::AutoTrimEffective,
-    // the same default DLSS-NR's own automatic exposure falls back to.
+    // frame.ColourIsLinearHdr directly, and Trim is what to divide linear light by -- the white point the encode
+    // uses for this frame (ResolveWhitePoint), not the Trim on top of it.
     bool DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
                      unsigned int Width, unsigned int Height, float Strength, uint32_t InputEncoding,
                      bool ColourIsLinearHdr, float Trim, const std::string& LutPath);

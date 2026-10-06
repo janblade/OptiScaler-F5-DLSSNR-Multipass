@@ -24,12 +24,10 @@ struct alignas(256) DlssNrLutConstants
     // open-ended linear light straight to 0-1 as if it were already display-referred. This carries the
     // real signal (frame.ColourIsLinearHdr) and Trim below carries what to divide it by first.
     uint32_t ColourIsLinearHdr;
-    // DlssNr::AutoTrimEffective(cfg) -- the same global default (or known-game override) the rest of
-    // DLSS-NR's own automatic exposure uses when nothing more specific has been measured yet. The real
-    // per-frame measured white point isn't computed until later in Dispatch(), well after this pass
-    // already ran; reusing the existing default is an approximation of that, not a duplicate of it, and
-    // good enough for a pass whose own role (Context, "Reviewed 2026-10-04") is already an accepted
-    // approximation -- grading the model's input, not reproducing its measured exposure exactly.
+    // What to divide linear HDR light by before compressing it into 0-1: the white point the encode will use for this
+    // frame (ResolveWhitePoint, or the Vulkan path's resolved white point). It is the whole divisor, not the Trim on top
+    // of it -- a game that scales its frame by its exposure sits near paper white 1000x, and dividing that by a Trim of ~1
+    // would pin every pixel at the top of the curve. Unused for tone-mapped and PQ frames.
     float Trim;
 };
 static_assert(sizeof(DlssNrLutConstants) == 256);

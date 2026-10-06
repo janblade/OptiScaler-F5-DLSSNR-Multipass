@@ -3637,9 +3637,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
                 const float lutStrength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
+                // The divisor the encode below will use, so a linear HDR frame lands in the LUT's 0-1 domain where the
+                // model's own proxy puts it. Not AutoTrimEffective: that is only the Trim on top of the base white point,
+                // and a game whose frame is scaled by its exposure (RDR2: paper white ~1700x) would otherwise be seen
+                // as ~1000x over white -- the whole picture pinned at the top of the curve.
+                const float lutWhitePoint =
+                    frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride : ResolveWhitePoint(cfg, isHdrBuffer);
                 const bool graded =
                     DispatchLut(cmdList, target, g_nr.lutScratch, width, height, lutStrength, frame.InputEncoding,
-                                isHdrBuffer, DlssNr::AutoTrimEffective(cfg), lutPath);
+                                isHdrBuffer, lutWhitePoint, lutPath);
 
                 DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, _lutState.failed,
                                         _lutState.error, _lutState.attemptedPath, lutStrength);

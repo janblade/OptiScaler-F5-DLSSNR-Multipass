@@ -56,6 +56,9 @@ class NativeProducer
         bool sceneCut = false;   // the mask saw a hard cut: the histories were reset
         float distrustedShare = 0.0f;
         bool nativeRan = false;  // the consumer ran on the picture
+        const char* stoppedAt = nullptr; // when nothing was submitted: the step that gave up (for the log)
+        long stoppedHr = 0;              // and the HRESULT it got, when it had one
+        long deviceRemoved = 0;          // the device's removed reason at that moment (0: not removed)
     };
 
     NativeProducer() = default;

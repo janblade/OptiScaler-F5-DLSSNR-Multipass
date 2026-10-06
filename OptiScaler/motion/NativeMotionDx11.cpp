@@ -70,6 +70,28 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
     native::FrameInput input;
     const auto acquired = g_source.Acquire(input);
 
+    // A line every 300 presents saying where the frames go, so a "waiting for the motion estimate" that never ends can
+    // be told apart: no picture (Acquire not ready), flow never valid, trust mask not running, or the backend not
+    // applying.
+    static uint64_t diagPresents = 0, diagReady = 0, diagWaiting = 0, diagFlowValid = 0, diagTrust = 0, diagNative = 0,
+                    diagSubmitted = 0;
+    ++diagPresents;
+    diagReady += acquired == native::AcquireStatus::Ready ? 1 : 0;
+    diagWaiting += acquired == native::AcquireStatus::WaitingForUpscaler ? 1 : 0;
+
+    const auto logDiag = [&]()
+    {
+        if (diagPresents % 300 != 0)
+            return;
+
+        LOG_INFO(
+            "Native motion (D3D11) frames: of {} presents, picture ready {}, waiting for the game's upscaler {}, "
+            "submitted {}, flow valid {}, trust mask ran {}, native input applied {}, scene cuts {}, virtual upscaler "
+            "{}",
+            diagPresents, diagReady, diagWaiting, diagSubmitted, diagFlowValid, diagTrust, diagNative, g_cuts,
+            g_virtualUpscaler != nullptr && g_virtualUpscaler->Active() ? "active" : "not active");
+    };
+
     if (acquired == native::AcquireStatus::WaitingForUpscaler)
     {
         // The game's own upscaler call takes over: ours goes, as a game's feature would.
@@ -79,11 +101,15 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
         if (g_producer)
             g_producer->Reset();
 
+        logDiag();
         return nullptr;
     }
 
     if (acquired != native::AcquireStatus::Ready)
+    {
+        logDiag();
         return nullptr;
+    }
 
     if (g_producer == nullptr || g_producer->Device() != g_source.Device12())
     {
@@ -139,6 +165,25 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
     native::FrameOutput output;
     const auto result = g_producer->Run(g_source.Queue12(), input, options, apply, output);
     g_source.Return(input, output);
+
+    if (result.stoppedAt != nullptr)
+    {
+        static uint64_t stopped = 0;
+        ++stopped;
+
+        if (stopped == 1 || stopped == 100 || stopped % 1000 == 0)
+            LOG_WARN(
+                "Native motion (D3D11): the producer stopped at \"{}\" (HRESULT 0x{:X}, device removed reason 0x{:X}), "
+                "{} frames so far",
+                result.stoppedAt, (unsigned) result.stoppedHr, (unsigned) result.deviceRemoved, stopped);
+    }
+
+    diagFlowValid += result.flowValid ? 1 : 0;
+    diagTrust += result.trustRan ? 1 : 0;
+    diagNative += result.nativeRan ? 1 : 0;
+    diagSubmitted += result.submitted ? 1 : 0;
+
+    logDiag();
 
     g_trustRan = result.trustRan;
     g_nativeRan = result.nativeRan;

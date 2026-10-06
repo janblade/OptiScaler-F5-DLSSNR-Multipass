@@ -93,7 +93,13 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     output = FrameOutput {};
 
     if (!Ready() || queue == nullptr || input.picture == nullptr || _list == nullptr)
+    {
+        result.stoppedAt = !Ready()                   ? "not ready"
+                           : queue == nullptr         ? "no queue"
+                           : input.picture == nullptr ? "no picture"
+                                                      : "no list";
         return result;
+    }
 
     // The previous work may still be reading the textures a new size replaces.
     if (input.width != _width || input.height != _height)
@@ -111,8 +117,16 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     const UINT slot = (UINT) (_frame % kRing);
     WaitFor(_values[slot]);
 
-    if (FAILED(_allocators[slot]->Reset()) || FAILED(_list->Reset(_allocators[slot], nullptr)))
+    const HRESULT allocatorHr = _allocators[slot]->Reset();
+    const HRESULT listHr = FAILED(allocatorHr) ? allocatorHr : _list->Reset(_allocators[slot], nullptr);
+
+    if (FAILED(listHr))
+    {
+        result.stoppedAt = FAILED(allocatorHr) ? "allocator reset" : "list reset";
+        result.stoppedHr = (long) listHr;
+        result.deviceRemoved = _device != nullptr ? (long) _device->GetDeviceRemovedReason() : 0;
         return result;
+    }
 
     ID3D12GraphicsCommandList* list = _list;
 
@@ -220,6 +234,9 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         output.processed = result.nativeRan;
         result.submitted = true;
     }
+
+    if (!result.submitted && result.stoppedAt == nullptr)
+        result.stoppedAt = "close";
 
     return result;
 }

@@ -166,6 +166,18 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
     const auto result = g_producer->Run(g_source.Queue12(), input, options, apply, output);
     g_source.Return(input, output);
 
+    if (result.stoppedAt != nullptr)
+    {
+        static uint64_t stopped = 0;
+        ++stopped;
+
+        if (stopped == 1 || stopped == 100 || stopped % 1000 == 0)
+            LOG_WARN(
+                "Native motion (D3D11): the producer stopped at \"{}\" (HRESULT 0x{:X}, device removed reason 0x{:X}), "
+                "{} frames so far",
+                result.stoppedAt, (unsigned) result.stoppedHr, (unsigned) result.deviceRemoved, stopped);
+    }
+
     diagFlowValid += result.flowValid ? 1 : 0;
     diagTrust += result.trustRan ? 1 : 0;
     diagNative += result.nativeRan ? 1 : 0;

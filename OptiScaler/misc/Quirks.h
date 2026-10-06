@@ -569,6 +569,11 @@ static const QuirkEntry quirkTable[] = {
     // The Game Pass build runs this exe instead (its log shows the elevation still firing under this name)
     QUIRK_ENTRY("acodyssey_plus.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
+    // Batman: Arkham Knight
+    // Asks for 11_0 and gets elevated to 11_1; with that, native input / the virtual upscaler did not take effect under
+    // the frame generation swapchain and leaving exclusive fullscreen broke it. A test entry: confirm in game.
+    QUIRK_ENTRY("batmanak.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+
     // Shadow of the Tomb Raider
     // Hudfix incompatible
     QUIRK_ENTRY("sottr.exe", GameQuirk::DisableHudfix),

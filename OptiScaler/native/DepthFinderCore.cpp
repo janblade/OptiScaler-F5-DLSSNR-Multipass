@@ -649,6 +649,7 @@ bool DepthFinderCore::EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, 
             _cacheEpoch.fetch_add(1, std::memory_order_release);
             _stats.clear();
             _pick = GenericDepthSelect::Pick {};
+            _pickSeen = false;
             _selector.Reset();
             _warmupStart = _presents;
             return true;
@@ -679,8 +680,13 @@ bool DepthFinderCore::EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, 
         _lastLoggedPick = pick.valid ? pick.id : 0;
     }
 
+    // A held pick can be of a buffer that drew nothing this frame: say whether it did.
+    const bool seen = pick.valid && std::any_of(_frameCandidates.begin(), _frameCandidates.end(),
+                                                [&pick](const auto& c) { return c.id == pick.id; });
+
     std::lock_guard lock(_mutex);
     _pick = pick;
+    _pickSeen = seen;
     return false;
 }
 
@@ -721,6 +727,12 @@ GenericDepthSelect::Pick DepthFinderCore::CurrentPick() const
 {
     std::lock_guard lock(_mutex);
     return _pick;
+}
+
+bool DepthFinderCore::PickSeenThisFrame() const
+{
+    std::lock_guard lock(_mutex);
+    return _pick.valid && _pickSeen;
 }
 
 uint64_t DepthFinderCore::WarmupStart() const

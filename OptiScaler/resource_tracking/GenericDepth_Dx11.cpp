@@ -698,12 +698,15 @@ void OnPresent(IDXGISwapChain* swapChain)
     }
 
     // The cached read view keeps the buffer it reads alive: once that buffer is no longer the pick (a resolution change made
-    // a new one, or the finder stood down), it goes, so the game's own release frees the old buffer.
+    // a new one, or the finder stood down), or the pick is held but its buffer drew nothing this frame (the game let it go and
+    // the Selector has not dropped it yet), it goes, so the game's own release frees the old buffer.
     {
         const auto pick = g_core.CurrentPick();
+        const bool seen = g_core.PickSeenThisFrame();
         std::lock_guard lock(g_mutex);
 
-        if (g_sourceSrvResource != nullptr && (!pick.valid || pick.id != (uint64_t) (size_t) g_sourceSrvResource))
+        if (g_sourceSrvResource != nullptr &&
+            (!pick.valid || pick.id != (uint64_t) (size_t) g_sourceSrvResource || !seen))
             ReleaseSourceView();
     }
 }

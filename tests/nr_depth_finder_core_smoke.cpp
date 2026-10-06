@@ -598,6 +598,45 @@ int main()
         core.EndPresent(W, H, kWarmup);
     }
 
+#ifdef FINDER_HAS_PICK_SEEN
+    // The pick is kept for a while when its buffer drops out of the frame: PickSeenThisFrame says whether the picked buffer was
+    // drawn into in the frame that just closed, which a valid pick does not.
+    {
+        DepthFinderCore core;
+        core.Start({});
+
+        std::vector<SnapshotRequest> ignored;
+
+        for (int frame = 0; frame < 6; ++frame)
+            SingleContextFrame(core, ignored);
+
+        CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+        CHECK(core.PickSeenThisFrame());
+
+        // A frame in which only the shadow map is drawn (the scene's buffer is gone for now): the Selector still holds the pick.
+        core.OnDepthBound(1, true, &kShadow);
+        core.OnViewport(1, 2048.0f);
+        for (int i = 0; i < 30; ++i)
+            core.OnDraw(1, 3000, 1);
+        core.OnDepthBound(1, false, nullptr);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
+
+        CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
+        CHECK(!core.PickSeenThisFrame());
+
+        // And it is seen again as soon as the scene draws.
+        SingleContextFrame(core, ignored);
+        CHECK(core.CurrentPick().valid && core.PickSeenThisFrame());
+
+        // A stood-down finder has no pick to have seen.
+        core.NoteUpscalerCall();
+        core.BeginPresent(W, H);
+        CHECK(core.EndPresent(W, H, kWarmup));
+        CHECK(!core.PickSeenThisFrame());
+    }
+#endif
+
     // An adapter whose one context id is drawn on from several threads (D3D11's deferred contexts go through the immediate
     // context's hooks): with shared contexts every draw counts.
     {

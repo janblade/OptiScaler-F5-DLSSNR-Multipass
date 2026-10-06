@@ -133,6 +133,10 @@ class DepthFinderCore
 
     // The pick as of the last present.
     GenericDepthSelect::Pick CurrentPick() const;
+    // Whether the picked buffer was among the buffers drawn into or cleared in the frame that last closed. The Selector keeps a
+    // pick for a while after its buffer drops out (a menu, a resolution change leaving the old buffer behind), so a valid pick
+    // does not say the buffer is still in use; an adapter holding a reference to it can let go when this is false.
+    bool PickSeenThisFrame() const;
     uint64_t Presents() const { return _presentsNow.load(std::memory_order_relaxed); }
     uint64_t WarmupStart() const;                     // the present count the current warm-up began at
     uint64_t SnapshotFloor() const;                   // the least a stretch must draw to be copied
@@ -298,6 +302,7 @@ class DepthFinderCore
     uint64_t _lastLoggedPick = 0;
     GenericDepthSelect::Selector _selector;
     GenericDepthSelect::Pick _pick;
+    bool _pickSeen = false; // _pick's buffer was among the last frame's candidates
 
     static constexpr uint64_t kLogEveryFrames = 600;
     // A context unseen for this many presents is retired (looked at every kLogEveryFrames), and freed kRetireGrace later.

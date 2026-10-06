@@ -839,6 +839,7 @@ class Config
     // Hooks
     CustomOptional<bool> HookOriginalNvngxOnly { false };
     CustomOptional<bool> EarlyHooking { false };
+    CustomOptional<bool, NoDefault> D3D11FeatureLevelElevation; // unset: elevate unless a game quirk skips it
     CustomOptional<bool> UseNtdllHooks { true };
 
     // Upscale Ratio Override

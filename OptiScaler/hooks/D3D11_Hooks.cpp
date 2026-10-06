@@ -55,6 +55,15 @@ static ULONG hkD3D11DeviceRelease(IUnknown* device)
     return result;
 }
 
+// The ini setting wins; unset, the game's quirk decides.
+static bool ElevateD3D11FeatureLevel()
+{
+    if (Config::Instance()->D3D11FeatureLevelElevation.has_value())
+        return Config::Instance()->D3D11FeatureLevelElevation.value();
+
+    return !(State::Instance().gameQuirks & GameQuirk::SkipD3D11FeatureLevelElevation);
+}
+
 static inline D3D11_FILTER UpgradeToAF(D3D11_FILTER f)
 {
     if (Config::Instance()->AnisotropySkipPointFilter.value_or_default() &&
@@ -235,7 +244,7 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
         }
     }
 
-    if (!(State::Instance().gameQuirks & GameQuirk::SkipD3D11FeatureLevelElevation))
+    if (ElevateD3D11FeatureLevel())
     {
         static const D3D_FEATURE_LEVEL levels[] = {
             D3D_FEATURE_LEVEL_11_1,
@@ -342,7 +351,7 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
 
     static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1 };
 
-    if (!(State::Instance().gameQuirks & GameQuirk::SkipD3D11FeatureLevelElevation))
+    if (ElevateD3D11FeatureLevel())
     {
         D3D_FEATURE_LEVEL maxLevel = D3D_FEATURE_LEVEL_1_0_CORE;
 

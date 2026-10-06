@@ -151,7 +151,7 @@ AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
         if (haveTexture && _depth.Open(_device12))
         {
             depthReady = true;
-            _context11->CopyResource(_depth.Tex11(), depthSnap.resource);
+            _context11->CopyResource(_depth.Tex11(), depthSnap.resource.Get());
         }
         else
         {

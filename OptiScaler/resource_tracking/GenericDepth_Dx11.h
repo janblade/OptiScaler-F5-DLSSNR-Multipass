@@ -13,8 +13,9 @@
 // not watched yet, so a game that draws its scene only through one is not seen -- a per-game limitation, recorded as such).
 //
 // Off unless [DlssNr] NativeDepthFinder is set (checked at the device's first use, since OptiScaler attaches to a D3D11 game
-// later than it does a D3D12 one). When on, the hooks only observe: ClearDepthStencilView, OMSetRenderTargets(AndUnorderedAccessViews),
-// RSSetViewports and the draw calls on the immediate context. Nothing is changed.
+// later than it does a D3D12 one). When on, the hooks observe ClearDepthStencilView, OMSetRenderTargets(AndUnorderedAccessViews),
+// RSSetViewports and the draw calls on the immediate context, and copy the picked buffer into the finder's own textures there
+// (the game's compute bindings it uses for that are put back; nothing else of the game's is changed).
 namespace GenericDepthDx11
 {
 // Hooks the immediate context once a D3D11 device is known; a no-op when the key is off or it has run already.
@@ -30,7 +31,9 @@ GenericDepthSelect::Pick CurrentPick();
 struct Snapshot
 {
     bool valid = false;
-    ID3D11Resource* resource = nullptr; // a plain (non-shared) D3D11 copy; the adapter shares it across to D3D12 itself
+    // A plain (non-shared) D3D11 copy; the adapter shares it across to D3D12 itself. Holds a reference, so the copy outlives
+    // a replacement of it made while the adapter is still using this one.
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
     DXGI_FORMAT typelessFormat = DXGI_FORMAT_UNKNOWN; // the copy's own (typeless) format, for making a shared copy of it
     DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN; // a typed format that reads its depth
     uint32_t width = 0;

@@ -76,7 +76,8 @@ ID3D11DeviceContext* g_context = nullptr; // the immediate context, hooked once
 uint64_t g_contextId = 0;
 
 // A plain (non-shared) D3D11 copy of the picked depth buffer for the frame, always R32_FLOAT (see LinearizeDepth): one context
-// means one copy, unlike the D3D12 finder's several command lists. Recreated when the size changes.
+// means one copy, unlike the D3D12 finder's several command lists. Made again when the size or the device changes, and let go
+// at stand-down.
 ID3D11Texture2D* g_copy = nullptr;
 uint32_t g_copyWidth = 0, g_copyHeight = 0;
 bool g_copyTaken = false; // a copy was recorded for the frame just closed
@@ -114,39 +115,45 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 }
 )HLSL";
 
-ID3D11ComputeShader* g_linearizeCs = nullptr;
-bool g_linearizeFailed = false;
+ID3D11ComputeShader* g_linearizeCs = nullptr; // made on g_copyDevice
+bool g_linearizeFailed = false;               // making it on g_copyDevice failed
+ID3DBlob* g_linearizeCode = nullptr;          // compiled once, for every device
+bool g_compileFailed = false;
 
 ID3D11ComputeShader* LinearizeShader(ID3D11Device* device)
 {
-    if (g_linearizeCs != nullptr || g_linearizeFailed)
+    if (g_linearizeCs != nullptr || g_linearizeFailed || g_compileFailed)
         return g_linearizeCs;
 
-    ID3DBlob* code = nullptr;
-    ID3DBlob* messages = nullptr;
-    const HRESULT hr = D3DCompile(kLinearizeSource, strlen(kLinearizeSource), "DepthLinearize", nullptr, nullptr,
-                                  "CSMain", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &messages);
-
-    if (FAILED(hr))
+    if (g_linearizeCode == nullptr)
     {
-        LOG_ERROR("Depth finder (D3D11): compiling the linearize shader failed: {}",
-                 messages != nullptr ? (const char*) messages->GetBufferPointer() : "no message");
+        ID3DBlob* messages = nullptr;
+        const HRESULT hr = D3DCompile(kLinearizeSource, strlen(kLinearizeSource), "DepthLinearize", nullptr, nullptr,
+                                      "CSMain", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &g_linearizeCode, &messages);
+
+        if (FAILED(hr))
+        {
+            LOG_ERROR("Depth finder (D3D11): compiling the linearize shader failed: {}",
+                      messages != nullptr ? (const char*) messages->GetBufferPointer() : "no message");
+            if (messages != nullptr)
+                messages->Release();
+            SAFE_RELEASE(g_linearizeCode);
+            g_compileFailed = true;
+            return nullptr;
+        }
+
         if (messages != nullptr)
             messages->Release();
-        g_linearizeFailed = true;
-        return nullptr;
     }
 
-    if (messages != nullptr)
-        messages->Release();
-
-    if (FAILED(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_linearizeCs)))
+    if (FAILED(device->CreateComputeShader(g_linearizeCode->GetBufferPointer(), g_linearizeCode->GetBufferSize(), nullptr,
+                                           &g_linearizeCs)))
     {
         LOG_ERROR("Depth finder (D3D11): creating the linearize compute shader failed");
+        g_linearizeCs = nullptr;
         g_linearizeFailed = true;
     }
 
-    code->Release();
     return g_linearizeCs;
 }
 
@@ -159,7 +166,7 @@ void ReleaseCopies()
     SAFE_RELEASE(g_stage);
     SAFE_RELEASE(g_linearizeCs);
     SAFE_RELEASE(g_copyDevice);
-    g_linearizeFailed = false;
+    g_linearizeFailed = false; // the compiled code is kept: only making it on a device is done again
     g_copyTaken = false;
 }
 
@@ -198,11 +205,71 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
     return true;
 }
 
-// Reads `resource` (the picked buffer, in whatever format the game made it) through a copy of it and the linearize shader into
-// the frame's D3D11-side slot, making again what it keeps when the size, format or device changes.
-void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* callerDevice, ID3D11Resource* resource, uint32_t width,
-                  uint32_t height, DXGI_FORMAT format, const char* where)
+// Whether `context` can copy `resource`: they are of the same device, a wrapping layer's proxy of it (Streamline's) counting
+// as it. The answer for the last pair is kept, so the proxy check, which logs, runs once per pair.
+bool SameDevice(ID3D11DeviceContext* context, ID3D11Device* resourceDevice)
 {
+    Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
+    context->GetDevice(&contextDevice);
+
+    if (contextDevice.Get() == resourceDevice)
+        return true;
+
+    static ID3D11Device* lastContextDevice = nullptr;
+    static ID3D11Device* lastResourceDevice = nullptr;
+    static bool lastSame = false;
+
+    if (contextDevice.Get() != lastContextDevice || resourceDevice != lastResourceDevice)
+    {
+        IUnknown* real = nullptr;
+        lastSame = contextDevice != nullptr && Util::CheckForRealObject(__FUNCTION__, contextDevice.Get(), &real) &&
+                   real == resourceDevice;
+        lastContextDevice = contextDevice.Get();
+        lastResourceDevice = resourceDevice;
+
+        if (!lastSame)
+            LOG_WARN("Depth finder (D3D11): the picked buffer is of another device than the context that would copy it; no copy");
+    }
+
+    return lastSame;
+}
+
+// Reads `resource` (the picked buffer, in whatever format the game made it) through a copy of it and, unless it already is one,
+// the linearize shader into the frame's D3D11-side slot, making again what it keeps when the size, format or device changes.
+void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Resource* resource, const char* where)
+{
+    // A deferred context only records: a copy made there runs when the game executes its list, if it does, so none is taken.
+    if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
+        return;
+
+    D3D11_TEXTURE2D_DESC sourceDesc {};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sourceTex;
+
+    if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&sourceTex))))
+        return;
+
+    sourceTex->GetDesc(&sourceDesc);
+    const uint32_t width = sourceDesc.Width;
+    const uint32_t height = sourceDesc.Height;
+    const DXGI_FORMAT format = sourceDesc.Format;
+
+    // A buffer that cannot be copied is not the frame's copy: the copy of an earlier one is not offered for it.
+    auto noCopy = [](const char* why)
+    {
+        {
+            std::lock_guard lock(g_mutex);
+            g_copyTaken = false;
+        }
+
+        static const char* logged = nullptr;
+
+        if (logged != why)
+        {
+            logged = why;
+            LOG_WARN("Depth finder (D3D11): {}; no copy", why);
+        }
+    };
+
     static int calls = 0;
 
     if (calls < 8 || calls % 200 == 0)
@@ -215,41 +282,31 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* callerDevice, ID3D
 
     if (!native::SharedDepthFormats(format, &typeless, &view))
     {
-        static bool loggedFormatFail = false;
-
-        if (!loggedFormatFail)
-        {
-            loggedFormatFail = true;
-            LOG_WARN("Depth finder (D3D11): format {} does not map to a shareable depth format, no copy", (int) format);
-        }
-
+        noCopy("the picked buffer's format does not map to a shareable depth format");
         return;
     }
 
-    // A deferred context only records: a copy made there runs when the game executes its list, if it does, so none is taken.
-    if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
-        return;
-
-    D3D11_TEXTURE2D_DESC sourceDesc {};
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> sourceTex;
-
-    if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&sourceTex))))
-        return;
-
-    sourceTex->GetDesc(&sourceDesc);
-
     // A multisampled buffer would need a resolve.
     if (sourceDesc.SampleDesc.Count > 1)
+    {
+        noCopy("the picked buffer is multisampled");
         return;
+    }
 
     // The device the buffer was made on, not the one the caller holds (that can be a wrapper of it): what is kept between copies
     // is made on it, and made again when the game makes a new one.
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     resource->GetDevice(&device);
-    (void) callerDevice;
 
-    if (device == nullptr)
+    if (device == nullptr || !SameDevice(context, device.Get()))
+    {
+        noCopy("the picked buffer is of another device");
         return;
+    }
+
+    // An R32 depth (D32_FLOAT, R32_TYPELESS: the most common) is already the copy's format family: it is copied straight into
+    // the copy, with no read copy and no pass.
+    const bool direct = typeless == DXGI_FORMAT_R32_TYPELESS;
 
     std::lock_guard lock(g_mutex);
 
@@ -260,9 +317,9 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* callerDevice, ID3D
         g_copyDevice->AddRef();
     }
 
-    ID3D11ComputeShader* shader = LinearizeShader(device.Get());
+    ID3D11ComputeShader* shader = direct ? nullptr : LinearizeShader(device.Get());
 
-    if (shader == nullptr)
+    if (!direct && shader == nullptr)
         return;
 
     if (g_copy == nullptr || g_copyWidth != width || g_copyHeight != height)
@@ -310,6 +367,15 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* callerDevice, ID3D
         }
     }
 
+    // Only the first subresource (the top mip of the first slice) is copied: a whole-resource copy of a buffer with mips or
+    // slices into one with neither would be dropped by the runtime without a word.
+    if (direct)
+    {
+        context->CopySubresourceRegion(g_copy, 0, 0, 0, 0, resource, 0, nullptr);
+        g_copyTaken = true;
+        return;
+    }
+
     // The buffer is most often still bound for depth writes here (a copy is taken before the game moves off it, clears it or
     // presents), and a resource bound for writing cannot also be read: the runtime would quietly bind no read view and the
     // pass would read nothing. It is copied as it is first (a copy may read a bound depth buffer) into a texture of its own
@@ -349,6 +415,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* callerDevice, ID3D
                          (int) typeless);
             }
 
+            g_copyTaken = false;
             return;
         }
 
@@ -357,7 +424,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* callerDevice, ID3D
         g_stageFormat = typeless;
     }
 
-    context->CopyResource(g_stage, resource);
+    context->CopySubresourceRegion(g_stage, 0, 0, 0, 0, resource, 0, nullptr);
 
     // The game's own compute state: this runs in the middle of its frame, so what it had bound at slot 0 is put back after.
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> gameShader;
@@ -402,27 +469,11 @@ void OnBound(ID3D11DeviceContext* context, ID3D11DepthStencilView* view)
     const bool hadDepth = view != nullptr;
     const bool have = hadDepth && Describe(view, &buffer, &resource);
 
-    ID3D11Device* dev = nullptr;
-    context->GetDevice(&dev);
-
     const auto request = g_core.OnDepthBound(g_contextId, hadDepth, have ? &buffer : nullptr);
 
-    if (request.take && dev != nullptr)
-    {
-        ID3D11Resource* snapResource = (ID3D11Resource*) (size_t) request.id;
-        D3D11_TEXTURE2D_DESC desc {};
-        ID3D11Texture2D* tex = nullptr;
+    if (request.take)
+        TakeSnapshot(context, (ID3D11Resource*) (size_t) request.id, "unbind");
 
-        if (SUCCEEDED(snapResource->QueryInterface(IID_PPV_ARGS(&tex))))
-        {
-            tex->GetDesc(&desc);
-            tex->Release();
-            TakeSnapshot(context, dev, snapResource, desc.Width, desc.Height, desc.Format, "unbind");
-        }
-    }
-
-    if (dev != nullptr)
-        dev->Release();
     if (resource != nullptr)
         resource->Release();
 }
@@ -464,16 +515,7 @@ void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D11DeviceContext* This, ID3D11
             const auto request = g_core.OnDepthClear(g_contextId, buffer, Depth);
 
             if (request.take)
-            {
-                ID3D11Device* dev = nullptr;
-                This->GetDevice(&dev);
-
-                if (dev != nullptr)
-                {
-                    TakeSnapshot(This, dev, resource, buffer.width, buffer.height, (DXGI_FORMAT) buffer.format, "clear");
-                    dev->Release();
-                }
-            }
+                TakeSnapshot(This, resource, "clear");
 
             resource->Release();
         }
@@ -657,26 +699,7 @@ void OnPresent(IDXGISwapChain* swapChain)
         const auto request = g_core.FlushForPresent(g_contextId);
 
         if (request.take)
-        {
-            ID3D11Resource* snapResource = (ID3D11Resource*) (size_t) request.id;
-            ID3D11Texture2D* tex = nullptr;
-
-            if (SUCCEEDED(snapResource->QueryInterface(IID_PPV_ARGS(&tex))))
-            {
-                D3D11_TEXTURE2D_DESC texDesc {};
-                tex->GetDesc(&texDesc);
-                tex->Release();
-
-                ID3D11Device* dev = nullptr;
-                g_context->GetDevice(&dev);
-
-                if (dev != nullptr)
-                {
-                    TakeSnapshot(g_context, dev, snapResource, texDesc.Width, texDesc.Height, texDesc.Format, "present");
-                    dev->Release();
-                }
-            }
-        }
+            TakeSnapshot(g_context, (ID3D11Resource*) (size_t) request.id, "present");
     }
 
     g_core.BeginPresent(desc.BufferDesc.Width, desc.BufferDesc.Height);

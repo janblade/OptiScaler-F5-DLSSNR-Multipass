@@ -200,8 +200,11 @@ class DepthFinderCore
         std::atomic<float> viewportWidth { 0.0f }; // its main viewport
         std::atomic<float> lastRealViewport { 0.0f }; // the viewport at its last real draw
         // The processor's time stamp counter at that draw: contexts are folded in no fixed order, and the viewport the buffer
-        // keeps must be the newest real draw's among them, as when each draw set it at once.
+        // keeps must be the newest real draw's among them, as when each draw set it at once. Reading the counter costs more
+        // than the rest of a draw, so only a context that shares its buffer with another takes it (stampDraws, kept by Bind);
+        // one that is alone on its buffer has nothing to be ordered against, and is the newest when it is folded.
         std::atomic<uint64_t> lastRealDrawStamp { 0 };
+        std::atomic<bool> stampDraws { false };
         // The present count at its last draw: the draw path takes no lock, so lastSeen below does not move while a context only
         // draws, and a context still in use must not look idle to RetireIdleContexts.
         std::atomic<uint64_t> lastDrawPresent { 0 };
@@ -226,6 +229,8 @@ class DepthFinderCore
     void FoldBuffer(Stats& stats);
     // Under _mutex. Moves the context to another buffer (or none), keeping both buffers' `bound` right.
     void Bind(ContextState& context, Stats* stats);
+    // Under _mutex. Tells the contexts bound to the buffer whether they must stamp their draws (two or more of them do).
+    static void UpdateStamping(Stats& stats);
     // Under _mutex, from BeginPresent. Contexts not seen for a long time (lists a game made once and let go) leave the map,
     // and are freed a while later.
     void RetireIdleContexts();

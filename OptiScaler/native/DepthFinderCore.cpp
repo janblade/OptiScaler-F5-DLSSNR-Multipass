@@ -114,12 +114,26 @@ void DepthFinderCore::Bind(ContextState& context, Stats* stats)
             *found = bound.back();
             bound.pop_back();
         }
+
+        UpdateStamping(*context.stats);
     }
 
     context.stats = stats;
+    context.stampDraws.store(false, std::memory_order_relaxed);
 
     if (stats != nullptr)
+    {
         stats->bound.push_back(&context);
+        UpdateStamping(*stats);
+    }
+}
+
+void DepthFinderCore::UpdateStamping(Stats& stats)
+{
+    const bool shared = stats.bound.size() > 1;
+
+    for (ContextState* context : stats.bound)
+        context->stampDraws.store(shared, std::memory_order_relaxed);
 }
 
 void DepthFinderCore::FoldBuffer(Stats& stats)
@@ -185,10 +199,14 @@ void DepthFinderCore::Fold(ContextState& context)
             s->drawcallsIndirect += addIndirect;
         }
 
-        // The viewport is the newest real draw's among every context that drew into the buffer, whichever folds first.
+        // The viewport is the newest real draw's among every context that drew into the buffer, whichever folds first. A
+        // context alone on the buffer stamped nothing; every other context that drew into it was folded when it left, so what
+        // this one drew since is the newest.
         if (realDraws != context.foldedRealDraws)
         {
-            const uint64_t stamp = context.lastRealDrawStamp.load(std::memory_order_relaxed);
+            const uint64_t stamp = context.stampDraws.load(std::memory_order_relaxed)
+                                       ? context.lastRealDrawStamp.load(std::memory_order_relaxed)
+                                       : __rdtsc();
 
             if (stamp >= stats->current.viewportStamp)
             {
@@ -242,7 +260,9 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
         {
             Bump(state.realDraws, 1);
             state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
+
+            if (state.stampDraws.load(std::memory_order_relaxed))
+                state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
         }
     };
 
@@ -270,7 +290,9 @@ void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
         Bump(state.indirectCalls, maxCount);
         Bump(state.realDraws, 1);
         state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
+
+        if (state.stampDraws.load(std::memory_order_relaxed))
+            state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
     };
 
     if (_sharedContexts)

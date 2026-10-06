@@ -575,6 +575,27 @@ int main()
         core.OnContextEnd(301);
         core.BeginPresent(W, H);
         core.EndPresent(W, H, kWarmup);
+
+        // The mirror's list leaves the buffer, and the one left on it (alone now) draws at 2560 after that: those are the newest
+        // draws, whatever stamps the other list's draws carried.
+        core.OnDepthBound(300, true, &kScene);
+        core.OnDepthBound(301, true, &kScene);
+        core.OnViewport(301, 512.0f);
+        for (int i = 0; i < 10; ++i)
+            core.OnDraw(301, 100, 1);
+        core.SetSnapshotsWanted(false); // so the stretch is not taken at the unbind, and the viewport held stays the mirror's
+        core.OnDepthBound(301, false, nullptr);
+        core.SetSnapshotsWanted(true);
+
+        core.OnViewport(300, 2560.0f);
+        for (int i = 0; i < 200; ++i)
+            core.OnDraw(300, 6000, 1);
+
+        const auto alone = core.OnDepthClear(300, kScene, 0.0f);
+        CHECK(alone.take && alone.id == 0xA && std::string(alone.where) == "clear");
+        core.OnContextEnd(300);
+        core.BeginPresent(W, H);
+        core.EndPresent(W, H, kWarmup);
     }
 
     // An adapter whose one context id is drawn on from several threads (D3D11's deferred contexts go through the immediate

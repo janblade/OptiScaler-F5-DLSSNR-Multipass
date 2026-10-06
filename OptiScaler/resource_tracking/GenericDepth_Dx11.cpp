@@ -82,7 +82,12 @@ uint32_t g_copyWidth = 0, g_copyHeight = 0;
 bool g_copyTaken = false; // a copy was recorded for the frame just closed
 // The view the linearize pass writes through, kept with g_copy (made again when g_copy is).
 ID3D11UnorderedAccessView* g_copyUav = nullptr;
-ID3D11Device* g_copyDevice = nullptr; // what g_copy, g_copyUav and the linearize shader were made on (held alive by g_copy)
+// The picked buffer copied as it is, in its own format family, and the view the linearize pass reads it through.
+ID3D11Texture2D* g_stage = nullptr;
+ID3D11ShaderResourceView* g_stageSrv = nullptr;
+uint32_t g_stageWidth = 0, g_stageHeight = 0;
+DXGI_FORMAT g_stageFormat = DXGI_FORMAT_UNKNOWN;
+ID3D11Device* g_copyDevice = nullptr; // what all of the above and the linearize shader were made on (a reference is held)
 bool g_installed = false;
 bool g_installFailed = false;
 
@@ -145,6 +150,19 @@ ID3D11ComputeShader* LinearizeShader(ID3D11Device* device)
     return g_linearizeCs;
 }
 
+// Under g_mutex. Lets go of everything kept between copies, and of the device it was made on.
+void ReleaseCopies()
+{
+    SAFE_RELEASE(g_copyUav);
+    SAFE_RELEASE(g_copy);
+    SAFE_RELEASE(g_stageSrv);
+    SAFE_RELEASE(g_stage);
+    SAFE_RELEASE(g_linearizeCs);
+    SAFE_RELEASE(g_copyDevice);
+    g_linearizeFailed = false;
+    g_copyTaken = false;
+}
+
 // The depth buffer a depth-stencil view points at, as a DepthBuffer (plain data for the core). `*outResource` gets an
 // addref'd ID3D11Resource the caller must Release (the copy, if taken, is made from it).
 bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Resource** outResource)
@@ -180,9 +198,9 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
     return true;
 }
 
-// Reads `resource` (the picked buffer, in whatever format the game made it) through the linearize shader into the frame's
-// D3D11-side slot, recreating it if the size changed.
-void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Resource* resource, uint32_t width,
+// Reads `resource` (the picked buffer, in whatever format the game made it) through a copy of it and the linearize shader into
+// the frame's D3D11-side slot, making again what it keeps when the size, format or device changes.
+void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* callerDevice, ID3D11Resource* resource, uint32_t width,
                   uint32_t height, DXGI_FORMAT format, const char* where)
 {
     static int calls = 0;
@@ -208,21 +226,41 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         return;
     }
 
+    // A deferred context only records: a copy made there runs when the game executes its list, if it does, so none is taken.
+    if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
+        return;
+
+    D3D11_TEXTURE2D_DESC sourceDesc {};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sourceTex;
+
+    if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&sourceTex))))
+        return;
+
+    sourceTex->GetDesc(&sourceDesc);
+
+    // A multisampled buffer would need a resolve.
+    if (sourceDesc.SampleDesc.Count > 1)
+        return;
+
+    // The device the buffer was made on, not the one the caller holds (that can be a wrapper of it): what is kept between copies
+    // is made on it, and made again when the game makes a new one.
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    resource->GetDevice(&device);
+    (void) callerDevice;
+
+    if (device == nullptr)
+        return;
+
     std::lock_guard lock(g_mutex);
 
-    // Everything kept between copies belongs to the device it was made on: a game that makes its device again gets it all made
-    // again on the new one.
-    if (g_copyDevice != device)
+    if (g_copyDevice != device.Get())
     {
-        SAFE_RELEASE(g_copyUav);
-        SAFE_RELEASE(g_copy);
-        SAFE_RELEASE(g_linearizeCs);
-        g_linearizeFailed = false;
-        g_copyTaken = false;
-        g_copyDevice = device;
+        ReleaseCopies();
+        g_copyDevice = device.Get();
+        g_copyDevice->AddRef();
     }
 
-    ID3D11ComputeShader* shader = LinearizeShader(device);
+    ID3D11ComputeShader* shader = LinearizeShader(device.Get());
 
     if (shader == nullptr)
         return;
@@ -257,31 +295,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
 
         g_copyWidth = width;
         g_copyHeight = height;
-    }
 
-    // The read view is made for each copy and let go after it: kept, it would hold the game's depth buffer alive after the game
-    // let go of it (a resolution change), and a copy or two a frame is cheap.
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
-    srvDesc.Format = view;
-    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-
-    if (FAILED(device->CreateShaderResourceView(resource, &srvDesc, &srv)))
-    {
-        static bool loggedSrvFail = false;
-
-        if (!loggedSrvFail)
-        {
-            loggedSrvFail = true;
-            LOG_WARN("Depth finder (D3D11): creating the read view (format {}) on the picked buffer failed", (int) view);
-        }
-
-        return;
-    }
-
-    if (g_copyUav == nullptr)
-    {
         D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc {};
         uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
         uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
@@ -290,45 +304,60 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
         if (FAILED(uavResult))
         {
             g_copyUav = nullptr;
-            static bool loggedUavFail = false;
-
-            if (!loggedUavFail)
-            {
-                loggedUavFail = true;
-                LOG_WARN("Depth finder (D3D11): creating the write view on the copy texture failed: {:X}",
-                         (UINT) uavResult);
-            }
-
+            SAFE_RELEASE(g_copy);
+            LOG_WARN("Depth finder (D3D11): creating the write view on the copy texture failed: {:X}", (UINT) uavResult);
             return;
         }
     }
 
     // The buffer is most often still bound for depth writes here (a copy is taken before the game moves off it, clears it or
-    // presents): a resource bound for writing cannot be read at the same time, and the runtime would quietly bind no read view
-    // at all, so the pass would copy nothing. The depth view comes off for the pass and goes back after, through the original
-    // functions so the finder does not see it as the game's.
-    ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] {};
-    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> gameDepth;
-    context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &gameDepth);
-
-    bool depthOff = false;
-    UINT targetCount = 0;
-
-    if (gameDepth != nullptr)
+    // presents), and a resource bound for writing cannot also be read: the runtime would quietly bind no read view and the
+    // pass would read nothing. It is copied as it is first (a copy may read a bound depth buffer) into a texture of its own
+    // format family that can be read, so the game's bindings are never touched. That also reads a buffer made with a typed
+    // depth format, which no read view can be made on.
+    if (g_stage == nullptr || g_stageWidth != width || g_stageHeight != height || g_stageFormat != typeless)
     {
-        Microsoft::WRL::ComPtr<ID3D11Resource> bound;
-        gameDepth->GetResource(&bound);
-        depthOff = bound.Get() == resource;
+        SAFE_RELEASE(g_stageSrv);
+        SAFE_RELEASE(g_stage);
+
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = typeless;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
+        srvDesc.Format = view;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &g_stage)) ||
+            FAILED(device->CreateShaderResourceView(g_stage, &srvDesc, &g_stageSrv)))
+        {
+            SAFE_RELEASE(g_stageSrv);
+            SAFE_RELEASE(g_stage);
+            static bool loggedStageFail = false;
+
+            if (!loggedStageFail)
+            {
+                loggedStageFail = true;
+                LOG_WARN("Depth finder (D3D11): making the {}x{} read copy (format {}) failed", width, height,
+                         (int) typeless);
+            }
+
+            return;
+        }
+
+        g_stageWidth = width;
+        g_stageHeight = height;
+        g_stageFormat = typeless;
     }
 
-    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
-        if (targets[i] != nullptr)
-            targetCount = i + 1;
-
-    // The pixel shader's UAVs stay as they are.
-    if (depthOff)
-        o_OMSetRenderTargetsAndUAV(context, targetCount, targets, nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr,
-                                   nullptr);
+    context->CopyResource(g_stage, resource);
 
     // The game's own compute state: this runs in the middle of its frame, so what it had bound at slot 0 is put back after.
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> gameShader;
@@ -344,7 +373,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
     const UINT keepCount = (UINT) -1;
 
     context->CSSetShader(shader, nullptr, 0);
-    context->CSSetShaderResources(0, 1, srv.GetAddressOf());
+    context->CSSetShaderResources(0, 1, &g_stageSrv);
     context->CSSetUnorderedAccessViews(0, 1, &g_copyUav, &keepCount);
     context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 
@@ -354,13 +383,6 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Device* device, ID3D11Reso
 
     for (UINT i = 0; i < gameInstanceCount; ++i)
         SAFE_RELEASE(gameInstances[i]);
-
-    if (depthOff)
-        o_OMSetRenderTargetsAndUAV(context, targetCount, targets, gameDepth.Get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
-                                   nullptr, nullptr);
-
-    for (auto*& target : targets)
-        SAFE_RELEASE(target);
 
     g_copyTaken = true;
 
@@ -693,10 +715,12 @@ void OnPresent(IDXGISwapChain* swapChain)
         noCopyStreak = 0;
     }
 
+    // Stood down: nothing is copied while the game calls an upscaler, so what the copies need (and the device it was made on)
+    // is let go until the finder wakes.
     if (stoodDown)
     {
         std::lock_guard lock(g_mutex);
-        g_copyTaken = false;
+        ReleaseCopies();
     }
 }
 

@@ -637,7 +637,7 @@ int main()
             core.OnContextEnd(1000 + list);
         }
 
-        for (int frame = 0; frame < 40; ++frame)
+        for (int frame = 0; frame < 650; ++frame)
             SingleContextFrame(core, ignored);
 
         CHECK(core.CurrentPick().valid && core.CurrentPick().id == 0xA);
@@ -664,7 +664,7 @@ int main()
         core.OnDepthBound(520, true, &kScene);
         core.OnViewport(520, (float) W);
 
-        for (int frame = 0; frame < 40; ++frame)
+        for (int frame = 0; frame < 650; ++frame)
         {
             core.OnDraw(500, 100, 1);
             core.OnDraw(520, 6000, 1);

@@ -130,8 +130,12 @@ void DepthFinderCore::FoldBuffer(Stats& stats)
 
 void DepthFinderCore::RetireIdleContexts()
 {
-    // Free what was retired long enough ago that no thread can still be inside a draw on it.
-    std::erase_if(_retired, [this](const auto& retired) { return _presents - retired.first > kRetireGrace; });
+    // Free what was retired long enough ago that no thread can still be inside a draw on it: enough presents and enough time.
+    const auto now = std::chrono::steady_clock::now();
+
+    std::erase_if(_retired,
+                  [this, now](const RetiredContext& retired)
+                  { return _presents - retired.present > kRetireGrace && now - retired.when >= kRetireGraceTime; });
 
     bool any = false;
 
@@ -149,7 +153,7 @@ void DepthFinderCore::RetireIdleContexts()
         _retiredIndirect += state.indirectEvents.load(std::memory_order_relaxed);
 
         auto next = std::next(it);
-        _retired.emplace_back(_presents, _contexts.extract(it));
+        _retired.push_back({ _presents, now, _contexts.extract(it) });
         it = next;
         any = true;
     }

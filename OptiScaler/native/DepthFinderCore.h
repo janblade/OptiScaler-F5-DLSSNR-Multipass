@@ -21,6 +21,7 @@
 #include "../resource_tracking/GenericDepth_Select.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -265,9 +266,17 @@ class DepthFinderCore
     bool _sharedContexts = false;
 
     std::unordered_map<uint64_t, ContextState> _contexts; // node-stable: see ContextState
-    // Contexts taken out of the map, with the present count they left at. A thread's cache can still point at one until it
-    // sees the new _cacheEpoch, which it does on its next draw; the node is freed only kRetireGrace presents later.
-    std::vector<std::pair<uint64_t, std::unordered_map<uint64_t, ContextState>::node_type>> _retired;
+    // Contexts taken out of the map, with the present count and the time they left at. A thread's cache can still point at one
+    // until it sees the new _cacheEpoch, which it does on its next draw (a thread that records for a while without drawing on
+    // it, or one that is slow to be scheduled, takes longer); the node is freed only kRetireGrace presents and kRetireGraceTime
+    // later, so a game that presents very fast does not shorten the wait.
+    struct RetiredContext
+    {
+        uint64_t present = 0;
+        std::chrono::steady_clock::time_point when;
+        std::unordered_map<uint64_t, ContextState>::node_type node;
+    };
+    std::vector<RetiredContext> _retired;
     uint64_t _retiredDraws = 0;    // the retired contexts' share of the log's counts
     uint64_t _retiredIndirect = 0;
     std::unordered_map<uint64_t, Stats> _stats; // node-stable: _contexts holds pointers into it
@@ -286,6 +295,7 @@ class DepthFinderCore
     // A context unseen for this many presents is retired (looked at every kLogEveryFrames), and freed kRetireGrace later.
     static constexpr uint64_t kRetireAfter = 600;
     static constexpr uint64_t kRetireGrace = 120;
+    static constexpr std::chrono::seconds kRetireGraceTime { 2 };
     // The finder stands down while the game is calling an upscaler and wakes again once it has stopped for this many presents
     // (a game's settings menu turning its upscaler off: Cyberpunk creates its Ray Reconstruction feature at startup, long
     // before anyone reaches the setting). About two seconds at 60 fps.

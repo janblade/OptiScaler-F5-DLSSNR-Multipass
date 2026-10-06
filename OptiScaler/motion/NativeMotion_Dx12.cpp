@@ -354,6 +354,13 @@ void DrawAdvancedUi()
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", "Finds the picture's gradients once from the current frame and stops early. Faster, but\n"
                                     "less exact on thin lines and grain; switch it on and off to compare.");
+        ImGui::Checkbox("Find a hard cut on its own frame##flowscene", &tune.sceneCutDetector);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s", "Compares the picture's brightness histograms with the last frame's on the GPU. On a cut\n"
+                      "the flow is zero and every pixel is distrusted on that very frame, instead of a few\n"
+                      "frames later. A fade or an exposure change is not a cut.");
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
                            ImGuiSliderFlags_Logarithmic);

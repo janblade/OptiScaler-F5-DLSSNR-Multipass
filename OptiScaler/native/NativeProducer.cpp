@@ -166,6 +166,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         in.fullPerFlow = (float) input.width / (float) _flow->FlowWidth();
         in.lumaNow = _flow->LumaOfLastFrame();
         in.lumaBefore = _flow->LumaOfFrameBefore();
+        in.sceneCut = _flow->SceneCutFlag();
 
         if (input.depthCount > 0 && input.depthView != DXGI_FORMAT_UNKNOWN)
         {

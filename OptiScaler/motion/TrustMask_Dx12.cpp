@@ -31,7 +31,7 @@ cbuffer P : register(b0)
     uint depthCount;
     uint debugView;      // 0 the mask, 1 depth, 2 revealed, 3 flow consistency, 4 luma, 5 out of the picture (no memory)
     uint depthBoth;      // this frame and the one before both had depth: the depth checks have two real depths to compare
-    uint pad;
+    uint sceneCutEnabled; // the scene-cut flag (CutFlag, t7) is there to be read
 };
 
 SamplerState Linear : register(s0);
@@ -43,6 +43,7 @@ Texture2D<float>  DepthBefore : register(t3);
 Texture2D<float>  LumaNow : register(t4);
 Texture2D<float>  LumaBefore : register(t5);
 Texture2D<float>  MaskBefore : register(t6);
+Texture2D<uint>   CutFlag : register(t7);
 RWTexture2D<float>  OutFloat : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
 RWByteAddressBuffer Counter : register(u1);
@@ -92,7 +93,11 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     bool inside = id.x < size.x && id.y < size.y;
     float mask = 1.0;
 
-    if (inside && hasHistory != 0)
+    // The flow found a hard cut on this very frame: what the previous frame holds is another scene, so every pixel stays
+    // distrusted (the history is not remembered into it either: the mask is one everywhere, as on a first frame).
+    const bool cut = sceneCutEnabled != 0 && CutFlag.Load(int3(0, 0, 0)) != 0;
+
+    if (inside && hasHistory != 0 && !cut)
     {
         int2 p = int2(id.xy);
         float2 flow = Flow.Load(int3(p, 0)).xy;       // to the previous frame, in picture pixels
@@ -620,6 +625,7 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     constants.debugView = (uint32_t) _settings.debugView;
     // Depth coming or going compares a real depth with the all-far proxy, which would distrust every pixel.
     constants.depthBoth = in.depthCount > 0 && _hadDepth ? 1 : 0;
+    constants.sceneCutEnabled = in.sceneCut != nullptr ? 1 : 0;
 
     // 1. the depth proxy at the flow's size
     {
@@ -648,15 +654,13 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
 
     // 3. the mask
     {
-        ID3D12Resource* const srv[8] = { in.flow,
-                                         _flowBefore.resource,
-                                         _depth[write].resource,
-                                         _depth[_depthIndex].resource,
-                                         in.lumaNow,
-                                         in.lumaBefore,
-                                         _mask[_maskIndex].resource };
-        const DXGI_FORMAT formats[8] = { kFlowFormat, kFlowFormat, kDepthFormat, kDepthFormat,
-                                         DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, kMaskFormat };
+        ID3D12Resource* const srv[8] = {
+            in.flow,    _flowBefore.resource, _depth[write].resource,     _depth[_depthIndex].resource,
+            in.lumaNow, in.lumaBefore,        _mask[_maskIndex].resource, in.sceneCut
+        };
+        const DXGI_FORMAT formats[8] = { kFlowFormat,  kFlowFormat,           kDepthFormat,
+                                         kDepthFormat, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                                         kMaskFormat,  DXGI_FORMAT_R32_UINT };
         Pass(list, _trust, srv, formats, _mask[maskWrite], kMaskFormat, groupsX, groupsY, constants);
     }
 

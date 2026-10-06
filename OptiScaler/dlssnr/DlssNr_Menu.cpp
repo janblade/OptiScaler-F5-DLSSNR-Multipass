@@ -8,6 +8,7 @@
 
 #include <Config.h>
 #include <State.h>
+#include <Util.h>
 #include <menu/menu_common.h>
 #include <menu/MenuPages.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
@@ -27,6 +28,7 @@
 #include "DlssNr_ColourEncodingStatus.h"
 #include "DlssNr_GameDefaults.h"
 #include "DlssNr_NativeMode.h"
+#include "DlssNr_LutStatus.h"
 
 #include <string>
 #include <vector>
@@ -35,6 +37,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
+#include <filesystem>
 
 namespace DlssNr
 {
@@ -67,6 +71,43 @@ static void StatusSlotEnd(float begin, int lines)
 
     if (gap > 0.5f)
         ImGui::Dummy(ImVec2(0.0f, gap));
+}
+
+// `*.cube` files in `LUTs` inside the OptiScaler folder (MainDllPath: `OptiScaler` beside the game exe, or
+// [Libraries] OptiDllPath -- where the bundled streamline/plugins folders live too), for the LUT combo below.
+// Scanned once (first menu render) and on demand (the Rescan button) rather than every frame -- a directory
+// listing is not worth paying for on every one of a menu's many redraws, and the folder only changes when the
+// user drops a new file in.
+static std::filesystem::path LutFolder()
+{
+    return std::filesystem::path(Config::Instance()->MainDllPath.value_or(Util::DllPath().parent_path().wstring())) /
+           L"LUTs";
+}
+
+static std::vector<std::filesystem::path> ScanLutFolder()
+{
+    std::vector<std::filesystem::path> found;
+    std::error_code ec;
+    const std::filesystem::path lutsDir = LutFolder();
+
+    if (!std::filesystem::exists(lutsDir, ec) || ec)
+        return found;
+
+    for (const auto& entry : std::filesystem::directory_iterator(lutsDir, ec))
+    {
+        if (ec)
+            break;
+        if (!entry.is_regular_file())
+            continue;
+
+        std::wstring ext = entry.path().extension().wstring();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return std::towlower(c); });
+        if (ext == L".cube")
+            found.push_back(entry.path());
+    }
+
+    std::sort(found.begin(), found.end());
+    return found;
 }
 
 // Trim multiplies the white point, so a larger Trim darkens the picture NR is shown. The menu shows it in stops
@@ -2142,6 +2183,94 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
     ImGui::Spacing();
 }
 
+// A 3D LUT (.cube) graded onto the NR input image before the model sees it (dlssnr-lut-apply epic,
+// Story 4). Scanned from the LUTs folder inside the OptiScaler folder; LutFile also accepts any path typed
+// into the ini directly, so the combo's preview shows the current selection's filename even when it
+// is not one of the scanned entries.
+static void RenderLutSection(Config* config)
+{
+    static std::vector<std::filesystem::path> lutFiles = ScanLutFolder();
+
+    const std::string current = config->DlssNrLutFile.value_or_default();
+    const std::string preview = current.empty() ? "(none)" : std::filesystem::path(current).filename().string();
+
+    if (ImGui::BeginCombo("LUT", preview.c_str()))
+    {
+        const bool noneSelected = current.empty();
+        if (ImGui::Selectable("(none)", noneSelected))
+            config->DlssNrLutFile = std::string();
+        if (noneSelected)
+            ImGui::SetItemDefaultFocus();
+
+        for (const auto& path : lutFiles)
+        {
+            const std::string pathStr = path.string();
+            const bool selected = pathStr == current;
+            if (ImGui::Selectable(path.filename().string().c_str(), selected))
+                config->DlssNrLutFile = pathStr;
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Rescan##lut"))
+        lutFiles = ScanLutFolder();
+
+    HelpMarker("A 3D LUT (.cube file -- Adobe/DaVinci/ReShade format) graded onto the NR input image "
+               "before the model ever sees it. Drop files into OptiScaler\\LUTs (the OptiScaler folder "
+               "beside the game's exe) and press Rescan to list them here, or set LutFile in the ini to "
+               "any path directly.\nThis "
+               "grades the image NR works from, not the final picture -- a strong or unusual grade can "
+               "affect auto-exposure, skin-tone masking and detail reuse the same way an unusual game "
+               "colour grade would.");
+
+    if (!current.empty())
+    {
+        float strength = config->DlssNrLutStrength.value_or_default();
+        if (ImGui::SliderFloat("LUT strength", &strength, 0.0f, 1.0f, "%.2f"))
+            config->DlssNrLutStrength = strength;
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##lutstrength"))
+            config->DlssNrLutStrength = 1.0f;
+
+        HelpMarker("How much of the LUT's grade reaches the image. 0 = no effect, 1 = the full grade.");
+    }
+
+    const auto lutStatus = DlssNr::ReadLutStatus();
+    if (ImGui::TreeNode("Status##lut"))
+    {
+        const float lutSlot = StatusSlotBegin();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        if (!lutStatus.seen)
+            ImGui::TextWrapped("Waiting for a frame.");
+        else if (!lutStatus.wanted)
+            ImGui::TextWrapped("No LUT loaded.");
+        else if (lutStatus.loaded)
+            ImGui::TextWrapped("Loaded: %s (%d^3)",
+                               std::filesystem::path(lutStatus.loadedPath).filename().string().c_str(), lutStatus.size);
+        else
+            ImGui::TextWrapped("No LUT loaded.");
+        ImGui::PopStyleColor();
+
+        if (lutStatus.failed)
+        {
+            // Wrapped: a parse error can be longer than the menu is wide. A failed attempt does not
+            // necessarily mean nothing is loaded -- a working LUT stays active if a later, different
+            // path fails (DlssNr_Lut.h's documented contract) -- so this is shown alongside, not
+            // instead of, the line above.
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+            ImGui::TextWrapped("%s: %s", std::filesystem::path(lutStatus.attemptedPath).filename().string().c_str(),
+                               lutStatus.error.c_str());
+            ImGui::PopStyleColor();
+        }
+        StatusSlotEnd(lutSlot, 5);
+        ImGui::TreePop();
+    }
+}
+
 // NR Input.
 static void RenderInputPage(Config* config, float menuResScale, const NrCommon& nr)
 {
@@ -2235,6 +2364,8 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
         HelpMarker("Filter used to reduce NR output when Model resolution exceeds 100%.\nSharper filters may introduce ringing around edges.");
     }
+
+    RenderLutSection(config);
 
     ImGui::PopItemWidth();
 

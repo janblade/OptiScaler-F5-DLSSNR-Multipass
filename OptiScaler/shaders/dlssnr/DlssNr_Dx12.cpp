@@ -25,6 +25,8 @@
 #include "DlssNr_AutoTrimDefault.h"
 #include "DlssNr_ColourEncoding.h"
 #include <dlssnr/DlssNr_ColourEncodingStatus.h>
+#include <dlssnr/DlssNr_LutPack.h>
+#include <dlssnr/DlssNr_LutStatus.h>
 #include "DlssNr_FollowGame.h"
 #include "DlssNr_ExposureCalibrate.h"
 #include "DlssNr_ExposureCalibrate_Run.h"
@@ -53,6 +55,7 @@
 #include "precompile/dlssnr_detail_stats_Shader.h"
 #include "precompile/dlssnr_detail_reuse_Shader.h"
 #include "precompile/dlssnr_exposure_adapt_Shader.h"
+#include "precompile/dlssnr_lut_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 #include "../sgsr1/SGSR1_Dx12.h"
 
@@ -278,6 +281,13 @@ struct NrState
     // Compact origin-zero pre-SR image, only needed when Color has allocation padding. All codec,
     // hold and capture paths then see the real raster. UAV at rest, retired with the scratch set.
     ID3D12Resource* activeColor = nullptr;
+
+    // LUT-apply epic (dlssnr-lut-apply), Story 2: the LUT pass's graded copy of
+    // `target`, same size/format, only allocated while a LUT is actually loaded. UAV at rest, like
+    // activeColor -- the graded result is copied back onto `target` itself (DlssNr_Dx12::DispatchLut's
+    // caller), so every later stage reads the same resource it always did with no extra indirection.
+    ID3D12Resource* lutScratch = nullptr;
+    bool lutScratchFailed = false;
 
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;
@@ -964,13 +974,14 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
     }
 
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.passScratch, &g_nr.passClampScratch, &g_nr.passClampScratch2,
-           &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall, &g_nr.outputNative, &g_nr.activeColor })
+         { &g_nr.output, &g_nr.passScratch, &g_nr.passClampScratch, &g_nr.passClampScratch2, &g_nr.colorCopy,
+           &g_nr.hdrCopy, &g_nr.colorSmall, &g_nr.outputNative, &g_nr.activeColor, &g_nr.lutScratch })
         ParkNrResource(*r);
 
     g_nr.passScratchFailed = false;
     g_nr.passClampScratchFailed = false;
     g_nr.passClampScratch2Failed = false;
+    g_nr.lutScratchFailed = false;
 
     g_nr.reset = true;
 }
@@ -2190,12 +2201,275 @@ DlssNr_Dx12::~DlssNr_Dx12()
             buffer = nullptr;
         }
     }
+
+    if (_lutPipelineState)
+        _lutPipelineState->Release();
+    if (_lutRootSignature)
+        _lutRootSignature->Release();
+    if (_lutTexture)
+        _lutTexture->Release();
+    for (auto& buffer : _lutConstantBuffers)
+    {
+        if (buffer != nullptr)
+        {
+            buffer->Release();
+            buffer = nullptr;
+        }
+    }
+}
+
+bool DlssNr_Dx12::LutPipelineReady()
+{
+    if (_lutPipelineState != nullptr || _lutPipelineFailed || !_init)
+        return _lutPipelineState != nullptr;
+
+    // Its own root signature: t0 input, t1 the LUT as a 3D texture, u0 output, b0 constants, plus a static
+    // linear-clamp sampler at s0 (the same filter/address choice as this class's own sampler, just not that
+    // root signature: this is the first pass here to sample a 3D texture, and folding it into the shared
+    // table would mean touching every other Dispatch* call site's stand-in array for a slot only this
+    // shader reads).
+    D3D12_STATIC_SAMPLER_DESC sampler {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.RegisterSpace = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    CD3DX12_DESCRIPTOR_RANGE1 ranges[3] = {
+        CD3DX12_DESCRIPTOR_RANGE1(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0), // t0, t1
+        CD3DX12_DESCRIPTOR_RANGE1(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0), // u0
+        CD3DX12_DESCRIPTOR_RANGE1(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0), // b0
+    };
+
+    CD3DX12_ROOT_PARAMETER1 rootParameter {};
+    rootParameter.InitAsDescriptorTable(_countof(ranges), ranges);
+
+    CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSigDesc {};
+    rootSigDesc.Init_1_1(1, &rootParameter, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+    Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+    HRESULT hr = D3D12SerializeVersionedRootSignature(&rootSigDesc, &signatureBlob, &errorBlob);
+    if (SUCCEEDED(hr))
+        hr = _device->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(),
+                                          IID_PPV_ARGS(&_lutRootSignature));
+
+    if (FAILED(hr) || _lutRootSignature == nullptr)
+    {
+        _lutPipelineFailed = true;
+        LOG_WARN("DLSS-NR: the LUT pass's root signature could not be built; LutFile is ignored");
+        return false;
+    }
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc {};
+    psoDesc.pRootSignature = _lutRootSignature;
+    psoDesc.CS = CD3DX12_SHADER_BYTECODE(dlssnr_lut_cso, sizeof(dlssnr_lut_cso));
+    hr = _device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&_lutPipelineState));
+
+    if (FAILED(hr) || _lutPipelineState == nullptr)
+    {
+        _lutPipelineFailed = true;
+        LOG_WARN("DLSS-NR: the LUT pass could not be built; LutFile is ignored");
+        return false;
+    }
+
+    for (uint32_t i = 0; i < kLutHeapCount; ++i)
+    {
+        if (!_lutHeaps[i].Initialize(_device, 2, 1, 1)) // 2 SRV (t0, t1), 1 UAV (u0), 1 CBV (b0)
+        {
+            _lutPipelineFailed = true;
+            LOG_WARN("DLSS-NR: the LUT pass's descriptor heaps could not be built; LutFile is ignored");
+            return false;
+        }
+
+        const D3D12_RESOURCE_DESC cbDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(DlssNrLutConstants));
+        const auto cbHeapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+        if (FAILED(_device->CreateCommittedResource(&cbHeapProps, D3D12_HEAP_FLAG_NONE, &cbDesc,
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                    IID_PPV_ARGS(&_lutConstantBuffers[i]))))
+        {
+            _lutPipelineFailed = true;
+            LOG_WARN("DLSS-NR: the LUT pass's constant buffers could not be built; LutFile is ignored");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void DlssNr_Dx12::ReleaseLutTexture()
+{
+    if (_lutTexture != nullptr)
+        ParkNrResource(_lutTexture);
+    _lutTextureSize = 0;
+    _lutTextureSourcePath.clear();
+}
+
+bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
+{
+    if (!_lutState.Loaded() || InCmdList == nullptr || _device == nullptr)
+        return false;
+
+    const int size = _lutState.lut.size;
+
+    // Keyed on the loaded path, not the lattice size: two different .cube files sharing a size (17/33/65
+    // are near-universal) must not read as "nothing changed" just because neither resized the texture --
+    // that was the bug (Review Pass, 2026-10-04): switching between two same-size LUTs silently kept
+    // sampling whichever uploaded first.
+    if (_lutTexture != nullptr && _lutTextureSize == size && _lutTextureSourcePath == _lutState.loadedPath)
+        return true; // already uploaded, and it is still this exact file
+
+    if (_lutTexture != nullptr)
+        ParkNrResource(_lutTexture);
+    _lutTextureSize = 0;
+    _lutTextureSourcePath.clear();
+
+    D3D12_HEAP_PROPERTIES heapProps {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC texDesc {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    texDesc.Width = (UINT64) size;
+    texDesc.Height = (UINT) size;
+    texDesc.DepthOrArraySize = (UINT16) size;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    HRESULT hr = _device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&_lutTexture));
+    if (FAILED(hr) || _lutTexture == nullptr)
+    {
+        LOG_ERROR("DLSS-NR: the LUT texture could not be allocated ({0}x{0}x{0})", size);
+        return false;
+    }
+
+    // Pack the parsed lattice (red-fastest, matching .cube's own order, which is already x-fastest-then-y-
+    // then-z -- exactly a 3D texture's own row-major layout) into half4, honouring the destination's row
+    // pitch -- GetCopyableFootprints is the only correct source for it, rather than assuming size*8 bytes is
+    // already 256-byte aligned.
+    UINT64 totalBytes = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    _device->GetCopyableFootprints(&texDesc, 0, 1, 0, &footprint, nullptr, nullptr, &totalBytes);
+
+    D3D12_HEAP_PROPERTIES uploadHeapProps {};
+    uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    const D3D12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(totalBytes);
+
+    ID3D12Resource* uploadBuffer = nullptr;
+    hr = _device->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+                                          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
+    if (FAILED(hr) || uploadBuffer == nullptr)
+    {
+        LOG_ERROR("DLSS-NR: the LUT texture's upload buffer could not be allocated");
+        ParkNrResource(_lutTexture);
+        return false;
+    }
+
+    uint8_t* mapped = nullptr;
+    const CD3DX12_RANGE readRange(0, 0);
+    if (FAILED(uploadBuffer->Map(0, &readRange, reinterpret_cast<void**>(&mapped))))
+    {
+        LOG_ERROR("DLSS-NR: the LUT texture's upload buffer could not be mapped");
+        uploadBuffer->Release();
+        ParkNrResource(_lutTexture);
+        return false;
+    }
+
+    DlssNrLutPack::PackHalf4(_lutState.lut.rgb.data(), size, mapped, (size_t) footprint.Footprint.RowPitch,
+                             (size_t) footprint.Footprint.RowPitch * (size_t) size);
+
+    uploadBuffer->Unmap(0, nullptr);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = _lutTexture;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = uploadBuffer;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = footprint;
+
+    InCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    Barrier(InCmdList, _lutTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // The copy above is only recorded, not yet executed -- the upload buffer must outlive it, which
+    // ParkNrResource's deferred release (rather than an immediate one here) already guarantees for every
+    // other scratch resource in this file.
+    ParkNrResource(uploadBuffer);
+
+    _lutTextureSize = size;
+    _lutTextureSourcePath = _lutState.loadedPath;
+    return true;
+}
+
+bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
+                              unsigned int Width, unsigned int Height, float Strength, uint32_t InputEncoding,
+                              bool ColourIsLinearHdr, float Trim, const std::string& LutPath)
+{
+    DlssNr_LutEnsureParsed(&_lutState, LutPath);
+
+    if (!_lutState.Loaded())
+        return false;
+
+    if (InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr || Width == 0 ||
+        Height == 0)
+        return false;
+
+    if (!LutPipelineReady())
+        return false;
+
+    if (!EnsureLutTexture(InCmdList))
+        return false;
+
+    const uint32_t slot = _lutHeapIndex;
+    _lutHeapIndex = (_lutHeapIndex + 1) % kLutHeapCount;
+
+    FrameDescriptorHeap& heap = _lutHeaps[slot];
+
+    CreateShaderResourceView(_device, InSource, heap.GetSrvCPU(0));
+    CreateShaderResourceView(_device, _lutTexture, heap.GetSrvCPU(1));
+    CreateUnorderedAccessView(_device, OutTarget, heap.GetUavCPU(0), 0);
+
+    DlssNrLutConstants constants {};
+    constants.Width = Width;
+    constants.Height = Height;
+    constants.Strength = Strength;
+    constants.DomainMinR = _lutState.lut.domainMin[0];
+    constants.DomainMinG = _lutState.lut.domainMin[1];
+    constants.DomainMinB = _lutState.lut.domainMin[2];
+    constants.DomainMaxR = _lutState.lut.domainMax[0];
+    constants.DomainMaxG = _lutState.lut.domainMax[1];
+    constants.DomainMaxB = _lutState.lut.domainMax[2];
+    constants.LutSize = (uint32_t) _lutState.lut.size;
+    constants.InputEncoding = InputEncoding;
+    constants.ColourIsLinearHdr = ColourIsLinearHdr ? 1u : 0u;
+    constants.Trim = Trim;
+
+    if (!CreateConstantsBuffer(_device, _lutConstantBuffers[slot], constants, heap.GetCbvCPU(0)))
+    {
+        LOG_ERROR("[{0}] Failed to create the LUT pass's constants buffer", _name);
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = { heap.GetHeapCSU() };
+    InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+    InCmdList->SetComputeRootSignature(_lutRootSignature);
+    InCmdList->SetPipelineState(_lutPipelineState);
+    InCmdList->SetComputeRootDescriptorTable(0, heap.GetTableGPUStart());
+    InCmdList->Dispatch((Width + 7) / 8, (Height + 7) / 8, 1);
+
+    return true;
 }
 
 bool DlssNr_Dx12::DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
-                                      ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput,
-                                      ID3D12Resource* InInput, ID3D12Resource* InPrevInput,
-                                      ID3D12Resource* InProxy, ID3D12Resource* OutGrid)
+                                      ID3D12Resource* InOutput, ID3D12Resource* InPrevOutput, ID3D12Resource* InInput,
+                                      ID3D12Resource* InPrevInput, ID3D12Resource* InProxy, ID3D12Resource* OutGrid)
 {
     if (!_detailStatsPipelineState && _init)
         CreateComputePipeline(_device, &_detailStatsPipelineState, dlssnr_detail_stats_cso,
@@ -2667,9 +2941,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.colorSmall);
             ParkNrResource(g_nr.outputNative);
             ParkNrResource(g_nr.activeColor);
+            ParkNrResource(g_nr.lutScratch);
             g_nr.passScratchFailed = false;
             g_nr.passClampScratchFailed = false;
             g_nr.passClampScratch2Failed = false;
+            g_nr.lutScratchFailed = false;
         }
     }
 
@@ -3327,6 +3603,88 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             Barrier(cmdList, g_nr.autoExposureRaw, D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         ConsumeMeterReadback();
+    }
+
+    // LUT-apply epic (dlssnr-lut-apply), Story 2: grade `target` through a
+    // loaded .cube file before the model sees it. Deliberately placed AFTER the crop above and the
+    // exposure measurement above that, not right after g_gpuTime->Start where Story 2 originally put
+    // it -- that measured the LUT's own graded output as if it were the clean upscaler frame, repeating
+    // (from a different angle) the exact mistake the Automatic-exposure meter's own comment above warns
+    // about ("nothing this pass writes is measured"). A nonlinear grade shifts apparent scene brightness
+    // by a different, content-dependent amount per scene, so the symptom wasn't a fixed bias but
+    // exposure needing a different correction shot to shot (found 2026-10-04, user report). Grading
+    // here instead means the meter and crop both still see the clean frame, exactly as they did before
+    // this epic existed; only the model and everything after it see the grade. Writes back onto
+    // `target` itself (via lutScratch and a GPU copy) rather than reassigning the pointer, so codec,
+    // model and resolve all still run exactly as they did before the epic existed, LUT loaded or not.
+    {
+        const std::string lutPath = cfg.DlssNrLutFile.value_or_default();
+
+        if (!lutPath.empty())
+        {
+            if (g_nr.lutScratch == nullptr && !g_nr.lutScratchFailed)
+            {
+                g_nr.lutScratch = CreateScratch(device, desc.Format, width, height);
+                g_nr.lutScratchFailed = g_nr.lutScratch == nullptr;
+
+                if (g_nr.lutScratchFailed)
+                    LOG_ERROR("DLSS-NR: could not allocate the LUT pass's scratch target; LutFile is ignored");
+            }
+
+            if (g_nr.lutScratchFailed)
+                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, true,
+                                        "could not allocate the LUT pass's scratch target", lutPath,
+                                        cfg.DlssNrLutStrength.value_or_default());
+
+            if (g_nr.lutScratch != nullptr)
+            {
+                const D3D12_RESOURCE_STATES priorTargetState = targetState;
+                TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                const float lutStrength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
+                // The divisor the encode below will use, so a linear HDR frame lands in the LUT's 0-1 domain where the
+                // model's own proxy puts it. Not AutoTrimEffective: that is only the Trim on top of the base white point,
+                // and a game whose frame is scaled by its exposure (RDR2: paper white ~1700x) would otherwise be seen
+                // as ~1000x over white -- the whole picture pinned at the top of the curve.
+                const float lutWhitePoint =
+                    frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride : ResolveWhitePoint(cfg, isHdrBuffer);
+                const bool graded =
+                    DispatchLut(cmdList, target, g_nr.lutScratch, width, height, lutStrength, frame.InputEncoding,
+                                isHdrBuffer, lutWhitePoint, lutPath);
+
+                DlssNr::ReportLutStatus(true, _lutState.loadedPath, _lutState.lut.size, _lutState.failed,
+                                        _lutState.error, _lutState.attemptedPath, lutStrength);
+
+                if (graded)
+                {
+                    // Copy the graded scratch back onto `target` itself: nothing after this point needs to
+                    // know a LUT ran, including the model dispatch ahead, which otherwise has no idea its
+                    // own source (`target`) might be aliased to a texture it does not own.
+                    TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
+                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    DlssNr::CopyActiveColor(cmdList, target, g_nr.lutScratch, DlssNr::ColorExtent { width, height });
+                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+
+                // Parsed-but-unusable (a malformed file) or the pipeline failed to build takes the same path
+                // back: restore exactly the state target was in before this block touched it.
+                TransitionTarget(priorTargetState);
+            }
+        }
+        else
+        {
+            // LutFile was cleared: neither the scratch target nor the uploaded 3D texture (up to ~16 MB for
+            // a 128^3 lattice) is reused by anything else, so there is no reason to keep holding either --
+            // the same hold-only-while-wanted discipline activeColor's own scratch follows for cropColor.
+            // Fixed (Review Pass, 2026-10-04): this used to park only the scratch target, so _lutTexture
+            // stayed resident for the rest of the session once any LUT had ever loaded. A no-op once
+            // already released/parked.
+            ParkNrResource(g_nr.lutScratch);
+            ReleaseLutTexture();
+            DlssNr::ReportLutStatus(false, "", 0, false, "", "", cfg.DlssNrLutStrength.value_or_default());
+        }
     }
 
     // Automatic follows the game's own exposure when that is on (DlssNr_GameDefaults.h: a known unexposed game or the
@@ -5137,6 +5495,13 @@ void Shutdown()
         g_nr.activeColor->Release();
         g_nr.activeColor = nullptr;
     }
+
+    if (g_nr.lutScratch != nullptr)
+    {
+        g_nr.lutScratch->Release();
+        g_nr.lutScratch = nullptr;
+    }
+    g_nr.lutScratchFailed = false;
 
     if (g_nr.colorSmall != nullptr)
     {

@@ -25,6 +25,7 @@
 #include "DlssNr_AutoTrimDefault.h"
 #include "DlssNr_ColourEncoding.h"
 #include <dlssnr/DlssNr_ColourEncodingStatus.h>
+#include <dlssnr/DlssNr_LutPack.h>
 #include <dlssnr/DlssNr_LutStatus.h>
 #include "DlssNr_FollowGame.h"
 #include "DlssNr_ExposureCalibrate.h"
@@ -1728,26 +1729,6 @@ ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned
     return res;
 }
 
-// Round-to-zero float -> half, no dependency on DirectXPackedVector: LUT colour data never needs anything
-// beyond half's mantissa, and a truncated rather than rounded mantissa is one bit at most, far under what
-// the format can represent of an 8-or-more-bit source table. Flushes subnormal/overflow results to
-// signed-zero/infinity rather than reproducing their bit patterns -- never relevant for 0..a few LUT values.
-uint16_t FloatToHalf(float value)
-{
-    uint32_t bits;
-    std::memcpy(&bits, &value, sizeof(bits));
-
-    const uint32_t sign = (bits >> 16) & 0x8000u;
-    const int32_t exponent = (int32_t) ((bits >> 23) & 0xFFu) - 127 + 15;
-    const uint32_t mantissa = bits & 0x7FFFFFu;
-
-    if (exponent <= 0)
-        return (uint16_t) sign;
-    if (exponent >= 0x1F)
-        return (uint16_t) (sign | 0x7C00u);
-    return (uint16_t) (sign | ((uint32_t) exponent << 10) | (mantissa >> 13));
-}
-
 void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
              D3D12_RESOURCE_STATES to)
 {
@@ -2399,25 +2380,8 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
         return false;
     }
 
-    const std::vector<float>& rgb = _lutState.lut.rgb;
-    const size_t sizeT = (size_t) size;
-    for (int z = 0; z < size; ++z)
-    {
-        uint8_t* const slice = mapped + (size_t) footprint.Footprint.RowPitch * sizeT * (size_t) z;
-        for (int y = 0; y < size; ++y)
-        {
-            uint16_t* const row =
-                reinterpret_cast<uint16_t*>(slice + (size_t) footprint.Footprint.RowPitch * (size_t) y);
-            for (int x = 0; x < size; ++x)
-            {
-                const size_t i = ((size_t) z * sizeT + (size_t) y) * sizeT + (size_t) x;
-                row[x * 4 + 0] = FloatToHalf(rgb[i * 3 + 0]);
-                row[x * 4 + 1] = FloatToHalf(rgb[i * 3 + 1]);
-                row[x * 4 + 2] = FloatToHalf(rgb[i * 3 + 2]);
-                row[x * 4 + 3] = FloatToHalf(1.0f);
-            }
-        }
-    }
+    DlssNrLutPack::PackHalf4(_lutState.lut.rgb.data(), size, mapped, (size_t) footprint.Footprint.RowPitch,
+                             (size_t) footprint.Footprint.RowPitch * (size_t) size);
 
     uploadBuffer->Unmap(0, nullptr);
 

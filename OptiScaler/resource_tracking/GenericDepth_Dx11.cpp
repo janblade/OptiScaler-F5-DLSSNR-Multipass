@@ -186,18 +186,8 @@ bool Describe(ID3D11DepthStencilView* view, native::DepthBuffer* out, ID3D11Reso
 // Under g_mutex. Lets go of the cached read view and the reference it keeps on the game's depth buffer.
 void ReleaseSourceView()
 {
-    if (g_sourceSrv != nullptr)
-    {
-        g_sourceSrv->Release();
-        g_sourceSrv = nullptr;
-    }
-
-    if (g_sourceSrvResource != nullptr)
-    {
-        g_sourceSrvResource->Release();
-        g_sourceSrvResource = nullptr;
-    }
-
+    SAFE_RELEASE(g_sourceSrv);
+    SAFE_RELEASE(g_sourceSrvResource);
     g_sourceSrvFormat = DXGI_FORMAT_UNKNOWN;
 }
 

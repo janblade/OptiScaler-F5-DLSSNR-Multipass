@@ -244,30 +244,10 @@ void DepthFinderCore::CountEvents(uint64_t& draws, uint64_t& indirect) const
     }
 }
 
-void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t instances)
+// The draw path's one way to a context's counts: under the lock when the adapter's contexts are shared (one id written by
+// several threads), through the thread's cache without it otherwise.
+template <typename Count> void DepthFinderCore::WithContext(uint64_t context, Count&& count)
 {
-    // Acquire pairs with the release of whatever made the finder active: the hook then sees the settings made before it
-    // (_sharedContexts). Free on x86.
-    if (!_active.load(std::memory_order_acquire))
-        return;
-
-    const auto count = [this, vertices, instances](ContextState& state)
-    {
-        Bump(state.vertices, vertices * instances);
-        Bump(state.drawcalls, 1);
-        state.lastDrawPresent.store(_presentsNow.load(std::memory_order_relaxed), std::memory_order_relaxed);
-
-        // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
-        if (!(vertices == 6 && instances == 1))
-        {
-            Bump(state.realDraws, 1);
-            state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
-
-            if (state.stampDraws.load(std::memory_order_relaxed))
-                state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
-        }
-    };
-
     if (_sharedContexts.load(std::memory_order_relaxed))
     {
         std::lock_guard lock(_mutex);
@@ -279,33 +259,52 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
     }
 }
 
+void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t instances)
+{
+    // Acquire pairs with the release of whatever made the finder active: the hook then sees the settings made before it
+    // (_sharedContexts). Free on x86.
+    if (!_active.load(std::memory_order_acquire))
+        return;
+
+    WithContext(context,
+                [this, vertices, instances](ContextState& state)
+                {
+                    Bump(state.vertices, vertices * instances);
+                    Bump(state.drawcalls, 1);
+                    state.lastDrawPresent.store(_presentsNow.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+                    // A fullscreen rectangle (two triangles) does not update the viewport the last real draw used.
+                    if (!(vertices == 6 && instances == 1))
+                    {
+                        Bump(state.realDraws, 1);
+                        state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed),
+                                                     std::memory_order_relaxed);
+
+                        if (state.stampDraws.load(std::memory_order_relaxed))
+                            state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
+                    }
+                });
+}
+
 void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
 {
     if (!_active.load(std::memory_order_acquire))
         return;
 
-    const auto count = [this, maxCount](ContextState& state)
-    {
-        state.lastDrawPresent.store(_presentsNow.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        Bump(state.indirectEvents, 1);
-        Bump(state.drawcalls, maxCount);
-        Bump(state.indirectCalls, maxCount);
-        Bump(state.realDraws, 1);
-        state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    WithContext(context,
+                [this, maxCount](ContextState& state)
+                {
+                    state.lastDrawPresent.store(_presentsNow.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                    Bump(state.indirectEvents, 1);
+                    Bump(state.drawcalls, maxCount);
+                    Bump(state.indirectCalls, maxCount);
+                    Bump(state.realDraws, 1);
+                    state.lastRealViewport.store(state.viewportWidth.load(std::memory_order_relaxed),
+                                                 std::memory_order_relaxed);
 
-        if (state.stampDraws.load(std::memory_order_relaxed))
-            state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
-    };
-
-    if (_sharedContexts.load(std::memory_order_relaxed))
-    {
-        std::lock_guard lock(_mutex);
-        count(ContextLocked(context));
-    }
-    else
-    {
-        count(ContextForDraw(context));
-    }
+                    if (state.stampDraws.load(std::memory_order_relaxed))
+                        state.lastRealDrawStamp.store(__rdtsc(), std::memory_order_relaxed);
+                });
 }
 
 void DepthFinderCore::OnViewport(uint64_t context, float width)
@@ -314,15 +313,7 @@ void DepthFinderCore::OnViewport(uint64_t context, float width)
     if (!_active.load(std::memory_order_acquire))
         return;
 
-    if (_sharedContexts.load(std::memory_order_relaxed))
-    {
-        std::lock_guard lock(_mutex);
-        ContextLocked(context).viewportWidth.store(width, std::memory_order_relaxed);
-    }
-    else
-    {
-        ContextForDraw(context).viewportWidth.store(width, std::memory_order_relaxed);
-    }
+    WithContext(context, [width](ContextState& state) { state.viewportWidth.store(width, std::memory_order_relaxed); });
 }
 
 SnapshotRequest DepthFinderCore::OnDepthBound(uint64_t context, bool hadDepth, const DepthBuffer* bound)

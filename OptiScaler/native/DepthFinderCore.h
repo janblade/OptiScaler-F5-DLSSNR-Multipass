@@ -226,6 +226,8 @@ class DepthFinderCore
     ContextState& ContextForDraw(uint64_t context);
     // Under _mutex. The context's entry, made if it is new, with a stand-down's forgetting applied to it.
     ContextState& ContextLocked(uint64_t context);
+    // Runs `count` on the context's state: the draw events' one dispatch between the locked and the lock-free way to it.
+    template <typename Count> void WithContext(uint64_t context, Count&& count);
     // Under _mutex. Adds what the context drew since the last fold to the counts of the buffer it is bound to (or drops it if
     // it is bound to none), so those counts are as if every draw had been added at once.
     void Fold(ContextState& context);

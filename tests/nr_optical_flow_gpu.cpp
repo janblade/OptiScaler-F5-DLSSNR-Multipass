@@ -1,9 +1,13 @@
-// GPU test for OptiScaler/motion/OpticalFlow_Dx12.cpp, no game: a synthetic picture (multi-scale value noise), the same picture
-// moved by a known amount, and the flow the pass reports for it. The picture is a continuous function, so a shift of half a
-// pixel is exact.
+// GPU test for OptiScaler/motion/OpticalFlow_Dx12.cpp, no game: a synthetic picture (multi-scale value noise), the same
+// picture moved by a known amount, and the flow the pass reports for it. The picture is a continuous function, so a
+// shift of half a pixel is exact.
 //
 //   vcvars64, then from the repo root:
-//   cl /std:c++20 /EHsc /O2 tests\nr_optical_flow_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
+//   cl /std:c++20 /EHsc /O2 tests\nr_optical_flow_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp d3d12.lib dxgi.lib
+//   d3dcompiler.lib
+//
+// Modes: no argument runs every check; "score" prints one summary line for the settings given as key=value; "perf"
+// times a frame at 2560x1440 from the CPU; "passes" times each pass of a frame on the GPU (timestamps) at 2560x1440.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -357,10 +361,11 @@ std::vector<float> ReadFlow(Gpu& gpu, ID3D12Resource* out)
 int main(int argc, char** argv)
 {
     const bool perf = argc > 1 && std::string(argv[1]) == "perf";
+    const bool passes = argc > 1 && std::string(argv[1]) == "passes";
     bool score = false; // "score": one summary line for the settings given as key=value (radius=2 cells=4 ...)
     const bool noSmoothing = (argc > 1 && std::string(argv[1]) == "nosmooth") || (argc > 2 && std::string(argv[2]) == "nosmooth");
 
-    if (perf)
+    if (perf || passes)
     {
         kWidth = 2560;
         kHeight = 1440;
@@ -475,6 +480,72 @@ int main(int argc, char** argv)
         QueryPerformanceCounter(&b);
         printf("%ux%u: %.3f ms per flow (wall, %d frames)\n", kWidth, kHeight,
                1000.0 * (double) (b.QuadPart - a.QuadPart) / freq.QuadPart / (batches * 6), batches * 6);
+        return 0;
+    }
+
+    if (passes)
+    {
+        // The GPU time of each pass, averaged over many frames of a pan with depth: one frame per submit, a timestamp
+        // after every pass, the match summed over its levels.
+        std::vector<ComPtr<ID3D12Resource>> frames;
+        for (int i = 0; i < 4; ++i)
+            frames.push_back(gpu.Picture(i * 7.0f, i * -3.0f));
+
+        auto depthMap = gpu.DepthMap(800.0f, 400.0f, 500.0f);
+
+        D3D12_QUERY_HEAP_DESC heapDesc {};
+        heapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        heapDesc.Count = 64;
+        ComPtr<ID3D12QueryHeap> heap;
+        gpu.device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&heap));
+        auto readback = gpu.Buffer(64 * 8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        UINT64 frequency = 0;
+        gpu.queue->GetTimestampFrequency(&frequency);
+
+        flow.SetTimestampHeap(heap.Get(), 64);
+        flow.Reset();
+
+        std::vector<std::string> names;
+        std::vector<double> sums;
+        double total = 0;
+        const int warm = 8, measured = 120;
+
+        for (int n = 0; n < warm + measured; ++n)
+        {
+            flow.ClearTimestamps();
+            flow.Dispatch(gpu.list.Get(), frames[n % 4].Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depthMap.Get(),
+                          flow.Tuning().depthMatching ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN, true);
+            const uint32_t count = flow.TimestampCount();
+            gpu.list->ResolveQueryData(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, count, readback.Get(), 0);
+            gpu.Submit();
+
+            if (n < warm || count < 2)
+                continue;
+
+            UINT64* ticks = nullptr;
+            readback->Map(0, nullptr, (void**) &ticks);
+            for (uint32_t i = 1; i < count; ++i)
+            {
+                const double ms = 1000.0 * (double) (ticks[i] - ticks[i - 1]) / (double) frequency;
+                const std::string name = flow.TimestampName(i);
+                size_t slot = 0;
+                while (slot < names.size() && names[slot] != name)
+                    ++slot;
+                if (slot == names.size())
+                {
+                    names.push_back(name);
+                    sums.push_back(0);
+                }
+                sums[slot] += ms;
+                total += ms;
+            }
+            readback->Unmap(0, nullptr);
+        }
+
+        for (size_t i = 0; i < names.size(); ++i)
+            printf("pass %-8s %.4f ms per frame\n", names[i].c_str(), sums[i] / measured);
+        printf("%ux%u: %.4f ms per frame in all (GPU timestamps, %d frames)\n", kWidth, kHeight, total / measured,
+               measured);
         return 0;
     }
 

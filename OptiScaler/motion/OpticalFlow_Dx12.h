@@ -94,6 +94,19 @@ class OpticalFlowDx12
     Settings& Tuning() { return _settings; }
     const std::string& Error() const { return _error; }
 
+    // Timing, for the GPU test: with a timestamp query heap given, every pass records a timestamp after itself. The
+    // owner resolves the first TimestampCount() entries (the one before the first pass included) and clears the count
+    // before the next Dispatch(); TimestampName(i) names the pass that ended at entry i (entry 0 is the start).
+    void SetTimestampHeap(ID3D12QueryHeap* heap, uint32_t capacity)
+    {
+        _timeHeap = heap;
+        _timeCapacity = capacity;
+        _timeCount = 0;
+    }
+    uint32_t TimestampCount() const { return _timeCount; }
+    void ClearTimestamps() { _timeCount = 0; }
+    const char* TimestampName(uint32_t index) const { return index < _timeCount ? _timeNames[index] : ""; }
+
   private:
     struct Tex
     {
@@ -154,6 +167,11 @@ class OpticalFlowDx12
     bool _globalReady = false; // _globalFlow holds the last frame's whole-frame motion
     uint32_t _width = 0;
     uint32_t _height = 0;
+
+    ID3D12QueryHeap* _timeHeap = nullptr;
+    uint32_t _timeCapacity = 0;
+    uint32_t _timeCount = 0;
+    const char* _timeNames[64] = {};
 
     Settings _settings;
     std::string _error;

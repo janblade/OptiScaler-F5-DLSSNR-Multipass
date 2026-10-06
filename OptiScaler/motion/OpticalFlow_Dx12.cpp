@@ -832,6 +832,16 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
 {
     Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    // The test's timing: a timestamp before the first pass, then one after each (the barrier at the end of a pass is in
+    // it).
+    const bool timed = _timeHeap != nullptr && _timeCount + 2 <= _timeCapacity && _timeCount + 2 <= 64;
+
+    if (timed && _timeCount == 0)
+    {
+        list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
+        _timeNames[_timeCount++] = "start";
+    }
+
     const UINT first = _heapCursor;
     _heapCursor = (_heapCursor + kDescriptorsPerPass) % (kDescriptorsPerPass * kPassesPerFrame * kFramesInFlight);
 
@@ -873,6 +883,18 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
 
     // Anything that reads it next reads it as a texture.
     Transition(list, dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (timed)
+    {
+        list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
+        _timeNames[_timeCount++] = pso == _luma     ? "luma"
+                                   : pso == _down   ? "down"
+                                   : pso == _match  ? "match"
+                                   : pso == _median ? "median"
+                                   : pso == _smooth ? "smooth"
+                                   : pso == _global ? "global"
+                                                    : "other";
+    }
 }
 
 bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,

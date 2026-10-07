@@ -1,5 +1,5 @@
-// Host check of native/NativeLowLatencyRule.h: when F5Low's own low latency runs and stands aside. No GPU, no game.
-// cl /std:c++20 /EHsc /W4 tests/nr_native_low_latency_smoke.cpp
+// Host check of native/NativeLowLatencyRule.h: when Optical F5Low's own low latency runs and stands aside. No GPU, no
+// game. cl /std:c++20 /EHsc /W4 tests/nr_native_low_latency_smoke.cpp
 #include "../OptiScaler/native/NativeLowLatencyRule.h"
 
 #include <cstdio>
@@ -24,10 +24,10 @@ int main()
     Inputs in;
     in.f5lowRunning = true;
 
-    // The default: on with an F5Low mode
+    // The default: on with an Optical F5Low mode
     CHECK(Decide(in) == Decision::Run);
 
-    // Auto needs an F5Low mode; On does not
+    // Auto needs an Optical F5Low mode; On does not
     in.f5lowRunning = false;
     CHECK(Decide(in) == Decision::NoF5Low);
     in.setting = Setting::On;

@@ -119,7 +119,7 @@ Decision Evaluate()
         g_table = FindTable() ? Table::Found : Table::Missing;
 
         if (g_table == Table::Missing)
-            LOG_WARN("F5Low low latency: no Reflex or fakenvapi interface found, it stays off");
+            LOG_WARN("Optical F5Low low latency: no Reflex or fakenvapi interface found, it stays off");
 
         decision = Decide(GatherInputs());
     }
@@ -198,7 +198,7 @@ void OnPresentEnd(IUnknown* device)
     {
         if (g_running.load(std::memory_order_relaxed))
         {
-            LOG_INFO("F5Low low latency: stopped ({})", DecisionText(decision));
+            LOG_INFO("Optical F5Low low latency: stopped ({})", DecisionText(decision));
             Stop(device);
         }
 
@@ -213,7 +213,7 @@ void OnPresentEnd(IUnknown* device)
         g_sleepModeDevice = device;
 
         if (!g_running.load(std::memory_order_relaxed))
-            LOG_INFO("F5Low low latency: started ({})", PathText());
+            LOG_INFO("Optical F5Low low latency: started ({})", PathText());
     }
 
     if (g_presentStarted)

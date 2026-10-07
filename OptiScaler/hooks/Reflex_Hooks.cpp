@@ -146,7 +146,7 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetLatencyMarker(IUnknown* pDev,
 
     static bool skip[20] = {};
 
-    // Our own markers (F5Low's low latency) are not the game sending markers
+    // Our own markers (Optical F5Low's low latency) are not the game sending markers
     if (pSetLatencyMarkerParams->markerType == SIMULATION_START && !_ownCall)
         _lastMarkerFrame = State::Instance().fgLastFrame;
 

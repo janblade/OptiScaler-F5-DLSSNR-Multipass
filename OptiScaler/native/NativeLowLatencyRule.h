@@ -1,14 +1,14 @@
 #pragma once
 
-// When F5Low's own low latency (native/NativeLowLatency.cpp) runs, and what the menu says when it does not. No D3D, no
-// ImGui, no Config: a host test can include it.
+// When Optical F5Low's own low latency (native/NativeLowLatency.cpp) runs, and what the menu says when it does not. No
+// D3D, no ImGui, no Config: a host test can include it.
 
 #include <cstdint>
 
 namespace native::lowlatency
 {
-// [DlssNr] NativeLowLatency. Auto: with an F5Low mode running. On: also without one, in any game that makes no Reflex
-// call of its own. Off: never.
+// [DlssNr] NativeLowLatency. Auto: with an Optical F5Low mode running. On: also without one, in any game that makes no
+// Reflex call of its own. Off: never.
 enum class Setting : uint32_t
 {
     Auto,
@@ -19,7 +19,7 @@ enum class Setting : uint32_t
 struct Inputs
 {
     Setting setting = Setting::Auto;
-    bool f5lowRunning = false;              // an F5Low mode is on and not standing aside for a game upscaler
+    bool f5lowRunning = false;              // an Optical F5Low mode is on and not standing aside for a game upscaler
     bool gameCallsReflex = false;           // the game has made a Reflex call (SetSleepMode, Sleep or a marker)
     bool forceReflexDisabled = false;       // fakenvapi's Force Reflex is Force Disable
     bool forceXell = false;                 // fakenvapi's Force XeLL (it takes the frame generation slot and runs XeLL)
@@ -74,7 +74,7 @@ inline const char* DecisionText(Decision decision)
     case Decision::SettingOff:
         return "Off: switched off";
     case Decision::NoF5Low:
-        return "Off: no F5Low mode is running";
+        return "Off: no Optical F5Low mode is running";
     case Decision::GameRunsReflex:
         return "Off: the game runs its own Reflex";
     case Decision::ForceReflexDisabled:

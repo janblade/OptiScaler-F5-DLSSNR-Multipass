@@ -36,8 +36,8 @@ class ReflexHooks
 
     inline static std::thread::id _lastSetSleepThread {};
 
-    // The game's own Reflex calls versus OptiScaler's (ownSetSleepMode and friends, F5Low's low latency): ours go
-    // through the same wrappers, so they take the same routing, but they are not "the game sends markers".
+    // The game's own Reflex calls versus OptiScaler's (ownSetSleepMode and friends, Optical F5Low's low latency): ours
+    // go through the same wrappers, so they take the same routing, but they are not "the game sends markers".
     inline static thread_local bool _ownCall = false;
     inline static std::atomic<bool> _gameCalledReflex = false;
     inline static std::atomic<bool> _gameCalledSetSleepMode = false;

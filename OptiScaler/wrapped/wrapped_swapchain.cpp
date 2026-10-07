@@ -563,7 +563,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     LOG_DEBUG("Calling original present");
 
-    // F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present
+    // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present
     IUnknown* lowLatencyDevice = nullptr;
 
     // (A D3D11 game behind OptiScaler's D3D12 bridge is covered in Dx11wDx12SC::Present, the game's own present.)

@@ -1,7 +1,7 @@
 #pragma once
 
-// F5Low's low latency: OptiScaler calls the Reflex API itself, because a game that makes no upscaler call makes no
-// Reflex call either. One path for every vendor: through ReflexHooks' function table, so real Reflex on NVIDIA and
+// Optical F5Low's low latency: OptiScaler calls the Reflex API itself, because a game that makes no upscaler call makes
+// no Reflex call either. One path for every vendor: through ReflexHooks' function table, so real Reflex on NVIDIA and
 // fakenvapi (Anti-Lag 2, XeLL or LatencyFlex, whichever the fakenvapi settings pick) everywhere else.
 //
 // The calls are paced by the game's Present, since there are no engine hooks:
@@ -9,8 +9,8 @@
 //   the frame's first queue submit (D3D12) / first draw (D3D11): SIMULATION_END, RENDERSUBMIT_START
 //   just before Present: RENDERSUBMIT_END, PRESENT_START
 // The markers are approximate, so useMarkersToOptimize stays off. It runs only while native/NativeLowLatencyRule.h
-// says so (an F5Low mode runs, the game makes no Reflex call itself, fakenvapi's Force Reflex and Force XeLL are not
-// in the way) and stands aside the moment the game calls Reflex. Our own calls are not counted as the game's.
+// says so (an Optical F5Low mode runs, the game makes no Reflex call itself, fakenvapi's Force Reflex and Force XeLL
+// are not in the way) and stands aside the moment the game calls Reflex. Our own calls are not counted as the game's.
 // Never writes a fakenvapi setting.
 
 #include "NativeLowLatencyRule.h"

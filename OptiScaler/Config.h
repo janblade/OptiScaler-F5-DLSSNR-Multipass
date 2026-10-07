@@ -365,7 +365,7 @@ class Config
     // The proxy curve (Final Image Composition), values in shaders/dlssnr/DlssNr_ProxyCurve.h. 0 = soft
     // knee + our composition (default); 1/2 = unclipped Neutwo proxy + composition / pure-inverse replace;
     // 3/4 = the balanced (hybrid) curve, the same two ways; 5 HLG and 6 PQ + composition; 7 linear +
-    // composition, a diagnostic set in the ini only. Out-of-range values fall back to 0.
+    // composition (what game integrations hand the model). Out-of-range values fall back to 0.
     CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
 
     // How the NR pass decodes the game's colour. 0 Auto (the game's DLSS HDR flag + the output format, as before),

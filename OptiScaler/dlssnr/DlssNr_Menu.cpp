@@ -16,6 +16,8 @@
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
 #include <framegen/IFGFeature.h>
+#include <native/NativeLowLatency.h>
+#include <nvapi/fakenvapi.h>
 
 #include <imgui/imgui.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -1100,8 +1102,49 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
     }
 }
 
-// Optical F5Low: NR for a game that makes no upscaler call of its own (the native modes). The mode selector sits at the
-// top, then the Advanced settings (depth, flow tuning).
+// F5Low's own Reflex calls (native/NativeLowLatency.h): the switch, the method in use and, where the driver reports
+// it, the measured latency. Never touches the fakenvapi settings; it only points to them.
+static void RenderLowLatencySection(Config* config)
+{
+    if (!ImGui::TreeNodeEx("Low latency##nativelowlatency", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    using native::lowlatency::Decision;
+    using native::lowlatency::Setting;
+
+    bool on = config->DlssNrNativeLowLatency.value_or_default() != Setting::Off;
+
+    if (ImGui::Checkbox("Lower the game's latency##nativelowlatency", &on))
+        config->DlssNrNativeLowLatency = on ? Setting::Auto : Setting::Off;
+
+    HelpMarker("A game F5Low runs in makes no call to lower its latency, so F5Low makes them for it: NVIDIA Reflex on "
+               "NVIDIA cards, and on other cards Anti-Lag 2, XeLL or LatencyFlex through fakenvapi. It keeps the GPU's "
+               "queue short, which matters most when the GPU is the limit, as it is with NR and frame generation on.\n"
+               "It stands aside as soon as the game calls Reflex itself. Takes effect at once.");
+
+    const auto status = native::lowlatency::GetStatus();
+
+    if (status.decision == Decision::Run)
+    {
+        ImGui::Text("Using: %s", status.path);
+
+        if (status.hasLatency)
+            ImGui::Text("Measured latency: %.1f ms", status.latencyMs);
+    }
+    else
+    {
+        ImGui::TextWrapped("%s", native::lowlatency::DecisionText(status.decision));
+    }
+
+    if (fakenvapi::isUsingAsMainNvapi() || State::Instance().activeFgOutput == FGOutput::XeFG ||
+        status.decision == Decision::ForceReflexDisabled || status.decision == Decision::ForceXell)
+        ImGui::TextWrapped("How it lowers latency is set in the fakenvapi settings.");
+
+    ImGui::TreePop();
+}
+
+// F5Low: NR for a game that makes no upscaler call of its own (the native modes). The mode selector sits at the top,
+// then the Advanced settings (depth, flow tuning).
 static void RenderF5LowPage(Config* config, const NrCommon& nr)
 {
     ImGui::SeparatorText("Optical F5Low (experimental)");
@@ -1115,7 +1158,9 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
     bool finishedPicture = nr.finishedPicture;
     RenderNativeMode(config, nr.enabled, finishedPicture);
 
-    // The page is Optical F5Low's own, so every control shows and the section starts open.
+    RenderLowLatencySection(config);
+
+    // The page is F5Low's own, so every control shows and the section starts open.
     if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
     {
         bool pictures = config->DlssNrNativeDebugView.value_or_default();

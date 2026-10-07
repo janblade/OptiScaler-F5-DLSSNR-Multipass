@@ -17,8 +17,10 @@ namespace native
 class Dx11FrameSource : public IFrameSource
 {
   public:
-    // The present being processed: the swap chain and the game's D3D11 device. Call before Acquire().
-    void SetPresent(IDXGISwapChain* swapChain, ID3D11Device* device11);
+    // The present being processed: the swap chain and the game's D3D11 device. Call before Acquire(). `copyBack`: the
+    // result goes back into the D3D11 back buffer (Return). False under frame generation's swap chain (Dx11wDx12SC),
+    // which copies ProcessedPicture() out on the D3D12 side and shows nothing of the D3D11 back buffer.
+    void SetPresent(IDXGISwapChain* swapChain, ID3D11Device* device11, bool copyBack = true);
 
     Api GetApi() const override { return Api::D3D11; }
     AcquireStatus Acquire(FrameInput& input) override;
@@ -54,6 +56,11 @@ class Dx11FrameSource : public IFrameSource
 
     uint64_t _frame = 0;
     std::string _error;
+
+    bool _copyBack = true;
+    // D3D12 work of an earlier frame may still read the shared picture and depth (no copy-back waited for it): the next
+    // Acquire makes the D3D11 context wait for it before overwriting them
+    bool _sharedInUse = false;
 };
 
 } // namespace native

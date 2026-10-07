@@ -26,9 +26,10 @@ ColorSpace ToColorSpace(DXGI_COLOR_SPACE_TYPE type)
 }
 } // namespace
 
-void Dx11FrameSource::SetPresent(IDXGISwapChain* swapChain, ID3D11Device* device11)
+void Dx11FrameSource::SetPresent(IDXGISwapChain* swapChain, ID3D11Device* device11, bool copyBack)
 {
     _swapChain = swapChain;
+    _copyBack = copyBack;
 
     if (device11 != _device11)
     {
@@ -143,6 +144,17 @@ AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
         }
     }
 
+    // Under frame generation the last frame's D3D12 work (the producer, then the bridge's copy of the result into frame
+    // generation's back buffer, both on _queue12) is not waited for at its present: it is here, a frame later, just
+    // before the shared textures it reads are overwritten. A signal now is ordered after all of it on that queue.
+    if (_sharedInUse)
+    {
+        const uint64_t releasedValue = _fence.Next();
+        _queue12->Signal(_fence.Fence12(), releasedValue);
+        _context4->Wait(_fence.Fence11(), releasedValue);
+        _sharedInUse = false;
+    }
+
     _context11->CopyResource(_picture.Tex11(), _backBuffer.Get());
 
     const auto depthSnap = GenericDepthDx11::BestSnapshot();
@@ -234,6 +246,16 @@ void Dx11FrameSource::Return(const FrameInput& input, const FrameOutput& output)
 
     if (_backBuffer == nullptr)
         return;
+
+    // Under frame generation's swap chain nothing shows the D3D11 back buffer: the bridge copies ProcessedPicture() out
+    // on the D3D12 side. Waiting here would hold the game's next D3D11 frame on the GPU until all of this frame's D3D12
+    // work ran, every frame; the next Acquire waits instead, only before it overwrites the shared textures.
+    if (!_copyBack)
+    {
+        _sharedInUse = true;
+        _backBuffer.Reset();
+        return;
+    }
 
     // output.done names NativeProducer's own internal fence (shared with no one -- it only tells the D3D12 adapter, which
     // reads nothing back across an API boundary, that a frame was submitted). Waiting on it directly here was a bug: it

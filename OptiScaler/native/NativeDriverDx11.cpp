@@ -26,7 +26,7 @@ native::Dx11FrameSource g_source;
 // Shared by OnPresent and OnFGPresent; the depth finder's frame close is the caller's job (see the two entry points
 // below), since only one of them needs to do it. Returns the D3D12 picture the producer ended up with this frame, or
 // null when nothing ran.
-ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
+ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device, bool copyBack)
 {
     if (!g_driver.Enabled())
         return nullptr;
@@ -34,7 +34,7 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
     if (swapChain == nullptr || device == nullptr || g_driver.Failed())
         return nullptr;
 
-    g_source.SetPresent(swapChain, device);
+    g_source.SetPresent(swapChain, device, copyBack);
 
     // The consumer is inert (same as native input and Finished Picture) while a D3D11 game's swap chain has been
     // replaced by Dx11wDx12SC for frame generation -- see OnFGPresent for that path.
@@ -46,14 +46,15 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
 namespace NativeMotionDx11
 {
 
-void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device) { RunFrame(swapChain, device); }
+void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device) { RunFrame(swapChain, device, true); }
 
 ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
 {
     // The one call site that closes the D3D11 depth finder's frame on this path; MenuOverlayDx::Present, which frame
     // generation's present still reaches, skips its own close under Dx11wDx12SC so this frame is not closed twice.
     GenericDepthDx11::OnPresent(real);
-    return RunFrame(real, device);
+    // The bridge copies the D3D12 result into frame generation's back buffer itself: no copy back to D3D11
+    return RunFrame(real, device, false);
 }
 
 void DrawStatus() { g_driver.DrawStatus(); }

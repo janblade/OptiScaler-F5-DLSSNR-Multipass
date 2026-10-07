@@ -285,8 +285,10 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
                 _cutQuietUntil = _frame + kRing + 2;
             else
             {
+                // The consumer is skipped this frame (and the next, which has no flow yet): the reset waits for it.
                 Reset();
                 nativeReady = false;
+                _consumerResetPending = true;
             }
         }
     }

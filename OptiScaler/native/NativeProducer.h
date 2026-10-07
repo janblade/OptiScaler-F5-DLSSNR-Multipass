@@ -41,7 +41,8 @@ struct NativeFrame
 // Signal 1, the flow's detector (OpticalFlowDx12, Tuning().sceneCutDetector, on by default). On the GPU it compares the
 // brightness histogram of this picture with the last one's; past sceneCutThreshold it sets a flag on that very frame.
 // The flow then matches nothing on that frame (zero motion, no confidence) and the trust mask, given the flag in
-// Inputs::sceneCut, is distrust everywhere: the cut frame itself is already safe for the consumer.
+// Inputs::sceneCut, is distrust everywhere. The consumer sees neither (it takes the guides only), so its history still
+// holds the last scene until signal 2 resets it.
 //
 // Signal 2, the flag's readback. Run() copies the flag into a readback slot of the frame's ring entry and reads it once
 // the GPU has finished that frame, usually in the next Run(). A set flag outside the quiet window (below) reports the
@@ -54,7 +55,8 @@ struct NativeFrame
 // later. Seen outside the quiet window it reports the cut and asks for the consumer's reset for this frame. With the
 // detector on, the flow and the mask carry on, the consumer runs on this frame too (skipping it showed one frame
 // without it, a flash over the whole picture) and a quiet window opens. With the detector off, the flow and the mask
-// are reset instead and the consumer does not run until they have a flow again; this is the only signal then.
+// are reset instead and the consumer does not run until they have a flow again; the reset is then kept asked for
+// (_consumerResetPending) until it does. This is the only signal then.
 //
 // The quiet window (_cutQuietUntil, kRing + 2 frames after a reported cut) is what keeps the late count of a cut that
 // signal 2 already reported from being a second cut: a signal inside it is ignored. A cut hint from the adapter

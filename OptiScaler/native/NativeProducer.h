@@ -35,6 +35,31 @@ struct NativeFrame
     bool reset = false;               // the frame does not continue the last one
 };
 
+// How a hard scene cut is handled, end to end. Three signals can report one cut; Run() makes it one Result::sceneCut
+// and one reset of the consumer.
+//
+// Signal 1, the flow's detector (OpticalFlowDx12, Tuning().sceneCutDetector, on by default). On the GPU it compares the
+// brightness histogram of this picture with the last one's; past sceneCutThreshold it sets a flag on that very frame.
+// The flow then matches nothing on that frame (zero motion, no confidence) and the trust mask, given the flag in
+// Inputs::sceneCut, is distrust everywhere: the cut frame itself is already safe for the consumer.
+//
+// Signal 2, the flag's readback. Run() copies the flag into a readback slot of the frame's ring entry and reads it once
+// the GPU has finished that frame, usually in the next Run(). A set flag outside the quiet window (below) reports the
+// cut (sceneCut, distrustedShare 1) and asks for the consumer's reset (_consumerResetPending): the next time the
+// consumer runs, NativeFrame::reset is set, and the request stays until it has run. This restarts the consumer's
+// history a couple of frames before signal 3 could.
+//
+// Signal 3, the mask's late count. TrustMaskDx12 counts on the GPU the frames in which at least cutShare of the pixels
+// are fully distrusted (only frames that had a history count) and reports it through SceneCutSeen() a couple of frames
+// later. Seen outside the quiet window it reports the cut and asks for the consumer's reset for this frame. With the
+// detector on, the flow and the mask carry on, the consumer runs on this frame too (skipping it showed one frame
+// without it, a flash over the whole picture) and a quiet window opens. With the detector off, the flow and the mask
+// are reset instead and the consumer does not run until they have a flow again; this is the only signal then.
+//
+// The quiet window (_cutQuietUntil, kRing + 2 frames after a reported cut) is what keeps the late count of a cut that
+// signal 2 already reported from being a second cut: a signal inside it is ignored. A cut hint from the adapter
+// (FrameInput::cutHint) and a size change are not cuts here: they reset the flow and the mask only, with no report. The
+// caller counts Result::sceneCut and logs it (native/NativeDriver.cpp).
 class NativeProducer
 {
   public:

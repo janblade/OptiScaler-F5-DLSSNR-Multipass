@@ -610,6 +610,22 @@ int main(int argc, char** argv)
             tuning.stillEpsilon = value;
         else if (key == "stillmargin")
             tuning.stillMargin = value;
+        else if (key == "look")
+            tuning.lookWeights = value != 0.0f;
+        else if (key == "lookrange")
+            tuning.lookRange = value;
+        else if (key == "lookdist")
+            tuning.lookDistance = value;
+        else if (key == "shifted")
+            tuning.shiftedWindows = value != 0.0f;
+        else if (key == "shiftpen")
+            tuning.shiftPenalty = value;
+        else if (key == "small")
+            tuning.smallAmbiguity = value;
+        else if (key == "wide")
+            tuning.wideRadius = (int) value;
+        else if (key == "widetrig")
+            tuning.wideTrigger = value;
         else if (key == "lumaperc")
             tuning.perceptualLuma = value != 0.0f;
         else if (key == "white")
@@ -1566,7 +1582,8 @@ int main(int argc, char** argv)
     if (score)
     {
         printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d "
-               "inverse=%d still=%d stilleps=%g stillmargin=%g | "
+               "inverse=%d still=%d stilleps=%g stillmargin=%g look=%d lookrange=%g lookdist=%g shifted=%d "
+               "shiftpen=%g small=%g wide=%d widetrig=%g | "
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
                "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f "
                "hudStillLong %.4f thinSlowBand %.4f thinSlowRest %.4f edgeLookNoDepth1 %.4f "
@@ -1574,11 +1591,13 @@ int main(int argc, char** argv)
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
                std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0,
                tuning.globalCandidate ? 1 : 0, tuning.inverseRefinement ? 1 : 0, tuning.stillFrames,
-               tuning.stillEpsilon, tuning.stillMargin, panHalf.worst, panError.Mean(), brightHalf.worst,
-               grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(), edgeDepthOne.Mean(),
-               edgeNoDepthOne.Mean(), smallDepthOne.Mean(), smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean(),
-               hudStillLong.Mean(), thinSlowBand.Mean(), thinSlowRest.Mean(), edgeLookNoDepthOne.Mean(), cutHit,
-               cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet, hdrNow.panErr, hdrNow.grainOne);
+               tuning.stillEpsilon, tuning.stillMargin, tuning.lookWeights ? 1 : 0, tuning.lookRange,
+               tuning.lookDistance, tuning.shiftedWindows ? 1 : 0, tuning.shiftPenalty, tuning.smallAmbiguity,
+               tuning.wideRadius, tuning.wideTrigger, panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(),
+               sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(), edgeDepthOne.Mean(), edgeNoDepthOne.Mean(),
+               smallDepthOne.Mean(), smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean(), hudStillLong.Mean(),
+               thinSlowBand.Mean(), thinSlowRest.Mean(), edgeLookNoDepthOne.Mean(), cutHit, cutTotal, cutFalse,
+               quietTotal, weakestCut, worstQuiet, hdrNow.panErr, hdrNow.grainOne);
         return 0;
     }
 

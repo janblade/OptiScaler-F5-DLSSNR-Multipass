@@ -7,6 +7,7 @@
 #include <State.h>
 
 #include <dlssnr/DlssNr_NativeMode.h>
+#include <framegen/IFGFeature_Dx12.h>
 #include <hooks/LibraryLoad_Hooks.h>
 #include <hooks/Reflex_Hooks.h>
 #include <nvapi/NvApiHooks.h>
@@ -29,6 +30,9 @@ enum class Table
 std::atomic<bool> g_running = false;    // markers are being sent
 std::atomic<bool> g_submitSent = false; // this frame's SIMULATION_END / RENDERSUBMIT_START went out
 std::atomic<IUnknown*> g_device = nullptr;
+std::atomic<IUnknown*> g_sleepModeDevice = nullptr;   // the device our Reflex mode was set on
+std::atomic<const void*> g_gameQueue = nullptr;       // the queue the game's frame is submitted to (D3D12)
+std::atomic<double> g_frameGenerationPresentAt = 0.0; // last PresentSource::FrameGeneration call, ms
 std::atomic<Decision> g_decision = Decision::NoF5Low;
 
 // Only the game's present thread touches these.
@@ -36,7 +40,6 @@ Table g_table = Table::Unknown;
 uint64_t g_frameId = 0;
 bool g_presentStarted = false; // PRESENT_START of the frame in flight went out, PRESENT_END is owed
 bool g_sleepModeSent = false;  // we turned Reflex on
-IUnknown* g_sleepModeDevice = nullptr;
 
 // GetStatus
 double g_latencyAskedAt = 0.0;
@@ -137,11 +140,43 @@ void Stop(IUnknown* device)
 
     g_presentStarted = false;
 
-    if (g_sleepModeSent && g_sleepModeDevice != nullptr && !ReflexHooks::gameCalledSetSleepMode())
-        SetSleepMode(g_sleepModeDevice, false);
+    if (auto sleepModeDevice = g_sleepModeDevice.exchange(nullptr);
+        g_sleepModeSent && sleepModeDevice != nullptr && !ReflexHooks::gameCalledSetSleepMode())
+    {
+        SetSleepMode(sleepModeDevice, false);
+
+        // With our Sleep calls gone, Reflex can no longer hold OptiScaler's fps cap: hand it back to OptiScaler's own
+        ReflexHooks::forgetSleepDevice(sleepModeDevice);
+    }
 
     g_sleepModeSent = false;
-    g_sleepModeDevice = nullptr;
+}
+
+// With frame generation's swap chain in place, its presents are the game's and the wrapped swap chain's are frame
+// generation's own (real and generated frames, on its thread)
+bool Ignored(PresentSource source)
+{
+    const auto now = Util::MillisecondsNow();
+
+    if (source == PresentSource::FrameGeneration)
+    {
+        g_frameGenerationPresentAt = now;
+        return false;
+    }
+
+    return SwapChainPresentIgnored(now, g_frameGenerationPresentAt.load(std::memory_order_relaxed));
+}
+
+const void* GameQueue()
+{
+    auto& state = State::Instance();
+
+    // Frame generation's swap chain can leave State::currentCommandQueue on its own queue; it knows the game's
+    if (auto* fg12 = dynamic_cast<IFGFeature_Dx12*>(state.currentFG);
+        fg12 != nullptr && fg12->GameCommandQueue() != nullptr)
+        return fg12->GameCommandQueue();
+
+    return state.currentCommandQueue;
 }
 
 const char* PathText()
@@ -167,10 +202,14 @@ const char* PathText()
 }
 } // namespace
 
-void OnPresentBegin(IUnknown* device)
+void OnPresentBegin(IUnknown* device, PresentSource source)
 {
-    if (!g_running.load(std::memory_order_relaxed) || device == nullptr || ReflexHooks::gameCalledReflex())
+    // Ignored first: a FrameGeneration call must be noted even before we run, ahead of frame generation's own presents
+    if (Ignored(source) || !g_running.load(std::memory_order_relaxed) || device == nullptr ||
+        ReflexHooks::gameCalledReflex())
+    {
         return;
+    }
 
     g_device = device;
 
@@ -186,9 +225,9 @@ void OnPresentBegin(IUnknown* device)
     g_presentStarted = true;
 }
 
-void OnPresentEnd(IUnknown* device)
+void OnPresentEnd(IUnknown* device, PresentSource source)
 {
-    if (device == nullptr || State::Instance().isShuttingDown)
+    if (device == nullptr || State::Instance().isShuttingDown || Ignored(source))
         return;
 
     const auto decision = Evaluate();
@@ -205,7 +244,7 @@ void OnPresentEnd(IUnknown* device)
         return;
     }
 
-    if (!g_running.load(std::memory_order_relaxed) || g_sleepModeDevice != device)
+    if (!g_running.load(std::memory_order_relaxed) || g_sleepModeDevice.load() != device)
     {
         // Once, and again when the device is a new one
         SetSleepMode(device, true);
@@ -221,6 +260,7 @@ void OnPresentEnd(IUnknown* device)
 
     g_presentStarted = false;
     g_device = device;
+    g_gameQueue = GameQueue();
 
     ReflexHooks::ownSleep(device);
 
@@ -230,10 +270,17 @@ void OnPresentEnd(IUnknown* device)
     Marker(device, SIMULATION_START);
 }
 
-void OnFirstSubmit()
+void OnFirstSubmit(const void* queue)
 {
-    if (!g_running.load(std::memory_order_relaxed))
+    if (!g_running.load(std::memory_order_relaxed) || g_submitSent.load(std::memory_order_relaxed))
         return;
+
+    // OptiScaler's own queues and frame generation's do not start the game's frame
+    if (queue != nullptr)
+    {
+        if (auto gameQueue = g_gameQueue.load(std::memory_order_relaxed); gameQueue != nullptr && queue != gameQueue)
+            return;
+    }
 
     if (g_submitSent.exchange(true))
         return;
@@ -245,6 +292,21 @@ void OnFirstSubmit()
 
     Marker(device, SIMULATION_END);
     Marker(device, RENDERSUBMIT_START);
+}
+
+void OnDeviceReleased(IUnknown* device)
+{
+    if (device == nullptr)
+        return;
+
+    auto expected = device;
+    g_device.compare_exchange_strong(expected, nullptr);
+
+    // The next present on a new device sets our Reflex mode again (OnPresentEnd)
+    expected = device;
+    g_sleepModeDevice.compare_exchange_strong(expected, nullptr);
+
+    ReflexHooks::forgetSleepDevice(device);
 }
 
 Status GetStatus()

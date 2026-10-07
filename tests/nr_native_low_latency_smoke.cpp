@@ -84,6 +84,14 @@ int main()
     CHECK(strcmp(DecisionText(Decision::ForceReflexDisabled),
                  "Off: Force Reflex is set to Force Disable in the fakenvapi settings") == 0);
 
+    // With frame generation's swap chain, only the game's present to it counts; the wrapped swap chain's presents
+    // behind it (real and generated frames) are skipped, and count again once frame generation's presents stop
+    CHECK(!SwapChainPresentIgnored(5000.0, 0.0));
+    CHECK(SwapChainPresentIgnored(5000.0, 4990.0));
+    CHECK(SwapChainPresentIgnored(5000.0, 5000.0));
+    CHECK(!SwapChainPresentIgnored(5000.0, 5000.0 - kFrameGenerationPresentHoldMs));
+    CHECK(!SwapChainPresentIgnored(9000.0, 4990.0));
+
     printf(fails == 0 ? "nr_native_low_latency_smoke: PASS\n" : "nr_native_low_latency_smoke: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

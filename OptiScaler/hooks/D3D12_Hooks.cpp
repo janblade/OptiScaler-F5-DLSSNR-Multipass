@@ -9,6 +9,7 @@
 
 #include <resource_tracking/ResTrack_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <native/NativeLowLatency.h>
 
 #include <proxies/D3D12_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
@@ -1842,6 +1843,7 @@ static ULONG hkD3D12DeviceRelease(IUnknown* device)
         {
             LOG_DEBUG("Set State::Instance().currentD3D12Device = nullptr, was: {:X}", (size_t) device);
             State::Instance().currentD3D12Device = nullptr;
+            native::lowlatency::OnDeviceReleased(device);
         }
     }
 

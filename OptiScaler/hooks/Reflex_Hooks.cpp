@@ -24,6 +24,8 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+    std::scoped_lock lock(_sleepModeMutex);
+
     if (!_ownCall)
     {
         _gameCalledReflex = true;
@@ -536,6 +538,8 @@ bool ReflexHooks::updateTimingData()
         return true;
     };
 
+    std::scoped_lock lock(_sleepModeMutex);
+
     if (_lastSleepDev && o_NvAPI_D3D_GetLatency)
     {
         // Not calling free on this but it's static so hopefully fine
@@ -707,6 +711,8 @@ void ReflexHooks::setFPSLimit(float fps)
     else
         _minimumIntervalUs = static_cast<uint32_t>(std::round(1'000'000 / fps));
 
+    std::scoped_lock lock(_sleepModeMutex);
+
     if (_lastSleepDev != nullptr)
     {
         NV_SET_SLEEP_MODE_PARAMS temp {};
@@ -754,8 +760,22 @@ struct OwnCallScope
 
 NvAPI_Status ReflexHooks::ownSetSleepMode(IUnknown* pDev, NV_SET_SLEEP_MODE_PARAMS* pParams)
 {
+    std::scoped_lock lock(_sleepModeMutex);
+
+    // The game's own SetSleepMode is the last word, even one that came in just before ours
+    if (_gameCalledSetSleepMode)
+        return NVAPI_OK;
+
     OwnCallScope scope(_ownCall);
     return hkNvAPI_D3D_SetSleepMode(pDev, pParams);
+}
+
+void ReflexHooks::forgetSleepDevice(IUnknown* pDev)
+{
+    std::scoped_lock lock(_sleepModeMutex);
+
+    if (pDev != nullptr && _lastSleepDev == pDev)
+        _lastSleepDev = nullptr;
 }
 
 NvAPI_Status ReflexHooks::ownSleep(IUnknown* pDev)

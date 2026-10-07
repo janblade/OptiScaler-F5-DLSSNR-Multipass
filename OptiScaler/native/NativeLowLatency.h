@@ -20,12 +20,17 @@
 namespace native::lowlatency
 {
 // The game's Present: before the real Present (RENDERSUBMIT_END, PRESENT_START) and after it returns (PRESENT_END,
-// Sleep, SIMULATION_START). `device` is the game's D3D12 or D3D11 device.
-void OnPresentBegin(IUnknown* device);
-void OnPresentEnd(IUnknown* device);
+// Sleep, SIMULATION_START). `device` is the game's D3D12 or D3D11 device. SwapChain calls are ignored while
+// FrameGeneration calls come in.
+void OnPresentBegin(IUnknown* device, PresentSource source = PresentSource::SwapChain);
+void OnPresentEnd(IUnknown* device, PresentSource source = PresentSource::SwapChain);
 
 // The frame's first queue submit (D3D12) or first draw (D3D11): any thread, one relaxed load when we do not run.
-void OnFirstSubmit();
+// `queue`: the D3D12 queue submitted to; only the game's queue counts. nullptr (D3D11) always counts.
+void OnFirstSubmit(const void* queue = nullptr);
+
+// The game's device is being released for good: nothing of ours may use it again.
+void OnDeviceReleased(IUnknown* device);
 
 struct Status
 {

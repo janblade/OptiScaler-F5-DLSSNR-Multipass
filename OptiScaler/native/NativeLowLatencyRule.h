@@ -67,6 +67,25 @@ inline Decision Decide(const Inputs& in)
 }
 
 // Plain words for the menu when we do not run. Run has no text here: the path in use names it.
+// Where a present was seen. With OptiScaler's frame generation on a D3D12 game, the game presents to frame
+// generation's swap chain (FGHooks::FGPresent) and frame generation then presents every shown frame, real and
+// generated, through the wrapped swap chain on its own thread: only the first is the game's frame.
+enum class PresentSource
+{
+    SwapChain,      // the wrapped swap chain (no frame generation swap chain), or the D3D11 bridge's game present
+    FrameGeneration // FGHooks::FGPresent, the game's present to frame generation
+};
+
+// How long a FrameGeneration present keeps SwapChain presents ignored: frame generation's swap chain can go away
+// (turned off, swap chain recreated), and then the wrapped swap chain's presents are the game's again.
+inline constexpr double kFrameGenerationPresentHoldMs = 1000.0;
+
+// A SwapChain present is skipped while FrameGeneration presents come in. `lastFrameGenerationMs` is 0 when none came.
+inline bool SwapChainPresentIgnored(double nowMs, double lastFrameGenerationMs)
+{
+    return lastFrameGenerationMs > 0.0 && nowMs - lastFrameGenerationMs < kFrameGenerationPresentHoldMs;
+}
+
 inline const char* DecisionText(Decision decision)
 {
     switch (decision)

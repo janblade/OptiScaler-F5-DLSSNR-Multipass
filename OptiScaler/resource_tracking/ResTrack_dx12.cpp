@@ -772,7 +772,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
                                           ID3D12CommandList* const* ppCommandLists)
 {
     // Before the submit: the frame's first one is where the game's simulation ends and its render submit starts
-    native::lowlatency::OnFirstSubmit();
+    native::lowlatency::OnFirstSubmit(This);
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
     DlssNr::FinishedPictureSubmitted(This, NumCommandLists, ppCommandLists);
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include <d3d12.h>
 #include <atomic>
+#include <mutex>
 #include <nvapi/NvApiTypes.h>
 
 #include "Hook_Utils.h"
@@ -41,6 +42,8 @@ class ReflexHooks
     inline static thread_local bool _ownCall = false;
     inline static std::atomic<bool> _gameCalledReflex = false;
     inline static std::atomic<bool> _gameCalledSetSleepMode = false;
+    // SetSleepMode and the stored device: the game's call and ours never interleave, and a released device is dropped
+    inline static std::recursive_mutex _sleepModeMutex;
 
     // D3D
     inline static decltype(&NvAPI_D3D_SetSleepMode) o_NvAPI_D3D_SetSleepMode = nullptr;
@@ -96,6 +99,8 @@ class ReflexHooks
     static NvAPI_Status ownSleep(IUnknown* pDev);
     static NvAPI_Status ownSetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER_PARAMS* pParams);
     static NvAPI_Status ownGetLatency(IUnknown* pDev, NV_LATENCY_RESULT_PARAMS* pParams);
+    // The device is gone, or our Reflex mode is off: the fps cap no longer goes through it (setFPSLimit, update)
+    static void forgetSleepDevice(IUnknown* pDev);
 
     // The game itself has called Reflex (SetSleepMode, Sleep, a marker or an async marker), ever; and SetSleepMode
     // in particular (a game that only sends markers has Reflex off).

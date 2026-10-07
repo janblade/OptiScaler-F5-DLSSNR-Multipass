@@ -58,15 +58,60 @@ int main()
         CHECK(b.line == Line::SelectUpscaler && b.action == Action::None);
     }
 
-    // Optical F5Low's virtual upscaler running.
+    // Optical F5Low's virtual upscaler running: the line names only what runs with it.
     {
-        const Banner b = Decide(Make(Feature::F5Low, true, false, Shown::NrAndFrameGeneration, true));
+        Inputs in = Make(Feature::F5Low, true, false, Shown::NrAndFrameGeneration, true);
+        in.nrEnabled = true;
+        in.frameGeneration = true;
+        Banner b = Decide(in);
         CHECK(b.line == Line::F5LowNrAndFrameGen && b.action == Action::F5LowSettings);
+
+        in.frameGeneration = false;
+        CHECK(Decide(in).line == Line::F5LowNrNoFrameGen);
+
+        in.nrEnabled = false;
+        in.frameGeneration = true;
+        CHECK(Decide(in).line == Line::F5LowFrameGenNoNr);
+
+        in.frameGeneration = false;
+        b = Decide(in);
+        CHECK(b.line == Line::F5LowStabiliser && b.action == Action::F5LowSettings);
     }
     // ... whatever else is true: the feature wins.
     {
         const Banner b = Decide(Make(Feature::F5Low, false, true, Shown::Off, false));
-        CHECK(b.line == Line::F5LowNrAndFrameGen);
+        CHECK(b.line == Line::F5LowStabiliser && b.action == Action::F5LowSettings);
+    }
+
+    // The one-time notice: real time with the offer standing, a long stall counts little, and the count restarts
+    // whenever the offer goes away (a game upscaler call, a mode switched on).
+    {
+        double quiet = 0.0;
+
+        for (int i = 0; i < 59 * 60; ++i)
+            quiet = HintQuietAfter(quiet, true, 1000.0 / 60.0);
+
+        CHECK(!HintDue(quiet));
+
+        for (int i = 0; i < 2 * 60; ++i)
+            quiet = HintQuietAfter(quiet, true, 1000.0 / 60.0);
+
+        CHECK(HintDue(quiet));
+
+        // A 30 s loading stall adds at most one capped step
+        quiet = HintQuietAfter(0.0, true, 30000.0);
+        CHECK(quiet <= kHintStepCapMs);
+
+        // The offer gone: back to zero
+        CHECK(HintQuietAfter(50000.0, false, 16.0) == 0.0);
+
+        // The same seconds at 30 and 144 fps
+        double q30 = 0.0, q144 = 0.0;
+        for (int i = 0; i < 30 * 61; ++i)
+            q30 = HintQuietAfter(q30, true, 1000.0 / 30.0);
+        for (int i = 0; i < 144 * 61; ++i)
+            q144 = HintQuietAfter(q144, true, 1000.0 / 144.0);
+        CHECK(HintDue(q30) && HintDue(q144));
     }
 
     // NR only running, and waiting.

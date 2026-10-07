@@ -2528,6 +2528,37 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
     }
 }
 
+// Which upscaler files and hooks were found: for troubleshooting a game whose upscaler call does not arrive. Drawn
+// inside a tooltip, by the header's lines (here and DlssNr::RenderHeaderBanner's offer).
+static void UpscalerFileChecks()
+{
+    const auto& state = State::Instance();
+    const auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+
+    if (primaryGpu.dlssCapable)
+    {
+        ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
+        ImGui::SameLine(0.0f, 16.0f);
+        ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
+    }
+    else
+    {
+        ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
+        ImGui::SameLine(0.0f, 16.0f);
+        ImGui::Text("nvngx replacement: %s", state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
+    }
+
+    ImGui::Text("libxess: %s", (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
+
+    ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
+}
+
 void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -2616,7 +2647,7 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
         : currentFeature->IsFrozen()                             ? HeaderBanner::Feature::Frozen
                                                                  : HeaderBanner::Feature::Game,
         upscalerFiles, joinedUpscalers, currentFeature != nullptr ? currentFeature->Name() : std::string(),
-        toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)));
+        toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), UpscalerFileChecks);
 
     if (f5lowLine)
     {
@@ -2638,30 +2669,7 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
                 ImGui::TextUnformatted("Upscalers don't always work in menus.");
                 ImGui::Spacing();
 
-                if (primaryGpu.dlssCapable)
-                {
-                    ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
-                    ImGui::SameLine(0.0f, 16.0f);
-                    ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
-                }
-                else
-                {
-                    ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
-                    ImGui::SameLine(0.0f, 16.0f);
-                    ImGui::Text("nvngx replacement: %s",
-                                state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
-                }
-
-                ImGui::Text("libxess: %s",
-                            (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
-
-                ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
-                ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
-                ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
-                ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
+                UpscalerFileChecks();
 
                 ImGui::EndTooltip();
             }

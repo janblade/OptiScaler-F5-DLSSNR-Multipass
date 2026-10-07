@@ -15,6 +15,7 @@
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
+#include <framegen/IFGFeature.h>
 
 #include <imgui/imgui.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -2859,11 +2860,14 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     in.nrAvailable =
         config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0 && state.swapchainApi != API::Vulkan;
     in.f5lowNrOnlyRunning = dx11 ? NativeMotionDx11::NrOnlyRunning() : NativeMotionDx12::NrOnlyRunning();
+    in.nrEnabled = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
+    in.frameGeneration = state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused();
     return in;
 }
 
 bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
-                        const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour)
+                        const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour,
+                        void (*upscalerFileChecks)())
 {
     using namespace HeaderBanner;
 
@@ -2878,15 +2882,28 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
     case Line::NoFiles:
         return false; // the menu's own lines
     case Line::OfferWithFiles:
-        ImGui::TextColored(offerColour,
-                           "No upscaler call from the game. Pick %s as its upscaler, or use Optical F5Low.",
-                           upscalerNames.c_str());
+        ImGui::TextColored(
+            offerColour,
+            "No upscaler call from the game. Pick %s as its upscaler and load a save, or use Optical F5Low.",
+            upscalerNames.c_str());
         break;
     case Line::OfferNoFiles:
         ImGui::TextColored(offerColour, "No upscaler files found. Optical F5Low can still run NR without one.");
         break;
     case Line::F5LowNrAndFrameGen:
         ImGui::TextDisabled("Optical F5Low: NR and frame generation on the finished picture (%s as stabiliser).",
+                            backendName.c_str());
+        break;
+    case Line::F5LowNrNoFrameGen:
+        ImGui::TextDisabled("Optical F5Low: NR on the finished picture (%s as stabiliser), frame generation off.",
+                            backendName.c_str());
+        break;
+    case Line::F5LowFrameGenNoNr:
+        ImGui::TextDisabled("Optical F5Low: frame generation on the finished picture (%s as stabiliser), NR off.",
+                            backendName.c_str());
+        break;
+    case Line::F5LowStabiliser:
+        ImGui::TextDisabled("Optical F5Low: %s keeps the picture steady; NR and frame generation are off.",
                             backendName.c_str());
         break;
     case Line::F5LowNrOnly:
@@ -2907,8 +2924,26 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
     }
 
     if (banner.line == Line::OfferWithFiles || banner.line == Line::OfferNoFiles)
-        HelpMarker("Menus and loading screens make no upscaler call either, so this can show there too.\n"
-                   "Optical F5Low runs NR on the finished picture, with or without the game's upscaler.");
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+
+        // The file checks stay behind the marker, as on the line this offer replaces: they are for troubleshooting
+        if (ImGui::BeginItemTooltip())
+        {
+            ImGui::TextUnformatted("Menus and loading screens make no upscaler call either, so this can show there "
+                                   "too.\nOptical F5Low runs NR on the finished picture, with or without the game's "
+                                   "upscaler.");
+
+            if (banner.line == Line::OfferWithFiles && upscalerFileChecks != nullptr)
+            {
+                ImGui::Spacing();
+                upscalerFileChecks();
+            }
+
+            ImGui::EndTooltip();
+        }
+    }
 
     if (banner.action != Action::None)
     {
@@ -2955,33 +2990,35 @@ void UpdateF5LowHint(Config* config)
 {
     // Once per session, and never again after it has been shown or once a game upscaler is in play.
     static bool shown = false;
-    static float quietSeconds = 0.0f;
+    static double quietMs = 0.0;
+    static double lastCallMs = 0.0;
 
     if (shown || !config->F5LowHint.value_or_default())
         return;
+
+    // Real time between presents (ImGui's DeltaTime stands still while no menu frame is drawn)
+    const double now = Util::MillisecondsNow();
+    const double stepMs = lastCallMs > 0.0 ? now - lastCallMs : 0.0;
+    lastCallMs = now;
 
     const auto feature = State::Instance().currentFeature;
     const bool noFeature = feature == nullptr || !feature->IsInited();
 
     // The header's offer: Optical F5Low off, NR available, no upscaler call from the game, and no upscaler running.
-    if (!noFeature || HeaderBanner::Decide(HeaderInputs(config, HeaderBanner::Feature::None, false)).action !=
-                          HeaderBanner::Action::UseF5Low)
-    {
-        quietSeconds = 0.0f;
-        return;
-    }
+    const bool offerStands =
+        noFeature && HeaderBanner::Decide(HeaderInputs(config, HeaderBanner::Feature::None, false)).action ==
+                         HeaderBanner::Action::UseF5Low;
 
-    // Counted from presented frames, a long stall (loading) at most adds a tenth of a second, so the wait is about ten
-    // seconds of the game running with no upscaler call, not of the clock.
-    quietSeconds += std::min(ImGui::GetIO().DeltaTime, 0.1f);
+    // A minute of the game running with the offer standing (a loading stall counts little): see HeaderBanner.h
+    quietMs = HeaderBanner::HintQuietAfter(quietMs, offerStands, stepMs);
 
-    if (quietSeconds < 10.0f)
+    if (!HeaderBanner::HintDue(quietMs))
         return;
 
     shown = true;
     ImGui::InsertNotification({ ImGuiToastType::Info, 15000,
-                                "No upscaler call from this game so far.\nF5Low can run NR without one: open the menu, "
-                                "Neural Rendering, Optical F5Low." });
+                                "No upscaler call from this game so far.\nOptical F5Low can run NR without one: open "
+                                "the menu, Neural Rendering, Optical F5Low." });
 }
 
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)

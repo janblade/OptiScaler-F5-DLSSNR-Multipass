@@ -26,6 +26,8 @@ struct Inputs
     DlssNrNativeMode::Shown mode = DlssNrNativeMode::Shown::Off;
     bool nrAvailable = false;        // NR can run here, so offering Optical F5Low makes sense
     bool f5lowNrOnlyRunning = false; // the native driver has run NR on the finished picture
+    bool nrEnabled = false;          // Enable Neural Rendering is on and NR has not failed (any API)
+    bool frameGeneration = false;    // OptiScaler's frame generation is running
 };
 
 enum class Line
@@ -36,7 +38,10 @@ enum class Line
     NoFiles,            // "Can't find nvngx.dll, libxess.dll ..." (unchanged)
     OfferWithFiles,     // no upscaler call: pick one, or use Optical F5Low
     OfferNoFiles,       // no upscaler files: Optical F5Low can still run NR
-    F5LowNrAndFrameGen, // Optical F5Low's virtual upscaler is running
+    F5LowNrAndFrameGen, // Optical F5Low's virtual upscaler is running, with NR and frame generation
+    F5LowNrNoFrameGen,  // ... with NR, frame generation off
+    F5LowFrameGenNoNr,  // ... with frame generation, NR off
+    F5LowStabiliser,    // ... with neither: only the upscaler runs
     F5LowNrOnly,        // Optical F5Low runs NR on the finished picture
     F5LowStandsAside,   // a mode is on, the game calls an upscaler of its own
     F5LowStatus         // a mode is on and not yet running: the driver's own status text
@@ -66,8 +71,13 @@ inline Banner Decide(const Inputs& in)
     if (in.feature == Feature::Game)
         return { Line::Blank, Action::None };
 
+    // The virtual upscaler runs whatever NR and frame generation do, so the line says which of them run with it.
     if (in.feature == Feature::F5Low)
-        return { Line::F5LowNrAndFrameGen, Action::F5LowSettings };
+    {
+        const Line line = in.nrEnabled ? (in.frameGeneration ? Line::F5LowNrAndFrameGen : Line::F5LowNrNoFrameGen)
+                                       : (in.frameGeneration ? Line::F5LowFrameGenNoNr : Line::F5LowStabiliser);
+        return { line, Action::F5LowSettings };
+    }
 
     // No feature at all.
     if (in.mode != Shown::Off)
@@ -90,4 +100,24 @@ inline Banner Decide(const Inputs& in)
 
     return { in.upscalerFiles ? Line::OfferWithFiles : Line::OfferNoFiles, Action::UseF5Low };
 }
+
+// The one-time notice ([Menu] F5LowHint) comes after this much real time with the header's offer standing: long
+// enough that a game with an upscaler is past its title screen and menus, where it makes no upscaler call either.
+inline constexpr double kHintQuietMs = 60000.0;
+// Per present at most this much counts, so a loading stall adds little.
+inline constexpr double kHintStepCapMs = 100.0;
+
+// The offer's standing time after one more present `stepMs` after the last; 0 when the offer is gone.
+inline double HintQuietAfter(double quietMs, bool offerStands, double stepMs)
+{
+    if (!offerStands)
+        return 0.0;
+
+    if (stepMs < 0.0)
+        stepMs = 0.0;
+
+    return quietMs + (stepMs < kHintStepCapMs ? stepMs : kHintStepCapMs);
+}
+
+inline bool HintDue(double quietMs) { return quietMs >= kHintQuietMs; }
 } // namespace HeaderBanner

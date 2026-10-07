@@ -102,6 +102,10 @@ class ReflexHooks
     // The device is gone, or our Reflex mode is off: the fps cap no longer goes through it (setFPSLimit, update)
     static void forgetSleepDevice(IUnknown* pDev);
 
+    // A Reflex call made by the game: not one of ours, and not from the Streamline OptiScaler loaded for its own DLSS
+    // frame generation (`returnAddress`: the hooked function's caller)
+    static bool isGameCall(void* returnAddress);
+
     // The game itself has called Reflex (SetSleepMode, Sleep, a marker or an async marker), ever; and SetSleepMode
     // in particular (a game that only sends markers has Reflex off).
     static bool gameCalledReflex() { return _gameCalledReflex.load(std::memory_order_relaxed); }

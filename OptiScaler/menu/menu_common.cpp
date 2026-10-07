@@ -109,6 +109,25 @@ static std::string currentBackendName = "";
 static int refreshRate = 0;
 static ImVec2 lastPosition(-1000.0f, -1000.0f);
 
+// How many frames DLSS frame generation adds per real frame (0: off). A game's own DLSS frame generation reports it on
+// each evaluate; OptiScaler's own DLSSG output (OptiFG input, e.g. Optical F5Low's upscaler) gets no such report back,
+// so there it is the count OptiScaler asked for while its frame generation runs.
+static int DlssgInterpolationCount(const State& state)
+{
+    if (const int reported = state.dlssgDetectedInterpolationCount; reported > 0)
+        return reported;
+
+    const auto fg = state.currentFG;
+
+    if (state.activeFgOutput == FGOutput::DLSSG && state.activeFgInput == FGInput::Upscaler && fg != nullptr &&
+        fg->IsActive() && !fg->IsPaused())
+    {
+        return (int) fg->GetInterpolatedFrameCount();
+    }
+
+    return 0;
+}
+
 static ImVec2 splashPosition(-1000.0f, -1000.0f);
 static ImVec2 splashSize(0.0f, 0.0f);
 static double splashStart = 0.0;
@@ -2159,7 +2178,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             auto fgText = (fg != nullptr && fg->IsActive() && !fg->IsPaused()) ? (" (" + std::string(fg->Name()) + ")")
                                                                                : std::string();
 
-            const int fakeFramesCount = state.dlssgDetectedInterpolationCount;
+            const int fakeFramesCount = DlssgInterpolationCount(state);
             auto formatFg = [&](std::string_view name, int maxFakeFrames)
             {
                 if (fakeFramesCount > maxFakeFrames)
@@ -4717,7 +4736,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         ImGui::Text("Current DLSSG state:");
         ImGui::SameLine();
-        if (auto count = state.dlssgDetectedInterpolationCount; count > 0)
+        if (auto count = DlssgInterpolationCount(state); count > 0)
         {
             ImGui::TextColored(toneMapColor(ImVec4(0.f, 1.f, 0.25f, 1.f)), std::format("ON {}x", count + 1).c_str());
         }

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Reflex_Hooks.h"
 #include <Config.h>
+#include <Util.h>
 
 #include <nvapi/fakenvapi.h>
 
@@ -11,6 +12,9 @@
 
 #include <math.h>
 #include <imgui/ImGuiNotify.hpp>
+
+#include <intrin.h>
+#include <unordered_map>
 
 static inline uint64_t _lastFrameId[20] = { 0 };
 static inline IUnknown* _lastDev[20] = { 0 };
@@ -26,7 +30,7 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
 #endif
     std::scoped_lock lock(_sleepModeMutex);
 
-    if (!_ownCall)
+    if (isGameCall(_ReturnAddress()))
     {
         _gameCalledReflex = true;
         _gameCalledSetSleepMode = true;
@@ -54,7 +58,7 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_Sleep(IUnknown* pDev)
     LOG_FUNC();
 #endif
 
-    if (!_ownCall)
+    if (isGameCall(_ReturnAddress()))
         _gameCalledReflex = true;
 
     static bool skip = false;
@@ -112,7 +116,7 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetLatencyMarker(IUnknown* pDev,
 
     _updatesWithoutMarker = 0;
 
-    if (!_ownCall)
+    if (isGameCall(_ReturnAddress()))
         _gameCalledReflex = true;
 
     // LOG_DEBUG("frameID: {}, markerType: {}", pSetLatencyMarkerParams->frameID,
@@ -293,7 +297,9 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D12_SetAsyncFrameMarker(ID3D12CommandQueue* 
     LOG_FUNC();
 #endif
 
-    _gameCalledReflex = true;
+    if (isGameCall(_ReturnAddress()))
+        _gameCalledReflex = true;
+
     _lastAsyncMarkerFrameId = pSetAsyncFrameMarkerParams->frameID;
 
     // if (pSetAsyncFrameMarkerParams->markerType == OUT_OF_BAND_PRESENT_START)
@@ -768,6 +774,45 @@ NvAPI_Status ReflexHooks::ownSetSleepMode(IUnknown* pDev, NV_SET_SLEEP_MODE_PARA
 
     OwnCallScope scope(_ownCall);
     return hkNvAPI_D3D_SetSleepMode(pDev, pParams);
+}
+
+// Streamline's own modules (sl.interposer, sl.reflex, sl.pcl, sl.dlss_g ...) and the DLSS frame generation module
+static bool IsStreamlineModule(HMODULE module)
+{
+    if (module == nullptr)
+        return false;
+
+    static std::mutex cacheMutex;
+    static std::unordered_map<HMODULE, bool> cache;
+
+    std::scoped_lock lock(cacheMutex);
+
+    if (auto it = cache.find(module); it != cache.end())
+        return it->second;
+
+    wchar_t path[MAX_PATH] {};
+    GetModuleFileNameW(module, path, MAX_PATH);
+
+    auto name = std::filesystem::path(path).filename().wstring();
+    std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+
+    const bool streamline = name.starts_with(L"sl.") || name == L"nvngx_dlssg.dll";
+    cache[module] = streamline;
+    return streamline;
+}
+
+bool ReflexHooks::isGameCall(void* returnAddress)
+{
+    if (_ownCall)
+        return false;
+
+    // A game that started Streamline itself may run its own Reflex through it (NBA 2K27): Streamline's calls are its
+    if (State::Instance().gameCalledSlInit)
+        return true;
+
+    // Otherwise Streamline is the one OptiScaler loaded for its own DLSS frame generation output: its Reflex calls are
+    // OptiScaler's, not the game's
+    return !IsStreamlineModule(Util::GetCallerModule(returnAddress));
 }
 
 void ReflexHooks::forgetSleepDevice(IUnknown* pDev)

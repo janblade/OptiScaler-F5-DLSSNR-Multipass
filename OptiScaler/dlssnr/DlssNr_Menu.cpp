@@ -1081,32 +1081,60 @@ static void RenderStatusLine(const NrCommon& nr)
         ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.");
 }
 
-// Status & Presets: NR without a game upscaler (its mode selector) and the pass-count and quality-tier presets.
-static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
+// The mode in effect, as the F5Low page and the summary line name it.
+static const char* NativeModeName(DlssNrNativeMode::Shown shown)
 {
-    if (ImGui::TreeNode("NR without a game upscaler (experimental)##nativeinputpreset"))
+    switch (shown)
     {
-        bool finishedPicture = nr.finishedPicture;
-        RenderNativeMode(config, nr.enabled, finishedPicture);
+    case DlssNrNativeMode::Shown::NrOnly:
+        return "NR only";
+    case DlssNrNativeMode::Shown::NrAndFrameGeneration:
+        return "NR + frame generation";
+    case DlssNrNativeMode::Shown::MotionOnly:
+        return "motion only";
+    default:
+        return "Off";
+    }
+}
 
-        if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
+// F5Low: NR for a game that makes no upscaler call of its own (the native modes). The mode selector sits at the top,
+// then the Advanced settings (depth, flow tuning).
+static void RenderF5LowPage(Config* config, const NrCommon& nr)
+{
+    ImGui::SeparatorText("F5Low (experimental)");
+
+    bool finishedPicture = nr.finishedPicture;
+    RenderNativeMode(config, nr.enabled, finishedPicture);
+
+    if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
+    {
+        if (State::Instance().currentD3D11Device != nullptr)
         {
-            if (State::Instance().currentD3D11Device != nullptr)
-            {
-                GenericDepthDx11::DrawAdvancedUi();
-                NativeMotionDx11::DrawAdvancedUi();
-            }
-            else
-            {
-                GenericDepthDx12::DrawAdvancedUi();
-                NativeMotionDx12::DrawAdvancedUi();
-            }
-
-            ImGui::TreePop();
+            GenericDepthDx11::DrawAdvancedUi();
+            NativeMotionDx11::DrawAdvancedUi();
+        }
+        else
+        {
+            GenericDepthDx12::DrawAdvancedUi();
+            NativeMotionDx12::DrawAdvancedUi();
         }
 
         ImGui::TreePop();
     }
+}
+
+// Status & Presets: a line pointing to F5Low, and the pass-count and quality-tier presets.
+static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
+{
+    const auto shown = DlssNrNativeMode::FromKeys(
+        { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+
+    ImGui::Text("F5Low (NR without a game upscaler): %s", NativeModeName(shown));
+    ImGui::SameLine();
+
+    if (ImGui::SmallButton("Open F5Low##statuslink"))
+        MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
     ImGui::SeparatorText("Multipass Presets");
     if (PresetButton("1 Pass", PassPresetActive(config, 1u)))
@@ -2859,7 +2887,7 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
 
         if (ImGui::SmallButton(banner.action == Action::UseF5Low ? "Use F5Low##headerf5low"
                                                                  : "F5Low settings##headerf5low"))
-            MenuPages::RequestPage(MenuPages::Page::NrStatus);
+            MenuPages::RequestPage(MenuPages::Page::NrF5Low);
     }
 
     return true;
@@ -2897,6 +2925,9 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
         break;
     case Page::NrStatus:
         RenderStatusPage(config, menuResScale, nr);
+        break;
+    case Page::NrF5Low:
+        RenderF5LowPage(config, nr);
         break;
     default:
         IM_ASSERT(false && "not a Neural Rendering page");

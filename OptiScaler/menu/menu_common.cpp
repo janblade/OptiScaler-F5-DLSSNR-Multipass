@@ -7738,7 +7738,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
 
         if (nrNodeOpen)
         {
-            for (int p = static_cast<int>(Page::NrStatus); p < static_cast<int>(MenuPages::kPageCount); p++)
+            for (int p = static_cast<int>(Page::NrF5Low); p < static_cast<int>(MenuPages::kPageCount); p++)
                 navItem(static_cast<Page>(p));
 
             ImGui::TreePop();
@@ -7809,6 +7809,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             section(RenderLoggingSettings, true);
             section(RenderApiAndTextureSettings, true);
             break;
+        case Page::NrF5Low:
         case Page::NrStatus:
         case Page::NrOptions:
         case Page::NrInput:

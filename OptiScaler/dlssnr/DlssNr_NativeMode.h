@@ -1,6 +1,6 @@
 #pragma once
 
-// Modes of the menu's "NR without a game upscaler" section; no D3D/ImGui, so a host test can include it.
+// Modes of the menu's F5Low page (NR without a game upscaler); no D3D/ImGui, so a host test can include it.
 
 #include <optional>
 

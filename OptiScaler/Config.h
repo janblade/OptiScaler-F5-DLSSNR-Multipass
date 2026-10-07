@@ -615,7 +615,7 @@ class Config
     // native-input options (this, NativeInput, Finished Picture NR) that still works once FGInput=Upscaler is selected:
     // that replaces the game's swap chain with with_dx12::Dx11wDx12SC, which the other two require not to be in play
     // (see native/NativeDriverDx11.cpp's OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's
-    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + frame generation" mode: it sets NativeDepthFinder,
+    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + upscaler & frame generation" mode (F5Low page): it sets NativeDepthFinder,
     // NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished Picture if it was on
     // (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };

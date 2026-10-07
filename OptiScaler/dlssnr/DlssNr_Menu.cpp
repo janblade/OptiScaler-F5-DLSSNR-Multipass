@@ -810,7 +810,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     static constexpr ModeChoice kModes[] = {
         { Mode::Off, Shown::Off, "Off##nativemode" },
         { Mode::NrOnly, Shown::NrOnly, "NR only##nativemode" },
-        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + frame generation##nativemode" },
+        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + upscaler & frame generation##nativemode" },
     };
 
     const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
@@ -853,18 +853,18 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         }
     }
 
-    HelpMarker("For a game that makes no upscaler call of its own: OptiScaler estimates the motion of the finished "
-               "picture itself.\n"
-               "NR only: runs NR on the finished picture. Lower GPU cost, no frame generation. Sets NR Pass at: to "
+    HelpMarker("For a game that makes no upscaler call of its own. F5Low works out the motion of the finished picture "
+               "itself, so NR can still run.\n"
+               "NR only: NR runs on the finished picture. Costs less, no frame generation. Sets NR Pass at: to "
                "Finished Picture.\n"
-               "NR + frame generation: runs OptiScaler's upscaler (the one chosen in the menu, FSR when none is) on "
-               "the picture at the same size, as a stabiliser, so frame generation with FGInput=Upscaler works; NR "
-               "runs around that call. Higher GPU cost. Moves NR Pass at: off Finished Picture.\n"
-               "Both use the game's depth when it is found (Advanced): it improves quality but is optional, and "
-               "without it NR runs on motion only. Choosing a mode turns it on (Off turns it off); it needs a restart "
-               "whenever it was not running at this start.\n"
-               "NR runs only with Enable Neural Rendering on. Applies at once.\n"
-               "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen and a mode "
+               "NR + upscaler & frame generation: also runs OptiScaler's upscaler (your choice in the menu, FSR when "
+               "none) on the picture at the same size, to keep it steady. Frame generation needs this, and it unlocks "
+               "the upscaler settings. Costs more. Moves NR Pass at: off Finished Picture.\n"
+               "Both use the game's depth when F5Low finds it (Advanced). Depth is optional: without it NR uses motion "
+               "only. Choosing a mode turns depth on (Off turns it off); if depth was not running when the game "
+               "started, restart the game to use it.\n"
+               "NR runs only with Enable Neural Rendering on. Changes apply at once.\n"
+               "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode "
                "already on stands aside.");
 
     if (shown == Shown::Off)
@@ -893,7 +893,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         break;
     case Warning::Dx11FrameGeneration:
         warningText = "NR only does nothing while OptiScaler's frame generation has replaced this D3D11 game's swap "
-                      "chain. Choose NR + frame generation.";
+                      "chain. Choose NR + upscaler & frame generation.";
         break;
     case Warning::NrDisabled:
         warningText = shown == Shown::NrOnly ? "Enable Neural Rendering (above) is off, so NR does not run."
@@ -1089,7 +1089,7 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
     case DlssNrNativeMode::Shown::NrOnly:
         return "NR only";
     case DlssNrNativeMode::Shown::NrAndFrameGeneration:
-        return "NR + frame generation";
+        return "NR + upscaler & frame generation";
     case DlssNrNativeMode::Shown::MotionOnly:
         return "motion only";
     default:
@@ -1102,6 +1102,7 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
 static void RenderF5LowPage(Config* config, const NrCommon& nr)
 {
     ImGui::SeparatorText("F5Low (experimental)");
+    ImGui::TextWrapped("Runs NR in a game that makes no upscaler call of its own.");
 
     bool finishedPicture = nr.finishedPicture;
     RenderNativeMode(config, nr.enabled, finishedPicture);
@@ -1130,7 +1131,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
           config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
 
-    ImGui::Text("F5Low (NR without a game upscaler): %s", NativeModeName(shown));
+    ImGui::Text("F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
     ImGui::SameLine();
 
     if (ImGui::SmallButton("Open F5Low##statuslink"))
@@ -2861,7 +2862,7 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
                            upscalerNames.c_str());
         break;
     case Line::OfferNoFiles:
-        ImGui::TextColored(offerColour, "No upscaler files found. F5Low can still run NR without a game upscaler.");
+        ImGui::TextColored(offerColour, "No upscaler files found. F5Low can still run NR without one.");
         break;
     case Line::F5LowNrAndFrameGen:
         ImGui::TextDisabled("F5Low: NR and frame generation on the finished picture (%s as stabiliser).",

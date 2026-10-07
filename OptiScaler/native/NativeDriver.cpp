@@ -40,10 +40,10 @@ void NativeDriver::LogDiagnostics()
         return;
 
     LOG_INFO("{} frames: of {} presents, picture ready {}, waiting for the game's upscaler {}, "
-             "submitted {}, flow valid {}, trust mask ran {}, native input applied {}, scene cuts {}, virtual upscaler "
-             "{}",
-             _tag, _diagPresents, _diagReady, _diagWaiting, _diagSubmitted, _diagFlowValid, _diagTrust, _diagNative,
-             _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
+             "submitted {}, flow valid {} (matched with depth {}), trust mask ran {}, native input applied {}, scene "
+             "cuts {}, virtual upscaler {}",
+             _tag, _diagPresents, _diagReady, _diagWaiting, _diagSubmitted, _diagFlowValid, _diagDepth, _diagTrust,
+             _diagNative, _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
 }
 
 NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview)
@@ -144,6 +144,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     }
 
     _diagFlowValid += result.flowValid ? 1 : 0;
+    _diagDepth += result.flowValid && _producer->Flow() != nullptr && _producer->Flow()->UsedDepth() ? 1 : 0;
     _diagTrust += result.trustRan ? 1 : 0;
     _diagNative += result.nativeRan ? 1 : 0;
     _diagSubmitted += result.submitted ? 1 : 0;
@@ -240,6 +241,13 @@ void NativeDriver::DrawFlowTuning()
     ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
     ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
     ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
+    ImGui::Checkbox("Match within what looks alike##flowlook", &tune.lookWeights);
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "%s", "The match counts the pixels around each one by how close their brightness is to its own,\n"
+                  "so a moving thing's edge does not drag its motion onto what lies beside it. Without depth it\n"
+                  "does what depth would; with depth it keeps a misaligned depth from doing harm.");
     ImGui::Checkbox("Camera motion where the picture is flat##flowglobal", &tune.globalCandidate);
 
     if (ImGui::IsItemHovered())
@@ -247,6 +255,20 @@ void NativeDriver::DrawFlowTuning()
                           "Where nothing in the picture says how it moved (a plain wall, sky), use what the whole\n"
                           "picture did last frame. It also moves the flat inside of a still HUD panel while the\n"
                           "camera turns; switch it off to compare.");
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SliderInt("Frames unchanged before it counts as still (0 = off)##flowstill", &tune.stillFrames, 0, 60);
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s",
+                          "Where the picture has not changed at all for this many frames (a HUD panel), the camera\n"
+                          "motion above no longer wins a tie with no motion, so the HUD stays still while the\n"
+                          "picture pans behind it. Near a line or an edge a panning wall changes, so it keeps moving\n"
+                          "with the camera; a plain patch far from any is held still too. 0 switches the rule off.");
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SliderFloat("Still: largest change allowed##flowstilleps", &tune.stillEpsilon, 0.0005f, 0.05f, "%.4f",
+                       ImGuiSliderFlags_Logarithmic);
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SliderFloat("Still: what the camera must win by##flowstillmargin", &tune.stillMargin, 0.0f, 0.2f, "%.3f");
     ImGui::Checkbox("Cheaper sub-pixel refinement##flowinverse", &tune.inverseRefinement);
 
     if (ImGui::IsItemHovered())

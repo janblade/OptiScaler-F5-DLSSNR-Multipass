@@ -41,6 +41,14 @@ class SyntheticUpscalerCallScope
     SyntheticUpscalerCallScope& operator=(const SyntheticUpscalerCallScope&) = delete;
 };
 
+// Whether the game itself calls an upscaler, known whether or not a depth finder is installed: the menu's native modes
+// and the frame sources ask it. Every upscaler call notes itself (the adapters' NoteUpscalerCall, before their own
+// installed check); our synthetic call inside a SyntheticUpscalerCallScope does not. A call counts for
+// kGameUpscalerQuietMs after it, about the finder's quiet window at 60 frames a second.
+constexpr int64_t kGameUpscalerQuietMs = 2000;
+void NoteGameUpscalerCall();
+bool GameUpscalerCalledRecently();
+
 // A depth buffer as the adapter identifies it. `id` is stable for the buffer's life (a pointer will do).
 struct DepthBuffer
 {

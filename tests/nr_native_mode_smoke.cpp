@@ -139,21 +139,40 @@ int main()
     }
 
     // Warnings.
-    CHECK(WarningFor(Shown::NrOnly, true, true, false) == Warning::None);
-    CHECK(WarningFor(Shown::NrOnly, true, true, true) == Warning::Dx11FrameGeneration);
-    CHECK(WarningFor(Shown::NrOnly, false, false, true) == Warning::Dx11FrameGeneration); // the one to act on first
-    CHECK(WarningFor(Shown::NrOnly, false, true, false) == Warning::NrDisabled);
-    CHECK(WarningFor(Shown::NrOnly, false, false, false) == Warning::NrDisabled);
-    CHECK(WarningFor(Shown::NrOnly, true, false, false) == Warning::NeedsFinishedPicture);
+    CHECK(WarningFor(Shown::NrOnly, true, true, false, false) == Warning::None);
+    CHECK(WarningFor(Shown::NrOnly, true, true, true, false) == Warning::Dx11FrameGeneration);
+    CHECK(WarningFor(Shown::NrOnly, false, false, true, false) ==
+          Warning::Dx11FrameGeneration); // the one to act on first
+    CHECK(WarningFor(Shown::NrOnly, false, true, false, false) == Warning::NrDisabled);
+    CHECK(WarningFor(Shown::NrOnly, false, false, false, false) == Warning::NrDisabled);
+    CHECK(WarningFor(Shown::NrOnly, true, false, false, false) == Warning::NeedsFinishedPicture);
 
-    CHECK(WarningFor(Shown::NrAndFrameGeneration, true, false, false) == Warning::None);
-    CHECK(WarningFor(Shown::NrAndFrameGeneration, true, true, true) == Warning::None);
-    CHECK(WarningFor(Shown::NrAndFrameGeneration, false, false, true) == Warning::NrDisabled);
+    CHECK(WarningFor(Shown::NrAndFrameGeneration, true, false, false, false) == Warning::None);
+    CHECK(WarningFor(Shown::NrAndFrameGeneration, true, true, true, false) == Warning::None);
+    CHECK(WarningFor(Shown::NrAndFrameGeneration, false, false, true, false) == Warning::NrDisabled);
 
     for (int bits = 0; bits < 8; ++bits)
     {
-        CHECK(WarningFor(Shown::Off, bits & 1, bits & 2, bits & 4) == Warning::None);
-        CHECK(WarningFor(Shown::MotionOnly, bits & 1, bits & 2, bits & 4) == Warning::None);
+        CHECK(WarningFor(Shown::Off, bits & 1, bits & 2, bits & 4, false) == Warning::None);
+        CHECK(WarningFor(Shown::MotionOnly, bits & 1, bits & 2, bits & 4, false) == Warning::None);
+    }
+
+    // A game that calls an upscaler of its own: only Off can be chosen, and a mode already on says it stands aside
+    // before anything else.
+    for (Mode mode : { Mode::NrOnly, Mode::NrAndFrameGeneration })
+    {
+        CHECK(Selectable(mode, false));
+        CHECK(!Selectable(mode, true));
+    }
+
+    CHECK(Selectable(Mode::Off, false) && Selectable(Mode::Off, true));
+
+    for (int bits = 0; bits < 8; ++bits)
+    {
+        for (Shown shown : { Shown::NrOnly, Shown::NrAndFrameGeneration, Shown::MotionOnly })
+            CHECK(WarningFor(shown, bits & 1, bits & 2, bits & 4, true) == Warning::GameUpscaler);
+
+        CHECK(WarningFor(Shown::Off, bits & 1, bits & 2, bits & 4, true) == Warning::None);
     }
 
     printf(fails == 0 ? "native mode: ok\n" : "native mode: %d FAILED\n", fails);

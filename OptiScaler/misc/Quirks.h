@@ -65,6 +65,7 @@ enum class GameQuirk : uint64_t
     ForceFGRenderSizeMVs,
     CreateSLOnThe2ndDevice,
     Kcd2DlssgHdr10,
+    XeFGBridgeResizeAsCreated,
     // Don't forget to add the new entry to printQuirks
     _
 };
@@ -93,6 +94,10 @@ static const QuirkEntry quirkTable[] = {
 
     // Native DLSSG requires HDR10; the game's HDR toggle otherwise restores scRGB.
     QUIRK_ENTRY("kingdomcome.exe", GameQuirk::Kcd2DlssgHdr10),
+
+    // Metal Gear Solid V: The Phantom Pain resizes with an SRGB format and 1 buffer, which XeFG's flip swapchain
+    // rejects through the D3D11 bridge.
+    QUIRK_ENTRY("mgsvtpp.exe", GameQuirk::XeFGBridgeResizeAsCreated),
 
     // Red Dead Redemption 2
     // Spoofing causes FSR2 inputs crash, DLSS inputs need OptiPatcher to avoid artifacts/crashes anyway

@@ -2693,6 +2693,9 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
     if (currentFeature != nullptr && !currentFeature->IsFrozen())
     {
+        if (native::IsVirtualUpscalerFeature(currentFeature))
+            DlssNr::RenderF5LowUpscalerNote();
+
         // UPSCALERS -----------------------------
         ImGui::SeparatorText("Upscalers");
         ShowTooltip("Which copium do you choose?");
@@ -3498,6 +3501,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
     auto config = ctx.config;
+    DlssNr::RenderF5LowFrameGenHint(config, ctx.currentFeature == nullptr || !ctx.currentFeature->IsInited());
     bool external = config->ExternalFrameGeneration.value_or_default();
     const bool ampereActive = config->FGDLSSGAmpereMfgUnlock.value_or_default();
     if (ampereActive)

@@ -67,6 +67,12 @@ void RenderMenu(::Config* config, float menuResScale, MenuPages::Page page);
 bool RenderHeaderBanner(::Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
                         const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour);
 
+// A line on the Upscaler page while the current upscaler is F5Low's own (the game makes no upscaler call), and a hint
+// on the Frame Generation page where F5Low could give frame generation its input (`noUpscalerFeature`: no upscaler is
+// running).
+void RenderF5LowUpscalerNote();
+void RenderF5LowFrameGenHint(::Config* config, bool noUpscalerFeature);
+
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
 

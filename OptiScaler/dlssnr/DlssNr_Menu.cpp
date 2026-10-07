@@ -2820,8 +2820,7 @@ static void RenderDebugPage(Config* config, float menuResScale)
     ImGui::PopItemWidth();
 }
 
-bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
-                        const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour)
+static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature feature, bool upscalerFiles)
 {
     using namespace HeaderBanner;
 
@@ -2839,8 +2838,16 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
     in.nrAvailable =
         config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0 && state.swapchainApi != API::Vulkan;
     in.f5lowNrOnlyRunning = dx11 ? NativeMotionDx11::NrOnlyRunning() : NativeMotionDx12::NrOnlyRunning();
+    return in;
+}
 
-    const Banner banner = Decide(in);
+bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
+                        const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour)
+{
+    using namespace HeaderBanner;
+
+    const bool dx11 = State::Instance().currentD3D11Device != nullptr;
+    const Banner banner = Decide(HeaderInputs(config, feature, upscalerFiles));
 
     switch (banner.line)
     {
@@ -2891,6 +2898,34 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
     }
 
     return true;
+}
+
+void RenderF5LowUpscalerNote()
+{
+    ImGui::TextWrapped("Driven by F5Low (the game makes no upscaler call): this upscaler runs at the same size as a "
+                       "stabiliser.");
+
+    if (ImGui::SmallButton("F5Low settings##upscalernote"))
+        MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+
+    ImGui::Spacing();
+}
+
+void RenderF5LowFrameGenHint(Config* config, bool noUpscalerFeature)
+{
+    using namespace HeaderBanner;
+
+    // The same offer as the header's: only where F5Low is off, NR can run and the game makes no upscaler call.
+    if (!noUpscalerFeature || Decide(HeaderInputs(config, Feature::None, false)).action != Action::UseF5Low)
+        return;
+
+    ImGui::TextWrapped("No upscaler call from the game? F5Low's NR + upscaler & frame generation gives frame "
+                       "generation its input.");
+
+    if (ImGui::SmallButton("Use F5Low##framegenhint"))
+        MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+
+    ImGui::Spacing();
 }
 
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)

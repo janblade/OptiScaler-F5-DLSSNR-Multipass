@@ -2,6 +2,7 @@
 
 #include "SysUtils.h"
 #include "State.h"
+#include "native/NativeLowLatencyRule.h"
 
 #include <optional>
 #include <filesystem>
@@ -620,6 +621,11 @@ class Config
     // sets NativeDepthFinder, NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished
     // Picture if it was on (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
+    // NativeLowLatency: F5Low calls the Reflex API itself, since a game that makes no upscaler call makes no Reflex call
+    // either (see native/NativeLowLatency.h). Real Reflex on NVIDIA; fakenvapi answers elsewhere (Anti-Lag 2, XeLL or
+    // LatencyFlex, chosen by the fakenvapi settings). auto: on while an F5Low mode runs; true: also without one, in any
+    // game that makes no Reflex call of its own; false: off. Stands aside the moment the game calls Reflex itself.
+    CustomOptional<native::lowlatency::Setting> DlssNrNativeLowLatency { native::lowlatency::Setting::Auto };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.

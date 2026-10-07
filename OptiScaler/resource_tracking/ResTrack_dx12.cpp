@@ -10,6 +10,7 @@
 #include <Util.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <native/NativeLowLatency.h>
 
 #include <algorithm>
 #include <future>
@@ -770,6 +771,8 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
 void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumCommandLists,
                                           ID3D12CommandList* const* ppCommandLists)
 {
+    // Before the submit: the frame's first one is where the game's simulation ends and its render submit starts
+    native::lowlatency::OnFirstSubmit();
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
     DlssNr::FinishedPictureSubmitted(This, NumCommandLists, ppCommandLists);
 }

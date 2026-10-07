@@ -24,6 +24,12 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+    if (!_ownCall)
+    {
+        _gameCalledReflex = true;
+        _gameCalledSetSleepMode = true;
+    }
+
     // Store for later so we can adjust the fps whenever we want
     memcpy(&_lastSleepParams, pSetSleepModeParams, sizeof(NV_SET_SLEEP_MODE_PARAMS));
     _lastSleepDev = pDev;
@@ -45,6 +51,9 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_Sleep(IUnknown* pDev)
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+
+    if (!_ownCall)
+        _gameCalledReflex = true;
 
     static bool skip = false;
     if (State::Instance().activeFgOutput == FGOutput::DLSSG &&
@@ -101,6 +110,9 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetLatencyMarker(IUnknown* pDev,
 
     _updatesWithoutMarker = 0;
 
+    if (!_ownCall)
+        _gameCalledReflex = true;
+
     // LOG_DEBUG("frameID: {}, markerType: {}", pSetLatencyMarkerParams->frameID,
     //           magic_enum::enum_name(pSetLatencyMarkerParams->markerType));
 
@@ -134,7 +146,8 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetLatencyMarker(IUnknown* pDev,
 
     static bool skip[20] = {};
 
-    if (pSetLatencyMarkerParams->markerType == SIMULATION_START)
+    // Our own markers (F5Low's low latency) are not the game sending markers
+    if (pSetLatencyMarkerParams->markerType == SIMULATION_START && !_ownCall)
         _lastMarkerFrame = State::Instance().fgLastFrame;
 
     if (State::Instance().activeFgOutput == FGOutput::DLSSG && StreamlineProxy::IsD3D12Inited() &&
@@ -278,6 +291,7 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D12_SetAsyncFrameMarker(ID3D12CommandQueue* 
     LOG_FUNC();
 #endif
 
+    _gameCalledReflex = true;
     _lastAsyncMarkerFrameId = pSetAsyncFrameMarkerParams->frameID;
 
     // if (pSetAsyncFrameMarkerParams->markerType == OUT_OF_BAND_PRESENT_START)
@@ -718,4 +732,46 @@ bool ReflexHooks::gameIsSendingMarkers()
 {
     return _lastMarkerFrame != 0 && ((State::Instance().fgLastFrame < _lastMarkerFrame) ||
                                      (State::Instance().fgLastFrame - _lastMarkerFrame) < 5);
+}
+
+bool ReflexHooks::ensureTable(PFN_NvApi_QueryInterface queryInterface)
+{
+    if (!_inited && queryInterface != nullptr)
+        hookReflex(queryInterface);
+
+    return _inited;
+}
+
+namespace
+{
+struct OwnCallScope
+{
+    explicit OwnCallScope(bool& flag) : _flag(flag) { _flag = true; }
+    ~OwnCallScope() { _flag = false; }
+    bool& _flag;
+};
+} // namespace
+
+NvAPI_Status ReflexHooks::ownSetSleepMode(IUnknown* pDev, NV_SET_SLEEP_MODE_PARAMS* pParams)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_SetSleepMode(pDev, pParams);
+}
+
+NvAPI_Status ReflexHooks::ownSleep(IUnknown* pDev)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_Sleep(pDev);
+}
+
+NvAPI_Status ReflexHooks::ownSetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER_PARAMS* pParams)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_SetLatencyMarker(pDev, pParams);
+}
+
+NvAPI_Status ReflexHooks::ownGetLatency(IUnknown* pDev, NV_LATENCY_RESULT_PARAMS* pParams)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_GetLatency(pDev, pParams);
 }

@@ -1,0 +1,89 @@
+// Host check of native/NativeLowLatencyRule.h: when F5Low's own low latency runs and stands aside. No GPU, no game.
+// cl /std:c++20 /EHsc /W4 tests/nr_native_low_latency_smoke.cpp
+#include "../OptiScaler/native/NativeLowLatencyRule.h"
+
+#include <cstdio>
+#include <cstring>
+#include <initializer_list>
+
+using namespace native::lowlatency;
+
+static int fails = 0;
+#define CHECK(c)                                                                                                       \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (!(c))                                                                                                      \
+        {                                                                                                              \
+            printf("FAIL line %d: %s\n", __LINE__, #c);                                                                \
+            ++fails;                                                                                                   \
+        }                                                                                                              \
+    } while (0)
+
+int main()
+{
+    Inputs in;
+    in.f5lowRunning = true;
+
+    // The default: on with an F5Low mode
+    CHECK(Decide(in) == Decision::Run);
+
+    // Auto needs an F5Low mode; On does not
+    in.f5lowRunning = false;
+    CHECK(Decide(in) == Decision::NoF5Low);
+    in.setting = Setting::On;
+    CHECK(Decide(in) == Decision::Run);
+
+    // Off beats everything
+    in.setting = Setting::Off;
+    in.f5lowRunning = true;
+    CHECK(Decide(in) == Decision::SettingOff);
+
+    // The game's own Reflex: ours never runs, in either setting
+    for (auto setting : { Setting::Auto, Setting::On })
+    {
+        Inputs g;
+        g.setting = setting;
+        g.f5lowRunning = true;
+        g.gameCallsReflex = true;
+        CHECK(Decide(g) == Decision::GameRunsReflex);
+    }
+
+    // fakenvapi's settings are respected, never overridden
+    {
+        Inputs f;
+        f.f5lowRunning = true;
+        f.forceReflexDisabled = true;
+        CHECK(Decide(f) == Decision::ForceReflexDisabled);
+        f.forceReflexDisabled = false;
+        f.forceXell = true;
+        CHECK(Decide(f) == Decision::ForceXell);
+        f.forceXell = false;
+        f.otherFrameGenerationOwner = true;
+        CHECK(Decide(f) == Decision::FrameGenerationOwnsReflex);
+        f.otherFrameGenerationOwner = false;
+        f.apiAvailable = false;
+        CHECK(Decide(f) == Decision::NoApi);
+    }
+
+    // The game beats the fakenvapi reasons (the more useful line)
+    {
+        Inputs f;
+        f.f5lowRunning = true;
+        f.gameCallsReflex = true;
+        f.forceReflexDisabled = true;
+        CHECK(Decide(f) == Decision::GameRunsReflex);
+    }
+
+    // Every reason has its plain text; Run has none
+    for (auto d : { Decision::SettingOff, Decision::NoF5Low, Decision::GameRunsReflex, Decision::ForceReflexDisabled,
+                    Decision::ForceXell, Decision::FrameGenerationOwnsReflex, Decision::NoApi })
+        CHECK(strncmp(DecisionText(d), "Off: ", 5) == 0);
+
+    CHECK(DecisionText(Decision::Run)[0] == '\0');
+    CHECK(strcmp(DecisionText(Decision::GameRunsReflex), "Off: the game runs its own Reflex") == 0);
+    CHECK(strcmp(DecisionText(Decision::ForceReflexDisabled),
+                 "Off: Force Reflex is set to Force Disable in the fakenvapi settings") == 0);
+
+    printf(fails == 0 ? "nr_native_low_latency_smoke: PASS\n" : "nr_native_low_latency_smoke: %d FAIL\n", fails);
+    return fails == 0 ? 0 : 1;
+}

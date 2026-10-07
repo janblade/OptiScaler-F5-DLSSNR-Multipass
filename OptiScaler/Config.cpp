@@ -485,6 +485,15 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
             DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
             DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
+            if (auto lowLatency = readString("DlssNr", "NativeLowLatency", true); lowLatency.has_value())
+            {
+                if (lowLatency.value() == "auto")
+                    DlssNrNativeLowLatency.set_from_config(native::lowlatency::Setting::Auto);
+                else if (lowLatency.value() == "true")
+                    DlssNrNativeLowLatency.set_from_config(native::lowlatency::Setting::On);
+                else if (lowLatency.value() == "false")
+                    DlssNrNativeLowLatency.set_from_config(native::lowlatency::Setting::Off);
+            }
             DlssNrAutoExposureAdaptBrighterSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptBrighterSeconds"));
             DlssNrAutoExposureAdaptDarkerSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptDarkerSeconds"));
             DlssNrAutoExposureAdaptSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptSeconds"));
@@ -1519,6 +1528,16 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeUpscaler",
                  GetBoolValue(Instance()->DlssNrNativeUpscaler.value_for_config()).c_str());
+    {
+        const char* lowLatency = "auto";
+
+        if (auto held = Instance()->DlssNrNativeLowLatency.value_for_config(); held.has_value())
+            lowLatency = held.value() == native::lowlatency::Setting::On    ? "true"
+                         : held.value() == native::lowlatency::Setting::Off ? "false"
+                                                                            : "auto";
+
+        ini.SetValue("DlssNr", "NativeLowLatency", lowLatency);
+    }
     ini.SetValue("DlssNr", "AutoExposureAdaptBrighterSeconds",
                  GetFloatValue(Instance()->DlssNrAutoExposureAdaptBrighterSeconds.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureAdaptDarkerSeconds",

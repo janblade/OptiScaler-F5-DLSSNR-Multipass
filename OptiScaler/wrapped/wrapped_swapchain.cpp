@@ -14,6 +14,7 @@
 
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx12.h>
+#include <native/NativeLowLatency.h>
 
 #include <misc/FrameLimit.h>
 
@@ -562,11 +563,24 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     LOG_DEBUG("Calling original present");
 
+    // F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present
+    IUnknown* lowLatencyDevice = nullptr;
+
+    if (willPresent && !isD3D11 && device12 != nullptr &&
+        State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+    {
+        lowLatencyDevice = device12;
+        native::lowlatency::OnPresentBegin(lowLatencyDevice);
+    }
+
     // swapchain present
     if (pPresentParameters == nullptr)
         presentResult = pSwapChain->Present(SyncInterval, Flags);
     else
         presentResult = ((IDXGISwapChain1*) pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
+
+    if (lowLatencyDevice != nullptr)
+        native::lowlatency::OnPresentEnd(lowLatencyDevice);
 
     if (presentResult == S_OK)
     {

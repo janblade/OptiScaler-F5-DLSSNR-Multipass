@@ -2,6 +2,7 @@
 #include "DepthCopyDx11.h"
 
 #include "SharedFrame.h"
+#include "F5LowShaderBytecode.h"
 
 #include <cstring>
 
@@ -9,30 +10,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace native
 {
-namespace
-{
-// Reads the read copy (whatever its depth format family) through a single-channel view and writes the plain R32_FLOAT copy. A
-// typeless depth-stencil format (R32G8X24_TYPELESS and the like) can fail to make a cross-API (D3D11<->D3D12) shared NT handle
-// outright (CreateTexture2D returns E_INVALIDARG for such a format with D3D11_RESOURCE_MISC_SHARED_NTHANDLE, even though the same
-// device shares an ordinary colour texture of that size), where a plain float texture shares without issue.
-const char* kConvertSource = R"HLSL(
-Texture2D<float> Src : register(t0);
-RWTexture2D<float> Dst : register(u0);
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
-{
-    uint w, h;
-    Dst.GetDimensions(w, h);
-
-    if (id.x >= w || id.y >= h)
-        return;
-
-    Dst[id.xy] = Src.Load(int3(id.xy, 0));
-}
-)HLSL";
-} // namespace
-
 void DepthCopyDx11::Release()
 {
     _copyUav.Reset();
@@ -52,19 +29,15 @@ void DepthCopyDx11::Release()
 
 ID3D11ComputeShader* DepthCopyDx11::Shader()
 {
-    if (_shader != nullptr || _shaderFailed || _compileFailed)
+    if (_shader != nullptr || _shaderFailed)
         return _shader.Get();
 
-    if (_code == nullptr &&
-        FAILED(D3DCompile(kConvertSource, strlen(kConvertSource), "DepthCopy", nullptr, nullptr, "CSMain", "cs_5_0",
-                          D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &_code, nullptr)))
-    {
-        _code.Reset();
-        _compileFailed = true;
-        return nullptr;
-    }
+    // Compiled ahead of time (native/DepthCopyDx11_Hlsl.h -> native/F5LowShaderBytecode.h): a compile here ran in the
+    // game's bind hook, under the depth finder's lock, the first time a non-R32 depth buffer was copied.
+    const auto* code = F5LowShaderBytecode::Find("DepthCopy", "CSMain");
 
-    if (FAILED(_device->CreateComputeShader(_code->GetBufferPointer(), _code->GetBufferSize(), nullptr, &_shader)))
+    if (code == nullptr ||
+        FAILED(_device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &_shader)))
     {
         _shader.Reset();
         _shaderFailed = true;
@@ -201,7 +174,7 @@ const char* DepthCopyDx11::Take(ID3D11DeviceContext* context, ID3D11Resource* so
     ID3D11ComputeShader* shader = direct ? nullptr : Shader();
 
     if (!direct && shader == nullptr)
-        return _compileFailed ? "compiling the conversion pass failed" : "making the conversion pass failed";
+        return "making the conversion pass failed";
 
     if (const char* failed = MakeCopy(sourceDesc.Width, sourceDesc.Height))
         return failed;

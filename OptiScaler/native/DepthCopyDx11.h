@@ -3,7 +3,6 @@
 // Direct3D only (no OptiScaler headers but native/SharedFrame.h), so tests/nr_depth_copy_dx11_gpu.cpp builds it with
 // native/SharedFrame.cpp alone.
 #include <d3d11.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 
 #include <cstdint>
@@ -34,7 +33,7 @@ class DepthCopyDx11
     // when the size, format or device changes; a texture that could not be made is not tried again until one of those changes.
     const char* Take(ID3D11DeviceContext* context, ID3D11Resource* source);
 
-    // Lets go of everything made on the device, and of the device. The compiled pass is kept (it is not tied to a device).
+    // Lets go of everything made on the device, and of the device.
     void Release();
 
     // No copy for the frame (the caller decided not to take one): the copy of an earlier buffer is not offered for it.
@@ -64,8 +63,6 @@ class DepthCopyDx11
     DXGI_FORMAT _stageFormat = DXGI_FORMAT_UNKNOWN;
     bool _stageFailed = false; // making the read copy at the size and format above failed
 
-    Microsoft::WRL::ComPtr<ID3DBlob> _code; // compiled once, for every device
-    bool _compileFailed = false;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> _shader; // made on _device
     bool _shaderFailed = false;
 

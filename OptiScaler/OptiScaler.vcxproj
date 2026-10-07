@@ -529,6 +529,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\NativeDriver.h" />
     <ClInclude Include="native\NativeLowLatency.h" />
     <ClInclude Include="native\NativeLowLatencyRule.h" />
+    <ClInclude Include="motion\OpticalFlow_Hlsl.h" />
+    <ClInclude Include="motion\TrustMask_Hlsl.h" />
+    <ClInclude Include="native\DepthCopyDx11_Hlsl.h" />
+    <ClInclude Include="native\F5LowShaderBytecode.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNr_WatchedLists.h" />
     <ClInclude Include="motion\OpticalFlow_Dx12.h" />
     <ClInclude Include="motion\TrustMask_Dx12.h" />
     <ClInclude Include="native\NativeDriverDx12.h" />

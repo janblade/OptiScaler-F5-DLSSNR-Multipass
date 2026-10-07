@@ -6,7 +6,7 @@
 
 #include <hooks/FG_Hooks.h>
 #include <menu/menu_overlay_dx.h>
-#include <motion/NativeMotionDx11.h>
+#include <native/NativeDriverDx11.h>
 
 #include <Util.h>
 #include <Config.h>

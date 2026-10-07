@@ -13,8 +13,8 @@
 #include <menu/MenuPages.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
-#include <motion/NativeMotion_Dx12.h>
-#include <motion/NativeMotionDx11.h>
+#include <native/NativeDriverDx12.h>
+#include <native/NativeDriverDx11.h>
 
 #include <imgui/imgui.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>

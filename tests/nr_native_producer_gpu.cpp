@@ -550,6 +550,11 @@ int main()
         // The frame after the report starts over.
         const auto r = frame(Scene { 91, -1, 4.0f, 4.0f }, kRead, true, true, false, output, nullptr, nullptr);
         ok &= Check("the frame after it has no flow yet (the histories were reset)", !r.flowValid);
+
+        // The next frame NR runs on is a reset (it was skipped on the frames the reset was asked on).
+        const int before = nr.count;
+        frame(Scene { 91, -1, 4.0f, 4.0f }, kRead, true, true, false, output, nullptr, nullptr);
+        ok &= Check("the next NR call is a reset", nr.count != before && nr.reset);
         producer.Flow()->Tuning().sceneCutDetector = true;
     }
 

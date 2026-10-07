@@ -42,10 +42,11 @@ ColorSpace ToColorSpace(DXGI_COLOR_SPACE_TYPE type)
 }
 } // namespace
 
-void Dx12FrameSource::SetPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue)
+void Dx12FrameSource::SetPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
 {
     _swapChain = swapChain;
     _queue = queue;
+    _device = device;
 }
 
 void Dx12FrameSource::Release()

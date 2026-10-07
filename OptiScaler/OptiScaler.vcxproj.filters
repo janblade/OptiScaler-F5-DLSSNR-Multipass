@@ -425,10 +425,10 @@
     <ClInclude Include="hudfix\Hudfix_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="motion\NativeMotion_Dx12.h">
+    <ClInclude Include="native\NativeDriverDx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="motion\NativeMotionDx11.h">
+    <ClInclude Include="native\NativeDriverDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="motion\TrustMask_Dx12.h">
@@ -459,6 +459,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\VirtualUpscalerDriver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\NativeDriver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h">
@@ -1280,10 +1283,10 @@
     <ClCompile Include="hudfix\Hudfix_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="motion\NativeMotion_Dx12.cpp">
+    <ClCompile Include="native\NativeDriverDx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="motion\NativeMotionDx11.cpp">
+    <ClCompile Include="native\NativeDriverDx11.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="motion\TrustMask_Dx12.cpp">
@@ -1311,6 +1314,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\VirtualUpscalerDriver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\NativeDriver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="resource_tracking\GenericDepth_Dx12.cpp">

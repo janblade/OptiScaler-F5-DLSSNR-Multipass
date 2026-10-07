@@ -9,7 +9,7 @@
 // The call follows the real one (inputs/NVNGX_DLSS_Dx12.cpp, NVSDK_NGX_D3D12_EvaluateFeature and TryEvaluateOptiFeature):
 // DLSS-NR's EvaluateBeforeUpscale, currentFeature, UpscalerInputsDx12::UpscaleStart and UpscaleEnd (which feed frame
 // generation), Evaluate, then DLSS-NR's EvaluateAfterUpscale. It must run before frame generation presents, on the game's
-// queue: motion/NativeMotion_Dx12.cpp drives it from FGHooks::FGPresent when frame generation owns the swapchain.
+// queue: native/NativeDriverDx12.cpp drives it from FGHooks::FGPresent when frame generation owns the swapchain.
 //
 // Jitter is zero and render size equals output size: there is no upscaling, the backend runs as a temporal stabiliser on the
 // native-resolution picture.

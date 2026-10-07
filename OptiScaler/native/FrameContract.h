@@ -100,6 +100,11 @@ class IFrameSource
 
     virtual Api GetApi() const = 0;
 
+    // The D3D12 device and direct queue the producer runs on, valid after an Acquire that returned Ready. For a D3D12
+    // game they are the game's own; a D3D11 adapter has a private pair (the picture is shared across to it).
+    virtual ID3D12Device* Device() const = 0;
+    virtual ID3D12CommandQueue* Queue() const = 0;
+
     // Once per presented frame, before the overlay is drawn: when a frame is ready, fill `input`. Missing depth is not a
     // failure (the producer then runs the flow only); the game's picture is left alone whenever the status is not Ready.
     virtual AcquireStatus Acquire(FrameInput& input) = 0;

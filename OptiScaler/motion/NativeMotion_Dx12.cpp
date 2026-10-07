@@ -138,7 +138,7 @@ void RunFrame(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device
     if (swapChain == nullptr || queue == nullptr || device == nullptr || g_status == Status::Failed)
         return;
 
-    g_source.SetPresent(swapChain, queue);
+    g_source.SetPresent(swapChain, queue, device);
 
     native::FrameInput input;
     const auto acquired = g_source.Acquire(input);

@@ -111,11 +111,11 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
         return nullptr;
     }
 
-    if (g_producer == nullptr || g_producer->Device() != g_source.Device12())
+    if (g_producer == nullptr || g_producer->Device() != g_source.Device())
     {
         auto fresh = std::make_unique<native::NativeProducer>();
 
-        if (!fresh->Init(g_source.Device12()))
+        if (!fresh->Init(g_source.Device()))
         {
             g_failure = fresh->Error();
             g_status = Status::Failed;
@@ -158,12 +158,12 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device)
             frame.space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
             : frame.space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
                                                      : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-        return DlssNr::ApplyNativeInput(g_source.Queue12(), cmd, frame.color, frame.depth, frame.motion,
+        return DlssNr::ApplyNativeInput(g_source.Queue(), cmd, frame.color, frame.depth, frame.motion,
                                         frame.depthReversed, frame.reset, type, frame.pictureState);
     };
 
     native::FrameOutput output;
-    const auto result = g_producer->Run(g_source.Queue12(), input, options, apply, output);
+    const auto result = g_producer->Run(g_source.Queue(), input, options, apply, output);
     g_source.Return(input, output);
 
     if (result.stoppedAt != nullptr)

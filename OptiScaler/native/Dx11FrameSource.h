@@ -25,8 +25,8 @@ class Dx11FrameSource : public IFrameSource
     void Return(const FrameInput& input, const FrameOutput& output) override;
     void OnResize() override;
 
-    ID3D12Device* Device12() const { return _device12; }
-    ID3D12CommandQueue* Queue12() const { return _queue12; }
+    ID3D12Device* Device() const override { return _device12; }
+    ID3D12CommandQueue* Queue() const override { return _queue12; }
     const std::string& Error() const { return _error; }
 
     // The D3D12-side picture, valid once Acquire has succeeded: the producer's consumer (DLSS-NR or

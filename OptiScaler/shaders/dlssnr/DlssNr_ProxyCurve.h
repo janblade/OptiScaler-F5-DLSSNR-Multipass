@@ -18,7 +18,9 @@ constexpr uint32_t kBalancedComposed = 3;
 constexpr uint32_t kBalancedReplace = 4;
 constexpr uint32_t kHlg = 5;    // ITU-R BT.2100 HLG, white at 0.75 (ITU-R BT.2408)
 constexpr uint32_t kPq = 6;     // SMPTE ST 2084, white (203 nits) at 0.58
-constexpr uint32_t kLinear = 7; // a diagnostic: set in the ini only, never offered in the menu
+// What game integrations hand the model: each channel's light as it is, clipped at white (dlssnr.hlsl SignalEncode).
+// Set in the ini only, never offered in the menu.
+constexpr uint32_t kLinear = 7;
 constexpr uint32_t kCount = 8;
 constexpr uint32_t kPickable = kLinear; // the menu offers 0 .. kPickable - 1
 

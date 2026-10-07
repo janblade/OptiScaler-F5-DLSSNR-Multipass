@@ -36,6 +36,17 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
         _gameCalledSetSleepMode = true;
     }
 
+    // Our own calls (Optical F5Low's low latency) only keep the GPU queue short. OptiScaler's own limiter keeps the fps
+    // cap (FrameLimit): stored here they would hand the cap to Reflex (update's reflexLimitsFps, setFPSLimit), which
+    // upstream warns costs performance with FSR frame generation and does not halve it for XeFG.
+    if (_ownCall)
+    {
+        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+            return nvapi_calls::NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+
+        return o_NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+    }
+
     // Store for later so we can adjust the fps whenever we want
     memcpy(&_lastSleepParams, pSetSleepModeParams, sizeof(NV_SET_SLEEP_MODE_PARAMS));
     _lastSleepDev = pDev;

@@ -61,7 +61,7 @@ void SetSleepMode(IUnknown* device, bool on)
     params.version = NV_SET_SLEEP_MODE_PARAMS_VER;
     params.bLowLatencyMode = on;
     params.bLowLatencyBoost = false;
-    // 0: ReflexHooks puts OptiScaler's fps cap in here (setFPSLimit) whenever it has one
+    // 0: OptiScaler's own limiter keeps the fps cap (ReflexHooks does not hand it to our calls)
     params.minimumIntervalUs = 0;
     // The markers are approximate (no engine hooks), so the driver must not tune itself to them
     params.bUseMarkersToOptimize = false;
@@ -142,12 +142,7 @@ void Stop(IUnknown* device)
 
     if (auto sleepModeDevice = g_sleepModeDevice.exchange(nullptr);
         g_sleepModeSent && sleepModeDevice != nullptr && !ReflexHooks::gameCalledSetSleepMode())
-    {
         SetSleepMode(sleepModeDevice, false);
-
-        // With our Sleep calls gone, Reflex can no longer hold OptiScaler's fps cap: hand it back to OptiScaler's own
-        ReflexHooks::forgetSleepDevice(sleepModeDevice);
-    }
 
     g_sleepModeSent = false;
 }

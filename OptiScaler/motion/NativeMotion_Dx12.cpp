@@ -1,18 +1,14 @@
 #include "pch.h"
 
 #include "NativeMotion_Dx12.h"
-#include "OpticalFlow_Dx12.h"
-#include "TrustMask_Dx12.h"
 
 #include <native/Dx12FrameSource.h>
-#include <native/NativeProducer.h>
-#include <native/VirtualUpscalerDriver.h>
+#include <native/NativeDriver.h>
 
 #include <Config.h>
 
 #include <menu/menu_overlay_dx.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
-#include <dlssnr/DlssNrFeature_Dx12.h>
 
 #include <imgui/imgui.h>
 
@@ -24,21 +20,8 @@
 namespace
 {
 
-constexpr float kPreviewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
-
-enum class Status
-{
-    Off,
-    Waiting,   // the game calls an upscaler
-    Failed,
-    Running
-};
-
-std::unique_ptr<native::NativeProducer> g_producer;
+native::NativeDriver g_driver("Native motion", "");
 native::Dx12FrameSource g_source;
-
-// Made on first use and never destroyed at exit: its destructor would tear down an upscaler backend under the loader lock.
-native::VirtualUpscalerDriver* g_virtualUpscaler = nullptr;
 
 // Under frame generation the menu's present hook sees the real swap chain after frame generation ran, on its presenter's
 // thread and queue; FGPresent drives the step instead. The menu's hook stands aside while FGPresent ran within this many of
@@ -52,16 +35,7 @@ std::atomic<bool> g_fgDriven { false };
 // generation's presenter, which must never wait on the game thread.
 std::mutex g_runMutex;
 
-ID3D12Device* g_device = nullptr; // the menu's previews are made on it
-uint64_t g_frame = 0;
 bool g_previewWanted = false; // the menu node is open
-bool g_previewReady = false;  // a flow preview has been recorded
-bool g_trustRan = false;      // the trust mask was recorded in the last frame
-bool g_nativeRan = false;     // DLSS-NR or the virtual upscaler ran on native input in the last frame
-uint64_t g_trustFrame = 0;    // the last frame it was
-uint64_t g_cuts = 0;          // scene cuts the mask reported
-Status g_status = Status::Off;
-std::string g_failure;
 
 // The menu's descriptors for the two preview pictures.
 struct PreviewView
@@ -83,7 +57,9 @@ bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format,
 {
     ID3D12DescriptorHeap* heap = MenuOverlayDx::SrvHeap();
 
-    if (heap == nullptr || texture == nullptr)
+    ID3D12Device* device = g_driver.Producer() != nullptr ? g_driver.Producer()->Device() : nullptr;
+
+    if (heap == nullptr || texture == nullptr || device == nullptr)
         return false;
 
     if (heap != g_srvHeap)
@@ -112,7 +88,7 @@ bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format,
                               D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
                         : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = 1;
-        g_device->CreateShaderResourceView(texture, &srv, view.cpu);
+        device->CreateShaderResourceView(texture, &srv, view.cpu);
         view.resource = texture;
     }
 
@@ -120,134 +96,18 @@ bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format,
     return true;
 }
 
-void ReleaseVirtualUpscaler()
-{
-    if (g_virtualUpscaler != nullptr)
-        g_virtualUpscaler->Release();
-}
-
 void RunFrame(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
 {
-    if (!Config::Instance()->DlssNrNativeMotion.value_or_default())
-    {
-        ReleaseVirtualUpscaler();
-        g_status = Status::Off;
+    if (!g_driver.Enabled())
         return;
-    }
 
-    if (swapChain == nullptr || queue == nullptr || device == nullptr || g_status == Status::Failed)
+    if (swapChain == nullptr || queue == nullptr || device == nullptr || g_driver.Failed())
         return;
 
     g_source.SetPresent(swapChain, queue, device);
 
-    native::FrameInput input;
-    const auto acquired = g_source.Acquire(input);
-
-    if (acquired == native::AcquireStatus::WaitingForUpscaler)
-    {
-        // The game's own upscaler call takes over: ours goes, as a game's feature would.
-        ReleaseVirtualUpscaler();
-        g_status = Status::Waiting;
-
-        if (g_producer)
-            g_producer->Reset();
-
-        return;
-    }
-
-    if (acquired != native::AcquireStatus::Ready)
-        return;
-
-    if (g_producer == nullptr || g_producer->Device() != device)
-    {
-        auto fresh = std::make_unique<native::NativeProducer>();
-
-        if (!fresh->Init(device))
-        {
-            g_failure = fresh->Error();
-            g_status = Status::Failed;
-            LOG_ERROR("Native motion: {}", g_failure);
-            g_source.Return(input, native::FrameOutput {});
-            return;
-        }
-
-        // The upscaler backend belongs to the old device too.
-        if (g_virtualUpscaler != nullptr)
-        {
-            delete g_virtualUpscaler;
-            g_virtualUpscaler = nullptr;
-        }
-
-        g_producer = std::move(fresh);
-        g_device = device;
-        LOG_INFO("Native motion: optical flow and trust mask ready");
-    }
-
-    // Presents the picture to an upscaler backend as a synthetic call instead of running DLSS-NR on it. Takes priority when
-    // both are on.
-    const bool useVirtualUpscaler = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
-
-    if (useVirtualUpscaler && g_virtualUpscaler == nullptr)
-        g_virtualUpscaler = new native::VirtualUpscalerDriver();
-    else if (!useVirtualUpscaler)
-        ReleaseVirtualUpscaler();
-
-    native::NativeProducer::Options options;
-    options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
-    options.flowPreview = g_previewWanted;
-    options.previewMaxSpeed = kPreviewMaxSpeed;
-
-    const auto apply = [useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, const native::NativeFrame& frame)
-    {
-        if (useVirtualUpscaler)
-            return g_virtualUpscaler->Run(cmd, frame);
-
-        const DXGI_COLOR_SPACE_TYPE type =
-            frame.space == native::ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
-            : frame.space == native::ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-                                                     : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-        return DlssNr::ApplyNativeInput(g_source.Queue(), cmd, frame.color, frame.depth, frame.motion,
-                                        frame.depthReversed, frame.reset, type, frame.pictureState);
-    };
-
-    native::FrameOutput output;
-    const auto result = g_producer->Run(queue, input, options, apply, output);
-    g_source.Return(input, output);
-
-    g_trustRan = result.trustRan;
-    g_nativeRan = result.nativeRan;
-
-    if (result.trustRan)
-        g_trustFrame = g_frame;
-
-    if (result.flowValid)
-    {
-        // How often the depth finder has a copy for the mask: the log shows it every 600 frames.
-        static uint64_t seen = 0, ran = 0;
-        ++seen;
-        ran += result.trustRan ? 1 : 0;
-
-        if (seen == 600)
-        {
-            LOG_INFO("Native motion: the trust mask ran in {} of {} frames", ran, seen);
-            seen = ran = 0;
-        }
-    }
-
-    if (result.sceneCut)
-    {
-        ++g_cuts;
-        LOG_INFO("Native motion: scene cut seen ({:.0f}% of the picture distrusted), histories reset",
-                 result.distrustedShare * 100.0f);
-    }
-
-    if (result.submitted)
-    {
-        ++g_frame;
-        g_status = Status::Running;
-    }
-
-    g_previewWanted = false;
+    if (g_driver.RunFrame(g_source, g_previewWanted).ran)
+        g_previewWanted = false;
 }
 
 } // namespace
@@ -290,113 +150,14 @@ void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Dev
 
 void DrawStatus()
 {
-    switch (g_status)
-    {
-    case Status::Off:
-        ImGui::TextDisabled("Waiting for the first frame.");
-        return;
-    case Status::Waiting:
-        ImGui::TextDisabled("Standing aside: the game is calling an upscaler.");
-        return;
-    case Status::Failed:
-        ImGui::TextDisabled("Could not start (see the log).");
-        return;
-    default:
-        break;
-    }
-
-    if (Config::Instance()->DlssNrNativeUpscaler.value_or_default())
-    {
-        if (g_nativeRan && g_virtualUpscaler != nullptr && g_virtualUpscaler->Active())
-            ImGui::TextDisabled("%s is running as a stabiliser on this picture.",
-                                g_virtualUpscaler->BackendName().c_str());
-        else if (g_virtualUpscaler != nullptr && !g_virtualUpscaler->Error().empty())
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Stabiliser: %s", g_virtualUpscaler->Error().c_str());
-        else
-            ImGui::TextDisabled("Stabiliser: waiting for the motion estimate.");
-    }
-    else if (g_nativeRan)
-    {
-        ImGui::TextDisabled("NR running on this picture.");
-    }
-    else
-    {
-        const std::string reason = DlssNr::FinishedPictureStatus();
-        ImGui::TextDisabled("%s", reason.empty() ? "NR: waiting for the motion estimate." : reason.c_str());
-    }
+    g_driver.DrawStatus();
 }
 
 void DrawAdvancedUi()
 {
-    auto* config = Config::Instance();
+    const bool debugView = Config::Instance()->DlssNrNativeDebugView.value_or_default();
 
-    const bool debugView = config->DlssNrNativeDebugView.value_or_default();
-
-    if (debugView && g_producer && ImGui::TreeNode("Flow tuning (to compare, applies at once)##flowtuning"))
-    {
-        auto& tune = g_producer->Flow()->Tuning();
-        ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
-        ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3);
-        ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
-        ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
-        ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
-        ImGui::Checkbox("Camera motion where the picture is flat##flowglobal", &tune.globalCandidate);
-
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Where nothing in the picture says how it moved (a plain wall, sky), use what the whole\n"
-                                    "picture did last frame. It also moves the flat inside of a still HUD panel while the\n"
-                                    "camera turns; switch it off to compare.");
-        ImGui::Checkbox("Cheaper sub-pixel refinement##flowinverse", &tune.inverseRefinement);
-
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Finds the picture's gradients once from the current frame and stops early. Faster, but\n"
-                                    "less exact on thin lines and grain; switch it on and off to compare.");
-        ImGui::Checkbox("Perceptual luma (HDR and SDR)##flowluma", &tune.perceptualLuma);
-
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "%s", "Matches on a lightness that follows how the eye sees it: an SDR picture as it is, an HDR\n"
-                      "one (scRGB, PQ) after dividing by a white of 203 nits and a lightness curve, so dark\n"
-                      "detail counts like bright. Off: the older tone-mapped luma.");
-        bool preferStill = tune.zeroMargin > 0.0f;
-
-        if (ImGui::Checkbox("Prefer no motion in flat ground (experimental)##flowzero", &preferStill))
-            tune.zeroMargin = preferStill ? 0.001f : 0.0f;
-
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "%s", "Where no motion matches almost as well as the best offset, keep the flow at zero. Holds a\n"
-                      "still HUD panel still while the picture pans behind it, but also stops a plain wall\n"
-                      "from moving with the pan; off by default.");
-        ImGui::Checkbox("Find a hard cut on its own frame##flowscene", &tune.sceneCutDetector);
-
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "%s", "Compares the picture's brightness histograms with the last frame's on the GPU. On a cut\n"
-                      "the flow is zero and every pixel is distrusted on that very frame, instead of a few\n"
-                      "frames later. A fade or an exposure change is not a cut.");
-        ImGui::SetNextItemWidth(160.0f);
-        ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
-                           ImGuiSliderFlags_Logarithmic);
-
-        if (ImGui::Button("Close to the earlier build##flowold"))
-        {
-            tune.smoothRadius = 0;
-            tune.radius = 2;
-            tune.coarseCells = 1;
-            tune.useHistory = false;
-        }
-
-        ImGui::SameLine();
-
-        if (ImGui::Button("Defaults##flowdefaults"))
-            tune = OpticalFlowDx12::Settings {};
-
-        ImGui::TreePop();
-    }
+    g_driver.DrawFlowTuning();
 
     // The pictures and their controls are debugging aids: off by default, nothing is recorded for them while they are hidden.
     if (!debugView)
@@ -408,47 +169,37 @@ void DrawAdvancedUi()
 
     ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
 
-    if (g_status == Status::Running)
+    if (g_driver.GetStatus() == native::NativeDriver::Status::Running)
     {
         g_previewWanted = true;
 
-        if (g_producer && g_producer->PreviewReady())
-            drawn = ShowTexture(g_flowView, g_producer->Flow()->Preview(), DXGI_FORMAT_R8G8B8A8_UNORM, false, boxWidth, boxHeight);
+        if (g_driver.Producer() && g_driver.Producer()->PreviewReady())
+            drawn = ShowTexture(g_flowView, g_driver.Producer()->Flow()->Preview(), DXGI_FORMAT_R8G8B8A8_UNORM, false, boxWidth, boxHeight);
     }
 
     if (!drawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));
 
     // A frame can have no mask (no motion estimate yet); the picture then keeps the last one rather than going black.
-    const bool trustRecent = g_trustFrame != 0 && g_frame - g_trustFrame < 30;
+    const bool trustRecent = g_driver.TrustRecent();
 
-    if (g_status == Status::Running)
+    if (g_driver.GetStatus() == native::NativeDriver::Status::Running)
     {
         if (trustRecent)
             ImGui::TextDisabled("Trust: white is where the last frame cannot be trusted (%llu cuts seen).",
-                                (unsigned long long) g_cuts);
+                                (unsigned long long) g_driver.Cuts());
         else
             ImGui::TextDisabled("Trust: waiting for the motion estimate.");
     }
     else
         ImGui::TextDisabled("Trust: -");
 
-    if (g_producer)
-    {
-        static const char* kViews[] = { "Final mask", "Depth check", "Revealed-surface check", "Flow consistency check",
-                                        "Luma check", "Outside the picture" };
-        int view = g_producer->Trust()->Tuning().debugView;
-
-        ImGui::SetNextItemWidth(220.0f);
-
-        if (ImGui::Combo("Show##trustview", &view, kViews, IM_ARRAYSIZE(kViews)))
-            g_producer->Trust()->Tuning().debugView = view;
-    }
+    g_driver.DrawTrustViewCombo();
 
     bool maskDrawn = false;
 
-    if (g_status == Status::Running && trustRecent && g_producer)
-        maskDrawn = ShowTexture(g_maskView, g_producer->Trust()->Mask(), DXGI_FORMAT_R8_UNORM, true, boxWidth, boxHeight);
+    if (g_driver.GetStatus() == native::NativeDriver::Status::Running && trustRecent && g_driver.Producer())
+        maskDrawn = ShowTexture(g_maskView, g_driver.Producer()->Trust()->Mask(), DXGI_FORMAT_R8_UNORM, true, boxWidth, boxHeight);
 
     if (!maskDrawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));

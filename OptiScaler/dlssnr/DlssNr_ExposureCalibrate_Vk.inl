@@ -223,12 +223,15 @@ float CalibrationVkFollowedBase()
                : 0.0f;
 }
 
-// The base white point the tuned source's Trim multiplies, 0 without one: Game exposure's is the game's own,
-// Automatic's is its own metering, following the game's exposure or not (Cal::RelearnFollowOnStart has why).
+// The base white point the tuned source's Trim multiplies, 0 without one: Game exposure's is the same as the
+// encode's, so a sweep measures the white the picture is made with (DlssNrGameScale::WhiteBase), Automatic's is its
+// own metering, following the game's exposure or not (Cal::RelearnFollowOnStart has why).
 float CalibrationVkBase(const Config& cfg)
 {
     if (cfg.DlssNrWhitePointSource.value_or_default() == 1)
-        return g_vk.gameExposure > 1e-6f ? g_vk.gamePreExposure / g_vk.gameExposure : 0.0f;
+        return g_vk.gameExposure > 1e-6f ? DlssNrGameScale::WhiteBase(cfg.DlssNrGameExposureScale.value_or_default(),
+                                                                      g_vk.gamePreExposure, g_vk.gameExposure)
+                                         : 0.0f;
 
     return CalibrationVkOwnBase();
 }
@@ -240,6 +243,7 @@ Cal::Situation CalibrationVkSituation(const Config& cfg, bool linearHdr, bool au
 {
     Cal::Situation s;
     s.source = cfg.DlssNrWhitePointSource.value_or_default();
+    s.anchorKey = DlssNrGameScale::AnchorKey(g_vk.gamePreExposure, g_vk.gameExposure);
     s.hdr = linearHdr;
     s.colourConverted = colourConverted;
     s.autoRunning = autoRunning;

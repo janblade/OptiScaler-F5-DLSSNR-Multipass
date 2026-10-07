@@ -365,7 +365,7 @@ class Config
     // The proxy curve (Final Image Composition), values in shaders/dlssnr/DlssNr_ProxyCurve.h. 0 = soft
     // knee + our composition (default); 1/2 = unclipped Neutwo proxy + composition / pure-inverse replace;
     // 3/4 = the balanced (hybrid) curve, the same two ways; 5 HLG and 6 PQ + composition; 7 linear +
-    // composition, a diagnostic set in the ini only. Out-of-range values fall back to 0.
+    // composition (what game integrations hand the model). Out-of-range values fall back to 0.
     CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
 
     // How the NR pass decodes the game's colour. 0 Auto (the game's DLSS HDR flag + the output format, as before),
@@ -555,6 +555,11 @@ class Config
     // choice cannot reach it: there is nothing to keep consistent, because there is only one value.
     // Default 3 (Automatic, at +1.5 EV): it needs nothing from the game; Game exposure left NBA 2K27 far too dark.
     CustomOptional<uint32_t> DlssNrWhitePointSource { 3 };
+
+    // Game exposure's scale: what its Trim multiplies. 0 = with the game's exposure (PreExposure / exposure, the value
+    // the game reports to DLSS SR), 1 = the game's colour as is (a base of exactly 1, as games with built-in DLSS-NR
+    // feed the model). Only read with WhitePointSource 1. See DlssNr_GameScale.h.
+    CustomOptional<uint32_t> DlssNrGameExposureScale { 0 };
 
     // OptiScaler-owned automatic exposure controls. When active, automatic exposure uses the
     // linear-HDR NR input. Finished-picture mode bypasses this calculation and keeps its own

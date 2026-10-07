@@ -14,6 +14,7 @@
 #include <dlssnr/DlssNr_Lut.h>
 #include <dlssnr/DlssNr_LutStatus.h>
 #include <shaders/dlssnr/DlssNr_Guides.h>
+#include <shaders/dlssnr/DlssNr_GameScale.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
@@ -1348,10 +1349,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     {
         // The Trim is the slider, or interpolated from the Trim anchors at this base white point when
         // there are any. Resolved here on the CPU: this backend has no live exposure path in the shader.
-        const float baseWhitePoint = g_vk.gamePreExposure / g_vk.gameExposure;
+        // What the Trim multiplies follows the scale (DlssNr_GameScale.h); the points stay keyed by the game's
+        // exposure in both scales.
+        const float baseWhitePoint = DlssNrGameScale::WhiteBase(cfg.DlssNrGameExposureScale.value_or_default(),
+                                                                g_vk.gamePreExposure, g_vk.gameExposure);
+        const float anchorKey = DlssNrGameScale::AnchorKey(g_vk.gamePreExposure, g_vk.gameExposure);
         const auto anchors = DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default());
-        const float trim = DlssNrTrim::TrimForKey(baseWhitePoint, cfg.DlssNrWhitePointTrim.value_or_default(),
-                                                  anchors, cfg.DlssNrGameExposureTrimPreview.value_or_default());
+        const float trim = DlssNrTrim::TrimForKey(anchorKey, cfg.DlssNrWhitePointTrim.value_or_default(), anchors,
+                                                  cfg.DlssNrGameExposureTrimPreview.value_or_default());
         whitePoint = std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
         debugWhitePoint = std::clamp(baseWhitePoint, 0.01f, 4096.0f);
     }

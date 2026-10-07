@@ -17,6 +17,7 @@
 #include <native/NativeDriverDx11.h>
 
 #include <imgui/imgui.h>
+#include <shaders/dlssnr/DlssNr_GameScale.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
@@ -225,7 +226,7 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         std::string text = table.value_or_default();
         pointNote.clear();
 
-        if (DlssNrTrim::AddPoint(text, cal.baseWhitePoint, EvToTrim(ev, neutral)))
+        if (DlssNrTrim::AddPoint(text, cal.anchorKey, EvToTrim(ev, neutral)))
             table = text;
         else
             pointNote = "The table of brightness points is full (8): delete one first.";
@@ -1261,15 +1262,24 @@ static void RenderExposureSection(Config* config, float menuResScale)
                                        "No game exposure available. Using manual paper white.");
                 else if (ex.exposure > 1e-6f)
                 {
-                    const float baseWhitePoint = ex.preExposure / ex.exposure;
+                    // Brightness points are keyed by the game's exposure in both scales; the scale only changes what
+                    // the Trim multiplies. Both whites are shown so the scale can be chosen by eye.
+                    const float anchorKey = DlssNrGameScale::AnchorKey(ex.preExposure, ex.exposure);
                     const auto trimAnchors =
                         DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default());
                     const float trim = DlssNrTrim::TrimForKey(
-                        baseWhitePoint, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
-                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                       "Game exposure %.4f  ->  model white at %.2f%s", ex.exposure,
-                                       baseWhitePoint * trim,
-                                       ex.offeredNow ? "" : "  (held: absent this frame)");
+                        anchorKey, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
+                    const bool asIs = config->DlssNrGameExposureScale.value_or_default() == DlssNrGameScale::kAsIs;
+                    const float whiteAsIs =
+                        DlssNrGameScale::WhiteBase(DlssNrGameScale::kAsIs, ex.preExposure, ex.exposure) * trim;
+                    const float whiteWithExposure =
+                        DlssNrGameScale::WhiteBase(DlssNrGameScale::kWithExposure, ex.preExposure, ex.exposure) * trim;
+                    ImGui::TextColored(
+                        ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                        asIs ? "Game value %.2f  ->  NR level %.2f (Native look), %.2f with Game's setting%s"
+                             : "Game value %.2f  ->  NR level %.2f (Game's setting), %.2f with Native look%s",
+                        ex.exposure, asIs ? whiteAsIs : whiteWithExposure, asIs ? whiteWithExposure : whiteAsIs,
+                        ex.offeredNow ? "" : "  (held: absent this frame)");
                 }
                 else
                     ImGui::TextDisabled("Reading exposure...");
@@ -1459,12 +1469,32 @@ static void RenderExposureSection(Config* config, float menuResScale)
         // Up to 50x under the hood: a game's reported exposure scale can sit well below what the picture wants
         // (Marvel's Spider-Man Remastered with XeSS swapped to DLSS is one), so 4x was too tight. Shown as
         // stops around 1x, which is why the slider runs further towards darker than towards brighter.
+        // Index = DlssNrGameScale value: 0 with the game's exposure, 1 as is.
+        static const char* scaleNames[] = { "Game's setting", "Native look" };
+        int scale = (int) config->DlssNrGameExposureScale.value_or_default();
+
+        if (scale < 0 || scale > 1)
+            scale = 0;
+
+        if (ImGui::Combo("Starting point##gameexposure", &scale, scaleNames, IM_ARRAYSIZE(scaleNames)))
+        {
+            config->DlssNrGameExposureScale = (uint32_t) scale;
+            // A Trim set on one scale means something else on the other, so the slider starts again at 0 EV.
+            config->DlssNrWhitePointTrim = DlssNrExposureCalibrate::kGameExposureNeutralTrim;
+        }
+
+        HelpMarker("Native look: NR sees the picture the same way it does in games with built-in Neural Rendering"
+                   "\n(such as NBA 2K27). Try this first."
+                   "\nGame's setting: uses the brightness value the game reports. Pick this if Native look is far"
+                   "\ntoo dark (for example Red Dead Redemption 2)."
+                   "\nChanging this sets the brightness below back to 0.");
+
         RenderTrimEvSlider(config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
                            DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default()).size(),
                            "gameexposure",
-                           "Brightness of the picture handed to NR, relative to the exposure the game reports."
-                           "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
-                           "\nToo bright clips highlights; too dark hides shadow detail.");
+                           "How bright a picture NR works on. 0 is the starting point chosen above."
+                           "\nHigher is brighter, lower is darker. Too bright loses detail in highlights;"
+                           "\ntoo dark loses detail in shadows.");
         RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
                                config->DlssNrGameExposureTrimAnchors);
         RenderBrightnessPoints(config->DlssNrGameExposureTrimAnchors, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
@@ -2456,12 +2486,12 @@ static void RenderOutputPage(Config* config, float menuResScale)
 
     // Experimental. 0 off (soft knee), 1 Reversible curve + our composition, 2 Reversible curve +
     // pure-inverse replace, 3 Balanced+composed, 4 Balanced+replace (identity midtones + unclipped
-    // highlights), 5 HLG+composed, 6 PQ+composed (BT.2100 / ST 2084, white per BT.2408). 7 Linear+composed
-    // is a diagnostic set in the ini only: shown when set, never offered. Always shown.
+    // highlights), 5 HLG+composed, 6 PQ+composed (BT.2100 / ST 2084, white per BT.2408), 7 Linear+composed (what
+    // game integrations hand the model). Always shown.
     static const char* reversibleNames[] = { "Off (soft knee)",          "Reversible curve + composed",
                                              "Reversible curve + replace", "Balanced curve + composed",
                                              "Balanced curve + replace",   "HLG curve + composed",
-                                             "PQ curve + composed",        "Linear + composed (ini only)" };
+                                             "PQ curve + composed",        "Linear + composed" };
     static_assert(IM_ARRAYSIZE(reversibleNames) == DlssNrProxyCurve::kCount, "one name per proxy curve");
     const uint32_t reversibleValue = config->DlssNrReversibleMode.value_or_default();
     const int reversible = DlssNrProxyCurve::Valid(reversibleValue) ? (int) reversibleValue : 0;
@@ -2478,7 +2508,7 @@ static void RenderOutputPage(Config* config, float menuResScale)
         ImGui::EndCombo();
     }
 
-    HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Reversible curve uses a reversible mapping. Balanced preserves midtones and compresses highlights.\nHLG and PQ are the broadcast HDR curves: white sits at 75% (HLG) or 58% (PQ), leaving more room for highlights (HLG up to about 4x white, PQ about 50x), but the model sees midtones differently. If you used Tune, run it again after changing the curve.\nComposed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.");
+    HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Reversible curve uses a reversible mapping. Balanced preserves midtones and compresses highlights.\nHLG and PQ are the broadcast HDR curves: white sits at 75% (HLG) or 58% (PQ), leaving more room for highlights (HLG up to about 4x white, PQ about 50x), but the model sees midtones differently.\nLinear: gives NR the picture exactly the way games with built-in Neural Rendering do, for NVIDIA's own look. Use it with White point source = Game exposure and Starting point = Native look. Very bright coloured lights can shift a little in colour, and some games may show banding in dark areas.\nIf you used Tune, run it again after changing the curve.\nComposed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.");
 
     if (DlssNrProxyCurve::IsReplace((uint32_t) reversible))
     {

@@ -1125,17 +1125,14 @@ static void RenderLowLatencySection(Config* config)
 
     const auto status = native::lowlatency::GetStatus();
 
-    if (status.decision == Decision::Run)
-    {
-        ImGui::Text("Using: %s", status.path);
+    // Run with no path yet: the first frame, before the first Reflex call went out
+    const char* reason = status.decision == Decision::Run ? (status.path[0] != '\0' ? status.path : "Starting")
+                                                          : native::lowlatency::DecisionText(status.decision);
 
-        if (status.hasLatency)
-            ImGui::Text("Measured latency: %.1f ms", status.latencyMs);
-    }
-    else
-    {
-        ImGui::TextWrapped("%s", native::lowlatency::DecisionText(status.decision));
-    }
+    ImGui::TextWrapped("Status: [%s]: %s", native::lowlatency::StatusLabel(status.decision), reason);
+
+    if (status.decision == Decision::Run && status.hasLatency)
+        ImGui::Text("Measured latency: %.1f ms", status.latencyMs);
 
     if (fakenvapi::isUsingAsMainNvapi() || State::Instance().activeFgOutput == FGOutput::XeFG ||
         status.decision == Decision::ForceReflexDisabled || status.decision == Decision::ForceXell)

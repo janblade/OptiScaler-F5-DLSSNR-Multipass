@@ -86,24 +86,44 @@ inline bool SwapChainPresentIgnored(double nowMs, double lastFrameGenerationMs)
     return lastFrameGenerationMs > 0.0 && nowMs - lastFrameGenerationMs < kFrameGenerationPresentHoldMs;
 }
 
+// The menu's status line: "Status: [<StatusLabel>]: <reason>". On: it runs (the reason is the method in use). Standing
+// Aside: something else owns latency here (the game's Reflex, a fakenvapi setting, frame generation). Off: nothing to
+// run on, or switched off.
+inline const char* StatusLabel(Decision decision)
+{
+    switch (decision)
+    {
+    case Decision::Run:
+        return "On";
+    case Decision::GameRunsReflex:
+    case Decision::ForceReflexDisabled:
+    case Decision::ForceXell:
+    case Decision::FrameGenerationOwnsReflex:
+        return "Standing Aside";
+    default:
+        return "Off";
+    }
+}
+
+// The reason when it does not run. Run has none here: the method in use names it.
 inline const char* DecisionText(Decision decision)
 {
     switch (decision)
     {
     case Decision::SettingOff:
-        return "Off: switched off";
+        return "Switched off";
     case Decision::NoF5Low:
-        return "Off: no Optical F5Low mode is running";
+        return "No Optical F5Low mode is running";
     case Decision::GameRunsReflex:
-        return "Off: the game runs its own Reflex";
+        return "Please use the Game's Own Reflex Settings";
     case Decision::ForceReflexDisabled:
-        return "Off: Force Reflex is set to Force Disable in the fakenvapi settings";
+        return "Force Reflex is set to Force Disable in the fakenvapi settings";
     case Decision::ForceXell:
-        return "Off: Force XeLL is on in the fakenvapi settings and already runs XeLL";
+        return "Force XeLL is on in the fakenvapi settings and already runs XeLL";
     case Decision::FrameGenerationOwnsReflex:
-        return "Off: the frame generation in use runs Reflex itself";
+        return "The frame generation in use runs Reflex itself";
     case Decision::NoApi:
-        return "Off: no Reflex or fakenvapi interface could be found";
+        return "No Reflex or fakenvapi interface could be found";
     default:
         return "";
     }

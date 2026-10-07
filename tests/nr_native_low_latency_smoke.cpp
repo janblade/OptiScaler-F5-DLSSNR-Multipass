@@ -77,12 +77,20 @@ int main()
     // Every reason has its plain text; Run has none
     for (auto d : { Decision::SettingOff, Decision::NoF5Low, Decision::GameRunsReflex, Decision::ForceReflexDisabled,
                     Decision::ForceXell, Decision::FrameGenerationOwnsReflex, Decision::NoApi })
-        CHECK(strncmp(DecisionText(d), "Off: ", 5) == 0);
+        CHECK(DecisionText(d)[0] != '\0');
 
     CHECK(DecisionText(Decision::Run)[0] == '\0');
-    CHECK(strcmp(DecisionText(Decision::GameRunsReflex), "Off: the game runs its own Reflex") == 0);
-    CHECK(strcmp(DecisionText(Decision::ForceReflexDisabled),
-                 "Off: Force Reflex is set to Force Disable in the fakenvapi settings") == 0);
+    CHECK(strcmp(DecisionText(Decision::GameRunsReflex), "Please use the Game's Own Reflex Settings") == 0);
+
+    // The status label: On when it runs, Standing Aside when something else owns latency, Off otherwise
+    CHECK(strcmp(StatusLabel(Decision::Run), "On") == 0);
+
+    for (auto d : { Decision::GameRunsReflex, Decision::ForceReflexDisabled, Decision::ForceXell,
+                    Decision::FrameGenerationOwnsReflex })
+        CHECK(strcmp(StatusLabel(d), "Standing Aside") == 0);
+
+    for (auto d : { Decision::SettingOff, Decision::NoF5Low, Decision::NoApi })
+        CHECK(strcmp(StatusLabel(d), "Off") == 0);
 
     // With frame generation's swap chain, only the game's present to it counts; the wrapped swap chain's presents
     // behind it (real and generated frames) are skipped, and count again once frame generation's presents stop

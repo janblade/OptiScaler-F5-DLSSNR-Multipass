@@ -8,6 +8,7 @@
 
 #include <native/DepthCopyDx11.h>
 #include <native/DepthFinderCore.h>
+#include <native/NativeLowLatency.h>
 
 #include <detours/detours.h>
 
@@ -298,7 +299,10 @@ void STDMETHODCALLTYPE hkRSSetViewports(ID3D11DeviceContext* This, UINT NumViewp
 void STDMETHODCALLTYPE hkDraw(ID3D11DeviceContext* This, UINT VertexCount, UINT StartVertexLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, VertexCount, 1);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_Draw(This, VertexCount, StartVertexLocation);
 }
@@ -307,7 +311,10 @@ void STDMETHODCALLTYPE hkDrawIndexed(ID3D11DeviceContext* This, UINT IndexCount,
                                      INT BaseVertexLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, IndexCount, 1);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_DrawIndexed(This, IndexCount, StartIndexLocation, BaseVertexLocation);
 }
@@ -316,7 +323,10 @@ void STDMETHODCALLTYPE hkDrawInstanced(ID3D11DeviceContext* This, UINT VertexCou
                                        UINT StartVertexLocation, UINT StartInstanceLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, VertexCountPerInstance, InstanceCount);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
@@ -326,7 +336,10 @@ void STDMETHODCALLTYPE hkDrawIndexedInstanced(ID3D11DeviceContext* This, UINT In
                                               UINT StartInstanceLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, IndexCountPerInstance, InstanceCount);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
                           StartInstanceLocation);

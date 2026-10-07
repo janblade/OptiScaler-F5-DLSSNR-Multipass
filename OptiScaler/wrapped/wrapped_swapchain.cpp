@@ -566,11 +566,16 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     // F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present
     IUnknown* lowLatencyDevice = nullptr;
 
-    if (willPresent && !isD3D11 && device12 != nullptr &&
-        State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+    // (A D3D11 game behind OptiScaler's D3D12 bridge is covered in Dx11wDx12SC::Present, the game's own present.)
+    if (willPresent && State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
     {
-        lowLatencyDevice = device12;
-        native::lowlatency::OnPresentBegin(lowLatencyDevice);
+        if (isD3D11)
+            lowLatencyDevice = device;
+        else
+            lowLatencyDevice = device12;
+
+        if (lowLatencyDevice != nullptr)
+            native::lowlatency::OnPresentBegin(lowLatencyDevice);
     }
 
     // swapchain present

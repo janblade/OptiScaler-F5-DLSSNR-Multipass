@@ -7,6 +7,7 @@
 #include <hooks/FG_Hooks.h>
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx11.h>
+#include <native/NativeLowLatency.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -366,6 +367,25 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _real->Present(SyncInterval, Flags);
+
+    // F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present, on the game's own
+    // D3D11 device. This is the game's only present here; the bridge's D3D12 presents belong to frame generation.
+    struct LowLatencyScope
+    {
+        explicit LowLatencyScope(IUnknown* device) : _device(device)
+        {
+            if (_device != nullptr)
+                native::lowlatency::OnPresentBegin(_device);
+        }
+
+        ~LowLatencyScope()
+        {
+            if (_device != nullptr)
+                native::lowlatency::OnPresentEnd(_device);
+        }
+
+        IUnknown* _device;
+    } lowLatencyScope(State::Instance().currentD3D11Device);
 
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;

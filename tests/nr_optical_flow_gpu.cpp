@@ -616,16 +616,6 @@ int main(int argc, char** argv)
             tuning.lookRange = value;
         else if (key == "lookdist")
             tuning.lookDistance = value;
-        else if (key == "shifted")
-            tuning.shiftedWindows = value != 0.0f;
-        else if (key == "shiftpen")
-            tuning.shiftPenalty = value;
-        else if (key == "small")
-            tuning.smallAmbiguity = value;
-        else if (key == "wide")
-            tuning.wideRadius = (int) value;
-        else if (key == "widetrig")
-            tuning.wideTrigger = value;
         else if (key == "lumaperc")
             tuning.perceptualLuma = value != 0.0f;
         else if (key == "white")
@@ -647,8 +637,8 @@ int main(int argc, char** argv)
         double Mean() const { return n ? sum / n : 0; }
     };
     Tally panHalf, panError, grainOne, brightHalf, sparseOne, thinOne, thinAliasError, edgeDepthOne, edgeNoDepthOne,
-        smallDepthOne, smallNoDepthOne, hudStill, wallStill, hudStillLong, thinSlowBand, thinSlowRest,
-        edgeLookNoDepthOne;
+        smallDepthOne, smallNoDepthOne, hudStill, wallStill, hudStillLong, thinSlowBand, thinSlowRest, thinPanBand,
+        thinPanRest, edgeLookNoDepthOne;
 
     if (perf)
     {
@@ -1127,9 +1117,21 @@ int main(int argc, char** argv)
     // A slow pan over thin lines on a flat wall, a pixel a picture for sixteen pictures (a camera creeping along a wall
     // with cables on it): the share of flow samples within 1 px of the pan, in a band of 12 pixels around the lines
     // (where the picture says how it moved) and on the flat rest (where only the camera's motion can say). Reported
-    // only.
-    for (const SparseCase& c : { SparseCase { 1, 0, 16 }, SparseCase { 1, 1, 16 } })
+    // only. At a pixel a picture the camera's motion is half a pixel of the finest level, which rounds to no motion, so
+    // holding the wall still and following the camera look the same there; at two pixels a picture (thinPan) they
+    // differ: that is where a flat patch held still by the still age would show.
+    struct SlowCase
     {
+        SparseCase c;
+        Tally& band;
+        Tally& rest;
+    };
+
+    for (const SlowCase& s :
+         { SlowCase { { 1, 0, 16 }, thinSlowBand, thinSlowRest }, SlowCase { { 1, 1, 16 }, thinSlowBand, thinSlowRest },
+           SlowCase { { 2, 0, 16 }, thinPanBand, thinPanRest }, SlowCase { { 2, -2, 16 }, thinPanBand, thinPanRest } })
+    {
+        const SparseCase& c = s.c;
         flow.Reset();
         flow.Tuning() = tuning;
 
@@ -1161,8 +1163,8 @@ int main(int argc, char** argv)
                 ++n[band];
             }
 
-        thinSlowBand.Add((double) one[1] / n[1]);
-        thinSlowRest.Add((double) one[0] / n[0]);
+        s.band.Add((double) one[1] / n[1]);
+        s.rest.Add((double) one[0] / n[0]);
         printf("thin lines on a flat wall, slow pan (%3.1f, %3.1f), %d pictures: within 1 px, band of 12 px round the "
                "lines %5.1f%%, flat rest %5.1f%%   (reported)\n",
                c.dx, c.dy, c.frames, 100.0 * one[1] / n[1], 100.0 * one[0] / n[0]);
@@ -1240,6 +1242,10 @@ int main(int argc, char** argv)
             flow.Tuning().coarseCells = variants[run].cells != 0 ? variants[run].cells : tuning.coarseCells;
             flow.Tuning().depthMatching = variants[run].cells != 0 ? variants[run].matching
                                                                    : variants[run].matching && tuning.depthMatching;
+            // The fixed variants compare depth matching with plain matching, so they match without the brightness
+            // weights; the "as set" ones show what the settings do.
+            if (variants[run].cells != 0)
+                flow.Tuning().lookWeights = false;
             if (variants[run].unsmoothed)
                 flow.Tuning().smoothRadius = 0;
             const int frames = 3;
@@ -1582,22 +1588,21 @@ int main(int argc, char** argv)
     if (score)
     {
         printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d "
-               "inverse=%d still=%d stilleps=%g stillmargin=%g look=%d lookrange=%g lookdist=%g shifted=%d "
-               "shiftpen=%g small=%g wide=%d widetrig=%g | "
+               "inverse=%d still=%d stilleps=%g stillmargin=%g look=%d lookrange=%g lookdist=%g | "
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
                "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f "
-               "hudStillLong %.4f thinSlowBand %.4f thinSlowRest %.4f edgeLookNoDepth1 %.4f "
+               "hudStillLong %.4f thinSlowBand %.4f thinSlowRest %.4f thinPanBand %.4f thinPanRest %.4f "
+               "edgeLookNoDepth1 %.4f "
                "cutHit %d/%d cutFalse %d/%d weakestCut %.3f worstQuiet %.3f hdrPanErr %.4f hdrGrain1 %.4f\n",
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
                std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0,
                tuning.globalCandidate ? 1 : 0, tuning.inverseRefinement ? 1 : 0, tuning.stillFrames,
                tuning.stillEpsilon, tuning.stillMargin, tuning.lookWeights ? 1 : 0, tuning.lookRange,
-               tuning.lookDistance, tuning.shiftedWindows ? 1 : 0, tuning.shiftPenalty, tuning.smallAmbiguity,
-               tuning.wideRadius, tuning.wideTrigger, panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(),
-               sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(), edgeDepthOne.Mean(), edgeNoDepthOne.Mean(),
-               smallDepthOne.Mean(), smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean(), hudStillLong.Mean(),
-               thinSlowBand.Mean(), thinSlowRest.Mean(), edgeLookNoDepthOne.Mean(), cutHit, cutTotal, cutFalse,
-               quietTotal, weakestCut, worstQuiet, hdrNow.panErr, hdrNow.grainOne);
+               tuning.lookDistance, panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(), sparseOne.Mean(),
+               thinOne.Mean(), thinAliasError.Mean(), edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(),
+               smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean(), hudStillLong.Mean(), thinSlowBand.Mean(),
+               thinSlowRest.Mean(), thinPanBand.Mean(), thinPanRest.Mean(), edgeLookNoDepthOne.Mean(), cutHit, cutTotal,
+               cutFalse, quietTotal, weakestCut, worstQuiet, hdrNow.panErr, hdrNow.grainOne);
         return 0;
     }
 

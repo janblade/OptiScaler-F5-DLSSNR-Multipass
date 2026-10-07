@@ -241,6 +241,13 @@ void NativeDriver::DrawFlowTuning()
     ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
     ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
     ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
+    ImGui::Checkbox("Without depth: match within what looks alike##flowlook", &tune.lookWeights);
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s",
+                          "When there is no depth, the match counts the pixels around each one by how close their\n"
+                          "brightness is to its own, so a moving thing's edge does not drag its motion onto what\n"
+                          "lies beside it.");
     ImGui::Checkbox("Camera motion where the picture is flat##flowglobal", &tune.globalCandidate);
 
     if (ImGui::IsItemHovered())
@@ -255,8 +262,9 @@ void NativeDriver::DrawFlowTuning()
         ImGui::SetTooltip("%s",
                           "Where the picture has not changed at all for this many frames (a HUD panel), the camera\n"
                           "motion above no longer wins a tie with no motion, so the HUD stays still while the\n"
-                          "picture pans behind it. A flat wall that is panning changes as soon as a line or an edge\n"
-                          "passes near, so it keeps moving with the camera. 0 switches the rule off.");
+                          "picture pans behind it. Near a line or an edge a panning wall changes, so it keeps moving\n"
+                          "with the camera; a plain patch far from any is held still too, which looks the same.\n"
+                          "0 switches the rule off.");
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderFloat("Still: largest change allowed##flowstilleps", &tune.stillEpsilon, 0.0005f, 0.05f, "%.4f",
                        ImGuiSliderFlags_Logarithmic);

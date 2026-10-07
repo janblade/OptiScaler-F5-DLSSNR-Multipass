@@ -139,36 +139,22 @@ class OpticalFlowDx12
         // whole-picture camera candidate no longer wins a tie with no motion: it must beat it by stillMargin (luma
         // units, the match's cost). A HUD is unchanged for as long as it is shown; a flat patch of a panning wall stays
         // unchanged only until an edge or a line passes near it, so a still HUD stays still while the picture pans
-        // behind it, and the camera candidate still carries a flat wall, which a rule inside one frame cannot tell
-        // apart.
+        // behind it, and the camera candidate still carries a flat wall near its lines and edges, which a rule inside
+        // one frame cannot tell apart. A plain patch farther than the window from any of them is held still too (the
+        // thinPan tallies of the flow test): the last frame matched there at no motion, so it looks the same.
         int stillFrames = 8;
         float stillEpsilon = 0.004f;
         float stillMargin = 0.02f;
 
-        // Four ways to keep the finest level's window from straddling the edge of a moving thing when there is no
-        // depth to say where its surface ends, to be measured against each other (the plan's spike). All off by
-        // default, all used only where the match has no depth (with depth the weights already keep only the pixel's
-        // surface); one match pipeline built for them, so the default match is untouched.
-        // lookWeights: each sample of the window counts by how close its luma is to the centre pixel's (lookRange,
-        // luma units) and a little by its distance (lookDistance, half-resolution pixels): the depth weights'
-        // counterpart.
-        // shiftedWindows: every candidate and search offset is also scored with the window shifted half a window
-        // left, right, up and down (shiftPenalty above the centred one's cost); the lowest counts, so a window that
-        // lies wholly on one side of the edge can decide.
-        // smallAmbiguity (0 = off): where the best and the second-best candidate offset (a different offset) cost
-        // within this of each other, the candidates and the search are scored with a dense 4x4 window instead (8x8
-        // picture pixels), which is narrower at an edge.
-        // wideRadius (0 = off): where the best offset still costs more than wideTrigger times the window's own
-        // structure (its mean absolute deviation: a coarse level blended two motions, so no candidate is right),
-        // search the whole +-wideRadius square around the best offset too.
-        bool lookWeights = false;
-        float lookRange = 0.04f;   // the best of the ranges tried (0.02 .. 0.15) on the edge tallies
+        // Brightness weights, on the finest level when there is no depth to say where a surface ends: each sample of
+        // the window counts by how close its luma is to the centre pixel's (lookRange, luma units) and a little by its
+        // distance (lookDistance, half-resolution pixels), the depth weights' counterpart, so the window does not take
+        // the motion of a thing that looks different across an edge. Measured against shifted windows, a small window
+        // where the match is unsure and a wider search where it is poor (2026-10-07): these won on every edge tally
+        // and cost nothing measurable; the others gained less, cost up to 0.9 ms or hurt grain.
+        bool lookWeights = true;
+        float lookRange = 0.06f;   // 0.04 is best on edges (0.759 vs 0.746) but costs dark HDR grain past its gate
         float lookDistance = 8.0f; // 8 keeps the grain tally nearly whole (4: -0.02), 2 costs 0.06
-        bool shiftedWindows = false;
-        float shiftPenalty = 0.0f;
-        float smallAmbiguity = 0.0f;
-        int wideRadius = 0;
-        float wideTrigger = 0.25f;
     };
 
     Settings& Tuning() { return _settings; }
@@ -215,13 +201,9 @@ class OpticalFlowDx12
         uint32_t hasAge;      // Match: the last frame's ages are there to read
         float stillEpsilon;   // Match: under this the window did not change
         float stillMargin;    // Match: what the camera must win by where the age is at least stillFrames
-        uint32_t lookWeights; // The spike's four ways (see Settings), read by the spike pipeline of the finest match
+        uint32_t lookWeights; // Match, finest level, no depth: the brightness weights (see Settings)
         float lookRange, lookDistance;
-        uint32_t shiftedWindows;
-        float shiftPenalty, smallAmbiguity;
-        int32_t wideRadius;
-        float wideTrigger;
-        uint32_t padding[3];
+        uint32_t padding[4];
     };
 
     // The scene-cut passes have a root signature of their own: the luma, the histogram state and the flag.
@@ -261,7 +243,6 @@ class OpticalFlowDx12
     ID3D12PipelineState* _lumaPq = nullptr;
     ID3D12PipelineState* _down = nullptr;
     ID3D12PipelineState* _match = nullptr;
-    ID3D12PipelineState* _matchSpike = nullptr; // the match with the spike's four ways built in (finest level, no depth)
     ID3D12PipelineState* _median = nullptr;
     ID3D12PipelineState* _smooth = nullptr;
     ID3D12PipelineState* _visualise = nullptr;

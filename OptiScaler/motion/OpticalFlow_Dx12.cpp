@@ -43,14 +43,9 @@ cbuffer P : register(b0)
     uint hasAge;            // Match: the last frame's ages (LastAge, t7) are there to read
     float stillEpsilon;     // Match: the window did not change if its largest difference to the last frame is under this
     float stillMargin;      // Match: what the camera candidate must win by over no motion where the picture is still
-    uint lookWeights;       // Match, SPIKE (see Settings): the window's samples count by how near their luma is to the pixel's
-    float lookRange;
-    float lookDistance;
-    uint shiftedWindows;    // Match, SPIKE: also score each offset with the window shifted half a window every way
-    float shiftPenalty;
-    float smallAmbiguity;   // Match, SPIKE: a dense 4x4 window where the best two candidates are this close (0 = off)
-    int wideRadius;         // Match, SPIKE: also search this square around the best offset where it matches poorly (0 = off)
-    float wideTrigger;
+    uint lookWeights;       // Match, finest level, no depth: the window's samples count by how near their luma is to the pixel's
+    float lookRange;        // ... within this much luma
+    float lookDistance;     // ... and a little less with their distance from it, in this level's pixels
 };
 
 SamplerState Linear : register(s0);
@@ -209,9 +204,6 @@ float LargestChange(int2 p, float cur[16])
 }
 )HLSL" // the compiler limits one string literal to 16 KB; the source goes on in a second one
                       R"HLSL(
-// The spike's four ways to keep the window from straddling an edge (see Settings), in a pipeline of their own (SPIKE):
-// the finest level when there is no depth. Without SPIKE COST is the plain cost and PUSH does nothing.
-#ifdef SPIKE
 // How much a sample with luma l counts beside the centre pixel's lc: about 1 where the look is alike, little across an edge
 // that changes it, and a little less with the distance from the centre (offset, in pixels of this level).
 float LookWeight(float l, float lc, float2 offset)
@@ -219,85 +211,6 @@ float LookWeight(float l, float lc, float2 offset)
     float dl = (l - lc) / lookRange;
     return max(exp(-dl * dl - 0.5 * dot(offset, offset) / (lookDistance * lookDistance)), 0.02);
 }
-
-// Cost of the window centred `shift` away from p, with the same sums as Cost; its samples are loaded as they are used.
-float CostShifted(int2 p, int2 shift, int2 d)
-{
-    float diff[16], wt[16];
-    float mean = 0.0, total = 0.0;
-    int2 hi = int2(size) - 1;
-    const float lc = CurLuma.Load(int3(p, 0));
-
-    [unroll] for (int j = 0; j < 4; ++j)
-        [unroll] for (int i = 0; i < 4; ++i)
-        {
-            int2 offset = shift + int2(2 * i - 3, 2 * j - 3);
-            int2 q = clamp(p + offset, 0, hi);
-            float c = CurLuma.Load(int3(q, 0));
-            float r = PrevLuma.Load(int3(clamp(q + d, 0, hi), 0));
-            float wv = lookWeights != 0 ? LookWeight(c, lc, float2(offset)) : 1.0;
-            diff[j * 4 + i] = c - r;
-            wt[j * 4 + i] = wv;
-            mean += wv * (c - r);
-            total += wv;
-        }
-
-    mean /= total;
-    float s = 0.0;
-
-    [unroll] for (int k = 0; k < 16; ++k)
-        s += wt[k] * abs(diff[k] - mean);
-
-    return s * 16.0 / total;
-}
-
-// The cost of an offset, the centred window's or, with shifted windows, the lowest of it and the four shifted ones.
-float CostB(int2 p, int2 d, float w[16], float cur[16])
-{
-    float c = Cost(p, d, w, cur);
-
-    if (shiftedWindows != 0)
-    {
-        c = min(c, CostShifted(p, int2(-4, 0), d) + shiftPenalty);
-        c = min(c, CostShifted(p, int2(4, 0), d) + shiftPenalty);
-        c = min(c, CostShifted(p, int2(0, -4), d) + shiftPenalty);
-        c = min(c, CostShifted(p, int2(0, 4), d) + shiftPenalty);
-    }
-
-    return c;
-}
-
-// The cost with a dense 4x4 window (8x8 picture pixels) around p, every sample counting the same.
-float CostSmall(int2 p, int2 d)
-{
-    float diff[16];
-    float mean = 0.0;
-    int2 hi = int2(size) - 1;
-
-    [unroll] for (int j = 0; j < 4; ++j)
-        [unroll] for (int i = 0; i < 4; ++i)
-        {
-            int2 q = clamp(p + int2(i - 2, j - 2), 0, hi);
-            float v = CurLuma.Load(int3(q, 0)) - PrevLuma.Load(int3(clamp(q + d, 0, hi), 0));
-            diff[j * 4 + i] = v;
-            mean += v;
-        }
-
-    mean /= 16.0;
-    float s = 0.0;
-
-    [unroll] for (int k = 0; k < 16; ++k)
-        s += abs(diff[k] - mean);
-
-    return s;
-}
-
-#define COST(p, d, w, cur) CostB(p, d, w, cur)
-#define PUSH(d, c) candD[candCount] = d; candC[candCount++] = c
-#else
-#define COST(p, d, w, cur) Cost(p, d, w, cur)
-#define PUSH(d, c)
-#endif
 )HLSL"
                       R"HLSL(
 
@@ -342,9 +255,9 @@ void Match(uint3 id : SV_DispatchThreadID)
         [unroll] for (int ci = 0; ci < 4; ++ci)
             cur[cj * 4 + ci] = CurLuma.Load(int3(clamp(p + int2(2 * ci - 3, 2 * cj - 3), 0, int2(size) - 1), 0));
 
-#ifdef SPIKE
-    // Without depth the samples can count by how near their look is to this pixel's, and every candidate is kept with its cost.
-    if (lookWeights != 0 && depthMatching == 0)
+    // Without depth the samples count by how near their brightness is to this pixel's (the constant is only set then): the
+    // depth weights' counterpart, so the edge of a thing that looks different does not decide the match beside it.
+    if (lookWeights != 0)
     {
         const float lc = CurLuma.Load(int3(p, 0));
 
@@ -353,18 +266,12 @@ void Match(uint3 id : SV_DispatchThreadID)
                 w[lj * 4 + li] = LookWeight(cur[lj * 4 + li], lc, float2(2 * li - 3, 2 * lj - 3));
     }
 
-    int2 candD[12];
-    float candC[12];
-    int candCount = 0;
-#endif
-
     // The candidates for where to search: no motion, the coarser level's answer at the cells around this pixel (doubled, it is
     // in this level's pixels) and the last frame's flow here. The one that matches
     // best is where the search starts, so a steady pan carries over from frame to frame and an edge is not stuck with the
     // answer of a cell that lies across it.
     int2 centre = 0;
-    float start = COST(p, centre, w, cur);
-    PUSH(centre, start);
+    float start = Cost(p, centre, w, cur);
 
     // How long the picture has been unchanged here (finest level only): the age last frame, and from this frame's
     // difference at no offset the age now, written at the end. Where it has been still long enough, the camera below has
@@ -389,8 +296,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         if (g.z > 0.5)
         {
             int2 d = int2(round(g.xy * scale));
-            float c = COST(p, d, w, cur);
-            PUSH(d, c);
+            float c = Cost(p, d, w, cur);
 
             if (pictureStill ? c + stillMargin < start : c <= start)
             {
@@ -414,8 +320,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         {
             int2 cell = cp + kCells[k] * step;
             int2 d = int2(round(Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0));
-            float c = COST(p, d, w, cur);
-            PUSH(d, c);
+            float c = Cost(p, d, w, cur);
 
             if (c < start)
             {
@@ -428,8 +333,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     if (hasHistory != 0)
     {
         int2 d = int2(round(History.Load(int3(p, 0)).xy));
-        float c = COST(p, d, w, cur);
-        PUSH(d, c);
+        float c = Cost(p, d, w, cur);
 
         if (c < start)
         {
@@ -437,38 +341,6 @@ void Match(uint3 id : SV_DispatchThreadID)
             centre = d;
         }
     }
-
-#ifdef SPIKE
-    // An ambiguous match (the best two candidates of different offsets cost nearly the same with the big window): the
-    // candidates and the search are judged with the dense small window instead.
-    bool useSmall = false;
-
-    if (smallAmbiguity > 0.0 && depthMatching == 0)
-    {
-        float second = 1e30;
-
-        for (int a = 0; a < candCount; ++a)
-            if (any(candD[a] != centre))
-                second = min(second, candC[a]);
-
-        if (second - start < smallAmbiguity)
-        {
-            useSmall = true;
-            float smallest = CostSmall(p, centre);
-
-            for (int a2 = 0; a2 < candCount; ++a2)
-            {
-                float c = CostSmall(p, candD[a2]);
-
-                if (c < smallest)
-                {
-                    smallest = c;
-                    centre = candD[a2];
-                }
-            }
-        }
-    }
-#endif
 
     float best = 1e30;
     float bestCost = 0.0;
@@ -478,11 +350,7 @@ void Match(uint3 id : SV_DispatchThreadID)
         for (int dx = -radius; dx <= radius; ++dx)
         {
             int2 d = centre + int2(dx, dy);
-#ifdef SPIKE
-            float cost = useSmall ? CostSmall(p, d) : COST(p, d, w, cur);
-#else
             float cost = Cost(p, d, w, cur);
-#endif
             float c = cost + lambda * length(float2(dx, dy));
 
             if (c < best)
@@ -492,43 +360,6 @@ void Match(uint3 id : SV_DispatchThreadID)
                 bestD = d;
             }
         }
-
-#ifdef SPIKE
-    // A poor match for the window's own structure (a coarse level blended two motions, so no candidate was right): the
-    // whole square around the best offset too.
-    if (wideRadius > 0 && depthMatching == 0 && !useSmall)
-    {
-        float meanCur = 0.0;
-
-        [unroll] for (int m = 0; m < 16; ++m)
-            meanCur += cur[m] * (1.0 / 16.0);
-
-        float structure = 0.0;
-
-        [unroll] for (int s = 0; s < 16; ++s)
-            structure += abs(cur[s] - meanCur);
-
-        if (bestCost > wideTrigger * structure)
-        {
-            const int2 around = bestD;
-
-            for (int wy = -wideRadius; wy <= wideRadius; ++wy)
-                for (int wx = -wideRadius; wx <= wideRadius; ++wx)
-                {
-                    int2 d = around + int2(wx, wy);
-                    float cost = COST(p, d, w, cur);
-                    float c = cost + lambda * length(float2(d - centre));
-
-                    if (c < best)
-                    {
-                        best = c;
-                        bestCost = cost;
-                        bestD = d;
-                    }
-                }
-        }
-    }
-#endif
 
     // Zero wins a near tie on the finest level: in flat or grainy ground the best match is a small offset picked on noise, and
     // the picture did not move there. Only an offset within zeroReach is overruled (a real pan is far from it).
@@ -1070,8 +901,8 @@ OpticalFlowDx12::~OpticalFlowDx12()
 {
     ReleaseTextures();
 
-    for (ID3D12PipelineState** pso : { &_luma, &_lumaSdr, &_lumaScRgb, &_lumaPq, &_down, &_match, &_matchSpike,
-                                       &_median, &_smooth, &_visualise, &_global, &_sceneHist, &_sceneDiverge })
+    for (ID3D12PipelineState** pso : { &_luma, &_lumaSdr, &_lumaScRgb, &_lumaPq, &_down, &_match, &_median, &_smooth,
+                                       &_visualise, &_global, &_sceneHist, &_sceneDiverge })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -1210,28 +1041,6 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
                 _error = "creating the pipeline Luma";
                 return false;
             }
-        }
-    }
-
-    // The match with the spike's four ways built in: the same entry point built with SPIKE.
-    {
-        const D3D_SHADER_MACRO macros[] = { { "SPIKE", "1" }, { nullptr, nullptr } };
-        ID3DBlob* code = Compile("Match", &_error, kSource, macros);
-
-        if (code == nullptr)
-            return false;
-
-        D3D12_COMPUTE_PIPELINE_STATE_DESC pso {};
-        pso.pRootSignature = _rootSignature;
-        pso.CS = { code->GetBufferPointer(), code->GetBufferSize() };
-
-        const HRESULT hr = device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&_matchSpike));
-        code->Release();
-
-        if (FAILED(hr))
-        {
-            _error = "creating the pipeline Match (spike)";
-            return false;
         }
     }
 
@@ -1527,7 +1336,7 @@ void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineSt
     list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
     _timeNames[_timeCount++] = pso == _luma || pso == _lumaSdr || pso == _lumaScRgb || pso == _lumaPq ? "luma"
                                : pso == _down                                                         ? "down"
-                               : pso == _match || pso == _matchSpike                                  ? "match"
+                               : pso == _match                                                        ? "match"
                                : pso == _median                                                       ? "median"
                                : pso == _smooth                                                       ? "smooth"
                                : pso == _global                                                       ? "global"
@@ -1690,22 +1499,10 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.stillEpsilon = _settings.stillEpsilon;
             constants.stillMargin = _settings.stillMargin;
 
-            // The spike's ways, on the finest level and without depth only, in a pipeline of their own.
-            const bool spike = level == 0 && !depthMatching &&
-                               (_settings.lookWeights || _settings.shiftedWindows || _settings.smallAmbiguity > 0.0f ||
-                                _settings.wideRadius > 0);
-
-            if (spike)
-            {
-                constants.lookWeights = _settings.lookWeights ? 1 : 0;
-                constants.lookRange = (std::max)(_settings.lookRange, 1e-4f);
-                constants.lookDistance = (std::max)(_settings.lookDistance, 0.5f);
-                constants.shiftedWindows = _settings.shiftedWindows ? 1 : 0;
-                constants.shiftPenalty = _settings.shiftPenalty;
-                constants.smallAmbiguity = _settings.smallAmbiguity;
-                constants.wideRadius = std::clamp(_settings.wideRadius, 0, 8);
-                constants.wideTrigger = _settings.wideTrigger;
-            }
+            // The brightness weights: on the finest level and only without depth (with it the depth weights decide).
+            constants.lookWeights = level == 0 && !depthMatching && _settings.lookWeights ? 1 : 0;
+            constants.lookRange = (std::max)(_settings.lookRange, 1e-4f);
+            constants.lookDistance = (std::max)(_settings.lookDistance, 0.5f);
 
             if (!coarsest)
             {
@@ -1723,12 +1520,11 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
                 Transition(list, _age[_current], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
 
-            Pass(list, spike ? _matchSpike : _match, current[level].resource, kLumaFormat, previous[level].resource,
-                 kLumaFormat, coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level],
-                 kFlowFormat, constants, (history && _settings.useHistory) ? levelBefore[level].resource : nullptr,
-                 kFlowFormat, depthMatching ? depth : nullptr, depthFormat,
-                 _globalReady ? _globalFlow.resource : nullptr, kFlowFormat, _sceneCutRan ? _cutFlag.resource : nullptr,
-                 kStateFormat);
+            Pass(list, _match, current[level].resource, kLumaFormat, previous[level].resource, kLumaFormat,
+                 coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat,
+                 constants, (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat,
+                 depthMatching ? depth : nullptr, depthFormat, _globalReady ? _globalFlow.resource : nullptr,
+                 kFlowFormat, _sceneCutRan ? _cutFlag.resource : nullptr, kStateFormat);
 
             if (keepAge)
             {

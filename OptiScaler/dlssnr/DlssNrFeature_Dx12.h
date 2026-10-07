@@ -184,7 +184,8 @@ struct ExposureCalibrationStatus
     unsigned passes = 1;
     std::string aborted; // why the last run stopped early, empty if it did not
     float currentEv = 0.0f;
-    float baseWhitePoint = 0.0f; // the scene's brightness the run was tuned at: the key of a point Tune's result is saved as
+    float baseWhitePoint = 0.0f; // the base the run was tuned at (what the Trim multiplies)
+    float anchorKey = 0.0f; // the scene's brightness the run was tuned at: the key of a point Tune's result is saved as
     bool changed = false; // the chosen value differs from the current one (a flat curve keeps the current)
     bool unsure = false;  // detail varied no more than the measurement's own noise: the current value is kept
     bool unrepeated = false; // the passes disagreed (firstPassEv, lastPassEv): the current is kept

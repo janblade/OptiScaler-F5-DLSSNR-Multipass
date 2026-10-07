@@ -178,6 +178,9 @@ inline const char* BlockerText(Blocker b)
 struct Situation
 {
     uint32_t source = 0;
+    // Game exposure's brightness-point key (the game's exposure), 0 without a reading. The base a run is tuned at can
+    // be a constant under the "as is" scale, so the points cannot be keyed by it.
+    float anchorKey = 0.0f;
     bool proxyMode = false;
     bool holdFrame = false;
     bool finishedPicture = false;

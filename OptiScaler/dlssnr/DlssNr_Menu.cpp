@@ -17,6 +17,7 @@
 #include <native/NativeDriverDx11.h>
 
 #include <imgui/imgui.h>
+#include <shaders/dlssnr/DlssNr_GameScale.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
@@ -225,7 +226,7 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         std::string text = table.value_or_default();
         pointNote.clear();
 
-        if (DlssNrTrim::AddPoint(text, cal.baseWhitePoint, EvToTrim(ev, neutral)))
+        if (DlssNrTrim::AddPoint(text, cal.anchorKey, EvToTrim(ev, neutral)))
             table = text;
         else
             pointNote = "The table of brightness points is full (8): delete one first.";
@@ -1261,14 +1262,23 @@ static void RenderExposureSection(Config* config, float menuResScale)
                                        "No game exposure available. Using manual paper white.");
                 else if (ex.exposure > 1e-6f)
                 {
-                    const float baseWhitePoint = ex.preExposure / ex.exposure;
+                    // Brightness points are keyed by the game's exposure in both scales; the scale only changes what
+                    // the Trim multiplies. Both whites are shown so the scale can be chosen by eye.
+                    const float anchorKey = DlssNrGameScale::AnchorKey(ex.preExposure, ex.exposure);
                     const auto trimAnchors =
                         DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default());
                     const float trim = DlssNrTrim::TrimForKey(
-                        baseWhitePoint, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
+                        anchorKey, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
+                    const bool asIs = config->DlssNrGameExposureScale.value_or_default() == DlssNrGameScale::kAsIs;
+                    const float whiteAsIs =
+                        DlssNrGameScale::WhiteBase(DlssNrGameScale::kAsIs, ex.preExposure, ex.exposure) * trim;
+                    const float whiteWithExposure =
+                        DlssNrGameScale::WhiteBase(DlssNrGameScale::kWithExposure, ex.preExposure, ex.exposure) * trim;
                     ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                       "Game exposure %.4f  ->  model white at %.2f%s", ex.exposure,
-                                       baseWhitePoint * trim,
+                                       asIs ? "Game exposure %.4f  ->  model white %.2f (as is) / %.2f with exposure%s"
+                                            : "Game exposure %.4f  ->  model white %.2f (with exposure) / %.2f as is%s",
+                                       ex.exposure, asIs ? whiteAsIs : whiteWithExposure,
+                                       asIs ? whiteWithExposure : whiteAsIs,
                                        ex.offeredNow ? "" : "  (held: absent this frame)");
                 }
                 else
@@ -1459,12 +1469,35 @@ static void RenderExposureSection(Config* config, float menuResScale)
         // Up to 50x under the hood: a game's reported exposure scale can sit well below what the picture wants
         // (Marvel's Spider-Man Remastered with XeSS swapped to DLSS is one), so 4x was too tight. Shown as
         // stops around 1x, which is why the slider runs further towards darker than towards brighter.
-        RenderTrimEvSlider(config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
-                           DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default()).size(),
-                           "gameexposure",
-                           "Brightness of the picture handed to NR, relative to the exposure the game reports."
-                           "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
-                           "\nToo bright clips highlights; too dark hides shadow detail.");
+        static const char* scaleNames[] = { "With the game's exposure", "Game's colour as is" };
+        int scale = (int) config->DlssNrGameExposureScale.value_or_default();
+
+        if (scale < 0 || scale > 1)
+            scale = 0;
+
+        if (ImGui::Combo("Scale##gameexposure", &scale, scaleNames, IM_ARRAYSIZE(scaleNames)))
+        {
+            config->DlssNrGameExposureScale = (uint32_t) scale;
+            // A Trim set on one scale means something else on the other, so the slider starts again at 0 EV.
+            config->DlssNrWhitePointTrim = DlssNrExposureCalibrate::kGameExposureNeutralTrim;
+        }
+
+        HelpMarker(
+            "Game's colour as is: gives the model the game's colour exactly as it arrives, as games with built-in"
+            "\nDLSS-NR do, so 0 EV is that point. It suits games whose colour arrives already exposed (most)."
+            "\nWith the game's exposure: multiplies in the exposure value the game reports to DLSS. Use it for"
+            "\ngames that hand over unexposed colour (RDR2).");
+
+        const bool scaleAsIs = scale == (int) DlssNrGameScale::kAsIs;
+        RenderTrimEvSlider(
+            config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
+            DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default()).size(), "gameexposure",
+            scaleAsIs ? "Brightness of the picture handed to NR, relative to the game's colour as it arrives."
+                        "\n+ is brighter, - is darker; 0 EV is the game's colour as is."
+                        "\nToo bright clips highlights; too dark hides shadow detail."
+                      : "Brightness of the picture handed to NR, relative to the exposure the game reports."
+                        "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
+                        "\nToo bright clips highlights; too dark hides shadow detail.");
         RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
                                config->DlssNrGameExposureTrimAnchors);
         RenderBrightnessPoints(config->DlssNrGameExposureTrimAnchors, DlssNrExposureCalibrate::kGameExposureNeutralTrim,

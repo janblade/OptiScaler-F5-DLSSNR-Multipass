@@ -592,9 +592,9 @@ class Config
     // recorded into the game's own command list.
     CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
     CustomOptional<bool> DlssNrNativeDepthOverlay { false };
-    // NativeDebugView: show the pictures of the depth finder and the motion estimate on the menu's F5Low page (the
-    // depth preview, the motion and trust pictures, the trust view chooser; D3D12 only), set by "Show the motion and
-    // trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
+    // NativeDebugView: show the pictures of the depth finder and the motion estimate on the menu's Optical F5Low page
+    // (the depth preview, the motion and trust pictures, the trust view chooser; D3D12 only), set by "Show the motion
+    // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
     // overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
     // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
@@ -616,9 +616,9 @@ class Config
     // native-input options (this, NativeInput, Finished Picture NR) that still works once FGInput=Upscaler is selected:
     // that replaces the game's swap chain with with_dx12::Dx11wDx12SC, which the other two require not to be in play
     // (see native/NativeDriverDx11.cpp's OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's
-    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + upscaler & frame generation" mode (F5Low page): it sets NativeDepthFinder,
-    // NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished Picture if it was on
-    // (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
+    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + upscaler & frame generation" mode (Optical F5Low page): it
+    // sets NativeDepthFinder, NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished
+    // Picture if it was on (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
@@ -811,7 +811,7 @@ class Config
     CustomOptional<float, NoDefault> MenuWidth; // Main window size in pixels at Menu Scale 1.0
     CustomOptional<float, NoDefault> MenuHeight;
     CustomOptional<std::string, NoDefault> MenuPage; // Last page open in the main window, see menu/MenuPages.h
-    // One toast per session pointing to the F5Low page, see DlssNr::UpdateF5LowHint
+    // One toast per session pointing to the Optical F5Low page, see DlssNr::UpdateF5LowHint
     CustomOptional<bool> F5LowHint { true };
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };

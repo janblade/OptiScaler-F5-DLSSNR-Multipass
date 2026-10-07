@@ -232,8 +232,8 @@ void NativeDriver::DrawStatus()
 
 void NativeDriver::DrawFlowTuning()
 {
-    // Always shown and open on F5Low's page; the settings live in the running motion estimate, so there is nothing to
-    // tune until a mode runs.
+    // Always shown and open on Optical F5Low's page; the settings live in the running motion estimate, so there is
+    // nothing to tune until a mode runs.
     if (!ImGui::TreeNodeEx("Flow tuning (to compare, applies at once)##flowtuning", ImGuiTreeNodeFlags_DefaultOpen))
         return;
 

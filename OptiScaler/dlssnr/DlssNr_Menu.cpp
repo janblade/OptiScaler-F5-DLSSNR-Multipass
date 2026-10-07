@@ -854,19 +854,20 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         }
     }
 
-    HelpMarker("For a game that makes no upscaler call of its own. F5Low works out the motion of the finished picture "
-               "itself, so NR can still run.\n"
-               "NR only: NR runs on the finished picture. Costs less, no frame generation. Sets NR Pass at: to "
-               "Finished Picture.\n"
-               "NR + upscaler & frame generation: also runs OptiScaler's upscaler (your choice in the menu, FSR when "
-               "none) on the picture at the same size, to keep it steady. Frame generation needs this, and it unlocks "
-               "the upscaler settings. Costs more. Moves NR Pass at: off Finished Picture.\n"
-               "Both use the game's depth when F5Low finds it (Advanced). Depth is optional: without it NR uses motion "
-               "only. Choosing a mode turns depth on (Off turns it off); if depth was not running when the game "
-               "started, restart the game to use it.\n"
-               "NR runs only with Enable Neural Rendering on. Changes apply at once.\n"
-               "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode "
-               "already on stands aside.");
+    HelpMarker(
+        "For a game that makes no upscaler call of its own. Optical F5Low works out the motion of the finished picture "
+        "itself, so NR can still run.\n"
+        "NR only: NR runs on the finished picture. Costs less, no frame generation. Sets NR Pass at: to "
+        "Finished Picture.\n"
+        "NR + upscaler & frame generation: also runs OptiScaler's upscaler (your choice in the menu, FSR when "
+        "none) on the picture at the same size, to keep it steady. Frame generation needs this, and it unlocks "
+        "the upscaler settings. Costs more. Moves NR Pass at: off Finished Picture.\n"
+        "Both use the game's depth when Optical F5Low finds it (Advanced). Depth is optional: without it NR uses "
+        "motion only. Choosing a mode turns depth on (Off turns it off); if depth was not running when the "
+        "game started, restart the game to use it.\n"
+        "NR runs only with Enable Neural Rendering on. Changes apply at once.\n"
+        "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode "
+        "already on stands aside.");
 
     if (shown == Shown::Off)
     {
@@ -1082,7 +1083,7 @@ static void RenderStatusLine(const NrCommon& nr)
         ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.");
 }
 
-// The mode in effect, as the F5Low page and the summary line name it.
+// The mode in effect, as the Optical F5Low page and the summary line name it.
 static const char* NativeModeName(DlssNrNativeMode::Shown shown)
 {
     switch (shown)
@@ -1098,21 +1099,22 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
     }
 }
 
-// F5Low: NR for a game that makes no upscaler call of its own (the native modes). The mode selector sits at the top,
-// then the Advanced settings (depth, flow tuning).
+// Optical F5Low: NR for a game that makes no upscaler call of its own (the native modes). The mode selector sits at the
+// top, then the Advanced settings (depth, flow tuning).
 static void RenderF5LowPage(Config* config, const NrCommon& nr)
 {
-    ImGui::SeparatorText("F5Low (experimental)");
+    ImGui::SeparatorText("Optical F5Low (experimental)");
     ImGui::TextWrapped("Runs NR in a game that makes no upscaler call of its own.");
-    ImGui::TextWrapped("F5Low works out how the picture moves by itself, the way a game's motion vectors would tell "
-                       "it: it compares each frame with the last, uses the game's depth when it can find it, keeps a "
-                       "still HUD still and notices scene cuts. NR, and in the second mode OptiScaler's upscaler and "
-                       "frame generation, run on that motion. D3D11 and D3D12 games.");
+    ImGui::TextWrapped(
+        "Optical F5Low works out how the picture moves by itself, the way a game's motion vectors would tell "
+        "it: it compares each frame with the last, uses the game's depth when it can find it, keeps a "
+        "still HUD still and notices scene cuts. NR, and in the second mode OptiScaler's upscaler and "
+        "frame generation, run on that motion. D3D11 and D3D12 games.");
 
     bool finishedPicture = nr.finishedPicture;
     RenderNativeMode(config, nr.enabled, finishedPicture);
 
-    // The page is F5Low's own, so every control shows and the section starts open.
+    // The page is Optical F5Low's own, so every control shows and the section starts open.
     if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
     {
         bool pictures = config->DlssNrNativeDebugView.value_or_default();
@@ -1141,17 +1143,17 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
     }
 }
 
-// Status & Presets: a line pointing to F5Low, and the pass-count and quality-tier presets.
+// Status & Presets: a line pointing to Optical F5Low, and the pass-count and quality-tier presets.
 static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
 {
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
           config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
 
-    ImGui::Text("F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
+    ImGui::Text("Optical F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
     ImGui::SameLine();
 
-    if (ImGui::SmallButton("Open F5Low##statuslink"))
+    if (ImGui::SmallButton("Open Optical F5Low##statuslink"))
         MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
     ImGui::SeparatorText("Multipass Presets");
@@ -2852,7 +2854,8 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     in.mode = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
           config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
-    // F5Low is for D3D11 and D3D12 games, and only helps where NR is switched on and has not failed this session.
+    // Optical F5Low is for D3D11 and D3D12 games, and only helps where NR is switched on and has not failed this
+    // session.
     in.nrAvailable =
         config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0 && state.swapchainApi != API::Vulkan;
     in.f5lowNrOnlyRunning = dx11 ? NativeMotionDx11::NrOnlyRunning() : NativeMotionDx12::NrOnlyRunning();
@@ -2875,24 +2878,25 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
     case Line::NoFiles:
         return false; // the menu's own lines
     case Line::OfferWithFiles:
-        ImGui::TextColored(offerColour, "No upscaler call from the game. Pick %s as its upscaler, or use F5Low.",
+        ImGui::TextColored(offerColour,
+                           "No upscaler call from the game. Pick %s as its upscaler, or use Optical F5Low.",
                            upscalerNames.c_str());
         break;
     case Line::OfferNoFiles:
-        ImGui::TextColored(offerColour, "No upscaler files found. F5Low can still run NR without one.");
+        ImGui::TextColored(offerColour, "No upscaler files found. Optical F5Low can still run NR without one.");
         break;
     case Line::F5LowNrAndFrameGen:
-        ImGui::TextDisabled("F5Low: NR and frame generation on the finished picture (%s as stabiliser).",
+        ImGui::TextDisabled("Optical F5Low: NR and frame generation on the finished picture (%s as stabiliser).",
                             backendName.c_str());
         break;
     case Line::F5LowNrOnly:
-        ImGui::TextDisabled("F5Low: NR on the finished picture.");
+        ImGui::TextDisabled("Optical F5Low: NR on the finished picture.");
         break;
     case Line::F5LowStandsAside:
-        ImGui::TextDisabled("The game's upscaler is on: F5Low stands aside.");
+        ImGui::TextDisabled("The game's upscaler is on: Optical F5Low stands aside.");
         break;
     case Line::F5LowStatus:
-        ImGui::TextDisabled("F5Low:");
+        ImGui::TextDisabled("Optical F5Low:");
         ImGui::SameLine();
 
         if (dx11)
@@ -2904,14 +2908,14 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
 
     if (banner.line == Line::OfferWithFiles || banner.line == Line::OfferNoFiles)
         HelpMarker("Menus and loading screens make no upscaler call either, so this can show there too.\n"
-                   "F5Low runs NR on the finished picture, with or without the game's upscaler.");
+                   "Optical F5Low runs NR on the finished picture, with or without the game's upscaler.");
 
     if (banner.action != Action::None)
     {
         ImGui::SameLine();
 
-        if (ImGui::SmallButton(banner.action == Action::UseF5Low ? "Use F5Low##headerf5low"
-                                                                 : "F5Low settings##headerf5low"))
+        if (ImGui::SmallButton(banner.action == Action::UseF5Low ? "Use Optical F5Low##headerf5low"
+                                                                 : "Optical F5Low settings##headerf5low"))
             MenuPages::RequestPage(MenuPages::Page::NrF5Low);
     }
 
@@ -2920,10 +2924,11 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
 
 void RenderF5LowUpscalerNote()
 {
-    ImGui::TextWrapped("Driven by F5Low (the game makes no upscaler call): this upscaler runs at the same size as a "
-                       "stabiliser.");
+    ImGui::TextWrapped(
+        "Driven by Optical F5Low (the game makes no upscaler call): this upscaler runs at the same size as a "
+        "stabiliser.");
 
-    if (ImGui::SmallButton("F5Low settings##upscalernote"))
+    if (ImGui::SmallButton("Optical F5Low settings##upscalernote"))
         MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
     ImGui::Spacing();
@@ -2933,14 +2938,14 @@ void RenderF5LowFrameGenHint(Config* config, bool noUpscalerFeature)
 {
     using namespace HeaderBanner;
 
-    // The same offer as the header's: only where F5Low is off, NR can run and the game makes no upscaler call.
+    // The same offer as the header's: only where Optical F5Low is off, NR can run and the game makes no upscaler call.
     if (!noUpscalerFeature || Decide(HeaderInputs(config, Feature::None, false)).action != Action::UseF5Low)
         return;
 
-    ImGui::TextWrapped("No upscaler call from the game? F5Low's NR + upscaler & frame generation gives frame "
+    ImGui::TextWrapped("No upscaler call from the game? Optical F5Low's NR + upscaler & frame generation gives frame "
                        "generation its input.");
 
-    if (ImGui::SmallButton("Use F5Low##framegenhint"))
+    if (ImGui::SmallButton("Use Optical F5Low##framegenhint"))
         MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
     ImGui::Spacing();
@@ -2958,7 +2963,7 @@ void UpdateF5LowHint(Config* config)
     const auto feature = State::Instance().currentFeature;
     const bool noFeature = feature == nullptr || !feature->IsInited();
 
-    // The header's offer: F5Low off, NR available, no upscaler call from the game, and no upscaler running.
+    // The header's offer: Optical F5Low off, NR available, no upscaler call from the game, and no upscaler running.
     if (!noFeature || HeaderBanner::Decide(HeaderInputs(config, HeaderBanner::Feature::None, false)).action !=
                           HeaderBanner::Action::UseF5Low)
     {
@@ -2976,7 +2981,7 @@ void UpdateF5LowHint(Config* config)
     shown = true;
     ImGui::InsertNotification({ ImGuiToastType::Info, 15000,
                                 "No upscaler call from this game so far.\nF5Low can run NR without one: open the menu, "
-                                "Neural Rendering, F5Low." });
+                                "Neural Rendering, Optical F5Low." });
 }
 
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)

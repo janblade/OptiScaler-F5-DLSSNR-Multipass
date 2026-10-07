@@ -62,19 +62,19 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 // The settings panel, drawn inside OptiScaler's menu.
 void RenderMenu(::Config* config, float menuResScale, MenuPages::Page page);
 
-// The main menu's header line for the native modes (F5Low), by the rule in menu/HeaderBanner.h. True when it drew the
-// line and its button, false when the line is the menu's own (a game's feature, or no offer to make).
+// The main menu's header line for the native modes (Optical F5Low), by the rule in menu/HeaderBanner.h. True when it
+// drew the line and its button, false when the line is the menu's own (a game's feature, or no offer to make).
 bool RenderHeaderBanner(::Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
                         const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour);
 
-// A line on the Upscaler page while the current upscaler is F5Low's own (the game makes no upscaler call), and a hint
-// on the Frame Generation page where F5Low could give frame generation its input (`noUpscalerFeature`: no upscaler is
-// running).
+// A line on the Upscaler page while the current upscaler is Optical F5Low's own (the game makes no upscaler call), and
+// a hint on the Frame Generation page where Optical F5Low could give frame generation its input (`noUpscalerFeature`:
+// no upscaler is running).
 void RenderF5LowUpscalerNote();
 void RenderF5LowFrameGenHint(::Config* config, bool noUpscalerFeature);
 
-// Once per frame: after about ten seconds with no upscaler call (and the header making its F5Low offer), one toast per
-// session points to the F5Low page. [Menu] F5LowHint=false silences it.
+// Once per frame: after about ten seconds with no upscaler call (and the header making its Optical F5Low offer), one
+// toast per session points to the Optical F5Low page. [Menu] F5LowHint=false silences it.
 void UpdateF5LowHint(::Config* config);
 
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.

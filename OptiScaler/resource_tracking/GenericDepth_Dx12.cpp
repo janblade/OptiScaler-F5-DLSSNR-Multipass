@@ -1236,7 +1236,8 @@ void DrawAdvancedUi()
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
-    // Shown always on F5Low's page; the copy is made only with the pictures on as well (both read at the start).
+    // Shown always on Optical F5Low's page; the copy is made only with the pictures on as well (both read at the
+    // start).
     bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
 
     if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))

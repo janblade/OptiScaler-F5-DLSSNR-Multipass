@@ -58,7 +58,7 @@ int main()
         CHECK(b.line == Line::SelectUpscaler && b.action == Action::None);
     }
 
-    // F5Low's virtual upscaler running.
+    // Optical F5Low's virtual upscaler running.
     {
         const Banner b = Decide(Make(Feature::F5Low, true, false, Shown::NrAndFrameGeneration, true));
         CHECK(b.line == Line::F5LowNrAndFrameGen && b.action == Action::F5LowSettings);
@@ -93,7 +93,7 @@ int main()
         CHECK(b.line == Line::F5LowStandsAside && b.action == Action::None);
     }
 
-    // A game's feature: frozen keeps its line, running is blank; neither offers F5Low, in any mode.
+    // A game's feature: frozen keeps its line, running is blank; neither offers Optical F5Low, in any mode.
     for (const Shown mode : { Shown::Off, Shown::NrOnly, Shown::NrAndFrameGeneration, Shown::MotionOnly })
     {
         const Banner frozen = Decide(Make(Feature::Frozen, true, true, mode, true));

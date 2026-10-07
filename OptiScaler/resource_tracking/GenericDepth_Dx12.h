@@ -66,7 +66,7 @@ bool GameCallsUpscaler();
 bool Armed();
 
 // ImGui: the menu's one depth line (off, needs a restart, could not start, stood down, watching, picked). No checkbox.
-// Call inside the menu, on the F5Low page (dlssnr/DlssNr_Menu.cpp).
+// Call inside the menu, on the Optical F5Low page (dlssnr/DlssNr_Menu.cpp).
 void DrawStatus();
 
 // ImGui: the "Use the game's depth" and "Show the picked depth here" checkboxes, and with [DlssNr] NativeDepthOverlay

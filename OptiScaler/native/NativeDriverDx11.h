@@ -27,11 +27,11 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device);
 ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device);
 
 // ImGui: one status line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
-// Call inside the menu, on the F5Low page (dlssnr/DlssNr_Menu.cpp), while NativeMotion
+// Call inside the menu, on the Optical F5Low page (dlssnr/DlssNr_Menu.cpp), while NativeMotion
 // is on.
 void DrawStatus();
 
-// NR is running on the finished picture (the menu header's "F5Low: NR on the finished picture").
+// NR is running on the finished picture (the menu header's "Optical F5Low: NR on the finished picture").
 bool NrOnlyRunning();
 
 // ImGui: with NativeDebugView, the flow tuning sliders, the frame count and the trust mask's state. The keys themselves

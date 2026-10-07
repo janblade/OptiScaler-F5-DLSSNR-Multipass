@@ -2607,8 +2607,8 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 
     std::string joinedUpscalers(joined.begin(), joined.end());
 
-    // F5Low's lines (the native modes, menu/HeaderBanner.h) come first; the rule leaves a game's own feature, and the
-    // cases with no offer to make, to the lines below.
+    // Optical F5Low's lines (the native modes, menu/HeaderBanner.h) come first; the rule leaves a game's own feature,
+    // and the cases with no offer to make, to the lines below.
     const bool f5lowLine = DlssNr::RenderHeaderBanner(
         config,
         currentFeature == nullptr || !currentFeature->IsInited() ? HeaderBanner::Feature::None
@@ -7661,7 +7661,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
         }
     };
 
-    // A page another part of the menu asked for (the header's F5Low button): open its group too.
+    // A page another part of the menu asked for (the header's Optical F5Low button): open its group too.
     if (const auto requested = MenuPages::ConsumeRequest())
     {
         select(*requested);

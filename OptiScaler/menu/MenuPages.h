@@ -7,8 +7,8 @@
 // Pages of the main menu's navigation pane. Pure data, no ImGui, so it can be unit tested on the host.
 namespace MenuPages
 {
-// Neural Rendering is a nav group, not a page: clicking it opens NrStatus. F5Low is listed first in the group; saved
-// page names are by name, so an older MenuPage value (nr.status ...) still opens the same page.
+// Neural Rendering is a nav group, not a page: clicking it opens NrStatus. Optical F5Low is listed first in the group;
+// saved page names are by name, so an older MenuPage value (nr.status ...) still opens the same page.
 enum class Page : unsigned char
 {
     Upscaler,
@@ -42,7 +42,7 @@ inline constexpr PageInfo kPages[] = {
     { "overlay", "Overlay & Look" },
     { "input", "Input" },
     { "misc", "Misc" },
-    { "nr.f5low", "F5Low" },
+    { "nr.f5low", "Optical F5Low" },
     { "nr.status", "Status & Presets" },
     { "nr.options", "NR Options" },
     { "nr.input", "NR Input" },
@@ -76,9 +76,9 @@ inline constexpr Page PageFromName(std::string_view name)
     return Page::Upscaler;
 }
 
-// A page another part of the menu wants shown (the header's F5Low button, cross-links). The page choice itself is a
-// static inside MenuCommon::RenderMainMenuPages, so the request waits here until that function takes it, once, on its
-// next draw.
+// A page another part of the menu wants shown (the header's Optical F5Low button, cross-links). The page choice itself
+// is a static inside MenuCommon::RenderMainMenuPages, so the request waits here until that function takes it, once, on
+// its next draw.
 inline std::optional<Page>& PendingRequest()
 {
     static std::optional<Page> request;

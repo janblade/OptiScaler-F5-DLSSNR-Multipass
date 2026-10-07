@@ -42,11 +42,12 @@ class Takeover
 };
 
 // Whether a backend built for `built` should be rebuilt for `wanted` now. `flagsOnly`: the two differ only in the depth
-// direction or HDR.
+// direction or HDR. `firstRealDepth`: the backend was built before any real depth came (its direction was a guess) and
+// this frame has one: no reason to wait, the guess was simply wrong.
 template <class Key> class RebuildSettle
 {
   public:
-    bool Now(const Key& built, const Key& wanted, bool flagsOnly)
+    bool Now(const Key& built, const Key& wanted, bool flagsOnly, bool firstRealDepth = false)
     {
         if (wanted == built)
         {
@@ -54,7 +55,7 @@ template <class Key> class RebuildSettle
             return false;
         }
 
-        if (!flagsOnly)
+        if (!flagsOnly || firstRealDepth)
         {
             _frames = 0;
             return true;

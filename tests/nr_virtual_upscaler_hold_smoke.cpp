@@ -85,6 +85,17 @@ int main()
         CHECK(!t.Now(built, flipped, true));
     }
 
+    // Built before the game's depth came: the first real depth's direction rebuilds at once, a later flip still waits
+    {
+        RebuildSettle<Key> s;
+        const Key guessed { 1920, true };
+        const Key real { 1920, false };
+
+        CHECK(s.Now(guessed, real, true, true));
+        CHECK(!s.Now(real, guessed, true, false));
+        CHECK(!s.Now(guessed, guessed, true, true)); // nothing to change: no rebuild, first depth or not
+    }
+
     printf(fails == 0 ? "nr_virtual_upscaler_hold_smoke: PASS\n" : "nr_virtual_upscaler_hold_smoke: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

@@ -220,15 +220,22 @@ bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const 
     return true;
 }
 
-bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild)
+bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild, bool realDepth)
 {
     if (_feature != nullptr && !rebuild)
     {
         const bool flagsOnly = key.width == _featureKey.width && key.height == _featureKey.height &&
                                key.format == _featureKey.format && key.backend == _featureKey.backend;
 
-        if (!_settle.Now(_featureKey, key, flagsOnly))
+        // Built before the game's depth came, the direction was a guess: the first real depth corrects it at once
+        if (!_settle.Now(_featureKey, key, flagsOnly, !_featureRealDepth && realDepth))
+        {
+            // A guess that was right: from now on a flip is a real one, and waits
+            if (realDepth && key == _featureKey)
+                _featureRealDepth = true;
+
             return true;
+        }
     }
 
     // Tried and failed for exactly this: not again every frame.
@@ -253,6 +260,7 @@ bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const 
         return false;
     }
 
+    _featureRealDepth = realDepth;
     _failed = false;
     auto& state = State::Instance();
 
@@ -410,7 +418,7 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         rebuild = true;
     }
 
-    if (!EnsureFeature(cmd, key, rebuild))
+    if (!EnsureFeature(cmd, key, rebuild, frame.depth != nullptr))
         return false;
 
     const bool copyIn = colorDesc.Format != key.format;

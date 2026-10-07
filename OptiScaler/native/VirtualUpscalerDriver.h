@@ -74,7 +74,8 @@ class VirtualUpscalerDriver
         bool operator==(const Key&) const = default;
     };
 
-    bool EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild);
+    // `realDepth`: this frame has the game's depth (not the all-far stand-in).
+    bool EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild, bool realDepth);
     bool CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend);
     void DropFeature(bool destroyFgContext);
     bool EnsureTexture(ID3D12Resource*& texture, Key& made, const Key& key, D3D12_RESOURCE_FLAGS flags,
@@ -89,6 +90,7 @@ class VirtualUpscalerDriver
     bool _failed = false;
     Key _failedKey;
     bool _paused = false;
+    bool _featureRealDepth = false;   // the backend was built on a frame with the game's depth (its direction is known)
     hold::RebuildSettle<Key> _settle; // a flip of the depth direction or HDR must hold before a rebuild
 
     ID3D12Resource* _output = nullptr; // rests in UNORDERED_ACCESS

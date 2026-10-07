@@ -52,6 +52,21 @@ int main()
     // Out-of-range ids are safe to name.
     Check(std::string(Name(static_cast<Page>(kPageCount))) == "upscaler", "out-of-range page names as Upscaler");
 
+    // A page request is taken once.
+    Check(!ConsumeRequest().has_value(), "no request waits at the start");
+    RequestPage(Page::NrDebug);
+    {
+        const auto first = ConsumeRequest();
+        Check(first.has_value() && *first == Page::NrDebug, "a request is handed over");
+        Check(!ConsumeRequest().has_value(), "a request is consumed once");
+    }
+    RequestPage(Page::Misc);
+    RequestPage(Page::NrOutput);
+    {
+        const auto last = ConsumeRequest();
+        Check(last.has_value() && *last == Page::NrOutput, "the latest request wins");
+    }
+
     if (fails == 0)
         std::printf("menu_pages_smoke: all checks passed (%zu pages)\n", kPageCount);
 

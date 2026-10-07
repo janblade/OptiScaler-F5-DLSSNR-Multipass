@@ -32,6 +32,9 @@ enum class Upscaler;
 namespace native
 {
 
+// True when `feature` (State::currentFeature) is F5Low's own virtual upscaler, not a game's.
+bool IsVirtualUpscalerFeature(const void* feature);
+
 class VirtualUpscalerDriver
 {
   public:

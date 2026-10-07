@@ -58,6 +58,8 @@ ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
 
 void DrawStatus() { g_driver.DrawStatus(); }
 
+bool NrOnlyRunning() { return g_driver.NrOnlyRunning(); }
+
 void DrawAdvancedUi()
 {
     g_driver.DrawFlowTuning();

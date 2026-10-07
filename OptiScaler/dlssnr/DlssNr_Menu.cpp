@@ -2792,6 +2792,79 @@ static void RenderDebugPage(Config* config, float menuResScale)
     ImGui::PopItemWidth();
 }
 
+bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
+                        const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour)
+{
+    using namespace HeaderBanner;
+
+    const auto& state = State::Instance();
+    const bool dx11 = state.currentD3D11Device != nullptr;
+
+    Inputs in;
+    in.feature = feature;
+    in.upscalerFiles = upscalerFiles;
+    in.gameCallsUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
+    in.mode = DlssNrNativeMode::FromKeys(
+        { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+    // F5Low is for D3D11 and D3D12 games, and only helps where NR is switched on and has not failed this session.
+    in.nrAvailable =
+        config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0 && state.swapchainApi != API::Vulkan;
+    in.f5lowNrOnlyRunning = dx11 ? NativeMotionDx11::NrOnlyRunning() : NativeMotionDx12::NrOnlyRunning();
+
+    const Banner banner = Decide(in);
+
+    switch (banner.line)
+    {
+    case Line::Blank:
+    case Line::Frozen:
+    case Line::SelectUpscaler:
+    case Line::NoFiles:
+        return false; // the menu's own lines
+    case Line::OfferWithFiles:
+        ImGui::TextColored(offerColour, "No upscaler call from the game. Pick %s as its upscaler, or use F5Low.",
+                           upscalerNames.c_str());
+        break;
+    case Line::OfferNoFiles:
+        ImGui::TextColored(offerColour, "No upscaler files found. F5Low can still run NR without a game upscaler.");
+        break;
+    case Line::F5LowNrAndFrameGen:
+        ImGui::TextDisabled("F5Low: NR and frame generation on the finished picture (%s as stabiliser).",
+                            backendName.c_str());
+        break;
+    case Line::F5LowNrOnly:
+        ImGui::TextDisabled("F5Low: NR on the finished picture.");
+        break;
+    case Line::F5LowStandsAside:
+        ImGui::TextDisabled("The game's upscaler is on: F5Low stands aside.");
+        break;
+    case Line::F5LowStatus:
+        ImGui::TextDisabled("F5Low:");
+        ImGui::SameLine();
+
+        if (dx11)
+            NativeMotionDx11::DrawStatus();
+        else
+            NativeMotionDx12::DrawStatus();
+        break;
+    }
+
+    if (banner.line == Line::OfferWithFiles || banner.line == Line::OfferNoFiles)
+        HelpMarker("Menus and loading screens make no upscaler call either, so this can show there too.\n"
+                   "F5Low runs NR on the finished picture, with or without the game's upscaler.");
+
+    if (banner.action != Action::None)
+    {
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton(banner.action == Action::UseF5Low ? "Use F5Low##headerf5low"
+                                                                 : "F5Low settings##headerf5low"))
+            MenuPages::RequestPage(MenuPages::Page::NrStatus);
+    }
+
+    return true;
+}
+
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
 {
     using MenuPages::Page;

@@ -4,6 +4,7 @@
 
 #include "DepthFinderCore.h"
 
+#include <atomic>
 #include <NVNGX_Parameter.h>
 #include <State.h>
 #include <Config.h>
@@ -18,6 +19,9 @@ namespace native
 
 namespace
 {
+// The feature the virtual upscaler is running now, for IsVirtualUpscalerFeature (read by the menu thread).
+std::atomic<const void*> g_virtualFeature { nullptr };
+
 // Our feature's handle id: never in the real NGX handle tables (HandleToFeature, Dx12Contexts), so no game call finds it. It is
 // in State::changeBackend, so the menu's backend switch reaches it like any other feature.
 constexpr UINT kVirtualHandleId = 0x4E524631; // 'NRF1'
@@ -102,6 +106,8 @@ Upscaler WantedBackend()
 
 VirtualUpscalerDriver::VirtualUpscalerDriver() = default;
 
+bool IsVirtualUpscalerFeature(const void* feature) { return feature != nullptr && g_virtualFeature.load() == feature; }
+
 VirtualUpscalerDriver::~VirtualUpscalerDriver()
 {
     Release();
@@ -134,6 +140,9 @@ void VirtualUpscalerDriver::DropFeature(bool destroyFgContext)
 
     if (state.currentFeature == _feature.get())
         state.currentFeature = nullptr;
+
+    if (g_virtualFeature.load() == _feature.get())
+        g_virtualFeature = nullptr;
 
     Util::DelayedDestroy(std::move(_feature));
 }
@@ -190,6 +199,7 @@ bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const 
     }
 
     _feature = std::move(feature);
+    g_virtualFeature = _feature.get();
     return true;
 }
 

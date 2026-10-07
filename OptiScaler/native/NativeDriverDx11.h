@@ -31,6 +31,9 @@ ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device);
 // is on.
 void DrawStatus();
 
+// NR is running on the finished picture (the menu header's "F5Low: NR on the finished picture").
+bool NrOnlyRunning();
+
 // ImGui: with NativeDebugView, the flow tuning sliders, the frame count and the trust mask's state. The keys themselves
 // are set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();

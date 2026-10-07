@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string_view>
 
 // Pages of the main menu's navigation pane. Pure data, no ImGui, so it can be unit tested on the host.
@@ -70,5 +71,24 @@ inline constexpr Page PageFromName(std::string_view name)
     }
 
     return Page::Upscaler;
+}
+
+// A page another part of the menu wants shown (the header's F5Low button, cross-links). The page choice itself is a
+// static inside MenuCommon::RenderMainMenuPages, so the request waits here until that function takes it, once, on its
+// next draw.
+inline std::optional<Page>& PendingRequest()
+{
+    static std::optional<Page> request;
+    return request;
+}
+
+inline void RequestPage(Page page) { PendingRequest() = page; }
+
+// The requested page, once: a second call returns nothing until the next RequestPage.
+inline std::optional<Page> ConsumeRequest()
+{
+    const std::optional<Page> request = PendingRequest();
+    PendingRequest().reset();
+    return request;
 }
 } // namespace MenuPages

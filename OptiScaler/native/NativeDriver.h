@@ -66,6 +66,9 @@ class NativeDriver
     // ImGui: which one of the trust mask's checks to look at (the mask picture shows it).
     void DrawTrustViewCombo();
 
+    // NR ran on the finished picture in the last frame (not the virtual upscaler): the menu header says so.
+    bool NrOnlyRunning() const;
+
     // For the API drivers' menu pictures and status text.
     NativeProducer* Producer() { return _producer.get(); }
     Status GetStatus() const { return _status; }

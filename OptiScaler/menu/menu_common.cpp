@@ -9,6 +9,7 @@
 #include <cfloat>
 
 #include <dlssnr/DlssNr.h>
+#include <native/VirtualUpscalerDriver.h>
 
 #include "input/input_system.h"
 
@@ -2586,26 +2587,43 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
     }
 
     // Upscaler state is one line in every case, so the panes below never move when it changes.
-    if (currentFeature == nullptr || !currentFeature->IsInited())
+    const bool upscalerFiles = state.nvngxExists || state.nvngxReplacement.has_value() ||
+                               (state.libxessExists || XeSSProxy::Module() != nullptr);
+
+    std::vector<std::string> upscalers;
+
+    if (state.fsrHooks)
+        upscalers.push_back("FSR");
+
+    if (state.nvngxExists || state.nvngxReplacement.has_value() || primaryGpu.dlssCapable)
+        upscalers.push_back("DLSS");
+
+    if (state.libxessExists || XeSSProxy::Module() != nullptr)
+        upscalers.push_back("XeSS");
+
+    auto joined = upscalers | std::views::join_with(std::string { " or " });
+
+    std::string joinedUpscalers(joined.begin(), joined.end());
+
+    // F5Low's lines (the native modes, menu/HeaderBanner.h) come first; the rule leaves a game's own feature, and the
+    // cases with no offer to make, to the lines below.
+    const bool f5lowLine = DlssNr::RenderHeaderBanner(
+        config,
+        currentFeature == nullptr || !currentFeature->IsInited() ? HeaderBanner::Feature::None
+        : native::IsVirtualUpscalerFeature(currentFeature)       ? HeaderBanner::Feature::F5Low
+        : currentFeature->IsFrozen()                             ? HeaderBanner::Feature::Frozen
+                                                                 : HeaderBanner::Feature::Game,
+        upscalerFiles, joinedUpscalers, currentFeature != nullptr ? currentFeature->Name() : std::string(),
+        toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)));
+
+    if (f5lowLine)
     {
-        if (state.nvngxExists || state.nvngxReplacement.has_value() ||
-            (state.libxessExists || XeSSProxy::Module() != nullptr))
+        // Drawn by DlssNr::RenderHeaderBanner.
+    }
+    else if (currentFeature == nullptr || !currentFeature->IsInited())
+    {
+        if (upscalerFiles)
         {
-            std::vector<std::string> upscalers;
-
-            if (state.fsrHooks)
-                upscalers.push_back("FSR");
-
-            if (state.nvngxExists || state.nvngxReplacement.has_value() || primaryGpu.dlssCapable)
-                upscalers.push_back("DLSS");
-
-            if (state.libxessExists || XeSSProxy::Module() != nullptr)
-                upscalers.push_back("XeSS");
-
-            auto joined = upscalers | std::views::join_with(std::string { " or " });
-
-            std::string joinedUpscalers(joined.begin(), joined.end());
-
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
                                "Select %s as the game's upscaler and load a save to enable these settings.",
                                joinedUpscalers.c_str());
@@ -7636,6 +7654,13 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             config->MenuPage = std::string(MenuPages::Name(next));
         }
     };
+
+    // A page another part of the menu asked for (the header's F5Low button): open its group too.
+    if (const auto requested = MenuPages::ConsumeRequest())
+    {
+        select(*requested);
+        nrOpen = nrOpen || MenuPages::IsNeuralRendering(*requested);
+    }
 
     const float footerHeight = mainMenuFooterHeight > 0.0f ? mainMenuFooterHeight : 110.0f * menuResScale;
     const float bodyHeight =

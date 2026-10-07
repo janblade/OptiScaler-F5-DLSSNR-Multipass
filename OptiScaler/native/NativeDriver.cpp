@@ -187,6 +187,11 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     return out;
 }
 
+bool NativeDriver::NrOnlyRunning() const
+{
+    return _status == Status::Running && _nativeRan && !Config::Instance()->DlssNrNativeUpscaler.value_or_default();
+}
+
 void NativeDriver::DrawStatus()
 {
     switch (_status)

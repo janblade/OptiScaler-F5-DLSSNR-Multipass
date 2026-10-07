@@ -153,6 +153,8 @@ void DrawStatus()
     g_driver.DrawStatus();
 }
 
+bool NrOnlyRunning() { return g_driver.NrOnlyRunning(); }
+
 void DrawAdvancedUi()
 {
     const bool debugView = Config::Instance()->DlssNrNativeDebugView.value_or_default();

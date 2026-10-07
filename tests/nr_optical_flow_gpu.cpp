@@ -1,9 +1,13 @@
-// GPU test for OptiScaler/motion/OpticalFlow_Dx12.cpp, no game: a synthetic picture (multi-scale value noise), the same picture
-// moved by a known amount, and the flow the pass reports for it. The picture is a continuous function, so a shift of half a
-// pixel is exact.
+// GPU test for OptiScaler/motion/OpticalFlow_Dx12.cpp, no game: a synthetic picture (multi-scale value noise), the same
+// picture moved by a known amount, and the flow the pass reports for it. The picture is a continuous function, so a
+// shift of half a pixel is exact.
 //
 //   vcvars64, then from the repo root:
-//   cl /std:c++20 /EHsc /O2 tests\nr_optical_flow_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
+//   cl /std:c++20 /EHsc /O2 tests\nr_optical_flow_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp d3d12.lib dxgi.lib
+//   d3dcompiler.lib
+//
+// Modes: no argument runs every check; "score" prints one summary line for the settings given as key=value; "perf"
+// times a frame at 2560x1440 from the CPU; "passes" times each pass of a frame on the GPU (timestamps) at 2560x1440.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -88,12 +92,68 @@ float LinesScene(float x, float y, int)
     return v;
 }
 
+// A picture with a layout, like a game's: a bright sky with a smooth gradient above a darker textured ground. Flipped,
+// the ground is above and the sky below, so every part of the picture changes its brightness at once (a cut to another
+// place).
+float LayoutScene(float x, float y, int channel, bool flipped)
+{
+    const float split = (flipped ? 0.6f : 0.4f) * (float) kHeight;
+    const bool sky = flipped ? y >= split : y < split;
+
+    if (sky)
+    {
+        const float t = flipped ? (y - split) / ((float) kHeight - split) : y / split;
+        return 0.8f - 0.2f * t + 0.04f * (Scene(x, y, channel) - 0.5f);
+    }
+
+    return 0.1f + 0.45f * Scene(x, y, channel);
+}
+
 // A HUD panel drawn over the picture and never moving: a flat fill inside a two-pixel border. Inside it a block match has
 // nothing to hold on to, like a flat wall, but it stays still whatever the picture behind it does.
 constexpr float kHudX = 500.0f, kHudY = 300.0f, kHudW = 300.0f, kHudH = 80.0f;
 
 bool InHud(float x, float y) { return x >= kHudX && x < kHudX + kHudW && y >= kHudY && y < kHudY + kHudH; }
 bool InHudFill(float x, float y) { return InHud(x - 2.0f, y - 2.0f) && InHud(x + 2.0f, y + 2.0f); }
+
+// A HUD-heavy picture: a flat panel down the left, a strip along the bottom and a box at the top right, about 40% of
+// the picture.
+float HeavyHud(float x, float y)
+{
+    if (x < 0.22f * (float) kWidth)
+        return 0.2f;
+    if (y > 0.85f * (float) kHeight)
+        return 0.12f;
+    if (x > 0.78f * (float) kWidth && y < 0.12f * (float) kHeight)
+        return 0.3f;
+    return -1.0f;
+}
+
+// A float as a half, rounded to nearest (values in the range a picture holds; very small ones flush to zero).
+uint16_t ToHalf(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, 4);
+    const uint32_t sign = (bits >> 16) & 0x8000;
+    const int exponent = (int) ((bits >> 23) & 0xFF) - 127 + 15;
+    const uint32_t mantissa = bits & 0x7FFFFF;
+
+    if (exponent <= 0)
+        return (uint16_t) sign;
+    if (exponent >= 31)
+        return (uint16_t) (sign | 0x7BFF);
+
+    uint32_t half = ((uint32_t) exponent << 10) | (mantissa >> 13);
+    half += (mantissa >> 12) & 1; // round to nearest
+    return (uint16_t) (sign | half);
+}
+
+// The PQ (SMPTE ST 2084) encoding of a luminance in nits.
+float PqEncode(float nits)
+{
+    const float y = std::pow(std::clamp(nits / 10000.0f, 0.0f, 1.0f), 0.1593017578125f);
+    return std::pow((0.8359375f + 18.8515625f * y) / (1.0f + 18.6875f * y), 78.84375f);
+}
 
 struct Gpu
 {
@@ -170,10 +230,11 @@ struct Gpu
     // An RGBA8 texture holding the scene moved by (dx, dy), left in the non-pixel shader resource state.
     // gain darkens it, noise (in 1/255 steps, peak) adds a different grain to every picture (noiseSeed).
     // With squareSize > 0 a square of another texture sits on top with its top-left corner at (squareX, squareY), its
-    // texture moving with it. With scene 1 the scene is SparseScene instead, with 2 LinesScene.
+    // texture moving with it. With scene 1 the scene is SparseScene instead, with 2 LinesScene, with 3 and 4
+    // LayoutScene (not flipped, flipped). hud 1 draws the panel, 2 the heavy HUD.
     ComPtr<ID3D12Resource> Picture(float dx, float dy, float gain = 1.0f, float noise = 0.0f, int noiseSeed = 0,
                                    float squareX = 0.0f, float squareY = 0.0f, float squareSize = 0.0f, int scene = 0,
-                                   bool hud = false)
+                                   int hud = 0)
     {
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -207,15 +268,83 @@ struct Gpu
                     const float base = inSquare     ? Scene(x - squareX + 3000.0f, y - squareY + 3000.0f, c)
                                        : scene == 1 ? SparseScene(x - dx, y - dy, c)
                                        : scene == 2 ? LinesScene(x - dx, y - dy, c)
+                                       : scene == 3 ? LayoutScene(x - dx, y - dy, c, false)
+                                       : scene == 4 ? LayoutScene(x - dx, y - dy, c, true)
                                                     : Scene(x - dx, y - dy, c);
                     float v = base * 255.0f * gain;
-                    if (hud && InHud(x, y))
+                    if (hud == 1 && InHud(x, y))
                         v = (InHudFill(x, y) ? 0.55f : 0.15f) * 255.0f;
+                    if (hud == 2 && HeavyHud(x, y) >= 0.0f)
+                        v = HeavyHud(x, y) * 255.0f;
                     if (noise > 0.0f)
                         v += (Hash((int) x * 3 + c, (int) y, 1000 + noiseSeed) * 2.0f - 1.0f) * noise;
                     px[c] = (uint8_t) std::clamp(v + 0.5f, 0.0f, 255.0f);
                 }
                 px[3] = 255;
+            }
+
+        upload->Unmap(0, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+        dst.pResource = tex.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource = upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = tex.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1, &b);
+        Submit();
+        return tex;
+    }
+
+    // An R16G16B16A16_FLOAT picture of a dark HDR scene moved by (dx, dy), left in the non-pixel shader resource state:
+    // the scene's value s (0..1) becomes the linear light 0.01 * 20^s (0.01 .. 0.2, in scRGB units, 1.0 = 80 nits),
+    // with grain (shot-noise like: its size goes with the square root of the light, grain is the factor, a new one
+    // every picture). With pq the same light is stored as PQ.
+    ComPtr<ID3D12Resource> HdrPicture(float dx, float dy, float grain, int noiseSeed, bool pq)
+    {
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = kWidth;
+        desc.Height = kHeight;
+        desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(&tex));
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+        auto upload = Buffer(total, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+        uint8_t* data = nullptr;
+        upload->Map(0, nullptr, (void**) &data);
+
+        for (uint32_t y = 0; y < kHeight; ++y)
+            for (uint32_t x = 0; x < kWidth; ++x)
+            {
+                uint16_t* px = (uint16_t*) (data + (size_t) y * fp.Footprint.RowPitch + x * 8);
+                for (int c = 0; c < 3; ++c)
+                {
+                    float v = 0.01f * std::pow(20.0f, Scene(x - dx, y - dy, c));
+                    if (grain > 0.0f)
+                        v = std::max(v + (Hash((int) x * 3 + c, (int) y, 2000 + noiseSeed) * 2.0f - 1.0f) * grain *
+                                             std::sqrt(v),
+                                     0.0f);
+                    px[c] = ToHalf(pq ? PqEncode(v * 80.0f) : v);
+                }
+                px[3] = ToHalf(1.0f);
             }
 
         upload->Unmap(0, nullptr);
@@ -352,15 +481,61 @@ std::vector<float> ReadFlow(Gpu& gpu, ID3D12Resource* out)
     return flow;
 }
 
+// The scene-cut flag the detector left (a 2x1 R32_UINT texture, in its resting read state): the flag and the
+// divergence.
+struct CutRead
+{
+    bool flag = false;
+    float value = 0.0f;
+};
+
+CutRead ReadCut(Gpu& gpu, ID3D12Resource* cut)
+{
+    const auto desc = cut->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+    UINT64 total = 0;
+    gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+    auto readback = gpu.Buffer(total, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    D3D12_RESOURCE_BARRIER b {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = cut;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    gpu.list->ResourceBarrier(1, &b);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+    dst.pResource = readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = cut;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+    gpu.list->ResourceBarrier(1, &b);
+    gpu.Submit();
+
+    uint32_t* data = nullptr;
+    readback->Map(0, nullptr, (void**) &data);
+    CutRead out;
+    out.flag = data[0] != 0;
+    memcpy(&out.value, data + 1, 4);
+    readback->Unmap(0, nullptr);
+    return out;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     const bool perf = argc > 1 && std::string(argv[1]) == "perf";
+    const bool passes = argc > 1 && std::string(argv[1]) == "passes";
     bool score = false; // "score": one summary line for the settings given as key=value (radius=2 cells=4 ...)
     const bool noSmoothing = (argc > 1 && std::string(argv[1]) == "nosmooth") || (argc > 2 && std::string(argv[2]) == "nosmooth");
 
-    if (perf)
+    if (perf || passes)
     {
         kWidth = 2560;
         kHeight = 1440;
@@ -419,6 +594,18 @@ int main(int argc, char** argv)
             tuning.globalCandidate = value != 0.0f;
         else if (key == "inverse")
             tuning.inverseRefinement = value != 0.0f;
+        else if (key == "scene")
+            tuning.sceneCutDetector = value != 0.0f;
+        else if (key == "scenethr")
+            tuning.sceneCutThreshold = value;
+        else if (key == "zero")
+            tuning.zeroMargin = value;
+        else if (key == "zeroreach")
+            tuning.zeroReach = (int) value;
+        else if (key == "lumaperc")
+            tuning.perceptualLuma = value != 0.0f;
+        else if (key == "white")
+            tuning.hdrWhiteNits = value;
     }
     flow.Tuning() = tuning;
 
@@ -475,6 +662,72 @@ int main(int argc, char** argv)
         QueryPerformanceCounter(&b);
         printf("%ux%u: %.3f ms per flow (wall, %d frames)\n", kWidth, kHeight,
                1000.0 * (double) (b.QuadPart - a.QuadPart) / freq.QuadPart / (batches * 6), batches * 6);
+        return 0;
+    }
+
+    if (passes)
+    {
+        // The GPU time of each pass, averaged over many frames of a pan with depth: one frame per submit, a timestamp
+        // after every pass, the match summed over its levels.
+        std::vector<ComPtr<ID3D12Resource>> frames;
+        for (int i = 0; i < 4; ++i)
+            frames.push_back(gpu.Picture(i * 7.0f, i * -3.0f));
+
+        auto depthMap = gpu.DepthMap(800.0f, 400.0f, 500.0f);
+
+        D3D12_QUERY_HEAP_DESC heapDesc {};
+        heapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        heapDesc.Count = 64;
+        ComPtr<ID3D12QueryHeap> heap;
+        gpu.device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&heap));
+        auto readback = gpu.Buffer(64 * 8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        UINT64 frequency = 0;
+        gpu.queue->GetTimestampFrequency(&frequency);
+
+        flow.SetTimestampHeap(heap.Get(), 64);
+        flow.Reset();
+
+        std::vector<std::string> names;
+        std::vector<double> sums;
+        double total = 0;
+        const int warm = 8, measured = 120;
+
+        for (int n = 0; n < warm + measured; ++n)
+        {
+            flow.ClearTimestamps();
+            flow.Dispatch(gpu.list.Get(), frames[n % 4].Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depthMap.Get(),
+                          flow.Tuning().depthMatching ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN, true);
+            const uint32_t count = flow.TimestampCount();
+            gpu.list->ResolveQueryData(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, count, readback.Get(), 0);
+            gpu.Submit();
+
+            if (n < warm || count < 2)
+                continue;
+
+            UINT64* ticks = nullptr;
+            readback->Map(0, nullptr, (void**) &ticks);
+            for (uint32_t i = 1; i < count; ++i)
+            {
+                const double ms = 1000.0 * (double) (ticks[i] - ticks[i - 1]) / (double) frequency;
+                const std::string name = flow.TimestampName(i);
+                size_t slot = 0;
+                while (slot < names.size() && names[slot] != name)
+                    ++slot;
+                if (slot == names.size())
+                {
+                    names.push_back(name);
+                    sums.push_back(0);
+                }
+                sums[slot] += ms;
+                total += ms;
+            }
+            readback->Unmap(0, nullptr);
+        }
+
+        for (size_t i = 0; i < names.size(); ++i)
+            printf("pass %-8s %.4f ms per frame\n", names[i].c_str(), sums[i] / measured);
+        printf("%ux%u: %.4f ms per frame in all (GPU timestamps, %d frames)\n", kWidth, kHeight, total / measured,
+               measured);
         return 0;
     }
 
@@ -901,16 +1154,278 @@ int main(int argc, char** argv)
         printf("  %s\n", pass ? "ok" : "FAIL");
     }
 
+    // Dark HDR pictures (scRGB, and the same light as PQ; the scene between 0.01 and 0.2 of 80 nits): the pans and the
+    // grain of the cases above, with the luma the flow matches on as the settings give it. The perceptual luma (a
+    // lightness curve after dividing by a white point) spreads the dark end that a tone-mapped linear luma squeezes, so
+    // it must not do worse here.
+    struct HdrScore
+    {
+        double panErr = 0, panHalf = 1, grainOne = 0, grainErr = 0;
+    };
+
+    auto hdrScore = [&](bool pq, bool perceptual) -> HdrScore
+    {
+        struct HdrCase
+        {
+            float dx, dy;
+            int frames;
+            float grain;
+        };
+
+        const HdrCase hdrCases[] = { { 3, -2, 2, 0 }, { 11, 7, 2, 0 },     { 21, -14, 2, 0 },
+                                     { 60, 0, 2, 0 }, { 3, -2, 2, 0.06f }, { 12, 5, 4, 0.06f } };
+        Tally err, half, grainShare, grainError;
+
+        for (const HdrCase& c : hdrCases)
+        {
+            flow.Tuning() = tuning;
+            flow.Tuning().perceptualLuma = perceptual;
+            flow.Reset();
+
+            for (int k = 0; k < c.frames; ++k)
+            {
+                auto picture = gpu.HdrPicture(c.dx * k, c.dy * k, c.grain, k, pq);
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, nullptr,
+                              DXGI_FORMAT_UNKNOWN, true,
+                              pq ? OpticalFlowDx12::Encoding::Pq : OpticalFlowDx12::Encoding::ScRgb);
+                gpu.Submit();
+            }
+
+            const auto desc = flow.Flow()->GetDesc();
+            const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+            const int margin = (int) std::ceil(std::max(std::fabs(c.dx), std::fabs(c.dy)) / 2.0f) + 24;
+            uint64_t n = 0, within = 0, one = 0;
+            double sum = 0;
+
+            for (uint32_t y = margin; y + margin < desc.Height; ++y)
+                for (uint32_t x = margin; x + margin < desc.Width; ++x)
+                {
+                    const size_t i = ((size_t) y * desc.Width + x) * 2;
+                    const float e = std::hypot(field[i] + c.dx, field[i + 1] + c.dy);
+                    sum += e;
+                    within += e <= 0.5f;
+                    one += e <= 1.0f;
+                    ++n;
+                }
+
+            if (c.grain > 0.0f)
+            {
+                grainShare.Add((double) one / n);
+                grainError.Add(sum / n);
+            }
+            else
+            {
+                err.Add(sum / n);
+                half.Add((double) within / n);
+            }
+        }
+
+        flow.Tuning() = tuning;
+        HdrScore score;
+        score.panErr = err.Mean();
+        score.panHalf = half.worst;
+        score.grainOne = grainShare.Mean();
+        score.grainErr = grainError.Mean();
+        return score;
+    };
+
+    HdrScore hdrNow;
+
+    {
+        printf("dark HDR pictures, the match's luma: legacy (tone-mapped) and perceptual (white %.0f nits)\n",
+               tuning.hdrWhiteNits);
+
+        for (int pq = 0; pq < 2; ++pq)
+        {
+            const HdrScore legacy = hdrScore(pq != 0, false);
+            const HdrScore perceptual = hdrScore(pq != 0, true);
+            // The pans must be no worse (they are well better) and the grain no worse by more than a hundredth of the
+            // share within a pixel or five percent of the error: the grain here is flat dark noise, which neither luma
+            // helps.
+            const bool improves = perceptual.panErr <= legacy.panErr && perceptual.grainOne >= legacy.grainOne - 0.01 &&
+                                  perceptual.grainErr <= legacy.grainErr * 1.05;
+            printf(
+                "  %-6s legacy: pan error %.4f px, worst within 0.5 px %5.1f%%, grain within 1 px %5.1f%%, grain error "
+                "%.3f px\n"
+                "         perceptual: pan error %.4f px, worst within 0.5 px %5.1f%%, grain within 1 px %5.1f%%, grain "
+                "error %.3f px   %s\n",
+                pq ? "PQ" : "scRGB", legacy.panErr, 100.0 * legacy.panHalf, 100.0 * legacy.grainOne, legacy.grainErr,
+                perceptual.panErr, 100.0 * perceptual.panHalf, 100.0 * perceptual.grainOne, perceptual.grainErr,
+                improves ? "ok" : "FAIL");
+            ok = ok && (improves || !tuning.perceptualLuma);
+
+            if (!pq)
+                hdrNow = tuning.perceptualLuma ? perceptual : legacy;
+        }
+    }
+
+    // The same-frame scene-cut detector. Each sequence is a few pictures; the flag the detector left after each frame
+    // is read back. A real cut must be flagged on its own frame and on none before it (and the flow must be zero on
+    // it); a fade, an exposure step, a fast pan and a HUD-heavy picture must be flagged on no frame. `value` is the
+    // divergence the flag was judged by, to see how far each is from the threshold.
+    struct CutSequence
+    {
+        const char* what;
+        int frames;
+        bool cutAtEnd; // the last frame is a hard cut from the one before; else no frame is
+        bool reported; // only reported (a case no histogram can tell apart)
+    };
+
+    int cutHit = 0, cutTotal = 0, cutFalse = 0, quietTotal = 0;
+    double worstQuiet = 0.0, weakestCut = 1.0;
+
+    if (tuning.sceneCutDetector)
+    {
+        // a picture of sequence `id` at frame k
+        auto make = [&](int id, int k) -> ComPtr<ID3D12Resource>
+        {
+            switch (id)
+            {
+            case 0: // hard cut: sky above -> sky below
+                return k < 4 ? gpu.Picture(3.0f * k, 0, 1.0f, 0.0f, k, 0, 0, 0, 3)
+                             : gpu.Picture(0, 0, 1.0f, 0.0f, k, 0, 0, 0, 4);
+            case 1: // hard cut: a textured scene -> sky and ground
+                return k < 4 ? gpu.Picture(3.0f * k, -2.0f * k, 1.0f, 0.0f, k)
+                             : gpu.Picture(0, 0, 1.0f, 0.0f, k, 0, 0, 0, 3);
+            case 2: // a cut to a picture of the same make (no histogram tells them apart): reported only
+                return k < 4 ? gpu.Picture(3.0f * k, -2.0f * k, 1.0f, 0.0f, k)
+                             : gpu.Picture(2000.0f, 900.0f, 1.0f, 0.0f, k);
+            case 3: // a fade, 5% a picture
+                return gpu.Picture(3.0f * k, 0, std::pow(0.95f, (float) k), 0.0f, k, 0, 0, 0, 3);
+            case 4:
+                return gpu.Picture(3.0f * k, -2.0f * k, 0.95f * std::pow(0.95f, (float) k), 0.0f, k);
+            case 5: // an exposure step to twice the brightness
+                return gpu.Picture(3.0f * k, 0, k < 4 ? 0.4f : 0.8f, 0.0f, k, 0, 0, 0, 3);
+            case 6: // and back down to half
+                return gpu.Picture(3.0f * k, 0, k < 4 ? 0.8f : 0.4f, 0.0f, k, 0, 0, 0, 3);
+            case 7: // a fast pan
+                return gpu.Picture(160.0f * k, -40.0f * k, 1.0f, 0.0f, k);
+            case 8:
+                return gpu.Picture(160.0f * k, 0, 1.0f, 0.0f, k, 0, 0, 0, 3);
+            case 9: // a HUD-heavy picture over a panning one
+                return gpu.Picture(12.0f * k, 4.0f * k, 1.0f, 0.0f, k, 0, 0, 0, 0, 2);
+            case 10:
+                return gpu.Picture(12.0f * k, 0, 1.0f, 0.0f, k, 0, 0, 0, 3, 2);
+            case 11: // dark and grainy
+                return gpu.Picture(3.0f * k, -2.0f * k, 0.08f, 3.0f, k);
+            default: // a fade, 10% a picture
+                return gpu.Picture(3.0f * k, 0, std::pow(0.9f, (float) k), 0.0f, k, 0, 0, 0, 3);
+            }
+        };
+
+        const CutSequence sequences[] = {
+            { "hard cut, sky above -> sky below", 5, true, false },
+            { "hard cut, textured scene -> sky and ground", 5, true, false },
+            { "hard cut to a picture of the same make", 5, true, true },
+            { "fade, 5% a picture (sky and ground)", 9, false, false },
+            { "fade, 5% a picture (textured)", 9, false, false },
+            { "exposure step to twice the brightness", 8, false, false },
+            { "exposure step to half the brightness", 8, false, false },
+            { "fast pan, 160 px a picture (textured)", 5, false, false },
+            { "fast pan, 160 px a picture (sky and ground)", 5, false, false },
+            { "HUD-heavy picture, textured scene panning", 5, false, false },
+            { "HUD-heavy picture, sky and ground panning", 5, false, false },
+            { "dark and grainy", 5, false, false },
+            { "fade, 10% a picture (sky and ground)", 9, false, false },
+        };
+
+        printf("scene-cut detector, threshold %.2f\n", tuning.sceneCutThreshold);
+
+        for (int id = 0; id < (int) (sizeof(sequences) / sizeof(sequences[0])); ++id)
+        {
+            const CutSequence& seq = sequences[id];
+            flow.Reset();
+            std::vector<CutRead> reads;
+            float flowMagnitude = -1.0f;
+
+            for (int k = 0; k < seq.frames; ++k)
+            {
+                auto picture = make(id, k);
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+                reads.push_back(ReadCut(gpu, flow.SceneCutTexture()));
+
+                if (seq.cutAtEnd && k == seq.frames - 1)
+                {
+                    const auto desc = flow.Flow()->GetDesc();
+                    const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+                    double sum = 0;
+                    for (size_t i = 0; i < field.size(); i += 2)
+                        sum += std::hypot(field[i], field[i + 1]);
+                    flowMagnitude = (float) (sum / ((double) desc.Width * desc.Height));
+                }
+            }
+
+            // the frames that have a previous one to compare with: from the second on
+            bool flaggedEarlier = false;
+            float largestBefore = 0.0f;
+            for (int k = 1; k + (seq.cutAtEnd ? 1 : 0) < seq.frames; ++k)
+            {
+                flaggedEarlier = flaggedEarlier || reads[k].flag;
+                largestBefore = std::max(largestBefore, reads[k].value);
+            }
+
+            const CutRead& last = reads.back();
+            bool pass;
+
+            if (seq.cutAtEnd)
+            {
+                pass = last.flag && !flaggedEarlier && flowMagnitude >= 0.0f && flowMagnitude < 0.01f;
+                if (!seq.reported)
+                {
+                    ++cutTotal;
+                    cutHit += pass ? 1 : 0;
+                    weakestCut = std::min(weakestCut, (double) last.value);
+                }
+                printf(
+                    "  %-52s divergence on the cut %.3f, before it at most %.3f, flow on the cut frame %.3f px   %s\n",
+                    seq.what, last.value, largestBefore, flowMagnitude,
+                    seq.reported
+                        ? (last.flag ? "(reported: flagged)" : "(reported: not flagged; the readback finds it later)")
+                        : (pass ? "ok" : "FAIL"));
+                ok = ok && (pass || seq.reported);
+            }
+            else
+            {
+                const float largest = std::max(largestBefore, last.value);
+                pass = !flaggedEarlier && !last.flag;
+                ++quietTotal;
+                cutFalse += pass ? 0 : 1;
+                worstQuiet = std::max(worstQuiet, (double) largest);
+                printf("  %-52s largest divergence %.3f, flagged: %s   %s\n", seq.what, largest, pass ? "no" : "YES",
+                       pass ? "ok" : "FAIL");
+                ok = ok && pass;
+            }
+        }
+
+        // The flag must be left out of the trust mask and the match when the detector is off.
+        {
+            flow.Tuning() = tuning;
+            flow.Tuning().sceneCutDetector = false;
+            flow.Reset();
+            auto a = make(0, 0);
+            flow.Dispatch(gpu.list.Get(), a.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            gpu.Submit();
+            const bool none = flow.SceneCutFlag() == nullptr;
+            printf("  %-52s %s\n", "detector off: no flag is offered", none ? "ok" : "FAIL");
+            ok = ok && none;
+            flow.Tuning() = tuning;
+        }
+    }
+
     if (score)
     {
-        printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d inverse=%d | "
+        printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d "
+               "inverse=%d | "
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
-               "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f\n",
+               "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f "
+               "cutHit %d/%d cutFalse %d/%d weakestCut %.3f worstQuiet %.3f hdrPanErr %.4f hdrGrain1 %.4f\n",
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
-               std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0, tuning.globalCandidate ? 1 : 0,
-               tuning.inverseRefinement ? 1 : 0, panHalf.worst, panError.Mean(), brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(),
-               thinAliasError.Mean(), edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(),
-               smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean());
+               std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0,
+               tuning.globalCandidate ? 1 : 0, tuning.inverseRefinement ? 1 : 0, panHalf.worst, panError.Mean(),
+               brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(),
+               edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(), smallNoDepthOne.Mean(),
+               hudStill.Mean(), wallStill.Mean(), cutHit, cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet,
+               hdrNow.panErr, hdrNow.grainOne);
         return 0;
     }
 

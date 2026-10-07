@@ -5,7 +5,9 @@
 //   - the inside of the moving square is trusted (it moves as one, at one depth),
 //   - a hard cut to another scene distrusts nearly everything and is reported a few frames later,
 //   - a scene that does not move at all is trusted everywhere,
-//   - depth coming and going is not a scene cut.
+//   - depth coming and going is not a scene cut,
+//   - a cut that changes the picture's layout is found on its own frame by the flow's detector, and the mask is then
+//     distrust everywhere on that frame (not only a couple of frames later through the readback).
 //
 //   vcvars64, then from the repo root:
 //   cl /std:c++20 /EHsc /O2 tests\nr_trust_mask_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
@@ -227,6 +229,8 @@ struct Scene
     float backgroundZ;
     float squareZ;
     float depthShift = 0;   // the depth map's square is this many pixels off the picture's (a jittered depth buffer)
+    // 1: a bright sky above a darker textured ground; 2: the same flipped (sky below)
+    int layout = 0;
 };
 
 bool InSquare(const Scene& s, uint32_t x, uint32_t y, float shift = 0)
@@ -242,8 +246,15 @@ ComPtr<ID3D12Resource> Colour(Gpu& gpu, const Scene& s)
                           const bool in = InSquare(s, x, y);
                           for (int c = 0; c < 3; ++c)
                           {
-                              const float v = in ? Texture(x - s.squareX, (float) y, c, s.seed + 500)
-                                                 : Texture((float) x, (float) y, c, s.seed);
+                              float v = in ? Texture(x - s.squareX, (float) y, c, s.seed + 500)
+                                           : Texture((float) x, (float) y, c, s.seed);
+
+                              if (s.layout != 0)
+                              {
+                                  const float split = (s.layout == 2 ? 0.6f : 0.4f) * (float) kHeight;
+                                  const bool sky = s.layout == 2 ? y >= split : y < split;
+                                  v = sky ? 0.7f + 0.04f * (v - 0.5f) : 0.1f + 0.45f * v;
+                              }
                               px[c] = (uint8_t) std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f);
                           }
                           px[3] = 255;
@@ -302,6 +313,7 @@ struct Runner
             in.fullPerFlow = 2.0f;
             in.lumaNow = flow.LumaOfLastFrame();
             in.lumaBefore = flow.LumaOfFrameBefore();
+            in.sceneCut = flow.SceneCutFlag();
 
             if (!noDepth)
             {
@@ -544,6 +556,48 @@ int main()
 
         ok &= Check("worst whole-picture mean mask across the switches", worst, worst < 0.05);
         ok &= Check("no scene cut", run.trust.DistrustedShare(), !cut);
+    }
+
+    // 8. a cut that changes the layout of the picture: the flow's detector finds it on the frame, and that frame's
+    //    mask is distrust everywhere at once (with the detector off the mask is what the checks make of it)
+    for (int detector = 1; detector >= 0; --detector)
+    {
+        printf(detector ? "layout cut, detector on\n" : "layout cut, detector off (for comparison)\n");
+        Runner run(gpu);
+        if (!run.ok)
+            return 1;
+
+        run.flow.Tuning().sceneCutDetector = detector != 0;
+
+        for (int k = 0; k < 6; ++k)
+            run.Frame(Scene { 7, -1, 20.0f, 5.0f, 0, 1 });
+
+        const double before = run.Mean(0, 0, kWidth, kHeight);
+        run.Frame(Scene { 91, -1, 20.0f, 5.0f, 0, 2 });
+        const double cutMean = run.Mean(0, 0, kWidth, kHeight);
+        const double cutShare = run.ShareAbove(0, 0, kWidth, kHeight, 0.99);
+
+        if (detector)
+        {
+            ok &= Check("before the cut, mean mask", before, before < 0.1);
+            ok &= Check("on the cut frame, every pixel fully distrusted", cutShare, cutShare >= 0.999);
+        }
+        else
+            printf("  %-58s %6.3f   (reported)\n", "on the cut frame, share fully distrusted", cutShare);
+
+        printf("  %-58s %6.3f   (reported)\n", "on the cut frame, mean mask", cutMean);
+
+        for (int k = 0; k < 3; ++k)
+            run.Frame(Scene { 91, -1, 20.0f, 5.0f, 0, 2 });
+
+        // The readback counts the pixels the mask fully distrusts: with the flag that is all of them; without it a cut
+        // like this one leaves a quarter of them trusted, and the readback does not call it a cut at all.
+        if (detector)
+            ok &= Check("scene cut still reported a few frames later (readback)", run.trust.DistrustedShare(),
+                        run.trust.SceneCutSeen());
+        else
+            printf("  %-58s %6.3f   (reported: %s)\n", "share fully distrusted a few frames later",
+                   run.trust.DistrustedShare(), run.trust.SceneCutSeen() ? "seen" : "not seen");
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

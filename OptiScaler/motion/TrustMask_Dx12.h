@@ -16,6 +16,9 @@
 //
 // A scene cut shows as a frame in which nearly every pixel is distrusted; Dispatch() counts those on the GPU and a couple of
 // frames later SceneCutSeen() reports it, so the owner can reset the producer's histories.
+//
+// When the flow has found the cut on the frame itself (OpticalFlowDx12::SceneCutFlag(), given in Inputs::sceneCut),
+// that frame's mask is all distrust at once, without waiting for the count.
 
 #include <d3d12.h>
 #include <dxgiformat.h>
@@ -48,6 +51,8 @@ class TrustMaskDx12
         DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN; // a typed readable format of it: R32_FLOAT, R16_UNORM, R32_FLOAT_X8X24_TYPELESS...
         uint32_t depthWidth = 0, depthHeight = 0;
         bool depthReversed = true;               // near is 1.0
+        // OpticalFlowDx12::SceneCutFlag(), when it ran: a hard cut on this frame distrusts the whole mask
+        ID3D12Resource* sceneCut = nullptr;
     };
 
     // Records the mask for this frame; every input must be in the NON_PIXEL_SHADER_RESOURCE state and stays so. The first
@@ -109,7 +114,7 @@ class TrustMaskDx12
         float depthTolerance, flowTolerance, lumaTolerance, decay;
         uint32_t reversed, hasHistory;
         float fullPerFlow, revealTolerance;
-        uint32_t depthCount, debugView, depthBoth, pad;
+        uint32_t depthCount, debugView, depthBoth, sceneCutEnabled;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);

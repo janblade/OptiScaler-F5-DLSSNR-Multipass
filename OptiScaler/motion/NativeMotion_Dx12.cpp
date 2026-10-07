@@ -354,6 +354,30 @@ void DrawAdvancedUi()
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", "Finds the picture's gradients once from the current frame and stops early. Faster, but\n"
                                     "less exact on thin lines and grain; switch it on and off to compare.");
+        ImGui::Checkbox("Perceptual luma (HDR and SDR)##flowluma", &tune.perceptualLuma);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s", "Matches on a lightness that follows how the eye sees it: an SDR picture as it is, an HDR\n"
+                      "one (scRGB, PQ) after dividing by a white of 203 nits and a lightness curve, so dark\n"
+                      "detail counts like bright. Off: the older tone-mapped luma.");
+        bool preferStill = tune.zeroMargin > 0.0f;
+
+        if (ImGui::Checkbox("Prefer no motion in flat ground (experimental)##flowzero", &preferStill))
+            tune.zeroMargin = preferStill ? 0.001f : 0.0f;
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s", "Where no motion matches almost as well as the best offset, keep the flow at zero. Holds a\n"
+                      "still HUD panel still while the picture pans behind it, but also stops a plain wall\n"
+                      "from moving with the pan; off by default.");
+        ImGui::Checkbox("Find a hard cut on its own frame##flowscene", &tune.sceneCutDetector);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s", "Compares the picture's brightness histograms with the last frame's on the GPU. On a cut\n"
+                      "the flow is zero and every pixel is distrusted on that very frame, instead of a few\n"
+                      "frames later. A fade or an exposure change is not a cut.");
         ImGui::SetNextItemWidth(160.0f);
         ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
                            ImGuiSliderFlags_Logarithmic);

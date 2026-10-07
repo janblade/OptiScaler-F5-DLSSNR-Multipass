@@ -101,6 +101,12 @@ class NativeProducer
     UINT64 _values[kRing] = {};
     UINT64 _signalled = 0;
     uint64_t _frame = 0;
+    uint64_t _cutQuietUntil = 0; // a cut's consumer reset was asked for: the late count of the same cut is not another
+
+    // The flow's scene-cut flag of each frame in the ring, copied out to be read once the GPU has finished that frame.
+    ID3D12Resource* _cutReadback[kRing] = {};
+    bool _cutPending[kRing] = {};
+    bool _consumerResetPending = false; // a cut was found and the consumer has not run since
     uint32_t _width = 0;
     uint32_t _height = 0;
     bool _previewReady = false;

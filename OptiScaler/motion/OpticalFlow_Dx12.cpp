@@ -189,8 +189,10 @@ float Cost(int2 p, int2 d, float w[16], float cur[16])
     return s * 16.0 / total;
 }
 
-// The biggest absolute difference of the sixteen samples to the last frame at the same place (no offset, the mean not
-// taken out): the still age is told from it. Only the finest level asks.
+// The biggest absolute difference to the last frame at the same place (no offset, the mean not taken out): the still age
+// is told from it. Only the finest level asks. The window's sixteen samples lie at odd offsets, so the pixel itself and
+// its even neighbours are checked too: a dot one pixel wide that moves by an even step would otherwise slip between the
+// samples and be held still.
 float LargestChange(int2 p, float cur[16])
 {
     float largest = 0.0;
@@ -199,6 +201,14 @@ float LargestChange(int2 p, float cur[16])
     [unroll] for (int j = 0; j < 4; ++j)
         [unroll] for (int i = 0; i < 4; ++i)
             largest = max(largest, abs(cur[j * 4 + i] - PrevLuma.Load(int3(clamp(p + int2(2 * i - 3, 2 * j - 3), 0, hi), 0))));
+
+    static const int2 kEven[5] = { int2(0, 0), int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2) };
+
+    [unroll] for (int k = 0; k < 5; ++k)
+    {
+        int2 q = clamp(p + kEven[k], 0, hi);
+        largest = max(largest, abs(CurLuma.Load(int3(q, 0)) - PrevLuma.Load(int3(q, 0))));
+    }
 
     return largest;
 }
@@ -255,15 +265,26 @@ void Match(uint3 id : SV_DispatchThreadID)
         [unroll] for (int ci = 0; ci < 4; ++ci)
             cur[cj * 4 + ci] = CurLuma.Load(int3(clamp(p + int2(2 * ci - 3, 2 * cj - 3), 0, int2(size) - 1), 0));
 
-    // Without depth the samples count by how near their brightness is to this pixel's (the constant is only set then): the
-    // depth weights' counterpart, so the edge of a thing that looks different does not decide the match beside it.
+    // On the finest level the samples also count by how near their brightness is to this pixel's: without depth the depth
+    // weights' counterpart, so the edge of a thing that looks different does not decide the match beside it, and with depth
+    // on top of them, which keeps a misaligned depth from doing the same. The weights are then scaled back to the sum they
+    // had: the cost and the sub-pixel step do not change with a common scale, but the confidence below is a sum over the
+    // weights, and so its knee keeps the meaning it has with the depth weights alone.
     if (lookWeights != 0)
     {
         const float lc = CurLuma.Load(int3(p, 0));
+        float before = 0.0, after = 0.0;
 
         [unroll] for (int lj = 0; lj < 4; ++lj)
             [unroll] for (int li = 0; li < 4; ++li)
-                w[lj * 4 + li] = LookWeight(cur[lj * 4 + li], lc, float2(2 * li - 3, 2 * lj - 3));
+            {
+                before += w[lj * 4 + li];
+                w[lj * 4 + li] *= LookWeight(cur[lj * 4 + li], lc, float2(2 * li - 3, 2 * lj - 3));
+                after += w[lj * 4 + li];
+            }
+
+        [unroll] for (int ls = 0; ls < 16; ++ls)
+            w[ls] *= before / after;
     }
 
     // The candidates for where to search: no motion, the coarser level's answer at the cells around this pixel (doubled, it is
@@ -1469,6 +1490,8 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     _usedDepth = depthMatching;
     const D3D12_RESOURCE_DESC depthDesc = depthMatching ? depth->GetDesc() : D3D12_RESOURCE_DESC {};
 
+    bool wroteAge = false; // the finest match wrote this frame's ages
+
     if (_havePrevious)
     {
         for (int level = kLevels - 1; level >= 0; --level)
@@ -1499,8 +1522,8 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.stillEpsilon = _settings.stillEpsilon;
             constants.stillMargin = _settings.stillMargin;
 
-            // The brightness weights: on the finest level and only without depth (with it the depth weights decide).
-            constants.lookWeights = level == 0 && !depthMatching && _settings.lookWeights ? 1 : 0;
+            // The brightness weights, on the finest level (with depth on top of the depth weights).
+            constants.lookWeights = level == 0 && _settings.lookWeights ? 1 : 0;
             constants.lookRange = (std::max)(_settings.lookRange, 1e-4f);
             constants.lookDistance = (std::max)(_settings.lookDistance, 0.5f);
 
@@ -1530,6 +1553,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             {
                 Transition(list, _age[_current], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 _passAgeIn = _passAgeOut = nullptr;
+                wroteAge = true;
             }
         }
 
@@ -1572,8 +1596,9 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     Transition(list, _flow,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-    // The ages this frame wrote are next frame's last ones, if the match ran with them on.
-    _ageValid = _havePrevious && _settings.stillFrames > 0;
+    // The ages this frame wrote are next frame's last ones, if the match wrote them (taken from what ran, not from the
+    // settings, which the menu can change meanwhile).
+    _ageValid = wroteAge;
 
     _current = 1 - _current;
     _havePrevious = true;

@@ -1116,10 +1116,11 @@ int main(int argc, char** argv)
 
     // A slow pan over thin lines on a flat wall, a pixel a picture for sixteen pictures (a camera creeping along a wall
     // with cables on it): the share of flow samples within 1 px of the pan, in a band of 12 pixels around the lines
-    // (where the picture says how it moved) and on the flat rest (where only the camera's motion can say). Reported
-    // only. At a pixel a picture the camera's motion is half a pixel of the finest level, which rounds to no motion, so
-    // holding the wall still and following the camera look the same there; at two pixels a picture (thinPan) they
-    // differ: that is where a flat patch held still by the still age would show.
+    // (where the picture says how it moved) and on the flat rest (where only the camera's motion can say), reported;
+    // the lines themselves are checked from two pixels a picture. At a pixel a picture the camera's motion is half a
+    // pixel of the finest level, which rounds to no motion, so holding the wall still and following the camera look the
+    // same there; at two pixels a picture (thinPan) they differ: that is where a flat patch held still by the still age
+    // would show.
     struct SlowCase
     {
         SparseCase c;
@@ -1129,7 +1130,8 @@ int main(int argc, char** argv)
 
     for (const SlowCase& s :
          { SlowCase { { 1, 0, 16 }, thinSlowBand, thinSlowRest }, SlowCase { { 1, 1, 16 }, thinSlowBand, thinSlowRest },
-           SlowCase { { 2, 0, 16 }, thinPanBand, thinPanRest }, SlowCase { { 2, -2, 16 }, thinPanBand, thinPanRest } })
+           SlowCase { { 2, 0, 16 }, thinPanBand, thinPanRest }, SlowCase { { 2, -2, 16 }, thinPanBand, thinPanRest },
+           SlowCase { { 4, 0, 16 }, thinPanBand, thinPanRest }, SlowCase { { 4, -4, 16 }, thinPanBand, thinPanRest } })
     {
         const SparseCase& c = s.c;
         flow.Reset();
@@ -1146,7 +1148,7 @@ int main(int argc, char** argv)
         const std::vector<float> field = ReadFlow(gpu, flow.Flow());
         const float lastX = c.dx * (c.frames - 1), lastY = c.dy * (c.frames - 1);
         const int margin = (int) std::ceil(std::max(std::fabs(lastX), std::fabs(lastY)) / 2.0f) + 24;
-        uint64_t n[2] = {}, one[2] = {};
+        uint64_t n[2] = {}, one[2] = {}, lineN = 0, lineOne = 0;
 
         for (uint32_t y = margin; y + margin < desc.Height; ++y)
             for (uint32_t x = margin; x + margin < desc.Width; ++x)
@@ -1158,16 +1160,33 @@ int main(int argc, char** argv)
                     band = band || std::fabs(fy - (150.0f + 97.0f * i + lastY)) <= 12.0f ||
                            std::fabs(fx - (140.0f + 173.0f * i + lastX)) <= 12.0f;
 
+                // On a line that the pan moves across itself (a row line when the pan has a vertical part, a column
+                // line when it has a sideways one): there the picture changes, so the still age must never hold it
+                // still.
+                bool line = false;
+                for (int i = 0; i < 6; ++i)
+                    line = line || (c.dy != 0.0f && std::fabs(fy - (150.0f + 97.0f * i + lastY)) <= 2.0f) ||
+                           (c.dx != 0.0f && std::fabs(fx - (140.0f + 173.0f * i + lastX)) <= 2.0f);
+
                 const size_t i = ((size_t) y * desc.Width + x) * 2;
-                one[band] += std::hypot(field[i] + c.dx, field[i + 1] + c.dy) <= 1.0f;
+                const bool right = std::hypot(field[i] + c.dx, field[i + 1] + c.dy) <= 1.0f;
+                one[band] += right;
                 ++n[band];
+                lineOne += line && right;
+                lineN += line;
             }
 
         s.band.Add((double) one[1] / n[1]);
         s.rest.Add((double) one[0] / n[0]);
+        // From two pixels a picture the camera's motion is a whole pixel of the finest level: the lines themselves must
+        // follow it (at one pixel a picture it rounds to no motion, so they are reported only).
+        const double lineShare = lineN ? (double) lineOne / lineN : 1.0;
+        const bool linePass = std::fabs(c.dx) < 2.0f || lineShare >= 0.95;
+        ok = ok && linePass;
         printf("thin lines on a flat wall, slow pan (%3.1f, %3.1f), %d pictures: within 1 px, band of 12 px round the "
-               "lines %5.1f%%, flat rest %5.1f%%   (reported)\n",
-               c.dx, c.dy, c.frames, 100.0 * one[1] / n[1], 100.0 * one[0] / n[0]);
+               "lines %5.1f%%, flat rest %5.1f%%, on the lines that cross %5.1f%%   %s\n",
+               c.dx, c.dy, c.frames, 100.0 * one[1] / n[1], 100.0 * one[0] / n[0], 100.0 * lineShare,
+               std::fabs(c.dx) < 2.0f ? "(reported)" : (linePass ? "ok" : "FAIL"));
     }
 
     flow.Tuning() = tuning;
@@ -1242,9 +1261,9 @@ int main(int argc, char** argv)
             flow.Tuning().coarseCells = variants[run].cells != 0 ? variants[run].cells : tuning.coarseCells;
             flow.Tuning().depthMatching = variants[run].cells != 0 ? variants[run].matching
                                                                    : variants[run].matching && tuning.depthMatching;
-            // The fixed variants compare depth matching with plain matching, so they match without the brightness
-            // weights; the "as set" ones show what the settings do.
-            if (variants[run].cells != 0)
+            // The fixed variants without depth are plain matching (what depth matching is measured against), so they
+            // match without the brightness weights; the depth variants and the "as set" ones match as the settings do.
+            if (variants[run].cells != 0 && !variants[run].matching)
                 flow.Tuning().lookWeights = false;
             if (variants[run].unsmoothed)
                 flow.Tuning().smoothRadius = 0;
@@ -1323,8 +1342,14 @@ int main(int argc, char** argv)
         const bool pass = share[1] >= share[0] - 0.01 && share[2] >= share[1] + 0.25 && share[2] >= 0.85 &&
                           share[3] >= share[1] && share[4] >= share[1] && share[5] >= share[2] - 0.01 &&
                           share[6] >= share[1] - 0.03;
-        ok = ok && pass;
+        // Misaligned or wrong depth against what the flow does with no depth at all as set (with the brightness
+        // weights, which plain matching above has not): a bad depth must cost no more than ignoring it.
+        const bool badPass = share[3] >= share[8] && share[4] >= share[8] && share[6] >= share[8] - 0.03;
+        ok = ok && pass && badPass;
         printf("  %s\n", pass ? "ok" : "FAIL");
+        printf("  bad depth against no depth as set (%5.1f%%): 2 px off %+5.1f, 5 px off %+5.1f, wrong %+5.1f   %s\n",
+               100.0 * share[8], 100.0 * (share[3] - share[8]), 100.0 * (share[4] - share[8]),
+               100.0 * (share[6] - share[8]), badPass ? "ok" : "FAIL");
     }
 
     // Dark HDR pictures (scRGB, and the same light as PQ; the scene between 0.01 and 0.2 of 80 nits): the pans and the

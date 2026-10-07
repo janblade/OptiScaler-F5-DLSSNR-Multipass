@@ -141,17 +141,20 @@ class OpticalFlowDx12
         // unchanged only until an edge or a line passes near it, so a still HUD stays still while the picture pans
         // behind it, and the camera candidate still carries a flat wall near its lines and edges, which a rule inside
         // one frame cannot tell apart. A plain patch farther than the window from any of them is held still too (the
-        // thinPan tallies of the flow test): the last frame matched there at no motion, so it looks the same.
+        // thinPan tallies of the flow test). "Unchanged" is the luma at the window's sixteen samples, the pixel and its
+        // four even neighbours, each within stillEpsilon of the last frame: such a patch looks the same either way, but
+        // a change under stillEpsilon a frame (a slow, smooth gradient) or of colour alone is not seen.
         int stillFrames = 8;
         float stillEpsilon = 0.004f;
         float stillMargin = 0.02f;
 
-        // Brightness weights, on the finest level when there is no depth to say where a surface ends: each sample of
-        // the window counts by how close its luma is to the centre pixel's (lookRange, luma units) and a little by its
-        // distance (lookDistance, half-resolution pixels), the depth weights' counterpart, so the window does not take
-        // the motion of a thing that looks different across an edge. Measured against shifted windows, a small window
-        // where the match is unsure and a wider search where it is poor (2026-10-07): these won on every edge tally
-        // and cost nothing measurable; the others gained less, cost up to 0.9 ms or hurt grain.
+        // Brightness weights, on the finest level: each sample of the window counts by how close its luma is to the
+        // centre pixel's (lookRange, luma units) and a little by its distance (lookDistance, half-resolution pixels),
+        // so the window does not take the motion of a thing that looks different across an edge. Without depth they are
+        // the depth weights' counterpart; with depth they multiply them, so a misaligned or wrong depth costs no more
+        // than having none. Measured against shifted windows, a small window where the match is unsure and a wider
+        // search where it is poor (2026-10-07): these won on every edge tally and cost nothing measurable; the others
+        // gained less, cost up to 0.9 ms or hurt grain.
         bool lookWeights = true;
         float lookRange = 0.06f;   // 0.04 is best on edges (0.759 vs 0.746) but costs dark HDR grain past its gate
         float lookDistance = 8.0f; // 8 keeps the grain tally nearly whole (4: -0.02), 2 costs 0.06

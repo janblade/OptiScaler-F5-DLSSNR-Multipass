@@ -97,8 +97,8 @@ class NativeDriver
 
     // A line every 300 presents says where the frames go, so a "waiting for the motion estimate" that never ends can be
     // told apart: no picture (Acquire not ready), flow never valid, trust mask not running, or the backend not
-    // applying. Of the frames with a valid flow, how many were matched with depth (the depth finder had one): the
-    // edges-without-depth work only matters in the rest.
+    // applying. Of the frames with a valid flow, how many were matched with depth (the depth finder settled on exactly
+    // one depth buffer and depth matching is on): the edges-without-depth work only matters in the rest.
     uint64_t _diagPresents = 0, _diagReady = 0, _diagWaiting = 0, _diagFlowValid = 0, _diagDepth = 0, _diagTrust = 0,
              _diagNative = 0, _diagSubmitted = 0;
     uint64_t _stopped = 0; // frames the producer gave up on

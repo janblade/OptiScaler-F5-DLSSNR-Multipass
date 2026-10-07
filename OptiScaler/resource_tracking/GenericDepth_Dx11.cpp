@@ -178,8 +178,12 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Resource* resource, const 
 
     static int calls = 0;
 
-    if (calls < 8 || calls % 200 == 0)
+    // The first few at info; the rest at debug level: this runs under g_mutex in the game's bind hooks, and a log line
+    // is a synchronous file write
+    if (calls < 8)
         LOG_INFO("Depth finder (D3D11): TakeSnapshot call {} from {}, {:X}", calls, where, (size_t) resource);
+    else if (calls % 200 == 0)
+        LOG_DEBUG("Depth finder (D3D11): TakeSnapshot call {} from {}, {:X}", calls, where, (size_t) resource);
 
     ++calls;
 

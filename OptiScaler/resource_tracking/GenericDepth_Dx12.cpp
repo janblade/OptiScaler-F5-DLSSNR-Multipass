@@ -287,9 +287,10 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
             loggedFrames = g_core.Presents(); // a burst every 600 presents
     }
 
+    // Debug level: this runs under g_mutex on the game's recording threads, and a log line is a synchronous file write
     if (g_core.Presents() - loggedFrames < 2 && inFrame++ < 8)
-        LOG_INFO("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_core.Presents(), where,
-                 (size_t) list, stretchVertices, g_core.SnapshotFloor());
+        LOG_DEBUG("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_core.Presents(),
+                  where, (size_t) list, stretchVertices, g_core.SnapshotFloor());
 
     const auto depthState = readOnlyDepth ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE;
 

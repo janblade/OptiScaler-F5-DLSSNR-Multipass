@@ -231,10 +231,12 @@ struct Gpu
     // gain darkens it, noise (in 1/255 steps, peak) adds a different grain to every picture (noiseSeed).
     // With squareSize > 0 a square of another texture sits on top with its top-left corner at (squareX, squareY), its
     // texture moving with it. With scene 1 the scene is SparseScene instead, with 2 LinesScene, with 3 and 4
-    // LayoutScene (not flipped, flipped). hud 1 draws the panel, 2 the heavy HUD.
+    // LayoutScene (not flipped, flipped). hud 1 draws the panel, 2 the heavy HUD. The square's texture is scaled by
+    // squareGain and raised by squareOffset (in 0..1 picture units), so it can also differ from the background in
+    // brightness and contrast, as an object in a game usually does.
     ComPtr<ID3D12Resource> Picture(float dx, float dy, float gain = 1.0f, float noise = 0.0f, int noiseSeed = 0,
                                    float squareX = 0.0f, float squareY = 0.0f, float squareSize = 0.0f, int scene = 0,
-                                   int hud = 0)
+                                   int hud = 0, float squareGain = 1.0f, float squareOffset = 0.0f)
     {
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -271,7 +273,7 @@ struct Gpu
                                        : scene == 3 ? LayoutScene(x - dx, y - dy, c, false)
                                        : scene == 4 ? LayoutScene(x - dx, y - dy, c, true)
                                                     : Scene(x - dx, y - dy, c);
-                    float v = base * 255.0f * gain;
+                    float v = (inSquare ? squareOffset + squareGain * base : base) * 255.0f * gain;
                     if (hud == 1 && InHud(x, y))
                         v = (InHudFill(x, y) ? 0.55f : 0.15f) * 255.0f;
                     if (hud == 2 && HeavyHud(x, y) >= 0.0f)
@@ -623,7 +625,8 @@ int main(int argc, char** argv)
         double Mean() const { return n ? sum / n : 0; }
     };
     Tally panHalf, panError, grainOne, brightHalf, sparseOne, thinOne, thinAliasError, edgeDepthOne, edgeNoDepthOne,
-        smallDepthOne, smallNoDepthOne, hudStill, wallStill;
+        smallDepthOne, smallNoDepthOne, hudStill, wallStill, hudStillLong, thinSlowBand, thinSlowRest,
+        edgeLookNoDepthOne;
 
     if (perf)
     {
@@ -967,6 +970,46 @@ int main(int argc, char** argv)
                100.0 * share[0], 100.0 * share[1], c.hud ? "(reported)" : (pass ? "ok" : "FAIL"));
     }
 
+    // The same still HUD panel over a panning picture, but for a long time: sixteen pictures, scored on the last. A HUD
+    // is unchanged frame after frame for as long as it is shown, which three pictures cannot show. Reported only (the
+    // number for a build that tells a still HUD from a panning flat wall by time); the three-picture share above is
+    // hudStill.
+    for (const StillCase& c : stillCases)
+    {
+        if (!c.hud)
+            continue;
+
+        flow.Reset();
+        flow.Tuning() = tuning;
+        const int frames = 16;
+
+        for (int k = 0; k < frames; ++k)
+        {
+            auto picture = gpu.Picture(c.dx * k, c.dy * k, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, 0, true);
+            flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            gpu.Submit();
+        }
+
+        const auto desc = flow.Flow()->GetDesc();
+        const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+        uint64_t n = 0, still = 0;
+
+        for (uint32_t y = 12; y + 12 < desc.Height; ++y)
+            for (uint32_t x = 12; x + 12 < desc.Width; ++x)
+            {
+                if (!InHudFill(2.0f * x + 1.0f, 2.0f * y + 1.0f))
+                    continue;
+
+                const size_t i = ((size_t) y * desc.Width + x) * 2;
+                still += std::hypot(field[i], field[i + 1]) <= 1.0f;
+                ++n;
+            }
+
+        hudStillLong.Add((double) still / n);
+        printf("%s (%5.1f, %5.1f), %d pictures: still within 1 px %5.1f%%   (reported)\n", c.what, c.dx, c.dy, frames,
+               100.0 * still / n);
+    }
+
     // Headroom, reported only: a pan over a flat wall with thin lines, as the flow is now (depth matching and the
     // whole-picture candidate on), with and without the candidate. What is still wrong here is what a camera model
     // could win.
@@ -1015,6 +1058,50 @@ int main(int argc, char** argv)
                    c.dx, c.dy, c.frames, run ? "with" : "without", 100.0 * one / n, 100.0 * wild / n, sum / n);
         }
 
+    // A slow pan over thin lines on a flat wall, a pixel a picture for sixteen pictures (a camera creeping along a wall
+    // with cables on it): the share of flow samples within 1 px of the pan, in a band of 12 pixels around the lines
+    // (where the picture says how it moved) and on the flat rest (where only the camera's motion can say). Reported
+    // only.
+    for (const SparseCase& c : { SparseCase { 1, 0, 16 }, SparseCase { 1, 1, 16 } })
+    {
+        flow.Reset();
+        flow.Tuning() = tuning;
+
+        for (int k = 0; k < c.frames; ++k)
+        {
+            auto picture = gpu.Picture(c.dx * k, c.dy * k, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, 2);
+            flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            gpu.Submit();
+        }
+
+        const auto desc = flow.Flow()->GetDesc();
+        const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+        const float lastX = c.dx * (c.frames - 1), lastY = c.dy * (c.frames - 1);
+        const int margin = (int) std::ceil(std::max(std::fabs(lastX), std::fabs(lastY)) / 2.0f) + 24;
+        uint64_t n[2] = {}, one[2] = {};
+
+        for (uint32_t y = margin; y + margin < desc.Height; ++y)
+            for (uint32_t x = margin; x + margin < desc.Width; ++x)
+            {
+                // The lines of LinesScene, where the last picture has them.
+                const float fx = 2.0f * x + 1.0f, fy = 2.0f * y + 1.0f;
+                bool band = false;
+                for (int i = 0; i < 6; ++i)
+                    band = band || std::fabs(fy - (150.0f + 97.0f * i + lastY)) <= 12.0f ||
+                           std::fabs(fx - (140.0f + 173.0f * i + lastX)) <= 12.0f;
+
+                const size_t i = ((size_t) y * desc.Width + x) * 2;
+                one[band] += std::hypot(field[i] + c.dx, field[i + 1] + c.dy) <= 1.0f;
+                ++n[band];
+            }
+
+        thinSlowBand.Add((double) one[1] / n[1]);
+        thinSlowRest.Add((double) one[0] / n[0]);
+        printf("thin lines on a flat wall, slow pan (%3.1f, %3.1f), %d pictures: within 1 px, band of 12 px round the "
+               "lines %5.1f%%, flat rest %5.1f%%   (reported)\n",
+               c.dx, c.dy, c.frames, 100.0 * one[1] / n[1], 100.0 * one[0] / n[0]);
+    }
+
     flow.Tuning() = tuning;
 
     // A square moving over a background that moves differently: the flow near its edges, for each way of making it. Background
@@ -1045,6 +1132,7 @@ int main(int argc, char** argv)
         float depthScale = 1.0f;  // the depth map's size relative to the picture's
         bool wrongDepth = false;  // a depth map whose edges are not the picture's (the square 60 px off)
         bool unsmoothed = false;  // the settings as given, without the smoothing
+        bool look = false;        // the square also differs from the background in brightness and contrast
     };
 
     const Variant variants[] = {
@@ -1059,6 +1147,7 @@ int main(int argc, char** argv)
         { "as set, no depth", 0, false },
         { "as set, unsmoothed", 0, true, 0.0f, 1.0f, false, true },
         { "as set, no depth, unsmoothed", 0, false, 0.0f, 1.0f, false, true },
+        { "as set, no depth, brighter square", 0, false, 0.0f, 1.0f, false, false, true },
     };
     constexpr int kVariants = (int) (sizeof(variants) / sizeof(variants[0]));
 
@@ -1069,8 +1158,17 @@ int main(int argc, char** argv)
 
         // A small square runs only on the settings as given: the variants compare ways to make a flow at a big one's edges.
         const bool smallSquare = e.size < 256.0f;
-        for (int run = (score || smallSquare) ? 7 : 0; run < (smallSquare && !score ? kVariants : 9); ++run)
+        for (int run = (score || smallSquare) ? 7 : 0; run < kVariants; ++run)
         {
+            // Which runs: a big square 0..8 (7 and 8 in score mode) and the brighter square (11, reported); a small one
+            // 7..10 (7 and 8 in score mode).
+            const bool wanted = run <= 6    ? !smallSquare && !score
+                                : run <= 8  ? true
+                                : run <= 10 ? smallSquare && !score
+                                            : !smallSquare;
+            if (!wanted)
+                continue;
+
             flow.Reset();
             flow.Tuning() = tuning;
             flow.Tuning().coarseCells = variants[run].cells != 0 ? variants[run].cells : tuning.coarseCells;
@@ -1084,8 +1182,9 @@ int main(int argc, char** argv)
             for (int k = 0; k < frames; ++k)
             {
                 const float qx = x0 + e.squareDx * k, qy = y0 + e.squareDy * k;
-                auto picture = gpu.Picture(e.backgroundDx * k, e.backgroundDy * k, 1.0f, 0.0f, k, qx, qy, size);
                 const Variant& v = variants[run];
+                auto picture = gpu.Picture(e.backgroundDx * k, e.backgroundDy * k, 1.0f, 0.0f, k, qx, qy, size, 0, 0,
+                                           v.look ? 0.4f : 1.0f, v.look ? 0.55f : 0.0f);
                 auto depth = v.wrongDepth ? gpu.DepthMap(qx + 60.0f, qy + 60.0f, size)
                                           : gpu.DepthMap(qx + v.depthOffset, qy, size, v.depthScale);
                 flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depth.Get(), DXGI_FORMAT_R32_FLOAT,
@@ -1131,6 +1230,8 @@ int main(int argc, char** argv)
                 (e.size < 256.0f ? smallDepthOne : edgeDepthOne).Add(share[run]);
             else if (run == 8)
                 (e.size < 256.0f ? smallNoDepthOne : edgeNoDepthOne).Add(share[run]);
+            else if (run == 11)
+                edgeLookNoDepthOne.Add(share[run]);
         }
 
         if (score)
@@ -1418,14 +1519,16 @@ int main(int argc, char** argv)
                "inverse=%d | "
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
                "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f "
+               "hudStillLong %.4f thinSlowBand %.4f thinSlowRest %.4f edgeLookNoDepth1 %.4f "
                "cutHit %d/%d cutFalse %d/%d weakestCut %.3f worstQuiet %.3f hdrPanErr %.4f hdrGrain1 %.4f\n",
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
                std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0,
                tuning.globalCandidate ? 1 : 0, tuning.inverseRefinement ? 1 : 0, panHalf.worst, panError.Mean(),
                brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(),
                edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(), smallNoDepthOne.Mean(),
-               hudStill.Mean(), wallStill.Mean(), cutHit, cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet,
-               hdrNow.panErr, hdrNow.grainOne);
+               hudStill.Mean(), wallStill.Mean(), hudStillLong.Mean(), thinSlowBand.Mean(), thinSlowRest.Mean(),
+               edgeLookNoDepthOne.Mean(), cutHit, cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet, hdrNow.panErr,
+               hdrNow.grainOne);
         return 0;
     }
 

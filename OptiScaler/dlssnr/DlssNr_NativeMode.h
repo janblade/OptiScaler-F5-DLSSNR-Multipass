@@ -127,17 +127,27 @@ inline bool DepthRestartWarning(Shown shown, Finder finder)
     return shown != Shown::Off && finder == Finder::NeedsRestart;
 }
 
+// The modes are for a game with no upscaler call of its own; the frame sources stand aside while the game makes one
+// (gameUpscaler: GenericDepthDx12/Dx11::GameCallsUpscaler). Then only Off can be chosen: a click on another mode would
+// change NR Pass at: under the game's own upscaler for nothing.
+inline bool Selectable(Mode mode, bool gameUpscaler) { return mode == Mode::Off || !gameUpscaler; }
+
 enum class Warning
 {
     None,
+    GameUpscaler,        // a mode is on while the game calls an upscaler of its own: it stands aside
     Dx11FrameGeneration, // NR only, while frame generation replaces a D3D11 game's swap chain
     NrDisabled,          // Enable Neural Rendering is off
     NeedsFinishedPicture // NR only, with NR Pass at: not on Finished Picture
 };
 
 // nativeInputBlocked: DlssNr::NativeInputBlockedBySwapChainInterop(), the condition native input itself refuses on.
-inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool nativeInputBlocked)
+// gameUpscaler: as for Selectable; it comes first, since nothing else matters while the mode stands aside.
+inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool nativeInputBlocked, bool gameUpscaler)
 {
+    if (shown != Shown::Off && gameUpscaler)
+        return Warning::GameUpscaler;
+
     if (shown == Shown::NrOnly)
     {
         if (nativeInputBlocked)

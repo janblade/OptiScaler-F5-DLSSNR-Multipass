@@ -58,7 +58,8 @@ bool InstallFailed();
 // with an upscaler of its own needs no depth finder, so it stands down for good.
 void NoteUpscalerCall();
 
-// The game has called an upscaler within the last couple of seconds (valid when the finder is installed; false otherwise).
+// The game has called an upscaler within the last couple of seconds, whether or not the finder is installed
+// (native::GameUpscalerCalledRecently, or the installed finder's own present-counted window).
 bool GameCallsUpscaler();
 
 // The warm-up is over and no upscaler call was seen: the finder is allowed to pick and report.

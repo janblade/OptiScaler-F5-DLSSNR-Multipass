@@ -795,6 +795,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     using namespace DlssNrNativeMode;
 
     const bool dx11 = State::Instance().currentD3D11Device != nullptr;
+    const bool gameUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
     const Shown shown =
         FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
                    config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
@@ -824,7 +825,12 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         if (ImGui::GetCursorScreenPos().x + width > rowRight)
             ImGui::NewLine();
 
-        if (ImGui::RadioButton(choice.label, shown == choice.shown))
+        const bool selectable = Selectable(choice.mode, gameUpscaler);
+        ImGui::BeginDisabled(!selectable);
+        const bool clicked = ImGui::RadioButton(choice.label, shown == choice.shown);
+        ImGui::EndDisabled();
+
+        if (clicked && selectable)
         {
             const Change change = ForClick(choice.mode, shown, finishedPicture);
 
@@ -857,10 +863,18 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                "Both use the game's depth when it is found (Advanced): it improves quality but is optional, and "
                "without it NR runs on motion only. Choosing a mode turns it on (Off turns it off); it needs a restart "
                "whenever it was not running at this start.\n"
-               "NR runs only with Enable Neural Rendering on. Applies at once.");
+               "NR runs only with Enable Neural Rendering on. Applies at once.\n"
+               "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen and a mode "
+               "already on stands aside.");
 
     if (shown == Shown::Off)
+    {
+        if (gameUpscaler)
+            ImGui::TextWrapped("The game is calling an upscaler of its own, so NR runs on that call; this is not "
+                               "needed.");
+
         return;
+    }
 
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
     const Finder finder =
@@ -868,11 +882,15 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
              : FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
     const bool depthRestart = DepthRestartWarning(shown, finder);
     const Warning warning =
-        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop());
+        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler);
     const char* warningText = nullptr;
 
     switch (warning)
     {
+    case Warning::GameUpscaler:
+        warningText = "The game is calling an upscaler of its own, so this stands aside and NR runs on that call. "
+                      "Choose Off, or turn the game's upscaler off to use this.";
+        break;
     case Warning::Dx11FrameGeneration:
         warningText = "NR only does nothing while OptiScaler's frame generation has replaced this D3D11 game's swap "
                       "chain. Choose NR + frame generation.";

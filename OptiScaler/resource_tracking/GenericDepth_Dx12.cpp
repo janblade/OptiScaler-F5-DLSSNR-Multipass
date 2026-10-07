@@ -1066,13 +1066,16 @@ GenericDepthSelect::Pick CurrentPick()
 
 void NoteUpscalerCall()
 {
+    // Noted with no finder installed too: the menu and the frame source must know the game has an upscaler either way.
+    native::NoteGameUpscalerCall();
+
     if (!g_installed)
         return;
 
     g_core.NoteUpscalerCall();
 }
 
-bool GameCallsUpscaler() { return g_installed && g_core.GameCallsUpscaler(); }
+bool GameCallsUpscaler() { return native::GameUpscalerCalledRecently() || (g_installed && g_core.GameCallsUpscaler()); }
 
 bool Armed() { return g_installed && g_core.Armed(); }
 

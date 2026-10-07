@@ -2,6 +2,7 @@
 #include "DepthFinderCore.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 
 namespace native
@@ -10,7 +11,14 @@ namespace native
 namespace
 {
 thread_local int g_syntheticUpscalerDepth = 0;
+std::atomic<int64_t> g_lastGameUpscalerCallMs { 0 }; // steady clock, milliseconds; 0 never
+
+int64_t NowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
+} // namespace
 
 SyntheticUpscalerCallScope::SyntheticUpscalerCallScope()
 {
@@ -20,6 +28,20 @@ SyntheticUpscalerCallScope::SyntheticUpscalerCallScope()
 SyntheticUpscalerCallScope::~SyntheticUpscalerCallScope()
 {
     --g_syntheticUpscalerDepth;
+}
+
+void NoteGameUpscalerCall()
+{
+    if (g_syntheticUpscalerDepth > 0)
+        return;
+
+    g_lastGameUpscalerCallMs.store(std::max<int64_t>(NowMs(), 1), std::memory_order_relaxed);
+}
+
+bool GameUpscalerCalledRecently()
+{
+    const int64_t last = g_lastGameUpscalerCallMs.load(std::memory_order_relaxed);
+    return last != 0 && NowMs() - last < kGameUpscalerQuietMs;
 }
 
 void DepthFinderCore::Start(LogFn log)

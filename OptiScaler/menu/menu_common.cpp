@@ -1907,6 +1907,8 @@ void MenuCommon::RenderNotifications(RenderMenuContext& ctx)
 
     // No fallback font, SetWindowFontScale needs to be called after Begin()
 
+    DlssNr::UpdateF5LowHint(config);
+
     ImGui::RenderNotifications(ImGuiToastPos::TopCenter, notificationScale, tonemapRequired);
 
     if (config->UseHQFont.value_or_default())

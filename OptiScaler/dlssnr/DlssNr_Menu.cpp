@@ -17,6 +17,7 @@
 #include <native/NativeDriverDx11.h>
 
 #include <imgui/imgui.h>
+#include <imgui/ImGuiNotify.hpp>
 #include <shaders/dlssnr/DlssNr_GameScale.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
@@ -2927,6 +2928,39 @@ void RenderF5LowFrameGenHint(Config* config, bool noUpscalerFeature)
         MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
     ImGui::Spacing();
+}
+
+void UpdateF5LowHint(Config* config)
+{
+    // Once per session, and never again after it has been shown or once a game upscaler is in play.
+    static bool shown = false;
+    static float quietSeconds = 0.0f;
+
+    if (shown || !config->F5LowHint.value_or_default())
+        return;
+
+    const auto feature = State::Instance().currentFeature;
+    const bool noFeature = feature == nullptr || !feature->IsInited();
+
+    // The header's offer: F5Low off, NR available, no upscaler call from the game, and no upscaler running.
+    if (!noFeature || HeaderBanner::Decide(HeaderInputs(config, HeaderBanner::Feature::None, false)).action !=
+                          HeaderBanner::Action::UseF5Low)
+    {
+        quietSeconds = 0.0f;
+        return;
+    }
+
+    // Counted from presented frames, a long stall (loading) at most adds a tenth of a second, so the wait is about ten
+    // seconds of the game running with no upscaler call, not of the clock.
+    quietSeconds += std::min(ImGui::GetIO().DeltaTime, 0.1f);
+
+    if (quietSeconds < 10.0f)
+        return;
+
+    shown = true;
+    ImGui::InsertNotification({ ImGuiToastType::Info, 15000,
+                                "No upscaler call from this game so far.\nF5Low can run NR without one: open the menu, "
+                                "Neural Rendering, F5Low." });
 }
 
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)

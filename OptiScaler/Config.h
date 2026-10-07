@@ -810,6 +810,8 @@ class Config
     CustomOptional<float, NoDefault> MenuWidth; // Main window size in pixels at Menu Scale 1.0
     CustomOptional<float, NoDefault> MenuHeight;
     CustomOptional<std::string, NoDefault> MenuPage; // Last page open in the main window, see menu/MenuPages.h
+    // One toast per session pointing to the F5Low page, see DlssNr::UpdateF5LowHint
+    CustomOptional<bool> F5LowHint { true };
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };
     CustomOptional<bool> ExtendedLimits { false };

@@ -73,6 +73,10 @@ bool RenderHeaderBanner(::Config* config, HeaderBanner::Feature feature, bool up
 void RenderF5LowUpscalerNote();
 void RenderF5LowFrameGenHint(::Config* config, bool noUpscalerFeature);
 
+// Once per frame: after about ten seconds with no upscaler call (and the header making its F5Low offer), one toast per
+// session points to the F5Low page. [Menu] F5LowHint=false silences it.
+void UpdateF5LowHint(::Config* config);
+
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
 

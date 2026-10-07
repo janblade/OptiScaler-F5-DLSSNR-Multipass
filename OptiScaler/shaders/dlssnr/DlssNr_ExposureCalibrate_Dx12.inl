@@ -155,9 +155,9 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
 }
 
 // The base white point the tuned source's Trim multiplies, 0 without a reading: Game exposure's is the same as the
-// encode's, so a sweep measures the white the picture is made with (DlssNrGameScale::WhiteBase; with the game's
-// exposure it needs a reading, as is it does not), Automatic's is its own metering, following the game's exposure
-// or not (Cal::RelearnFollowOnStart has why).
+// encode's, so a sweep measures the white the picture is made with (DlssNrGameScale::WhiteBase; both scales wait
+// for a reading, as the encode's Game exposure path does), Automatic's is its own metering, following the game's
+// exposure or not (Cal::RelearnFollowOnStart has why).
 float CalibrationBase(const Config& cfg)
 {
     if (cfg.DlssNrWhitePointSource.value_or_default() == 1)

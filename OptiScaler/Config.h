@@ -556,6 +556,11 @@ class Config
     // Default 3 (Automatic, at +1.5 EV): it needs nothing from the game; Game exposure left NBA 2K27 far too dark.
     CustomOptional<uint32_t> DlssNrWhitePointSource { 3 };
 
+    // Game exposure's scale: what its Trim multiplies. 0 = with the game's exposure (PreExposure / exposure, the value
+    // the game reports to DLSS SR), 1 = the game's colour as is (a base of exactly 1, as games with built-in DLSS-NR
+    // feed the model). Only read with WhitePointSource 1. See DlssNr_GameScale.h.
+    CustomOptional<uint32_t> DlssNrGameExposureScale { 0 };
+
     // OptiScaler-owned automatic exposure controls. When active, automatic exposure uses the
     // linear-HDR NR input. Finished-picture mode bypasses this calculation and keeps its own
     // display white-point override.

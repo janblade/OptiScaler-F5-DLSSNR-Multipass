@@ -8,12 +8,13 @@
 namespace
 {
 
-constexpr uint32_t kDescriptorsPerPass = 8; // seven SRVs and one UAV (the scene-cut passes use three of the eight)
+constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs and two UAVs (the scene-cut passes use three of the ten)
 constexpr uint32_t kPassesPerFrame = 1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
 constexpr DXGI_FORMAT kStateFormat = DXGI_FORMAT_R32_UINT; // typed atomics on this are required of every device
+constexpr DXGI_FORMAT kAgeFormat = DXGI_FORMAT_R8_UINT;    // the still age: typed UAV stores of this are required too
 constexpr uint32_t kSceneStateRows = 19; // nine tiles' counts, nine previous histograms, one row of scratch
 
 const char* kSource = R"HLSL(
@@ -37,6 +38,11 @@ cbuffer P : register(b0)
     float whiteNits;        // Luma: what an HDR picture's white is, in nits (scRGB 1.0 is 80 nits)
     float zeroMargin;       // Match, finest level: no motion wins when its cost is within this of the best (0 = off)
     uint zeroReach;         // Match: ... but only over a best offset no larger than this many pixels (0 = any)
+    uint stillFrames;       // Match, finest level: keep the still age (0 = not); where the last age is this much or more the
+                            // camera candidate must beat no motion by stillMargin
+    uint hasAge;            // Match: the last frame's ages (LastAge, t7) are there to read
+    float stillEpsilon;     // Match: the window did not change if its largest difference to the last frame is under this
+    float stillMargin;      // Match: what the camera candidate must win by over no motion where the picture is still
 };
 
 SamplerState Linear : register(s0);
@@ -50,8 +56,10 @@ Texture2D<float4> FlowIn : register(t0);
 Texture2D<float>  SceneDepth : register(t4);
 Texture2D<float4> GlobalFlow : register(t5);
 Texture2D<uint>   CutFlag : register(t6);
+Texture2D<uint>   LastAge : register(t7);
 RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
+RWTexture2D<uint>   OutAge : register(u1);
 
 // PQ (SMPTE ST 2084) to linear light, 1.0 being 10000 nits.
 float3 PqToLinear(float3 v)
@@ -178,6 +186,22 @@ float Cost(int2 p, int2 d, float w[16], float cur[16])
     return s * 16.0 / total;
 }
 
+// The biggest absolute difference of the sixteen samples to the last frame at the same place (no offset, the mean not
+// taken out): the still age is told from it. Only the finest level asks.
+float LargestChange(int2 p, float cur[16])
+{
+    float largest = 0.0;
+    int2 hi = int2(size) - 1;
+
+    [unroll] for (int j = 0; j < 4; ++j)
+        [unroll] for (int i = 0; i < 4; ++i)
+            largest = max(largest, abs(cur[j * 4 + i] - PrevLuma.Load(int3(clamp(p + int2(2 * i - 3, 2 * j - 3), 0, hi), 0))));
+
+    return largest;
+}
+)HLSL" // the compiler limits one string literal to 16 KB; the source goes on in a second one
+                      R"HLSL(
+
 // Block matching at one level: look around the coarser level's answer (doubled, it is in that level's pixels) for the offset
 // into the previous frame with the smallest difference, then a few gradient steps for the part of a pixel.
 [numthreads(8, 8, 1)]
@@ -191,6 +215,10 @@ void Match(uint3 id : SV_DispatchThreadID)
     if (sceneCutEnabled != 0 && CutFlag.Load(int3(0, 0, 0)) != 0)
     {
         OutFlow[id.xy] = float4(0.0, 0.0, 0.0, 1.0);
+
+        if (stillFrames != 0)
+            OutAge[id.xy] = 0; // the picture is another one: nothing has been still yet
+
         return;
     }
 
@@ -222,6 +250,20 @@ void Match(uint3 id : SV_DispatchThreadID)
     int2 centre = 0;
     float start = Cost(p, centre, w, cur);
 
+    // How long the picture has been unchanged here (finest level only): the age last frame, and from this frame's
+    // difference at no offset the age now, written at the end. Where it has been still long enough, the camera below has
+    // to beat no motion by a margin instead of winning the tie.
+    uint lastAge = 0;
+    float largest = 0.0;
+
+    if (stillFrames != 0)
+    {
+        largest = LargestChange(p, cur);
+        lastAge = hasAge != 0 ? LastAge.Load(int3(p, 0)) : 0;
+    }
+
+    const bool pictureStill = stillFrames != 0 && lastAge >= stillFrames;
+
     // What the whole picture did last frame (the camera): where nothing in the window says otherwise it wins the tie with no
     // motion, so a flat wall moves with the picture. `scale` here is this level's pixels per full-resolution pixel.
     if (hasGlobal != 0)
@@ -233,7 +275,7 @@ void Match(uint3 id : SV_DispatchThreadID)
             int2 d = int2(round(g.xy * scale));
             float c = Cost(p, d, w, cur);
 
-            if (c <= start)
+            if (pictureStill ? c + stillMargin < start : c <= start)
             {
                 start = c;
                 centre = d;
@@ -418,9 +460,12 @@ void Match(uint3 id : SV_DispatchThreadID)
     }
 
     OutFlow[id.xy] = float4(float2(bestD) + sub, confidence, 1.0);
+
+    if (stillFrames != 0)
+        OutAge[id.xy] = largest < stillEpsilon ? min(lastAge + 1, 255u) : 0u;
 }
 
-)HLSL" // the compiler limits one string literal to 16 KB; the source goes on in a second one
+)HLSL" // ... and on in a third one
                       R"HLSL(
 // A 3x3 median of each component, which removes the odd wrong block, scaled to full-resolution pixels.
 void Sort(inout float a, inout float b)
@@ -856,16 +901,16 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
 
     _device = device;
 
-    // One table (seven SRVs, one UAV) and the root constants.
+    // One table (eight SRVs, two UAVs) and the root constants.
     D3D12_DESCRIPTOR_RANGE ranges[2] {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 7;
+    ranges[0].NumDescriptors = 8;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
+    ranges[1].NumDescriptors = 2;
     ranges[1].BaseShaderRegister = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 7;
+    ranges[1].OffsetInDescriptorsFromTableStart = 8;
 
     D3D12_ROOT_PARAMETER params[2] {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -1110,6 +1155,9 @@ void OpticalFlowDx12::ReleaseTextures()
     release(_preview);
     release(_sceneState);
     release(_cutFlag);
+
+    for (Tex& age : _age)
+        release(age);
 }
 
 bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
@@ -1124,6 +1172,7 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
     _globalReady = false;
     _scenePrevValid = false;
     _sceneCutRan = false;
+    _ageValid = false;
     _flowValid = false;
     _width = width;
     _height = height;
@@ -1144,6 +1193,10 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
         w = (w + 1) / 2;
         h = (h + 1) / 2;
     }
+
+    for (Tex& age : _age)
+        if (!CreateTexture(age, (width + 1) / 2, (height + 1) / 2, kAgeFormat, L"OpticalFlow_StillAge"))
+            return false;
 
     return CreateTexture(_sceneState, 256, kSceneStateRows, kStateFormat, L"OpticalFlow_SceneState") &&
            CreateTexture(_cutFlag, 2, 1, kStateFormat, L"OpticalFlow_SceneCut") &&
@@ -1187,22 +1240,24 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     cpu.ptr += (SIZE_T) first * _descriptorSize;
     gpu.ptr += (UINT64) first * _descriptorSize;
 
-    ID3D12Resource* sources[7] = { src0,
+    ID3D12Resource* sources[8] = { src0,
                                    src1 != nullptr ? src1 : src0,
                                    src2 != nullptr ? src2 : src0,
                                    src3 != nullptr ? src3 : src0,
                                    src4 != nullptr ? src4 : src0,
                                    src5 != nullptr ? src5 : src0,
-                                   src6 != nullptr ? src6 : src0 };
-    const DXGI_FORMAT formats[7] = { format0,
+                                   src6 != nullptr ? src6 : src0,
+                                   _passAgeIn != nullptr ? _passAgeIn : src0 };
+    const DXGI_FORMAT formats[8] = { format0,
                                      src1 != nullptr ? format1 : format0,
                                      src2 != nullptr ? format2 : format0,
                                      src3 != nullptr ? format3 : format0,
                                      src4 != nullptr ? format4 : format0,
                                      src5 != nullptr ? format5 : format0,
-                                     src6 != nullptr ? format6 : format0 };
+                                     src6 != nullptr ? format6 : format0,
+                                     _passAgeIn != nullptr ? kAgeFormat : format0 };
 
-    for (int i = 0; i < 7; ++i)
+    for (int i = 0; i < 8; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
         srv.Format = formats[i];
@@ -1217,6 +1272,13 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     uav.Format = dstFormat;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
+    cpu.ptr += _descriptorSize;
+
+    // The second UAV is the still age the finest match writes; every other pass gets a view of nothing.
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ageUav {};
+    ageUav.Format = kAgeFormat;
+    ageUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
 
     ID3D12DescriptorHeap* heaps[] = { _heap };
     list->SetDescriptorHeaps(1, heaps);
@@ -1409,6 +1471,10 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.zeroMargin = level == 0 ? _settings.zeroMargin : 0.0f;
             constants.zeroReach = (uint32_t) std::clamp(_settings.zeroReach, 0, 64);
             constants.scale = 1.0f / (float) (2 << level); // full-resolution pixels in this level's
+            constants.stillFrames = level == 0 ? (uint32_t) std::clamp(_settings.stillFrames, 0, 255) : 0;
+            constants.hasAge = _ageValid ? 1 : 0;
+            constants.stillEpsilon = _settings.stillEpsilon;
+            constants.stillMargin = _settings.stillMargin;
 
             if (!coarsest)
             {
@@ -1416,11 +1482,27 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
                 constants.auxY = current[level + 1].height;
             }
 
+            // The finest level reads the last frame's ages and writes this frame's (no pass of its own).
+            const bool keepAge = constants.stillFrames != 0;
+
+            if (keepAge)
+            {
+                _passAgeIn = _age[1 - _current].resource;
+                _passAgeOut = _age[_current].resource;
+                Transition(list, _age[_current], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
             Pass(list, _match, current[level].resource, kLumaFormat, previous[level].resource, kLumaFormat,
                  coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat,
                  constants, (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat,
                  depthMatching ? depth : nullptr, depthFormat, _globalReady ? _globalFlow.resource : nullptr,
                  kFlowFormat, _sceneCutRan ? _cutFlag.resource : nullptr, kStateFormat);
+
+            if (keepAge)
+            {
+                Transition(list, _age[_current], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                _passAgeIn = _passAgeOut = nullptr;
+            }
         }
 
         constants = Constants {};
@@ -1461,6 +1543,9 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     // The flow can be read by a pixel shader too (the menu preview, a consumer's sampling).
     Transition(list, _flow,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // The ages this frame wrote are next frame's last ones, if the match ran with them on.
+    _ageValid = _havePrevious && _settings.stillFrames > 0;
 
     _current = 1 - _current;
     _havePrevious = true;

@@ -72,6 +72,7 @@ class OpticalFlowDx12
         _havePrevious = false;
         _globalReady = false;
         _scenePrevValid = false;
+        _ageValid = false;
     }
 
     // A picture of the flow for a menu: hue is the direction, brightness the speed up to maxSpeed pixels, black is still.
@@ -131,6 +132,18 @@ class OpticalFlowDx12
         // and grainy ground that matched on noise stays still.
         float zeroMargin = 0.0f;
         int zeroReach = 0;
+
+        // Still age, on the finest level: how many frames in a row the picture has not changed around a pixel (the
+        // largest difference to the last frame, at the same place, over the match window stays under stillEpsilon, in
+        // luma units: about one 8-bit step). Where that is at least stillFrames (0 = off, at most 255), the
+        // whole-picture camera candidate no longer wins a tie with no motion: it must beat it by stillMargin (luma
+        // units, the match's cost). A HUD is unchanged for as long as it is shown; a flat patch of a panning wall stays
+        // unchanged only until an edge or a line passes near it, so a still HUD stays still while the picture pans
+        // behind it, and the camera candidate still carries a flat wall, which a rule inside one frame cannot tell
+        // apart.
+        int stillFrames = 8;
+        float stillEpsilon = 0.004f;
+        float stillMargin = 0.02f;
     };
 
     Settings& Tuning() { return _settings; }
@@ -172,7 +185,12 @@ class OpticalFlowDx12
         uint32_t inverseRefinement, sceneCutEnabled;
         float whiteNits;  // Luma: the white of an HDR picture, in nits
         float zeroMargin; // Match, finest level: no motion wins a near tie
-        uint32_t zeroReach, padding[3];
+        uint32_t zeroReach;
+        uint32_t stillFrames; // Match, finest level: the still age is kept (0 = not); the camera must win by a margin
+        uint32_t hasAge;      // Match: the last frame's ages are there to read
+        float stillEpsilon;   // Match: under this the window did not change
+        float stillMargin;    // Match: what the camera must win by where the age is at least stillFrames
+        uint32_t padding[3];
     };
 
     // The scene-cut passes have a root signature of their own: the luma, the histogram state and the flag.
@@ -198,6 +216,11 @@ class OpticalFlowDx12
               DXGI_FORMAT format4 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src5 = nullptr,
               DXGI_FORMAT format5 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src6 = nullptr,
               DXGI_FORMAT format6 = DXGI_FORMAT_UNKNOWN);
+
+    // The finest match pass also reads the last frame's ages and writes this frame's; Pass binds these two for it (and
+    // an unused view for every other pass).
+    ID3D12Resource* _passAgeIn = nullptr;
+    ID3D12Resource* _passAgeOut = nullptr;
 
     ID3D12Device* _device = nullptr;
     ID3D12RootSignature* _rootSignature = nullptr;
@@ -226,6 +249,8 @@ class OpticalFlowDx12
     Tex _preview;
     Tex _sceneState; // R32_UINT, 256 wide: the nine tiles' counts, the last frame's nine smoothed histograms, scratch
     Tex _cutFlag;    // R32_UINT, 2x1: the flag and the divergence
+    Tex _age[2]; // R8_UINT, half resolution: the still age (see Settings::stillFrames), this frame's and the last one's
+    bool _ageValid = false; // the last frame's ages are there (not after a Reset or a size change)
     int _current = 0;
     bool _havePrevious = false;
     bool _flowValid = false;

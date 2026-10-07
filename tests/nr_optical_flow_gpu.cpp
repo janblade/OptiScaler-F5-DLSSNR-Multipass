@@ -604,6 +604,12 @@ int main(int argc, char** argv)
             tuning.zeroMargin = value;
         else if (key == "zeroreach")
             tuning.zeroReach = (int) value;
+        else if (key == "still")
+            tuning.stillFrames = (int) value;
+        else if (key == "stilleps")
+            tuning.stillEpsilon = value;
+        else if (key == "stillmargin")
+            tuning.stillMargin = value;
         else if (key == "lumaperc")
             tuning.perceptualLuma = value != 0.0f;
         else if (key == "white")
@@ -1008,6 +1014,50 @@ int main(int argc, char** argv)
         hudStillLong.Add((double) still / n);
         printf("%s (%5.1f, %5.1f), %d pictures: still within 1 px %5.1f%%   (reported)\n", c.what, c.dx, c.dy, frames,
                100.0 * still / n);
+    }
+
+    // The still ages are cleared by a Reset: after sixteen pictures of the HUD case and a Reset, the next pictures
+    // start from no age, so the flat inside of the HUD is the camera's again (as in the three-picture case above).
+    if (tuning.stillFrames > 0)
+    {
+        flow.Reset();
+        flow.Tuning() = tuning;
+
+        for (int k = 0; k < 16; ++k)
+        {
+            auto picture = gpu.Picture(12.0f * k, 0.0f, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, 0, true);
+            flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            gpu.Submit();
+        }
+
+        flow.Reset();
+
+        for (int k = 16; k < 19; ++k)
+        {
+            auto picture = gpu.Picture(12.0f * k, 0.0f, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, 0, true);
+            flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            gpu.Submit();
+        }
+
+        const auto desc = flow.Flow()->GetDesc();
+        const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+        uint64_t n = 0, still = 0;
+
+        for (uint32_t y = 12; y + 12 < desc.Height; ++y)
+            for (uint32_t x = 12; x + 12 < desc.Width; ++x)
+            {
+                if (!InHudFill(2.0f * x + 1.0f, 2.0f * y + 1.0f))
+                    continue;
+
+                const size_t i = ((size_t) y * desc.Width + x) * 2;
+                still += std::hypot(field[i], field[i + 1]) <= 1.0f;
+                ++n;
+            }
+
+        const bool pass = (double) still / n <= 0.5;
+        ok = ok && pass;
+        printf("still HUD panel, a Reset after sixteen pictures, then three: still within 1 px %5.1f%%   %s\n",
+               100.0 * still / n, pass ? "ok" : "FAIL");
     }
 
     // Headroom, reported only: a pan over a flat wall with thin lines, as the flow is now (depth matching and the
@@ -1516,19 +1566,19 @@ int main(int argc, char** argv)
     if (score)
     {
         printf("SCORE radius=%d coarse=%d lambda=%g history=%d cells=%d smooth=%d knee=%g dmatch=%d global=%d "
-               "inverse=%d | "
+               "inverse=%d still=%d stilleps=%g stillmargin=%g | "
                "pan0.5 %.4f panErr %.4f bright0.5 %.4f grain1 %.4f sparse1 %.4f thin1 %.4f aliasErr %.1f "
                "edgeDepth1 %.4f edgeNoDepth1 %.4f smallDepth1 %.4f smallNoDepth1 %.4f hudStill %.4f wallStill %.4f "
                "hudStillLong %.4f thinSlowBand %.4f thinSlowRest %.4f edgeLookNoDepth1 %.4f "
                "cutHit %d/%d cutFalse %d/%d weakestCut %.3f worstQuiet %.3f hdrPanErr %.4f hdrGrain1 %.4f\n",
                tuning.radius, tuning.coarseRadius, tuning.lambda, tuning.useHistory ? 1 : 0, tuning.coarseCells,
                std::clamp(tuning.smoothRadius, 0, 4), tuning.confidenceKnee, tuning.depthMatching ? 1 : 0,
-               tuning.globalCandidate ? 1 : 0, tuning.inverseRefinement ? 1 : 0, panHalf.worst, panError.Mean(),
-               brightHalf.worst, grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(),
-               edgeDepthOne.Mean(), edgeNoDepthOne.Mean(), smallDepthOne.Mean(), smallNoDepthOne.Mean(),
-               hudStill.Mean(), wallStill.Mean(), hudStillLong.Mean(), thinSlowBand.Mean(), thinSlowRest.Mean(),
-               edgeLookNoDepthOne.Mean(), cutHit, cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet, hdrNow.panErr,
-               hdrNow.grainOne);
+               tuning.globalCandidate ? 1 : 0, tuning.inverseRefinement ? 1 : 0, tuning.stillFrames,
+               tuning.stillEpsilon, tuning.stillMargin, panHalf.worst, panError.Mean(), brightHalf.worst,
+               grainOne.Mean(), sparseOne.Mean(), thinOne.Mean(), thinAliasError.Mean(), edgeDepthOne.Mean(),
+               edgeNoDepthOne.Mean(), smallDepthOne.Mean(), smallNoDepthOne.Mean(), hudStill.Mean(), wallStill.Mean(),
+               hudStillLong.Mean(), thinSlowBand.Mean(), thinSlowRest.Mean(), edgeLookNoDepthOne.Mean(), cutHit,
+               cutTotal, cutFalse, quietTotal, weakestCut, worstQuiet, hdrNow.panErr, hdrNow.grainOne);
         return 0;
     }
 

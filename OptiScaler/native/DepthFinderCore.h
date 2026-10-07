@@ -194,7 +194,15 @@ class DepthFinderCore
             _log(line);
     }
 
+    // The lock for a per-draw hook (OnDraw, OnIndirect, OnViewport), measuring how often and how long a draw waited for
+    // it: reported with the candidates, to decide whether the draw path needs to go lock-free.
+    std::unique_lock<std::mutex> LockForDraw();
+
     mutable std::mutex _mutex;
+    std::atomic<uint64_t> _drawLockWaits { 0 };     // draws that found the lock taken, since the last report
+    std::atomic<uint64_t> _drawLockWaitNs { 0 };    // their total wait
+    std::atomic<uint64_t> _drawLockWaitMaxNs { 0 }; // the longest one
+    uint64_t _drawsAtLastReport = 0;
     LogFn _log;
     HookCounters _counters;
 

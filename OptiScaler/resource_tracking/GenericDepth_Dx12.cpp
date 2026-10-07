@@ -1236,18 +1236,16 @@ void DrawAdvancedUi()
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
-    if (debugView)
-    {
-        bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
+    // Shown always on F5Low's page; the copy is made only with the pictures on as well (both read at the start).
+    bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
 
-        if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))
-            config->DlssNrNativeDepthOverlay = overlay;
+    if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))
+        config->DlssNrNativeDepthOverlay = overlay;
 
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
-                                    "command list, and shows it below. Leave it off unless you are checking the pick.\n"
-                                    "Applies at the next start.");
-    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
+                                "command list, and shows it below. Needs \"Show the motion and trust pictures\" on too.\n"
+                                "Leave it off unless you are checking the pick. Applies at the next start.");
 
     if (finder != g_installed)
         ImGui::TextDisabled("Takes effect after saving and restarting the game.");

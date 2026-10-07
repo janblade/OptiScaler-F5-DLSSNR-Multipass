@@ -1112,8 +1112,20 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
     bool finishedPicture = nr.finishedPicture;
     RenderNativeMode(config, nr.enabled, finishedPicture);
 
-    if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
+    // The page is F5Low's own, so every control shows and the section starts open.
+    if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
     {
+        bool pictures = config->DlssNrNativeDebugView.value_or_default();
+
+        if (ImGui::Checkbox("Show the motion and trust pictures##nativedebugview", &pictures))
+            config->DlssNrNativeDebugView = pictures;
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s",
+                              "Draws the motion estimate and the trust mask on this page while it is open (a little\n"
+                              "GPU work while they are shown; D3D12 games). The picked depth also needs \"Show the\n"
+                              "picked depth here\" below and a restart.");
+
         if (State::Instance().currentD3D11Device != nullptr)
         {
             GenericDepthDx11::DrawAdvancedUi();

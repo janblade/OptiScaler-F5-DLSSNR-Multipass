@@ -592,9 +592,10 @@ class Config
     // recorded into the game's own command list.
     CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
     CustomOptional<bool> DlssNrNativeDepthOverlay { false };
-    // NativeDebugView: show the pictures and debug controls of the depth finder and the motion estimate in the DLSS-NR menu
-    // (the depth preview, the motion and trust pictures, the trust view chooser, the flow tuning; D3D12 only). Off, the menu
-    // keeps the switches and one status line each, and the depth overlay's copy is not made. Startup only.
+    // NativeDebugView: show the pictures of the depth finder and the motion estimate on the menu's F5Low page (the
+    // depth preview, the motion and trust pictures, the trust view chooser; D3D12 only), set by "Show the motion and
+    // trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
+    // overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
     // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at

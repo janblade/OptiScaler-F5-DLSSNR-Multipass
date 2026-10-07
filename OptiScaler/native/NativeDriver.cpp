@@ -232,10 +232,17 @@ void NativeDriver::DrawStatus()
 
 void NativeDriver::DrawFlowTuning()
 {
-    const bool debugView = Config::Instance()->DlssNrNativeDebugView.value_or_default();
-
-    if (!debugView || !_producer || !ImGui::TreeNode("Flow tuning (to compare, applies at once)##flowtuning"))
+    // Always shown and open on F5Low's page; the settings live in the running motion estimate, so there is nothing to
+    // tune until a mode runs.
+    if (!ImGui::TreeNodeEx("Flow tuning (to compare, applies at once)##flowtuning", ImGuiTreeNodeFlags_DefaultOpen))
         return;
+
+    if (!_producer)
+    {
+        ImGui::TextDisabled("Shown once a mode is running.");
+        ImGui::TreePop();
+        return;
+    }
 
     auto& tune = _producer->Flow()->Tuning();
     ImGui::SetNextItemWidth(160.0f);

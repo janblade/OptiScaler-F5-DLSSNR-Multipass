@@ -18,6 +18,7 @@
 // backend it built in Config::Dx12Upscaler, which is also the backend it builds: the user's choice, FFX when there is none.
 
 #include "NativeProducer.h"
+#include "VirtualUpscalerHold.h"
 
 #include <d3d12.h>
 #include <dxgiformat.h>
@@ -52,6 +53,10 @@ class VirtualUpscalerDriver
     // feature is destroyed once the GPU can no longer be using it. Nothing happens when there is none.
     void Release();
 
+    // The game is calling its own upscaler for now (VirtualUpscalerHold.h): the backend and frame generation's context
+    // stay, only currentFeature lets go of it. The next Run resumes, telling frame generation its input changed.
+    void Pause();
+
     bool Active() const { return _feature != nullptr; }
     const std::string& Error() const { return _error; }
     const std::string& BackendName() const { return _backendName; }
@@ -83,6 +88,8 @@ class VirtualUpscalerDriver
     std::string _backendName;
     bool _failed = false;
     Key _failedKey;
+    bool _paused = false;
+    hold::RebuildSettle<Key> _settle; // a flip of the depth direction or HDR must hold before a rebuild
 
     ID3D12Resource* _output = nullptr; // rests in UNORDERED_ACCESS
     Key _outputKey;

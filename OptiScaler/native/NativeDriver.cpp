@@ -22,6 +22,12 @@ void NativeDriver::ReleaseVirtualUpscaler()
         _virtualUpscaler->Release();
 }
 
+void NativeDriver::PauseVirtualUpscaler()
+{
+    if (_virtualUpscaler != nullptr)
+        _virtualUpscaler->Pause();
+}
+
 bool NativeDriver::Enabled()
 {
     if (!Config::Instance()->DlssNrNativeMotion.value_or_default())
@@ -57,10 +63,18 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     _diagReady += acquired == AcquireStatus::Ready ? 1 : 0;
     _diagWaiting += acquired == AcquireStatus::WaitingForUpscaler ? 1 : 0;
 
+    const bool gameTookOver = _takeover.Update(acquired == AcquireStatus::WaitingForUpscaler, Util::MillisecondsNow());
+
     if (acquired == AcquireStatus::WaitingForUpscaler)
     {
-        // The game's own upscaler call takes over: ours goes, as a game's feature would.
-        ReleaseVirtualUpscaler();
+        // The game's own upscaler call: ours pauses, and goes (with frame generation's context, as a game's feature
+        // would) only once the game's calls have run for a while. A menu or cutscene that calls it for a moment would
+        // otherwise cost a rebuild and a gap in frame generation each time (VirtualUpscalerHold.h).
+        if (gameTookOver)
+            ReleaseVirtualUpscaler();
+        else
+            PauseVirtualUpscaler();
+
         _status = Status::Waiting;
 
         if (_producer)
@@ -82,6 +96,8 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     {
         auto fresh = std::make_unique<NativeProducer>();
 
+        const double initStart = Util::MillisecondsNow();
+
         if (!fresh->Init(device))
         {
             _failure = fresh->Error();
@@ -99,7 +115,8 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
         }
 
         _producer = std::move(fresh);
-        LOG_INFO("{}: optical flow and trust mask ready{}", _tag, _readyNote);
+        LOG_INFO("{}: optical flow and trust mask ready{} (in {:.1f} ms, on the present thread)", _tag, _readyNote,
+                 Util::MillisecondsNow() - initStart);
     }
 
     // Presents the picture to an upscaler backend as a synthetic call instead of running DLSS-NR on it. Takes priority

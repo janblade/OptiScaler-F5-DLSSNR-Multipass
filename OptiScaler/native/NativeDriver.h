@@ -11,6 +11,7 @@
 
 #include "FrameContract.h"
 #include "NativeProducer.h"
+#include "VirtualUpscalerHold.h"
 
 #include <cstdint>
 #include <memory>
@@ -80,6 +81,7 @@ class NativeDriver
 
   private:
     void ReleaseVirtualUpscaler();
+    void PauseVirtualUpscaler();
     void LogDiagnostics();
 
     const char* _tag;
@@ -90,6 +92,7 @@ class NativeDriver
     // Made on first use and never destroyed at exit: its destructor would tear down an upscaler backend under the
     // loader lock. Deleted only when the producer's device changes.
     VirtualUpscalerDriver* _virtualUpscaler = nullptr;
+    hold::Takeover _takeover; // how long the game's own upscaler calls have run (VirtualUpscalerHold.h)
 
     uint64_t _frame = 0;      // frames the producer submitted
     bool _nativeRan = false;  // DLSS-NR or the virtual upscaler ran on native input in the last frame

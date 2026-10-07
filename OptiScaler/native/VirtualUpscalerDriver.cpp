@@ -152,10 +152,27 @@ void VirtualUpscalerDriver::Release()
     if (_feature == nullptr)
         return;
 
+    _paused = false;
+
     LOG_INFO("Virtual upscaler: releasing the {} backend", _backendName);
     DropFeature(true);
     State::Instance().changeBackend.erase(kVirtualHandleId);
     _backendName.clear();
+}
+
+void VirtualUpscalerDriver::Pause()
+{
+    if (_feature == nullptr || _paused)
+        return;
+
+    _paused = true;
+
+    auto& state = State::Instance();
+
+    if (state.currentFeature == _feature.get())
+        state.currentFeature = nullptr;
+
+    LOG_INFO("Virtual upscaler: paused, the game is calling its own upscaler (the {} backend stays)", _backendName);
 }
 
 bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend)
@@ -205,8 +222,14 @@ bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const 
 
 bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild)
 {
-    if (_feature != nullptr && !rebuild && key == _featureKey)
-        return true;
+    if (_feature != nullptr && !rebuild)
+    {
+        const bool flagsOnly = key.width == _featureKey.width && key.height == _featureKey.height &&
+                               key.format == _featureKey.format && key.backend == _featureKey.backend;
+
+        if (!_settle.Now(_featureKey, key, flagsOnly))
+            return true;
+    }
 
     // Tried and failed for exactly this: not again every frame.
     if (_feature == nullptr && !rebuild && _failed && key == _failedKey)
@@ -483,6 +506,21 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     Transition(cmd, frame.motion, inMotion, fgMotion);
     Transition(cmd, depth, inDepth, fgDepth);
     Transition(cmd, _output, inOutput, fgOutput);
+
+    // Back from a pause (the game called its own upscaler for a moment): frame generation's input changed, as when a
+    // game switches features, which it takes as a short pause, not a new context
+    if (_paused)
+    {
+        _paused = false;
+
+        if (state.currentFG != nullptr && state.activeFgInput == FGInput::Upscaler)
+        {
+            state.fgChanged = true;
+            state.clearCapturedHudlesses = true;
+        }
+
+        LOG_INFO("Virtual upscaler: resumed with the {} backend", _backendName);
+    }
 
     state.currentFeature = _feature.get();
 

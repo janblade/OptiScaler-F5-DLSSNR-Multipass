@@ -449,6 +449,9 @@
     <ClInclude Include="shaders\dlssnr\DlssNr_WatchedLists.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\VirtualUpscalerHold.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="motion\OpticalFlow_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>

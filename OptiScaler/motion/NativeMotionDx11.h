@@ -31,8 +31,8 @@ ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device);
 // is on.
 void DrawStatus();
 
-// ImGui: with NativeDebugView, the frame count and the trust mask's state. The keys themselves are set by the menu's
-// mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
+// ImGui: with NativeDebugView, the flow tuning sliders, the frame count and the trust mask's state. The keys themselves
+// are set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();
 
 } // namespace NativeMotionDx11

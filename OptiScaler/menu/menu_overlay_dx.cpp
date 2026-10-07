@@ -7,8 +7,8 @@
 #include <Config.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
-#include <motion/NativeMotion_Dx12.h>
-#include <motion/NativeMotionDx11.h>
+#include <native/NativeDriverDx12.h>
+#include <native/NativeDriverDx11.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>

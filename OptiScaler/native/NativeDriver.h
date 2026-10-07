@@ -3,7 +3,7 @@
 // The game-side half of the native input producer that D3D12 and D3D11 share: one frame step on a native::IFrameSource,
 // and the menu's status and tuning that go with it.
 //
-// A driver per API (motion/NativeMotion_Dx12.cpp, motion/NativeMotionDx11.cpp) owns an adapter (Dx12FrameSource,
+// A driver per API (native/NativeDriverDx12.cpp, native/NativeDriverDx11.cpp) owns an adapter (Dx12FrameSource,
 // Dx11FrameSource) and one NativeDriver, and keeps only what is its API's: when the step runs (the frame generation
 // hooks, the threads), the depth finder's frame close, the menu's pictures. Everything else lives here: the [DlssNr]
 // gate, Acquire, the producer made again when its device changes, the virtual upscaler's life, the consumer (DLSS-NR or

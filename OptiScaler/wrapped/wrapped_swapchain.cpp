@@ -13,7 +13,7 @@
 #include <with_dx12/with_dx12.h>
 
 #include <menu/menu_overlay_dx.h>
-#include <motion/NativeMotion_Dx12.h>
+#include <native/NativeDriverDx12.h>
 
 #include <misc/FrameLimit.h>
 

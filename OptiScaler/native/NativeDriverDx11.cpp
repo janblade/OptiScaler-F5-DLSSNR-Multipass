@@ -1,6 +1,6 @@
 #include "pch.h"
 
-#include "NativeMotionDx11.h"
+#include "NativeDriverDx11.h"
 
 #include <native/Dx11FrameSource.h>
 #include <native/NativeDriver.h>
@@ -10,7 +10,7 @@
 
 #include <imgui/imgui.h>
 
-// The D3D11 counterpart of motion/NativeMotion_Dx12.cpp: the same shared frame step (native::NativeDriver), a different
+// The D3D11 counterpart of native/NativeDriverDx12.cpp: the same shared frame step (native::NativeDriver), a different
 // adapter (native::Dx11FrameSource, the shared-texture transport). No live flow/trust picture here yet: they are D3D12
 // textures and the D3D11 game's menu renders with ImGui_ImplDX11, which needs a D3D11 shader-resource view; showing
 // them would need another shared-texture round trip, not done for Story B's first game. The status line and the flow

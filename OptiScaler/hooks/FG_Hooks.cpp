@@ -18,7 +18,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_dx.h>
-#include <motion/NativeMotion_Dx12.h>
+#include <native/NativeDriverDx12.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>

@@ -44,6 +44,7 @@
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
+#include "DlssNr_WatchedLists.h"
 #include "DlssNr_GpuTime.h"
 
 #include <atomic>

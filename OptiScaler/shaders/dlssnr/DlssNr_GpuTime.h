@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DlssNr_WatchedLists.h"
+
 // NR calls are serialized by g_nrMutex, including submission/reset notifications.
 // Associate every query pair with its actual submitting queue and GPU completion.
 class DlssNrGpuTime
@@ -84,6 +86,7 @@ class DlssNrGpuTime
             s.commands = cmd;
             ID3D12GraphicsCommandList* real = nullptr;
             if (Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**) &real)) s.commands = real;
+            DlssNrWatchedLists::Add(s.commands); // the submit/reset hooks must hear about this list
             s.occupied = true;
             s.ended = s.submitted = false;
             s.sequence = ++sequence;

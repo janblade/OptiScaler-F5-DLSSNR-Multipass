@@ -1104,6 +1104,30 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
 
 // Optical F5Low's own Reflex calls (native/NativeLowLatency.h): the switch, the method in use and, where the driver
 // reports it, the measured latency. Never touches the fakenvapi settings; it only points to them.
+// The "Reuse detail between frames" checkbox and its help, on the NR Options page and on the Optical F5Low page (one
+// setting). idSuffix keeps the two widgets apart. Returns whether it is on.
+static bool RenderDetailReuseToggle(Config* config, const char* idSuffix)
+{
+    bool detailReuse = config->DlssNrDetailReuse.value_or_default();
+    const std::string label = std::string("Reuse detail between frames (experimental)") + idSuffix;
+    if (ImGui::Checkbox(label.c_str(), &detailReuse))
+        config->DlssNrDetailReuse = detailReuse;
+    HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
+               "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
+               "any pass count. Detail can pop where objects move and reveal new areas.\n"
+               "Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to "
+               "move times how much the model changes the picture, and passes build on each other, so with two or "
+               "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
+               "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
+               "D3D12 and Vulkan with NR after SR, and with Optical F5Low (D3D11 and D3D12 games), which also tells "
+               "it where the last frame cannot be trusted. Not with NR before SR, nor in Finished Picture without "
+               "Optical F5Low. Reuse bottleneck is off while this runs.\n"
+               "It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and "
+               "reused frames cost differently, so the game's frame times alternate: a limiter just below the "
+               "average rate evens them out.");
+    return detailReuse;
+}
+
 static void RenderLowLatencySection(Config* config)
 {
     if (!ImGui::TreeNodeEx("Low latency##nativelowlatency", ImGuiTreeNodeFlags_DefaultOpen))
@@ -1157,6 +1181,20 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
     RenderNativeMode(config, nr.enabled, finishedPicture);
 
     RenderLowLatencySection(config);
+
+    // Detail reuse on Optical F5Low's motion: the same setting as on the NR Options page, shown here because this is
+    // where its saving matters most (NR on the whole finished picture). Its fine-tuning stays on the Options page.
+    ImGui::SeparatorText("Lighter NR");
+    if (RenderDetailReuseToggle(config, "##f5low"))
+    {
+        const auto status = DlssNr::DetailReuseStatus();
+        if (!status.why.empty())
+            ImGui::TextDisabled("Reuse detail: %s", status.why.c_str());
+        else if (status.active)
+            ImGui::TextDisabled("Full %llu | Reused %llu%s", status.full, status.reused,
+                                status.holding ? " | paused while moving fast" : "");
+        ImGui::TextDisabled("Fine-tuning and statistics: NR Options page, under the same checkbox.");
+    }
 
     // The page is Optical F5Low's own, so every control shows and the section starts open.
     if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2142,19 +2180,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
     else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
         ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
-    if (ImGui::Checkbox("Reuse detail between frames (experimental)", &detailReuse))
-        config->DlssNrDetailReuse = detailReuse;
-    HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
-               "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
-               "any pass count. Detail can pop where objects move and reveal new areas.\n"
-               "Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to "
-               "move times how much the model changes the picture, and passes build on each other, so with two or "
-               "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
-               "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
-               "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
-               "It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and "
-               "reused frames cost differently, so the game's frame times alternate: a limiter just below the "
-               "average rate evens them out.");
+    detailReuse = RenderDetailReuseToggle(config, "");
     if (detailReuse)
     {
         // Debugging and A/B testing only; the defaults are the tuned values.

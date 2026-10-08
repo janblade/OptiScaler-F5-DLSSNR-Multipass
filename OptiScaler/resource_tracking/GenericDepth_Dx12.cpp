@@ -108,6 +108,7 @@ struct Backup
     DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN;
     ID3D12Resource* readback = nullptr;                 // the same copy in CPU-readable memory, for the on-screen preview
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};    // where the first plane sits in it
+    UINT64 readbackBytes = 0;                           // its size: the last row is not padded to RowPitch
     // A multisampled buffer: the game's list copies it as it is into a multisampled slot of this format family and
     // these samples, and the resolve (native/DepthResolveDx12) turns that into the R32 copy described above (typeless
     // R32_TYPELESS, view R32_FLOAT), which is what everything else reads.
@@ -286,7 +287,7 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
     g_best = GenericDepthDx12::Snapshot {};
     g_previewFrame = 0;
     g_resolvedFrame = ~0ull;
-    g_backup = Backup { (uint32_t) source.Width, source.Height, typeless, view, readback, footprint };
+    g_backup = Backup { (uint32_t) source.Width, source.Height, typeless, view, readback, footprint, total };
     g_backup.samples = source.SampleDesc;
     g_backup.multisampledTypeless = multisampledTypeless;
     g_backup.multisampledView = multisampledView;
@@ -1255,11 +1256,17 @@ static bool DrawDepthPreview(float boxWidth, float boxHeight)
     if (g_backup.readback == nullptr || g_backup.width == 0 || g_backup.height == 0)
         return false;
 
-    D3D12_RANGE range { 0, (SIZE_T) (g_backup.footprint.Footprint.RowPitch * g_backup.height) };
+    // The buffer's own size, not RowPitch * height: the last row is not padded, so at a width whose row is not a multiple of
+    // 256 bytes (1707 pixels of R32 in NBA 2K27) that range runs past the end and Map refuses it, every frame.
+    D3D12_RANGE range { 0, (SIZE_T) g_backup.readbackBytes };
     uint8_t* data = nullptr;
 
-    if (FAILED(g_backup.readback->Map(0, &range, (void**) &data)) || data == nullptr)
+    if (const HRESULT hr = g_backup.readback->Map(0, &range, (void**) &data); FAILED(hr) || data == nullptr)
+    {
+        SayOnce("previewMap", std::format("the preview's readback could not be mapped (0x{:X}, {} bytes)", (unsigned) hr,
+                                          g_backup.readbackBytes));
         return false;
+    }
 
     constexpr int kCols = 96, kRows = 54;
     const ImVec2 origin = ImGui::GetCursorScreenPos();

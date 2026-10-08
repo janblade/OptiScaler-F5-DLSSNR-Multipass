@@ -3,7 +3,8 @@
 // shift of half a pixel is exact.
 //
 //   vcvars64, then from the repo root:
-//   cl /std:c++20 /EHsc /O2 tests\nr_optical_flow_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp d3d12.lib dxgi.lib
+//   cl /std:c++20 /EHsc /O2 tests\nr_optical_flow_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp
+//   OptiScaler\motion\SceneCut_Dx12.cpp d3d12.lib dxgi.lib
 //   d3dcompiler.lib
 //
 // Modes: no argument runs every check; "score" prints one summary line for the settings given as key=value; "perf"

@@ -532,6 +532,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="motion\OpticalFlow_Hlsl.h" />
     <ClInclude Include="motion\TrustMask_Hlsl.h" />
     <ClInclude Include="native\DepthCopyDx11_Hlsl.h" />
+    <ClInclude Include="native\DepthResolve_Hlsl.h" />
     <ClInclude Include="native\F5LowShaderBytecode.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_WatchedLists.h" />
     <ClInclude Include="native\VirtualUpscalerHold.h" />

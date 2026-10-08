@@ -443,6 +443,9 @@
     <ClInclude Include="native\DepthCopyDx11_Hlsl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\DepthResolve_Hlsl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\F5LowShaderBytecode.h">
       <Filter>Header Files</Filter>
     </ClInclude>

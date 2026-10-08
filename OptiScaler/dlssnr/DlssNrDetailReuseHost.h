@@ -204,9 +204,10 @@ class Host
         facts.blocked = f.blocked;
         facts.hold = w.hold;
         // Without frame generation NR runs on every present, so any skipped present is a gap. With it, the present
-        // counter can also count generated frames (up to 3 per real one with multi frame generation).
+        // counter also counts the generated frames: the step that is normal is learnt (StepTracker).
         facts.frame = f.frameNumber;
-        facts.maxStep = w.withFg ? 4 : 1;
+        _steps.Add(f.frameNumber);
+        facts.maxStep = MaxStepFor(w.withFg, _steps.Typical());
         // The saved change is in the values of the proxy curve it was made in, so another curve (or a frame that turns
         // passthrough, or back) starts over like any other change to the model's answer.
         const DlssNrReplaceCurve replaceCurve = ReplaceCurveFor(f.reversibleMode, f.passthrough);
@@ -357,6 +358,7 @@ class Host
 
   private:
     static constexpr const char* kBelowMinimumFps = "off below the minimum frame rate";
+    StepTracker _steps; // the frame number's normal step between two NR frames (see Decide)
     static constexpr unsigned long long kStalePresents = 30;
     // Frame generation pauses briefly and often (menu, loading, some games toggle it): the textures stay through this
     // many NR frames of it before they are released.

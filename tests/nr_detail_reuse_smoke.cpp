@@ -371,6 +371,42 @@ static void Route()
     CHECK(UnavailableOnRoute(false, true, true) == nullptr);
 }
 
+// The normal step under frame generation is learnt, so a multiplier above 4x is not a gap on every frame (Witcher 3,
+// 2026-10-08), while a frame NR really skipped (twice the step) still is.
+static void LearntStep()
+{
+    StepTracker t;
+    CHECK(t.Typical() == 1);
+    CHECK(MaxStepFor(false, 6) == 1);
+    CHECK(MaxStepFor(true, 1) == 4 && MaxStepFor(true, 2) == 4 && MaxStepFor(true, 4) == 6 && MaxStepFor(true, 6) == 9);
+
+    // 6x: the present counter steps by 6, with a skipped frame (12) and a short one (5) among them.
+    unsigned long long frame = 100;
+    for (int i = 0; i < 20; ++i)
+    {
+        frame += i == 7 ? 12 : i == 11 ? 5 : 6;
+        t.Add(frame);
+    }
+    CHECK(t.Typical() == 6);
+    t.Add(frame); // the same frame again is not a step
+    CHECK(t.Typical() == 6);
+
+    // Through the cadence: at 6x every frame alternates full and reuse; a skipped frame (12) falls back as a gap.
+    Cadence c;
+    FrameFacts f = Facts(1000);
+    f.maxStep = MaxStepFor(true, 6);
+    c.Next(f);
+    c.Captured(true);
+    f.frame += 6;
+    CHECK(c.Next(f).kind == Kind::Reuse);
+    c.Captured(true);
+    f.frame += 6;
+    CHECK(c.Next(f).kind == Kind::Full && c.Fallback() == 0);
+    c.Captured(true);
+    f.frame += 12;
+    CHECK(c.Next(f).kind == Kind::Full && c.Fallback() == 1 && c.Causes().gap == 1);
+}
+
 int main()
 {
     Route();
@@ -383,6 +419,7 @@ int main()
     ReuseFailedCounts();
     Disabled();
     StepTolerance();
+    LearntStep();
     HeldWhileMoving();
     HeldCountsOnlyLostReuse();
     Motion();

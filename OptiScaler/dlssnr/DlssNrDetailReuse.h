@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 // Reuse detail between frames: run the model on one frame, and on the next add the saved detail of that frame
@@ -54,6 +55,51 @@ struct Decision
     bool composeMotion = false;  // full frame: give the model motion composed over the last two frames
     bool saveMotion = false;     // reuse frame: keep this frame's motion for the next full frame to compose
 };
+
+// How far the frame number steps between two NR frames when NR runs on every rendered frame. With frame generation
+// the present counter also counts the generated frames, so the step is the multiplier: 2 at 2x, 4 at 4x, more with an
+// unlocked multiplier. A fixed limit of 4 made every frame above 4x look like a gap, and reuse fell back on all of
+// them (Witcher 3, 2026-10-08). The normal step is learnt instead: the median of the last 16 forward steps, so the odd
+// skipped frame does not move it. A frame NR really skipped doubles the step, which stays a gap.
+class StepTracker
+{
+    static constexpr unsigned kKept = 16;
+    unsigned long long steps[kKept] = {};
+    unsigned count = 0, next = 0;
+    unsigned long long last = 0;
+    bool hasLast = false;
+
+public:
+    void Add(unsigned long long frame)
+    {
+        if (hasLast && frame > last)
+        {
+            steps[next++ % kKept] = frame - last;
+            count = (std::min)(count + 1, kKept);
+        }
+        last = frame;
+        hasLast = true;
+    }
+
+    // The normal step, 1 before any was seen.
+    unsigned long long Typical() const
+    {
+        if (count == 0)
+            return 1;
+        unsigned long long sorted[kKept];
+        std::copy(steps, steps + count, sorted);
+        std::sort(sorted, sorted + count);
+        return sorted[count / 2];
+    }
+};
+
+// The largest step between two NR frames that is not a gap. Without frame generation every present is a rendered
+// frame. With it, at least 4 (what the fixed limit was), and half again the normal step, which a skipped frame (twice
+// the step) still passes.
+inline unsigned long long MaxStepFor(bool withFg, unsigned long long typical)
+{
+    return withFg ? (std::max)(4ull, typical + typical / 2) : 1ull;
+}
 
 // Why reuse frames fell back to the model (Cadence::Fallback), for the log: the first of these that held.
 struct FallbackCauses

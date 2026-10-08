@@ -129,14 +129,13 @@ inline bool DepthRestartWarning(Shown shown, Finder finder)
 
 // The modes are for a game with no upscaler call of its own; the frame sources stand aside while the game makes one
 // (gameUpscaler: GenericDepthDx12/Dx11::GameCallsUpscaler). Then only Off can be chosen: a click on another mode would
-// change NR Pass at: under the game's own upscaler for nothing. In a Vulkan game (`vulkan`) the mode with frame
-// generation cannot be chosen either: OptiScaler's frame generation presents on D3D12.
-inline bool Selectable(Mode mode, bool gameUpscaler, bool vulkan = false)
+// change NR Pass at: under the game's own upscaler for nothing.
+inline bool Selectable(Mode mode, bool gameUpscaler)
 {
     if (mode == Mode::Off)
         return true;
 
-    return !gameUpscaler && !(vulkan && mode == Mode::NrAndFrameGeneration);
+    return !gameUpscaler;
 }
 
 enum class Warning
@@ -144,13 +143,17 @@ enum class Warning
     None,
     GameUpscaler,        // a mode is on while the game calls an upscaler of its own: it stands aside
     Dx11FrameGeneration, // NR only, while frame generation replaces a D3D11 game's swap chain
+    VulkanNeedsRestart,  // NR + upscaler & frame generation in a Vulkan game whose swapchain was made without the bridge
     NrDisabled,          // Enable Neural Rendering is off
     NeedsFinishedPicture // NR only, with NR Pass at: not on Finished Picture
 };
 
 // nativeInputBlocked: DlssNr::NativeInputBlockedBySwapChainInterop(), the condition native input itself refuses on.
 // gameUpscaler: as for Selectable; it comes first, since nothing else matters while the mode stands aside.
-inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool nativeInputBlocked, bool gameUpscaler)
+// vulkanNoBridge: a Vulkan game whose swapchain was made without the present bridge (native/VkPresentBridge.h): frame
+// generation starts with the next start of the game, once chosen.
+inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool nativeInputBlocked, bool gameUpscaler,
+                          bool vulkanNoBridge = false)
 {
     if (shown != Shown::Off && gameUpscaler)
         return Warning::GameUpscaler;
@@ -165,6 +168,10 @@ inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, boo
 
         if (!finishedPicture)
             return Warning::NeedsFinishedPicture;
+    }
+    else if (shown == Shown::NrAndFrameGeneration && vulkanNoBridge)
+    {
+        return Warning::VulkanNeedsRestart;
     }
     else if (shown == Shown::NrAndFrameGeneration && !nrEnabled)
     {

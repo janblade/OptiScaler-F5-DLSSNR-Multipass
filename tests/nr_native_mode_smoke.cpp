@@ -167,12 +167,14 @@ int main()
 
     CHECK(Selectable(Mode::Off, false) && Selectable(Mode::Off, true));
 
-    // A Vulkan game: NR only and Off, never the mode with frame generation (which presents on D3D12).
-    CHECK(Selectable(Mode::Off, false, true) && Selectable(Mode::Off, true, true));
-    CHECK(Selectable(Mode::NrOnly, false, true));
-    CHECK(!Selectable(Mode::NrOnly, true, true));
-    CHECK(!Selectable(Mode::NrAndFrameGeneration, false, true));
-    CHECK(!Selectable(Mode::NrAndFrameGeneration, true, true));
+    // A Vulkan game has no mode left out: frame generation presents through the bridge made when the game starts. Until it
+    // is up the mode says to restart; the game's own upscaler still comes first.
+    CHECK(Selectable(Mode::NrAndFrameGeneration, false));
+    CHECK(WarningFor(Shown::NrAndFrameGeneration, true, false, false, false, true) == Warning::VulkanNeedsRestart);
+    CHECK(WarningFor(Shown::NrAndFrameGeneration, true, false, false, false, false) == Warning::None);
+    CHECK(WarningFor(Shown::NrAndFrameGeneration, true, false, false, true, true) == Warning::GameUpscaler);
+    CHECK(WarningFor(Shown::NrOnly, true, true, false, false, true) == Warning::None);
+    CHECK(WarningFor(Shown::Off, true, true, false, false, true) == Warning::None);
 
     for (int bits = 0; bits < 8; ++bits)
     {

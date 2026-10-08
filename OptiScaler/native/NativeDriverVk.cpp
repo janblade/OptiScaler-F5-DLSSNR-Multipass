@@ -28,7 +28,7 @@ std::mutex g_runMutex;
 // What the present waits on once the frame was processed: VkPresentInfoKHR keeps a pointer to it.
 VkSemaphore g_presentWait = VK_NULL_HANDLE;
 
-// The mode with frame generation is chosen, which Vulkan cannot run.
+// The mode with frame generation is chosen but the game's swapchain was made without the bridge.
 bool g_frameGenerationMode = false;
 
 } // namespace
@@ -158,7 +158,7 @@ void DrawStatus()
 {
     if (g_frameGenerationMode)
     {
-        ImGui::TextDisabled("NR + upscaler & frame generation does not run on Vulkan. Choose NR only.");
+        ImGui::TextDisabled("Frame generation on Vulkan starts with the game: set OptiFG (Upscaler) and an output, save, restart.");
         return;
     }
 

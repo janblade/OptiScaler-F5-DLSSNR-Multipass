@@ -16,6 +16,7 @@
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
 #include <native/NativeDriverVk.h>
+#include <native/VkPresentBridge.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 #include <framegen/IFGFeature.h>
 #include <native/NativeLowLatency.h>
@@ -923,7 +924,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         if (ImGui::GetCursorScreenPos().x + width > rowRight)
             ImGui::NewLine();
 
-        const bool selectable = Selectable(choice.mode, gameUpscaler, api == NativeApi::Vulkan);
+        const bool selectable = Selectable(choice.mode, gameUpscaler);
         ImGui::BeginDisabled(!selectable);
         const bool clicked = ImGui::RadioButton(choice.label, shown == choice.shown);
         ImGui::EndDisabled();
@@ -965,8 +966,8 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         "NR runs only with Enable Neural Rendering on. Changes apply at once.\n"
         "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode "
         "already on stands aside.\n"
-        "D3D11, D3D12 and Vulkan games. On Vulkan only NR only can be chosen: frame generation needs D3D11 or "
-        "D3D12.");
+        "D3D11, D3D12 and Vulkan games. On Vulkan, frame generation starts with the game (a hidden window and a D3D12 "
+        "swapchain are made when it starts): choose it, set the Frame Generation input and output, save and restart.");
 
     if (shown == Shown::Off)
     {
@@ -981,7 +982,8 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     const Finder finder = NativeFinder(api, depthWanted);
     const bool depthRestart = DepthRestartWarning(shown, finder);
     const Warning warning =
-        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler);
+        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler,
+                   api == NativeApi::Vulkan && !VkPresentBridge::IsUp());
     const char* warningText = nullptr;
 
     switch (warning)
@@ -993,6 +995,10 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     case Warning::Dx11FrameGeneration:
         warningText = "NR only does nothing while OptiScaler's frame generation has replaced this D3D11 game's swap "
                       "chain. Choose NR + upscaler & frame generation.";
+        break;
+    case Warning::VulkanNeedsRestart:
+        warningText = "Frame generation on a Vulkan game starts with the game: set the Frame Generation input to OptiFG "
+                      "(Upscaler) and an output, save the settings and restart the game.";
         break;
     case Warning::NrDisabled:
         warningText = shown == Shown::NrOnly ? "Enable Neural Rendering (above) is off, so NR does not run."

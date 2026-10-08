@@ -556,7 +556,9 @@ void PresentOutput()
         ++g_bridge->presents;
     }
 
-    if (output == nullptr)
+    // Nothing was put into the back buffer (the copy failed, or another thread held the frame source): a flip-model back
+    // buffer is undefined after its last present, so the last frame stays on screen instead.
+    if (output == nullptr || copyValue == 0)
         return;
 
     auto& state = State::Instance();
@@ -582,6 +584,18 @@ void PresentOutput()
 
         if (logged++ < 5)
             LOG_ERROR("Vulkan bridge: the D3D12 swapchain's Present failed: 0x{:X}", (unsigned) hr);
+
+        // The D3D12 device is gone (a driver reset): the window cannot be presented to any more. Said once, with the reason.
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+        {
+            static bool said = false;
+
+            if (!said && state.currentD3D12Device != nullptr)
+            {
+                said = true;
+                Util::GetDeviceRemovedReason(state.currentD3D12Device);
+            }
+        }
     }
 }
 

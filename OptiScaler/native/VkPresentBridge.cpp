@@ -331,6 +331,11 @@ bool OnCreateSwapchain(VkInstance instance, VkPhysicalDevice physical, VkDevice 
 
     if (g_bridge != nullptr)
     {
+        // A new surface on the same window, once the game's swapchains on the old one are gone: the bridge carries on.
+        if (g_bridge->realSurface != in.surface && g_bridge->device == device && g_bridge->swapchains.empty() &&
+            hwnd != nullptr && hwnd == g_bridge->window)
+            g_bridge->realSurface = in.surface;
+
         if (g_bridge->realSurface != in.surface || g_bridge->device != device)
         {
             LogOnce("a second window or device is making a swapchain: not bridged");
@@ -418,12 +423,11 @@ void OnSwapchainDestroyed(VkDevice device, VkSwapchainKHR swapchain)
 
     if (g_bridge != nullptr && g_bridge->swapchains.erase(swapchain) != 0)
     {
-        // The game's last swapchain: the D3D12 swapchain goes too, so a swapchain the game makes next starts clean.
+        // The game's last swapchain. The D3D12 swapchain and frame generation stay, for the swapchain the game makes next
+        // (a game commonly destroys the old one first, Detroit: Become Human at its first resize): making frame
+        // generation's swapchain again on the same window while its old one is being let go crashed the game.
         if (g_bridge->swapchains.empty())
-        {
-            LOG_INFO("Vulkan bridge: the game destroyed its swapchain");
-            Retire(g_bridge);
-        }
+            LOG_INFO("Vulkan bridge: the game destroyed its swapchain; the D3D12 swapchain is kept for its next one");
 
         return;
     }

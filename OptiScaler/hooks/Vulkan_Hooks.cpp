@@ -45,6 +45,8 @@ PFN_vkQueuePresentKHR o_QueuePresentKHR = nullptr;
 PFN_vkCreateSwapchainKHR o_CreateSwapchainKHR = nullptr;
 static PFN_vkDestroySwapchainKHR o_DestroySwapchainKHR = nullptr;
 static PFN_vkDestroySurfaceKHR o_vkDestroySurfaceKHR = nullptr;
+static PFN_vkAcquireFullScreenExclusiveModeEXT o_AcquireFullScreenExclusiveModeEXT = nullptr;
+static PFN_vkReleaseFullScreenExclusiveModeEXT o_ReleaseFullScreenExclusiveModeEXT = nullptr;
 static PFN_vkGetInstanceProcAddr o_vkGetInstanceProcAddr = nullptr;
 static PFN_vkGetDeviceProcAddr o_vkGetDeviceProcAddr = nullptr;
 
@@ -60,6 +62,24 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
                                        const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
 static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
 
+// A bridged swapchain is on a hidden window and made with exclusive full screen disallowed (native/VkPresentBridge.h):
+// the game's own acquire and release of the mode succeed without doing anything.
+static VkResult hkvkAcquireFullScreenExclusiveModeEXT(VkDevice device, VkSwapchainKHR swapchain)
+{
+    if (VkPresentBridge::Owns(swapchain))
+        return VK_SUCCESS;
+
+    return o_AcquireFullScreenExclusiveModeEXT(device, swapchain);
+}
+
+static VkResult hkvkReleaseFullScreenExclusiveModeEXT(VkDevice device, VkSwapchainKHR swapchain)
+{
+    if (VkPresentBridge::Owns(swapchain))
+        return VK_SUCCESS;
+
+    return o_ReleaseFullScreenExclusiveModeEXT(device, swapchain);
+}
+
 static void HookDevice(VkDevice InDevice)
 {
     if (o_CreateSwapchainKHR != nullptr || State::Instance().vulkanSkipHooks)
@@ -70,6 +90,10 @@ static void HookDevice(VkDevice InDevice)
     o_QueuePresentKHR = (PFN_vkQueuePresentKHR) (vkGetDeviceProcAddr(InDevice, "vkQueuePresentKHR"));
     o_CreateSwapchainKHR = (PFN_vkCreateSwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkCreateSwapchainKHR"));
     o_DestroySwapchainKHR = (PFN_vkDestroySwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkDestroySwapchainKHR"));
+    o_AcquireFullScreenExclusiveModeEXT = (PFN_vkAcquireFullScreenExclusiveModeEXT) (vkGetDeviceProcAddr(
+        InDevice, "vkAcquireFullScreenExclusiveModeEXT"));
+    o_ReleaseFullScreenExclusiveModeEXT = (PFN_vkReleaseFullScreenExclusiveModeEXT) (vkGetDeviceProcAddr(
+        InDevice, "vkReleaseFullScreenExclusiveModeEXT"));
 
     if (o_CreateSwapchainKHR)
     {
@@ -87,6 +111,12 @@ static void HookDevice(VkDevice InDevice)
 
         if (o_DestroySwapchainKHR != nullptr)
             DetourAttach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
+
+        if (o_AcquireFullScreenExclusiveModeEXT != nullptr)
+            DetourAttach(&(PVOID&) o_AcquireFullScreenExclusiveModeEXT, hkvkAcquireFullScreenExclusiveModeEXT);
+
+        if (o_ReleaseFullScreenExclusiveModeEXT != nullptr)
+            DetourAttach(&(PVOID&) o_ReleaseFullScreenExclusiveModeEXT, hkvkReleaseFullScreenExclusiveModeEXT);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
@@ -1044,6 +1074,12 @@ void VulkanHooks::Unhook()
     if (o_DestroySwapchainKHR != nullptr)
         DetourDetach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
 
+    if (o_AcquireFullScreenExclusiveModeEXT != nullptr)
+        DetourDetach(&(PVOID&) o_AcquireFullScreenExclusiveModeEXT, hkvkAcquireFullScreenExclusiveModeEXT);
+
+    if (o_ReleaseFullScreenExclusiveModeEXT != nullptr)
+        DetourDetach(&(PVOID&) o_ReleaseFullScreenExclusiveModeEXT, hkvkReleaseFullScreenExclusiveModeEXT);
+
     if (o_vkDestroySurfaceKHR != nullptr)
         DetourDetach(&(PVOID&) o_vkDestroySurfaceKHR, hkvkDestroySurfaceKHR);
 
@@ -1072,6 +1108,8 @@ void VulkanHooks::Unhook()
         o_QueuePresentKHR = nullptr;
         o_CreateSwapchainKHR = nullptr;
         o_DestroySwapchainKHR = nullptr;
+        o_AcquireFullScreenExclusiveModeEXT = nullptr;
+        o_ReleaseFullScreenExclusiveModeEXT = nullptr;
         o_vkDestroySurfaceKHR = nullptr;
         o_vkCreateDevice = nullptr;
         o_vkDestroyDevice = nullptr;

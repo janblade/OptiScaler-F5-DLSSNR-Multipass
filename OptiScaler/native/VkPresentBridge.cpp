@@ -31,10 +31,11 @@ namespace VkPresentBridge
 namespace
 {
 
-// The structure types of VK_EXT_full_screen_exclusive: the game owns the exclusive mode of the surface it passes, which is
-// not the one the picture ends up on.
+// VK_EXT_full_screen_exclusive: the game asks for exclusive full screen on the surface it passes, which is not the one the
+// picture ends up on. A bridged swapchain is made with DISALLOWED, and the game's own acquire and release of the mode
+// succeed without doing anything (Vulkan_Hooks.cpp), so a game that controls it (Detroit: Become Human) runs borderless
+// through the D3D12 swapchain.
 constexpr int32_t kFullScreenExclusiveInfo = 1000255000;
-constexpr int32_t kFullScreenExclusiveApplicationControlled = 3;
 
 // VkSurfaceFullScreenExclusiveInfoEXT, without the Win32 platform header.
 struct FullScreenExclusiveInfo
@@ -77,14 +78,6 @@ void LogOnce(const std::string& text)
     }
 }
 
-// VkSurfaceFullScreenExclusiveInfoEXT's mode is APPLICATION_CONTROLLED: the game takes exclusive full screen itself
-// (vkAcquireFullScreenExclusiveModeEXT). DEFAULT, ALLOWED and DISALLOWED only tell the driver what it may do, and many
-// games chain the structure with one of those (Detroit: Become Human does).
-bool GameControlsFullScreen(const void* chain)
-{
-    int32_t* mode = FullScreenExclusiveMode(chain);
-    return mode != nullptr && *mode == kFullScreenExclusiveApplicationControlled;
-}
 
 bool IsBridgedSwapchain(VkSwapchainKHR swapchain)
 {
@@ -128,12 +121,6 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
     if (window == nullptr)
     {
         why = "the swapchain's surface is not one OptiScaler saw being made on a window";
-        return false;
-    }
-
-    if (GameControlsFullScreen(in.pNext))
-    {
-        why = "the game controls exclusive full screen (VK_EXT_full_screen_exclusive), which the bridge cannot carry";
         return false;
     }
 

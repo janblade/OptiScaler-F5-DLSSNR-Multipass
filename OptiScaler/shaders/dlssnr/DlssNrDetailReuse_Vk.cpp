@@ -38,7 +38,7 @@ DlssNrDetailReuse_Vk::DlssNrDetailReuse_Vk(std::string InName, VkDevice InDevice
     // The [[vk::binding]] numbers of dlssnr_detail_reuse.hlsl under VK_MODE, entry for entry. Combined image samplers
     // for the reads, as DlssNr_Vk: the shader's own sampler is declared separately and the combined one's is unused.
     std::vector<VkDescriptorSetLayoutBinding> bindings = {
-        CreateBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER), // b0
+        CreateBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),         // b0
         CreateBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // t0
         CreateBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // t1
         CreateBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // t2
@@ -47,13 +47,14 @@ DlssNrDetailReuse_Vk::DlssNrDetailReuse_Vk(std::string InName, VkDevice InDevice
         CreateBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),          // u0
         CreateBinding(7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),          // u1
         CreateBinding(8, VK_DESCRIPTOR_TYPE_SAMPLER),                // s0
+        CreateBinding(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // t5
     };
 
     CreateLayouts(bindings);
 
     std::vector<VkDescriptorPoolSize> poolSizes = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5 * kSlots },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kReads * kSlots },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * kSlots },
         { VK_DESCRIPTOR_TYPE_SAMPLER, kSlots },
     };
@@ -165,7 +166,7 @@ bool DlssNrDetailReuse_Vk::CreateDummy(VkCommandBuffer cmdList)
 }
 
 bool DlssNrDetailReuse_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrDetailReuseConstants& InConstants,
-                                    uint32_t InWidth, uint32_t InHeight, const Read (&InReads)[5],
+                                    uint32_t InWidth, uint32_t InHeight, const Read (&InReads)[kReads],
                                     VkImageView InTarget, VkImageView InSecond)
 {
     if (!CanRender() || InCmdList == VK_NULL_HANDLE || InTarget == VK_NULL_HANDLE || InWidth == 0 || InHeight == 0)
@@ -186,8 +187,8 @@ bool DlssNrDetailReuse_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrDetai
     const VkDescriptorSet set = _descriptorSets[slot];
     VkDescriptorBufferInfo bufferInfo { _constantBuffer, offset, sizeof(DlssNrDetailReuseConstants) };
 
-    VkDescriptorImageInfo reads[5] {};
-    for (uint32_t i = 0; i < 5; ++i)
+    VkDescriptorImageInfo reads[kReads] {};
+    for (uint32_t i = 0; i < kReads; ++i)
     {
         const bool given = InReads[i].view != VK_NULL_HANDLE;
         reads[i] = { _textureSampler, given ? InReads[i].view : _dummyView,
@@ -199,8 +200,8 @@ bool DlssNrDetailReuse_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrDetai
                                    VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo sampler { _textureSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
 
-    VkWriteDescriptorSet writes[9] {};
-    for (uint32_t i = 0; i < 9; ++i)
+    VkWriteDescriptorSet writes[10] {};
+    for (uint32_t i = 0; i < 10; ++i)
     {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
@@ -220,8 +221,10 @@ bool DlssNrDetailReuse_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrDetai
     writes[7].pImageInfo = &second;
     writes[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[8].pImageInfo = &sampler;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[9].pImageInfo = &reads[5];
 
-    vkUpdateDescriptorSets(_device, 9, writes, 0, nullptr);
+    vkUpdateDescriptorSets(_device, 10, writes, 0, nullptr);
 
     vkCmdBindPipeline(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE, _pipeline);
     vkCmdBindDescriptorSets(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE, _pipelineLayout, 0, 1, &set, 0, nullptr);

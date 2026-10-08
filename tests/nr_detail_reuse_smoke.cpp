@@ -358,8 +358,21 @@ static void FrameRate()
     CHECK(h.Update(1.0 / 15.0, 25.0));
 }
 
+// Where NR runs decides whether reuse is offered at all. A finished picture needs vectors measured on it (Optical
+// F5Low's native input); the game's own vectors leave it blocked, as before.
+static void Route()
+{
+    CHECK(UnavailableOnRoute(false, false, false) == nullptr);
+    CHECK(UnavailableOnRoute(false, false, true) == nullptr);
+    CHECK(UnavailableOnRoute(true, false, false) != nullptr);
+    CHECK(UnavailableOnRoute(true, false, true) != nullptr); // before SR stays out, whatever the vectors
+    CHECK(UnavailableOnRoute(false, true, false) != nullptr);
+    CHECK(UnavailableOnRoute(false, true, true) == nullptr);
+}
+
 int main()
 {
+    Route();
     Alternates();
     NoDoubleReuse();
     FailedCaptureDropsHistory();

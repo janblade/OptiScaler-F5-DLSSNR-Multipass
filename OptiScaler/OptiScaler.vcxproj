@@ -524,6 +524,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\Dx12FrameSource.h" />
     <ClInclude Include="native\SharedFrame.h" />
     <ClInclude Include="native\DepthCopyDx11.h" />
+    <ClInclude Include="native\DepthResolveDx12.h" />
     <ClInclude Include="native\Dx11FrameSource.h" />
     <ClInclude Include="native\VirtualUpscalerDriver.h" />
     <ClInclude Include="native\NativeDriver.h" />
@@ -532,6 +533,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="motion\OpticalFlow_Hlsl.h" />
     <ClInclude Include="motion\TrustMask_Hlsl.h" />
     <ClInclude Include="native\DepthCopyDx11_Hlsl.h" />
+    <ClInclude Include="native\DepthResolve_Hlsl.h" />
     <ClInclude Include="native\F5LowShaderBytecode.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_WatchedLists.h" />
     <ClInclude Include="native\VirtualUpscalerHold.h" />
@@ -834,6 +836,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </ClCompile>
     <ClCompile Include="native\Dx12FrameSource.cpp" />
     <ClCompile Include="native\DepthCopyDx11.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="native\DepthResolveDx12.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>

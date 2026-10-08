@@ -3,7 +3,9 @@
 // read that value back.
 //   - D32_FLOAT, R32_TYPELESS with mips (copied straight), D24S8 and D32S8 typed and typeless with mips, D16 (converted),
 //   - the game's compute shader, CS read view 0 and CS write view 0 are what they were after the copy, set or empty,
-//   - a buffer that cannot be copied (multisampled, a colour format, a deferred context) leaves no copy, even after a good one,
+//   - a multisampled buffer with an edge (4 samples) is resolved to the nearest sample: the larger value with reversed Z, the
+//     smaller with standard Z, for D32 and D24S8,
+//   - a buffer that cannot be copied (a colour format, a deferred context) leaves no copy, even after a good one,
 //   - a new size, and a buffer of another device, make the copy again on the right device,
 //   - with the debug layer installed, the runtime reports no error or warning for any of it.
 //
@@ -199,7 +201,7 @@ void Formats(Device& d)
             continue;
         }
 
-        const char* failed = copy.Take(d.context.Get(), depth.Get());
+        const char* failed = copy.Take(d.context.Get(), depth.Get(), true);
         char what[160];
         std::snprintf(what, sizeof(what), "%s: taken, reads %.3f back while still bound", c.name, value);
         Check(failed == nullptr && copy.Taken() && copy.Converted() == c.converted && ReadsBack(d, copy.Copy(), value), what);
@@ -250,7 +252,7 @@ void GameState(Device& d)
         d.context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
         auto depth = BoundDepth(d, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D24_UNORM_S8_UINT, 64, 64, 1, 0.5f);
-        const char* failed = copy.Take(d.context.Get(), depth.Get());
+        const char* failed = copy.Take(d.context.Get(), depth.Get(), true);
 
         ComPtr<ID3D11ComputeShader> nowShader;
         ComPtr<ID3D11ShaderResourceView> nowSrv;
@@ -274,47 +276,199 @@ void GameState(Device& d)
     d.context->CSSetUnorderedAccessViews(0, 1, none, nullptr);
 }
 
+// How many of the copy's pixels read `value`, and how many read neither `value` nor `other`.
+void Count(Device& d, ID3D11Texture2D* copy, float value, float other, int* matching, int* neither)
+{
+    D3D11_TEXTURE2D_DESC desc {};
+    copy->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    *matching = *neither = 0;
+
+    ComPtr<ID3D11Texture2D> readback;
+
+    if (FAILED(d.device->CreateTexture2D(&desc, nullptr, &readback)))
+    {
+        *neither = -1;
+        return;
+    }
+
+    d.context->CopyResource(readback.Get(), copy);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+
+    if (FAILED(d.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+    {
+        *neither = -1;
+        return;
+    }
+
+    const float tolerance = 1.0f / 16777215.0f * 4.0f; // D24 is the coarsest here
+
+    for (UINT y = 0; y < desc.Height; ++y)
+    {
+        for (UINT x = 0; x < desc.Width; ++x)
+        {
+            const float v = ((const float*) ((const uint8_t*) mapped.pData + y * mapped.RowPitch))[x];
+
+            if (std::fabs(v - value) < tolerance)
+                ++*matching;
+            else if (std::fabs(v - other) >= tolerance)
+                ++*neither;
+        }
+    }
+
+    d.context->Unmap(readback.Get(), 0);
+}
+
+// A multisampled buffer with an edge across it: cleared to 0.25, then a triangle at 0.75 over its upper-left half, with 4
+// samples, so the pixels along the triangle's diagonal hold both depths. The copy keeps each pixel's nearest sample: with
+// reversed Z (near is 1) the 0.75 of the triangle reaches out over the edge, with standard Z the 0.25 does.
+void Multisampled(Device& d)
+{
+    const char* vsSource = "float4 VSMain(uint id : SV_VertexID) : SV_Position {\n"
+                           "  float2 p = id == 0 ? float2(-1, 1) : id == 1 ? float2(1, 1) : float2(-1, -1);\n"
+                           "  return float4(p, 0.75, 1); }";
+    ComPtr<ID3DBlob> code;
+    D3DCompile(vsSource, std::strlen(vsSource), "edge", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &code, nullptr);
+    ComPtr<ID3D11VertexShader> vs;
+    d.device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &vs);
+
+    D3D11_DEPTH_STENCIL_DESC dsDesc {};
+    dsDesc.DepthEnable = TRUE;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    ComPtr<ID3D11DepthStencilState> always;
+    d.device->CreateDepthStencilState(&dsDesc, &always);
+
+    D3D11_RASTERIZER_DESC rsDesc {};
+    rsDesc.FillMode = D3D11_FILL_SOLID;
+    rsDesc.CullMode = D3D11_CULL_NONE;
+    rsDesc.DepthClipEnable = TRUE;
+    rsDesc.MultisampleEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> raster;
+    d.device->CreateRasterizerState(&rsDesc, &raster);
+
+    struct Case
+    {
+        const char* name;
+        DXGI_FORMAT resource, dsv;
+    };
+
+    const Case cases[] = {
+        { "D32_FLOAT, 4 samples", DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_D32_FLOAT },
+        { "R24G8_TYPELESS as D24S8, 4 samples", DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_D24_UNORM_S8_UINT },
+    };
+
+    for (const auto& c : cases)
+    {
+        UINT quality = 0;
+
+        if (FAILED(d.device->CheckMultisampleQualityLevels(c.dsv, 4, &quality)) || quality == 0)
+        {
+            std::printf("      %s: 4 samples not supported here, skipped\n", c.name);
+            continue;
+        }
+
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = 96;
+        desc.Height = 64;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = c.resource;
+        desc.SampleDesc.Count = 4;
+        desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ComPtr<ID3D11Texture2D> tex;
+        ComPtr<ID3D11DepthStencilView> view;
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc {};
+        dsvDesc.Format = c.dsv;
+        dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
+
+        if (FAILED(d.device->CreateTexture2D(&desc, nullptr, &tex)) ||
+            FAILED(d.device->CreateDepthStencilView(tex.Get(), &dsvDesc, &view)))
+        {
+            Check(false, c.name);
+            continue;
+        }
+
+        D3D11_VIEWPORT viewport { 0, 0, (float) desc.Width, (float) desc.Height, 0, 1 };
+        d.context->OMSetRenderTargets(0, nullptr, view.Get());
+        d.context->ClearDepthStencilView(view.Get(), D3D11_CLEAR_DEPTH, 0.25f, 0);
+        d.context->OMSetDepthStencilState(always.Get(), 0);
+        d.context->RSSetState(raster.Get());
+        d.context->RSSetViewports(1, &viewport);
+        d.context->IASetInputLayout(nullptr);
+        d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        d.context->VSSetShader(vs.Get(), nullptr, 0);
+        d.context->PSSetShader(nullptr, nullptr, 0);
+        d.context->Draw(3, 0);
+
+        native::DepthCopyDx11 copy;
+        int nearReversed = 0, strayReversed = 0, nearStandard = 0, strayStandard = 0;
+
+        const char* failed = copy.Take(d.context.Get(), tex.Get(), true);
+        const bool takenReversed = failed == nullptr && copy.Taken() && copy.Samples() == 4;
+
+        if (takenReversed)
+            Count(d, copy.Copy(), 0.75f, 0.25f, &nearReversed, &strayReversed);
+        else if (failed != nullptr)
+            std::printf("      not taken: %s\n", failed);
+
+        failed = copy.Take(d.context.Get(), tex.Get(), false);
+        const bool takenStandard = failed == nullptr && copy.Taken() && copy.Samples() == 4;
+
+        if (takenStandard)
+            Count(d, copy.Copy(), 0.75f, 0.25f, &nearStandard, &strayStandard);
+
+        char what[200];
+        std::snprintf(what, sizeof(what), "%s: taken and resolved, every pixel one of the two depths", c.name);
+        Check(takenReversed && takenStandard && strayReversed == 0 && strayStandard == 0, what);
+        // Half the picture is the triangle; the edge pixels go to 0.75 with reversed Z only.
+        std::snprintf(what, sizeof(what), "%s: the edge keeps its nearest sample (0.75 on %d pixels reversed, %d standard)",
+                      c.name, nearReversed, nearStandard);
+        Check(nearStandard > 0 && nearReversed > nearStandard + (int) desc.Height / 2, what);
+
+        d.context->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+
+    d.context->VSSetShader(nullptr, nullptr, 0);
+    d.context->OMSetDepthStencilState(nullptr, 0);
+    d.context->RSSetState(nullptr);
+}
+
 void NoCopy(Device& d)
 {
     native::DepthCopyDx11 copy;
     auto good = BoundDepth(d, DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_D32_FLOAT, 64, 64, 1, 0.5f);
-    Check(copy.Take(d.context.Get(), good.Get()) == nullptr && copy.Taken(), "a good copy first");
+    Check(copy.Take(d.context.Get(), good.Get(), true) == nullptr && copy.Taken(), "a good copy first");
 
-    // Multisampled.
+    // A colour format.
     D3D11_TEXTURE2D_DESC desc {};
     desc.Width = 64;
     desc.Height = 64;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_D32_FLOAT;
-    desc.SampleDesc.Count = 4;
+    desc.SampleDesc.Count = 1;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    ComPtr<ID3D11Texture2D> msaa;
-
-    if (SUCCEEDED(d.device->CreateTexture2D(&desc, nullptr, &msaa)))
-        Check(copy.Take(d.context.Get(), msaa.Get()) != nullptr && !copy.Taken(),
-              "a multisampled buffer: not taken, the good copy before is not offered");
-
-    // A colour format.
-    Check(copy.Take(d.context.Get(), good.Get()) == nullptr && copy.Taken(), "the good copy again");
+    Check(copy.Take(d.context.Get(), good.Get(), true) == nullptr && copy.Taken(), "the good copy again");
     desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET;
     ComPtr<ID3D11Texture2D> colour;
     d.device->CreateTexture2D(&desc, nullptr, &colour);
-    Check(copy.Take(d.context.Get(), colour.Get()) != nullptr && !copy.Taken(),
+    Check(copy.Take(d.context.Get(), colour.Get(), true) != nullptr && !copy.Taken(),
           "a colour buffer: not taken, the good copy before is not offered");
 
     // A deferred context.
-    Check(copy.Take(d.context.Get(), good.Get()) == nullptr && copy.Taken(), "the good copy once more");
+    Check(copy.Take(d.context.Get(), good.Get(), true) == nullptr && copy.Taken(), "the good copy once more");
     ComPtr<ID3D11DeviceContext> deferred;
 
     if (SUCCEEDED(d.device->CreateDeferredContext(0, &deferred)))
-        Check(copy.Take(deferred.Get(), good.Get()) != nullptr && !copy.Taken(),
+        Check(copy.Take(deferred.Get(), good.Get(), true) != nullptr && !copy.Taken(),
               "a deferred context: not taken, the good copy before is not offered");
 
     // Forget().
-    Check(copy.Take(d.context.Get(), good.Get()) == nullptr && copy.Taken(), "the good copy a last time");
+    Check(copy.Take(d.context.Get(), good.Get(), true) == nullptr && copy.Taken(), "the good copy a last time");
     copy.Forget();
     Check(!copy.Taken(), "Forget(): the copy is not offered");
 
@@ -326,21 +480,21 @@ void SizeAndDevice(Device& a, Device& b)
     native::DepthCopyDx11 copy;
 
     auto first = BoundDepth(a, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D24_UNORM_S8_UINT, 320, 180, 1, 0.25f);
-    Check(copy.Take(a.context.Get(), first.Get()) == nullptr && copy.Width() == 320 && ReadsBack(a, copy.Copy(), 0.25f),
+    Check(copy.Take(a.context.Get(), first.Get(), true) == nullptr && copy.Width() == 320 && ReadsBack(a, copy.Copy(), 0.25f),
           "320x180 on the first device");
 
     auto bigger = BoundDepth(a, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D24_UNORM_S8_UINT, 640, 360, 1, 0.375f);
-    Check(copy.Take(a.context.Get(), bigger.Get()) == nullptr && copy.Width() == 640 && copy.Height() == 360 &&
+    Check(copy.Take(a.context.Get(), bigger.Get(), true) == nullptr && copy.Width() == 640 && copy.Height() == 360 &&
               ReadsBack(a, copy.Copy(), 0.375f),
           "a new size: the copy is made again at 640x360");
 
     auto other = BoundDepth(b, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D24_UNORM_S8_UINT, 640, 360, 1, 0.75f);
-    Check(copy.Take(b.context.Get(), other.Get()) == nullptr && DeviceOf(copy.Copy()) == b.device &&
+    Check(copy.Take(b.context.Get(), other.Get(), true) == nullptr && DeviceOf(copy.Copy()) == b.device &&
               ReadsBack(b, copy.Copy(), 0.75f),
           "a buffer of another device: the copy is made again on that device");
 
     auto straight = BoundDepth(b, DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_D32_FLOAT, 640, 360, 1, 0.125f);
-    Check(copy.Take(b.context.Get(), straight.Get()) == nullptr && !copy.Converted() && ReadsBack(b, copy.Copy(), 0.125f),
+    Check(copy.Take(b.context.Get(), straight.Get(), true) == nullptr && !copy.Converted() && ReadsBack(b, copy.Copy(), 0.125f),
           "then a D32 buffer of the same size: copied straight into the same copy");
 
     copy.Release();
@@ -365,7 +519,8 @@ int main()
 
     Formats(a);
     GameState(a);
-    // The debug layer warns about the deferred context and the multisampled buffer only if they are copied: they must not be.
+    Multisampled(a);
+    // The debug layer warns about the deferred context and the colour buffer only if they are copied: they must not be.
     NoCopy(a);
     SizeAndDevice(a, b);
 

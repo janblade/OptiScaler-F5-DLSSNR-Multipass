@@ -2,15 +2,16 @@
 
 // Reuse detail between frames on Vulkan: the dispatches of precompile/dlssnr_detail_reuse.hlsl (SPIR-V).
 //
-// The same shader as D3D12's DlssNr_Dx12::DispatchDetailReuse, compiled from the same source. It reads five textures and
+// The same shader as D3D12's DlssNr_Dx12::DispatchDetailReuse, compiled from the same source. It reads six textures and
 // writes two, which DlssNr_Vk's layout (four sampled, two storage) cannot hold, so it has a pass and a descriptor set
 // layout of its own, one binding per D3D12 register: 0 constants (b0), 1-5 sampled (t0-t4), 6-7 storage (u0-u1),
-// 8 the linear sampler (s0). What the frame does with it is dlssnr/DlssNr_DetailReuse_Vk.inl.
+// 8 the linear sampler (s0), 9 sampled (t5, the history distrust; no Vulkan route supplies one yet). What the frame
+// does with it is dlssnr/DlssNr_DetailReuse_Vk.inl.
 //
 // As in DlssNr_Vk: every binding is written every dispatch (a slot a mode does not use gets a 1x1 placeholder),
-// constants and descriptor sets come from a ring of slots so dispatches of one frame and of frames still in flight never
-// share one, and the layouts of the images are the caller's to state. Each dispatch is followed by a compute-to-compute
-// barrier.
+// constants and descriptor sets come from a ring of slots so dispatches of one frame and of frames still in flight
+// never share one, and the layouts of the images are the caller's to state. Each dispatch is followed by a
+// compute-to-compute barrier.
 //
 // The storage images are declared without a format (they write RGBA16F, RG32F, RGBA32F or the answers' format by
 // mode), which needs the device's shaderStorageImageWriteWithoutFormat (DlssNr_VkExtensions.h switches it on at device
@@ -54,8 +55,12 @@ class DlssNrDetailReuse_Vk : public Shader_Vk
 
     bool Ready() const { return CanRender(); }
 
-    // One dispatch over InWidth x InHeight threads (8x8 groups). InReads are t0-t4; InTarget (u0) must be given,
+    // t0-t4, then t5 (the history distrust, DlssNrDetailReuseConstants::HistoryDistrust). Arrays of this size given
+    // fewer entries leave the rest null, which binds the placeholder.
+    static constexpr uint32_t kReads = 6;
+
+    // One dispatch over InWidth x InHeight threads (8x8 groups). InReads are t0-t5; InTarget (u0) must be given,
     // InSecond (u1) may be null. Both written images are in GENERAL.
     bool Dispatch(VkCommandBuffer InCmdList, const DlssNrDetailReuseConstants& InConstants, uint32_t InWidth,
-                  uint32_t InHeight, const Read (&InReads)[5], VkImageView InTarget, VkImageView InSecond);
+                  uint32_t InHeight, const Read (&InReads)[kReads], VkImageView InTarget, VkImageView InSecond);
 };

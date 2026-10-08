@@ -5,7 +5,8 @@
 // scale), padded depth guides, invalid saved detail, fill (including partial trust), steadiness, NaN safety; the
 // coverage grid that says how much of a frame had no detail to move; the Replace modes, which land a moved change so
 // that it cannot blow up near white; and a depth-less frame (DepthWidth/DepthHeight == 0), which falls back to
-// colour-only trust instead of reading the colour that stands in for depth's descriptor slot. cl /std:c++20 /EHsc /W4
+// colour-only trust instead of reading the colour that stands in for depth's descriptor slot; and an outside opinion of
+// the history (t5, HistoryDistrust), which scales the moved detail's trust. cl /std:c++20 /EHsc /W4
 // /wd4324 tests/nr_detail_reuse_shader_smoke.cpp d3d11.lib d3dcompiler.lib nr_detail_reuse_shader_smoke.exe
 // OptiScaler/shaders/dlssnr/precompile/dlssnr_detail_reuse.hlsl [reference.hlsl] With a reference (the shader before
 // the Replace change: git show c62aae96:<that path> > reference.hlsl), every run that is not a Replace one, and not one
@@ -145,7 +146,7 @@ struct Gpu
             check(device->CreateShaderResourceView(tex.Get(), nullptr, &srv));
             srvs.push_back(srv);
         }
-        while (srvs.size() < 5)
+        while (srvs.size() < 6)
             srvs.push_back(srvs.front());
 
         const auto out0 = Make(outW, outH, D3D11_BIND_UNORDERED_ACCESS);
@@ -154,12 +155,12 @@ struct Gpu
         check(device->CreateUnorderedAccessView(out0.Get(), nullptr, &uav0));
         check(device->CreateUnorderedAccessView(out1.Get(), nullptr, &uav1));
 
-        ID3D11ShaderResourceView* views[5];
-        for (int i = 0; i < 5; ++i)
+        ID3D11ShaderResourceView* views[6];
+        for (int i = 0; i < 6; ++i)
             views[i] = srvs[i].Get();
         ID3D11UnorderedAccessView* uavs[] = { uav0.Get(), uav1.Get() };
         ctx->CSSetShader(program, nullptr, 0);
-        ctx->CSSetShaderResources(0, 5, views);
+        ctx->CSSetShaderResources(0, 6, views);
         ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
         ctx->CSSetConstantBuffers(0, 1, constants.GetAddressOf());
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
@@ -329,6 +330,43 @@ try
             for (unsigned x = 0; x < W; ++x)
                 ok = ok && Near3(out.at(x, y), withDetail(grey, x, y));
         expect(ok, "Reproject: still scene is input + saved detail, exactly");
+    }
+
+    // An outside opinion of the history (HistoryDistrust, t5; Optical F5Low's trust mask on native input): its
+    // distrust scales the moved detail's trust, read by uv at any size. With the constant off, t5 is not read.
+    {
+        gpu.newer = true;
+        // Half size, like the trust mask at the flow's size: the left half trusts the history, the right half does not.
+        const auto split = Fill([](unsigned x, unsigned) { return Grey(x < W / 4 ? 0.0f : 1.0f); }, W / 2, H / 2);
+        DlssNrDetailReuseConstants c = Base(DlssNrDetailReuse_Reproject);
+        c.HistoryDistrust = 1;
+        auto out = gpu.Run(c, { grey, detail, savedColourDepth, still, depth, split });
+        bool kept = true, dropped = true;
+        for (unsigned y = 0; y < H; ++y)
+        {
+            for (unsigned x = 0; x + 2 < W / 2; ++x)
+                kept = kept && Near3(out.at(x, y), withDetail(grey, x, y));
+            for (unsigned x = W / 2 + 2; x < W; ++x)
+                dropped = dropped && Near3(out.at(x, y), Grey(0.5f));
+        }
+        expect(kept, "History distrust: detail kept where the outside opinion trusts the history");
+        expect(dropped, "History distrust: detail dropped where it does not");
+
+        const auto halfTrust = Fill([](unsigned, unsigned) { return Grey(0.25f); }, W / 2, H / 2);
+        c.Mode = DlssNrDetailReuse_Estimate;
+        out = gpu.Run(c, { grey, detail, savedColourDepth, still, depth, halfTrust });
+        expect(Near(out.at(5, 3).a, 0.75f, 1e-3f) && Near3(out.at(5, 3), Detail(5, 3)),
+               "History distrust: the estimate's trust is scaled by 1 - distrust, its detail unchanged");
+
+        const auto none = Fill([](unsigned, unsigned) { return Grey(1.0f); });
+        c = Base(DlssNrDetailReuse_Reproject);
+        out = gpu.Run(c, { grey, detail, savedColourDepth, still, depth, none });
+        bool ok = true;
+        for (unsigned y = 0; y < H; ++y)
+            for (unsigned x = 0; x < W; ++x)
+                ok = ok && Near3(out.at(x, y), withDetail(grey, x, y));
+        expect(ok, "History distrust: off (0), t5 is not read even when it holds full distrust");
+        gpu.newer = false;
     }
 
     // Reproject, whole image moved 2 px: previous = current + 2, so the detail comes from x + 2.

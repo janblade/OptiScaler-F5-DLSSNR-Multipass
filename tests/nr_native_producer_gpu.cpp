@@ -2,7 +2,8 @@
 // hands it pictures and depth copies through the FrameContract, and a stand-in for DLSS-NR is passed in as a function.
 // It checks, through the contract only:
 //   - the first frame has no flow, later frames do; the trust mask runs with or without depth,
-//   - the stand-in for NR is called with the guides (depth null when there was none) and not called when apply is off,
+//   - the stand-in for NR is called with the guides (depth null when there was none) and the trust mask, and not called
+//     when apply is off,
 //   - the picture is left exactly as it was (bit for bit) when NR does nothing, whatever state it came in,
 //   - the output's fence point completes, and a hard cut is reported and makes the next NR call a reset,
 //   - a cut hint from the adapter restarts the flow.
@@ -328,6 +329,7 @@ struct NrCalls
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool guidesSeen = false;       // depth and motion both present
     bool motionOnlyGuides = false; // motion present, depth null (no depth this frame)
+    bool distrustIsMask = false;   // the history distrust handed over is this frame's trust mask
 };
 
 } // namespace
@@ -361,6 +363,7 @@ int main()
         nr.format = f.colorFormat;
         nr.guidesSeen = f.depth != nullptr && f.motion != nullptr;
         nr.motionOnlyGuides = f.depth == nullptr && f.motion != nullptr;
+        nr.distrustIsMask = f.historyDistrust != nullptr && f.historyDistrust == producer.Trust()->Mask();
         return true;
     };
 
@@ -439,6 +442,7 @@ int main()
 
         ok &= Check("later frame: flow valid and the trust mask ran", r.flowValid && r.trustRan);
         ok &= Check("NR called on it with the guides", r.nativeRan && nr.count >= 1 && nr.guidesSeen);
+        ok &= Check("and with the trust mask as the history distrust", nr.distrustIsMask);
         ok &= Check("... with reversed-Z, sRGB and the picture's state", nr.reversed && nr.space == native::ColorSpace::Srgb &&
                                                                      nr.state == kRead);
         ok &= Check("... and the picture's typed format", nr.format == DXGI_FORMAT_R8G8B8A8_UNORM);

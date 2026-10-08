@@ -94,8 +94,9 @@ AcquireStatus Dx12FrameSource::Acquire(FrameInput& input)
     input.width = (uint32_t) desc.Width;
     input.height = desc.Height;
 
-    // The scene's depth as the finder copied it this frame (none yet: the producer then runs the flow only).
-    const auto depth = GenericDepthDx12::BestSnapshot();
+    // The scene's depth as the finder copied it this frame (none yet: the producer then runs the flow only), resolved
+    // on the producer's queue when the game's buffer is multisampled.
+    const auto depth = GenericDepthDx12::ResolvedSnapshot(_queue);
 
     if (depth.valid)
     {

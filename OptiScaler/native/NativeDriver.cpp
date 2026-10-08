@@ -143,7 +143,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
                                            : frame.space == ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
                                                                             : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
         return DlssNr::ApplyNativeInput(source.Queue(), cmd, frame.color, frame.depth, frame.motion,
-                                        frame.depthReversed, frame.reset, type, frame.pictureState);
+                                        frame.historyDistrust, frame.depthReversed, frame.reset, type, frame.pictureState);
     };
 
     FrameOutput output;

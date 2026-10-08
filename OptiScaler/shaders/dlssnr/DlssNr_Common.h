@@ -105,6 +105,14 @@ struct DlssNrFrameInfo
     // Owned copy, not the game's Color: always arrives/returns NON_PIXEL_SHADER_RESOURCE.
     bool PrivateColorCopy = false;
     bool FinishedPicture = false;
+    // The motion vectors describe this very picture, HUD and post-processing included, because they were measured on
+    // it (Optical F5Low's native input) rather than rendered by the game for its scene. Reuse detail between frames
+    // needs that to run on a finished picture.
+    bool MotionMatchesPicture = false;
+    // Optional: how far the previous frame's history can be trusted at each pixel, as distrust 0..1 in .r (0 trusts it
+    // fully), at any size (read by uv). On native input it is Optical F5Low's trust mask. A D3D12 resource readable
+    // from a compute shader, left in the state it came in. Null: no outside opinion, reuse trusts its own tests.
+    void* HistoryDistrust = nullptr;
     uint32_t OutputArrivalState = 0;
     float WhitePointOverride = 0.0f;
     bool IndependentCommands = false; // owned command list, no game root signature to restore

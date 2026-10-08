@@ -61,7 +61,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // The shader reads five inputs and writes two, and not every mode uses all of them. Unused slots
     // still need a view bound -- an unbound descriptor is not an empty read, it is a read from
     // nothing -- so a stand-in is written into whichever are spare.
-    static constexpr uint32_t kSrvCount = 5;
+    static constexpr uint32_t kSrvCount = 6; // t5: read only by the detail reuse pass (its history distrust)
     static constexpr uint32_t kUavCount = 2;
 
     uint32_t _numThreadsX = 8;
@@ -177,13 +177,15 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                                ID3D12Resource* InReading, ID3D12Resource* OutEased);
 
     // Reuse detail between frames (dlssnr_detail_reuse.hlsl, DlssNr_DetailReuse.inl). DetailReuseReady builds the PSO
-    // on first use and says whether there is one; DispatchDetailReuse is false (no-op) without it. Same descriptor table shape as
-    // DispatchPass; null inputs get t0 as a stand-in, a null OutSecond gets OutTarget. Dispatches Width x Height threads.
+    // on first use and says whether there is one; DispatchDetailReuse is false (no-op) without it. Same descriptor
+    // table shape as DispatchPass; null inputs get t0 as a stand-in, a null OutSecond gets OutTarget. Dispatches Width
+    // x Height threads. InHistoryDistrust is t5 (DlssNrDetailReuseConstants::HistoryDistrust), read by Reproject and
+    // Estimate only.
     bool DetailReuseReady();
     bool DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList, const DlssNrDetailReuseConstants& InConstants,
                              unsigned int Width, unsigned int Height, ID3D12Resource* In0, ID3D12Resource* In1,
                              ID3D12Resource* In2, ID3D12Resource* In3, ID3D12Resource* In4, ID3D12Resource* OutTarget,
-                             ID3D12Resource* OutSecond);
+                             ID3D12Resource* OutSecond, ID3D12Resource* InHistoryDistrust = nullptr);
 
     // The LUT pass (dlssnr_lut.hlsl, DlssNr_Lut.h, LUT-apply epic Story 2:
     // dlssnr-lut-apply). Grades InSource (Width x Height, already in the colour

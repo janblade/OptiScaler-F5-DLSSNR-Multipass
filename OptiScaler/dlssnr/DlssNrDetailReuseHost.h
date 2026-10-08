@@ -33,6 +33,7 @@ struct HostFrame
     const Config* cfg = nullptr;
     bool beforeUpscale = false;   // NR runs before SR
     bool finishedPicture = false; // NR runs on the finished picture
+    bool motionMatchesPicture = false; // the vectors were measured on this picture (DlssNrFrameInfo::MotionMatchesPicture)
     unsigned int workWidth = 0, workHeight = 0;
     unsigned int motionWidth = 0, motionHeight = 0, motionBaseX = 0, motionBaseY = 0;
     unsigned int motionAllocWidth = 0, motionAllocHeight = 0; // the motion texture itself
@@ -144,19 +145,18 @@ class Host
         w.hold = _motionGuard.Update(std::exchange(_dropped, -1.0f), maxDropped, sinceLast);
         if (!w.measure)
             _droppedLast = -1.0f; // nothing is being measured: the menu must not show an old reading
-        const char* whyNot = nullptr;
-        if (f.beforeUpscale)
-            whyNot = "unavailable while NR runs before SR";
-        else if (f.finishedPicture)
-            whyNot = "unavailable in Finished Picture";
-        else if (fg != nullptr && !w.withFg)
-            whyNot = fg;
-        else if (!fastEnough)
-            whyNot = kBelowMinimumFps;
-        else if (_allocFailed)
-            whyNot = "its history textures could not be allocated";
-        else if (on)
-            whyNot = shaderReady();
+        const char* whyNot = UnavailableOnRoute(f.beforeUpscale, f.finishedPicture, f.motionMatchesPicture);
+        if (whyNot == nullptr)
+        {
+            if (fg != nullptr && !w.withFg)
+                whyNot = fg;
+            else if (!fastEnough)
+                whyNot = kBelowMinimumFps;
+            else if (_allocFailed)
+                whyNot = "its history textures could not be allocated";
+            else if (on)
+                whyNot = shaderReady();
+        }
         _why = on && whyNot != nullptr ? whyNot : "";
 
         const std::string state = !_why.empty()       ? _why

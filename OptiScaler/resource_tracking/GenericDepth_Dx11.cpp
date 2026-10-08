@@ -199,7 +199,7 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Resource* resource, const 
     else
     {
         t_copying = true;
-        failed = g_copy.Take(context, resource);
+        failed = g_copy.Take(context, resource, g_core.CurrentPick().reversed);
         t_copying = false;
     }
 
@@ -216,7 +216,9 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Resource* resource, const 
     {
         loggedFirst = true;
         LOG_INFO("Depth finder (D3D11): first depth copy taken, {}x{}, {} R32_FLOAT", g_copy.Width(), g_copy.Height(),
-                 g_copy.Converted() ? "converted to" : "copied straight into");
+                 g_copy.Samples() > 1 ? std::format("{} samples resolved (nearest) into", g_copy.Samples())
+                 : g_copy.Converted() ? std::string("converted to")
+                                      : std::string("copied straight into"));
     }
 }
 

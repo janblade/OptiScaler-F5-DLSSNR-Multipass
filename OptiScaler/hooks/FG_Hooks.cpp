@@ -18,7 +18,8 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_dx.h>
-#include <motion/NativeMotion_Dx12.h>
+#include <native/NativeDriverDx12.h>
+#include <native/NativeLowLatency.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -1347,6 +1348,18 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (willPresent)
         state.fgPresentIsCalled = true;
 
+    // Optical F5Low's low latency (native/NativeLowLatency.h): this is the game's present; the wrapped swap chain's
+    // presents behind it are frame generation's own. (A D3D11 game's is Dx11wDx12SC::Present.)
+    IUnknown* lowLatencyDevice = nullptr;
+
+    if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None)
+    {
+        lowLatencyDevice = state.currentD3D12Device;
+
+        if (lowLatencyDevice != nullptr)
+            native::lowlatency::OnPresentBegin(lowLatencyDevice, native::lowlatency::PresentSource::FrameGeneration);
+    }
+
     HRESULT result;
     if (pPresentParameters == nullptr)
         result = o_FGSCPresent(This, SyncInterval, Flags);
@@ -1395,6 +1408,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         LOG_TRACE("Releasing FG->Mutex: {}", fg->Mutex.getOwner());
         fg->Mutex.unlockThis(2);
     }
+
+    // After frame generation's lock is released: Sleep holds this thread until the next frame should start
+    if (lowLatencyDevice != nullptr)
+        native::lowlatency::OnPresentEnd(lowLatencyDevice, native::lowlatency::PresentSource::FrameGeneration);
 
     LOG_DEBUG("Present finished");
 

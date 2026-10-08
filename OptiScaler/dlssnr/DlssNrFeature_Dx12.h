@@ -8,6 +8,8 @@
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
 #include <menu/MenuPages.h>
+#include <menu/HeaderBanner.h>
+#include <imgui/imgui.h>
 
 // DLSS 5 Neural Rendering, run over the upscaler's output.
 //
@@ -59,6 +61,23 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 
 // The settings panel, drawn inside OptiScaler's menu.
 void RenderMenu(::Config* config, float menuResScale, MenuPages::Page page);
+
+// The main menu's header line for the native modes (Optical F5Low), by the rule in menu/HeaderBanner.h. True when it
+// drew the line and its button, false when the line is the menu's own (a game's feature, or no offer to make).
+// `upscalerFileChecks` draws the menu's upscaler file checks inside the offer's tooltip.
+bool RenderHeaderBanner(::Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
+                        const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour,
+                        void (*upscalerFileChecks)());
+
+// A line on the Upscaler page while the current upscaler is Optical F5Low's own (the game makes no upscaler call), and
+// a hint on the Frame Generation page where Optical F5Low could give frame generation its input (`noUpscalerFeature`:
+// no upscaler is running).
+void RenderF5LowUpscalerNote();
+void RenderF5LowFrameGenHint(::Config* config, bool noUpscalerFeature);
+
+// Once per frame: after about ten seconds with no upscaler call (and the header making its Optical F5Low offer), one
+// toast per session points to the Optical F5Low page. [Menu] F5LowHint=false silences it.
+void UpdateF5LowHint(::Config* config);
 
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
@@ -184,7 +203,8 @@ struct ExposureCalibrationStatus
     unsigned passes = 1;
     std::string aborted; // why the last run stopped early, empty if it did not
     float currentEv = 0.0f;
-    float baseWhitePoint = 0.0f; // the scene's brightness the run was tuned at: the key of a point Tune's result is saved as
+    float baseWhitePoint = 0.0f; // the base the run was tuned at (what the Trim multiplies)
+    float anchorKey = 0.0f; // the scene's brightness the run was tuned at: the key of a point Tune's result is saved as
     bool changed = false; // the chosen value differs from the current one (a flat curve keeps the current)
     bool unsure = false;  // detail varied no more than the measurement's own noise: the current value is kept
     bool unrepeated = false; // the passes disagreed (firstPassEv, lastPassEv): the current is kept

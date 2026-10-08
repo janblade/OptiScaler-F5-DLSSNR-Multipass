@@ -30,7 +30,7 @@ int main()
     for (uint32_t mode = 0; mode < kCount; ++mode)
         Check(Valid(mode), "mode " + std::to_string(mode) + " should be valid");
     Check(!Valid(kCount) && !Valid(99), "modes past the last curve should be invalid");
-    Check(kPickable == kLinear && kLinear == kCount - 1, "the menu should offer every curve but Linear, which is last");
+    Check(kPickable == kCount && kLinear == kCount - 1, "the menu should offer every curve, Linear last");
     for (uint32_t mode = 0; mode < kCount; ++mode)
     {
         Check(IsReplace(mode) == (mode == 2 || mode == 4), "Replace is 2 and 4 only (mode " + std::to_string(mode) + ")");

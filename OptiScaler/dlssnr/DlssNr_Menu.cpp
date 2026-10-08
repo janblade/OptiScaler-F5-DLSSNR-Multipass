@@ -13,10 +13,15 @@
 #include <menu/MenuPages.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
-#include <motion/NativeMotion_Dx12.h>
-#include <motion/NativeMotionDx11.h>
+#include <native/NativeDriverDx12.h>
+#include <native/NativeDriverDx11.h>
+#include <framegen/IFGFeature.h>
+#include <native/NativeLowLatency.h>
+#include <nvapi/fakenvapi.h>
 
 #include <imgui/imgui.h>
+#include <imgui/ImGuiNotify.hpp>
+#include <shaders/dlssnr/DlssNr_GameScale.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
@@ -225,7 +230,7 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         std::string text = table.value_or_default();
         pointNote.clear();
 
-        if (DlssNrTrim::AddPoint(text, cal.baseWhitePoint, EvToTrim(ev, neutral)))
+        if (DlssNrTrim::AddPoint(text, cal.anchorKey, EvToTrim(ev, neutral)))
             table = text;
         else
             pointNote = "The table of brightness points is full (8): delete one first.";
@@ -794,6 +799,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     using namespace DlssNrNativeMode;
 
     const bool dx11 = State::Instance().currentD3D11Device != nullptr;
+    const bool gameUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
     const Shown shown =
         FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
                    config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
@@ -808,7 +814,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     static constexpr ModeChoice kModes[] = {
         { Mode::Off, Shown::Off, "Off##nativemode" },
         { Mode::NrOnly, Shown::NrOnly, "NR only##nativemode" },
-        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + frame generation##nativemode" },
+        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + upscaler & frame generation##nativemode" },
     };
 
     const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
@@ -823,7 +829,12 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         if (ImGui::GetCursorScreenPos().x + width > rowRight)
             ImGui::NewLine();
 
-        if (ImGui::RadioButton(choice.label, shown == choice.shown))
+        const bool selectable = Selectable(choice.mode, gameUpscaler);
+        ImGui::BeginDisabled(!selectable);
+        const bool clicked = ImGui::RadioButton(choice.label, shown == choice.shown);
+        ImGui::EndDisabled();
+
+        if (clicked && selectable)
         {
             const Change change = ForClick(choice.mode, shown, finishedPicture);
 
@@ -846,20 +857,29 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         }
     }
 
-    HelpMarker("For a game that makes no upscaler call of its own: OptiScaler estimates the motion of the finished "
-               "picture itself.\n"
-               "NR only: runs NR on the finished picture. Lower GPU cost, no frame generation. Sets NR Pass at: to "
-               "Finished Picture.\n"
-               "NR + frame generation: runs OptiScaler's upscaler (the one chosen in the menu, FSR when none is) on "
-               "the picture at the same size, as a stabiliser, so frame generation with FGInput=Upscaler works; NR "
-               "runs around that call. Higher GPU cost. Moves NR Pass at: off Finished Picture.\n"
-               "Both use the game's depth when it is found (Advanced): it improves quality but is optional, and "
-               "without it NR runs on motion only. Choosing a mode turns it on (Off turns it off); it needs a restart "
-               "whenever it was not running at this start.\n"
-               "NR runs only with Enable Neural Rendering on. Applies at once.");
+    HelpMarker(
+        "For a game that makes no upscaler call of its own. Optical F5Low works out the motion of the finished picture "
+        "itself, so NR can still run.\n"
+        "NR only: NR runs on the finished picture. Costs less, no frame generation. Sets NR Pass at: to "
+        "Finished Picture.\n"
+        "NR + upscaler & frame generation: also runs OptiScaler's upscaler (your choice in the menu, FSR when "
+        "none) on the picture at the same size, to keep it steady. Frame generation needs this, and it unlocks "
+        "the upscaler settings. Costs more. Moves NR Pass at: off Finished Picture.\n"
+        "Both use the game's depth when Optical F5Low finds it (Advanced). Depth is optional: without it NR uses "
+        "motion only. Choosing a mode turns depth on (Off turns it off); if depth was not running when the "
+        "game started, restart the game to use it.\n"
+        "NR runs only with Enable Neural Rendering on. Changes apply at once.\n"
+        "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode "
+        "already on stands aside.");
 
     if (shown == Shown::Off)
+    {
+        if (gameUpscaler)
+            ImGui::TextWrapped("The game is calling an upscaler of its own, so NR runs on that call; this is not "
+                               "needed.");
+
         return;
+    }
 
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
     const Finder finder =
@@ -867,14 +887,18 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
              : FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
     const bool depthRestart = DepthRestartWarning(shown, finder);
     const Warning warning =
-        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop());
+        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler);
     const char* warningText = nullptr;
 
     switch (warning)
     {
+    case Warning::GameUpscaler:
+        warningText = "The game is calling an upscaler of its own, so this stands aside and NR runs on that call. "
+                      "Choose Off, or turn the game's upscaler off to use this.";
+        break;
     case Warning::Dx11FrameGeneration:
         warningText = "NR only does nothing while OptiScaler's frame generation has replaced this D3D11 game's swap "
-                      "chain. Choose NR + frame generation.";
+                      "chain. Choose NR + upscaler & frame generation.";
         break;
     case Warning::NrDisabled:
         warningText = shown == Shown::NrOnly ? "Enable Neural Rendering (above) is off, so NR does not run."
@@ -1062,32 +1086,119 @@ static void RenderStatusLine(const NrCommon& nr)
         ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.");
 }
 
-// Status & Presets: NR without a game upscaler (its mode selector) and the pass-count and quality-tier presets.
-static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
+// The mode in effect, as the Optical F5Low page and the summary line name it.
+static const char* NativeModeName(DlssNrNativeMode::Shown shown)
 {
-    if (ImGui::TreeNode("NR without a game upscaler (experimental)##nativeinputpreset"))
+    switch (shown)
     {
-        bool finishedPicture = nr.finishedPicture;
-        RenderNativeMode(config, nr.enabled, finishedPicture);
+    case DlssNrNativeMode::Shown::NrOnly:
+        return "NR only";
+    case DlssNrNativeMode::Shown::NrAndFrameGeneration:
+        return "NR + upscaler & frame generation";
+    case DlssNrNativeMode::Shown::MotionOnly:
+        return "motion only";
+    default:
+        return "Off";
+    }
+}
 
-        if (ImGui::TreeNode("Advanced##nativeinputadvanced"))
+// Optical F5Low's own Reflex calls (native/NativeLowLatency.h): the switch, the method in use and, where the driver
+// reports it, the measured latency. Never touches the fakenvapi settings; it only points to them.
+static void RenderLowLatencySection(Config* config)
+{
+    if (!ImGui::TreeNodeEx("Low latency##nativelowlatency", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    using native::lowlatency::Decision;
+    using native::lowlatency::Setting;
+
+    bool on = config->DlssNrNativeLowLatency.value_or_default() != Setting::Off;
+
+    if (ImGui::Checkbox("Lower the game's latency##nativelowlatency", &on))
+        config->DlssNrNativeLowLatency = on ? Setting::Auto : Setting::Off;
+
+    HelpMarker("A game running Optical F5Low makes no call to lower its latency, so Optical F5Low makes them for it: "
+               "NVIDIA Reflex on NVIDIA cards, and on other cards Anti-Lag 2, XeLL or LatencyFlex through fakenvapi. It "
+               "keeps the GPU's queue short, which matters most when the GPU is the limit, as it is with NR and frame "
+               "generation on.\n"
+               "It stands aside as soon as the game calls Reflex itself. Takes effect at once.");
+
+    const auto status = native::lowlatency::GetStatus();
+
+    // Run with no path yet: the first frame, before the first Reflex call went out
+    const char* reason = status.decision == Decision::Run ? (status.path[0] != '\0' ? status.path : "Starting")
+                                                          : native::lowlatency::DecisionText(status.decision);
+
+    ImGui::TextWrapped("Status: [%s]: %s", native::lowlatency::StatusLabel(status.decision), reason);
+
+    if (status.decision == Decision::Run && status.hasLatency)
+        ImGui::Text("Measured latency: %.1f ms", status.latencyMs);
+
+    if (fakenvapi::isUsingAsMainNvapi() || State::Instance().activeFgOutput == FGOutput::XeFG ||
+        status.decision == Decision::ForceReflexDisabled || status.decision == Decision::ForceXell)
+        ImGui::TextWrapped("How it lowers latency is set in the fakenvapi settings.");
+
+    ImGui::TreePop();
+}
+
+// Optical F5Low: NR for a game that makes no upscaler call of its own (the native modes). The mode selector sits at the
+// top, then the Advanced settings (depth, flow tuning).
+static void RenderF5LowPage(Config* config, const NrCommon& nr)
+{
+    ImGui::SeparatorText("Optical F5Low (experimental)");
+    ImGui::TextWrapped("Runs NR in a game that makes no upscaler call of its own.");
+    ImGui::TextWrapped(
+        "Optical F5Low works out how the picture moves by itself, the way a game's motion vectors would tell "
+        "it: it compares each frame with the last, uses the game's depth when it can find it, keeps a "
+        "still HUD still and notices scene cuts. NR, and in the second mode OptiScaler's upscaler and "
+        "frame generation, run on that motion. D3D11 and D3D12 games.");
+
+    bool finishedPicture = nr.finishedPicture;
+    RenderNativeMode(config, nr.enabled, finishedPicture);
+
+    RenderLowLatencySection(config);
+
+    // The page is Optical F5Low's own, so every control shows and the section starts open.
+    if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        bool pictures = config->DlssNrNativeDebugView.value_or_default();
+
+        if (ImGui::Checkbox("Show the motion and trust pictures##nativedebugview", &pictures))
+            config->DlssNrNativeDebugView = pictures;
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s",
+                              "Draws the motion estimate and the trust mask on this page while it is open (a little\n"
+                              "GPU work while they are shown; D3D12 games). The picked depth also needs \"Show the\n"
+                              "picked depth here\" below and a restart.");
+
+        if (State::Instance().currentD3D11Device != nullptr)
         {
-            if (State::Instance().currentD3D11Device != nullptr)
-            {
-                GenericDepthDx11::DrawAdvancedUi();
-                NativeMotionDx11::DrawAdvancedUi();
-            }
-            else
-            {
-                GenericDepthDx12::DrawAdvancedUi();
-                NativeMotionDx12::DrawAdvancedUi();
-            }
-
-            ImGui::TreePop();
+            GenericDepthDx11::DrawAdvancedUi();
+            NativeMotionDx11::DrawAdvancedUi();
+        }
+        else
+        {
+            GenericDepthDx12::DrawAdvancedUi();
+            NativeMotionDx12::DrawAdvancedUi();
         }
 
         ImGui::TreePop();
     }
+}
+
+// Status & Presets: a line pointing to Optical F5Low, and the pass-count and quality-tier presets.
+static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
+{
+    const auto shown = DlssNrNativeMode::FromKeys(
+        { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+
+    ImGui::Text("Optical F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
+    ImGui::SameLine();
+
+    if (ImGui::SmallButton("Open Optical F5Low##statuslink"))
+        MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
     ImGui::SeparatorText("Multipass Presets");
     if (PresetButton("1 Pass", PassPresetActive(config, 1u)))
@@ -1261,15 +1372,24 @@ static void RenderExposureSection(Config* config, float menuResScale)
                                        "No game exposure available. Using manual paper white.");
                 else if (ex.exposure > 1e-6f)
                 {
-                    const float baseWhitePoint = ex.preExposure / ex.exposure;
+                    // Brightness points are keyed by the game's exposure in both scales; the scale only changes what
+                    // the Trim multiplies. Both whites are shown so the scale can be chosen by eye.
+                    const float anchorKey = DlssNrGameScale::AnchorKey(ex.preExposure, ex.exposure);
                     const auto trimAnchors =
                         DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default());
                     const float trim = DlssNrTrim::TrimForKey(
-                        baseWhitePoint, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
-                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
-                                       "Game exposure %.4f  ->  model white at %.2f%s", ex.exposure,
-                                       baseWhitePoint * trim,
-                                       ex.offeredNow ? "" : "  (held: absent this frame)");
+                        anchorKey, config->DlssNrWhitePointTrim.value_or_default(), trimAnchors, false);
+                    const bool asIs = config->DlssNrGameExposureScale.value_or_default() == DlssNrGameScale::kAsIs;
+                    const float whiteAsIs =
+                        DlssNrGameScale::WhiteBase(DlssNrGameScale::kAsIs, ex.preExposure, ex.exposure) * trim;
+                    const float whiteWithExposure =
+                        DlssNrGameScale::WhiteBase(DlssNrGameScale::kWithExposure, ex.preExposure, ex.exposure) * trim;
+                    ImGui::TextColored(
+                        ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                        asIs ? "Game value %.2f  ->  NR level %.2f (Native look), %.2f with Game's setting%s"
+                             : "Game value %.2f  ->  NR level %.2f (Game's setting), %.2f with Native look%s",
+                        ex.exposure, asIs ? whiteAsIs : whiteWithExposure, asIs ? whiteWithExposure : whiteAsIs,
+                        ex.offeredNow ? "" : "  (held: absent this frame)");
                 }
                 else
                     ImGui::TextDisabled("Reading exposure...");
@@ -1459,12 +1579,32 @@ static void RenderExposureSection(Config* config, float menuResScale)
         // Up to 50x under the hood: a game's reported exposure scale can sit well below what the picture wants
         // (Marvel's Spider-Man Remastered with XeSS swapped to DLSS is one), so 4x was too tight. Shown as
         // stops around 1x, which is why the slider runs further towards darker than towards brighter.
+        // Index = DlssNrGameScale value: 0 with the game's exposure, 1 as is.
+        static const char* scaleNames[] = { "Game's setting", "Native look" };
+        int scale = (int) config->DlssNrGameExposureScale.value_or_default();
+
+        if (scale < 0 || scale > 1)
+            scale = 0;
+
+        if (ImGui::Combo("Starting point##gameexposure", &scale, scaleNames, IM_ARRAYSIZE(scaleNames)))
+        {
+            config->DlssNrGameExposureScale = (uint32_t) scale;
+            // A Trim set on one scale means something else on the other, so the slider starts again at 0 EV.
+            config->DlssNrWhitePointTrim = DlssNrExposureCalibrate::kGameExposureNeutralTrim;
+        }
+
+        HelpMarker("Native look: NR sees the picture the same way it does in games with built-in Neural Rendering"
+                   "\n(such as NBA 2K27). Try this first."
+                   "\nGame's setting: uses the brightness value the game reports. Pick this if Native look is far"
+                   "\ntoo dark (for example Red Dead Redemption 2)."
+                   "\nChanging this sets the brightness below back to 0.");
+
         RenderTrimEvSlider(config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
                            DlssNrTrim::Parse(config->DlssNrGameExposureTrimAnchors.value_or_default()).size(),
                            "gameexposure",
-                           "Brightness of the picture handed to NR, relative to the exposure the game reports."
-                           "\n+ is brighter, - is darker; 0 EV uses the game's exposure as is."
-                           "\nToo bright clips highlights; too dark hides shadow detail.");
+                           "How bright a picture NR works on. 0 is the starting point chosen above."
+                           "\nHigher is brighter, lower is darker. Too bright loses detail in highlights;"
+                           "\ntoo dark loses detail in shadows.");
         RenderTuneForThisScene(1, config->DlssNrWhitePointTrim, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
                                config->DlssNrGameExposureTrimAnchors);
         RenderBrightnessPoints(config->DlssNrGameExposureTrimAnchors, DlssNrExposureCalibrate::kGameExposureNeutralTrim,
@@ -2456,12 +2596,12 @@ static void RenderOutputPage(Config* config, float menuResScale)
 
     // Experimental. 0 off (soft knee), 1 Reversible curve + our composition, 2 Reversible curve +
     // pure-inverse replace, 3 Balanced+composed, 4 Balanced+replace (identity midtones + unclipped
-    // highlights), 5 HLG+composed, 6 PQ+composed (BT.2100 / ST 2084, white per BT.2408). 7 Linear+composed
-    // is a diagnostic set in the ini only: shown when set, never offered. Always shown.
+    // highlights), 5 HLG+composed, 6 PQ+composed (BT.2100 / ST 2084, white per BT.2408), 7 Linear+composed (what
+    // game integrations hand the model). Always shown.
     static const char* reversibleNames[] = { "Off (soft knee)",          "Reversible curve + composed",
                                              "Reversible curve + replace", "Balanced curve + composed",
                                              "Balanced curve + replace",   "HLG curve + composed",
-                                             "PQ curve + composed",        "Linear + composed (ini only)" };
+                                             "PQ curve + composed",        "Linear + composed" };
     static_assert(IM_ARRAYSIZE(reversibleNames) == DlssNrProxyCurve::kCount, "one name per proxy curve");
     const uint32_t reversibleValue = config->DlssNrReversibleMode.value_or_default();
     const int reversible = DlssNrProxyCurve::Valid(reversibleValue) ? (int) reversibleValue : 0;
@@ -2478,7 +2618,7 @@ static void RenderOutputPage(Config* config, float menuResScale)
         ImGui::EndCombo();
     }
 
-    HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Reversible curve uses a reversible mapping. Balanced preserves midtones and compresses highlights.\nHLG and PQ are the broadcast HDR curves: white sits at 75% (HLG) or 58% (PQ), leaving more room for highlights (HLG up to about 4x white, PQ about 50x), but the model sees midtones differently. If you used Tune, run it again after changing the curve.\nComposed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.");
+    HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Reversible curve uses a reversible mapping. Balanced preserves midtones and compresses highlights.\nHLG and PQ are the broadcast HDR curves: white sits at 75% (HLG) or 58% (PQ), leaving more room for highlights (HLG up to about 4x white, PQ about 50x), but the model sees midtones differently.\nLinear: gives NR the picture exactly the way games with built-in Neural Rendering do, for NVIDIA's own look. Use it with White point source = Game exposure and Starting point = Native look. Very bright coloured lights can shift a little in colour, and some games may show banding in dark areas.\nIf you used Tune, run it again after changing the curve.\nComposed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.");
 
     if (DlssNrProxyCurve::IsReplace((uint32_t) reversible))
     {
@@ -2744,6 +2884,186 @@ static void RenderDebugPage(Config* config, float menuResScale)
     ImGui::PopItemWidth();
 }
 
+static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature feature, bool upscalerFiles)
+{
+    using namespace HeaderBanner;
+
+    const auto& state = State::Instance();
+    const bool dx11 = state.currentD3D11Device != nullptr;
+
+    Inputs in;
+    in.feature = feature;
+    in.upscalerFiles = upscalerFiles;
+    in.gameCallsUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
+    in.mode = DlssNrNativeMode::FromKeys(
+        { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+    // Optical F5Low is for D3D11 and D3D12 games, and only helps where NR is switched on and has not failed this
+    // session.
+    in.nrAvailable =
+        config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0 && state.swapchainApi != API::Vulkan;
+    in.f5lowNrOnlyRunning = dx11 ? NativeMotionDx11::NrOnlyRunning() : NativeMotionDx12::NrOnlyRunning();
+    in.nrEnabled = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
+    in.frameGeneration = state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused();
+    return in;
+}
+
+bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
+                        const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour,
+                        void (*upscalerFileChecks)())
+{
+    using namespace HeaderBanner;
+
+    const bool dx11 = State::Instance().currentD3D11Device != nullptr;
+    const Banner banner = Decide(HeaderInputs(config, feature, upscalerFiles));
+
+    switch (banner.line)
+    {
+    case Line::Blank:
+    case Line::Frozen:
+    case Line::SelectUpscaler:
+    case Line::NoFiles:
+        return false; // the menu's own lines
+    case Line::OfferWithFiles:
+        ImGui::TextColored(
+            offerColour,
+            "No upscaler call from the game. Pick %s as its upscaler and load a save, or use Optical F5Low.",
+            upscalerNames.c_str());
+        break;
+    case Line::OfferNoFiles:
+        ImGui::TextColored(offerColour, "No upscaler files found. Optical F5Low can still run NR without one.");
+        break;
+    case Line::F5LowNrAndFrameGen:
+        ImGui::TextDisabled("Optical F5Low: NR and frame generation on the finished picture (%s as stabiliser).",
+                            backendName.c_str());
+        break;
+    case Line::F5LowNrNoFrameGen:
+        ImGui::TextDisabled("Optical F5Low: NR on the finished picture (%s as stabiliser), frame generation off.",
+                            backendName.c_str());
+        break;
+    case Line::F5LowFrameGenNoNr:
+        ImGui::TextDisabled("Optical F5Low: frame generation on the finished picture (%s as stabiliser), NR off.",
+                            backendName.c_str());
+        break;
+    case Line::F5LowStabiliser:
+        ImGui::TextDisabled("Optical F5Low: %s keeps the picture steady; NR and frame generation are off.",
+                            backendName.c_str());
+        break;
+    case Line::F5LowNrOnly:
+        ImGui::TextDisabled("Optical F5Low: NR on the finished picture.");
+        break;
+    case Line::F5LowStandsAside:
+        ImGui::TextDisabled("The game's upscaler is on: Optical F5Low stands aside.");
+        break;
+    case Line::F5LowStatus:
+        ImGui::TextDisabled("Optical F5Low:");
+        ImGui::SameLine();
+
+        if (dx11)
+            NativeMotionDx11::DrawStatus();
+        else
+            NativeMotionDx12::DrawStatus();
+        break;
+    }
+
+    if (banner.line == Line::OfferWithFiles || banner.line == Line::OfferNoFiles)
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+
+        // The file checks stay behind the marker, as on the line this offer replaces: they are for troubleshooting
+        if (ImGui::BeginItemTooltip())
+        {
+            ImGui::TextUnformatted("Menus and loading screens make no upscaler call either, so this can show there "
+                                   "too.\nOptical F5Low runs NR on the finished picture, with or without the game's "
+                                   "upscaler.");
+
+            if (banner.line == Line::OfferWithFiles && upscalerFileChecks != nullptr)
+            {
+                ImGui::Spacing();
+                upscalerFileChecks();
+            }
+
+            ImGui::EndTooltip();
+        }
+    }
+
+    if (banner.action != Action::None)
+    {
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton(banner.action == Action::UseF5Low ? "Use Optical F5Low##headerf5low"
+                                                                 : "Optical F5Low settings##headerf5low"))
+            MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+    }
+
+    return true;
+}
+
+void RenderF5LowUpscalerNote()
+{
+    ImGui::TextWrapped(
+        "Driven by Optical F5Low (the game makes no upscaler call): this upscaler runs at the same size as a "
+        "stabiliser.");
+
+    if (ImGui::SmallButton("Optical F5Low settings##upscalernote"))
+        MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+
+    ImGui::Spacing();
+}
+
+void RenderF5LowFrameGenHint(Config* config, bool noUpscalerFeature)
+{
+    using namespace HeaderBanner;
+
+    // The same offer as the header's: only where Optical F5Low is off, NR can run and the game makes no upscaler call.
+    if (!noUpscalerFeature || Decide(HeaderInputs(config, Feature::None, false)).action != Action::UseF5Low)
+        return;
+
+    ImGui::TextWrapped("No upscaler call from the game? Optical F5Low's NR + upscaler & frame generation gives frame "
+                       "generation its input.");
+
+    if (ImGui::SmallButton("Use Optical F5Low##framegenhint"))
+        MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+
+    ImGui::Spacing();
+}
+
+void UpdateF5LowHint(Config* config)
+{
+    // Once per session, and never again after it has been shown or once a game upscaler is in play.
+    static bool shown = false;
+    static double quietMs = 0.0;
+    static double lastCallMs = 0.0;
+
+    if (shown || !config->F5LowHint.value_or_default())
+        return;
+
+    // Real time between presents (ImGui's DeltaTime stands still while no menu frame is drawn)
+    const double now = Util::MillisecondsNow();
+    const double stepMs = lastCallMs > 0.0 ? now - lastCallMs : 0.0;
+    lastCallMs = now;
+
+    const auto feature = State::Instance().currentFeature;
+    const bool noFeature = feature == nullptr || !feature->IsInited();
+
+    // The header's offer: Optical F5Low off, NR available, no upscaler call from the game, and no upscaler running.
+    const bool offerStands =
+        noFeature && HeaderBanner::Decide(HeaderInputs(config, HeaderBanner::Feature::None, false)).action ==
+                         HeaderBanner::Action::UseF5Low;
+
+    // A minute of the game running with the offer standing (a loading stall counts little): see HeaderBanner.h
+    quietMs = HeaderBanner::HintQuietAfter(quietMs, offerStands, stepMs);
+
+    if (!HeaderBanner::HintDue(quietMs))
+        return;
+
+    shown = true;
+    ImGui::InsertNotification({ ImGuiToastType::Info, 15000,
+                                "No upscaler call from this game so far.\nOptical F5Low can run NR without one: open "
+                                "the menu, Neural Rendering, Optical F5Low." });
+}
+
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
 {
     using MenuPages::Page;
@@ -2776,6 +3096,9 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
         break;
     case Page::NrStatus:
         RenderStatusPage(config, menuResScale, nr);
+        break;
+    case Page::NrF5Low:
+        RenderF5LowPage(config, nr);
         break;
     default:
         IM_ASSERT(false && "not a Neural Rendering page");

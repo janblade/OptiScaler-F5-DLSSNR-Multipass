@@ -470,6 +470,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
+            DlssNrGameExposureScale.set_from_config(readUInt("DlssNr", "GameExposureScale"));
+            if (DlssNrGameExposureScale.has_value() && DlssNrGameExposureScale.value() > 1)
+                DlssNrGameExposureScale.reset();
             DlssNrAutoExposureTrim.set_from_config(readFloat("DlssNr", "AutoExposureTrim"));
             DlssNrAutoExposureShadowProtection.set_from_config(readFloat("DlssNr", "AutoExposureShadowProtection"));
             DlssNrAutoExposureMeter.set_from_config(readUInt("DlssNr", "AutoExposureMeter"));
@@ -482,6 +485,15 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
             DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
             DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
+            if (auto lowLatency = readString("DlssNr", "NativeLowLatency", true); lowLatency.has_value())
+            {
+                if (lowLatency.value() == "auto")
+                    DlssNrNativeLowLatency.set_from_config(native::lowlatency::Setting::Auto);
+                else if (lowLatency.value() == "true")
+                    DlssNrNativeLowLatency.set_from_config(native::lowlatency::Setting::On);
+                else if (lowLatency.value() == "false")
+                    DlssNrNativeLowLatency.set_from_config(native::lowlatency::Setting::Off);
+            }
             DlssNrAutoExposureAdaptBrighterSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptBrighterSeconds"));
             DlssNrAutoExposureAdaptDarkerSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptDarkerSeconds"));
             DlssNrAutoExposureAdaptSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptSeconds"));
@@ -719,6 +731,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ShortcutKey.set_from_config(readInt("Menu", "ShortcutKey"));
             ExtendedLimits.set_from_config(readBool("Menu", "ExtendedLimits"));
             ShowFps.set_from_config(readBool("Menu", "ShowFps"));
+            F5LowHint.set_from_config(readBool("Menu", "F5LowHint"));
             UseHQFont.set_from_config(readBool("Menu", "UseHQFont"));
             DisableSplash.set_from_config(readBool("Menu", "DisableSplash"));
 
@@ -1489,6 +1502,8 @@ bool Config::SaveIni()
     // restart -- the white-point source, both trims, the anchor, the pass count and the rest all
     // reset to default on the next run.
     ini.SetValue("DlssNr", "WhitePointSource", GetIntValue(Instance()->DlssNrWhitePointSource.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "GameExposureScale",
+                 GetIntValue(Instance()->DlssNrGameExposureScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointTrim", GetFloatValue(Instance()->DlssNrWhitePointTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureShadowProtection",
@@ -1513,6 +1528,16 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeUpscaler",
                  GetBoolValue(Instance()->DlssNrNativeUpscaler.value_for_config()).c_str());
+    {
+        const char* lowLatency = "auto";
+
+        if (auto held = Instance()->DlssNrNativeLowLatency.value_for_config(); held.has_value())
+            lowLatency = held.value() == native::lowlatency::Setting::On    ? "true"
+                         : held.value() == native::lowlatency::Setting::Off ? "false"
+                                                                            : "auto";
+
+        ini.SetValue("DlssNr", "NativeLowLatency", lowLatency);
+    }
     ini.SetValue("DlssNr", "AutoExposureAdaptBrighterSeconds",
                  GetFloatValue(Instance()->DlssNrAutoExposureAdaptBrighterSeconds.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoExposureAdaptDarkerSeconds",
@@ -1707,6 +1732,7 @@ bool Config::SaveIni()
 
         ini.SetValue("Menu", "ExtendedLimits", GetBoolValue(Instance()->ExtendedLimits.value_for_config()).c_str());
         ini.SetValue("Menu", "ShowFps", GetBoolValue(Instance()->ShowFps.value_for_config()).c_str());
+        ini.SetValue("Menu", "F5LowHint", GetBoolValue(Instance()->F5LowHint.value_for_config()).c_str());
         ini.SetValue("Menu", "UseHQFont", GetBoolValue(Instance()->UseHQFont.value_for_config()).c_str());
         ini.SetValue("Menu", "DisableSplash", GetBoolValue(Instance()->DisableSplash.value_for_config()).c_str());
 

@@ -80,6 +80,7 @@ struct RunState
     Sweep sweep;
     bool startRequested = false;
     uint32_t source = 3;                  // the panel a run was started from: 3 Automatic, 1 Game exposure
+    float anchorKey = 0.0f;               // Game exposure: the brightness-point key of the scene it started in
     Blocker blocker = Blocker::NrStopped; // why a run cannot start or go on, as of the last wanted evaluation
     const char* startError = "";          // why the last start did not happen, "" if it did
     // The run (or the start asked for) is a Measure detail, not a Tune. Atomic: Follow's easing reads it lock-free
@@ -458,6 +459,7 @@ inline FrameEvents BeginFrame(RunState& run, Backend& gpu, const StartPoints& st
         {
             // Each source tunes its own slider: Automatic around its 5x neutral, Game exposure around 1x.
             run.source = situation.source;
+            run.anchorKey = situation.anchorKey;
             const float current = situation.source == 1 ? start.gameExposure : start.automatic;
             if (run.measuring)
                 run.sweep.Start(current, MeasureSettings(situation.source), ctx);

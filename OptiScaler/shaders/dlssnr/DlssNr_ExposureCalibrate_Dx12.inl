@@ -137,6 +137,7 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
 {
     Cal::Situation s;
     s.source = cfg.DlssNrWhitePointSource.value_or_default();
+    s.anchorKey = DlssNrGameScale::AnchorKey(g_nr.gamePreExposure, g_nr.gameExposure);
     s.proxyMode = cfg.DlssNrUseProxy.value_or_default();
     s.holdFrame = cfg.DlssNrHoldFrame.value_or_default();
     s.finishedPicture = finishedPicture;
@@ -153,13 +154,16 @@ Cal::Situation CalibrationSituation(const Config& cfg, bool usingAutoExposure, b
     return s;
 }
 
-// The base white point the tuned source's Trim multiplies, 0 without a reading: Game exposure's is the game's own
-// (PreExposure / exposure), Automatic's is its own metering, following the game's exposure or not
-// (Cal::RelearnFollowOnStart has why).
+// The base white point the tuned source's Trim multiplies, 0 without a reading: Game exposure's is the same as the
+// encode's, so a sweep measures the white the picture is made with (DlssNrGameScale::WhiteBase; both scales wait
+// for a reading, as the encode's Game exposure path does), Automatic's is its own metering, following the game's
+// exposure or not (Cal::RelearnFollowOnStart has why).
 float CalibrationBase(const Config& cfg)
 {
     if (cfg.DlssNrWhitePointSource.value_or_default() == 1)
-        return g_nr.gameExposure > 1e-6f ? g_nr.gamePreExposure / g_nr.gameExposure : 0.0f;
+        return g_nr.gameExposure > 1e-6f ? DlssNrGameScale::WhiteBase(cfg.DlssNrGameExposureScale.value_or_default(),
+                                                                      g_nr.gamePreExposure, g_nr.gameExposure)
+                                         : 0.0f;
 
     return AutoOwnBaseWhitePoint();
 }

@@ -694,6 +694,16 @@ float SignalCurveInv(float signal, uint curve)
 float3 SignalEncode(float3 v, uint curve)
 {
     v = max(v, 0.0);
+
+    // Linear is what game integrations hand the model: each channel's light as it is, clipped at white, no curve and
+    // no shared scalar (the model reads the stored value, and the store sRGB-encodes what this returns). It reproduces
+    // their input exactly at the game's own exposure, which the peak-channel scalar did not: the other channels came
+    // out sRGB-shaped. Over white a colour clips toward white per channel, as theirs does.
+    if (curve == kCurveLinear)
+    {
+        const float3 c = saturate(v);
+        return float3(SrgbDecodeUnclipped1(c.r), SrgbDecodeUnclipped1(c.g), SrgbDecodeUnclipped1(c.b));
+    }
     const float m = max(v.r, max(v.g, v.b));
 
     // Below a millionth of white the value is kept as it is (as Neutwo and the hybrid do). The curve steps up just
@@ -707,6 +717,11 @@ float3 SignalEncode(float3 v, uint curve)
 float3 SignalDecode(float3 y, uint curve)
 {
     y = max(y, 0.0);
+
+    // Linear: per channel, the inverse of SignalEncode's (the ceiling at white returns as white).
+    if (curve == kCurveLinear)
+        return float3(SrgbEncodeUnclipped1(min(y.r, 1.0)), SrgbEncodeUnclipped1(min(y.g, 1.0)),
+                      SrgbEncodeUnclipped1(min(y.b, 1.0)));
     const float m = min(max(y.r, max(y.g, y.b)), 1.0);
 
     if (m <= 1e-6)

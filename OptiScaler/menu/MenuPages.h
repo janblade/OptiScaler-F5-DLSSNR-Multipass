@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string_view>
 
 // Pages of the main menu's navigation pane. Pure data, no ImGui, so it can be unit tested on the host.
 namespace MenuPages
 {
-// Neural Rendering is a nav group, not a page: clicking it opens NrStatus.
+// Neural Rendering is a nav group, not a page: clicking it opens NrStatus. Optical F5Low is listed first in the group;
+// saved page names are by name, so an older MenuPage value (nr.status ...) still opens the same page.
 enum class Page : unsigned char
 {
     Upscaler,
@@ -16,6 +18,7 @@ enum class Page : unsigned char
     OverlayLook,
     Input,
     Misc,
+    NrF5Low, // first under Neural Rendering: NR for a game that makes no upscaler call
     NrStatus,
     NrOptions,
     NrInput,
@@ -39,6 +42,7 @@ inline constexpr PageInfo kPages[] = {
     { "overlay", "Overlay & Look" },
     { "input", "Input" },
     { "misc", "Misc" },
+    { "nr.f5low", "Optical F5Low" },
     { "nr.status", "Status & Presets" },
     { "nr.options", "NR Options" },
     { "nr.input", "NR Input" },
@@ -49,7 +53,7 @@ inline constexpr PageInfo kPages[] = {
 
 inline constexpr size_t kPageCount = sizeof(kPages) / sizeof(kPages[0]);
 
-inline constexpr bool IsNeuralRendering(Page page) { return page >= Page::NrStatus; }
+inline constexpr bool IsNeuralRendering(Page page) { return page >= Page::NrF5Low; }
 
 inline constexpr const PageInfo& Info(Page page)
 {
@@ -70,5 +74,24 @@ inline constexpr Page PageFromName(std::string_view name)
     }
 
     return Page::Upscaler;
+}
+
+// A page another part of the menu wants shown (the header's Optical F5Low button, cross-links). The page choice itself
+// is a static inside MenuCommon::RenderMainMenuPages, so the request waits here until that function takes it, once, on
+// its next draw.
+inline std::optional<Page>& PendingRequest()
+{
+    static std::optional<Page> request;
+    return request;
+}
+
+inline void RequestPage(Page page) { PendingRequest() = page; }
+
+// The requested page, once: a second call returns nothing until the next RequestPage.
+inline std::optional<Page> ConsumeRequest()
+{
+    const std::optional<Page> request = PendingRequest();
+    PendingRequest().reset();
+    return request;
 }
 } // namespace MenuPages

@@ -4,6 +4,7 @@
 #include "LibraryLoad_Hooks.h"
 
 #include <Util.h>
+#include <intrin.h>
 #include <Config.h>
 
 #include <nvapi/fakenvapi.h>
@@ -176,6 +177,10 @@ void StreamlineHooks::streamlineLogCallback(sl::LogType type, const char* msg)
 sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVersion)
 {
     LOG_FUNC();
+
+    // The game's own Streamline, not one OptiScaler started for its DLSS frame generation (ReflexHooks::isGameCall)
+    if (Util::GetCallerModule(_ReturnAddress()) != Util::GetCallerModule((void*) &StreamlineHooks::hkslInit))
+        State::Instance().gameCalledSlInit = true;
 
     sl::Preferences localPref = pref;
     GamePluginLoadScope pluginScope(localPref);
@@ -738,6 +743,9 @@ void StreamlineHooks::streamlineLogCallback_sl1(sl1::LogType type, const char* m
 bool StreamlineHooks::hkslInit_sl1(const sl1::Preferences& pref, int applicationId)
 {
     LOG_FUNC();
+
+    if (Util::GetCallerModule(_ReturnAddress()) != Util::GetCallerModule((void*) &StreamlineHooks::hkslInit_sl1))
+        State::Instance().gameCalledSlInit = true;
 
     sl1::Preferences localPref = pref;
 

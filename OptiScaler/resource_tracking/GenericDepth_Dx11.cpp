@@ -8,6 +8,7 @@
 
 #include <native/DepthCopyDx11.h>
 #include <native/DepthFinderCore.h>
+#include <native/NativeLowLatency.h>
 
 #include <detours/detours.h>
 
@@ -177,8 +178,12 @@ void TakeSnapshot(ID3D11DeviceContext* context, ID3D11Resource* resource, const 
 
     static int calls = 0;
 
-    if (calls < 8 || calls % 200 == 0)
+    // The first few at info; the rest at debug level: this runs under g_mutex in the game's bind hooks, and a log line
+    // is a synchronous file write
+    if (calls < 8)
         LOG_INFO("Depth finder (D3D11): TakeSnapshot call {} from {}, {:X}", calls, where, (size_t) resource);
+    else if (calls % 200 == 0)
+        LOG_DEBUG("Depth finder (D3D11): TakeSnapshot call {} from {}, {:X}", calls, where, (size_t) resource);
 
     ++calls;
 
@@ -298,7 +303,10 @@ void STDMETHODCALLTYPE hkRSSetViewports(ID3D11DeviceContext* This, UINT NumViewp
 void STDMETHODCALLTYPE hkDraw(ID3D11DeviceContext* This, UINT VertexCount, UINT StartVertexLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, VertexCount, 1);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_Draw(This, VertexCount, StartVertexLocation);
 }
@@ -307,7 +315,10 @@ void STDMETHODCALLTYPE hkDrawIndexed(ID3D11DeviceContext* This, UINT IndexCount,
                                      INT BaseVertexLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, IndexCount, 1);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_DrawIndexed(This, IndexCount, StartIndexLocation, BaseVertexLocation);
 }
@@ -316,7 +327,10 @@ void STDMETHODCALLTYPE hkDrawInstanced(ID3D11DeviceContext* This, UINT VertexCou
                                        UINT StartVertexLocation, UINT StartInstanceLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, VertexCountPerInstance, InstanceCount);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
@@ -326,7 +340,10 @@ void STDMETHODCALLTYPE hkDrawIndexedInstanced(ID3D11DeviceContext* This, UINT In
                                               UINT StartInstanceLocation)
 {
     if (Watched(This))
+    {
         g_core.OnDraw((uint64_t) (size_t) This, IndexCountPerInstance, InstanceCount);
+        native::lowlatency::OnFirstSubmit();
+    }
 
     o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
                           StartInstanceLocation);
@@ -625,11 +642,14 @@ Snapshot BestSnapshot()
 
 void NoteUpscalerCall()
 {
+    // Noted with no finder installed too: the menu and the frame source must know the game has an upscaler either way.
+    native::NoteGameUpscalerCall();
+
     if (g_installed)
         g_core.NoteUpscalerCall();
 }
 
-bool GameCallsUpscaler() { return g_installed && g_core.GameCallsUpscaler(); }
+bool GameCallsUpscaler() { return native::GameUpscalerCalledRecently() || (g_installed && g_core.GameCallsUpscaler()); }
 bool Armed() { return g_installed && g_core.Armed(); }
 
 void DrawStatus()

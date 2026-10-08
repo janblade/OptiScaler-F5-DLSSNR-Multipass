@@ -220,6 +220,7 @@ void CopyCoverage(ID3D12GraphicsCommandList* cmdList)
     ID3D12GraphicsCommandList* real = nullptr;
     if (Util::CheckForRealObject(__FUNCTION__, cmdList, (IUnknown**) &real))
         free->commands = real;
+    DlssNrWatchedLists::Add(free->commands); // the submit/reset hooks must hear about this list
     free->pending = true;
     free->submitted = false;
 }

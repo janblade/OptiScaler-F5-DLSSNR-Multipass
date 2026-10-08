@@ -287,9 +287,10 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
             loggedFrames = g_core.Presents(); // a burst every 600 presents
     }
 
+    // Debug level: this runs under g_mutex on the game's recording threads, and a log line is a synchronous file write
     if (g_core.Presents() - loggedFrames < 2 && inFrame++ < 8)
-        LOG_INFO("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_core.Presents(), where,
-                 (size_t) list, stretchVertices, g_core.SnapshotFloor());
+        LOG_DEBUG("Depth finder: frame {} copy at {} on list {:X}, stretch {} vertices (floor {})", g_core.Presents(),
+                  where, (size_t) list, stretchVertices, g_core.SnapshotFloor());
 
     const auto depthState = readOnlyDepth ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
@@ -1066,13 +1067,16 @@ GenericDepthSelect::Pick CurrentPick()
 
 void NoteUpscalerCall()
 {
+    // Noted with no finder installed too: the menu and the frame source must know the game has an upscaler either way.
+    native::NoteGameUpscalerCall();
+
     if (!g_installed)
         return;
 
     g_core.NoteUpscalerCall();
 }
 
-bool GameCallsUpscaler() { return g_installed && g_core.GameCallsUpscaler(); }
+bool GameCallsUpscaler() { return native::GameUpscalerCalledRecently() || (g_installed && g_core.GameCallsUpscaler()); }
 
 bool Armed() { return g_installed && g_core.Armed(); }
 
@@ -1233,18 +1237,17 @@ void DrawAdvancedUi()
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
-    if (debugView)
-    {
-        bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
+    // Shown always on Optical F5Low's page; the copy is made only with the pictures on as well (both read at the
+    // start).
+    bool overlay = config->DlssNrNativeDepthOverlay.value_or_default();
 
-        if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))
-            config->DlssNrNativeDepthOverlay = overlay;
+    if (ImGui::Checkbox("Show the picked depth here##depthfinder", &overlay))
+        config->DlssNrNativeDepthOverlay = overlay;
 
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
-                                    "command list, and shows it below. Leave it off unless you are checking the pick.\n"
-                                    "Applies at the next start.");
-    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
+                                "command list, and shows it below. Needs \"Show the motion and trust pictures\" on too.\n"
+                                "Leave it off unless you are checking the pick. Applies at the next start.");
 
     if (finder != g_installed)
         ImGui::TextDisabled("Takes effect after saving and restarting the game.");

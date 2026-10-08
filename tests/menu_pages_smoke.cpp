@@ -38,7 +38,12 @@ int main()
               "NR pages are exactly the nr.* names ('" + name + "')");
     }
 
-    Check(kPageCount == 13, "7 categories plus 6 Neural Rendering sub-pages");
+    Check(kPageCount == 14, "7 categories plus 7 Neural Rendering sub-pages");
+    Check(std::string(Name(Page::NrF5Low)) == "nr.f5low", "the Optical F5Low page has its ini name");
+    Check(static_cast<int>(Page::NrF5Low) + 1 == static_cast<int>(Page::NrStatus),
+          "Optical F5Low comes first in the Neural Rendering group, right before Status & Presets");
+    Check(!IsNeuralRendering(Page::Misc) && IsNeuralRendering(Page::NrF5Low), "the group starts at Optical F5Low");
+    Check(PageFromName("nr.status") == Page::NrStatus, "an older saved nr.status still opens Status & Presets");
     Check(std::string(Name(Page::NrOutput)) == "nr.output", "the NR Output page keeps its documented ini name");
     Check(std::string(Name(Page::Upscaler)) == "upscaler", "the Upscaler page keeps its documented ini name");
 
@@ -51,6 +56,21 @@ int main()
 
     // Out-of-range ids are safe to name.
     Check(std::string(Name(static_cast<Page>(kPageCount))) == "upscaler", "out-of-range page names as Upscaler");
+
+    // A page request is taken once.
+    Check(!ConsumeRequest().has_value(), "no request waits at the start");
+    RequestPage(Page::NrDebug);
+    {
+        const auto first = ConsumeRequest();
+        Check(first.has_value() && *first == Page::NrDebug, "a request is handed over");
+        Check(!ConsumeRequest().has_value(), "a request is consumed once");
+    }
+    RequestPage(Page::Misc);
+    RequestPage(Page::NrOutput);
+    {
+        const auto last = ConsumeRequest();
+        Check(last.has_value() && *last == Page::NrOutput, "the latest request wins");
+    }
 
     if (fails == 0)
         std::printf("menu_pages_smoke: all checks passed (%zu pages)\n", kPageCount);

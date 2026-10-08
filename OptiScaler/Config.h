@@ -2,6 +2,7 @@
 
 #include "SysUtils.h"
 #include "State.h"
+#include "native/NativeLowLatencyRule.h"
 
 #include <optional>
 #include <filesystem>
@@ -365,7 +366,7 @@ class Config
     // The proxy curve (Final Image Composition), values in shaders/dlssnr/DlssNr_ProxyCurve.h. 0 = soft
     // knee + our composition (default); 1/2 = unclipped Neutwo proxy + composition / pure-inverse replace;
     // 3/4 = the balanced (hybrid) curve, the same two ways; 5 HLG and 6 PQ + composition; 7 linear +
-    // composition, a diagnostic set in the ini only. Out-of-range values fall back to 0.
+    // composition (what game integrations hand the model). Out-of-range values fall back to 0.
     CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
 
     // How the NR pass decodes the game's colour. 0 Auto (the game's DLSS HDR flag + the output format, as before),
@@ -556,6 +557,11 @@ class Config
     // Default 3 (Automatic, at +1.5 EV): it needs nothing from the game; Game exposure left NBA 2K27 far too dark.
     CustomOptional<uint32_t> DlssNrWhitePointSource { 3 };
 
+    // Game exposure's scale: what its Trim multiplies. 0 = with the game's exposure (PreExposure / exposure, the value
+    // the game reports to DLSS SR), 1 = the game's colour as is (a base of exactly 1, as games with built-in DLSS-NR
+    // feed the model). Only read with WhitePointSource 1. See DlssNr_GameScale.h.
+    CustomOptional<uint32_t> DlssNrGameExposureScale { 0 };
+
     // OptiScaler-owned automatic exposure controls. When active, automatic exposure uses the
     // linear-HDR NR input. Finished-picture mode bypasses this calculation and keeps its own
     // display white-point override.
@@ -587,14 +593,15 @@ class Config
     // recorded into the game's own command list.
     CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
     CustomOptional<bool> DlssNrNativeDepthOverlay { false };
-    // NativeDebugView: show the pictures and debug controls of the depth finder and the motion estimate in the DLSS-NR menu
-    // (the depth preview, the motion and trust pictures, the trust view chooser, the flow tuning; D3D12 only). Off, the menu
-    // keeps the switches and one status line each, and the depth overlay's copy is not made. Startup only.
+    // NativeDebugView: show the pictures of the depth finder and the motion estimate on the menu's Optical F5Low page
+    // (the depth preview, the motion and trust pictures, the trust view chooser; D3D12 only), set by "Show the motion
+    // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
+    // overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
     // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at
-    // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See motion/NativeMotion_Dx12.h and
-    // NativeMotionDx11.h.
+    // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See native/NativeDriverDx12.h and
+    // NativeDriverDx11.h.
     CustomOptional<bool> DlssNrNativeMotion { false };
     // NativeInput: with NativeMotion on and the game making no upscaler call, runs DLSS-NR on the finished picture with
     // the optical flow as its motion and the depth finder's depth when it has one (Story 4 of the native input
@@ -609,11 +616,17 @@ class Config
     // priority over NativeInput. Changes apply at once. For a D3D11 game, this is also the only one of the three
     // native-input options (this, NativeInput, Finished Picture NR) that still works once FGInput=Upscaler is selected:
     // that replaces the game's swap chain with with_dx12::Dx11wDx12SC, which the other two require not to be in play
-    // (see motion/NativeMotionDx11.cpp's OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's
-    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + frame generation" mode: it sets NativeDepthFinder,
-    // NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished Picture if it was on
-    // (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
+    // (see native/NativeDriverDx11.cpp's OnFGPresent and with_dx12/dx11_with_dx12_sc.cpp's
+    // _ApplyNativeInputToFGBackBuffer). The menu's "NR + upscaler & frame generation" mode (Optical F5Low page): it
+    // sets NativeDepthFinder, NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished
+    // Picture if it was on (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
+    // NativeLowLatency: Optical F5Low calls the Reflex API itself, since a game that makes no upscaler call makes no
+    // Reflex call either (see native/NativeLowLatency.h). Real Reflex on NVIDIA; fakenvapi answers elsewhere (Anti-Lag
+    // 2, XeLL or LatencyFlex, chosen by the fakenvapi settings). auto: on while an Optical F5Low mode runs; true: also
+    // without one, in any game that makes no Reflex call of its own; false: off. Stands aside the moment the game calls
+    // Reflex itself.
+    CustomOptional<native::lowlatency::Setting> DlssNrNativeLowLatency { native::lowlatency::Setting::Auto };
     // AutoExposureAdaptBrighterSeconds / AutoExposureAdaptDarkerSeconds are the menu's "Eye adaptation": how long
     // Automatic takes to follow a scene getting brighter / darker, as a time constant in seconds; 0 = at once. Faster to
     // brighter, as in Unreal and Unity HDRP. See shaders/dlssnr/DlssNr_ExposureAdapt.h.
@@ -805,6 +818,8 @@ class Config
     CustomOptional<float, NoDefault> MenuWidth; // Main window size in pixels at Menu Scale 1.0
     CustomOptional<float, NoDefault> MenuHeight;
     CustomOptional<std::string, NoDefault> MenuPage; // Last page open in the main window, see menu/MenuPages.h
+    // One toast per session pointing to the Optical F5Low page, see DlssNr::UpdateF5LowHint
+    CustomOptional<bool> F5LowHint { true };
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };
     CustomOptional<bool> ExtendedLimits { false };

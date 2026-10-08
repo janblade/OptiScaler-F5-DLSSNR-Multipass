@@ -9,6 +9,7 @@
 #include <cfloat>
 
 #include <dlssnr/DlssNr.h>
+#include <native/VirtualUpscalerDriver.h>
 
 #include "input/input_system.h"
 
@@ -107,6 +108,25 @@ static Upscaler currentBackend = Upscaler::Reset;
 static std::string currentBackendName = "";
 static int refreshRate = 0;
 static ImVec2 lastPosition(-1000.0f, -1000.0f);
+
+// How many frames DLSS frame generation adds per real frame (0: off). A game's own DLSS frame generation reports it on
+// each evaluate; OptiScaler's own DLSSG output (OptiFG input, e.g. Optical F5Low's upscaler) gets no such report back,
+// so there it is the count OptiScaler asked for while its frame generation runs.
+static int DlssgInterpolationCount(const State& state)
+{
+    if (const int reported = state.dlssgDetectedInterpolationCount; reported > 0)
+        return reported;
+
+    const auto fg = state.currentFG;
+
+    if (state.activeFgOutput == FGOutput::DLSSG && state.activeFgInput == FGInput::Upscaler && fg != nullptr &&
+        fg->IsActive() && !fg->IsPaused())
+    {
+        return (int) fg->GetInterpolatedFrameCount();
+    }
+
+    return 0;
+}
 
 static ImVec2 splashPosition(-1000.0f, -1000.0f);
 static ImVec2 splashSize(0.0f, 0.0f);
@@ -1906,6 +1926,8 @@ void MenuCommon::RenderNotifications(RenderMenuContext& ctx)
 
     // No fallback font, SetWindowFontScale needs to be called after Begin()
 
+    DlssNr::UpdateF5LowHint(config);
+
     ImGui::RenderNotifications(ImGuiToastPos::TopCenter, notificationScale, tonemapRequired);
 
     if (config->UseHQFont.value_or_default())
@@ -2156,7 +2178,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             auto fgText = (fg != nullptr && fg->IsActive() && !fg->IsPaused()) ? (" (" + std::string(fg->Name()) + ")")
                                                                                : std::string();
 
-            const int fakeFramesCount = state.dlssgDetectedInterpolationCount;
+            const int fakeFramesCount = DlssgInterpolationCount(state);
             auto formatFg = [&](std::string_view name, int maxFakeFrames)
             {
                 if (fakeFramesCount > maxFakeFrames)
@@ -2525,6 +2547,37 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
     }
 }
 
+// Which upscaler files and hooks were found: for troubleshooting a game whose upscaler call does not arrive. Drawn
+// inside a tooltip, by the header's lines (here and DlssNr::RenderHeaderBanner's offer).
+static void UpscalerFileChecks()
+{
+    const auto& state = State::Instance();
+    const auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+
+    if (primaryGpu.dlssCapable)
+    {
+        ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
+        ImGui::SameLine(0.0f, 16.0f);
+        ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
+    }
+    else
+    {
+        ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
+        ImGui::SameLine(0.0f, 16.0f);
+        ImGui::Text("nvngx replacement: %s", state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
+    }
+
+    ImGui::Text("libxess: %s", (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
+
+    ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
+}
+
 void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -2586,26 +2639,43 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
     }
 
     // Upscaler state is one line in every case, so the panes below never move when it changes.
-    if (currentFeature == nullptr || !currentFeature->IsInited())
+    const bool upscalerFiles = state.nvngxExists || state.nvngxReplacement.has_value() ||
+                               (state.libxessExists || XeSSProxy::Module() != nullptr);
+
+    std::vector<std::string> upscalers;
+
+    if (state.fsrHooks)
+        upscalers.push_back("FSR");
+
+    if (state.nvngxExists || state.nvngxReplacement.has_value() || primaryGpu.dlssCapable)
+        upscalers.push_back("DLSS");
+
+    if (state.libxessExists || XeSSProxy::Module() != nullptr)
+        upscalers.push_back("XeSS");
+
+    auto joined = upscalers | std::views::join_with(std::string { " or " });
+
+    std::string joinedUpscalers(joined.begin(), joined.end());
+
+    // Optical F5Low's lines (the native modes, menu/HeaderBanner.h) come first; the rule leaves a game's own feature,
+    // and the cases with no offer to make, to the lines below.
+    const bool f5lowLine = DlssNr::RenderHeaderBanner(
+        config,
+        currentFeature == nullptr || !currentFeature->IsInited() ? HeaderBanner::Feature::None
+        : native::IsVirtualUpscalerFeature(currentFeature)       ? HeaderBanner::Feature::F5Low
+        : currentFeature->IsFrozen()                             ? HeaderBanner::Feature::Frozen
+                                                                 : HeaderBanner::Feature::Game,
+        upscalerFiles, joinedUpscalers, currentFeature != nullptr ? currentFeature->Name() : std::string(),
+        toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), UpscalerFileChecks);
+
+    if (f5lowLine)
     {
-        if (state.nvngxExists || state.nvngxReplacement.has_value() ||
-            (state.libxessExists || XeSSProxy::Module() != nullptr))
+        // Drawn by DlssNr::RenderHeaderBanner.
+    }
+    else if (currentFeature == nullptr || !currentFeature->IsInited())
+    {
+        if (upscalerFiles)
         {
-            std::vector<std::string> upscalers;
-
-            if (state.fsrHooks)
-                upscalers.push_back("FSR");
-
-            if (state.nvngxExists || state.nvngxReplacement.has_value() || primaryGpu.dlssCapable)
-                upscalers.push_back("DLSS");
-
-            if (state.libxessExists || XeSSProxy::Module() != nullptr)
-                upscalers.push_back("XeSS");
-
-            auto joined = upscalers | std::views::join_with(std::string { " or " });
-
-            std::string joinedUpscalers(joined.begin(), joined.end());
-
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
                                "Select %s as the game's upscaler and load a save to enable these settings.",
                                joinedUpscalers.c_str());
@@ -2618,30 +2688,7 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
                 ImGui::TextUnformatted("Upscalers don't always work in menus.");
                 ImGui::Spacing();
 
-                if (primaryGpu.dlssCapable)
-                {
-                    ImGui::Text("nvngx_dlss : %s", state.NVNGX_DLSS_Path.has_value() ? "Exists" : "Doesn't Exist");
-                    ImGui::SameLine(0.0f, 16.0f);
-                    ImGui::Text("nvngx_dlssd : %s", state.NVNGX_DLSSD_Path.has_value() ? "Exists" : "Doesn't Exist");
-                }
-                else
-                {
-                    ImGui::Text("nvngx.dll: %s", state.nvngxExists ? "Exists" : "Doesn't Exist");
-                    ImGui::SameLine(0.0f, 16.0f);
-                    ImGui::Text("nvngx replacement: %s",
-                                state.nvngxReplacement.has_value() ? "Exists" : "Doesn't Exist");
-                }
-
-                ImGui::Text("libxess: %s",
-                            (state.libxessExists || XeSSProxy::Module() != nullptr) ? "Exists" : "Doesn't Exist");
-
-                ImGui::Text("FSR Hooks: %s", state.fsrHooks ? "Exist" : "Don't Exist");
-                ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("FSR 3.1: %s", FfxApiProxy::Dx12Module() != nullptr ? "Exists" : "Doesn't Exist");
-                ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("FSR 3.1 SR: %s", FfxApiProxy::Dx12Module_SR() != nullptr ? "Exists" : "Doesn't Exist");
-                ImGui::SameLine(0.0f, 16.0f);
-                ImGui::Text("FSR 3.1 FG: %s", FfxApiProxy::Dx12Module_FG() != nullptr ? "Exists" : "Doesn't Exist");
+                UpscalerFileChecks();
 
                 ImGui::EndTooltip();
             }
@@ -2675,6 +2722,9 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
     if (currentFeature != nullptr && !currentFeature->IsFrozen())
     {
+        if (native::IsVirtualUpscalerFeature(currentFeature))
+            DlssNr::RenderF5LowUpscalerNote();
+
         // UPSCALERS -----------------------------
         ImGui::SeparatorText("Upscalers");
         ShowTooltip("Which copium do you choose?");
@@ -3480,6 +3530,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
     auto config = ctx.config;
+    DlssNr::RenderF5LowFrameGenHint(config, ctx.currentFeature == nullptr || !ctx.currentFeature->IsInited());
     bool external = config->ExternalFrameGeneration.value_or_default();
     const bool ampereActive = config->FGDLSSGAmpereMfgUnlock.value_or_default();
     if (ampereActive)
@@ -4685,7 +4736,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         ImGui::Text("Current DLSSG state:");
         ImGui::SameLine();
-        if (auto count = state.dlssgDetectedInterpolationCount; count > 0)
+        if (auto count = DlssgInterpolationCount(state); count > 0)
         {
             ImGui::TextColored(toneMapColor(ImVec4(0.f, 1.f, 0.25f, 1.f)), std::format("ON {}x", count + 1).c_str());
         }
@@ -7637,6 +7688,13 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
         }
     };
 
+    // A page another part of the menu asked for (the header's Optical F5Low button): open its group too.
+    if (const auto requested = MenuPages::ConsumeRequest())
+    {
+        select(*requested);
+        nrOpen = nrOpen || MenuPages::IsNeuralRendering(*requested);
+    }
+
     const float footerHeight = mainMenuFooterHeight > 0.0f ? mainMenuFooterHeight : 110.0f * menuResScale;
     const float bodyHeight =
         std::max(ImGui::GetContentRegionAvail().y - footerHeight - ImGui::GetStyle().ItemSpacing.y - 2.0f,
@@ -7713,7 +7771,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
 
         if (nrNodeOpen)
         {
-            for (int p = static_cast<int>(Page::NrStatus); p < static_cast<int>(MenuPages::kPageCount); p++)
+            for (int p = static_cast<int>(Page::NrF5Low); p < static_cast<int>(MenuPages::kPageCount); p++)
                 navItem(static_cast<Page>(p));
 
             ImGui::TreePop();
@@ -7784,6 +7842,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             section(RenderLoggingSettings, true);
             section(RenderApiAndTextureSettings, true);
             break;
+        case Page::NrF5Low:
         case Page::NrStatus:
         case Page::NrOptions:
         case Page::NrInput:

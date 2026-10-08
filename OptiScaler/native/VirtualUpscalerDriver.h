@@ -9,7 +9,7 @@
 // The call follows the real one (inputs/NVNGX_DLSS_Dx12.cpp, NVSDK_NGX_D3D12_EvaluateFeature and TryEvaluateOptiFeature):
 // DLSS-NR's EvaluateBeforeUpscale, currentFeature, UpscalerInputsDx12::UpscaleStart and UpscaleEnd (which feed frame
 // generation), Evaluate, then DLSS-NR's EvaluateAfterUpscale. It must run before frame generation presents, on the game's
-// queue: motion/NativeMotion_Dx12.cpp drives it from FGHooks::FGPresent when frame generation owns the swapchain.
+// queue: native/NativeDriverDx12.cpp drives it from FGHooks::FGPresent when frame generation owns the swapchain.
 //
 // Jitter is zero and render size equals output size: there is no upscaling, the backend runs as a temporal stabiliser on the
 // native-resolution picture.
@@ -18,6 +18,7 @@
 // backend it built in Config::Dx12Upscaler, which is also the backend it builds: the user's choice, FFX when there is none.
 
 #include "NativeProducer.h"
+#include "VirtualUpscalerHold.h"
 
 #include <d3d12.h>
 #include <dxgiformat.h>
@@ -31,6 +32,9 @@ enum class Upscaler;
 
 namespace native
 {
+
+// True when `feature` (State::currentFeature) is Optical F5Low's own virtual upscaler, not a game's.
+bool IsVirtualUpscalerFeature(const void* feature);
 
 class VirtualUpscalerDriver
 {
@@ -49,6 +53,10 @@ class VirtualUpscalerDriver
     // feature is destroyed once the GPU can no longer be using it. Nothing happens when there is none.
     void Release();
 
+    // The game is calling its own upscaler for now (VirtualUpscalerHold.h): the backend and frame generation's context
+    // stay, only currentFeature lets go of it. The next Run resumes, telling frame generation its input changed.
+    void Pause();
+
     bool Active() const { return _feature != nullptr; }
     const std::string& Error() const { return _error; }
     const std::string& BackendName() const { return _backendName; }
@@ -66,7 +74,8 @@ class VirtualUpscalerDriver
         bool operator==(const Key&) const = default;
     };
 
-    bool EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild);
+    // `realDepth`: this frame has the game's depth (not the all-far stand-in).
+    bool EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild, bool realDepth);
     bool CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend);
     void DropFeature(bool destroyFgContext);
     bool EnsureTexture(ID3D12Resource*& texture, Key& made, const Key& key, D3D12_RESOURCE_FLAGS flags,
@@ -80,6 +89,9 @@ class VirtualUpscalerDriver
     std::string _backendName;
     bool _failed = false;
     Key _failedKey;
+    bool _paused = false;
+    bool _featureRealDepth = false;   // the backend was built on a frame with the game's depth (its direction is known)
+    hold::RebuildSettle<Key> _settle; // a flip of the depth direction or HDR must hold before a rebuild
 
     ID3D12Resource* _output = nullptr; // rests in UNORDERED_ACCESS
     Key _outputKey;

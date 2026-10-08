@@ -21,6 +21,7 @@
 #include "DlssNr_ActiveColor.h"
 #include "DlssNr_Guides.h"
 #include "DlssNr_SeamClock.h"
+#include "DlssNr_GameScale.h"
 #include "DlssNr_TrimAnchors.h"
 #include "DlssNr_AutoTrimDefault.h"
 #include "DlssNr_ColourEncoding.h"
@@ -43,6 +44,7 @@
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
+#include "DlssNr_WatchedLists.h"
 #include "DlssNr_GpuTime.h"
 
 #include <atomic>
@@ -1650,10 +1652,15 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
         //
         // The Trim is the slider, or interpolated from the Trim anchors at this base white point when
         // there are any. See DlssNr_TrimAnchors.h.
-        const float baseWhitePoint = g_nr.gamePreExposure / g_nr.gameExposure;
+        //
+        // What the Trim multiplies follows the scale (DlssNr_GameScale.h), but the points stay keyed by the game's
+        // exposure, the scene's brightness, in both scales.
+        const float baseWhitePoint = DlssNrGameScale::WhiteBase(cfg.DlssNrGameExposureScale.value_or_default(),
+                                                                g_nr.gamePreExposure, g_nr.gameExposure);
+        const float anchorKey = DlssNrGameScale::AnchorKey(g_nr.gamePreExposure, g_nr.gameExposure);
         const auto anchors = DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default());
-        const float trim = DlssNrTrim::TrimForKey(baseWhitePoint, cfg.DlssNrWhitePointTrim.value_or_default(),
-                                                  anchors, cfg.DlssNrGameExposureTrimPreview.value_or_default());
+        const float trim = DlssNrTrim::TrimForKey(anchorKey, cfg.DlssNrWhitePointTrim.value_or_default(), anchors,
+                                                  cfg.DlssNrGameExposureTrimPreview.value_or_default());
 
         return std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
     }

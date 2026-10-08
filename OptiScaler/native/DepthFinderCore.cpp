@@ -2,6 +2,7 @@
 #include "DepthFinderCore.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 
 namespace native
@@ -10,7 +11,14 @@ namespace native
 namespace
 {
 thread_local int g_syntheticUpscalerDepth = 0;
+std::atomic<int64_t> g_lastGameUpscalerCallMs { 0 }; // steady clock, milliseconds; 0 never
+
+int64_t NowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
+} // namespace
 
 SyntheticUpscalerCallScope::SyntheticUpscalerCallScope()
 {
@@ -20,6 +28,20 @@ SyntheticUpscalerCallScope::SyntheticUpscalerCallScope()
 SyntheticUpscalerCallScope::~SyntheticUpscalerCallScope()
 {
     --g_syntheticUpscalerDepth;
+}
+
+void NoteGameUpscalerCall()
+{
+    if (g_syntheticUpscalerDepth > 0)
+        return;
+
+    g_lastGameUpscalerCallMs.store(std::max<int64_t>(NowMs(), 1), std::memory_order_relaxed);
+}
+
+bool GameUpscalerCalledRecently()
+{
+    const int64_t last = g_lastGameUpscalerCallMs.load(std::memory_order_relaxed);
+    return last != 0 && NowMs() - last < kGameUpscalerQuietMs;
 }
 
 void DepthFinderCore::Start(LogFn log)
@@ -40,6 +62,31 @@ void DepthFinderCore::NoteUpscalerCall()
                             std::memory_order_relaxed);
 }
 
+std::unique_lock<std::mutex> DepthFinderCore::LockForDraw()
+{
+    std::unique_lock lock(_mutex, std::try_to_lock);
+
+    if (lock.owns_lock())
+        return lock;
+
+    const auto start = std::chrono::steady_clock::now();
+    lock.lock();
+    const auto waited =
+        (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+            .count();
+
+    _drawLockWaits.fetch_add(1, std::memory_order_relaxed);
+    _drawLockWaitNs.fetch_add(waited, std::memory_order_relaxed);
+
+    uint64_t longest = _drawLockWaitMaxNs.load(std::memory_order_relaxed);
+
+    while (waited > longest && !_drawLockWaitMaxNs.compare_exchange_weak(longest, waited, std::memory_order_relaxed))
+    {
+    }
+
+    return lock;
+}
+
 void DepthFinderCore::AddDraw(DrawStats& s, uint64_t vertices, uint32_t drawcalls, bool indirect)
 {
     s.vertices += vertices;
@@ -55,7 +102,7 @@ void DepthFinderCore::OnDraw(uint64_t context, uint64_t vertices, uint32_t insta
 
     _counters.draws.fetch_add(1, std::memory_order_relaxed);
 
-    std::lock_guard lock(_mutex);
+    const auto lock = LockForDraw();
 
     const auto found = _contexts.find(context);
 
@@ -80,7 +127,7 @@ void DepthFinderCore::OnIndirect(uint64_t context, uint32_t maxCount)
 
     _counters.indirect.fetch_add(1, std::memory_order_relaxed);
 
-    std::lock_guard lock(_mutex);
+    const auto lock = LockForDraw();
 
     const auto found = _contexts.find(context);
 
@@ -99,7 +146,7 @@ void DepthFinderCore::OnViewport(uint64_t context, float width)
     if (!_active.load(std::memory_order_relaxed))
         return;
 
-    std::lock_guard lock(_mutex);
+    const auto lock = LockForDraw();
     _contexts[context].viewportWidth = width;
 }
 
@@ -475,6 +522,14 @@ void DepthFinderCore::LogCandidates(const std::vector<GenericDepthSelect::Candid
                     _counters.bindsUnknownDepth.load(), _counters.draws.load(), _counters.indirect.load(),
                     _counters.bundles.load(), bundleSame < 0 ? "unknown" : bundleSame ? "yes" : "no",
                     _counters.dispatches.load()));
+
+    const uint64_t draws = (uint64_t) _counters.draws.load();
+    Say(std::format(
+        "Depth finder:   draws that waited for the finder's lock since the last report: {} of {}, {:.2f} ms in all, "
+        "longest {:.1f} us",
+        _drawLockWaits.exchange(0), draws - _drawsAtLastReport, _drawLockWaitNs.exchange(0) / 1e6,
+        _drawLockWaitMaxNs.exchange(0) / 1e3));
+    _drawsAtLastReport = draws;
 
     const size_t shown = std::min<size_t>(sorted.size(), 8);
 

@@ -136,6 +136,7 @@ void Arm(Slot& slot, ID3D12GraphicsCommandList* cmd)
     slot.producer = cmd;
     ID3D12GraphicsCommandList* real = nullptr;
     if (Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**) &real)) slot.producer = real;
+    DlssNrWatchedLists::Add(slot.producer); // the submit/reset hooks must hear about this list
     slot.serial = ++serial;
     slot.ready = slot.done + 1;
     slot.done = slot.ready;
@@ -222,7 +223,12 @@ bool CaptureResidual(ID3D12GraphicsCommandList* cmd, ID3D12Resource* clean, ID3D
 
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
 {
+    // Nearly every reset is of a list NR never recorded on: no lock for those (DlssNr_WatchedLists.h)
+    const void* list = cmd;
+    if (!DlssNrWatchedLists::Any(1, &list)) return;
+
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    DlssNrWatchedLists::Remove(1, &list);
     if (g_gpuTime) g_gpuTime->ResetRecording(cmd);
     if (g_ngxTime) g_ngxTime->ResetRecording(cmd);
     // Reuse's coverage readbacks: a recording thrown away frees its slot, since no fence will ever be signalled for it.
@@ -264,7 +270,13 @@ std::string FinishedPictureStatus()
 
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
+    // Every submit in the process comes here, on any thread: only one with a list NR recorded on takes the lock NR
+    // holds while it records (DlssNr_WatchedLists.h)
+    const auto watched = reinterpret_cast<const void* const*>(lists);
+    if (!DlssNrWatchedLists::Any(count, watched)) return;
+
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    DlssNrWatchedLists::Remove(count, watched);
     if (g_gpuTime) g_gpuTime->Submitted(queue, count, lists);
     if (g_ngxTime) g_ngxTime->Submitted(queue, count, lists);
     // Reuse's coverage readbacks: a copy is safe to read once the list it was recorded on has been executed.

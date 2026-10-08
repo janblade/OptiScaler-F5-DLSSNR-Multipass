@@ -526,10 +526,19 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\DepthCopyDx11.h" />
     <ClInclude Include="native\Dx11FrameSource.h" />
     <ClInclude Include="native\VirtualUpscalerDriver.h" />
+    <ClInclude Include="native\NativeDriver.h" />
+    <ClInclude Include="native\NativeLowLatency.h" />
+    <ClInclude Include="native\NativeLowLatencyRule.h" />
+    <ClInclude Include="motion\OpticalFlow_Hlsl.h" />
+    <ClInclude Include="motion\TrustMask_Hlsl.h" />
+    <ClInclude Include="native\DepthCopyDx11_Hlsl.h" />
+    <ClInclude Include="native\F5LowShaderBytecode.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNr_WatchedLists.h" />
+    <ClInclude Include="native\VirtualUpscalerHold.h" />
     <ClInclude Include="motion\OpticalFlow_Dx12.h" />
     <ClInclude Include="motion\TrustMask_Dx12.h" />
-    <ClInclude Include="motion\NativeMotion_Dx12.h" />
-    <ClInclude Include="motion\NativeMotionDx11.h" />
+    <ClInclude Include="native\NativeDriverDx12.h" />
+    <ClInclude Include="native\NativeDriverDx11.h" />
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h" />
     <ClInclude Include="resource_tracking\GenericDepth_Dx11.h" />
     <ClInclude Include="resource_tracking\GenericDepth_Select.h" />
@@ -801,8 +810,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="nvapi\NvApiHooks.cpp" />
     <ClCompile Include="nvapi\NvApiTypes.cpp" />
     <ClCompile Include="hooks\Reflex_Hooks.cpp" />
-    <ClCompile Include="motion\NativeMotion_Dx12.cpp" />
-    <ClCompile Include="motion\NativeMotionDx11.cpp" />
+    <ClCompile Include="native\NativeDriverDx12.cpp" />
+    <ClCompile Include="native\NativeDriverDx11.cpp" />
     <ClCompile Include="motion\TrustMask_Dx12.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
@@ -836,6 +845,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </ClCompile>
     <ClCompile Include="native\Dx11FrameSource.cpp" />
     <ClCompile Include="native\VirtualUpscalerDriver.cpp" />
+    <ClCompile Include="native\NativeDriver.cpp" />
+    <ClCompile Include="native\NativeLowLatency.cpp" />
     <ClCompile Include="resource_tracking\GenericDepth_Dx12.cpp" />
     <ClCompile Include="resource_tracking\GenericDepth_Dx11.cpp" />
     <ClCompile Include="resource_tracking\ResTrack_dx12.cpp" />

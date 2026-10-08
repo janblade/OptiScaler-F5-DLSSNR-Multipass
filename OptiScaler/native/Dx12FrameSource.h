@@ -14,9 +14,11 @@ class Dx12FrameSource : public IFrameSource
   public:
     ~Dx12FrameSource() override { Release(); }
 
-    // The present being processed: the swap chain whose back buffer is the picture, and its queue. Call before Acquire().
-    void SetPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue);
-    ID3D12CommandQueue* Queue() const { return _queue; }
+    // The present being processed: the swap chain whose back buffer is the picture, and its queue and device. Call
+    // before Acquire().
+    void SetPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device);
+    ID3D12Device* Device() const override { return _device; }
+    ID3D12CommandQueue* Queue() const override { return _queue; }
 
     Api GetApi() const override { return Api::D3D12; }
     AcquireStatus Acquire(FrameInput& input) override;
@@ -28,6 +30,7 @@ class Dx12FrameSource : public IFrameSource
 
     IDXGISwapChain* _swapChain = nullptr;
     ID3D12CommandQueue* _queue = nullptr;
+    ID3D12Device* _device = nullptr;
     ID3D12Resource* _backBuffer = nullptr; // held between Acquire and Return
     uint64_t _frame = 0;
 };

@@ -31,7 +31,7 @@ void BeginFrameNow(Backend& gpu, const ::Config& cfg, unsigned int width, unsign
         DlssNrTrim::Parse(cfg.DlssNrAutoExposureTrimAnchors.value_or_default()),
         cfg.DlssNrAutoExposureTrimPreview.value_or_default());
     const float gameTrim = DlssNrTrim::TrimForKey(
-        situation.source == 1 ? baseWhitePoint : 0.0f, cfg.DlssNrWhitePointTrim.value_or_default(),
+        situation.source == 1 ? situation.anchorKey : 0.0f, cfg.DlssNrWhitePointTrim.value_or_default(),
         DlssNrTrim::Parse(cfg.DlssNrGameExposureTrimAnchors.value_or_default()),
         cfg.DlssNrGameExposureTrimPreview.value_or_default());
     const StartPoints start { EvForTrim(autoTrim), EvForTrim(gameTrim, kGameExposureNeutralTrim) };
@@ -153,6 +153,7 @@ ExposureCalibrationStatus ExposureCalibration()
     s.aborted = Cal::StopText(sweep);
     s.currentEv = Cal::Tidy(sweep.CurrentEv());
     s.baseWhitePoint = sweep.FrozenBase();
+    s.anchorKey = run.source == 1 ? run.anchorKey : s.baseWhitePoint;
     s.source = run.source;
 
     if (s.finished)

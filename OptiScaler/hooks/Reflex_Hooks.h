@@ -1,5 +1,7 @@
 #pragma once
 #include <d3d12.h>
+#include <atomic>
+#include <mutex>
 #include <nvapi/NvApiTypes.h>
 
 #include "Hook_Utils.h"
@@ -34,6 +36,14 @@ class ReflexHooks
     inline static HANDLE _lastVkSleepDev = nullptr;
 
     inline static std::thread::id _lastSetSleepThread {};
+
+    // The game's own Reflex calls versus OptiScaler's (ownSetSleepMode and friends, Optical F5Low's low latency): ours
+    // go through the same wrappers, so they take the same routing, but they are not "the game sends markers".
+    inline static thread_local bool _ownCall = false;
+    inline static std::atomic<bool> _gameCalledReflex = false;
+    inline static std::atomic<bool> _gameCalledSetSleepMode = false;
+    // SetSleepMode and the stored device: the game's call and ours never interleave, and a released device is dropped
+    inline static std::recursive_mutex _sleepModeMutex;
 
     // D3D
     inline static decltype(&NvAPI_D3D_SetSleepMode) o_NvAPI_D3D_SetSleepMode = nullptr;
@@ -80,6 +90,26 @@ class ReflexHooks
     static void* getHookedReflex(unsigned int InterfaceId);
     static bool updateTimingData();
     static bool gameIsSendingMarkers();
+
+    // Calls OptiScaler makes itself (native/NativeLowLatency.cpp). Call ensureTable first. They run the hooked
+    // wrappers, so the fps cap, XeFG's routing and fakenvapi's modes apply as for the game's calls, without counting as
+    // the game's.
+    static bool ensureTable(PFN_NvApi_QueryInterface queryInterface);
+    static NvAPI_Status ownSetSleepMode(IUnknown* pDev, NV_SET_SLEEP_MODE_PARAMS* pParams);
+    static NvAPI_Status ownSleep(IUnknown* pDev);
+    static NvAPI_Status ownSetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER_PARAMS* pParams);
+    static NvAPI_Status ownGetLatency(IUnknown* pDev, NV_LATENCY_RESULT_PARAMS* pParams);
+    // The device is gone, or our Reflex mode is off: the fps cap no longer goes through it (setFPSLimit, update)
+    static void forgetSleepDevice(IUnknown* pDev);
+
+    // A Reflex call made by the game: not one of ours, and not from the Streamline OptiScaler loaded for its own DLSS
+    // frame generation (`returnAddress`: the hooked function's caller)
+    static bool isGameCall(void* returnAddress);
+
+    // The game itself has called Reflex (SetSleepMode, Sleep, a marker or an async marker), ever; and SetSleepMode
+    // in particular (a game that only sends markers has Reflex off).
+    static bool gameCalledReflex() { return _gameCalledReflex.load(std::memory_order_relaxed); }
+    static bool gameCalledSetSleepMode() { return _gameCalledSetSleepMode.load(std::memory_order_relaxed); }
 
     // For updating information about Reflex hooks
     static void update(bool optiFg_FgState, bool isVulkan);

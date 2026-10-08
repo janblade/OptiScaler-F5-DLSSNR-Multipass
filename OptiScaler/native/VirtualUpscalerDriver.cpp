@@ -4,6 +4,7 @@
 
 #include "DepthFinderCore.h"
 
+#include <atomic>
 #include <NVNGX_Parameter.h>
 #include <State.h>
 #include <Config.h>
@@ -18,6 +19,9 @@ namespace native
 
 namespace
 {
+// The feature the virtual upscaler is running now, for IsVirtualUpscalerFeature (read by the menu thread).
+std::atomic<const void*> g_virtualFeature { nullptr };
+
 // Our feature's handle id: never in the real NGX handle tables (HandleToFeature, Dx12Contexts), so no game call finds it. It is
 // in State::changeBackend, so the menu's backend switch reaches it like any other feature.
 constexpr UINT kVirtualHandleId = 0x4E524631; // 'NRF1'
@@ -102,6 +106,8 @@ Upscaler WantedBackend()
 
 VirtualUpscalerDriver::VirtualUpscalerDriver() = default;
 
+bool IsVirtualUpscalerFeature(const void* feature) { return feature != nullptr && g_virtualFeature.load() == feature; }
+
 VirtualUpscalerDriver::~VirtualUpscalerDriver()
 {
     Release();
@@ -135,6 +141,9 @@ void VirtualUpscalerDriver::DropFeature(bool destroyFgContext)
     if (state.currentFeature == _feature.get())
         state.currentFeature = nullptr;
 
+    if (g_virtualFeature.load() == _feature.get())
+        g_virtualFeature = nullptr;
+
     Util::DelayedDestroy(std::move(_feature));
 }
 
@@ -143,10 +152,27 @@ void VirtualUpscalerDriver::Release()
     if (_feature == nullptr)
         return;
 
+    _paused = false;
+
     LOG_INFO("Virtual upscaler: releasing the {} backend", _backendName);
     DropFeature(true);
     State::Instance().changeBackend.erase(kVirtualHandleId);
     _backendName.clear();
+}
+
+void VirtualUpscalerDriver::Pause()
+{
+    if (_feature == nullptr || _paused)
+        return;
+
+    _paused = true;
+
+    auto& state = State::Instance();
+
+    if (state.currentFeature == _feature.get())
+        state.currentFeature = nullptr;
+
+    LOG_INFO("Virtual upscaler: paused, the game is calling its own upscaler (the {} backend stays)", _backendName);
 }
 
 bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend)
@@ -190,13 +216,27 @@ bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const 
     }
 
     _feature = std::move(feature);
+    g_virtualFeature = _feature.get();
     return true;
 }
 
-bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild)
+bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild, bool realDepth)
 {
-    if (_feature != nullptr && !rebuild && key == _featureKey)
-        return true;
+    if (_feature != nullptr && !rebuild)
+    {
+        const bool flagsOnly = key.width == _featureKey.width && key.height == _featureKey.height &&
+                               key.format == _featureKey.format && key.backend == _featureKey.backend;
+
+        // Built before the game's depth came, the direction was a guess: the first real depth corrects it at once
+        if (!_settle.Now(_featureKey, key, flagsOnly, !_featureRealDepth && realDepth))
+        {
+            // A guess that was right: from now on a flip is a real one, and waits
+            if (realDepth && key == _featureKey)
+                _featureRealDepth = true;
+
+            return true;
+        }
+    }
 
     // Tried and failed for exactly this: not again every frame.
     if (_feature == nullptr && !rebuild && _failed && key == _failedKey)
@@ -220,6 +260,7 @@ bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const 
         return false;
     }
 
+    _featureRealDepth = realDepth;
     _failed = false;
     auto& state = State::Instance();
 
@@ -377,7 +418,7 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         rebuild = true;
     }
 
-    if (!EnsureFeature(cmd, key, rebuild))
+    if (!EnsureFeature(cmd, key, rebuild, frame.depth != nullptr))
         return false;
 
     const bool copyIn = colorDesc.Format != key.format;
@@ -473,6 +514,21 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     Transition(cmd, frame.motion, inMotion, fgMotion);
     Transition(cmd, depth, inDepth, fgDepth);
     Transition(cmd, _output, inOutput, fgOutput);
+
+    // Back from a pause (the game called its own upscaler for a moment): frame generation's input changed, as when a
+    // game switches features, which it takes as a short pause, not a new context
+    if (_paused)
+    {
+        _paused = false;
+
+        if (state.currentFG != nullptr && state.activeFgInput == FGInput::Upscaler)
+        {
+            state.fgChanged = true;
+            state.clearCapturedHudlesses = true;
+        }
+
+        LOG_INFO("Virtual upscaler: resumed with the {} backend", _backendName);
+    }
 
     state.currentFeature = _feature.get();
 

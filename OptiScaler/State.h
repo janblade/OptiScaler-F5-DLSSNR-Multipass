@@ -221,6 +221,9 @@ class State
     std::optional<std::wstring> NVNGX_DLSSD_Path;
     std::optional<std::wstring> NVNGX_DLSSG_Path;
 
+    // The game itself called slInit (StreamlineHooks): a Streamline of its own, which may run its Reflex
+    bool gameCalledSlInit = false;
+
     // optis dlls
     HMODULE optiSlInterposer = nullptr;
     HMODULE optiSlCommon = nullptr;

@@ -438,6 +438,18 @@ int main()
         CHECK(core.GameCallsUpscaler());
     }
 
+    // The finder-free signal the menu and the frame sources ask: never set by our own synthetic call, set by a game's.
+    {
+        CHECK(!GameUpscalerCalledRecently());
+        {
+            SyntheticUpscalerCallScope scope;
+            NoteGameUpscalerCall();
+        }
+        CHECK(!GameUpscalerCalledRecently());
+        NoteGameUpscalerCall();
+        CHECK(GameUpscalerCalledRecently());
+    }
+
     // Lists recorded on several threads at once give the same candidates, pick, copy requests and log as the same events made on
     // one thread.
     {

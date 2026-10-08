@@ -13,7 +13,8 @@
 #include <with_dx12/with_dx12.h>
 
 #include <menu/menu_overlay_dx.h>
-#include <motion/NativeMotion_Dx12.h>
+#include <native/NativeDriverDx12.h>
+#include <native/NativeLowLatency.h>
 
 #include <misc/FrameLimit.h>
 
@@ -562,11 +563,29 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     LOG_DEBUG("Calling original present");
 
+    // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present
+    IUnknown* lowLatencyDevice = nullptr;
+
+    // (A D3D11 game behind OptiScaler's D3D12 bridge is covered in Dx11wDx12SC::Present, the game's own present.)
+    if (willPresent && State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+    {
+        if (isD3D11)
+            lowLatencyDevice = device;
+        else
+            lowLatencyDevice = device12;
+
+        if (lowLatencyDevice != nullptr)
+            native::lowlatency::OnPresentBegin(lowLatencyDevice);
+    }
+
     // swapchain present
     if (pPresentParameters == nullptr)
         presentResult = pSwapChain->Present(SyncInterval, Flags);
     else
         presentResult = ((IDXGISwapChain1*) pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
+
+    if (lowLatencyDevice != nullptr)
+        native::lowlatency::OnPresentEnd(lowLatencyDevice);
 
     if (presentResult == S_OK)
     {

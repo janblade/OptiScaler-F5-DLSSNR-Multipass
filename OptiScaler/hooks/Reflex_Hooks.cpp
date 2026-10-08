@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Reflex_Hooks.h"
 #include <Config.h>
+#include <Util.h>
 
 #include <nvapi/fakenvapi.h>
 
@@ -11,6 +12,9 @@
 
 #include <math.h>
 #include <imgui/ImGuiNotify.hpp>
+
+#include <intrin.h>
+#include <unordered_map>
 
 static inline uint64_t _lastFrameId[20] = { 0 };
 static inline IUnknown* _lastDev[20] = { 0 };
@@ -24,6 +28,25 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+    std::scoped_lock lock(_sleepModeMutex);
+
+    if (isGameCall(_ReturnAddress()))
+    {
+        _gameCalledReflex = true;
+        _gameCalledSetSleepMode = true;
+    }
+
+    // Our own calls (Optical F5Low's low latency) only keep the GPU queue short. OptiScaler's own limiter keeps the fps
+    // cap (FrameLimit): stored here they would hand the cap to Reflex (update's reflexLimitsFps, setFPSLimit), which
+    // upstream warns costs performance with FSR frame generation and does not halve it for XeFG.
+    if (_ownCall)
+    {
+        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+            return nvapi_calls::NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+
+        return o_NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+    }
+
     // Store for later so we can adjust the fps whenever we want
     memcpy(&_lastSleepParams, pSetSleepModeParams, sizeof(NV_SET_SLEEP_MODE_PARAMS));
     _lastSleepDev = pDev;
@@ -45,6 +68,9 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_Sleep(IUnknown* pDev)
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+
+    if (isGameCall(_ReturnAddress()))
+        _gameCalledReflex = true;
 
     static bool skip = false;
     if (State::Instance().activeFgOutput == FGOutput::DLSSG &&
@@ -101,6 +127,9 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetLatencyMarker(IUnknown* pDev,
 
     _updatesWithoutMarker = 0;
 
+    if (isGameCall(_ReturnAddress()))
+        _gameCalledReflex = true;
+
     // LOG_DEBUG("frameID: {}, markerType: {}", pSetLatencyMarkerParams->frameID,
     //           magic_enum::enum_name(pSetLatencyMarkerParams->markerType));
 
@@ -134,7 +163,8 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetLatencyMarker(IUnknown* pDev,
 
     static bool skip[20] = {};
 
-    if (pSetLatencyMarkerParams->markerType == SIMULATION_START)
+    // Our own markers (Optical F5Low's low latency) are not the game sending markers
+    if (pSetLatencyMarkerParams->markerType == SIMULATION_START && !_ownCall)
         _lastMarkerFrame = State::Instance().fgLastFrame;
 
     if (State::Instance().activeFgOutput == FGOutput::DLSSG && StreamlineProxy::IsD3D12Inited() &&
@@ -277,6 +307,9 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D12_SetAsyncFrameMarker(ID3D12CommandQueue* 
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+
+    if (isGameCall(_ReturnAddress()))
+        _gameCalledReflex = true;
 
     _lastAsyncMarkerFrameId = pSetAsyncFrameMarkerParams->frameID;
 
@@ -522,6 +555,8 @@ bool ReflexHooks::updateTimingData()
         return true;
     };
 
+    std::scoped_lock lock(_sleepModeMutex);
+
     if (_lastSleepDev && o_NvAPI_D3D_GetLatency)
     {
         // Not calling free on this but it's static so hopefully fine
@@ -693,6 +728,8 @@ void ReflexHooks::setFPSLimit(float fps)
     else
         _minimumIntervalUs = static_cast<uint32_t>(std::round(1'000'000 / fps));
 
+    std::scoped_lock lock(_sleepModeMutex);
+
     if (_lastSleepDev != nullptr)
     {
         NV_SET_SLEEP_MODE_PARAMS temp {};
@@ -718,4 +755,99 @@ bool ReflexHooks::gameIsSendingMarkers()
 {
     return _lastMarkerFrame != 0 && ((State::Instance().fgLastFrame < _lastMarkerFrame) ||
                                      (State::Instance().fgLastFrame - _lastMarkerFrame) < 5);
+}
+
+bool ReflexHooks::ensureTable(PFN_NvApi_QueryInterface queryInterface)
+{
+    if (!_inited && queryInterface != nullptr)
+        hookReflex(queryInterface);
+
+    return _inited;
+}
+
+namespace
+{
+struct OwnCallScope
+{
+    explicit OwnCallScope(bool& flag) : _flag(flag) { _flag = true; }
+    ~OwnCallScope() { _flag = false; }
+    bool& _flag;
+};
+} // namespace
+
+NvAPI_Status ReflexHooks::ownSetSleepMode(IUnknown* pDev, NV_SET_SLEEP_MODE_PARAMS* pParams)
+{
+    std::scoped_lock lock(_sleepModeMutex);
+
+    // The game's own SetSleepMode is the last word, even one that came in just before ours
+    if (_gameCalledSetSleepMode)
+        return NVAPI_OK;
+
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_SetSleepMode(pDev, pParams);
+}
+
+// Streamline's own modules (sl.interposer, sl.reflex, sl.pcl, sl.dlss_g ...) and the DLSS frame generation module
+static bool IsStreamlineModule(HMODULE module)
+{
+    if (module == nullptr)
+        return false;
+
+    static std::mutex cacheMutex;
+    static std::unordered_map<HMODULE, bool> cache;
+
+    std::scoped_lock lock(cacheMutex);
+
+    if (auto it = cache.find(module); it != cache.end())
+        return it->second;
+
+    wchar_t path[MAX_PATH] {};
+    GetModuleFileNameW(module, path, MAX_PATH);
+
+    auto name = std::filesystem::path(path).filename().wstring();
+    std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+
+    const bool streamline = name.starts_with(L"sl.") || name == L"nvngx_dlssg.dll";
+    cache[module] = streamline;
+    return streamline;
+}
+
+bool ReflexHooks::isGameCall(void* returnAddress)
+{
+    if (_ownCall)
+        return false;
+
+    // A game that started Streamline itself may run its own Reflex through it (NBA 2K27): Streamline's calls are its
+    if (State::Instance().gameCalledSlInit)
+        return true;
+
+    // Otherwise Streamline is the one OptiScaler loaded for its own DLSS frame generation output: its Reflex calls are
+    // OptiScaler's, not the game's
+    return !IsStreamlineModule(Util::GetCallerModule(returnAddress));
+}
+
+void ReflexHooks::forgetSleepDevice(IUnknown* pDev)
+{
+    std::scoped_lock lock(_sleepModeMutex);
+
+    if (pDev != nullptr && _lastSleepDev == pDev)
+        _lastSleepDev = nullptr;
+}
+
+NvAPI_Status ReflexHooks::ownSleep(IUnknown* pDev)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_Sleep(pDev);
+}
+
+NvAPI_Status ReflexHooks::ownSetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER_PARAMS* pParams)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_SetLatencyMarker(pDev, pParams);
+}
+
+NvAPI_Status ReflexHooks::ownGetLatency(IUnknown* pDev, NV_LATENCY_RESULT_PARAMS* pParams)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_D3D_GetLatency(pDev, pParams);
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-// The native input producer's D3D11 driver: the Story B counterpart of motion/NativeMotion_Dx12.h. Runs native::NativeProducer
+// The native input producer's D3D11 driver: the Story B counterpart of native/NativeDriverDx12.h. Runs native::NativeProducer
 // (optical flow, trust mask, DLSS-NR) on a private D3D12 device paired with the game's D3D11 device, through
 // native::Dx11FrameSource (the shared-texture transport) and resource_tracking/GenericDepth_Dx11.h (the depth finder).
 //
@@ -27,12 +27,15 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device);
 ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device);
 
 // ImGui: one status line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
-// Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp), while NativeMotion
+// Call inside the menu, on the Optical F5Low page (dlssnr/DlssNr_Menu.cpp), while NativeMotion
 // is on.
 void DrawStatus();
 
-// ImGui: with NativeDebugView, the frame count and the trust mask's state. The keys themselves are set by the menu's
-// mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
+// NR is running on the finished picture (the menu header's "Optical F5Low: NR on the finished picture").
+bool NrOnlyRunning();
+
+// ImGui: with NativeDebugView, the flow tuning sliders, the frame count and the trust mask's state. The keys themselves
+// are set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();
 
 } // namespace NativeMotionDx11

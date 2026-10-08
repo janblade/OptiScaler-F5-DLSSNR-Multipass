@@ -58,14 +58,15 @@ bool InstallFailed();
 // with an upscaler of its own needs no depth finder, so it stands down for good.
 void NoteUpscalerCall();
 
-// The game has called an upscaler within the last couple of seconds (valid when the finder is installed; false otherwise).
+// The game has called an upscaler within the last couple of seconds, whether or not the finder is installed
+// (native::GameUpscalerCalledRecently, or the installed finder's own present-counted window).
 bool GameCallsUpscaler();
 
 // The warm-up is over and no upscaler call was seen: the finder is allowed to pick and report.
 bool Armed();
 
 // ImGui: the menu's one depth line (off, needs a restart, could not start, stood down, watching, picked). No checkbox.
-// Call inside the menu, under the shared "NR without a game upscaler" tree (dlssnr/DlssNr_Menu.cpp).
+// Call inside the menu, on the Optical F5Low page (dlssnr/DlssNr_Menu.cpp).
 void DrawStatus();
 
 // ImGui: the "Use the game's depth" and "Show the picked depth here" checkboxes, and with [DlssNr] NativeDepthOverlay

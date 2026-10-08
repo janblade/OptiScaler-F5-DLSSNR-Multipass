@@ -41,6 +41,14 @@ class SyntheticUpscalerCallScope
     SyntheticUpscalerCallScope& operator=(const SyntheticUpscalerCallScope&) = delete;
 };
 
+// Whether the game itself calls an upscaler, known whether or not a depth finder is installed: the menu's native modes
+// and the frame sources ask it. Every upscaler call notes itself (the adapters' NoteUpscalerCall, before their own
+// installed check); our synthetic call inside a SyntheticUpscalerCallScope does not. A call counts for
+// kGameUpscalerQuietMs after it, about the finder's quiet window at 60 frames a second.
+constexpr int64_t kGameUpscalerQuietMs = 2000;
+void NoteGameUpscalerCall();
+bool GameUpscalerCalledRecently();
+
 // A depth buffer as the adapter identifies it. `id` is stable for the buffer's life (a pointer will do).
 struct DepthBuffer
 {
@@ -186,7 +194,15 @@ class DepthFinderCore
             _log(line);
     }
 
+    // The lock for a per-draw hook (OnDraw, OnIndirect, OnViewport), measuring how often and how long a draw waited for
+    // it: reported with the candidates, to decide whether the draw path needs to go lock-free.
+    std::unique_lock<std::mutex> LockForDraw();
+
     mutable std::mutex _mutex;
+    std::atomic<uint64_t> _drawLockWaits { 0 };     // draws that found the lock taken, since the last report
+    std::atomic<uint64_t> _drawLockWaitNs { 0 };    // their total wait
+    std::atomic<uint64_t> _drawLockWaitMaxNs { 0 }; // the longest one
+    uint64_t _drawsAtLastReport = 0;
     LogFn _log;
     HookCounters _counters;
 

@@ -7,6 +7,7 @@
 #include <proxies/KernelBase_Proxy.h>
 
 #include <resource_tracking/GenericDepth_Dx11.h>
+#include <native/NativeLowLatency.h>
 
 #include <wrapped/wrapped_swapchain.h>
 
@@ -48,6 +49,7 @@ static ULONG hkD3D11DeviceRelease(IUnknown* device)
         {
             LOG_DEBUG("Set State::Instance().currentD3D11Device = nullptr, was: {:X}", (size_t) device);
             State::Instance().currentD3D11Device = nullptr;
+            native::lowlatency::OnDeviceReleased(device);
         }
     }
 

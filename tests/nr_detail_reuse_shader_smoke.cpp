@@ -366,6 +366,25 @@ try
             for (unsigned x = 0; x < W; ++x)
                 ok = ok && Near3(out.at(x, y), withDetail(grey, x, y));
         expect(ok, "History distrust: off (0), t5 is not read even when it holds full distrust");
+
+        // A 1x1 distrust, as the scene-cut detector gives on DLSS-NR's game input (DlssNr_SceneCut.inl): 1 on a cut
+        // frame drops every moved detail, 0 changes nothing.
+        c.HistoryDistrust = 1;
+        const auto cut = Fill([](unsigned, unsigned) { return Grey(1.0f); }, 1, 1);
+        out = gpu.Run(c, { grey, detail, savedColourDepth, still, depth, cut });
+        bool allDropped = true;
+        for (unsigned y = 0; y < H; ++y)
+            for (unsigned x = 0; x < W; ++x)
+                allDropped = allDropped && Near3(out.at(x, y), Grey(0.5f));
+        expect(allDropped, "History distrust 1x1 = 1 (a scene cut): every moved detail dropped");
+
+        const auto noCut = Fill([](unsigned, unsigned) { return Grey(0.0f); }, 1, 1);
+        out = gpu.Run(c, { grey, detail, savedColourDepth, still, depth, noCut });
+        ok = true;
+        for (unsigned y = 0; y < H; ++y)
+            for (unsigned x = 0; x < W; ++x)
+                ok = ok && Near3(out.at(x, y), withDetail(grey, x, y));
+        expect(ok, "History distrust 1x1 = 0 (no cut): input + saved detail, exactly");
         gpu.newer = false;
     }
 

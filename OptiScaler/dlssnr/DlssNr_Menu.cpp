@@ -1125,6 +1125,48 @@ static bool RenderDetailReuseToggle(Config* config)
     return detailReuse;
 }
 
+// Scene cuts the game does not flag (shaders/dlssnr/DlssNr_SceneCut.inl), on the NR Options page. The detector runs from
+// SceneCut=1, where it only counts; the checkbox is 2, where it also acts. 0 (nothing runs) is set in the ini.
+static void RenderSceneCutToggle(Config* config)
+{
+    if (DlssNr::IsRunningVk())
+    {
+        ImGui::TextDisabled("Scene cuts the game does not flag: D3D12 games only");
+        return;
+    }
+
+    const uint32_t setting = config->DlssNrSceneCut.value_or_default();
+    bool act = setting >= 2;
+
+    ImGui::BeginDisabled(setting == 0);
+    if (ImGui::Checkbox("Reset NR on scene cuts the game does not flag (experimental)", &act))
+        config->DlssNrSceneCut = act ? 2u : 1u;
+    ImGui::EndDisabled();
+
+    HelpMarker("Finds hard cuts in the picture (a camera cut, a new scene) on the frame they happen, by comparing how "
+               "bright each of nine areas of the picture is with the last frame. Fades, exposure changes and fast "
+               "pans are not cuts.\nMost games tell NR about their cuts. In one that does not, the old scene fades "
+               "out of NR's picture over several frames. With this on, NR starts over a few frames after such a cut, "
+               "and Reuse detail between frames drops the moved detail on the cut frame itself.\nOff, the cuts are "
+               "only counted below, which shows whether this game needs it. D3D12 games; not with Optical F5Low, "
+               "which finds its own cuts. SceneCut=0 in OptiScaler.ini stops the counting too.");
+
+    const DlssNr::SceneCutInfo status = DlssNr::SceneCutStatus();
+
+    if (setting == 0)
+        ImGui::TextDisabled("Scene cuts: off (SceneCut=0)");
+    else if (status.failed)
+        ImGui::TextDisabled("Scene cuts: the detector could not start (see the log)");
+    else if (status.found == 0)
+        ImGui::TextDisabled(status.running ? "Scene cuts: none found yet" : "Scene cuts: not running on this input");
+    else if (act)
+        ImGui::TextDisabled("Scene cuts: %llu found, %llu flagged by the game, %llu reset by NR", status.found,
+                            status.flagged, status.resets);
+    else
+        ImGui::TextDisabled("Scene cuts: %llu found, %llu flagged by the game, %llu not", status.found, status.flagged,
+                            status.silent);
+}
+
 // Optical F5Low's own Reflex calls (native/NativeLowLatency.h): the switch, the method in use and, where the driver
 // reports it, the measured latency. Never touches the fakenvapi settings; it only points to them.
 static void RenderLowLatencySection(Config* config)
@@ -2302,6 +2344,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
             ImGui::TreePop();
         }
     }
+    RenderSceneCutToggle(config);
     if (precisionChoice > 0 && DlssNr::IsRunningVk())
     {
         // The hybrid rewrites the model's kernels through NvAPI's D3D12 entry points; on Vulkan the model runs

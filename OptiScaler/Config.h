@@ -305,6 +305,11 @@ class Config
     // pause, so that is the top of the range. (DlssNrDetailReuse::MotionGuard; the default is from in-game
     // measurements: a Witcher 3 run measured 3% while calm and 21% while running.)
     CustomOptional<float> DlssNrDetailReuseMaxDropped { 10.0f };
+    // Scene cuts the game does not flag (dlssnr/DlssNrSceneCut.h, shaders/dlssnr/DlssNr_SceneCut.inl), D3D12 game input:
+    // 0 off, 1 found and counted only (log, menu; the picture is untouched), 2 also acted on (Reuse detail drops the
+    // moved detail on the cut frame, and the model resets when the answer arrives, a few frames later). 1 by default
+    // until in-game counts show how often games leave cuts unflagged and that nothing else reads as one.
+    CustomOptional<uint32_t> DlssNrSceneCut { 1 };
     CustomOptional<bool> DlssNrResidualFgApproxCamera { false }; // forced off, as DlssNrResidualFg
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.

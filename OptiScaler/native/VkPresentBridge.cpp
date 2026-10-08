@@ -34,8 +34,15 @@ namespace
 // The structure types of VK_EXT_full_screen_exclusive: the game owns the exclusive mode of the surface it passes, which is
 // not the one the picture ends up on.
 constexpr int32_t kFullScreenExclusiveInfo = 1000255000;
-constexpr int32_t kFullScreenExclusiveWin32Info = 1000255001;
-constexpr int32_t kFullScreenExclusiveCaps = 1000255002;
+constexpr int32_t kFullScreenExclusiveApplicationControlled = 3;
+
+// VkSurfaceFullScreenExclusiveInfoEXT, without the Win32 platform header.
+struct FullScreenExclusiveInfo
+{
+    int32_t sType;
+    const void* pNext;
+    int32_t fullScreenExclusive;
+};
 
 struct Bridge
 {
@@ -70,17 +77,13 @@ void LogOnce(const std::string& text)
     }
 }
 
-bool HasFullScreenExclusive(const void* chain)
+// VkSurfaceFullScreenExclusiveInfoEXT's mode is APPLICATION_CONTROLLED: the game takes exclusive full screen itself
+// (vkAcquireFullScreenExclusiveModeEXT). DEFAULT, ALLOWED and DISALLOWED only tell the driver what it may do, and many
+// games chain the structure with one of those (Detroit: Become Human does).
+bool GameControlsFullScreen(const void* chain)
 {
-    for (auto* header = static_cast<const VkBaseInStructure*>(chain); header != nullptr; header = header->pNext)
-    {
-        const int32_t type = (int32_t) header->sType;
-
-        if (type == kFullScreenExclusiveInfo || type == kFullScreenExclusiveWin32Info || type == kFullScreenExclusiveCaps)
-            return true;
-    }
-
-    return false;
+    int32_t* mode = FullScreenExclusiveMode(chain);
+    return mode != nullptr && *mode == kFullScreenExclusiveApplicationControlled;
 }
 
 bool IsBridgedSwapchain(VkSwapchainKHR swapchain)
@@ -128,7 +131,7 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
         return false;
     }
 
-    if (HasFullScreenExclusive(in.pNext))
+    if (GameControlsFullScreen(in.pNext))
     {
         why = "the game controls exclusive full screen (VK_EXT_full_screen_exclusive), which the bridge cannot carry";
         return false;
@@ -298,6 +301,17 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
 }
 
 } // namespace
+
+int32_t* FullScreenExclusiveMode(const void* chain)
+{
+    for (auto* header = static_cast<const VkBaseInStructure*>(chain); header != nullptr; header = header->pNext)
+    {
+        if ((int32_t) header->sType == kFullScreenExclusiveInfo)
+            return &reinterpret_cast<FullScreenExclusiveInfo*>(const_cast<VkBaseInStructure*>(header))->fullScreenExclusive;
+    }
+
+    return nullptr;
+}
 
 void NoteSurface(VkSurfaceKHR surface, HWND window)
 {

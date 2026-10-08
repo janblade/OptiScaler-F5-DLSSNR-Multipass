@@ -712,11 +712,21 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         }
     }
 
+    // On the hidden surface the swapchain never takes the screen; the game's own value is put back after the call.
+    int32_t* fullScreenMode = bridged ? VkPresentBridge::FullScreenExclusiveMode(localCreateInfo.pNext) : nullptr;
+    const int32_t gameFullScreenMode = fullScreenMode != nullptr ? *fullScreenMode : 0;
+
+    if (fullScreenMode != nullptr)
+        *fullScreenMode = VkPresentBridge::kFullScreenExclusiveDisallowed;
+
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
         result = o_CreateSwapchainKHR(device, pCreateInfo != nullptr ? &localCreateInfo : nullptr, pAllocator,
                                       pSwapchain);
     }
+
+    if (fullScreenMode != nullptr)
+        *fullScreenMode = gameFullScreenMode;
 
     if (bridged)
     {

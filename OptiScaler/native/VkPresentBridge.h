@@ -21,6 +21,12 @@
 namespace VkPresentBridge
 {
 
+// The fullScreenExclusive mode of a VkSurfaceFullScreenExclusiveInfoEXT in a create info's chain, or null. The swapchain
+// made on the hidden surface is asked for DISALLOWED through it (and the game's value put back after the call): the hidden
+// window must never take the screen, and the D3D12 swapchain on the real window handles full screen as for a D3D12 game.
+int32_t* FullScreenExclusiveMode(const void* chain);
+inline constexpr int32_t kFullScreenExclusiveDisallowed = 2;
+
 // vkCreateWin32SurfaceKHR / vkDestroySurfaceKHR: which window a surface is on.
 void NoteSurface(VkSurfaceKHR surface, HWND window);
 void ForgetSurface(VkSurfaceKHR surface);

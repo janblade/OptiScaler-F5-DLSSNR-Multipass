@@ -27,6 +27,9 @@ std::mutex g_runMutex;
 // What the present waits on once the frame was processed: VkPresentInfoKHR keeps a pointer to it.
 VkSemaphore g_presentWait = VK_NULL_HANDLE;
 
+// The mode with frame generation is chosen, which Vulkan cannot run.
+bool g_frameGenerationMode = false;
+
 } // namespace
 
 namespace NativeMotionVk
@@ -55,6 +58,13 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
         GenericDepthVk::OnPresent(device, width, height);
 
     if (!g_driver.Enabled() || g_driver.Failed())
+        return;
+
+    // "NR + upscaler & frame generation" presents through OptiScaler's frame generation, which is D3D12's: on Vulkan
+    // the mode stands aside (the menu offers NR only).
+    g_frameGenerationMode = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
+
+    if (g_frameGenerationMode)
         return;
 
     g_source.SetPresent(device, physical, queue, present->pSwapchains[0], present->pImageIndices[0],
@@ -87,7 +97,16 @@ void OnDeviceDestroyed(VkDevice device)
     g_source.OnDeviceDestroyed(device);
 }
 
-void DrawStatus() { g_driver.DrawStatus(); }
+void DrawStatus()
+{
+    if (g_frameGenerationMode)
+    {
+        ImGui::TextDisabled("NR + upscaler & frame generation does not run on Vulkan. Choose NR only.");
+        return;
+    }
+
+    g_driver.DrawStatus();
+}
 
 bool NrOnlyRunning() { return g_driver.NrOnlyRunning(); }
 

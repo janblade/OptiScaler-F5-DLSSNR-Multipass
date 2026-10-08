@@ -15,6 +15,8 @@
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
+#include <native/NativeDriverVk.h>
+#include <resource_tracking/GenericDepth_Vk.h>
 #include <framegen/IFGFeature.h>
 #include <native/NativeLowLatency.h>
 #include <nvapi/fakenvapi.h>
@@ -794,12 +796,104 @@ static bool ResolutionTierActive(Config* config, const ResolutionTier& tier, boo
            config->DlssNrReversibleMode.value_or_default() == tier.composition;
 }
 
+// Which API's Optical F5Low drivers and depth finder this game uses: a game presents with one of them. A dxvk game
+// presents its D3D frames through Vulkan, but its D3D drivers are the ones that run.
+enum class NativeApi
+{
+    Dx12,
+    Dx11,
+    Vulkan
+};
+
+static NativeApi CurrentNativeApi()
+{
+    const auto& state = State::Instance();
+
+    if (state.swapchainApi == API::Vulkan)
+        return NativeApi::Vulkan;
+
+    return state.currentD3D11Device != nullptr ? NativeApi::Dx11 : NativeApi::Dx12;
+}
+
+static bool NativeGameCallsUpscaler(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        return GenericDepthDx11::GameCallsUpscaler();
+    case NativeApi::Vulkan:
+        return GenericDepthVk::GameCallsUpscaler();
+    default:
+        return GenericDepthDx12::GameCallsUpscaler();
+    }
+}
+
+static DlssNrNativeMode::Finder NativeFinder(NativeApi api, bool depthWanted)
+{
+    using DlssNrNativeMode::FinderFor;
+
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        return FinderFor(depthWanted, GenericDepthDx11::Installed(), GenericDepthDx11::InstallFailed());
+    case NativeApi::Vulkan:
+        return FinderFor(depthWanted, GenericDepthVk::Installed(), GenericDepthVk::InstallFailed());
+    default:
+        return FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
+    }
+}
+
+static void NativeDepthStatus(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        GenericDepthDx11::DrawStatus();
+        break;
+    case NativeApi::Vulkan:
+        GenericDepthVk::DrawStatus();
+        break;
+    default:
+        GenericDepthDx12::DrawStatus();
+        break;
+    }
+}
+
+static void NativeMotionStatus(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        NativeMotionDx11::DrawStatus();
+        break;
+    case NativeApi::Vulkan:
+        NativeMotionVk::DrawStatus();
+        break;
+    default:
+        NativeMotionDx12::DrawStatus();
+        break;
+    }
+}
+
+static bool NativeNrOnlyRunning(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        return NativeMotionDx11::NrOnlyRunning();
+    case NativeApi::Vulkan:
+        return NativeMotionVk::NrOnlyRunning();
+    default:
+        return NativeMotionDx12::NrOnlyRunning();
+    }
+}
+
 static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPicture)
 {
     using namespace DlssNrNativeMode;
 
-    const bool dx11 = State::Instance().currentD3D11Device != nullptr;
-    const bool gameUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
+    const NativeApi api = CurrentNativeApi();
+    const bool gameUpscaler = NativeGameCallsUpscaler(api);
     const Shown shown =
         FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
                    config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
@@ -829,7 +923,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         if (ImGui::GetCursorScreenPos().x + width > rowRight)
             ImGui::NewLine();
 
-        const bool selectable = Selectable(choice.mode, gameUpscaler);
+        const bool selectable = Selectable(choice.mode, gameUpscaler, api == NativeApi::Vulkan);
         ImGui::BeginDisabled(!selectable);
         const bool clicked = ImGui::RadioButton(choice.label, shown == choice.shown);
         ImGui::EndDisabled();
@@ -870,7 +964,9 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         "game started, restart the game to use it.\n"
         "NR runs only with Enable Neural Rendering on. Changes apply at once.\n"
         "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode "
-        "already on stands aside.");
+        "already on stands aside.\n"
+        "D3D11, D3D12 and Vulkan games. On Vulkan only NR only can be chosen: frame generation needs D3D11 or "
+        "D3D12.");
 
     if (shown == Shown::Off)
     {
@@ -882,9 +978,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     }
 
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
-    const Finder finder =
-        dx11 ? FinderFor(depthWanted, GenericDepthDx11::Installed(), GenericDepthDx11::InstallFailed())
-             : FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
+    const Finder finder = NativeFinder(api, depthWanted);
     const bool depthRestart = DepthRestartWarning(shown, finder);
     const Warning warning =
         WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler);
@@ -926,22 +1020,12 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     ImGui::PopStyleColor();
 
     if (!depthRestart)
-    {
-        if (dx11)
-            GenericDepthDx11::DrawStatus();
-        else
-            GenericDepthDx12::DrawStatus();
-    }
+        NativeDepthStatus(api);
 
     if (shown == Shown::MotionOnly)
         ImGui::TextDisabled("Estimating motion only; nothing uses it.");
     else if (shown == Shown::NrAndFrameGeneration || warning == Warning::None)
-    {
-        if (dx11)
-            NativeMotionDx11::DrawStatus();
-        else
-            NativeMotionDx12::DrawStatus();
-    }
+        NativeMotionStatus(api);
 
     StatusSlotEnd(slot, 4);
 }
@@ -1116,7 +1200,7 @@ static bool RenderDetailReuseToggle(Config* config)
                "move times how much the model changes the picture, and passes build on each other, so with two or "
                "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
                "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
-               "D3D12 and Vulkan with NR after SR, and with Optical F5Low (D3D11 and D3D12 games), which also tells "
+               "D3D12 and Vulkan with NR after SR, and with Optical F5Low (D3D11, D3D12 and Vulkan games), which also tells "
                "it where the last frame cannot be trusted. Not with NR before SR, nor in Finished Picture without "
                "Optical F5Low. Reuse bottleneck is off while this runs.\n"
                "It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and "
@@ -1217,15 +1301,20 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
                               "GPU work while they are shown; D3D12 games). The picked depth also needs \"Show the\n"
                               "picked depth here\" below and a restart.");
 
-        if (State::Instance().currentD3D11Device != nullptr)
+        switch (CurrentNativeApi())
         {
+        case NativeApi::Dx11:
             GenericDepthDx11::DrawAdvancedUi();
             NativeMotionDx11::DrawAdvancedUi();
-        }
-        else
-        {
+            break;
+        case NativeApi::Vulkan:
+            GenericDepthVk::DrawAdvancedUi();
+            NativeMotionVk::DrawAdvancedUi();
+            break;
+        default:
             GenericDepthDx12::DrawAdvancedUi();
             NativeMotionDx12::DrawAdvancedUi();
+            break;
         }
 
         ImGui::TreePop();
@@ -2922,20 +3011,19 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     using namespace HeaderBanner;
 
     const auto& state = State::Instance();
-    const bool dx11 = state.currentD3D11Device != nullptr;
+    const NativeApi api = CurrentNativeApi();
 
     Inputs in;
     in.feature = feature;
     in.upscalerFiles = upscalerFiles;
-    in.gameCallsUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
+    in.gameCallsUpscaler = NativeGameCallsUpscaler(api);
     in.mode = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
           config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
-    // Optical F5Low is for D3D11 and D3D12 games, and only helps where NR is switched on and has not failed this
-    // session.
-    in.nrAvailable =
-        config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0 && state.swapchainApi != API::Vulkan;
-    in.f5lowNrOnlyRunning = dx11 ? NativeMotionDx11::NrOnlyRunning() : NativeMotionDx12::NrOnlyRunning();
+    // Optical F5Low is for D3D11, D3D12 and Vulkan games, and only helps where NR is switched on and has not failed
+    // this session.
+    in.nrAvailable = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
+    in.f5lowNrOnlyRunning = NativeNrOnlyRunning(api);
     in.nrEnabled = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
     in.frameGeneration = state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused();
     return in;
@@ -2947,7 +3035,7 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
 {
     using namespace HeaderBanner;
 
-    const bool dx11 = State::Instance().currentD3D11Device != nullptr;
+    const NativeApi api = CurrentNativeApi();
     const Banner banner = Decide(HeaderInputs(config, feature, upscalerFiles));
 
     switch (banner.line)
@@ -2991,11 +3079,7 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
     case Line::F5LowStatus:
         ImGui::TextDisabled("Optical F5Low:");
         ImGui::SameLine();
-
-        if (dx11)
-            NativeMotionDx11::DrawStatus();
-        else
-            NativeMotionDx12::DrawStatus();
+        NativeMotionStatus(api);
         break;
     }
 

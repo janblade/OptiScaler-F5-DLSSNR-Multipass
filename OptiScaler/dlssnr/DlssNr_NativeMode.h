@@ -129,8 +129,15 @@ inline bool DepthRestartWarning(Shown shown, Finder finder)
 
 // The modes are for a game with no upscaler call of its own; the frame sources stand aside while the game makes one
 // (gameUpscaler: GenericDepthDx12/Dx11::GameCallsUpscaler). Then only Off can be chosen: a click on another mode would
-// change NR Pass at: under the game's own upscaler for nothing.
-inline bool Selectable(Mode mode, bool gameUpscaler) { return mode == Mode::Off || !gameUpscaler; }
+// change NR Pass at: under the game's own upscaler for nothing. In a Vulkan game (`vulkan`) the mode with frame
+// generation cannot be chosen either: OptiScaler's frame generation presents on D3D12.
+inline bool Selectable(Mode mode, bool gameUpscaler, bool vulkan = false)
+{
+    if (mode == Mode::Off)
+        return true;
+
+    return !gameUpscaler && !(vulkan && mode == Mode::NrAndFrameGeneration);
+}
 
 enum class Warning
 {

@@ -167,6 +167,13 @@ int main()
 
     CHECK(Selectable(Mode::Off, false) && Selectable(Mode::Off, true));
 
+    // A Vulkan game: NR only and Off, never the mode with frame generation (which presents on D3D12).
+    CHECK(Selectable(Mode::Off, false, true) && Selectable(Mode::Off, true, true));
+    CHECK(Selectable(Mode::NrOnly, false, true));
+    CHECK(!Selectable(Mode::NrOnly, true, true));
+    CHECK(!Selectable(Mode::NrAndFrameGeneration, false, true));
+    CHECK(!Selectable(Mode::NrAndFrameGeneration, true, true));
+
     for (int bits = 0; bits < 8; ++bits)
     {
         for (Shown shown : { Shown::NrOnly, Shown::NrAndFrameGeneration, Shown::MotionOnly })

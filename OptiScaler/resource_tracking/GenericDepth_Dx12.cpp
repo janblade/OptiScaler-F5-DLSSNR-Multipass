@@ -134,6 +134,19 @@ UINT g_dsvIncrement = 0;
 bool g_installed = false;
 bool g_installFailed = false;
 
+// Under g_mutex. Why a copy of the picked buffer, or the preview's readback of it, was not made: said once per reason, since
+// each fails the same way every frame and the preview otherwise only says it is waiting.
+void SayOnce(const char* key, const std::string& line)
+{
+    static std::vector<const char*> said;
+
+    if (std::find(said.begin(), said.end(), key) != said.end())
+        return;
+
+    said.push_back(key);
+    LOG_INFO("Depth finder: {}", line);
+}
+
 void OnDraw(ID3D12GraphicsCommandList* list, uint64_t vertices, uint32_t instances)
 {
     g_core.OnDraw((uint64_t) (size_t) list, vertices, instances);
@@ -210,9 +223,21 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
         bufferDesc.SampleDesc.Count = 1;
         bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
-        if (FAILED(device->CreateCommittedResource(&readHeap, D3D12_HEAP_FLAG_NONE, &bufferDesc,
-                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback))))
+        const HRESULT hr = device->CreateCommittedResource(&readHeap, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+                                                           D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback));
+
+        if (FAILED(hr))
+        {
             readback = nullptr;
+            SayOnce("readback", std::format("the preview's readback ({} bytes) could not be made (0x{:X}); the copies "
+                                            "still go to the motion step",
+                                            total, (unsigned) hr));
+        }
+    }
+    else
+    {
+        SayOnce("footprint", std::format("no copyable footprint for a {}x{} buffer of format {}; the preview stays empty",
+                                         source.Width, source.Height, (int) typeless));
     }
 
     for (auto& slot : g_slots)
@@ -297,23 +322,41 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
     const auto desc = source->GetDesc();
 
     if (desc.SampleDesc.Count > 1)
+    {
+        SayOnce("msaa", std::format("the picked buffer is multisampled ({} samples) and is not copied",
+                                    desc.SampleDesc.Count));
         return;
+    }
 
     DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN, view = DXGI_FORMAT_UNKNOWN;
 
     if (!BackupFormats(desc.Format, &typeless, &view))
+    {
+        SayOnce("format", std::format("the picked buffer's resource format {} cannot be copied", (int) desc.Format));
         return;
+    }
 
     ID3D12Device* device = nullptr;
 
     if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+    {
+        SayOnce("device", "a game command list gave no device; the copy is skipped");
         return;
+    }
 
     SnapshotSlot* slot = EnsureBackup(device, desc, typeless, view) ? TakeSlot(device, desc) : nullptr;
     device->Release();
 
     if (slot == nullptr)
+    {
+        SayOnce("slot", g_slotsUsed >= kSnapshotSlots
+                            ? std::format("more than {} copies in one frame; the rest are skipped", kSnapshotSlots)
+                            : std::string("a copy target could not be made; the copy is skipped"));
         return;
+    }
+
+    SayOnce("copied", std::format("first copy of the picked buffer taken: {}x{}, resource format {}, copied as {}",
+                                  desc.Width, desc.Height, (int) desc.Format, (int) typeless));
 
     slot->vertices = stretchVertices;
 
@@ -1024,9 +1067,25 @@ void RecordPreviewCopy(ID3D12GraphicsCommandList* list)
 
     std::lock_guard lock(g_mutex);
 
+    // A frame now and then has no copy (a menu, a loading screen); a long run of them is what leaves the preview waiting,
+    // so that is said once, with which condition held.
+    static uint32_t missed = 0;
+
     // Only from the chosen copy of the frame just closed, and only when the menu is about to show it.
     if (!g_best.valid || g_backup.readback == nullptr || g_best.width != g_backup.width || g_best.height != g_backup.height)
+    {
+        if (++missed == 600)
+            SayOnce("previewMissed",
+                    std::format("the menu's preview found no copy for 600 frames in a row (frame's copy {}, readback {}, "
+                                "copy {}x{} vs readback {}x{}, pick {})",
+                                g_best.valid ? "there" : "missing", g_backup.readback != nullptr ? "there" : "missing",
+                                g_best.width, g_best.height, g_backup.width, g_backup.height,
+                                g_core.CurrentPick().valid ? "valid" : "none"));
         return;
+    }
+
+    missed = 0;
+    SayOnce("previewCopied", "the menu's preview recorded its first readback");
 
     auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {

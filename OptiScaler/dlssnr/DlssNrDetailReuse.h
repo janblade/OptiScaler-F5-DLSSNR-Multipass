@@ -165,6 +165,19 @@ public:
     unsigned long long Held() const { return held; }
 };
 
+// Why reuse cannot run where NR runs, or null when it can. Before SR it is not offered. On a finished picture it needs
+// vectors that describe that picture: a game's own vectors are rendered for its scene, and the HUD and post-processing
+// on top of it are not in them, so detail would be moved where nothing moved. Optical F5Low's native input measures the
+// motion on the finished picture itself, which is what motionMatchesPicture says.
+inline const char* UnavailableOnRoute(bool beforeUpscale, bool finishedPicture, bool motionMatchesPicture)
+{
+    if (beforeUpscale)
+        return "unavailable while NR runs before SR";
+    if (finishedPicture && !motionMatchesPicture)
+        return "unavailable in Finished Picture without Optical F5Low";
+    return nullptr;
+}
+
 // Whether the real frame rate is high enough for reuse. Moved detail errs by how far things move between two real
 // frames, so at a low frame rate the trails around moving bodies grow. Fed the time between two NR frames (one per
 // rendered frame, so frame generation's frames do not count). The rate is smoothed over about half a second; reuse

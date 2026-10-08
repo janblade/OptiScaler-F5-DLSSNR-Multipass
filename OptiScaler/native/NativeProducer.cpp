@@ -311,6 +311,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
             frame.space = input.colorSpace;
             frame.depth = _trust->GuideDepth();
             frame.motion = _trust->GuideMotion();
+            frame.historyDistrust = _trust->Mask();
             frame.depthReversed = nativeInputs.depthReversed;
             frame.reset = nativeReset || _consumerResetPending;
             result.nativeRan = apply(list, frame);

@@ -455,6 +455,7 @@ Plan BeforeModel(const Frame& f)
     DlssNrDetailReuse::HostFrame facts = f;
     facts.beforeUpscale = f.info->BeforeUpscale;
     facts.finishedPicture = f.info->FinishedPicture;
+    facts.motionMatchesPicture = f.info->MotionMatchesPicture;
     facts.present = State::Instance().frameCount;
     const DlssNrDetailReuse::Wanted want = host.Gate(
         facts, [&]() -> const char* { return f.pass->DetailReuseReady() ? nullptr : "its shader could not be built"; });

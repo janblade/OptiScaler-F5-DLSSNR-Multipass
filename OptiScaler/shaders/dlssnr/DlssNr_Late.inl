@@ -553,7 +553,8 @@ bool NativeInputBlockedBySwapChainInterop()
 }
 
 bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
-                      ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
+                      ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
+                      bool depthReversed, bool reset,
                       DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState)
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
@@ -619,6 +620,9 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
     frame.OutputWidth = (unsigned) desc.Width;
     frame.OutputHeight = desc.Height;
     frame.FinishedPicture = true;
+    // Optical F5Low measured the motion on this picture, so detail reuse may move detail with it.
+    frame.MotionMatchesPicture = true;
+    frame.HistoryDistrust = historyDistrust;
     frame.IndependentCommands = true;
     frame.OutputArrivalState = pictureState;
     frame.SubmissionEpoch = State::Instance().frameCount;

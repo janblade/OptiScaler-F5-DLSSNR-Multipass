@@ -4,6 +4,7 @@
 
 #include <native/NativeDriver.h>
 #include <native/VkFrameSource.h>
+#include <native/VkPresentBridge.h>
 
 #include <Config.h>
 #include <misc/IdentifyGpu.h>
@@ -57,20 +58,54 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
     if (native::VkFrameSource::SwapchainExtent(present->pSwapchains[0], &width, &height))
         GenericDepthVk::OnPresent(device, width, height);
 
-    if (!g_driver.Enabled() || g_driver.Failed())
-        return;
+    // With the Vulkan present bridge up the game presents on a hidden window and this is the only place its picture goes on
+    // to the D3D12 swapchain: every present is handled, producer or not.
+    const bool bridged = VkPresentBridge::Active(present->pSwapchains[0]);
+    g_source.SetBridged(bridged);
+    const bool producing = g_driver.Enabled() && !g_driver.Failed();
 
-    // "NR + upscaler & frame generation" presents through OptiScaler's frame generation, which is D3D12's: on Vulkan
-    // the mode stands aside (the menu offers NR only).
-    g_frameGenerationMode = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
+    if (!bridged)
+    {
+        if (!producing)
+            return;
 
-    if (g_frameGenerationMode)
-        return;
+        // "NR + upscaler & frame generation" presents through OptiScaler's frame generation, which is D3D12's: on a
+        // Vulkan swapchain made without the bridge the mode stands aside (the bridge is made when the game starts).
+        g_frameGenerationMode = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
+
+        if (g_frameGenerationMode)
+            return;
+    }
+    else
+    {
+        g_frameGenerationMode = false;
+    }
 
     g_source.SetPresent(device, physical, queue, present->pSwapchains[0], present->pImageIndices[0],
                         present->pWaitSemaphores, present->waitSemaphoreCount);
 
-    g_driver.RunFrame(g_source, false);
+    if (producing)
+    {
+        g_driver.RunFrame(g_source, false);
+    }
+    else
+    {
+        native::FrameInput unused;
+        g_source.Acquire(unused);
+    }
+
+    if (bridged)
+    {
+        // The producer did not run (or the game calls an upscaler): the present still needs its semaphore.
+        g_source.FinishPresent();
+
+        const uint64_t done = g_source.NextFenceValue();
+        const auto producerDone = g_source.BridgedProducerDone();
+
+        if (VkPresentBridge::CopyToOutput(g_source.BridgedPicture(), g_source.BridgedFence(), g_source.BridgedCopied(),
+                                          producerDone.fence, producerDone.value, done))
+            g_source.NoteBridgeDone(done);
+    }
 
     // Why a frame could not be handed over, once each time the reason changes.
     static std::string lastError;
@@ -89,6 +124,28 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
     g_presentWait = g_source.PresentWait();
     present->waitSemaphoreCount = g_presentWait != VK_NULL_HANDLE ? 1 : 0;
     present->pWaitSemaphores = g_presentWait != VK_NULL_HANDLE ? &g_presentWait : nullptr;
+}
+
+void AfterPresent(VkSwapchainKHR swapchain)
+{
+    if (VkPresentBridge::Active(swapchain))
+        VkPresentBridge::PresentOutput();
+}
+
+bool AcquireBridgeDevice(VkPhysicalDevice physical, ID3D12Device** device, ID3D12CommandQueue** queue, std::string& why)
+{
+    if (!g_source.EnsureD3D12(physical, why))
+        return false;
+
+    g_source.PinD3D12(true);
+    *device = g_source.Device12();
+    *queue = g_source.Queue12();
+    return true;
+}
+
+void ReleaseBridgeDevice()
+{
+    g_source.PinD3D12(false);
 }
 
 void OnDeviceDestroyed(VkDevice device)

@@ -744,7 +744,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
         // Let's try Dx11 like approach on Dx12
         std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
         if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+            State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
         {
             resizeLock.lock();
         }
@@ -982,7 +982,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
         // Let's try Dx11 like approach on Dx12
         std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
         if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+            State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
         {
             resizeLock.lock();
         }
@@ -1155,7 +1155,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         // Let's try Dx11 like approach on Dx12
         std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
         if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+            State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
         {
             resizeLock.lock();
         }
@@ -1218,7 +1218,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             // gameQueue names (WithDx12's paired one).
             const bool pureDx12Feature = currentFeature->Api() == API::DX12 && !currentFeature->IsWithDx12();
 
-            if (pureDx12Feature && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
+            if (pureDx12Feature && state.swapchainInteropApi != SwapchainInteropApi::None)
             {
                 if (gameQueue != nullptr)
                 {

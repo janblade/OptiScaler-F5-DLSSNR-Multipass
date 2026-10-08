@@ -207,6 +207,65 @@ void VkFrameSource::SetPresent(VkDevice device, VkPhysicalDevice physical, VkQue
     _waitCount = waitCount;
 }
 
+bool VkFrameSource::EnsureD3D12(VkPhysicalDevice physical, std::string& why)
+{
+    if (_device12 != nullptr)
+        return true;
+
+    LUID luid {};
+
+    if (!VkPhysicalDeviceLuid(physical, luid))
+    {
+        why = "the Vulkan driver does not say which adapter the device is on";
+        return false;
+    }
+
+    ScopedSkipSpoofingGlobal skipSpoofing {};
+    ScopedSkipVulkanHooks skipVulkanHooks {};
+
+    ComPtr<IDXGIFactory2> factory2;
+    HRESULT hr = DxgiProxy::Module() == nullptr
+                     ? CreateDXGIFactory2(0, IID_PPV_ARGS(&factory2))
+                     : DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(IDXGIFactory2), &factory2);
+
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter> adapter;
+
+    if (SUCCEEDED(hr))
+        hr = factory2.As(&factory);
+
+    if (SUCCEEDED(hr))
+        hr = factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
+
+    if (SUCCEEDED(hr))
+    {
+        hr = D3d12Proxy::Module() == nullptr
+                 ? D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device12))
+                 : D3d12Proxy::D3D12CreateDevice_()(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device12));
+    }
+
+    if (FAILED(hr) || _device12 == nullptr)
+    {
+        why = std::format("could not make a D3D12 device on the Vulkan device's adapter (0x{:X})", (unsigned) hr);
+        return false;
+    }
+
+    D3D12_COMMAND_QUEUE_DESC desc {};
+    desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    hr = _device12->CreateCommandQueue(&desc, IID_PPV_ARGS(&_queue12));
+
+    if (FAILED(hr))
+    {
+        why = std::format("could not make the D3D12 queue (0x{:X})", (unsigned) hr);
+        _device12->Release();
+        _device12 = nullptr;
+        return false;
+    }
+
+    LOG_INFO("Native motion (Vulkan): D3D12 device made on the Vulkan device's adapter");
+    return true;
+}
+
 bool VkFrameSource::EnsureDevices(std::string& why)
 {
     if (_interop.device != _device)
@@ -217,60 +276,8 @@ bool VkFrameSource::EnsureDevices(std::string& why)
             return false;
     }
 
-    if (_device12 == nullptr)
-    {
-        LUID luid {};
-
-        if (!VkPhysicalDeviceLuid(_physical, luid))
-        {
-            why = "the Vulkan driver does not say which adapter the device is on";
-            return false;
-        }
-
-        ScopedSkipSpoofingGlobal skipSpoofing {};
-        ScopedSkipVulkanHooks skipVulkanHooks {};
-
-        ComPtr<IDXGIFactory2> factory2;
-        HRESULT hr = DxgiProxy::Module() == nullptr
-                         ? CreateDXGIFactory2(0, IID_PPV_ARGS(&factory2))
-                         : DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(IDXGIFactory2), &factory2);
-
-        ComPtr<IDXGIFactory4> factory;
-        ComPtr<IDXGIAdapter> adapter;
-
-        if (SUCCEEDED(hr))
-            hr = factory2.As(&factory);
-
-        if (SUCCEEDED(hr))
-            hr = factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
-
-        if (SUCCEEDED(hr))
-        {
-            hr = D3d12Proxy::Module() == nullptr
-                     ? D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device12))
-                     : D3d12Proxy::D3D12CreateDevice_()(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device12));
-        }
-
-        if (FAILED(hr) || _device12 == nullptr)
-        {
-            why = std::format("could not make a D3D12 device on the Vulkan device's adapter (0x{:X})", (unsigned) hr);
-            return false;
-        }
-
-        D3D12_COMMAND_QUEUE_DESC desc {};
-        desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        hr = _device12->CreateCommandQueue(&desc, IID_PPV_ARGS(&_queue12));
-
-        if (FAILED(hr))
-        {
-            why = std::format("could not make the D3D12 queue (0x{:X})", (unsigned) hr);
-            _device12->Release();
-            _device12 = nullptr;
-            return false;
-        }
-
-        LOG_INFO("Native motion (Vulkan): D3D12 device made on the Vulkan device's adapter");
-    }
+    if (!EnsureD3D12(_physical, why))
+        return false;
 
     if (!_fence.Ready() && !_fence.Create(_device12, _interop))
     {
@@ -381,21 +388,36 @@ void VkFrameSource::Release()
         _device = current;
     }
 
-    if (_queue12 != nullptr)
-        _queue12->Release();
+    // The swapchain on the game's window is made on this device and queue: they stay while the bridge holds them.
+    if (!_pinned)
+    {
+        if (_queue12 != nullptr)
+            _queue12->Release();
 
-    if (_device12 != nullptr)
-        _device12->Release();
+        if (_device12 != nullptr)
+            _device12->Release();
 
-    _queue12 = nullptr;
-    _device12 = nullptr;
+        _queue12 = nullptr;
+        _device12 = nullptr;
+    }
+
     _interop = VkInterop {};
     _acquired = false;
+    _acquiredPicture = nullptr;
+}
+
+void VkFrameSource::PinD3D12(bool pin)
+{
+    _pinned = pin;
+
+    // Nothing on the Vulkan side uses them: no reason to keep them.
+    if (!pin && _interop.device == VK_NULL_HANDLE)
+        Release();
 }
 
 void VkFrameSource::OnDeviceDestroyed(VkDevice device)
 {
-    if (_interop.device == device)
+    if (_interop.device == device || (_device == device && _device12 != nullptr))
     {
         Release();
         _device = VK_NULL_HANDLE;
@@ -423,11 +445,16 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     _acquired = false;
     _tookPresentWaits = false;
     _presentWait = VK_NULL_HANDLE;
+    _acquiredPicture = nullptr;
+    _producerDone = SyncPoint {};
 
     if (_device == VK_NULL_HANDLE || _queue == VK_NULL_HANDLE || _swapchain == VK_NULL_HANDLE)
         return AcquireStatus::Unavailable;
 
-    if (GameUpscalerCalledRecently())
+    // Bridged, the picture is copied in all the same: the D3D12 swapchain presents it, producer or not.
+    const bool waiting = GameUpscalerCalledRecently();
+
+    if (waiting && !_bridged)
         return AcquireStatus::WaitingForUpscaler;
 
     VkImage image = VK_NULL_HANDLE;
@@ -521,18 +548,27 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     vkBeginCommandBuffer(slot.copyIn, &begin);
     RecordCopyToShared(slot.copyIn, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, _picture, family);
     FrameInput depth;
-    const bool haveDepth = RecordDepth(slot.copyIn, family, depth);
+    const bool haveDepth = !waiting && RecordDepth(slot.copyIn, family, depth);
     vkEndCommandBuffer(slot.copyIn);
 
-    // The present's semaphores are binary: their values are ignored, but the arrays must match the counts.
+    // The present's semaphores are binary: their values are ignored, but the arrays must match the counts. Bridged, the
+    // shared picture is also the D3D12 swapchain's source: the copy in waits until D3D12 is done with the last one.
     const uint64_t copied = _fence.Next();
+    std::vector<VkSemaphore> waitSemaphores(_waits, _waits + _waitCount);
     std::vector<uint64_t> waitValues(_waitCount, 0);
-    std::vector<VkPipelineStageFlags> waitStages(_waitCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+    if (_bridged && _bridgeDone != 0)
+    {
+        waitSemaphores.push_back(_fence.Semaphore());
+        waitValues.push_back(_bridgeDone);
+    }
+
+    std::vector<VkPipelineStageFlags> waitStages(waitSemaphores.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     const VkSemaphore signal = _fence.Semaphore();
 
     VkTimelineSemaphoreSubmitInfo values {};
     values.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    values.waitSemaphoreValueCount = _waitCount;
+    values.waitSemaphoreValueCount = (uint32_t) waitValues.size();
     values.pWaitSemaphoreValues = waitValues.data();
     values.signalSemaphoreValueCount = 1;
     values.pSignalSemaphoreValues = &copied;
@@ -540,8 +576,8 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     VkSubmitInfo submit {};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.pNext = &values;
-    submit.waitSemaphoreCount = _waitCount;
-    submit.pWaitSemaphores = _waits;
+    submit.waitSemaphoreCount = (uint32_t) waitSemaphores.size();
+    submit.pWaitSemaphores = waitSemaphores.data();
     submit.pWaitDstStageMask = waitStages.data();
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &slot.copyIn;
@@ -561,6 +597,12 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     _error.clear();
     _image = image;
     _family = family;
+    _copied = copied;
+    _acquiredPicture = _picture.Res12();
+
+    // Bridged and the game calls an upscaler: copied in for the D3D12 swapchain, nothing for the producer.
+    if (waiting)
+        return AcquireStatus::WaitingForUpscaler;
 
     input = FrameInput {};
     input.api = Api::Vulkan;
@@ -793,7 +835,12 @@ void VkFrameSource::Return(const FrameInput& input, const FrameOutput& output)
 
     // The producer's done point is on its own fence, which Vulkan cannot see: a signal of ours on the same D3D12 queue,
     // right after its work, stands for it.
-    const bool processed = output.done.fence != nullptr && _queue12 != nullptr;
+    // Bridged, the processed picture stays on the D3D12 side for the swapchain: nothing is copied back, the present only
+    // waits for the copy in.
+    if (_bridged)
+        _producerDone = output.done;
+
+    const bool processed = !_bridged && output.done.fence != nullptr && _queue12 != nullptr;
     const uint64_t done = processed ? _fence.Next() : 0;
 
     if (processed)
@@ -848,6 +895,12 @@ void VkFrameSource::Return(const FrameInput& input, const FrameOutput& output)
     }
 
     _presentWait = presentWait;
+}
+
+void VkFrameSource::FinishPresent()
+{
+    if (_acquired)
+        Return(FrameInput {}, FrameOutput {});
 }
 
 } // namespace native

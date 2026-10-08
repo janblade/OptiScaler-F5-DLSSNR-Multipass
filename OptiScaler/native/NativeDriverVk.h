@@ -9,11 +9,23 @@
 
 #include <vulkan/vulkan.h>
 
+#include <d3d12.h>
+#include <string>
+
 namespace NativeMotionVk
 {
 // Once per present, from the vkQueuePresentKHR hook, before the menu is drawn. When the frame was processed, `present`'s
 // wait list is replaced by one semaphore of ours (its arrays then point into storage that lives until the next call).
 void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhysicalDevice physical);
+
+// After the game's own (hidden) present was queued: with the Vulkan present bridge up, the D3D12 swapchain presents the picture
+// OnPresent put into it.
+void AfterPresent(VkSwapchainKHR swapchain);
+
+// The Vulkan present bridge (native/VkPresentBridge.h) makes its D3D12 swapchain on the frame source's private D3D12 device and
+// queue: made now and kept until ReleaseBridgeDevice.
+bool AcquireBridgeDevice(VkPhysicalDevice physical, ID3D12Device** device, ID3D12CommandQueue** queue, std::string& why);
+void ReleaseBridgeDevice();
 
 // The game is destroying `device`: everything made on it goes.
 void OnDeviceDestroyed(VkDevice device);

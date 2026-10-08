@@ -287,7 +287,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     // This lock will delay/prevent release of buffers while present is ongoing
     std::shared_lock<std::shared_mutex> dx11wDx12PresentLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
-    if (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::None &&
         State::Instance().activeFgOutput == FGOutput::XeFG)
     {
         dx11wDx12PresentLock.lock();
@@ -567,7 +567,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     IUnknown* lowLatencyDevice = nullptr;
 
     // (A D3D11 game behind OptiScaler's D3D12 bridge is covered in Dx11wDx12SC::Present, the game's own present.)
-    if (willPresent && State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+    if (willPresent && State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
     {
         if (isD3D11)
             lowLatencyDevice = device;

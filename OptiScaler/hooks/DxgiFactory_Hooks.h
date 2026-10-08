@@ -11,6 +11,12 @@ class DxgiFactoryHooks
     static void HookToFactory(IDXGIFactory* pFactory);
     static void HookToDLSSGFactory(IDXGIFactory* pFactory);
 
+    // The D3D12 swapchain a bridged game presents through (the Vulkan present bridge, native/VkPresentBridge.cpp), made as a
+    // D3D11 game's is: frame generation's own swapchain, else a plain D3D12 one. `desc` is a flip-model description.
+    // *realFG: the swapchain is frame generation's own (its present is hooked); false: a plain one.
+    static HRESULT CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue, DXGI_SWAP_CHAIN_DESC* desc,
+                                             IDXGISwapChain4** out, bool* realFG);
+
   private:
     using PFN_EnumAdapterByGpuPreference =
         rewrite_signature<decltype(&IDXGIFactory6::EnumAdapterByGpuPreference)>::type;

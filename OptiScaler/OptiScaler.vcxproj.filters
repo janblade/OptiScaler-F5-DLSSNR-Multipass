@@ -488,6 +488,12 @@
     <ClInclude Include="native\VkFrameSource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\VkPresentBridgeCore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\VkPresentBridge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\NativeDriverVk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1365,6 +1371,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\VkFrameSource.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\VkPresentBridgeCore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\VkPresentBridge.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\NativeDriverVk.cpp">

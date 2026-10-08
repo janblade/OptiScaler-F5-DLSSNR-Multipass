@@ -21,6 +21,7 @@
 #include <dlssnr/DlssNrFeature_Vk.h>
 #include <native/NativeDriverVk.h>
 #include <native/VkFrameSource.h>
+#include <native/VkPresentBridge.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <detours/detours.h>
@@ -42,6 +43,8 @@ PFN_vkCreateInstance o_vkCreateInstance = nullptr;
 PFN_vkCreateWin32SurfaceKHR o_vkCreateWin32SurfaceKHR = nullptr;
 PFN_vkQueuePresentKHR o_QueuePresentKHR = nullptr;
 PFN_vkCreateSwapchainKHR o_CreateSwapchainKHR = nullptr;
+static PFN_vkDestroySwapchainKHR o_DestroySwapchainKHR = nullptr;
+static PFN_vkDestroySurfaceKHR o_vkDestroySurfaceKHR = nullptr;
 static PFN_vkGetInstanceProcAddr o_vkGetInstanceProcAddr = nullptr;
 static PFN_vkGetDeviceProcAddr o_vkGetDeviceProcAddr = nullptr;
 
@@ -55,6 +58,7 @@ PFN_vkAntiLagUpdateAMD VulkanHooks::o_vkAntiLagUpdateAMD = nullptr;
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo);
 static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                        const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
+static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
 
 static void HookDevice(VkDevice InDevice)
 {
@@ -65,6 +69,7 @@ static void HookDevice(VkDevice InDevice)
 
     o_QueuePresentKHR = (PFN_vkQueuePresentKHR) (vkGetDeviceProcAddr(InDevice, "vkQueuePresentKHR"));
     o_CreateSwapchainKHR = (PFN_vkCreateSwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkCreateSwapchainKHR"));
+    o_DestroySwapchainKHR = (PFN_vkDestroySwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkDestroySwapchainKHR"));
 
     if (o_CreateSwapchainKHR)
     {
@@ -79,6 +84,9 @@ static void HookDevice(VkDevice InDevice)
 
         if (o_CreateSwapchainKHR != nullptr)
             DetourAttach(&(PVOID&) o_CreateSwapchainKHR, hkvkCreateSwapchainKHR);
+
+        if (o_DestroySwapchainKHR != nullptr)
+            DetourAttach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
@@ -111,6 +119,9 @@ static VkResult hkvkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Surf
         _hwnd = pCreateInfo->hwnd;
         LOG_DEBUG("_hwnd captured: {0:X}", (UINT64) _hwnd);
     }
+
+    if (result == VK_SUCCESS && pSurface != nullptr)
+        VkPresentBridge::NoteSurface(*pSurface, pCreateInfo->hwnd);
 
     LOG_FUNC_RESULT(result);
 
@@ -636,8 +647,11 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // Optical F5Low: the picture through NR before the menu is drawn over it. May replace the wait list.
     NativeMotionVk::OnPresent(queue, &localPresentInfo, _device, _PD);
 
+    // The game's swapchain is on the bridge's hidden window: the menu and the frame limiter are the D3D12 swapchain's
+    const bool bridged = pPresentInfo->swapchainCount == 1 && VkPresentBridge::Active(pPresentInfo->pSwapchains[0]);
+
     // render menu if needed
-    if (!MenuOverlayVk::QueuePresent(queue, &localPresentInfo))
+    if (!bridged && !MenuOverlayVk::QueuePresent(queue, &localPresentInfo))
     {
         LOG_ERROR("QueuePresent: false!");
         return VK_ERROR_OUT_OF_DATE_KHR;
@@ -646,11 +660,24 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     ReflexHooks::update(false, true);
 
     // original call
-    ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
-    auto result = o_QueuePresentKHR(queue, &localPresentInfo);
+    VkResult result;
 
+    {
+        ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
+        result = o_QueuePresentKHR(queue, &localPresentInfo);
+    }
+
+    if (bridged)
+    {
+        // Paced by the D3D12 present (and frame generation's limiter inside it)
+        NativeMotionVk::AfterPresent(pPresentInfo->pSwapchains[0]);
+
+        // The window changed size and the hidden swapchain does not know: the game recreates when its present says so.
+        if (result == VK_SUCCESS && VkPresentBridge::WindowResized())
+            result = VK_ERROR_OUT_OF_DATE_KHR;
+    }
     // Unsure about Vulkan Reflex fps limit and if that could be causing an issue here
-    if (!State::Instance().reflexLimitsFps)
+    else if (!State::Instance().reflexLimitsFps)
         FrameLimit::sleep(false);
 
     LOG_FUNC_RESULT(result);
@@ -670,18 +697,44 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     // allows it (native/VkFrameSource.cpp).
     VkSwapchainCreateInfoKHR localCreateInfo {};
 
+    // With frame generation chosen the swapchain is made on a hidden window and the real one gets a D3D12 swapchain
+    // (native/VkPresentBridge.h). The usage is then asked of the hidden surface.
+    bool bridged = false;
+
     if (pCreateInfo != nullptr)
     {
         localCreateInfo = *pCreateInfo;
 
         if (!State::Instance().vulkanSkipHooks)
-            localCreateInfo.imageUsage = native::VkFrameSource::SwapchainUsage(_PD, *pCreateInfo);
+        {
+            bridged = VkPresentBridge::OnCreateSwapchain(_instance, _PD, device, *pCreateInfo, &localCreateInfo);
+            localCreateInfo.imageUsage = native::VkFrameSource::SwapchainUsage(_PD, localCreateInfo);
+        }
     }
 
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
         result = o_CreateSwapchainKHR(device, pCreateInfo != nullptr ? &localCreateInfo : nullptr, pAllocator,
                                       pSwapchain);
+    }
+
+    if (bridged)
+    {
+        VkPresentBridge::OnSwapchainCreated(true, result, result == VK_SUCCESS ? *pSwapchain : VK_NULL_HANDLE);
+
+        // The hidden window would not take it: the game's own window gets it, as it asked.
+        if (result != VK_SUCCESS)
+        {
+            bridged = false;
+            localCreateInfo = *pCreateInfo;
+            localCreateInfo.imageUsage = native::VkFrameSource::SwapchainUsage(_PD, localCreateInfo);
+
+            if (VkPresentBridge::Owns(pCreateInfo->oldSwapchain))
+                localCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+
+            ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+            result = o_CreateSwapchainKHR(device, &localCreateInfo, pAllocator, pSwapchain);
+        }
     }
 
     if (result == VK_SUCCESS && pCreateInfo != nullptr && pSwapchain != nullptr && *pSwapchain != VK_NULL_HANDLE &&
@@ -741,11 +794,31 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         _device = device;
         LOG_DEBUG("_device captured: {0:X}", (UINT64) _device);
 
-        MenuOverlayVk::CreateSwapchain(device, _PD, _instance, _hwnd, pCreateInfo, pAllocator, pSwapchain);
+        // The menu is drawn on the D3D12 swapchain of the bridge, not on the hidden Vulkan one.
+        if (!bridged)
+            MenuOverlayVk::CreateSwapchain(device, _PD, _instance, _hwnd, pCreateInfo, pAllocator, pSwapchain);
+        else
+            MenuOverlayVk::DestroyVulkanObjects(false);
     }
 
     LOG_FUNC_RESULT(result);
     return result;
+}
+
+VALIDATE_HOOK(hkvkDestroySwapchainKHR, PFN_vkDestroySwapchainKHR)
+static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator)
+{
+    o_DestroySwapchainKHR(device, swapchain, pAllocator);
+
+    if (swapchain != VK_NULL_HANDLE)
+        VkPresentBridge::OnSwapchainDestroyed(device, swapchain);
+}
+
+VALIDATE_HOOK(hkvkDestroySurfaceKHR, PFN_vkDestroySurfaceKHR)
+static void hkvkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surface, const VkAllocationCallbacks* pAllocator)
+{
+    VkPresentBridge::ForgetSurface(surface);
+    o_vkDestroySurfaceKHR(instance, surface, pAllocator);
 }
 
 // Neural Rendering's model, its parameter block and NGX itself are released while the device still lives -- NGX's
@@ -763,12 +836,16 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
 
     if (device != VK_NULL_HANDLE)
     {
+        VkPresentBridge::OnDeviceDestroying(device);
         NativeMotionVk::OnDeviceDestroyed(device);
         GenericDepthVk::OnDeviceDestroyed(device);
     }
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);
+
+    if (device != VK_NULL_HANDLE)
+        VkPresentBridge::OnDeviceDestroyed(device);
 }
 
 VALIDATE_HOOK(hkvkGetInstanceProcAddr, PFN_vkGetInstanceProcAddr)
@@ -855,6 +932,11 @@ PFN_vkVoidFunction hkvkGetDeviceProcAddr(VkDevice device, const char* pName)
     return orgFunc;
 }
 
+PFN_vkCreateWin32SurfaceKHR VulkanHooks::OriginalCreateWin32Surface()
+{
+    return o_vkCreateWin32SurfaceKHR != nullptr ? o_vkCreateWin32SurfaceKHR : &vkCreateWin32SurfaceKHR;
+}
+
 void VulkanHooks::Hook(HMODULE vulkan1)
 {
     if (vulkanModule == nullptr)
@@ -881,6 +963,9 @@ void VulkanHooks::Hook(HMODULE vulkan1)
 
     address = KernelBaseProxy::GetProcAddress_()(vulkan1, "vkCreateWin32SurfaceKHR");
     o_vkCreateWin32SurfaceKHR = (PFN_vkCreateWin32SurfaceKHR) address;
+
+    address = KernelBaseProxy::GetProcAddress_()(vulkan1, "vkDestroySurfaceKHR");
+    o_vkDestroySurfaceKHR = (PFN_vkDestroySurfaceKHR) address;
 
     // address = KernelBaseProxy::GetProcAddress_()(vulkan1, "vkCmdPipelineBarrier");
     // o_vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier) address;
@@ -915,6 +1000,9 @@ void VulkanHooks::Hook(HMODULE vulkan1)
     if (o_vkCreateWin32SurfaceKHR != nullptr)
         DetourAttach(&(PVOID&) o_vkCreateWin32SurfaceKHR, hkvkCreateWin32SurfaceKHR);
 
+    if (o_vkDestroySurfaceKHR != nullptr)
+        DetourAttach(&(PVOID&) o_vkDestroySurfaceKHR, hkvkDestroySurfaceKHR);
+
     // if (o_vkCmdPipelineBarrier != nullptr)
     //     DetourAttach(&(PVOID&) o_vkCmdPipelineBarrier, hkvkCmdPipelineBarrier);
 
@@ -943,6 +1031,12 @@ void VulkanHooks::Unhook()
     if (o_CreateSwapchainKHR != nullptr)
         DetourDetach(&(PVOID&) o_CreateSwapchainKHR, hkvkCreateSwapchainKHR);
 
+    if (o_DestroySwapchainKHR != nullptr)
+        DetourDetach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
+
+    if (o_vkDestroySurfaceKHR != nullptr)
+        DetourDetach(&(PVOID&) o_vkDestroySurfaceKHR, hkvkDestroySurfaceKHR);
+
     if (o_vkCreateDevice != nullptr)
         DetourDetach(&(PVOID&) o_vkCreateDevice, hkvkCreateDevice);
 
@@ -967,6 +1061,8 @@ void VulkanHooks::Unhook()
     {
         o_QueuePresentKHR = nullptr;
         o_CreateSwapchainKHR = nullptr;
+        o_DestroySwapchainKHR = nullptr;
+        o_vkDestroySurfaceKHR = nullptr;
         o_vkCreateDevice = nullptr;
         o_vkDestroyDevice = nullptr;
         o_vkCreateInstance = nullptr;

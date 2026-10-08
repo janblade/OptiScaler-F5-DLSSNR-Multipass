@@ -473,6 +473,9 @@
     <ClInclude Include="native\DepthCopyDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\DepthResolveDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\SharedFrame.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1332,6 +1335,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\DepthCopyDx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\DepthResolveDx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\SharedFrame.cpp">

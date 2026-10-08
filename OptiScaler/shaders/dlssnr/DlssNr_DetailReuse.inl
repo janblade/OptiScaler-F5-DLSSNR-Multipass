@@ -402,6 +402,9 @@ void MeasureCoverage(const Frame& f)
         CopyCoverage(f.cmdList);
 }
 
+// The outside opinion of each pixel's history for the moving passes (DlssNrFrameInfo::HistoryDistrust), or null.
+ID3D12Resource* HistoryDistrust(const Frame& f) { return static_cast<ID3D12Resource*>(f.info->HistoryDistrust); }
+
 // The moved detail with its trust into `estimate`, then `mode` (Fill or Steady) from it into `target`. measure: also
 // read off how much of the frame had no detail to move, while the estimate is readable anyway.
 bool EstimateThen(const Frame& f, DlssNrDetailReuseMode mode, ID3D12Resource* second, ID3D12Resource* target,
@@ -410,7 +413,7 @@ bool EstimateThen(const Frame& f, DlssNrDetailReuseMode mode, ID3D12Resource* se
     MakeHistoryReadable(f.cmdList, true);
     params.Mode = DlssNrDetailReuse_Estimate;
     bool ok = f.pass->DispatchDetailReuse(f.cmdList, params, f.workWidth, f.workHeight, f.modelInput, detail[cur],
-                                          colourDepth[cur], f.motion, f.depth, estimate, nullptr);
+                                          colourDepth[cur], f.motion, f.depth, estimate, nullptr, HistoryDistrust(f));
     MakeHistoryReadable(f.cmdList, false);
     if (!ok)
         return false;
@@ -432,8 +435,9 @@ void MeasureOnly(const Frame& f)
         return;
     MakeHistoryReadable(f.cmdList, true);
     params.Mode = DlssNrDetailReuse_Estimate;
-    const bool ok = f.pass->DispatchDetailReuse(f.cmdList, params, f.workWidth, f.workHeight, f.modelInput, detail[cur],
-                                                colourDepth[cur], f.motion, f.depth, estimate, nullptr);
+    const bool ok =
+        f.pass->DispatchDetailReuse(f.cmdList, params, f.workWidth, f.workHeight, f.modelInput, detail[cur],
+                                    colourDepth[cur], f.motion, f.depth, estimate, nullptr, HistoryDistrust(f));
     MakeHistoryReadable(f.cmdList, false);
     if (!ok)
         return;
@@ -461,6 +465,7 @@ Plan BeforeModel(const Frame& f)
         facts, [&]() -> const char* { return f.pass->DetailReuseReady() ? nullptr : "its shader could not be built"; });
     plan.active = Prepare(f, want.wanted, want.keep, want.steady, want.fill, want.measure);
     host.Decide(facts, plan.active, want);
+    params.HistoryDistrust = HistoryDistrust(f) != nullptr ? 1u : 0u;
 
     if (decision.kind == DlssNrDetailReuse::Kind::Reuse)
     {
@@ -479,9 +484,9 @@ Plan BeforeModel(const Frame& f)
 
             MakeHistoryReadable(f.cmdList, true);
             params.Mode = DlssNrDetailReuse_Reproject;
-            plan.reused = f.pass->DispatchDetailReuse(f.cmdList, params, f.workWidth, f.workHeight, f.modelInput,
-                                                      detail[cur], colourDepth[cur], f.motion, f.depth, f.output,
-                                                      nullptr);
+            plan.reused =
+                f.pass->DispatchDetailReuse(f.cmdList, params, f.workWidth, f.workHeight, f.modelInput, detail[cur],
+                                            colourDepth[cur], f.motion, f.depth, f.output, nullptr, HistoryDistrust(f));
             MakeHistoryReadable(f.cmdList, false);
         }
 

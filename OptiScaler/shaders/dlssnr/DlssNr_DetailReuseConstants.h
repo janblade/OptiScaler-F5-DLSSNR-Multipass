@@ -9,8 +9,9 @@
 enum DlssNrDetailReuseMode : uint32_t
 {
     DlssNrDetailReuse_Capture = 0,    // [work]   t0 input, t1 answer, t2 depth guide -> u0 detail, u1 colour + depth
-    DlssNrDetailReuse_Reproject = 1,  // [work]   t0 input, t1 detail, t2 colour + depth, t3 motion, t4 depth guide
-                                      //          -> u0 answer = input + moved detail * trust
+    DlssNrDetailReuse_Reproject = 1,  // [work]   t0 input, t1 detail, t2 colour + depth, t3 motion, t4 depth guide,
+                                      //          t5 history distrust (HistoryDistrust) -> u0 answer = input + moved
+                                      //          detail * trust
     DlssNrDetailReuse_SaveMotion = 2, // [work]   t3 motion guide -> u0 this frame's vectors as uv displacement
     DlssNrDetailReuse_Compose = 3,    // [motion] t3 motion guide, t4 saved vectors -> u0 raw vectors over two frames
     DlssNrDetailReuse_Steady = 4,     // [work]   t0 input, t1 answer, t2 estimate -> u0 steadied answer
@@ -67,6 +68,10 @@ struct alignas(256) DlssNrDetailReuseConstants
     // Steady: a difference between the full frame and the moved detail smaller than this (proxy units; about one 8-bit step) is
     // taken as none, so rounding does not show the two apart. 0 is off.
     float SteadyDeadZone;
+    // Reproject / Estimate: t5 holds an outside opinion of each pixel's history, distrust 0..1 in .r at any size
+    // (DlssNrFrameInfo::HistoryDistrust; Optical F5Low's trust mask on native input), which scales the moved detail's
+    // trust. 0: none, and t5 is a stand-in that is not read.
+    uint32_t HistoryDistrust;
 };
 static_assert(sizeof(DlssNrDetailReuseConstants) == 256);
 

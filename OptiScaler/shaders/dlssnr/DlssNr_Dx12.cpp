@@ -2082,7 +2082,8 @@ DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice)
 
     LOG_DEBUG("{0} start!", _name);
 
-    // Five inputs, two outputs, one constant buffer, and a clamped linear sampler.
+    // Six inputs (the sixth is read by the detail reuse pass only), two outputs, one constant buffer, and a clamped
+    // linear sampler.
     //
     // The sampler exists because the model may be run below full resolution, in which case its answer
     // has to be read back at a different size from the frame it is being transferred onto.
@@ -2151,6 +2152,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
         InOriginal != nullptr ? InOriginal : InSource,
         InMotion != nullptr ? InMotion : InSource,
         InPrevEdit != nullptr ? InPrevEdit : InSource,
+        InSource,
     };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
@@ -2492,7 +2494,7 @@ bool DlssNr_Dx12::DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, cons
 
     FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
 
-    ID3D12Resource* const srvs[kSrvCount] = { InOutput, InPrevOutput, InInput, InPrevInput, InProxy };
+    ID3D12Resource* const srvs[kSrvCount] = { InOutput, InPrevOutput, InInput, InPrevInput, InProxy, InOutput };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
         CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
@@ -2593,7 +2595,8 @@ bool DlssNr_Dx12::DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList,
                                       const DlssNrDetailReuseConstants& InConstants, unsigned int Width,
                                       unsigned int Height, ID3D12Resource* In0, ID3D12Resource* In1,
                                       ID3D12Resource* In2, ID3D12Resource* In3, ID3D12Resource* In4,
-                                      ID3D12Resource* OutTarget, ID3D12Resource* OutSecond)
+                                      ID3D12Resource* OutTarget, ID3D12Resource* OutSecond,
+                                      ID3D12Resource* InHistoryDistrust)
 {
     if (!DetailReuseReady() || InCmdList == nullptr || _device == nullptr || In0 == nullptr ||
         OutTarget == nullptr || Width == 0 || Height == 0)
@@ -2610,6 +2613,7 @@ bool DlssNr_Dx12::DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList,
         In2 != nullptr ? In2 : In0,
         In3 != nullptr ? In3 : In0,
         In4 != nullptr ? In4 : In0,
+        InHistoryDistrust != nullptr ? InHistoryDistrust : In0,
     };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
@@ -2654,13 +2658,14 @@ bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList,
 
     FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
 
-    // Same table shape as DispatchPass: the finished-colour shader reads t0..t3 + u0, and t4/u1 get
+    // Same table shape as DispatchPass: the finished-colour shader reads t0..t3 + u0, and t4/t5/u1 get
     // the source as a stand-in so no descriptor in the table is left unbound.
     ID3D12Resource* const srvs[kSrvCount] = {
         InSource,
         InModel != nullptr ? InModel : InSource,
         InOriginal != nullptr ? InOriginal : InSource,
         InMotion != nullptr ? InMotion : InSource,
+        InSource,
         InSource,
     };
 

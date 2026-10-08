@@ -455,9 +455,10 @@ VkImageView Written(const Frame& f, OwnedImage* img)
     return img->view;
 }
 
-// One dispatch: t0-t4 as given, u0 and u1 written. Reads are listed before writes so no image is both.
+// One dispatch: t0-t5 as given, u0 and u1 written. Reads are listed before writes so no image is both.
 bool Run(const Frame& f, DlssNrDetailReuseMode mode, unsigned int width, unsigned int height,
-         const DlssNrDetailReuse_Vk::Read (&reads)[5], OwnedImage* target, OwnedImage* second)
+         const DlssNrDetailReuse_Vk::Read (&reads)[DlssNrDetailReuse_Vk::kReads], OwnedImage* target,
+         OwnedImage* second)
 {
     host.params.Mode = mode;
     const VkImageView u0 = Written(f, target);
@@ -471,7 +472,7 @@ void MeasureCoverage(const Frame& f)
 {
     if (!coverage.Valid())
         return;
-    const DlssNrDetailReuse_Vk::Read reads[5] = { {}, Own(f, &estimate), {}, {}, {} };
+    const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = { {}, Own(f, &estimate), {}, {}, {} };
     // One 8x8 thread group per tile of the grid, whatever the working size.
     const unsigned int threads = kCoverageTiles * 8;
     if (!Run(f, DlssNrDetailReuse_Coverage, threads, threads, reads, &coverage, nullptr))
@@ -519,15 +520,17 @@ void MeasureCoverage(const Frame& f)
 bool EstimateThen(const Frame& f, DlssNrDetailReuseMode mode, OwnedImage* second, OwnedImage* target, bool measure)
 {
     {
-        const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, &detail[cur]),
-                                                      Own(f, &colourDepth[cur]), Game(f.motion), GameDepth(f) };
+        const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = {
+            Own(f, f.modelInput), Own(f, &detail[cur]), Own(f, &colourDepth[cur]), Game(f.motion), GameDepth(f)
+        };
         if (!Run(f, DlssNrDetailReuse_Estimate, f.workWidth, f.workHeight, reads, &estimate, nullptr))
             return false;
     }
     if (measure)
         MeasureCoverage(f);
-    const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, second), Own(f, &estimate), {},
-                                                  GameDepth(f) };
+    const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = {
+        Own(f, f.modelInput), Own(f, second), Own(f, &estimate), {}, GameDepth(f)
+    };
     return Run(f, mode, f.workWidth, f.workHeight, reads, target, nullptr);
 }
 
@@ -537,8 +540,9 @@ void MeasureOnly(const Frame& f)
 {
     if (!coverage.Valid() || !estimate.Valid())
         return;
-    const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, &detail[cur]),
-                                                  Own(f, &colourDepth[cur]), Game(f.motion), GameDepth(f) };
+    const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = { Own(f, f.modelInput), Own(f, &detail[cur]),
+                                                                             Own(f, &colourDepth[cur]), Game(f.motion),
+                                                                             GameDepth(f) };
     if (Run(f, DlssNrDetailReuse_Estimate, f.workWidth, f.workHeight, reads, &estimate, nullptr))
         MeasureCoverage(f);
 }
@@ -596,8 +600,9 @@ Plan BeforeModel(const Frame& f)
             if (want.measure)
                 MeasureOnly(f);
 
-            const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, &detail[cur]),
-                                                          Own(f, &colourDepth[cur]), Game(f.motion), GameDepth(f) };
+            const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = {
+                Own(f, f.modelInput), Own(f, &detail[cur]), Own(f, &colourDepth[cur]), Game(f.motion), GameDepth(f)
+            };
             plan.reused = Run(f, DlssNrDetailReuse_Reproject, f.workWidth, f.workHeight, reads, f.output, nullptr);
         }
 
@@ -605,7 +610,9 @@ Plan BeforeModel(const Frame& f)
         {
             // Kept for the next full frame, which composes it with its own vectors for the model's history. Without
             // it that frame cannot compose, so the cadence starts over and the model's history is reset instead.
-            const DlssNrDetailReuse_Vk::Read reads[5] = { Game(f.motion), {}, {}, Game(f.motion), {} };
+            const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = {
+                Game(f.motion), {}, {}, Game(f.motion), {}
+            };
             if (!Run(f, DlssNrDetailReuse_SaveMotion, f.workWidth, f.workHeight, reads, &prevMotion, nullptr))
                 host.cadence.Drop();
         }
@@ -637,7 +644,9 @@ Plan BeforeModel(const Frame& f)
     bool composedReady = false;
     if (!plan.reused && decision.kind == DlssNrDetailReuse::Kind::Full && decision.composeMotion)
     {
-        const DlssNrDetailReuse_Vk::Read reads[5] = { Game(f.motion), {}, {}, Game(f.motion), Own(f, &prevMotion) };
+        const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = {
+            Game(f.motion), {}, {}, Game(f.motion), Own(f, &prevMotion)
+        };
         if (Run(f, DlssNrDetailReuse_Compose, f.motionWidth, f.motionHeight, reads, &composed, nullptr))
         {
             // The model reads it like its other inputs.
@@ -674,8 +683,9 @@ void AfterModel(const Frame& f, const Plan& plan, bool succeeded, OwnedImage*& f
             !(plan.reused && host.params.DebugView != 0))
         {
             const unsigned int write = 1u - cur;
-            const DlssNrDetailReuse_Vk::Read reads[5] = { Own(f, f.modelInput), Own(f, finalAnswer), GameDepth(f), {},
-                                                          {} };
+            const DlssNrDetailReuse_Vk::Read reads[DlssNrDetailReuse_Vk::kReads] = {
+                Own(f, f.modelInput), Own(f, finalAnswer), GameDepth(f), {}, {}
+            };
             captured = Run(f, DlssNrDetailReuse_Capture, f.workWidth, f.workHeight, reads, &detail[write],
                            &colourDepth[write]);
             if (captured)

@@ -19,6 +19,8 @@
 
 #include <dlssnr/DlssNr_VkExtensions.h>
 #include <dlssnr/DlssNrFeature_Vk.h>
+#include <native/NativeDriverVk.h>
+#include <native/VkFrameSource.h>
 
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
@@ -450,7 +452,84 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
         }
     }
 
+    // Optical F5Low on Vulkan hands the picture to a D3D12 device and waits for it on the GPU through a D3D12 fence opened
+    // as a timeline semaphore (native/SharedFrameVk.h), which needs the timeline semaphore feature. The same as for the
+    // flags above: set in the game's own struct for the call when it lists one, else ours goes at the head of the chain,
+    // which is only valid when the extension is in the list (the spoofing step above adds it when offered). Not tied to
+    // the NVIDIA pair: the D3D12 side also runs the vendor-neutral port.
+    VkPhysicalDeviceTimelineSemaphoreFeatures nativeTimelineFeature {};
+    VkBool32* nativeBorrowedTimeline = nullptr;
+
+    if (Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        VkPhysicalDeviceTimelineSemaphoreFeatures offered {};
+        offered.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+        VkPhysicalDeviceFeatures2 query {};
+        query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        query.pNext = &offered;
+
+        if (o_vkGetPhysicalDeviceFeatures2)
+            o_vkGetPhysicalDeviceFeatures2(physicalDevice, &query);
+
+        const char* what = "not offered by the device";
+
+        if (offered.timelineSemaphore)
+        {
+            what = nullptr;
+
+            for (auto* node = (VkBaseOutStructure*) localCreteInfo.pNext; node != nullptr && what == nullptr;
+                 node = node->pNext)
+            {
+                VkBool32* flag = nullptr;
+
+                if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+                    flag = &((VkPhysicalDeviceVulkan12Features*) node)->timelineSemaphore;
+                else if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)
+                    flag = &((VkPhysicalDeviceTimelineSemaphoreFeatures*) node)->timelineSemaphore;
+
+                if (flag == nullptr)
+                    continue;
+
+                if (*flag)
+                    what = "already on (the game's own)";
+                else if (!DlssNr::VkExt::IsWritable(flag))
+                    what = "left off: the game's feature struct is read-only";
+                else
+                {
+                    *flag = VK_TRUE;
+                    nativeBorrowedTimeline = flag;
+                    what = "switched on in the game's feature struct for the create call";
+                }
+            }
+
+            if (what == nullptr)
+            {
+                if (DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
+                                           VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME))
+                {
+                    nativeTimelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+                    nativeTimelineFeature.timelineSemaphore = VK_TRUE;
+                    nativeTimelineFeature.pNext = (void*) localCreteInfo.pNext;
+                    localCreteInfo.pNext = &nativeTimelineFeature;
+                    what = "switched on here";
+                }
+                else
+                {
+                    what = "left off: neither the extension nor the game's Vulkan 1.2 features are in the create call";
+                }
+            }
+        }
+
+        LOG_INFO("Optical F5Low Vulkan: timelineSemaphore feature {}", what);
+    }
+
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
+
+    if (nativeBorrowedTimeline != nullptr)
+        *nativeBorrowedTimeline = VK_FALSE;
+
+    if (result == VK_SUCCESS && pDevice != nullptr && *pDevice != VK_NULL_HANDLE)
+        native::VkFrameSource::NoteDevice(*pDevice, localCreteInfo);
 
     if (nrBorrowedFlag != nullptr)
         *nrBorrowedFlag = VK_FALSE;
@@ -550,6 +629,9 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     VkPresentInfoKHR localPresentInfo {};
     memcpy(&localPresentInfo, pPresentInfo, sizeof(VkPresentInfoKHR));
 
+    // Optical F5Low: the picture through NR before the menu is drawn over it. May replace the wait list.
+    NativeMotionVk::OnPresent(queue, &localPresentInfo, _device, _PD);
+
     // render menu if needed
     if (!MenuOverlayVk::QueuePresent(queue, &localPresentInfo))
     {
@@ -579,10 +661,28 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 
     ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
     VkResult result = VK_SUCCESS;
+
+    // Optical F5Low copies the swapchain's images to and from its D3D12 device: TRANSFER usage is added when the surface
+    // allows it (native/VkFrameSource.cpp).
+    VkSwapchainCreateInfoKHR localCreateInfo {};
+
+    if (pCreateInfo != nullptr)
+    {
+        localCreateInfo = *pCreateInfo;
+
+        if (!State::Instance().vulkanSkipHooks)
+            localCreateInfo.imageUsage = native::VkFrameSource::SwapchainUsage(_PD, *pCreateInfo);
+    }
+
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
-        result = o_CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+        result = o_CreateSwapchainKHR(device, pCreateInfo != nullptr ? &localCreateInfo : nullptr, pAllocator,
+                                      pSwapchain);
     }
+
+    if (result == VK_SUCCESS && pCreateInfo != nullptr && pSwapchain != nullptr && *pSwapchain != VK_NULL_HANDLE &&
+        !State::Instance().vulkanSkipHooks)
+        native::VkFrameSource::NoteSwapchain(device, *pSwapchain, localCreateInfo);
 
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE && pCreateInfo != nullptr && *pSwapchain != VK_NULL_HANDLE &&
         !State::Instance().vulkanSkipHooks)
@@ -656,6 +756,9 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
 
     if (device != VK_NULL_HANDLE)
         DlssNr::VkExt::ForgetDevice(device);
+
+    if (device != VK_NULL_HANDLE)
+        NativeMotionVk::OnDeviceDestroyed(device);
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);

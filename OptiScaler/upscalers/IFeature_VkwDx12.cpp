@@ -5,6 +5,7 @@
 
 #include <Config.h>
 #include <dlssnr/DlssNr.h>
+#include <native/DepthFinderCore.h>
 #include <SysUtils.h>
 
 #include <proxies/DXGI_Proxy.h>
@@ -2116,6 +2117,9 @@ bool IFeature_VkwDx12::Init(VkInstance InInstance, VkPhysicalDevice InPD, VkDevi
 bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InParameters)
 {
     LOG_FUNC();
+
+    // Optical F5Low stands aside while the game calls an upscaler of its own.
+    native::NoteGameUpscalerCall();
     std::scoped_lock evaluateLock(EvaluateMutex);
 
     if (!IsInited())

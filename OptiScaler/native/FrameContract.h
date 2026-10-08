@@ -20,7 +20,8 @@ enum class Api
     D3D9,
     D3D10,
     D3D11,
-    D3D12
+    D3D12,
+    Vulkan
 };
 
 // What the picture's values mean. The producer supports Srgb (SDR) and ScRgb (linear, 1.0 = 80 nits) today; Pq (HDR10) is

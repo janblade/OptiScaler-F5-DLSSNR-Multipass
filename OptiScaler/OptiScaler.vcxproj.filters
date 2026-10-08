@@ -491,6 +491,12 @@
     <ClInclude Include="native\NativeDriverVk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="resource_tracking\GenericDepth_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="resource_tracking\GenericDepth_VkEvents.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\VirtualUpscalerDriver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1362,6 +1368,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\NativeDriverVk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="resource_tracking\GenericDepth_Vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\VirtualUpscalerDriver.cpp">

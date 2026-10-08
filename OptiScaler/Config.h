@@ -587,6 +587,11 @@ class Config
     // game's depth" under the menu's Advanced section. See resource_tracking/GenericDepth_Dx12.h and
     // GenericDepth_Dx11.h.
     CustomOptional<bool> DlssNrNativeDepthFinder { false };
+    // NativeDepthVkCopyUsage: Vulkan only. With NativeDepthFinder on, depth images the game makes for rendering are made
+    // copyable (TRANSFER_SRC added to their usage), or the finder could not copy the scene's depth: a Vulkan game seldom
+    // asks for that itself. Can cost a little depth compression on some GPUs. Off: Vulkan depth reads as not readable,
+    // and Optical F5Low runs on motion only. Startup only (images are made once). See resource_tracking/GenericDepth_Vk.h.
+    CustomOptional<bool> DlssNrNativeDepthVkCopyUsage { true };
     // NativeDepthWarmupFrames: presented frames to watch before the finder trusts that the game makes no upscaler call of its
     // own (it stands down for good the moment one is seen). NativeDepthOverlay: debug; copies the picked depth buffer at its
     // busiest clear and shows it in the DLSS-NR menu (D3D12 only; no preview round-trip exists for D3D11 yet). That copy is

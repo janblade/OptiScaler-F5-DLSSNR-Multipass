@@ -529,6 +529,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\SharedFrameVk.h" />
     <ClInclude Include="native\VkFrameSource.h" />
     <ClInclude Include="native\NativeDriverVk.h" />
+    <ClInclude Include="resource_tracking\GenericDepth_Vk.h" />
+    <ClInclude Include="resource_tracking\GenericDepth_VkEvents.h" />
     <ClInclude Include="native\VirtualUpscalerDriver.h" />
     <ClInclude Include="native\NativeDriver.h" />
     <ClInclude Include="native\NativeLowLatency.h" />
@@ -861,6 +863,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </ClCompile>
     <ClCompile Include="native\VkFrameSource.cpp" />
     <ClCompile Include="native\NativeDriverVk.cpp" />
+    <ClCompile Include="resource_tracking\GenericDepth_Vk.cpp" />
     <ClCompile Include="native\VirtualUpscalerDriver.cpp" />
     <ClCompile Include="native\NativeDriver.cpp" />
     <ClCompile Include="native\NativeLowLatency.cpp" />

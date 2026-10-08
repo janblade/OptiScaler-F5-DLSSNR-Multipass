@@ -21,6 +21,7 @@
 #include <dlssnr/DlssNrFeature_Vk.h>
 #include <native/NativeDriverVk.h>
 #include <native/VkFrameSource.h>
+#include <resource_tracking/GenericDepth_Vk.h>
 
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
@@ -529,7 +530,10 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
         *nativeBorrowedTimeline = VK_FALSE;
 
     if (result == VK_SUCCESS && pDevice != nullptr && *pDevice != VK_NULL_HANDLE)
+    {
         native::VkFrameSource::NoteDevice(*pDevice, localCreteInfo);
+        GenericDepthVk::OnDevice(*pDevice, physicalDevice);
+    }
 
     if (nrBorrowedFlag != nullptr)
         *nrBorrowedFlag = VK_FALSE;
@@ -758,7 +762,10 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         DlssNr::VkExt::ForgetDevice(device);
 
     if (device != VK_NULL_HANDLE)
+    {
         NativeMotionVk::OnDeviceDestroyed(device);
+        GenericDepthVk::OnDeviceDestroyed(device);
+    }
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);

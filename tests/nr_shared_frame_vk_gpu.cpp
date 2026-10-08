@@ -217,6 +217,11 @@ struct Dx
 
     bool Init(const LUID& luid)
     {
+        // The debug layer, so an invalid copy or view of the depth formats fails the test.
+        ComPtr<ID3D12Debug> debug;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
+            debug->EnableDebugLayer();
+
         ComPtr<IDXGIFactory4> factory;
         if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
             FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter))) ||
@@ -283,6 +288,36 @@ struct Dx
         barrier.Transition.StateAfter = to;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1, &barrier);
+    }
+
+    // Errors the debug layer reported since the last call (0 when the layer is not installed).
+    UINT64 DebugErrors()
+    {
+        ComPtr<ID3D12InfoQueue> info;
+
+        if (FAILED(device.As(&info)))
+            return 0;
+
+        UINT64 errors = 0;
+        const UINT64 count = info->GetNumStoredMessages();
+
+        for (UINT64 i = 0; i < count; ++i)
+        {
+            SIZE_T size = 0;
+            info->GetMessage(i, nullptr, &size);
+            std::vector<char> bytes(size);
+            auto* message = (D3D12_MESSAGE*) bytes.data();
+            info->GetMessage(i, message, &size);
+
+            if (message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR)
+            {
+                printf("    D3D12: %s\n", message->pDescription);
+                ++errors;
+            }
+        }
+
+        info->ClearStoredMessages();
+        return errors;
     }
 
     UINT64 VideoMemoryUsed()
@@ -507,10 +542,202 @@ bool RoundTrip(Vk& vk, Dx& dx, native::VkInterop& interop, native::SharedFenceVk
     return ok;
 }
 
+// The depth path: a Vulkan depth image cleared to a known value is copied by RecordDepthToBuffer into the finder's
+// own buffer, from there into the shared buffer (the frame source's step), and on D3D12 into a texture of the format it
+// is read through. The value must survive, and the view must be one D3D12 accepts.
+bool DepthRoundTrip(Vk& vk, Dx& dx, native::VkInterop& interop, native::SharedFenceVk& fence, VkFormat format)
+{
+    constexpr uint32_t kWidth = 333;
+    constexpr uint32_t kHeight = 187;
+    constexpr float kValue = 0.375f;
+
+    VkFormatProperties properties {};
+    vkGetPhysicalDeviceFormatProperties(vk.physical, format, &properties);
+
+    if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0)
+    {
+        printf("  not supported by this device, skipped\n");
+        return true;
+    }
+
+    native::VkDepthCopyFormat copy;
+    bool ok = Check("a depth format that crosses", native::VkDepthCopyFormatOf(format, &copy));
+
+    const uint32_t pitch = native::DepthRowPitch(kWidth, copy.bytes);
+    const uint64_t size = (uint64_t) pitch * kHeight;
+
+    // The game's depth image.
+    VkImageCreateInfo info {};
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent = { kWidth, kHeight, 1 };
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory imageMemory = VK_NULL_HANDLE;
+    vkCreateImage(vk.device, &info, nullptr, &image);
+    VkMemoryRequirements requirements {};
+    vkGetImageMemoryRequirements(vk.device, image, &requirements);
+    VkMemoryAllocateInfo allocate {};
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = vk.DeviceMemory(requirements.memoryTypeBits);
+    vkAllocateMemory(vk.device, &allocate, nullptr, &imageMemory);
+    vkBindImageMemory(vk.device, image, imageMemory, 0);
+
+    // The finder's own buffer.
+    VkBufferCreateInfo bufferInfo {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkBuffer own = VK_NULL_HANDLE;
+    VkDeviceMemory ownMemory = VK_NULL_HANDLE;
+    vkCreateBuffer(vk.device, &bufferInfo, nullptr, &own);
+    vkGetBufferMemoryRequirements(vk.device, own, &requirements);
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = vk.DeviceMemory(requirements.memoryTypeBits);
+    vkAllocateMemory(vk.device, &allocate, nullptr, &ownMemory);
+    vkBindBufferMemory(vk.device, own, ownMemory, 0);
+
+    native::SharedBufferVk shared;
+    ok &= Check("shared buffer made on D3D12 and opened in Vulkan", shared.Create(dx.device.Get(), interop, size));
+
+    if (!ok)
+    {
+        printf("    %s\n", shared.Error().c_str());
+        return false;
+    }
+
+    const bool stencil = format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                         format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    const VkImageAspectFlags aspects = VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+
+    vk.Begin();
+    VkImageMemoryBarrier barrier {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = { aspects, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
+    const VkClearDepthStencilValue clear { kValue, 0x5A };
+    vkCmdClearDepthStencilImage(vk.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1,
+                                &barrier.subresourceRange);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    vkCmdPipelineBarrier(vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0,
+                         nullptr, 0, nullptr, 1, &barrier);
+
+    // What a hook records after the scene's pass ends, then what the frame source records at the present.
+    native::RecordDepthToBuffer(vk.cmd, image, format, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, kWidth,
+                                kHeight, own);
+    const VkBufferCopy whole { 0, 0, size };
+    vkCmdCopyBuffer(vk.cmd, own, shared.Buffer(), 1, &whole);
+
+    const uint64_t copied = fence.Next();
+    ok &= Check("Vulkan depth copies submitted", vk.Submit(fence.Semaphore(), 0, copied, false));
+
+    // D3D12: into a texture of the crossing format, then read back.
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = kWidth;
+    desc.Height = kHeight;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = copy.texture;
+    desc.SampleDesc.Count = 1;
+    ComPtr<ID3D12Resource> texture;
+    ok &= Check("D3D12 depth texture made",
+                SUCCEEDED(dx.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                              IID_PPV_ARGS(&texture))));
+
+    if (!ok)
+        return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc {};
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.NumDescriptors = 1;
+    ComPtr<ID3D12DescriptorHeap> descriptors;
+    dx.device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&descriptors));
+    D3D12_SHADER_RESOURCE_VIEW_DESC view {};
+    view.Format = copy.view;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.Texture2D.MipLevels = 1;
+    dx.device->CreateShaderResourceView(texture.Get(), &view, descriptors->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    UINT64 total = 0;
+    dx.device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &total);
+    auto readback = dx.Buffer(D3D12_HEAP_TYPE_READBACK, total);
+
+    dx.queue->Wait(fence.Fence12(), copied);
+    dx.Begin();
+    native::RecordBufferToDepthTexture(dx.list.Get(), shared.Res12(), texture.Get(), copy, kWidth, kHeight);
+    dx.Transition(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION src { texture.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+    D3D12_TEXTURE_COPY_LOCATION dst { readback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+    dst.PlacedFootprint = footprint;
+    dx.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    dx.Execute();
+    dx.WaitIdle();
+
+    uint8_t* read = nullptr;
+    readback->Map(0, nullptr, (void**) &read);
+    bool same = true;
+    double worst = 0.0;
+
+    for (uint32_t y = 0; y < kHeight && same; ++y)
+    {
+        const uint8_t* row = read + y * footprint.Footprint.RowPitch;
+
+        for (uint32_t x = 0; x < kWidth && same; ++x)
+        {
+            double got = 0.0;
+
+            if (copy.bytes == 2)
+                got = ((const uint16_t*) row)[x] / 65535.0;
+            else if (copy.texture == DXGI_FORMAT_R24G8_TYPELESS)
+                got = (((const uint32_t*) row)[x] & 0xFFFFFF) / 16777215.0;
+            else
+                got = ((const float*) row)[x];
+
+            const double error = got > kValue ? got - kValue : kValue - got;
+            worst = error > worst ? error : worst;
+            same = error <= (copy.bytes == 2 ? 1.0 / 65535.0 : 1.0 / 16777215.0);
+        }
+    }
+
+    readback->Unmap(0, nullptr);
+    printf("    read %s, worst error %.3g\n", same ? "the cleared value" : "ANOTHER value", worst);
+    ok &= Check("D3D12 reads the cleared depth", same);
+    ok &= Check("no D3D12 debug layer error (the copy and the view are valid)", dx.DebugErrors() == 0);
+
+    vkDestroyImage(vk.device, image, nullptr);
+    vkFreeMemory(vk.device, imageMemory, nullptr);
+    vkDestroyBuffer(vk.device, own, nullptr);
+    vkFreeMemory(vk.device, ownMemory, nullptr);
+    return ok;
+}
+
 } // namespace
 
 int main()
 {
+    setvbuf(stdout, nullptr, _IONBF, 0);
     Vk vk;
 
     if (!vk.Init())
@@ -556,6 +783,24 @@ int main()
     {
         printf("%s:\n", f.name);
         ok &= RoundTrip(vk, dx, interop, fence, f);
+    }
+
+    const struct
+    {
+        const char* name;
+        VkFormat format;
+    } depths[] = {
+        { "D16_UNORM", VK_FORMAT_D16_UNORM },
+        { "X8_D24_UNORM_PACK32", VK_FORMAT_X8_D24_UNORM_PACK32 },
+        { "D24_UNORM_S8_UINT", VK_FORMAT_D24_UNORM_S8_UINT },
+        { "D32_SFLOAT", VK_FORMAT_D32_SFLOAT },
+        { "D32_SFLOAT_S8_UINT", VK_FORMAT_D32_SFLOAT_S8_UINT },
+    };
+
+    for (const auto& d : depths)
+    {
+        printf("depth %s:\n", d.name);
+        ok &= DepthRoundTrip(vk, dx, interop, fence, d.format);
     }
 
     printf("Ten resizes:\n");

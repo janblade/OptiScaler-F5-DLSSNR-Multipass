@@ -3,6 +3,8 @@
 #include "VkFrameSource.h"
 #include "DepthFinderCore.h"
 
+#include <resource_tracking/GenericDepth_Vk.h>
+
 #include <Config.h>
 #include <proxies/D3D12_Proxy.h>
 #include <proxies/DXGI_Proxy.h>
@@ -144,6 +146,19 @@ VkImageUsageFlags VkFrameSource::SwapchainUsage(VkPhysicalDevice physical, const
     }
 
     return info.imageUsage | kCopies;
+}
+
+bool VkFrameSource::SwapchainExtent(VkSwapchainKHR swapchain, uint32_t* width, uint32_t* height)
+{
+    std::lock_guard lock(g_registryMutex);
+    const auto it = g_swapchains.find(swapchain);
+
+    if (it == g_swapchains.end())
+        return false;
+
+    *width = it->second.extent.width;
+    *height = it->second.extent.height;
+    return true;
 }
 
 void VkFrameSource::NoteSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info)
@@ -360,6 +375,7 @@ void VkFrameSource::Release()
         const VkDevice current = _device;
         _device = _interop.device;
         ReleaseRing();
+        ReleaseDepth();
         _picture.Reset();
         _fence.Reset();
         _device = current;
@@ -504,6 +520,8 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(slot.copyIn, &begin);
     RecordCopyToShared(slot.copyIn, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, _picture, family);
+    FrameInput depth;
+    const bool haveDepth = RecordDepth(slot.copyIn, family, depth);
     vkEndCommandBuffer(slot.copyIn);
 
     // The present's semaphores are binary: their values are ignored, but the arrays must match the counts.
@@ -533,9 +551,11 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     if (const VkResult result = vkQueueSubmit(_queue, 1, &submit, VK_NULL_HANDLE); result != VK_SUCCESS)
     {
         _error = std::format("the copy of the picture could not be submitted ({})", (int) result);
+        _depthPending = false;
         return AcquireStatus::Unavailable;
     }
 
+    SubmitDepthCopy(copied);
     _acquired = true;
     _tookPresentWaits = true;
     _error.clear();
@@ -551,9 +571,193 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     input.colorSpace = ToColorSpace(space, format);
     input.width = extent.width;
     input.height = extent.height;
-    input.depthReadability = DepthReadability::Unknown;
+    input.depthReadability = GenericDepthVk::NotReadableReason() != nullptr ? DepthReadability::NotReadable
+                             : GenericDepthVk::Installed()                  ? DepthReadability::Readable
+                                                                            : DepthReadability::Unknown;
+
+    if (haveDepth)
+    {
+        input.depth[0] = depth.depth[0];
+        input.depthCount = 1;
+        input.depthView = depth.depthView;
+        input.depthWidth = depth.depthWidth;
+        input.depthHeight = depth.depthHeight;
+        input.depthReversed = depth.depthReversed;
+    }
+
     input.ready = SyncPoint { _fence.Fence12(), copied };
     return AcquireStatus::Ready;
+}
+
+bool VkFrameSource::RecordDepth(VkCommandBuffer copyIn, uint32_t family, FrameInput& input)
+{
+    _depthPending = false;
+
+    const auto snap = GenericDepthVk::BestSnapshot();
+    VkDepthCopyFormat format;
+
+    if (!snap.valid || !VkDepthCopyFormatOf(snap.format, &format))
+        return false;
+
+    const bool sizeChanged = _depthWidth != snap.width || _depthHeight != snap.height ||
+                             _depthFormat.texture != format.texture;
+
+    if (_depthShared.Size() < snap.size || sizeChanged || _depthTexture == nullptr)
+    {
+        // Both may still be read by the D3D12 queue for an earlier frame.
+        WaitRingIdle();
+
+        if (_depthShared.Size() < snap.size && !_depthShared.Create(_device12, _interop, snap.size))
+        {
+            static bool logged = false;
+
+            if (!logged)
+            {
+                logged = true;
+                LOG_WARN("Native motion (Vulkan): sharing the depth failed: {}", _depthShared.Error());
+            }
+
+            return false;
+        }
+
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = snap.width;
+        desc.Height = snap.height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = format.texture;
+        desc.SampleDesc.Count = 1;
+
+        _depthTexture.Reset();
+
+        if (FAILED(_device12->CreateCommittedResource(
+                &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                IID_PPV_ARGS(&_depthTexture))))
+            return false;
+
+        if (_depthList == nullptr)
+        {
+            for (auto& allocator : _depthAllocators)
+            {
+                if (FAILED(_device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                             IID_PPV_ARGS(&allocator))))
+                    return false;
+            }
+
+            if (FAILED(_device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _depthAllocators[0].Get(),
+                                                    nullptr, IID_PPV_ARGS(&_depthList))) ||
+                FAILED(_device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_depthFence))))
+                return false;
+
+            _depthList->Close();
+        }
+
+        _depthFormat = format;
+        _depthWidth = snap.width;
+        _depthHeight = snap.height;
+        LOG_INFO("Native motion (Vulkan): sharing the depth at {}x{}, Vulkan format {}", snap.width, snap.height,
+                 (int) snap.format);
+    }
+
+    // The finder's copy was written in the game's command buffers, before the present's semaphores: visible here.
+    const VkBufferCopy whole { 0, 0, snap.size };
+    vkCmdCopyBuffer(copyIn, snap.buffer, _depthShared.Buffer(), 1, &whole);
+
+    // Handed to the D3D12 queue, as the picture is.
+    VkBufferMemoryBarrier release {};
+    release.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    release.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    release.srcQueueFamilyIndex = family;
+    release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+    release.buffer = _depthShared.Buffer();
+    release.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(copyIn, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 1,
+                         &release, 0, nullptr);
+
+    _depthPending = true;
+    input.depth[0] = _depthTexture.Get();
+    input.depthView = format.view;
+    input.depthWidth = snap.width;
+    input.depthHeight = snap.height;
+    input.depthReversed = snap.reversed;
+    return true;
+}
+
+void VkFrameSource::SubmitDepthCopy(uint64_t copied)
+{
+    if (!_depthPending)
+        return;
+
+    _depthPending = false;
+
+    // The slot's allocator is free once its last copy has run.
+    if (_depthFence->GetCompletedValue() < _depthSlotValue[_slot])
+    {
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        _depthFence->SetEventOnCompletion(_depthSlotValue[_slot], event);
+        WaitForSingleObject(event, 5000);
+        CloseHandle(event);
+    }
+
+    auto* allocator = _depthAllocators[_slot].Get();
+    allocator->Reset();
+    _depthList->Reset(allocator, nullptr);
+
+    const auto toCopy = [&](D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
+    {
+        D3D12_RESOURCE_BARRIER barrier {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = _depthTexture.Get();
+        barrier.Transition.StateBefore = from;
+        barrier.Transition.StateAfter = to;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        _depthList->ResourceBarrier(1, &barrier);
+    };
+
+    constexpr auto kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    toCopy(kRead, D3D12_RESOURCE_STATE_COPY_DEST);
+    RecordBufferToDepthTexture(_depthList.Get(), _depthShared.Res12(), _depthTexture.Get(), _depthFormat, _depthWidth,
+                               _depthHeight);
+    toCopy(D3D12_RESOURCE_STATE_COPY_DEST, kRead);
+    _depthList->Close();
+
+    // Before the producer's work on the same queue, which waits on the same point.
+    _queue12->Wait(_fence.Fence12(), copied);
+    ID3D12CommandList* lists[] = { _depthList.Get() };
+    _queue12->ExecuteCommandLists(1, lists);
+    _depthSlotValue[_slot] = ++_depthFenceValue;
+    _queue12->Signal(_depthFence.Get(), _depthFenceValue);
+}
+
+void VkFrameSource::ReleaseDepth()
+{
+    if (_depthFence != nullptr && _depthFence->GetCompletedValue() < _depthFenceValue)
+    {
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        _depthFence->SetEventOnCompletion(_depthFenceValue, event);
+        WaitForSingleObject(event, 5000);
+        CloseHandle(event);
+    }
+
+    _depthShared.Reset();
+    _depthTexture.Reset();
+    _depthList.Reset();
+
+    for (auto& allocator : _depthAllocators)
+        allocator.Reset();
+
+    _depthFence.Reset();
+    _depthFenceValue = 0;
+
+    for (auto& value : _depthSlotValue)
+        value = 0;
+
+    _depthWidth = _depthHeight = 0;
+    _depthFormat = VkDepthCopyFormat {};
 }
 
 void VkFrameSource::Return(const FrameInput& input, const FrameOutput& output)

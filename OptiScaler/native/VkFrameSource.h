@@ -61,6 +61,8 @@ class VkFrameSource : public IFrameSource
     static VkImageUsageFlags SwapchainUsage(VkPhysicalDevice physical, const VkSwapchainCreateInfoKHR& info);
     // A swapchain was made: its images, format and colour space. The one it replaces is forgotten.
     static void NoteSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info);
+    // The picture size of a swapchain seen at creation.
+    static bool SwapchainExtent(VkSwapchainKHR swapchain, uint32_t* width, uint32_t* height);
 
   private:
     static constexpr uint32_t kRing = 3;
@@ -78,7 +80,14 @@ class VkFrameSource : public IFrameSource
     bool EnsureRing(uint32_t family);
     void ReleaseRing();
     void WaitRingIdle();
+    void ReleaseDepth();
     void Release();
+
+    // The scene's depth for this frame (resource_tracking/GenericDepth_Vk.h): the finder's buffer into _depthShared in
+    // the copy-in command buffer, then on D3D12 into _depthTexture. False when the frame has none.
+    bool RecordDepth(VkCommandBuffer copyIn, uint32_t family, FrameInput& input);
+    // After the copy-in submit: the D3D12 side of RecordDepth, ordered after `copied` on the D3D12 queue.
+    void SubmitDepthCopy(uint64_t copied);
 
     // The present being processed.
     VkDevice _device = VK_NULL_HANDLE;
@@ -105,6 +114,19 @@ class VkFrameSource : public IFrameSource
     SharedImageVk _picture;
     Slot _ring[kRing];
     uint32_t _ringFamily = UINT32_MAX;
+
+    // The depth path. Its D3D12 copy has a fence of its own (not the shared one, whose values Vulkan also signals).
+    SharedBufferVk _depthShared;
+    Microsoft::WRL::ComPtr<ID3D12Resource> _depthTexture;
+    VkDepthCopyFormat _depthFormat;
+    uint32_t _depthWidth = 0;
+    uint32_t _depthHeight = 0;
+    bool _depthPending = false; // RecordDepth recorded this frame's copy; SubmitDepthCopy sends the D3D12 half
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> _depthAllocators[kRing];
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> _depthList;
+    Microsoft::WRL::ComPtr<ID3D12Fence> _depthFence;
+    uint64_t _depthFenceValue = 0;
+    uint64_t _depthSlotValue[kRing] = {};
     uint64_t _frame = 0;
     std::string _error;
 };

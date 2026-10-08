@@ -7,6 +7,7 @@
 
 #include <Config.h>
 #include <misc/IdentifyGpu.h>
+#include <resource_tracking/GenericDepth_Vk.h>
 
 #include <imgui/imgui.h>
 
@@ -33,20 +34,27 @@ namespace NativeMotionVk
 
 void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhysicalDevice physical)
 {
-    if (!g_driver.Enabled())
-        return;
-
     // A dxvk game presents its D3D frames through here as well; those belong to the D3D drivers.
     if (IdentifyGpu::getPrimaryGpu().usesDxvk)
         return;
 
     if (present == nullptr || present->swapchainCount != 1 || queue == VK_NULL_HANDLE || device == VK_NULL_HANDLE ||
-        physical == VK_NULL_HANDLE || g_driver.Failed())
+        physical == VK_NULL_HANDLE)
         return;
 
     std::unique_lock lock(g_runMutex, std::try_to_lock);
 
     if (!lock.owns_lock())
+        return;
+
+    // The depth finder closes the frame first (whether or not the producer runs, as on D3D12), so the frame source
+    // hands over this frame's copy.
+    uint32_t width = 0, height = 0;
+
+    if (native::VkFrameSource::SwapchainExtent(present->pSwapchains[0], &width, &height))
+        GenericDepthVk::OnPresent(device, width, height);
+
+    if (!g_driver.Enabled() || g_driver.Failed())
         return;
 
     g_source.SetPresent(device, physical, queue, present->pSwapchains[0], present->pImageIndices[0],

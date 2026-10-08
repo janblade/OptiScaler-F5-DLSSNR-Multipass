@@ -324,6 +324,229 @@ void SharedFenceVk::Reset()
     _value = 0;
 }
 
+bool SharedBufferVk::Create(ID3D12Device* device12, const VkInterop& vk, uint64_t size)
+{
+    Reset();
+
+    if (device12 == nullptr || !vk.Ready() || size == 0)
+    {
+        _error = "no device to share on";
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    HRESULT hr = device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc, D3D12_RESOURCE_STATE_COMMON,
+                                                   nullptr, IID_PPV_ARGS(&_res12));
+
+    if (FAILED(hr))
+    {
+        _error = std::format("CreateCommittedResource (shared buffer, {} bytes) failed: 0x{:X}", size, (unsigned) hr);
+        return false;
+    }
+
+    HANDLE handle = nullptr;
+    hr = device12->CreateSharedHandle(_res12.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
+
+    if (FAILED(hr))
+    {
+        _error = std::format("CreateSharedHandle for the buffer failed: 0x{:X}", (unsigned) hr);
+        Reset();
+        return false;
+    }
+
+    VkExternalMemoryBufferCreateInfo external {};
+    external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+    external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+
+    VkBufferCreateInfo info {};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.pNext = &external;
+    info.size = size;
+    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    _device = vk.device;
+    VkResult result = vkCreateBuffer(vk.device, &info, nullptr, &_buffer);
+
+    if (result != VK_SUCCESS)
+    {
+        _error = std::format("vkCreateBuffer for the shared buffer failed: {}", (int) result);
+        CloseHandle(handle);
+        Reset();
+        return false;
+    }
+
+    VkMemoryRequirements requirements {};
+    vkGetBufferMemoryRequirements(vk.device, _buffer, &requirements);
+
+    VkMemoryWin32HandlePropertiesKHR handleProperties {};
+    handleProperties.sType = VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR;
+    result = vk.getMemoryWin32HandleProperties(vk.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT, handle,
+                                               &handleProperties);
+
+    const uint32_t type = result == VK_SUCCESS
+                              ? FindMemoryType(vk.memory, requirements.memoryTypeBits & handleProperties.memoryTypeBits)
+                              : UINT32_MAX;
+
+    if (type == UINT32_MAX)
+    {
+        _error = std::format("no Vulkan memory type can hold the shared buffer (handle properties {})", (int) result);
+        CloseHandle(handle);
+        Reset();
+        return false;
+    }
+
+    VkMemoryDedicatedAllocateInfo dedicated {};
+    dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicated.buffer = _buffer;
+
+    VkImportMemoryWin32HandleInfoKHR import {};
+    import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+    import.pNext = &dedicated;
+    import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+    import.handle = handle;
+
+    VkMemoryAllocateInfo allocate {};
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.pNext = &import;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = type;
+
+    result = vkAllocateMemory(vk.device, &allocate, nullptr, &_memory);
+    CloseHandle(handle);
+
+    if (result != VK_SUCCESS || vkBindBufferMemory(vk.device, _buffer, _memory, 0) != VK_SUCCESS)
+    {
+        _error = std::format("importing the shared buffer's memory failed: {}", (int) result);
+        Reset();
+        return false;
+    }
+
+    _size = size;
+    _error.clear();
+    return true;
+}
+
+void SharedBufferVk::Reset()
+{
+    if (_buffer != VK_NULL_HANDLE)
+        vkDestroyBuffer(_device, _buffer, nullptr);
+
+    if (_memory != VK_NULL_HANDLE)
+        vkFreeMemory(_device, _memory, nullptr);
+
+    _buffer = VK_NULL_HANDLE;
+    _memory = VK_NULL_HANDLE;
+    _res12.Reset();
+    _size = 0;
+}
+
+bool VkDepthCopyFormatOf(VkFormat depthFormat, VkDepthCopyFormat* out)
+{
+    switch (depthFormat)
+    {
+    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+        *out = { 2, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_UNORM };
+        return true;
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+        *out = { 4, DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R24_UNORM_X8_TYPELESS };
+        return true;
+    case VK_FORMAT_D32_SFLOAT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        *out = { 4, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT };
+        return true;
+    default:
+        return false;
+    }
+}
+
+void RecordDepthToBuffer(VkCommandBuffer cmd, VkImage image, VkFormat format, VkImageLayout layout, uint32_t width,
+                         uint32_t height, VkBuffer buffer)
+{
+    VkDepthCopyFormat copy;
+
+    if (!VkDepthCopyFormatOf(format, &copy))
+        return;
+
+    // A layout transition of a depth/stencil image covers both aspects; the copy reads depth only.
+    const bool stencil = format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                         format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    const VkImageAspectFlags aspects = VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+
+    VkImageMemoryBarrier toCopy {};
+    toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toCopy.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toCopy.oldLayout = layout;
+    toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toCopy.srcQueueFamilyIndex = toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toCopy.image = image;
+    toCopy.subresourceRange = { aspects, 0, 1, 0, 1 };
+
+    // The last frame's reader of the buffer (the frame source's copy) is long done by the time a command buffer that
+    // writes it again runs (the buffers rotate), so only the image needs a barrier.
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toCopy);
+
+    VkBufferImageCopy region {};
+    region.bufferRowLength = DepthRowPitch(width, copy.bytes) / copy.bytes;
+    region.imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
+    region.imageExtent = { width, height, 1 };
+    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
+
+    VkImageMemoryBarrier back = toCopy;
+    back.srcAccessMask = 0;
+    back.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    back.newLayout = layout;
+
+    VkBufferMemoryBarrier written {};
+    written.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    written.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    written.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    written.srcQueueFamilyIndex = written.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    written.buffer = buffer;
+    written.size = VK_WHOLE_SIZE;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 1,
+                         &written, 1, &back);
+}
+
+void RecordBufferToDepthTexture(ID3D12GraphicsCommandList* list, ID3D12Resource* buffer, ID3D12Resource* texture,
+                                const VkDepthCopyFormat& format, uint32_t width, uint32_t height)
+{
+    D3D12_TEXTURE_COPY_LOCATION from {};
+    from.pResource = buffer;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    from.PlacedFootprint.Footprint.Format = format.footprint;
+    from.PlacedFootprint.Footprint.Width = width;
+    from.PlacedFootprint.Footprint.Height = height;
+    from.PlacedFootprint.Footprint.Depth = 1;
+    from.PlacedFootprint.Footprint.RowPitch = DepthRowPitch(width, format.bytes);
+
+    D3D12_TEXTURE_COPY_LOCATION to {};
+    to.pResource = texture;
+    to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.SubresourceIndex = 0;
+
+    list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+}
+
 namespace
 {
 

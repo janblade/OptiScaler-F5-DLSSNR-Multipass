@@ -113,6 +113,58 @@ class SharedFenceVk
     std::string _error;
 };
 
+// A buffer made on the D3D12 device and opened in Vulkan: how the scene's depth crosses. Vulkan cannot copy depth into a
+// colour image, but it can copy the depth aspect into a buffer, and D3D12 copies a buffer into a texture of any format.
+class SharedBufferVk
+{
+  public:
+    ~SharedBufferVk() { Reset(); }
+
+    bool Create(ID3D12Device* device12, const VkInterop& vk, uint64_t size);
+    void Reset();
+
+    ID3D12Resource* Res12() const { return _res12.Get(); }
+    VkBuffer Buffer() const { return _buffer; }
+    uint64_t Size() const { return _size; }
+    const std::string& Error() const { return _error; }
+
+  private:
+    Microsoft::WRL::ComPtr<ID3D12Resource> _res12;
+    VkDevice _device = VK_NULL_HANDLE;
+    VkBuffer _buffer = VK_NULL_HANDLE;
+    VkDeviceMemory _memory = VK_NULL_HANDLE;
+    uint64_t _size = 0;
+    std::string _error;
+};
+
+// How a Vulkan depth format crosses: the bytes per texel its depth aspect takes in a buffer, the format of the D3D12
+// texture it is copied into, the format a buffer copy into it names (R24G8 is planar on D3D12: its depth plane is copied
+// as R32_TYPELESS), and the format the texture is read through. Vulkan's X8_D24 bit layout (depth in the low 24 bits) is
+// DXGI's R24G8. False for a format that is not depth.
+struct VkDepthCopyFormat
+{
+    uint32_t bytes = 0;
+    DXGI_FORMAT texture = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT footprint = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN;
+};
+bool VkDepthCopyFormatOf(VkFormat depthFormat, VkDepthCopyFormat* out);
+
+// A buffer row of depth, in bytes: D3D12 copies from a buffer only with rows on 256-byte boundaries.
+inline uint32_t DepthRowPitch(uint32_t width, uint32_t bytes)
+{
+    return (width * bytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+}
+
+// The depth aspect of `image` (in `layout`, left in it; single-sampled, made with TRANSFER_SRC) into `buffer` at offset
+// 0, rows DepthRowPitch apart. The depth was last written as an attachment, or by a clear or a copy.
+void RecordDepthToBuffer(VkCommandBuffer cmd, VkImage image, VkFormat format, VkImageLayout layout, uint32_t width,
+                         uint32_t height, VkBuffer buffer);
+
+// On D3D12: `buffer` (as RecordDepthToBuffer left it) into `texture` (of format.texture, in COPY_DEST).
+void RecordBufferToDepthTexture(ID3D12GraphicsCommandList* list, ID3D12Resource* buffer, ID3D12Resource* texture,
+                                const VkDepthCopyFormat& format, uint32_t width, uint32_t height);
+
 // The copies on the game's queue, recorded into a command buffer of the caller's. `family` is the queue family the
 // command buffer is submitted on.
 //

@@ -1102,15 +1102,12 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
     }
 }
 
-// Optical F5Low's own Reflex calls (native/NativeLowLatency.h): the switch, the method in use and, where the driver
-// reports it, the measured latency. Never touches the fakenvapi settings; it only points to them.
-// The "Reuse detail between frames" checkbox and its help, on the NR Options page and on the Optical F5Low page (one
-// setting). idSuffix keeps the two widgets apart. Returns whether it is on.
-static bool RenderDetailReuseToggle(Config* config, const char* idSuffix)
+// The "Reuse detail between frames" checkbox and its help, on the NR Options page; the Optical F5Low page shows its
+// state and links here. Returns whether it is on.
+static bool RenderDetailReuseToggle(Config* config)
 {
     bool detailReuse = config->DlssNrDetailReuse.value_or_default();
-    const std::string label = std::string("Reuse detail between frames (experimental)") + idSuffix;
-    if (ImGui::Checkbox(label.c_str(), &detailReuse))
+    if (ImGui::Checkbox("Reuse detail between frames (experimental)", &detailReuse))
         config->DlssNrDetailReuse = detailReuse;
     HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
                "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
@@ -1128,6 +1125,8 @@ static bool RenderDetailReuseToggle(Config* config, const char* idSuffix)
     return detailReuse;
 }
 
+// Optical F5Low's own Reflex calls (native/NativeLowLatency.h): the switch, the method in use and, where the driver
+// reports it, the measured latency. Never touches the fakenvapi settings; it only points to them.
 static void RenderLowLatencySection(Config* config)
 {
     if (!ImGui::TreeNodeEx("Low latency##nativelowlatency", ImGuiTreeNodeFlags_DefaultOpen))
@@ -1182,19 +1181,27 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
 
     RenderLowLatencySection(config);
 
-    // Detail reuse on Optical F5Low's motion: the same setting as on the NR Options page, shown here because this is
-    // where its saving matters most (NR on the whole finished picture). Its fine-tuning stays on the Options page.
+    // Detail reuse on Optical F5Low's motion: shown here because this is where its saving matters most (NR on the whole
+    // finished picture). Only its state: the checkbox and its fine-tuning live on the NR Options page.
     ImGui::SeparatorText("Lighter NR");
-    if (RenderDetailReuseToggle(config, "##f5low"))
+    if (!config->DlssNrDetailReuse.value_or_default())
+        ImGui::TextUnformatted("Reuse detail between frames: Off");
+    else
     {
         const auto status = DlssNr::DetailReuseStatus();
         if (!status.why.empty())
-            ImGui::TextDisabled("Reuse detail: %s", status.why.c_str());
+            ImGui::TextWrapped("Reuse detail between frames: On, %s", status.why.c_str());
         else if (status.active)
-            ImGui::TextDisabled("Full %llu | Reused %llu%s", status.full, status.reused,
-                                status.holding ? " | paused while moving fast" : "");
-        ImGui::TextDisabled("Fine-tuning and statistics: NR Options page, under the same checkbox.");
+            ImGui::Text("Reuse detail between frames: On (full %llu | reused %llu%s)", status.full, status.reused,
+                        status.holding ? " | paused while moving fast" : "");
+        else
+            ImGui::TextUnformatted("Reuse detail between frames: On");
     }
+    HelpMarker("Runs the model every other frame and moves the last result's detail onto the frames in between, "
+               "which roughly halves NR's GPU cost. With Optical F5Low it also uses the trust mask to drop detail "
+               "where the last frame cannot be trusted.\nTurned on and tuned on the NR Options page.");
+    if (ImGui::SmallButton("Set in NR Options##f5lowdetailreuse"))
+        MenuPages::RequestPage(MenuPages::Page::NrOptions);
 
     // The page is Optical F5Low's own, so every control shows and the section starts open.
     if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2180,7 +2187,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
     else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
         ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
-    detailReuse = RenderDetailReuseToggle(config, "");
+    detailReuse = RenderDetailReuseToggle(config);
     if (detailReuse)
     {
         // Debugging and A/B testing only; the defaults are the tuned values.

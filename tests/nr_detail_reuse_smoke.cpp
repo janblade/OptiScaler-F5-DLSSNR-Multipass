@@ -91,21 +91,21 @@ static void Invalidations()
         f.reset = true;
         const Decision d = c.Next(f);
         CHECK(d.kind == Kind::Full && d.captureHistory && !d.historyUsable && !d.composeMotion);
-        CHECK(c.Fallback() == 1);
+        CHECK(c.Fallback() == 1 && c.Causes().reset == 1 && c.Causes().gap == 0);
     }
     {
         Cadence c;
         afterOneFull(c);
         const Decision d = c.Next(Facts(101, 2)); // settings changed
         CHECK(d.kind == Kind::Full && !d.historyUsable);
-        CHECK(c.Fallback() == 1);
+        CHECK(c.Fallback() == 1 && c.Causes().changed == 1);
     }
     {
         Cadence c;
         afterOneFull(c);
         const Decision d = c.Next(Facts(103)); // NR did not run on 101 and 102
         CHECK(d.kind == Kind::Full && !d.historyUsable);
-        CHECK(c.Fallback() == 1);
+        CHECK(c.Fallback() == 1 && c.Causes().gap == 1 && c.Causes().lastGapStep == 3 && c.Causes().lastMaxStep == 1);
     }
     {
         Cadence c;
@@ -209,6 +209,7 @@ static void StepTolerance()
     c.Captured(true);
     f.frame = 21; // the same frame again is not continuous either
     CHECK(c.Next(f).kind == Kind::Full && c.Fallback() == 2);
+    CHECK(c.Causes().gap == 2 && c.Causes().lastGapStep == 0 && c.Causes().lastMaxStep == 4);
 }
 
 // Held off while the picture moves too fast: the frame runs the model, its history stays usable (so the measurement

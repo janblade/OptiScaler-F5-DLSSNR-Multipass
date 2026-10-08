@@ -4769,9 +4769,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 if (reusePlan.active)
                 {
                     const auto status = DetailReuse::Status();
+                    const auto& why = DetailReuse::cadence.Causes();
                     LOG_INFO("DLSS-NR detail reuse: {:.2f} ms per frame on average ({:.2f} to {:.2f}) over the last 16; "
-                             "full {}, reused {}, fallback {}, held {}", status.averageMs, status.lightMs,
-                             status.heavyMs, status.full, status.reused, status.fallback, status.held);
+                             "full {}, reused {}, fallback {}, held {}; fallbacks: reset {}, blocked {}, gap {} (last "
+                             "step {} of {} allowed), settings changed {}, not recorded {}",
+                             status.averageMs, status.lightMs, status.heavyMs, status.full, status.reused,
+                             status.fallback, status.held, why.reset, why.blocked, why.gap, why.lastGapStep,
+                             why.lastMaxStep, why.changed, why.notRecorded);
                 }
             }
         }

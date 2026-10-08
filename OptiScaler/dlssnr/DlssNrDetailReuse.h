@@ -55,6 +55,18 @@ struct Decision
     bool saveMotion = false;     // reuse frame: keep this frame's motion for the next full frame to compose
 };
 
+// Why reuse frames fell back to the model (Cadence::Fallback), for the log: the first of these that held.
+struct FallbackCauses
+{
+    unsigned long long reset = 0;       // the model started over
+    unsigned long long blocked = 0;     // a frame that must see the real model, or the one after it
+    unsigned long long gap = 0;         // NR did not run in between (the frame number stepped past maxStep)
+    unsigned long long changed = 0;     // something that changes the model's answer changed
+    unsigned long long notRecorded = 0; // decided, but the caller ran the model instead (ReuseFailed)
+    unsigned long long lastGapStep = 0; // the frame number's step at the last gap (0: it did not go forward)
+    unsigned long long lastMaxStep = 0; // ... and the largest step allowed then
+};
+
 class Cadence
 {
     bool historyValid = false; // the previous frame's detail is saved
@@ -65,6 +77,7 @@ class Cadence
     unsigned long long lastFrame = 0;
     unsigned long long lastRevision = 0;
     unsigned long long full = 0, reused = 0, fallback = 0, held = 0;
+    FallbackCauses causes;
 
 public:
     Decision Next(const FrameFacts& f)
@@ -105,7 +118,21 @@ public:
         else
         {
             if (wouldReuse && invalid)
+            {
                 ++fallback;
+                if (f.reset)
+                    ++causes.reset;
+                else if (f.blocked || lastBlocked)
+                    ++causes.blocked;
+                else if (gap)
+                {
+                    ++causes.gap;
+                    causes.lastGapStep = f.frame > lastFrame ? f.frame - lastFrame : 0;
+                    causes.lastMaxStep = f.maxStep;
+                }
+                else
+                    ++causes.changed;
+            }
             else if (wouldReuse && f.hold)
                 ++held; // counted only where a reuse was given up: comparable with Reused()
 
@@ -155,6 +182,7 @@ public:
         {
             --reused;
             ++fallback;
+            ++causes.notRecorded;
         }
         Drop();
     }
@@ -163,6 +191,7 @@ public:
     unsigned long long Reused() const { return reused; }
     unsigned long long Fallback() const { return fallback; }
     unsigned long long Held() const { return held; }
+    const FallbackCauses& Causes() const { return causes; }
 };
 
 // Why reuse cannot run where NR runs, or null when it can. Before SR it is not offered. On a finished picture it needs

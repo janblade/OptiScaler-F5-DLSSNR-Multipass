@@ -58,6 +58,10 @@ bool Active(VkSwapchainKHR swapchain);
 // Any bridge is up (the menu, the frame limiter and the Vulkan menu overlay ask).
 bool IsUp();
 
+// A bridged D3D12 output is up, or is being let go of (until frame generation's swapchain is released and the state no
+// longer points at the bridge's queue). Lock-free: XeFG's present thread asks while the teardown waits for that thread.
+bool OutputActive();
+
 // The bridge's private D3D12 device while its output is up, else null. Not a reference: it lives as long as the bridge.
 ID3D12Device* Device();
 

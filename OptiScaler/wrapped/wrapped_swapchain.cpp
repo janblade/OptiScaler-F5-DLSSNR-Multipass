@@ -4,6 +4,7 @@
 #include <hooks/DxgiSwapchainSizing.h>
 
 #include <Util.h>
+#include <Logger.h>
 #include <Config.h>
 
 #include <nvapi/fakenvapi.h>
@@ -15,6 +16,7 @@
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeLowLatency.h>
+#include <native/VkPresentBridge.h>
 
 #include <misc/FrameLimit.h>
 
@@ -294,6 +296,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     LOG_DEBUG("{}", _frameCounter);
+    NoteDroppedLogLinesOnPresent();
 
     HRESULT presentResult;
 
@@ -357,7 +360,9 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         if (State::Instance().swapchainInteropApi != SwapchainInteropApi::VkwDx12)
             State::Instance().swapchainApi = DX12;
 
-        if (State::Instance().currentCommandQueue == nullptr)
+        // Not while a Vulkan bridge's output is up or being let go of: this is XeFG's present on the bridge's private
+        // queue, and the state's pointer to it is cleared on purpose when the output goes (native/VkPresentBridge.cpp)
+        if (State::Instance().currentCommandQueue == nullptr && !VkPresentBridge::OutputActive())
             State::Instance().currentCommandQueue = cq;
 
         if (cq->GetDevice(IID_PPV_ARGS(&device12)) == S_OK)

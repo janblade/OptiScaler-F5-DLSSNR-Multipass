@@ -2,6 +2,7 @@
 
 #include "VkPresentBridge.h"
 #include "VkPresentBridgeCore.h"
+#include "VkPresentCopyRule.h"
 
 #include <native/NativeDriverVk.h>
 #include <native/NativeLowLatency.h>
@@ -19,6 +20,7 @@
 #include <with_dx12/dx11_with_dx12_sync.h>
 #include <with_dx12/with_dx12.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -62,10 +64,15 @@ struct Bridge
     bool outputUp = false;
     bool realFG = false;
     bool copied = false; // CopyToOutput queued this frame's picture; PresentOutput follows
+    native::VkCopyOutcome outcome = native::VkCopyOutcome::NoPicture; // what CopyToOutput did this frame
+    native::VkCopyFailureRule copyRule;
     uint64_t presents = 0;
 };
 
 std::mutex g_mutex;
+// Outputs that are up or being let go, without the mutex: XeFG's present thread asks (wrapped_swapchain.cpp LocalPresent)
+// while LetGoOfOutput waits for that thread
+std::atomic<int> g_outputsActive { 0 };
 std::unordered_map<VkSurfaceKHR, HWND> g_windows;
 std::unique_ptr<Bridge> g_bridge;
 std::vector<std::unique_ptr<Bridge>> g_retired; // output gone, hidden surface kept until their swapchains are destroyed
@@ -186,8 +193,18 @@ void LetGoOfOutput(Bridge& bridge, IDXGISwapChain4* output)
     state.currentRealSwapchain = nullptr;
     state.swapchainInteropApi = SwapchainInteropApi::None;
 
+    auto fg = state.currentFG;
+
+    if (fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
+    {
+        fg->Deactivate();
+        fg->ReleaseSwapchain(window);
+    }
+
     // The private device and queue were made current for frame generation (the make function below): they must not stay
     // so once the swapchain is gone, whatever uses the state next would reach a device that is about to be released.
+    // After frame generation let go of its swapchain: its present thread reads them until then, and (with the output
+    // still counted as active) LocalPresent does not take the queue back into the state in the meantime.
     if (bridge.device12 != nullptr)
     {
         native::lowlatency::OnDeviceReleased(bridge.device12);
@@ -200,13 +217,8 @@ void LetGoOfOutput(Bridge& bridge, IDXGISwapChain4* output)
     if (bridge.queue12 != nullptr && state.currentCommandQueue == bridge.queue12)
         state.currentCommandQueue = nullptr;
 
-    auto fg = state.currentFG;
-
-    if (fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
-    {
-        fg->Deactivate();
-        fg->ReleaseSwapchain(window);
-    }
+    if (bridge.outputUp)
+        --g_outputsActive;
 
     bridge.outputUp = false;
 }
@@ -337,6 +349,7 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
             FGHooks::SetDx12InteropPresentSC(out.Get(), self->window);
 
         self->outputUp = true;
+        ++g_outputsActive;
         LOG_INFO("Vulkan bridge: D3D12 swapchain {:X} on window {:X} ({}x{}, format {}, {} buffers, {})",
                  (size_t) out.Get(), (size_t) self->window, desc.BufferDesc.Width, desc.BufferDesc.Height,
                  (int) desc.BufferDesc.Format, desc.BufferCount, realFG ? "frame generation's own" : "plain");
@@ -598,6 +611,11 @@ bool IsUp()
     return g_bridge != nullptr && g_bridge->outputUp;
 }
 
+bool OutputActive()
+{
+    return g_outputsActive.load(std::memory_order_acquire) > 0;
+}
+
 ID3D12Device* Device()
 {
     std::lock_guard lock(g_mutex);
@@ -613,6 +631,7 @@ bool CopyToOutput(ID3D12Resource* picture, ID3D12Fence* fence, uint64_t copied, 
         return false;
 
     g_bridge->copied = false;
+    g_bridge->outcome = native::VkCopyOutcome::NoPicture;
 
     if (picture == nullptr)
     {
@@ -624,10 +643,12 @@ bool CopyToOutput(ID3D12Resource* picture, ID3D12Fence* fence, uint64_t copied, 
 
     if (!g_bridge->core.CopyFrame(picture, fence, copied, doneFence, doneValue, fence, signalValue, why))
     {
+        g_bridge->outcome = native::VkCopyOutcome::CopyFailed;
         LogOnce("the picture could not be put into the D3D12 swapchain: " + why);
         return false;
     }
 
+    g_bridge->outcome = native::VkCopyOutcome::Copied;
     g_bridge->copied = true;
     return true;
 }
@@ -641,6 +662,7 @@ void PresentOutput()
     HWND window = nullptr;
     UINT sync = 0;
     UINT flags = 0;
+    native::VkCopyFailureRule::Decision copy;
 
     {
         std::lock_guard lock(g_mutex);
@@ -655,7 +677,9 @@ void PresentOutput()
         window = g_bridge->window;
         sync = g_bridge->core.SyncInterval();
         flags = g_bridge->core.PresentFlags();
+        copy = g_bridge->copyRule.OnFrame(g_bridge->copied ? native::VkCopyOutcome::Copied : g_bridge->outcome);
         g_bridge->copied = false;
+        g_bridge->outcome = native::VkCopyOutcome::NoPicture;
         ++g_bridge->presents;
     }
 
@@ -663,27 +687,18 @@ void PresentOutput()
         return;
 
     // Nothing was put into the back buffer (the copy failed, or another thread held the frame source). The swapchain
-    // is presented all the same: this present is what paces the game and keeps the window alive, and a game whose
-    // copy keeps failing would otherwise freeze on its last frame with one line in the log. The window shows whatever
-    // the back buffer held (a flip-discard buffer's contents are undefined, in practice an earlier frame); said once
-    // with a count, at 1, 10, 100 ...
-    static uint64_t failedCopies = 0;
+    // is presented all the same after a few frames (native/VkPresentCopyRule.h): this present is what paces the game and
+    // keeps the window alive, and a game whose copy keeps failing would otherwise freeze on its last frame with one line
+    // in the log. The first few are skipped so the last good frame stays on screen, not a flip-discard buffer's undefined
+    // contents (which frame generation would also interpolate from). Said with a count, at 1, 10, 100 ...
+    if (copy.warn)
+        LOG_WARN("Vulkan bridge: no picture was put into the D3D12 swapchain ({} presents so far); {}", copy.failures,
+                 copy.present ? "presenting the swapchain as it is" : "keeping the last frame on screen");
+    else if (copy.recovered)
+        LOG_INFO("Vulkan bridge: pictures reach the D3D12 swapchain again (after {} presents without)", copy.failures);
 
-    if (copyValue == 0)
-    {
-        ++failedCopies;
-
-        if (failedCopies == 1 || failedCopies == 10 || failedCopies == 100 || failedCopies == 1000 ||
-            failedCopies == 10000)
-            LOG_WARN("Vulkan bridge: no picture was put into the D3D12 swapchain ({} presents so far); presenting the "
-                     "swapchain as it is",
-                     failedCopies);
-    }
-    else if (failedCopies != 0)
-    {
-        LOG_INFO("Vulkan bridge: pictures reach the D3D12 swapchain again (after {} presents without)", failedCopies);
-        failedCopies = 0;
-    }
+    if (!copy.present)
+        return;
 
     auto& state = State::Instance();
     auto fg = state.currentFG;

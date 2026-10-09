@@ -1262,11 +1262,15 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     }
 
     bool mutexUsed = false;
+    native::presenttiming::NoteFrameGenerationMutexWait(0.0);
     if (willPresent && fg != nullptr && fg->IsActive() && !fg->IsPaused() &&
         config->FGUseMutexForSwapchain.value_or_default() && fg->Mutex.getOwner() != 2)
     {
         LOG_TRACE("Waiting FG->Mutex 2, current: {}", fg->Mutex.getOwner());
+        const auto mutexWaitStartMs = Util::MillisecondsNow();
         fg->Mutex.lock(2);
+        // For the stall timing: on the Vulkan game's present thread this is the wait inside the bridge's present
+        native::presenttiming::NoteFrameGenerationMutexWait(Util::MillisecondsNow() - mutexWaitStartMs);
         mutexUsed = true;
         LOG_TRACE("Accuired FG->Mutex: {}", fg->Mutex.getOwner());
     }
@@ -1377,6 +1381,8 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
         const auto now = Util::MillisecondsNow();
         presentTiming.Record(native::presenttiming::Stage::FrameGenerationPresent, now - presentStartMs);
+        presentTiming.Record(native::presenttiming::Stage::FrameGenerationMutexWait,
+                             native::presenttiming::PeekFrameGenerationMutexWait());
         const auto outcome = presentTiming.EndPresent(now);
 
         if (outcome.stall)
@@ -1386,6 +1392,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         {
             LOG_INFO("Frame generation present timing, {}", presentTiming.SummaryLine());
             presentTiming.Restart();
+            NoteDroppedLogLines();
         }
     }
 

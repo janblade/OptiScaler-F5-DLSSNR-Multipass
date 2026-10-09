@@ -12,7 +12,9 @@
 namespace native::presenttiming
 {
 // What hkvkQueuePresentKHR times (Present = the original vkQueuePresentKHR, the hidden one when bridged), and what
-// FGHooks::FGPresent times (FrameGenerationPresent = o_FGSCPresent, XeFG's own present).
+// FGHooks::FGPresent times (FrameGenerationPresent = o_FGSCPresent, XeFG's own present). FrameGenerationMutexWait is the
+// time FGPresent waited for frame generation's mutex before it; on the game's present thread that wait sits inside
+// BridgePresent, so a stall there says whether it was our work or the wait for the other present.
 enum class Stage : uint32_t
 {
     NativeMotion,
@@ -21,6 +23,7 @@ enum class Stage : uint32_t
     BridgePresent,
     Hook,
     FrameGenerationPresent,
+    FrameGenerationMutexWait,
     Count
 };
 
@@ -40,6 +43,8 @@ inline const char* StageName(Stage stage)
         return "whole hook";
     case Stage::FrameGenerationPresent:
         return "frame generation present";
+    case Stage::FrameGenerationMutexWait:
+        return "frame generation mutex wait";
     default:
         return "?";
     }
@@ -48,6 +53,33 @@ inline const char* StageName(Stage stage)
 inline constexpr uint32_t kReportEveryPresents = 300;
 inline constexpr double kStallMs = 50.0;
 inline constexpr double kStallLogIntervalMs = 1000.0;
+
+// How long this thread's last FGPresent waited for frame generation's mutex. FGPresent sets it on every call (0 when it
+// took no lock); the game's present hook takes it after the bridge's present (the same thread) and records it as a stage.
+inline double& ThreadMutexWaitMs()
+{
+    thread_local double waitMs = 0.0;
+    return waitMs;
+}
+
+inline void NoteFrameGenerationMutexWait(double ms)
+{
+    ThreadMutexWaitMs() = ms;
+}
+
+// Read and keep: FGPresent's own timing
+inline double PeekFrameGenerationMutexWait()
+{
+    return ThreadMutexWaitMs();
+}
+
+// Read and clear: a frame whose present never reached FGPresent must not report the last frame's wait
+inline double TakeFrameGenerationMutexWait()
+{
+    const double ms = ThreadMutexWaitMs();
+    ThreadMutexWaitMs() = 0.0;
+    return ms;
+}
 
 class StageTiming
 {

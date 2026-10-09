@@ -12,6 +12,11 @@
 #include <include/spdlog_sink/debug_sink.h>
 
 #include "Util.h"
+#include "LogAsyncRule.h"
+
+// The logger in use and what its crash-path flush needs (LogAsyncRule.h). Left allocated at exit on purpose: destroying
+// a thread pool at process exit joins a worker that is already gone.
+static logasync::Setup* g_logSetup = nullptr;
 
 static bool InitializeConsole()
 {
@@ -82,10 +87,18 @@ void PrepareLogger()
 
             std::shared_ptr<spdlog::logger> shared_logger = nullptr;
 
-            if (Config::Instance()->LogAsync.value_or_default())
+            // Auto: a worker writes the file, so no game thread waits for a disk (a USB drive stalled presents for
+            // hundreds of ms). An explicit LogAsync=false writes every line on the calling thread.
+            const auto logAsync = Config::Instance()->LogAsync.has_value()
+                                      ? std::optional<bool>(Config::Instance()->LogAsync.value())
+                                      : std::nullopt;
+            const auto logMode = logasync::ChooseMode(logAsync, Config::Instance()->LogToFile.value_or_default());
+
+            if (logMode == logasync::Mode::AsyncBlock)
             {
                 // Set the queue size for asynchronous logging
-                spdlog::init_thread_pool(8192, Config::Instance()->LogAsyncThreads.value_or_default());
+                spdlog::init_thread_pool(logasync::kBlockQueueSize,
+                                         Config::Instance()->LogAsyncThreads.value_or_default());
             }
 
             std::vector<spdlog::sink_ptr> sinks;
@@ -149,17 +162,12 @@ void PrepareLogger()
 
             sinks.push_back(callback_sink);
 
-            if (Config::Instance()->LogAsync.value_or_default())
-            {
-                shared_logger =
-                    std::make_shared<spdlog::async_logger>("multi_sink_logger", sinks.begin(), sinks.end(),
-                                                           spdlog::thread_pool(), spdlog::async_overflow_policy::block);
-            }
-            else
-            {
-                spdlog::logger logger("multi_sink", sinks.begin(), sinks.end());
-                shared_logger = std::make_shared<spdlog::logger>(logger);
-            }
+            auto* setup = new logasync::Setup(
+                logasync::MakeLogger(logMode == logasync::Mode::Sync ? "multi_sink" : "multi_sink_logger", sinks,
+                                     logMode, logMode == logasync::Mode::AsyncBlock ? spdlog::thread_pool() : nullptr));
+            shared_logger = setup->logger;
+            std::swap(g_logSetup, setup);
+            delete setup; // an earlier logger's setup, if PrepareLogger ran before
 
             shared_logger->set_level((spdlog::level::level_enum) Config::Instance()->LogLevel.value_or_default());
             shared_logger->flush_on(spdlog::level::trace);
@@ -178,10 +186,47 @@ void PrepareLogger()
     }
 }
 
+// A bounded moment for the worker to write what is queued; never forever, the process is going down
+static constexpr auto kFlushWait = std::chrono::milliseconds(500);
+
 void CloseLogger()
 {
-    spdlog::default_logger()->flush();
+    bool drained = true;
+
+    NoteDroppedLogLines(); // a game that never reaches a periodic report still hears of it once
+
+    if (g_logSetup != nullptr)
+        drained = logasync::FlushAndDrain(*g_logSetup, kFlushWait);
+    else if (spdlog::default_logger() != nullptr)
+        spdlog::default_logger()->flush();
+
     spdlog::shutdown();
+
+    // Stopping the worker waits for it: only when it is idle
+    if (drained && g_logSetup != nullptr)
+    {
+        delete g_logSetup;
+        g_logSetup = nullptr;
+    }
+}
+
+void NoteDroppedLogLines()
+{
+    static std::mutex reportMutex;
+    static logasync::DropReporter reporter;
+
+    auto* setup = g_logSetup;
+
+    if (setup == nullptr || setup->mode != logasync::Mode::AsyncDropOldest || setup->pool == nullptr)
+        return;
+
+    std::unique_lock lock(reportMutex, std::try_to_lock);
+
+    if (!lock.owns_lock())
+        return;
+
+    if (const auto dropped = reporter.Poll(setup->pool->overrun_counter(), Util::MillisecondsNow()); dropped > 0)
+        LOG_WARN("{} log lines dropped (the log could not keep up)", dropped);
 }
 
 static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
@@ -194,7 +239,12 @@ static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
         spdlog::critical("Unhandled exception {:X} at {:X}, writing {}",
                          (unsigned long) exceptionInfo->ExceptionRecord->ExceptionCode,
                          (size_t) exceptionInfo->ExceptionRecord->ExceptionAddress, dumpPath.string());
-        spdlog::default_logger()->flush();
+
+        // The worker writes what is queued, then the dump: a bounded wait, not a flush that could wait for a stuck disk
+        if (g_logSetup != nullptr)
+            logasync::FlushAndDrain(*g_logSetup, kFlushWait);
+        else
+            spdlog::default_logger()->flush();
 
         HANDLE file = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);

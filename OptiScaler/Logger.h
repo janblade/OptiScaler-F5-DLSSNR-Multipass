@@ -5,6 +5,9 @@
 void PrepareLogger();
 void CloseLogger();
 void WaitForEnter();
+// Says how many log lines the full queue dropped since the last time (at most once every few seconds): for places that
+// already run periodically. Cheap when nothing was dropped.
+void NoteDroppedLogLines();
 // Diagnostic only: writes a minidump next to the log on an otherwise-unhandled exception, then lets the
 // crash proceed exactly as it would without this handler installed.
 void InstallCrashHandler();

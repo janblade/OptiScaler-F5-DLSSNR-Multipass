@@ -21,6 +21,7 @@
 #include <dlssnr/DlssNrFeature_Vk.h>
 #include <native/NativeDriverVk.h>
 #include <native/NativeLowLatency.h>
+#include <Logger.h>
 #include <native/PresentStageTiming.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
@@ -789,6 +790,7 @@ static void NotePresentTiming(double hookStartMs)
     {
         LOG_INFO("Vulkan present timing, {}", _presentTiming.SummaryLine());
         _presentTiming.Restart();
+        NoteDroppedLogLines();
     }
 }
 
@@ -904,6 +906,10 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
         const auto bridgeStartMs = Util::MillisecondsNow();
         NativeMotionVk::AfterPresent(pPresentInfo->pSwapchains[0]);
         _presentTiming.Record(Stage::BridgePresent, Util::MillisecondsNow() - bridgeStartMs);
+
+        // How much of that was FGHooks::FGPresent waiting for frame generation's mutex (it runs inside the D3D12
+        // swapchain's present, on this thread): a slow bridge present is then our work or the wait for the other present
+        _presentTiming.Record(Stage::FrameGenerationMutexWait, native::presenttiming::TakeFrameGenerationMutexWait());
 
         // The window changed size and the hidden swapchain does not know: the game recreates when its present says so.
         if (result == VK_SUCCESS && VkPresentBridge::WindowResized())

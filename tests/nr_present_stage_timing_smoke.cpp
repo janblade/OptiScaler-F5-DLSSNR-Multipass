@@ -80,6 +80,48 @@ int main()
         CHECK(t.StallLine().find("frame generation present 300.0 ms") != std::string::npos);
     }
 
+    // The wait for frame generation's mutex is its own stage, in the stall line and the summary
+    {
+        StageTiming t;
+        t.Record(Stage::BridgePresent, 400.0);
+        t.Record(Stage::FrameGenerationMutexWait, 380.0);
+        t.Record(Stage::Hook, 410.0);
+        auto out = t.EndPresent(0.0);
+        CHECK(out.stall);
+        CHECK(t.StallLine().find("bridge present 400.0 ms") != std::string::npos);
+        CHECK(t.StallLine().find("frame generation mutex wait 380.0 ms") != std::string::npos);
+
+        // Alone it does not make a stall: the stall is what the present took
+        StageTiming u;
+        u.Record(Stage::FrameGenerationMutexWait, 380.0);
+        CHECK(!u.EndPresent(0.0).stall);
+
+        StageTiming w;
+        int summaries = 0;
+
+        for (uint32_t i = 1; i <= kReportEveryPresents; ++i)
+        {
+            w.Record(Stage::FrameGenerationMutexWait, i == 5 ? 90.0 : 0.0);
+            summaries += w.EndPresent(i * 10.0).summary ? 1 : 0;
+        }
+
+        CHECK(summaries == 1);
+        CHECK(w.SummaryLine().find("frame generation mutex wait max 90.0 avg 0.30 ms") != std::string::npos);
+    }
+
+    // The per-thread hand-off from FGPresent to the Vulkan present hook: set each call, taken (and cleared) once
+    {
+        CHECK(TakeFrameGenerationMutexWait() == 0.0);
+        NoteFrameGenerationMutexWait(12.5);
+        CHECK(PeekFrameGenerationMutexWait() == 12.5);
+        CHECK(PeekFrameGenerationMutexWait() == 12.5);
+        NoteFrameGenerationMutexWait(0.0); // a later FGPresent that took no lock
+        CHECK(PeekFrameGenerationMutexWait() == 0.0);
+        NoteFrameGenerationMutexWait(7.0);
+        CHECK(TakeFrameGenerationMutexWait() == 7.0);
+        CHECK(TakeFrameGenerationMutexWait() == 0.0); // a frame whose present never reached FGPresent
+    }
+
     printf(fails == 0 ? "PASS\n" : "FAILED\n");
     return fails == 0 ? 0 : 1;
 }

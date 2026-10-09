@@ -57,6 +57,22 @@ class DxgiProxy
 
     static HMODULE Module() { return _dll; }
 
+    // Marks this thread as inside a DXGI factory creation OptiScaler made or hooked. A DXGI that is a layer on Vulkan
+    // (dxvk) creates its Vulkan instance inside CreateDXGIFactory, holding a lock it cannot take twice, and the Vulkan
+    // loader can load an overlay's Vulkan layer right there. That layer's DLL loads reach LibraryLoadHooks' overlay
+    // branch, which must then not call CreateDXGIFactory again on this thread: Batman: Arkham Knight on dxvk with the
+    // Steam overlay hung at startup on exactly that (IdentifyGpu -> dxvk -> vkCreateInstance -> Steam overlay layer ->
+    // overlay DLL load -> CreateDXGIFactory -> the same dxvk lock).
+    struct ScopedFactoryCreation
+    {
+        ScopedFactoryCreation() { ++_factoryCreationDepth; }
+        ~ScopedFactoryCreation() { --_factoryCreationDepth; }
+        ScopedFactoryCreation(const ScopedFactoryCreation&) = delete;
+        ScopedFactoryCreation& operator=(const ScopedFactoryCreation&) = delete;
+    };
+
+    static bool InsideFactoryCreation() { return _factoryCreationDepth > 0; }
+
     static PFN_CreateDxgiFactory CreateDxgiFactory_() { return _CreateDxgiFactory; }
     static PFN_CreateDxgiFactory1 CreateDxgiFactory1_() { return _CreateDxgiFactory1; }
     static PFN_CreateDxgiFactory2 CreateDxgiFactory2_() { return _CreateDxgiFactory2; }
@@ -190,6 +206,7 @@ class DxgiProxy
 
   private:
     inline static HMODULE _dll = nullptr;
+    inline static thread_local int _factoryCreationDepth = 0;
 
     inline static PFN_CreateDxgiFactory _CreateDxgiFactory = nullptr;
     inline static PFN_CreateDxgiFactory1 _CreateDxgiFactory1 = nullptr;

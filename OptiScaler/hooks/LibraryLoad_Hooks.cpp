@@ -322,8 +322,17 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 
         if (module != nullptr)
         {
-            if (DxgiProxy::Module() != nullptr)
+            // Loaded from inside a DXGI factory creation on this thread (dxvk's Vulkan instance loading an overlay's
+            // Vulkan layer): calling CreateDXGIFactory again would wait on that factory's own lock for ever. Only the
+            // hook order is lost; see DxgiProxy::ScopedFactoryCreation.
+            if (DxgiProxy::Module() != nullptr && DxgiProxy::InsideFactoryCreation())
             {
+                LOG_INFO("Overlay {} loaded inside a DXGI factory creation, not calling CreateDxgiFactory methods",
+                         dllName);
+            }
+            else if (DxgiProxy::Module() != nullptr)
+            {
+                DxgiProxy::ScopedFactoryCreation factoryCreation {};
                 LOG_INFO("Calling CreateDxgiFactory methods for overlay!");
                 IDXGIFactory* factory = nullptr;
                 IDXGIFactory1* factory1 = nullptr;

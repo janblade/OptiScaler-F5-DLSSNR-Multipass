@@ -38,6 +38,7 @@ struct BridgeTarget
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     PFN_vkCreateWin32SurfaceKHR createSurface = nullptr; // the loader's own, not a hooked one
+    PFN_vkDestroySurfaceKHR destroySurface = nullptr;    // the same: a hooked one takes the bridge's lock again
     HWND realWindow = nullptr;                           // the game's window: the D3D12 swapchain goes here
     ID3D12Device* device12 = nullptr;
     ID3D12CommandQueue* queue12 = nullptr;

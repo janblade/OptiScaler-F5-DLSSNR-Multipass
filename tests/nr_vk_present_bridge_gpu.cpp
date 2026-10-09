@@ -706,6 +706,7 @@ bool RunFormat(Vk& vk, Dx& dx, native::VkInterop& interop, native::SharedFenceVk
     target.instance = vk.instance;
     target.physical = vk.physical;
     target.createSurface = vkCreateWin32SurfaceKHR;
+    target.destroySurface = vkDestroySurfaceKHR;
     target.realWindow = window;
     target.device12 = dx.device.Get();
     target.queue12 = dx.queue.Get();

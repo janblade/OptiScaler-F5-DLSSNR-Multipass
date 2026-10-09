@@ -302,6 +302,7 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
     target.instance = bridge.instance;
     target.physical = bridge.physical;
     target.createSurface = VulkanHooks::OriginalCreateWin32Surface();
+    target.destroySurface = VulkanHooks::OriginalDestroySurface();
     target.realWindow = bridge.window;
     target.device12 = bridge.device12;
     target.queue12 = bridge.queue12;

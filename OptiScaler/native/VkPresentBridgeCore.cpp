@@ -99,7 +99,7 @@ bool VkPresentBridgeCore::Create(const BridgeTarget& target, const VkSwapchainCr
     Release();
 
     if (target.instance == VK_NULL_HANDLE || target.physical == VK_NULL_HANDLE || target.createSurface == nullptr ||
-        target.realWindow == nullptr || target.device12 == nullptr || target.queue12 == nullptr || !make)
+        target.destroySurface == nullptr || target.realWindow == nullptr || target.device12 == nullptr || target.queue12 == nullptr || !make)
     {
         why = "the bridge was given no window or device";
         return false;
@@ -595,7 +595,7 @@ void VkPresentBridgeCore::ReleaseSurface()
 {
     if (_surface != VK_NULL_HANDLE)
     {
-        vkDestroySurfaceKHR(_target.instance, _surface, nullptr);
+        _target.destroySurface(_target.instance, _surface, nullptr);
         _surface = VK_NULL_HANDLE;
     }
 

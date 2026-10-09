@@ -1204,6 +1204,11 @@ PFN_vkCreateWin32SurfaceKHR VulkanHooks::OriginalCreateWin32Surface()
     return o_vkCreateWin32SurfaceKHR != nullptr ? o_vkCreateWin32SurfaceKHR : &vkCreateWin32SurfaceKHR;
 }
 
+PFN_vkDestroySurfaceKHR VulkanHooks::OriginalDestroySurface()
+{
+    return o_vkDestroySurfaceKHR != nullptr ? o_vkDestroySurfaceKHR : &vkDestroySurfaceKHR;
+}
+
 void VulkanHooks::Hook(HMODULE vulkan1)
 {
     if (vulkanModule == nullptr)

@@ -127,23 +127,68 @@ inline bool DepthRestartWarning(Shown shown, Finder finder)
     return shown != Shown::Off && finder == Finder::NeedsRestart;
 }
 
+// Which API the game itself uses, for the Optical F5Low page's drivers, banner and depth status. State::swapchainApi
+// (what the last present was) mirrors State's API and SwapchainInteropApi without including them: a host test can.
+// A Vulkan game on the present bridge also presents through XeFG's D3D12 swapchain, and the wrapped swapchain's present
+// writes D3D12 into swapchainApi every frame; the interop says what the game is. A dxvk game presents D3D frames
+// through Vulkan, but its D3D drivers are the ones that run (swapchainApi is then not Vulkan).
+enum class GameApi
+{
+    Dx12,
+    Dx11,
+    Vulkan
+};
+
+enum class PresentApi
+{
+    NotSelected,
+    Dx11,
+    Dx12,
+    Vulkan
+};
+
+enum class Interop
+{
+    None,
+    Dx11wDx12,
+    VkwDx12
+};
+
+inline GameApi GameApiFor(PresentApi present, Interop interop, bool d3d11DevicePresent)
+{
+    if (interop == Interop::VkwDx12 || present == PresentApi::Vulkan)
+        return GameApi::Vulkan;
+
+    return d3d11DevicePresent ? GameApi::Dx11 : GameApi::Dx12;
+}
+
 // The modes are for a game with no upscaler call of its own; the frame sources stand aside while the game makes one
 // (gameUpscaler: GenericDepthDx12/Dx11::GameCallsUpscaler). Then only Off can be chosen: a click on another mode would
 // change NR Pass at: under the game's own upscaler for nothing.
-inline bool Selectable(Mode mode, bool gameUpscaler) { return mode == Mode::Off || !gameUpscaler; }
+inline bool Selectable(Mode mode, bool gameUpscaler)
+{
+    if (mode == Mode::Off)
+        return true;
+
+    return !gameUpscaler;
+}
 
 enum class Warning
 {
     None,
     GameUpscaler,        // a mode is on while the game calls an upscaler of its own: it stands aside
     Dx11FrameGeneration, // NR only, while frame generation replaces a D3D11 game's swap chain
+    VulkanNeedsRestart,  // NR + upscaler & frame generation in a Vulkan game whose swapchain was made without the bridge
     NrDisabled,          // Enable Neural Rendering is off
     NeedsFinishedPicture // NR only, with NR Pass at: not on Finished Picture
 };
 
 // nativeInputBlocked: DlssNr::NativeInputBlockedBySwapChainInterop(), the condition native input itself refuses on.
 // gameUpscaler: as for Selectable; it comes first, since nothing else matters while the mode stands aside.
-inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool nativeInputBlocked, bool gameUpscaler)
+// vulkanNoBridge: a Vulkan game whose swapchain was made without the present bridge (native/VkPresentBridge.h): frame
+// generation starts with the next start of the game, once chosen.
+inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool nativeInputBlocked, bool gameUpscaler,
+                          bool vulkanNoBridge = false)
 {
     if (shown != Shown::Off && gameUpscaler)
         return Warning::GameUpscaler;
@@ -158,6 +203,10 @@ inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, boo
 
         if (!finishedPicture)
             return Warning::NeedsFinishedPicture;
+    }
+    else if (shown == Shown::NrAndFrameGeneration && vulkanNoBridge)
+    {
+        return Warning::VulkanNeedsRestart;
     }
     else if (shown == Shown::NrAndFrameGeneration && !nrEnabled)
     {

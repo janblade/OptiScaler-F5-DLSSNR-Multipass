@@ -13,6 +13,7 @@
 
 #include <vulkan/vulkan_core.h>
 #include <misc/IdentifyGpu.h>
+#include <resource_tracking/GenericDepth_Vk.h>
 
 static std::map<std::string, bool> vkDeviceExtensions;
 static std::map<std::string, bool> vkInstanceExtensions;
@@ -791,6 +792,10 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetInstanceProcAddr(const PFN_vkVoidFunct
 {
     auto procName = std::string(pName);
 
+    // The depth finder's image and render pass hooks (resource_tracking/GenericDepth_Vk.h).
+    if (auto depth = GenericDepthVk::GetProcAddr(orgFunc, pName); depth != nullptr)
+        return depth;
+
     auto result = Vulkan_wDx12::GetInstanceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -878,6 +883,9 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetDeviceProcAddr(const PFN_vkVoidFunctio
 {
     auto procName = std::string(pName);
 
+    if (auto depth = GenericDepthVk::GetProcAddr(orgFunc, pName); depth != nullptr)
+        return depth;
+
     auto result = Vulkan_wDx12::GetDeviceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -964,6 +972,7 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetDeviceProcAddr(const PFN_vkVoidFunctio
 void VulkanSpoofing::HookForVulkanSpoofing(HMODULE vulkanModule)
 {
     Vulkan_wDx12::Hook(vulkanModule);
+    GenericDepthVk::Hook(vulkanModule);
 
     if (Config::Instance()->VulkanSpoofing.value_or_default() && o_vkGetPhysicalDeviceProperties == nullptr)
     {

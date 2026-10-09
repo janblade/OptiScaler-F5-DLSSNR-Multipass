@@ -605,6 +605,38 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     return true;
 }
 
+void MenuOverlayVk::HandOverToBridge()
+{
+    // Bridged from the game's first swapchain: no Vulkan menu was made, only what a previous one left
+    if (!_vulkanObjectsCreated)
+    {
+        DestroyVulkanObjects(false);
+        return;
+    }
+
+    LOG_INFO("Vulkan bridge: the menu moves from the game's Vulkan swapchain to the D3D12 one");
+
+    // The backend frees its textures' descriptor sets from our pool, so it goes first; nothing of it may be in flight
+    if (_ImVulkan_Info.Device != VK_NULL_HANDLE)
+        vkDeviceWaitIdle(_ImVulkan_Info.Device);
+
+    if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().BackendRendererUserData != nullptr)
+        ImGui_ImplVulkan_Shutdown(false); // the font texture is made again by the D3D12 backend
+
+    // Render pass and descriptor pool included: the next Vulkan menu (if the bridge ever ends) makes its own
+    DestroyVulkanObjects(true);
+
+    IM_FREE(_ImVulkan_Frames);
+    _ImVulkan_Frames = nullptr;
+    IM_FREE(_ImVulkan_Semaphores);
+    _ImVulkan_Semaphores = nullptr;
+    _vkRenderPass = VK_NULL_HANDLE;
+    _scImageCount = 0;
+
+    _vulkanObjectsCreated = false;
+    _isInited = false;
+}
+
 void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInstance instance, HWND hwnd,
                                     const VkSwapchainCreateInfoKHR* pCreateInfo,
                                     const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain)

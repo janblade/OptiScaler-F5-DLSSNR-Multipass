@@ -102,7 +102,12 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_Sleep(IUnknown* pDev)
     if (State::Instance().activeFgOutput == FGOutput::XeFG)
         return nvapi_calls::NvAPI_D3D_Sleep(pDev);
 
-    _lastSleepDev = pDev;
+    // On the Vulkan bridge our own Sleep (Optical F5Low's low latency, on the bridge's private D3D12 device) is not a
+    // Reflex device of the game's: stored, update() would see one and hand the fps cap to Reflex (reflexLimitsFps),
+    // skipping OptiScaler's own limiter. (D3D games keep storing it, as they have.)
+    if (!(_ownCall && State::Instance().swapchainInteropApi == SwapchainInteropApi::VkwDx12))
+        _lastSleepDev = pDev;
+
     return o_NvAPI_D3D_Sleep(pDev);
 }
 
@@ -398,6 +403,9 @@ NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_SetLatencyMarker(HANDLE vkDevice,
     LOG_FUNC();
 #endif
 
+    if (isGameCall(_ReturnAddress()))
+        _gameCalledReflex = true;
+
     _updatesWithoutMarker = 0;
     State::Instance().reflexFrameId = pSetLatencyMarkerParams->frameID;
 
@@ -410,6 +418,19 @@ NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_SetSleepMode(HANDLE vkDevice,
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+    std::scoped_lock lock(_sleepModeMutex);
+
+    if (isGameCall(_ReturnAddress()))
+    {
+        _gameCalledReflex = true;
+        _gameCalledSetSleepMode = true;
+    }
+
+    // Our own calls: as in hkNvAPI_D3D_SetSleepMode, not stored, so the fps cap stays with OptiScaler's own limiter.
+    // Stored, update() would see a Vulkan sleep device and hand the cap to Reflex.
+    if (_ownCall)
+        return o_NvAPI_Vulkan_SetSleepMode(vkDevice, pSetSleepModeParams);
+
     // Store for later so we can adjust the fps whenever we want
     memcpy(&_lastVkSleepParams, pSetSleepModeParams, sizeof(NV_VULKAN_SET_SLEEP_MODE_PARAMS));
     _lastVkSleepDev = vkDevice;
@@ -418,6 +439,18 @@ NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_SetSleepMode(HANDLE vkDevice,
         pSetSleepModeParams->minimumIntervalUs = _minimumIntervalUs;
 
     return o_NvAPI_Vulkan_SetSleepMode(vkDevice, pSetSleepModeParams);
+}
+
+NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_Sleep(HANDLE vkDevice, NvU64 signalValue)
+{
+#ifdef LOG_REFLEX_CALLS
+    LOG_FUNC();
+#endif
+
+    if (isGameCall(_ReturnAddress()))
+        _gameCalledReflex = true;
+
+    return o_NvAPI_Vulkan_Sleep(vkDevice, signalValue);
 }
 
 NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_GetLatency(HANDLE vkDevice, NV_VULKAN_LATENCY_RESULT_PARAMS* pGetLatencyParams)
@@ -444,11 +477,14 @@ void ReflexHooks::hookReflex(PFN_NvApi_QueryInterface& queryInterface)
         o_NvAPI_D3D12_SetAsyncFrameMarker = GET_INTERFACE(NvAPI_D3D12_SetAsyncFrameMarker, queryInterface);
         o_NvAPI_Vulkan_SetLatencyMarker = GET_INTERFACE(NvAPI_Vulkan_SetLatencyMarker, queryInterface);
         o_NvAPI_Vulkan_SetSleepMode = GET_INTERFACE(NvAPI_Vulkan_SetSleepMode, queryInterface);
+        o_NvAPI_Vulkan_Sleep = GET_INTERFACE(NvAPI_Vulkan_Sleep, queryInterface);
         o_NvAPI_Vulkan_GetLatency = GET_INTERFACE(NvAPI_Vulkan_GetLatency, queryInterface);
+        o_NvAPI_Vulkan_InitLowLatencyDevice = GET_INTERFACE(NvAPI_Vulkan_InitLowLatencyDevice, queryInterface);
 
         _inited = o_NvAPI_D3D_SetSleepMode && o_NvAPI_D3D_Sleep && o_NvAPI_D3D_GetLatency &&
                   o_NvAPI_D3D_SetLatencyMarker && o_NvAPI_D3D12_SetAsyncFrameMarker &&
-                  o_NvAPI_Vulkan_SetLatencyMarker && o_NvAPI_Vulkan_SetSleepMode && o_NvAPI_Vulkan_GetLatency;
+                  o_NvAPI_Vulkan_SetLatencyMarker && o_NvAPI_Vulkan_SetSleepMode && o_NvAPI_Vulkan_Sleep &&
+                  o_NvAPI_Vulkan_GetLatency;
 
         if (_inited)
             LOG_DEBUG("Inited Reflex hooks");
@@ -490,6 +526,10 @@ void* ReflexHooks::getHookedReflex(unsigned int InterfaceId)
     if (InterfaceId == GET_ID(NvAPI_Vulkan_SetSleepMode) && o_NvAPI_Vulkan_SetSleepMode)
     {
         return &hkNvAPI_Vulkan_SetSleepMode;
+    }
+    if (InterfaceId == GET_ID(NvAPI_Vulkan_Sleep) && o_NvAPI_Vulkan_Sleep)
+    {
+        return &hkNvAPI_Vulkan_Sleep;
     }
     if (InterfaceId == GET_ID(NvAPI_Vulkan_GetLatency) && o_NvAPI_Vulkan_GetLatency)
     {
@@ -850,4 +890,60 @@ NvAPI_Status ReflexHooks::ownGetLatency(IUnknown* pDev, NV_LATENCY_RESULT_PARAMS
 {
     OwnCallScope scope(_ownCall);
     return hkNvAPI_D3D_GetLatency(pDev, pParams);
+}
+
+void ReflexHooks::forgetSleepDeviceVulkan(HANDLE vkDevice)
+{
+    std::scoped_lock lock(_sleepModeMutex);
+
+    if (vkDevice != nullptr && _lastVkSleepDev == vkDevice)
+        _lastVkSleepDev = nullptr;
+}
+
+NvAPI_Status ReflexHooks::ownSetSleepModeVulkan(HANDLE vkDevice, NV_VULKAN_SET_SLEEP_MODE_PARAMS* pParams)
+{
+    std::scoped_lock lock(_sleepModeMutex);
+
+    // The game's own SetSleepMode is the last word, even one that came in just before ours
+    if (_gameCalledSetSleepMode)
+        return NVAPI_OK;
+
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_Vulkan_SetSleepMode(vkDevice, pParams);
+}
+
+NvAPI_Status ReflexHooks::ownSleepVulkan(HANDLE vkDevice, NvU64 signalValue)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_Vulkan_Sleep(vkDevice, signalValue);
+}
+
+NvAPI_Status ReflexHooks::ownSetLatencyMarkerVulkan(HANDLE vkDevice, NV_VULKAN_LATENCY_MARKER_PARAMS* pParams)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_Vulkan_SetLatencyMarker(vkDevice, pParams);
+}
+
+NvAPI_Status ReflexHooks::ownGetLatencyVulkan(HANDLE vkDevice, NV_VULKAN_LATENCY_RESULT_PARAMS* pParams)
+{
+    OwnCallScope scope(_ownCall);
+    return hkNvAPI_Vulkan_GetLatency(vkDevice, pParams);
+}
+
+NvAPI_Status ReflexHooks::ownInitLowLatencyDeviceVulkan(HANDLE vkDevice, HANDLE* signalSemaphore)
+{
+    if (o_NvAPI_Vulkan_InitLowLatencyDevice == nullptr)
+        return NVAPI_NO_IMPLEMENTATION;
+
+    return o_NvAPI_Vulkan_InitLowLatencyDevice(vkDevice, signalSemaphore);
+}
+
+void ReflexHooks::noteGameVulkanLowLatency2(bool setSleepMode)
+{
+    std::scoped_lock lock(_sleepModeMutex);
+
+    _gameCalledReflex = true;
+
+    if (setSleepMode)
+        _gameCalledSetSleepMode = true;
 }

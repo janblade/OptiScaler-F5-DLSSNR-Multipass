@@ -526,10 +526,21 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\DepthCopyDx11.h" />
     <ClInclude Include="native\DepthResolveDx12.h" />
     <ClInclude Include="native\Dx11FrameSource.h" />
+    <ClInclude Include="native\SharedFrameVk.h" />
+    <ClInclude Include="native\VkFrameSource.h" />
+    <ClInclude Include="native\VkPresentBridgeCore.h" />
+    <ClInclude Include="native\VkPresentBridge.h" />
+    <ClInclude Include="native\NativeDriverVk.h" />
+    <ClInclude Include="resource_tracking\GenericDepth_Vk.h" />
+    <ClInclude Include="resource_tracking\GenericDepth_VkEvents.h" />
     <ClInclude Include="native\VirtualUpscalerDriver.h" />
     <ClInclude Include="native\NativeDriver.h" />
     <ClInclude Include="native\NativeLowLatency.h" />
     <ClInclude Include="native\NativeLowLatencyRule.h" />
+    <ClInclude Include="native\NativeLowLatencyVkSync.h" />
+    <ClInclude Include="native\PresentStageTiming.h" />
+    <ClInclude Include="native\VkPresentCopyRule.h" />
+    <ClInclude Include="LogAsyncRule.h" />
     <ClInclude Include="motion\OpticalFlow_Hlsl.h" />
     <ClInclude Include="motion\TrustMask_Hlsl.h" />
     <ClInclude Include="native\DepthCopyDx11_Hlsl.h" />
@@ -851,6 +862,20 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="native\Dx11FrameSource.cpp" />
+    <ClCompile Include="native\SharedFrameVk.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="native\VkFrameSource.cpp" />
+    <ClCompile Include="native\VkPresentBridgeCore.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="native\VkPresentBridge.cpp" />
+    <ClCompile Include="native\NativeDriverVk.cpp" />
+    <ClCompile Include="resource_tracking\GenericDepth_Vk.cpp" />
     <ClCompile Include="native\VirtualUpscalerDriver.cpp" />
     <ClCompile Include="native\NativeDriver.cpp" />
     <ClCompile Include="native\NativeLowLatency.cpp" />

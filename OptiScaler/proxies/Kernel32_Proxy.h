@@ -25,7 +25,9 @@
     X(GetFileAttributesW)                                                                                              \
     X(CreateFileW)                                                                                                     \
     X(OutputDebugStringA)                                                                                              \
-    X(OutputDebugStringW)
+    X(OutputDebugStringW)                                                                                              \
+    X(SetUnhandledExceptionFilter)                                                                                     \
+    X(ExitProcess)
 
 class Kernel32Proxy
 {

@@ -85,6 +85,7 @@ enum class SwapchainInteropApi : uint32_t
 {
     None,
     Dx11wDx12,
+    VkwDx12, // a Vulkan game presenting through a D3D12 swapchain (native/VkPresentBridge.h)
 };
 
 enum class ColorTransfer : uint32_t

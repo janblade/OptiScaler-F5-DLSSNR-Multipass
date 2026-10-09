@@ -113,6 +113,13 @@ class SharedFenceVk
     std::string _error;
 };
 
+// A shared picture the D3D12 side will not use after all (the copy into the output swapchain failed after the producer had
+// been given it): the queue waits for the copy in (`copied` on `sharedFence`) and the producer's done point
+// (`producerValue` on `producerFence`; null: no producer ran), then signals `doneValue` on `sharedFence`. The next copy in
+// waits for that value, so Vulkan never overwrites the picture while the producer still reads it.
+void HandBackPicture(ID3D12CommandQueue* queue, ID3D12Fence* sharedFence, uint64_t copied, ID3D12Fence* producerFence,
+                     uint64_t producerValue, uint64_t doneValue);
+
 // A buffer made on the D3D12 device and opened in Vulkan: how the scene's depth crosses. Vulkan cannot copy depth into a
 // colour image, but it can copy the depth aspect into a buffer, and D3D12 copies a buffer into a texture of any format.
 class SharedBufferVk

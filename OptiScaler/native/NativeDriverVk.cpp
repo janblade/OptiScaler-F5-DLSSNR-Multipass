@@ -102,8 +102,17 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
         const uint64_t done = g_source.NextFenceValue();
         const auto producerDone = g_source.BridgedProducerDone();
 
-        if (VkPresentBridge::CopyToOutput(g_source.BridgedPicture(), g_source.BridgedFence(), g_source.BridgedCopied(),
-                                          producerDone.fence, producerDone.value, done))
+        bool signalled = VkPresentBridge::CopyToOutput(g_source.BridgedPicture(), g_source.BridgedFence(),
+                                                       g_source.BridgedCopied(), producerDone.fence, producerDone.value,
+                                                       done);
+
+        // The copy to the output failed and nothing was queued for `done`: the producer may still be reading the shared
+        // picture, and the next copy in must wait for it all the same
+        if (!signalled)
+            signalled = g_source.HandBackBridged(done);
+
+        // Only a value that will be signalled: the next copy in waits for it on the GPU
+        if (signalled)
             g_source.NoteBridgeDone(done);
     }
 

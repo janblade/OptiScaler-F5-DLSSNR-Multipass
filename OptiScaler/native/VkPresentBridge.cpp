@@ -4,9 +4,11 @@
 #include "VkPresentBridgeCore.h"
 
 #include <native/NativeDriverVk.h>
+#include <native/NativeLowLatency.h>
 
 #include <Config.h>
 #include <State.h>
+#include <dlssnr/DlssNr_VkExtensions.h>
 #include <hooks/DxgiFactory_Hooks.h>
 #include <hooks/FG_Hooks.h>
 #include <hooks/Vulkan_Hooks.h>
@@ -14,6 +16,7 @@
 #include <menu/menu_overlay_vk.h>
 #include <misc/IdentifyGpu.h>
 #include <proxies/DXGI_Proxy.h>
+#include <with_dx12/dx11_with_dx12_sync.h>
 #include <with_dx12/with_dx12.h>
 
 #include <memory>
@@ -183,6 +186,20 @@ void LetGoOfOutput(Bridge& bridge, IDXGISwapChain4* output)
     state.currentRealSwapchain = nullptr;
     state.swapchainInteropApi = SwapchainInteropApi::None;
 
+    // The private device and queue were made current for frame generation (the make function below): they must not stay
+    // so once the swapchain is gone, whatever uses the state next would reach a device that is about to be released.
+    if (bridge.device12 != nullptr)
+    {
+        native::lowlatency::OnDeviceReleased(bridge.device12);
+        WithDx12::ForgetD3D12Device(bridge.device12);
+
+        if (state.currentD3D12Device == bridge.device12)
+            state.currentD3D12Device = nullptr;
+    }
+
+    if (bridge.queue12 != nullptr && state.currentCommandQueue == bridge.queue12)
+        state.currentCommandQueue = nullptr;
+
     auto fg = state.currentFG;
 
     if (fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
@@ -192,6 +209,50 @@ void LetGoOfOutput(Bridge& bridge, IDXGISwapChain4* output)
     }
 
     bridge.outputUp = false;
+}
+
+// A resize of the D3D12 swapchain is the same hazard as the D3D11 bridge's (Dx11wDx12SC::ResizeBuffers): frame
+// generation is switched off, and XeFG's presents on its own thread are waited for, before ResizeBuffers releases the back
+// buffers they use. Held until the resize is done; when it is let go frame generation is told the swapchain changed. The
+// caller takes it BEFORE the bridge's own mutex: XeFG's thread holds the shared side while it draws the menu, which asks
+// IsUp().
+struct ResizeHold
+{
+    std::unique_lock<std::shared_mutex> lock { Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock };
+
+    ~ResizeHold()
+    {
+        auto& state = State::Instance();
+
+        if (Config::Instance()->FGEnabled.value_or_default())
+        {
+            state.fgResetCapturedResources = true;
+            state.fgOnlyUseCapturedResources = false;
+            state.fgChanged = true;
+        }
+
+        state.scChanged = true;
+    }
+};
+
+std::shared_ptr<ResizeHold> BeginResize()
+{
+    auto& state = State::Instance();
+
+    if (auto fg = state.currentFG; fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
+    {
+        state.fgChanged = true;
+        fg->UpdateTarget();
+        fg->Deactivate();
+    }
+
+    auto hold = std::make_shared<ResizeHold>();
+
+    // The wrapped swapchain's present takes the shared side for XeFG only
+    if (state.activeFgOutput == FGOutput::XeFG)
+        hold->lock.lock();
+
+    return hold;
 }
 
 // The D3D12 swapchain goes; the hidden surface with it unless a game swapchain still lives on it.
@@ -289,12 +350,28 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
 
 } // namespace
 
-int32_t* FullScreenExclusiveMode(const void* chain)
+int32_t* FullScreenExclusiveMode(const void* chain, bool* readOnly)
 {
+    if (readOnly != nullptr)
+        *readOnly = false;
+
     for (auto* header = static_cast<const VkBaseInStructure*>(chain); header != nullptr; header = header->pNext)
     {
-        if ((int32_t) header->sType == kFullScreenExclusiveInfo)
-            return &reinterpret_cast<FullScreenExclusiveInfo*>(const_cast<VkBaseInStructure*>(header))->fullScreenExclusive;
+        if ((int32_t) header->sType != kFullScreenExclusiveInfo)
+            continue;
+
+        // The chain is the game's memory, and may sit in a read-only section: only a field that can be written is handed
+        // out
+        auto* mode =
+            &reinterpret_cast<FullScreenExclusiveInfo*>(const_cast<VkBaseInStructure*>(header))->fullScreenExclusive;
+
+        if (DlssNr::VkExt::IsWritable(mode))
+            return mode;
+
+        if (readOnly != nullptr)
+            *readOnly = true;
+
+        return nullptr;
     }
 
     return nullptr;
@@ -316,6 +393,18 @@ bool OnCreateSwapchain(VkInstance instance, VkPhysicalDevice physical, VkDevice 
                        VkSwapchainCreateInfoKHR* out)
 {
     *out = in;
+
+    // The bridge resizes its D3D12 swapchain for this one: frame generation is out of it first (before g_mutex, see
+    // ResizeHold)
+    bool needsHold = false;
+    {
+        std::lock_guard lock(g_mutex);
+        needsHold = g_bridge != nullptr && g_bridge->outputUp && g_bridge->device == device &&
+                    g_bridge->core.ResizeNeeded(in);
+    }
+
+    std::shared_ptr<ResizeHold> resizeHold = needsHold ? BeginResize() : nullptr;
+
     std::lock_guard lock(g_mutex);
 
     const auto window = g_windows.find(in.surface);
@@ -342,7 +431,10 @@ bool OnCreateSwapchain(VkInstance instance, VkPhysicalDevice physical, VkDevice 
             return false;
         }
 
-        if (!Wanted(in, hwnd, why) || !g_bridge->core.Resize(in, why))
+        const bool resized = Wanted(in, hwnd, why) && g_bridge->core.Resize(in, why);
+        resizeHold.reset(); // the swapchain has its new size: frame generation may come back
+
+        if (!resized)
         {
             LogOnce(why.empty() ? "the bridge ends here: the swapchain is made on the game's window" : why);
             Retire(g_bridge);
@@ -567,10 +659,31 @@ void PresentOutput()
         ++g_bridge->presents;
     }
 
-    // Nothing was put into the back buffer (the copy failed, or another thread held the frame source): a flip-model back
-    // buffer is undefined after its last present, so the last frame stays on screen instead.
-    if (output == nullptr || copyValue == 0)
+    if (output == nullptr)
         return;
+
+    // Nothing was put into the back buffer (the copy failed, or another thread held the frame source). The swapchain
+    // is presented all the same: this present is what paces the game and keeps the window alive, and a game whose
+    // copy keeps failing would otherwise freeze on its last frame with one line in the log. The window shows whatever
+    // the back buffer held (a flip-discard buffer's contents are undefined, in practice an earlier frame); said once
+    // with a count, at 1, 10, 100 ...
+    static uint64_t failedCopies = 0;
+
+    if (copyValue == 0)
+    {
+        ++failedCopies;
+
+        if (failedCopies == 1 || failedCopies == 10 || failedCopies == 100 || failedCopies == 1000 ||
+            failedCopies == 10000)
+            LOG_WARN("Vulkan bridge: no picture was put into the D3D12 swapchain ({} presents so far); presenting the "
+                     "swapchain as it is",
+                     failedCopies);
+    }
+    else if (failedCopies != 0)
+    {
+        LOG_INFO("Vulkan bridge: pictures reach the D3D12 swapchain again (after {} presents without)", failedCopies);
+        failedCopies = 0;
+    }
 
     auto& state = State::Instance();
     auto fg = state.currentFG;
@@ -613,7 +726,24 @@ void PresentOutput()
 bool WindowResized()
 {
     std::lock_guard lock(g_mutex);
-    return g_bridge != nullptr && g_bridge->outputUp && g_bridge->core.RealWindowResized();
+
+    if (g_bridge == nullptr || !g_bridge->outputUp)
+        return false;
+
+    const bool report = g_bridge->core.ShouldReportOutOfDate();
+
+    // The window never matches the extent the game asks for (a windowed game with a fixed or clamped extent): the game is
+    // left alone after a few presents rather than recreating its swapchain on every one
+    if (!report && g_bridge->core.OutOfDateGivenUp())
+    {
+        RECT client {};
+        GetClientRect(g_bridge->core.RealWindow(), &client);
+        LogOnce(std::format("the window is {}x{} and the game's swapchain stays {}x{}: it is no longer told to recreate it",
+                            client.right - client.left, client.bottom - client.top, g_bridge->core.Width(),
+                            g_bridge->core.Height()));
+    }
+
+    return report;
 }
 
 } // namespace VkPresentBridge

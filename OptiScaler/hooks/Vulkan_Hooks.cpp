@@ -948,7 +948,13 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     }
 
     // On the hidden surface the swapchain never takes the screen; the game's own value is put back after the call.
-    int32_t* fullScreenMode = bridged ? VkPresentBridge::FullScreenExclusiveMode(localCreateInfo.pNext) : nullptr;
+    bool fullScreenModeReadOnly = false;
+    int32_t* fullScreenMode =
+        bridged ? VkPresentBridge::FullScreenExclusiveMode(localCreateInfo.pNext, &fullScreenModeReadOnly) : nullptr;
+
+    if (fullScreenModeReadOnly)
+        LOG_WARN("Vulkan bridge: the game's full screen exclusive struct is read-only, so it is made as the game asked "
+                 "(the game's own acquire of the mode is still ignored on the bridge)");
     const int32_t gameFullScreenMode = fullScreenMode != nullptr ? *fullScreenMode : 0;
 
     if (fullScreenMode != nullptr)

@@ -768,6 +768,20 @@ bool RunFormat(Vk& vk, Dx& dx, native::VkInterop& interop, native::SharedFenceVk
     // Ten resizes: the window changes, the bridge and the game's swapchain follow; the sizes cycle through three, so the
     // memory after the first cycle is the memory after the last.
     const uint32_t sizes[3][2] = { { 800, 450 }, { 480, 270 }, { 640, 360 } };
+
+    // The glue switches frame generation off and waits for its presents before a resize that resizes the D3D12
+    // swapchain, and only then: ResizeNeeded says which swapchains those are.
+    int needed = 0;
+    {
+        std::string unchangedWhy;
+        ok &= Check("a swapchain of the same size needs no resize",
+                    !bridge.ResizeNeeded(game.Info(kBaseW, kBaseH)) && bridge.Resize(game.Info(kBaseW, kBaseH), unchangedWhy));
+        ok &= Check("another extent, or another format, does", bridge.ResizeNeeded(game.Info(kBaseW + 16, kBaseH)));
+        auto otherFormat = game.Info(kBaseW, kBaseH);
+        otherFormat.imageFormat = f.format == VK_FORMAT_B8G8R8A8_UNORM ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+        ok &= Check("another format does too", bridge.ResizeNeeded(otherFormat));
+    }
+
     UINT64 afterFirstCycle = 0;
     bool resized = true;
     bool detected = true;
@@ -781,6 +795,7 @@ bool RunFormat(Vk& vk, Dx& dx, native::VkInterop& interop, native::SharedFenceVk
         detected &= bridge.RealWindowResized();
 
         const auto wanted = game.Info(w, h);
+        needed += bridge.ResizeNeeded(wanted) ? 1 : 0;
         resized &= bridge.Resize(wanted, why) && game.MakeSwapchain(wanted, why) && game.EnsureBuffers(w, h);
         detected &= !bridge.RealWindowResized();
 
@@ -797,6 +812,44 @@ bool RunFormat(Vk& vk, Dx& dx, native::VkInterop& interop, native::SharedFenceVk
 
     ok &= Check("ten resizes: Resize, the game's new swapchain with oldSwapchain, a frame", resized && carried);
     ok &= Check("the window is seen as resized before the bridge follows, and not after", detected);
+    ok &= Check("each of the ten resizes was one that needs the swapchain resized", needed == 10);
+
+    // A window the game never gets to match (it asks the hidden surface for another extent): told a few times, then left
+    // alone; the same extent again changes nothing; the window matching, or a resize, starts over.
+    {
+        const uint32_t w = bridge.Width();
+        const uint32_t h = bridge.Height();
+        ResizeClient(window, w + 100, h + 50);
+        uint32_t told = 0;
+
+        while (told < 100 && bridge.ShouldReportOutOfDate())
+            ++told;
+
+        ok &= Check("a window that stays the wrong size is reported out of date a few times only",
+                    told == native::VkPresentBridgeCore::kMaxOutOfDate && bridge.OutOfDateGivenUp());
+
+        std::string sameWhy;
+        ok &= Check("the game's swapchain at its old extent changes nothing",
+                    !bridge.ResizeNeeded(game.Info(w, h)) && bridge.Resize(game.Info(w, h), sameWhy) &&
+                        !bridge.ShouldReportOutOfDate() && bridge.OutOfDateGivenUp());
+
+        ResizeClient(window, w, h);
+        ok &= Check("the window matching again ends it", !bridge.ShouldReportOutOfDate() && !bridge.OutOfDateGivenUp());
+
+        ResizeClient(window, w + 100, h + 50);
+        told = 0;
+
+        while (told < 100 && bridge.ShouldReportOutOfDate())
+            ++told;
+
+        ok &= Check("a new mismatch is reported again", told == native::VkPresentBridgeCore::kMaxOutOfDate);
+
+        // The game follows the window: a real resize of the swapchain starts the count again
+        const auto followed = game.Info(w + 100, h + 50);
+        ok &= Check("a resize clears it", bridge.Resize(followed, sameWhy) && game.MakeSwapchain(followed, sameWhy) &&
+                                              game.EnsureBuffers(w + 100, h + 50) && !bridge.OutOfDateGivenUp() &&
+                                              !bridge.ShouldReportOutOfDate());
+    }
 
     game.Destroy();
     dx.WaitIdle();

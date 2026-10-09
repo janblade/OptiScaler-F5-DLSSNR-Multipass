@@ -67,6 +67,10 @@ class VkPresentBridgeCore
     // Does nothing when they have not changed.
     bool Resize(const VkSwapchainCreateInfoKHR& game, std::string& why);
 
+    // Resize would resize the D3D12 swapchain (the extent, format or colour space changed). The glue asks first, to keep
+    // frame generation out of the swapchain (switched off, its presents waited for) before the bridge's lock is taken.
+    bool ResizeNeeded(const VkSwapchainCreateInfoKHR& game) const;
+
     // What the game's swapchain is made with instead: the hidden surface, the surface's own extent, transform and
     // composite alpha, IMMEDIATE else MAILBOX else FIFO, and a format and colour space the hidden surface offers (the
     // game's format always; its colour space when offered, else any). False when the hidden surface cannot carry it.
@@ -83,6 +87,16 @@ class VkPresentBridgeCore
     // The real window's client area is not the swapchain's size (the game has not resized yet): a present that tells the
     // game so (VK_ERROR_OUT_OF_DATE_KHR) makes it recreate the swapchain. False while the window is minimised.
     bool RealWindowResized() const;
+
+    // The present's question: tell the game its swapchain is out of date? True while the real window is not the
+    // swapchain's size, for at most kMaxOutOfDate presents in a row: a window the game never gets to match (the
+    // extent it asks the hidden surface for is not the window's client size) would otherwise be told so forever and
+    // recreate its swapchain every frame. A resize of the swapchain, or the window matching, starts the count again.
+    static constexpr uint32_t kMaxOutOfDate = 6;
+    bool ShouldReportOutOfDate();
+
+    // The count ran out while the window still does not match.
+    bool OutOfDateGivenUp() const { return _outOfDate >= kMaxOutOfDate && RealWindowResized(); }
 
     // Waits for the copies in flight.
     void WaitIdle();
@@ -137,6 +151,7 @@ class VkPresentBridgeCore
     uint64_t _copyValue = 0;
     uint64_t _slotValue[kRing] = {};
     uint32_t _slot = 0;
+    uint32_t _outOfDate = 0; // presents in a row told the swapchain is out of date
 };
 
 } // namespace native

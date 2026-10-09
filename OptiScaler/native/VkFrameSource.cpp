@@ -601,8 +601,12 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     _acquiredPicture = _picture.Res12();
 
     // Bridged and the game calls an upscaler: copied in for the D3D12 swapchain, nothing for the producer.
+    // The ring slot follows the frame count: it advances here too, or every such frame waits on the one before it.
     if (waiting)
+    {
+        ++_frame;
         return AcquireStatus::WaitingForUpscaler;
+    }
 
     input = FrameInput {};
     input.api = Api::Vulkan;
@@ -895,6 +899,16 @@ void VkFrameSource::Return(const FrameInput& input, const FrameOutput& output)
     }
 
     _presentWait = presentWait;
+}
+
+bool VkFrameSource::HandBackBridged(uint64_t done)
+{
+    // _acquiredPicture is cleared by every Acquire and set only once the copy in was submitted
+    if (!_bridged || _acquiredPicture == nullptr || _queue12 == nullptr || _fence.Fence12() == nullptr)
+        return false;
+
+    HandBackPicture(_queue12, _fence.Fence12(), _copied, _producerDone.fence, _producerDone.value, done);
+    return true;
 }
 
 void VkFrameSource::FinishPresent()

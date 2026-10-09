@@ -630,4 +630,18 @@ void RecordCopyFromShared(VkCommandBuffer cmd, const SharedImageVk& shared, VkIm
                          nullptr, 1, &after);
 }
 
+void HandBackPicture(ID3D12CommandQueue* queue, ID3D12Fence* sharedFence, uint64_t copied, ID3D12Fence* producerFence,
+                     uint64_t producerValue, uint64_t doneValue)
+{
+    if (queue == nullptr || sharedFence == nullptr)
+        return;
+
+    queue->Wait(sharedFence, copied);
+
+    if (producerFence != nullptr)
+        queue->Wait(producerFence, producerValue);
+
+    queue->Signal(sharedFence, doneValue);
+}
+
 } // namespace native

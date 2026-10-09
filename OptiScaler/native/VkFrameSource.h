@@ -59,6 +59,11 @@ class VkFrameSource : public IFrameSource
     uint64_t NextFenceValue() { return _fence.Next(); }
     void NoteBridgeDone(uint64_t value) { _bridgeDone = value; }
 
+    // The copy to the output failed: hands the shared picture back (SharedFrameVk.h HandBackPicture) so that the signal the
+    // next copy in waits for (`done`) still comes, and only after the producer is finished with the picture. False when
+    // there was no picture to hand back (nothing signals `done`, so nothing may wait for it).
+    bool HandBackBridged(uint64_t done);
+
     // Gives the present its semaphore when the producer did not run for it (Return was not called): the copy in was made,
     // the game's own wait list was taken, and the present must still wait on something.
     void FinishPresent();

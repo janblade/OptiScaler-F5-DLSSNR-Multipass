@@ -836,6 +836,43 @@ int main()
         ok &= Check("a D3D12 signal is seen by the Vulkan semaphore", reached >= c);
     }
 
+    // The output copy failed after the producer ran: the picture is handed back, and the next copy in (which waits for
+    // `done` on the shared fence) must not go ahead before the producer is finished with it.
+    printf("A failed output copy:\n");
+    {
+        ComPtr<ID3D12Fence> producer;
+        dx.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&producer));
+        const uint64_t copied = fence.Next();
+        dx.queue->Signal(fence.Fence12(), copied); // the copy in is done
+        const uint64_t done = fence.Next();
+        native::HandBackPicture(dx.queue.Get(), fence.Fence12(), copied, producer.Get(), 1, done);
+
+        // The producer has not finished: nothing may be signalled yet
+        Sleep(100);
+        uint64_t reached = 0;
+        vkGetSemaphoreCounterValue(vk.device, fence.Semaphore(), &reached);
+        ok &= Check("the picture is not handed back while the producer still reads it", reached < done);
+
+        // The producer finishes: the hand back goes through, in order
+        producer->Signal(1);
+        dx.WaitIdle();
+        vkGetSemaphoreCounterValue(vk.device, fence.Semaphore(), &reached);
+        ok &= Check("the picture is handed back once the producer is done", reached >= done);
+
+        // Without a producer (null fence) it is only the copy in that is waited for
+        const uint64_t copied2 = fence.Next();
+        dx.queue->Signal(fence.Fence12(), copied2);
+        const uint64_t done2 = fence.Next();
+        native::HandBackPicture(dx.queue.Get(), fence.Fence12(), copied2, nullptr, 0, done2);
+        dx.WaitIdle();
+        vkGetSemaphoreCounterValue(vk.device, fence.Semaphore(), &reached);
+        ok &= Check("with no producer the hand back follows the copy in", reached >= done2 && done2 > done);
+
+        // A normal frame afterwards
+        ok &= RoundTrip(vk, dx, interop, fence, { "B8G8R8A8_UNORM", VK_FORMAT_B8G8R8A8_UNORM, 4 });
+        ok &= Check("no D3D12 debug layer error", dx.DebugErrors() == 0);
+    }
+
     fence.Reset();
     vkDestroyCommandPool(vk.device, vk.pool, nullptr);
     vkDestroyDevice(vk.device, nullptr);

@@ -379,6 +379,12 @@ bool VkPresentBridgeCore::Patch(const VkSwapchainCreateInfoKHR& game, VkSwapchai
     return true;
 }
 
+bool VkPresentBridgeCore::ResizeNeeded(const VkSwapchainCreateInfoKHR& game) const
+{
+    return game.imageExtent.width != _width || game.imageExtent.height != _height || game.imageFormat != _format ||
+           game.imageColorSpace != _space;
+}
+
 bool VkPresentBridgeCore::Resize(const VkSwapchainCreateInfoKHR& game, std::string& why)
 {
     DXGI_FORMAT dxgi = DXGI_FORMAT_UNKNOWN;
@@ -393,8 +399,7 @@ bool VkPresentBridgeCore::Resize(const VkSwapchainCreateInfoKHR& game, std::stri
                         ? 1
                         : 0;
 
-    if (game.imageExtent.width == _width && game.imageExtent.height == _height && game.imageFormat == _format &&
-        game.imageColorSpace == _space)
+    if (!ResizeNeeded(game))
         return true;
 
     if (_output == nullptr)
@@ -421,6 +426,7 @@ bool VkPresentBridgeCore::Resize(const VkSwapchainCreateInfoKHR& game, std::stri
     _format = game.imageFormat;
     _space = game.imageColorSpace;
     _dxgi = dxgi;
+    _outOfDate = 0;
 
     DXGI_COLOR_SPACE_TYPE space;
     UINT support = 0;
@@ -529,6 +535,21 @@ bool VkPresentBridgeCore::RealWindowResized() const
     const LONG height = rect.bottom - rect.top;
 
     return width > 0 && height > 0 && ((uint32_t) width != _width || (uint32_t) height != _height);
+}
+
+bool VkPresentBridgeCore::ShouldReportOutOfDate()
+{
+    if (!RealWindowResized())
+    {
+        _outOfDate = 0;
+        return false;
+    }
+
+    if (_outOfDate >= kMaxOutOfDate)
+        return false;
+
+    ++_outOfDate;
+    return true;
 }
 
 void VkPresentBridgeCore::WaitIdle()

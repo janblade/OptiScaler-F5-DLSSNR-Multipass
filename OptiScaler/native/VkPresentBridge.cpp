@@ -464,6 +464,20 @@ bool OnCreateSwapchain(VkInstance instance, VkPhysicalDevice physical, VkDevice 
             hwnd != nullptr && hwnd == g_bridge->window)
             g_bridge->realSurface = in.surface;
 
+        // Another window, once the game's swapchains on the old one are gone: the game moved (RDR2 makes a new window).
+        // The D3D12 swapchain on the old window goes, and the bridge is made again below on the new one.
+        if (g_bridge->realSurface != in.surface && g_bridge->device == device && g_bridge->swapchains.empty() &&
+            hwnd != nullptr && hwnd != g_bridge->window)
+        {
+            LOG_INFO("Vulkan bridge: the game moved to window {:X} (was {:X}): the bridge follows",
+                     (size_t) hwnd, (size_t) g_bridge->window);
+            resizeHold.reset();
+            Retire(g_bridge);
+        }
+    }
+
+    if (g_bridge != nullptr)
+    {
         if (g_bridge->realSurface != in.surface || g_bridge->device != device)
         {
             LogOnce("a second window or device is making a swapchain: not bridged");

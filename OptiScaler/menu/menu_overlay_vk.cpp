@@ -27,6 +27,19 @@ static VkRenderPass _vkRenderPass = VK_NULL_HANDLE;
 static uint32_t _scImageCount;
 static ULONG64 _frameCount;
 
+// ImGui's renderer backend is the Vulkan one. Not a given: with the frame-generation bridge (native/VkPresentBridge.h)
+// the menu moves to the D3D12 swapchain and its backend, and when the game then makes a swapchain the bridge does not
+// take, ImGui_ImplVulkan_Shutdown with no Vulkan backend reads through a null pointer (RDR2, FG only).
+static bool VulkanBackendIsUp()
+{
+    if (ImGui::GetCurrentContext() == nullptr)
+        return false;
+
+    const ImGuiIO& io = ImGui::GetIO();
+    return io.BackendRendererUserData != nullptr && io.BackendRendererName != nullptr &&
+           strcmp(io.BackendRendererName, "imgui_impl_vulkan") == 0;
+}
+
 static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType objectType, uint64_t objectHandle,
                             const char* name)
 {
@@ -62,7 +75,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     {
         LOG_DEBUG("_vulkanObjectsCreated, releasing objects");
 
-        if (ImGui::GetIO().BackendRendererUserData != nullptr)
+        if (VulkanBackendIsUp())
             ImGui_ImplVulkan_Shutdown(false);
 
         MenuOverlayVk::DestroyVulkanObjects(false);
@@ -368,6 +381,15 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         _ImVulkan_Info.Allocator = NULL;
         _ImVulkan_Info.RenderPass = _vkRenderPass;
 
+        // Another renderer backend still owns ImGui (the bridge's D3D12 menu was not let go): starting the Vulkan one
+        // over it would leave both pointing at one context. No menu on this swapchain rather than a crash.
+        if (ImGui::GetIO().BackendRendererUserData != nullptr && !VulkanBackendIsUp())
+        {
+            LOG_WARN("Vulkan menu: ImGui's renderer backend is still {}; the menu is not drawn on this swapchain",
+                     ImGui::GetIO().BackendRendererName != nullptr ? ImGui::GetIO().BackendRendererName : "another one");
+            return;
+        }
+
         bool initResult = ImGui_ImplVulkan_Init(&_ImVulkan_Info);
         LOG_DEBUG("ImGui_ImplVulkan_Init result: {}", initResult);
 
@@ -620,7 +642,7 @@ void MenuOverlayVk::HandOverToBridge()
     if (_ImVulkan_Info.Device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(_ImVulkan_Info.Device);
 
-    if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().BackendRendererUserData != nullptr)
+    if (VulkanBackendIsUp())
         ImGui_ImplVulkan_Shutdown(false); // the font texture is made again by the D3D12 backend
 
     // Render pass and descriptor pool included: the next Vulkan menu (if the bridge ever ends) makes its own
@@ -649,7 +671,9 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
 
         if (MenuOverlayBase::IsInited())
         {
-            ImGui_ImplVulkan_Shutdown(false);
+            if (VulkanBackendIsUp())
+                ImGui_ImplVulkan_Shutdown(false);
+
             LOG_DEBUG("MenuOverlayBase::Shutdown();");
             MenuOverlayBase::Shutdown();
         }

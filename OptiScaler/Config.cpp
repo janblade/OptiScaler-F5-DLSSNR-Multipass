@@ -380,6 +380,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrDetailReuseSigmaFloor.set_from_config(readFloat("DlssNr", "DetailReuseSigmaFloor"));
             DlssNrDetailReuseWithFg.set_from_config(readBool("DlssNr", "DetailReuseWithFG"));
             DlssNrDetailReuseMinFps.set_from_config(readFloat("DlssNr", "DetailReuseMinFps"));
+            DlssNrSceneCut.set_from_config(readUInt("DlssNr", "SceneCut"));
+            if (DlssNrSceneCut.value_or_default() > 2u)
+                DlssNrSceneCut = 2u;
             DlssNrDetailReuseMaxDropped.set_from_config(readFloat("DlssNr", "DetailReuseMaxDropped"));
             if (DlssNrDetailReuseMaxDropped.has_value() &&
                 (!std::isfinite(DlssNrDetailReuseMaxDropped.value()) || DlssNrDetailReuseMaxDropped.value() < 0.0f ||
@@ -1457,6 +1460,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "DetailReuseClipFalloff", GetFloatValue(Instance()->DlssNrDetailReuseClipFalloff.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseSigmaFloor", GetFloatValue(Instance()->DlssNrDetailReuseSigmaFloor.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SceneCut", GetIntValue(Instance()->DlssNrSceneCut.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMaxDropped", GetFloatValue(Instance()->DlssNrDetailReuseMaxDropped.value_for_config()).c_str());
     {

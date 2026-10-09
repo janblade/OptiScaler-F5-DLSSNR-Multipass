@@ -12,10 +12,8 @@
 // neighbour counts by how much picture structure its match had, how close its motion is and how close its brightness is.
 // Nothing is taken from any shader of another project; some ideas are credited in docs/CREDITS.md.
 //
-// A hard cut is also found on the same frame, on the GPU: brightness histograms of the luma in a 3x3 grid of tiles
-// are compared with the last frame's (symmetric KL divergence, the smallest over a range of sideways shifts, so a
-// brightness step of the whole picture is not a cut). Past a threshold a flag is set that the match and the trust
-// mask read in that same frame, with no wait for the CPU.
+// A hard cut is also found on the same frame, on the GPU, by the scene-cut detector (motion/SceneCut_Dx12.h) run on the
+// first luma level: its flag is read by the match and the trust mask in that same frame, with no wait for the CPU.
 //
 // Self-contained: it needs only D3D12 and the HLSL compiler, so tests/nr_optical_flow_gpu.cpp drives it with synthetic images
 // and known motion, with no game.
@@ -27,6 +25,8 @@
 //
 // Dispatch() records onto a command list the caller owns and changes the descriptor heaps bound on it, so it belongs on a
 // list of our own (the finished-picture seam), not on a game's list.
+
+#include "SceneCut_Dx12.h"
 
 #include <d3d12.h>
 #include <dxgiformat.h>
@@ -71,7 +71,7 @@ class OpticalFlowDx12
     {
         _havePrevious = false;
         _globalReady = false;
-        _scenePrevValid = false;
+        _sceneCut.Reset();
         _ageValid = false;
     }
 
@@ -93,9 +93,9 @@ class OpticalFlowDx12
     // The scene-cut flag of the last Dispatch: a 2x1 R32_UINT texture in the NON_PIXEL_SHADER_RESOURCE state, texel 0
     // is 1 on a frame found to be a hard cut, texel 1 the float bits of the divergence (0..1) it was judged by. Null
     // when the detector did not run; the trust mask takes it as its input, so it distrusts the cut frame whole.
-    ID3D12Resource* SceneCutFlag() const { return _sceneCutRan ? _cutFlag.resource : nullptr; }
+    ID3D12Resource* SceneCutFlag() const { return _sceneCutRan ? _sceneCut.Flag() : nullptr; }
     // For the test: the texture even when the detector did not run.
-    ID3D12Resource* SceneCutTexture() const { return _cutFlag.resource; }
+    ID3D12Resource* SceneCutTexture() const { return _sceneCut.Flag(); }
     uint32_t FlowWidth() const { return _flow.width; }
     uint32_t FlowHeight() const { return _flow.height; }
 
@@ -209,22 +209,12 @@ class OpticalFlowDx12
         uint32_t padding[4];
     };
 
-    // The scene-cut passes have a root signature of their own: the luma, the histogram state and the flag.
-    struct SceneConstants
-    {
-        uint32_t sizeX, sizeY;
-        uint32_t hasPrevious; // the last frame's histograms are there to compare with
-        float threshold;
-    };
-
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
     bool EnsureSize(uint32_t width, uint32_t height);
     void ReleaseTextures();
     void Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state);
     void StampBegin(ID3D12GraphicsCommandList* list);
-    void StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso);
-    void ScenePass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* luma, uint32_t groupsX,
-                   uint32_t groupsY, const SceneConstants& constants);
+    void StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, const char* name = nullptr);
     void Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* src0, DXGI_FORMAT format0,
               ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2, DXGI_FORMAT format2, Tex& dst,
               DXGI_FORMAT dstFormat, const Constants& constants, ID3D12Resource* src3 = nullptr,
@@ -250,9 +240,6 @@ class OpticalFlowDx12
     ID3D12PipelineState* _smooth = nullptr;
     ID3D12PipelineState* _visualise = nullptr;
     ID3D12PipelineState* _global = nullptr;
-    ID3D12RootSignature* _sceneRoot = nullptr;
-    ID3D12PipelineState* _sceneHist = nullptr;
-    ID3D12PipelineState* _sceneDiverge = nullptr;
     ID3D12DescriptorHeap* _heap = nullptr;
     UINT _descriptorSize = 0;
     UINT _heapCursor = 0;
@@ -263,8 +250,6 @@ class OpticalFlowDx12
     Tex _globalFlow; // 1x1: the whole picture's motion in full-resolution pixels, z = 1 when there was enough to say
     Tex _flow;
     Tex _preview;
-    Tex _sceneState; // R32_UINT, 256 wide: the nine tiles' counts, the last frame's nine smoothed histograms, scratch
-    Tex _cutFlag;    // R32_UINT, 2x1: the flag and the divergence
     Tex _age[2]; // R8_UINT, half resolution: the still age (see Settings::stillFrames), this frame's and the last one's
     bool _ageValid = false; // the last frame's ages are there (not after a Reset or a size change)
     int _current = 0;
@@ -273,8 +258,8 @@ class OpticalFlowDx12
     bool _usedDepth = false;
     bool _globalReady = false; // _globalFlow holds the last frame's whole-frame motion
 
-    // _sceneState holds the last frame's histograms; the last Dispatch ran the detector, so _cutFlag is this frame's.
-    bool _scenePrevValid = false;
+    // The scene-cut detector, on the first luma level; the last Dispatch ran it, so its flag is this frame's.
+    SceneCutDx12 _sceneCut;
     bool _sceneCutRan = false;
     uint32_t _width = 0;
     uint32_t _height = 0;

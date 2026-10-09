@@ -10,7 +10,8 @@
 //
 //   vcvars64, then from the repo root:
 //   cl /std:c++20 /EHsc /O2 tests\nr_native_producer_gpu.cpp OptiScaler\native\NativeProducer.cpp
-//   OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
+//   OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\SceneCut_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp
+//   d3d12.lib dxgi.lib d3dcompiler.lib
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN

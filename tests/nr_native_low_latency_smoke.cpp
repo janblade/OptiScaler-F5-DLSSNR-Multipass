@@ -198,11 +198,25 @@ int main()
         CHECK(VkSleepFrame(sync, calls, &first) == VkSleepResult::TimedOut && !first && lastSleep == 9);
         CHECK(VkSleepFrame(sync, calls, &first) == VkSleepResult::TimedOut && lastSleep == 10);
 
-        // Three in a row and the device gives up: no more NVAPI calls at all
+        // Many timeouts in a row after the driver has signalled before: logged once, tried again, never given up
         CHECK(VkSleepFrame(sync, calls, &first) == VkSleepResult::TimedOut && lastSleep == 11);
-        CHECK(sync.state == VkSleepState::Unavailable && sync.why == VkSleepWhy::WaitTimedOut);
+        CHECK(VkSleepFrame(sync, calls, &first) == VkSleepResult::TimedOut && lastSleep == 12);
+        CHECK(VkSleepFrame(sync, calls, &first) == VkSleepResult::TimedOut && !first && lastSleep == 13);
+        CHECK(sync.state == VkSleepState::Ready);
+        reached = true;
+        CHECK(VkSleepFrame(sync, calls, &first) == VkSleepResult::Slept && lastSleep == 14);
+
+        // A device whose semaphore never reaches a value (the driver does not signal): three in a row and it gives up,
+        // no more NVAPI calls at all
+        reached = false;
+        VkSleepSync silent;
+        CHECK(VkSleepFrame(silent, calls, &first) == VkSleepResult::TimedOut && first);
+        CHECK(VkSleepFrame(silent, calls, &first) == VkSleepResult::TimedOut && !first);
+        CHECK(silent.state == VkSleepState::Ready);
+        CHECK(VkSleepFrame(silent, calls, &first) == VkSleepResult::TimedOut);
+        CHECK(silent.state == VkSleepState::Unavailable && silent.why == VkSleepWhy::WaitTimedOut);
         const int sleepsBefore = sleepCalls;
-        CHECK(VkSleepFrame(sync, calls, &first) == VkSleepResult::Unavailable && sleepCalls == sleepsBefore);
+        CHECK(VkSleepFrame(silent, calls, &first) == VkSleepResult::Unavailable && sleepCalls == sleepsBefore);
 
         // A device without the timeline feature: no NVAPI call of any kind
         initCalls = sleepCalls = waitCalls = 0;

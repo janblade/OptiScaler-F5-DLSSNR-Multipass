@@ -26,7 +26,7 @@ enum class VkSleepWhy
     NoTimelineSemaphores, // the device was made without the timeline semaphore feature
     InitFailed,           // the init call failed (initStatus has its NVAPI status)
     NoSemaphore,          // the init call succeeded and returned no semaphore
-    WaitTimedOut          // the Sleep's value never arrived, several frames in a row
+    WaitTimedOut          // the Sleep's value never arrived, several frames in a row and never once before
 };
 
 struct VkSleepSync
@@ -38,6 +38,7 @@ struct VkSleepSync
     uint64_t value = 0; // the last value given to Sleep; the next frame's is one more
     bool timeoutWarned = false;
     uint32_t timeouts = 0; // waits in a row that timed out
+    bool everSignalled = false; // a wait has reached its value at least once: the driver does signal
 };
 
 // What the sync calls. All return success as 0 / true.
@@ -116,6 +117,7 @@ inline VkSleepResult VkSleepFrame(VkSleepSync& sync, const VkSleepCalls& calls, 
     if (calls.wait(sync.semaphore, value, kVkSleepWaitNs))
     {
         sync.timeouts = 0;
+        sync.everSignalled = true;
         return VkSleepResult::Slept;
     }
 
@@ -127,8 +129,11 @@ inline VkSleepResult VkSleepFrame(VkSleepSync& sync, const VkSleepCalls& calls, 
             *firstTimeout = true;
     }
 
-    // A wait that never ends would cost its whole timeout every frame: after a few in a row the device gives up
-    if (++sync.timeouts >= kVkSleepTimeoutsBeforeGivingUp)
+    // A driver that never signals would cost the whole timeout every frame: after a few in a row the device gives up. One
+    // that has signalled before is only hitting a hiccup (a loading screen, a stalled GPU): it is tried again next frame.
+    ++sync.timeouts;
+
+    if (!sync.everSignalled && sync.timeouts >= kVkSleepTimeoutsBeforeGivingUp)
     {
         sync.state = VkSleepState::Unavailable;
         sync.why = VkSleepWhy::WaitTimedOut;

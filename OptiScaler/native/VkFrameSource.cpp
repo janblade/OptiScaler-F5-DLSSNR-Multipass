@@ -509,18 +509,6 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
         return AcquireStatus::Unavailable;
     }
 
-    // NR on the finished picture takes RGBA, not BGRA (DOOM Eternal's swapchain is B8G8R8A8): the picture is shared as
-    // RGBA and the copies swap the channels. Not bridged only: the bridge's D3D12 swapchain has the game's format and
-    // copies straight from the shared picture, and its virtual upscaler takes BGRA. SRGB is left as it is: a blit from
-    // it would decode the values.
-    _swizzle = !_bridged && format == VK_FORMAT_B8G8R8A8_UNORM;
-
-    if (_swizzle)
-    {
-        dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-        sharedFormat = VK_FORMAT_R8G8B8A8_UNORM;
-    }
-
     if (family == UINT32_MAX)
     {
         _error = "the present's queue was not seen at device creation";
@@ -563,7 +551,7 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(slot.copyIn, &begin);
-    RecordCopyToShared(slot.copyIn, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, _picture, family, _swizzle);
+    RecordCopyToShared(slot.copyIn, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, _picture, family);
     FrameInput depth;
     const bool haveDepth = !waiting && RecordDepth(slot.copyIn, family, depth);
     vkEndCommandBuffer(slot.copyIn);
@@ -872,7 +860,7 @@ void VkFrameSource::Return(const FrameInput& input, const FrameOutput& output)
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(slot.copyOut, &begin);
-        RecordCopyFromShared(slot.copyOut, _picture, _image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, _family, _swizzle);
+        RecordCopyFromShared(slot.copyOut, _picture, _image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, _family);
         vkEndCommandBuffer(slot.copyOut);
     }
 

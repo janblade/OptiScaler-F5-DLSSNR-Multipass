@@ -590,7 +590,12 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
         Config::Instance()->DlssNrColourEncoding.value_or_default(), screenPq || screenScrgb || screenSdr,
         screenPq ? Screen::Pq : screenScrgb ? Screen::Scrgb : Screen::Sdr,
         desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
-        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+        // BGRA too: a Vulkan swapchain is usually B8G8R8A8 (DOOM Eternal's), and Optical F5Low's shared picture keeps
+        // it, since swapping the channels on the game's queue needs a blit and the game may present from a compute queue
+        // (a blit there is a GPU fault). The pass reads it through views, which order the channels, and its scratch
+        // copies take the picture's own format.
+        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ||
+            desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM);
     DlssNr::ReportColourEncoding(screenChoice.choice, DiagFormatName(desc.Format), "native input");
     if (!screenChoice.supported)
     {

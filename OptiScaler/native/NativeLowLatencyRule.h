@@ -25,6 +25,7 @@ struct Inputs
     bool forceXell = false;                 // fakenvapi's Force XeLL (it takes the frame generation slot and runs XeLL)
     bool otherFrameGenerationOwner = false; // frame generation that runs Reflex itself (DLSS FG, an external owner)
     bool apiAvailable = true;               // the Reflex function table could be found
+    bool deviceAvailable = true;            // the device can do it (a Vulkan device without a working sleep semaphore cannot)
 };
 
 enum class Decision
@@ -36,7 +37,8 @@ enum class Decision
     ForceReflexDisabled,
     ForceXell,
     FrameGenerationOwnsReflex,
-    NoApi
+    NoApi,
+    DeviceUnavailable
 };
 
 // Order matters: what the player can change comes first, then what stops us for another reason.
@@ -62,6 +64,9 @@ inline Decision Decide(const Inputs& in)
 
     if (!in.apiAvailable)
         return Decision::NoApi;
+
+    if (!in.deviceAvailable)
+        return Decision::DeviceUnavailable;
 
     return Decision::Run;
 }
@@ -154,6 +159,8 @@ inline const char* DecisionText(Decision decision)
         return "The frame generation in use runs Reflex itself";
     case Decision::NoApi:
         return "No Reflex or fakenvapi interface could be found";
+    case Decision::DeviceUnavailable:
+        return "Unavailable on this device";
     default:
         return "";
     }

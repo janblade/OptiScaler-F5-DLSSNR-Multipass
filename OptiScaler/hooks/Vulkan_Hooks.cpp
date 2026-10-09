@@ -82,6 +82,121 @@ static VkResult hkvkReleaseFullScreenExclusiveModeEXT(VkDevice device, VkSwapcha
     return o_ReleaseFullScreenExclusiveModeEXT(device, swapchain);
 }
 
+// A Vulkan game's own Reflex, through VK_NV_low_latency2: Optical F5Low's low latency stands aside once it is called
+// (native/NativeLowLatency.h). Our own low latency goes through the NvAPI_Vulkan_* interface and never calls these.
+static PFN_vkSetLatencySleepModeNV o_vkSetLatencySleepModeNV = nullptr;
+static PFN_vkLatencySleepNV o_vkLatencySleepNV = nullptr;
+static PFN_vkSetLatencyMarkerNV o_vkSetLatencyMarkerNV = nullptr;
+
+static VkResult VKAPI_CALL hkvkSetLatencySleepModeNV(VkDevice device, VkSwapchainKHR swapchain,
+                                                     const VkLatencySleepModeInfoNV* pSleepModeInfo)
+{
+    ReflexHooks::noteGameVulkanLowLatency2(true);
+    return o_vkSetLatencySleepModeNV(device, swapchain, pSleepModeInfo);
+}
+
+static VkResult VKAPI_CALL hkvkLatencySleepNV(VkDevice device, VkSwapchainKHR swapchain,
+                                              const VkLatencySleepInfoNV* pSleepInfo)
+{
+    ReflexHooks::noteGameVulkanLowLatency2(false);
+    return o_vkLatencySleepNV(device, swapchain, pSleepInfo);
+}
+
+static void VKAPI_CALL hkvkSetLatencyMarkerNV(VkDevice device, VkSwapchainKHR swapchain,
+                                              const VkSetLatencyMarkerInfoNV* pLatencyMarkerInfo)
+{
+    ReflexHooks::noteGameVulkanLowLatency2(false);
+    o_vkSetLatencyMarkerNV(device, swapchain, pLatencyMarkerInfo);
+}
+
+// Handed out by vkGetInstanceProcAddr / vkGetDeviceProcAddr for the three calls (the loader's own stubs for extension
+// functions are too small to detour, so the game gets our function and ours calls the one the loader gave). Null for any
+// other name.
+static PFN_vkVoidFunction HookLowLatency2(const std::string& name, PFN_vkVoidFunction orgFunc)
+{
+    if (name == "vkSetLatencySleepModeNV")
+    {
+        if (o_vkSetLatencySleepModeNV == nullptr)
+            o_vkSetLatencySleepModeNV = (PFN_vkSetLatencySleepModeNV) orgFunc;
+
+        return (PFN_vkVoidFunction) hkvkSetLatencySleepModeNV;
+    }
+
+    if (name == "vkLatencySleepNV")
+    {
+        if (o_vkLatencySleepNV == nullptr)
+            o_vkLatencySleepNV = (PFN_vkLatencySleepNV) orgFunc;
+
+        return (PFN_vkVoidFunction) hkvkLatencySleepNV;
+    }
+
+    if (name == "vkSetLatencyMarkerNV")
+    {
+        if (o_vkSetLatencyMarkerNV == nullptr)
+            o_vkSetLatencyMarkerNV = (PFN_vkSetLatencyMarkerNV) orgFunc;
+
+        return (PFN_vkVoidFunction) hkvkSetLatencyMarkerNV;
+    }
+
+    return nullptr;
+}
+
+// Devices created with the timeline semaphore feature on, as the create call finally had it (VulkanHooks::
+// TimelineSemaphoresOn): the Vulkan Sleep's semaphore is one.
+static std::mutex _timelineDevicesMutex;
+static std::set<VkDevice> _timelineDevices;
+
+static bool TimelineFeatureOn(const void* chain)
+{
+    for (auto* node = static_cast<const VkBaseInStructure*>(chain); node != nullptr; node = node->pNext)
+    {
+        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES &&
+            reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)->timelineSemaphore)
+            return true;
+
+        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES &&
+            reinterpret_cast<const VkPhysicalDeviceTimelineSemaphoreFeatures*>(node)->timelineSemaphore)
+            return true;
+    }
+
+    return false;
+}
+
+bool VulkanHooks::TimelineSemaphoresOn(VkDevice device)
+{
+    std::lock_guard lock(_timelineDevicesMutex);
+    return _timelineDevices.contains(device);
+}
+
+bool VulkanHooks::WaitTimelineSemaphore(VkDevice device, VkSemaphore semaphore, uint64_t value, uint64_t timeoutNs)
+{
+    static PFN_vkWaitSemaphores wait = nullptr;
+    static VkDevice waitDevice = VK_NULL_HANDLE;
+
+    if (wait == nullptr || waitDevice != device)
+    {
+        wait = o_vkGetDeviceProcAddr != nullptr
+                   ? reinterpret_cast<PFN_vkWaitSemaphores>(o_vkGetDeviceProcAddr(device, "vkWaitSemaphores"))
+                   : nullptr;
+
+        if (wait == nullptr && o_vkGetDeviceProcAddr != nullptr)
+            wait = reinterpret_cast<PFN_vkWaitSemaphores>(o_vkGetDeviceProcAddr(device, "vkWaitSemaphoresKHR"));
+
+        waitDevice = device;
+    }
+
+    if (wait == nullptr || semaphore == VK_NULL_HANDLE)
+        return false;
+
+    VkSemaphoreWaitInfo info {};
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    info.semaphoreCount = 1;
+    info.pSemaphores = &semaphore;
+    info.pValues = &value;
+
+    return wait(device, &info, timeoutNs) == VK_SUCCESS;
+}
+
 static void HookDevice(VkDevice InDevice)
 {
     if (o_CreateSwapchainKHR != nullptr || State::Instance().vulkanSkipHooks)
@@ -569,6 +684,14 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
 
+    // As the call had it, before a borrowed flag is put back
+    if (result == VK_SUCCESS && pDevice != nullptr && *pDevice != VK_NULL_HANDLE &&
+        TimelineFeatureOn(localCreteInfo.pNext))
+    {
+        std::lock_guard lock(_timelineDevicesMutex);
+        _timelineDevices.insert(*pDevice);
+    }
+
     if (nativeBorrowedTimeline != nullptr)
         *nativeBorrowedTimeline = VK_FALSE;
 
@@ -962,6 +1085,9 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         NativeMotionVk::OnDeviceDestroyed(device);
         GenericDepthVk::OnDeviceDestroyed(device);
         native::lowlatency::OnDeviceReleasedVulkan(device);
+
+        std::lock_guard lock(_timelineDevicesMutex);
+        _timelineDevices.erase(device);
     }
 
     if (o_vkDestroyDevice != nullptr)
@@ -1006,6 +1132,9 @@ PFN_vkVoidFunction hkvkGetInstanceProcAddr(VkInstance instance, const char* pNam
         return (PFN_vkVoidFunction) hkvkDestroyDevice;
     }
 
+    if (auto lowLatency2 = HookLowLatency2(procName, orgFunc); lowLatency2 != nullptr)
+        return lowLatency2;
+
     auto result = VulkanSpoofing::hkvkGetInstanceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -1047,6 +1176,9 @@ PFN_vkVoidFunction hkvkGetDeviceProcAddr(VkDevice device, const char* pName)
 
         return (PFN_vkVoidFunction) hkvkDestroyDevice;
     }
+
+    if (auto lowLatency2 = HookLowLatency2(procName, orgFunc); lowLatency2 != nullptr)
+        return lowLatency2;
 
     auto result = VulkanSpoofing::hkvkGetDeviceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)

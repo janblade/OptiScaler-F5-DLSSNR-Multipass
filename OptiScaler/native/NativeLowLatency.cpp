@@ -10,10 +10,14 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <hooks/LibraryLoad_Hooks.h>
 #include <hooks/Reflex_Hooks.h>
+#include <hooks/Vulkan_Hooks.h>
 #include <nvapi/NvApiHooks.h>
 #include <nvapi/fakenvapi.h>
 
+#include "NativeLowLatencyVkSync.h"
+
 #include <atomic>
+#include <mutex>
 
 namespace native::lowlatency
 {
@@ -142,7 +146,96 @@ bool FindTable()
     return ReflexHooks::ensureTable(queryInterface);
 }
 
-Inputs GatherInputs()
+// The Vulkan sleep pair (NativeLowLatencyVkSync.h) of the game's VkDevice. The game's present thread, and the thread that
+// destroys the device.
+std::mutex g_vkMutex;
+VkSleepSync g_vkSync;
+VkDevice g_vkSyncDevice = VK_NULL_HANDLE;
+bool g_vkUnavailableLogged = false;
+
+VkSleepCalls VulkanSleepCalls(VkDevice device)
+{
+    VkSleepCalls calls;
+    calls.timelineSemaphoresOn = [device] { return VulkanHooks::TimelineSemaphoresOn(device); };
+    calls.init = [device](void** semaphore)
+    {
+        HANDLE handle = nullptr;
+        const auto status = ReflexHooks::ownInitLowLatencyDeviceVulkan(reinterpret_cast<HANDLE>(device), &handle);
+        *semaphore = handle;
+        return static_cast<int>(status);
+    };
+    calls.sleep = [device](uint64_t value)
+    { return static_cast<int>(ReflexHooks::ownSleepVulkan(reinterpret_cast<HANDLE>(device), value)); };
+    calls.wait = [device](void* semaphore, uint64_t value, uint64_t timeoutNs)
+    { return VulkanHooks::WaitTimelineSemaphore(device, reinterpret_cast<VkSemaphore>(semaphore), value, timeoutNs); };
+    return calls;
+}
+
+const char* VulkanWhyText(VkSleepWhy why)
+{
+    switch (why)
+    {
+    case VkSleepWhy::NoTimelineSemaphores:
+        return "the device was made without timeline semaphores";
+    case VkSleepWhy::InitFailed:
+        return "NvAPI_Vulkan_InitLowLatencyDevice failed";
+    case VkSleepWhy::NoSemaphore:
+        return "NvAPI_Vulkan_InitLowLatencyDevice returned no semaphore";
+    case VkSleepWhy::WaitTimedOut:
+        return "the sleep's semaphore never reached its value";
+    default:
+        return "";
+    }
+}
+
+// The device can do the Vulkan sleep: initialised once, and no Vulkan NVAPI call is made on one that cannot (fakenvapi
+// signals a null semaphore in a Sleep that never had an init). Logs why, once per device.
+bool VulkanDeviceReady(VkDevice device)
+{
+    std::lock_guard lock(g_vkMutex);
+
+    if (g_vkSyncDevice != device)
+    {
+        g_vkSync = {};
+        g_vkSyncDevice = device;
+        g_vkUnavailableLogged = false;
+    }
+
+    const bool ready = VkSleepReady(g_vkSync, VulkanSleepCalls(device));
+
+    if (!ready && !g_vkUnavailableLogged)
+    {
+        g_vkUnavailableLogged = true;
+        LOG_WARN("Optical F5Low low latency: unavailable on this Vulkan device ({}; NvAPI status {})",
+                 VulkanWhyText(g_vkSync.why), g_vkSync.initStatus);
+    }
+
+    return ready;
+}
+
+// One frame's NvAPI_Vulkan_Sleep and the wait for the semaphore value it signals
+void VulkanSleep(VkDevice device)
+{
+    std::lock_guard lock(g_vkMutex);
+
+    if (g_vkSyncDevice != device)
+        return;
+
+    bool firstTimeout = false;
+    VkSleepFrame(g_vkSync, VulkanSleepCalls(device), &firstTimeout);
+
+    if (firstTimeout)
+        LOG_WARN("Optical F5Low low latency: the Vulkan sleep's semaphore did not reach its value within {} ms",
+                 kVkSleepWaitNs / 1000000);
+
+    if (g_vkSync.state == VkSleepState::Unavailable && !g_vkUnavailableLogged)
+    {
+        g_vkUnavailableLogged = true;
+        LOG_WARN("Optical F5Low low latency: unavailable on this Vulkan device ({})", VulkanWhyText(g_vkSync.why));
+    }
+}
+
+Inputs GatherInputs(bool deviceAvailable)
 {
     auto config = Config::Instance();
     auto& state = State::Instance();
@@ -160,12 +253,13 @@ Inputs GatherInputs()
     in.forceXell = config->ForceXeLL.value_or_default() || state.activeFgInput == FGInput::ForceXeLL;
     in.otherFrameGenerationOwner = state.externalFrameGeneration || state.activeFgOutput == FGOutput::DLSSG;
     in.apiAvailable = g_table != Table::Missing;
+    in.deviceAvailable = deviceAvailable;
     return in;
 }
 
-Decision Evaluate()
+Decision Evaluate(Api api, IUnknown* device)
 {
-    auto decision = Decide(GatherInputs());
+    auto decision = Decide(GatherInputs(true));
 
     if (decision == Decision::Run && g_table == Table::Unknown)
     {
@@ -174,8 +268,12 @@ Decision Evaluate()
         if (g_table == Table::Missing)
             LOG_WARN("Optical F5Low low latency: no Reflex or fakenvapi interface found, it stays off");
 
-        decision = Decide(GatherInputs());
+        decision = Decide(GatherInputs(true));
     }
+
+    // Only a Vulkan device can fail to do it, and only once everything else says go
+    if (decision == Decision::Run && api == Api::Vulkan && !VulkanDeviceReady(reinterpret_cast<VkDevice>(device)))
+        decision = Decide(GatherInputs(false));
 
     return decision;
 }
@@ -278,7 +376,7 @@ void PresentEnd(Api api, IUnknown* device, PresentSource source)
     if (device == nullptr || State::Instance().isShuttingDown || Ignored(source))
         return;
 
-    const auto decision = Evaluate();
+    const auto decision = Evaluate(api, device);
     g_decision = decision;
 
     if (decision != Decision::Run)
@@ -314,7 +412,7 @@ void PresentEnd(Api api, IUnknown* device, PresentSource source)
     g_gameQueue = GameQueue();
 
     if (api == Api::Vulkan)
-        ReflexHooks::ownSleepVulkan(reinterpret_cast<HANDLE>(device), g_frameId);
+        VulkanSleep(reinterpret_cast<VkDevice>(device));
     else
         ReflexHooks::ownSleep(device);
 
@@ -401,6 +499,16 @@ void OnDeviceReleasedVulkan(VkDevice device)
     g_sleepModeDevice.compare_exchange_strong(expected, nullptr);
 
     ReflexHooks::forgetSleepDeviceVulkan(device);
+
+    // The device's sleep state goes with it (a new device is initialised again)
+    std::lock_guard lock(g_vkMutex);
+
+    if (g_vkSyncDevice == device)
+    {
+        g_vkSync = {};
+        g_vkSyncDevice = VK_NULL_HANDLE;
+        g_vkUnavailableLogged = false;
+    }
 }
 
 Status GetStatus()

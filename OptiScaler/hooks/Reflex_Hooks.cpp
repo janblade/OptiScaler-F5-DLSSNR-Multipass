@@ -102,7 +102,12 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_Sleep(IUnknown* pDev)
     if (State::Instance().activeFgOutput == FGOutput::XeFG)
         return nvapi_calls::NvAPI_D3D_Sleep(pDev);
 
-    _lastSleepDev = pDev;
+    // On the Vulkan bridge our own Sleep (Optical F5Low's low latency, on the bridge's private D3D12 device) is not a
+    // Reflex device of the game's: stored, update() would see one and hand the fps cap to Reflex (reflexLimitsFps),
+    // skipping OptiScaler's own limiter. (D3D games keep storing it, as they have.)
+    if (!(_ownCall && State::Instance().swapchainInteropApi == SwapchainInteropApi::VkwDx12))
+        _lastSleepDev = pDev;
+
     return o_NvAPI_D3D_Sleep(pDev);
 }
 
@@ -474,6 +479,7 @@ void ReflexHooks::hookReflex(PFN_NvApi_QueryInterface& queryInterface)
         o_NvAPI_Vulkan_SetSleepMode = GET_INTERFACE(NvAPI_Vulkan_SetSleepMode, queryInterface);
         o_NvAPI_Vulkan_Sleep = GET_INTERFACE(NvAPI_Vulkan_Sleep, queryInterface);
         o_NvAPI_Vulkan_GetLatency = GET_INTERFACE(NvAPI_Vulkan_GetLatency, queryInterface);
+        o_NvAPI_Vulkan_InitLowLatencyDevice = GET_INTERFACE(NvAPI_Vulkan_InitLowLatencyDevice, queryInterface);
 
         _inited = o_NvAPI_D3D_SetSleepMode && o_NvAPI_D3D_Sleep && o_NvAPI_D3D_GetLatency &&
                   o_NvAPI_D3D_SetLatencyMarker && o_NvAPI_D3D12_SetAsyncFrameMarker &&
@@ -922,4 +928,22 @@ NvAPI_Status ReflexHooks::ownGetLatencyVulkan(HANDLE vkDevice, NV_VULKAN_LATENCY
 {
     OwnCallScope scope(_ownCall);
     return hkNvAPI_Vulkan_GetLatency(vkDevice, pParams);
+}
+
+NvAPI_Status ReflexHooks::ownInitLowLatencyDeviceVulkan(HANDLE vkDevice, HANDLE* signalSemaphore)
+{
+    if (o_NvAPI_Vulkan_InitLowLatencyDevice == nullptr)
+        return NVAPI_NO_IMPLEMENTATION;
+
+    return o_NvAPI_Vulkan_InitLowLatencyDevice(vkDevice, signalSemaphore);
+}
+
+void ReflexHooks::noteGameVulkanLowLatency2(bool setSleepMode)
+{
+    std::scoped_lock lock(_sleepModeMutex);
+
+    _gameCalledReflex = true;
+
+    if (setSleepMode)
+        _gameCalledSetSleepMode = true;
 }

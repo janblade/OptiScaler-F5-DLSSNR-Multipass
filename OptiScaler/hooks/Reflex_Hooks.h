@@ -65,6 +65,8 @@ class ReflexHooks
     inline static decltype(&NvAPI_Vulkan_SetSleepMode) o_NvAPI_Vulkan_SetSleepMode = nullptr;
     inline static decltype(&NvAPI_Vulkan_Sleep) o_NvAPI_Vulkan_Sleep = nullptr;
     inline static decltype(&NvAPI_Vulkan_GetLatency) o_NvAPI_Vulkan_GetLatency = nullptr;
+    // Not part of the hooked table (only our own low latency calls it); resolved with the rest, and optional
+    inline static decltype(&NvAPI_Vulkan_InitLowLatencyDevice) o_NvAPI_Vulkan_InitLowLatencyDevice = nullptr;
 
     static NvAPI_Status hkNvAPI_Vulkan_SetLatencyMarker(HANDLE vkDevice,
                                                         NV_VULKAN_LATENCY_MARKER_PARAMS* pSetLatencyMarkerParams);
@@ -108,6 +110,12 @@ class ReflexHooks
     static NvAPI_Status ownSleepVulkan(HANDLE vkDevice, NvU64 signalValue);
     static NvAPI_Status ownSetLatencyMarkerVulkan(HANDLE vkDevice, NV_VULKAN_LATENCY_MARKER_PARAMS* pParams);
     static NvAPI_Status ownGetLatencyVulkan(HANDLE vkDevice, NV_VULKAN_LATENCY_RESULT_PARAMS* pParams);
+    // NvAPI_Vulkan_InitLowLatencyDevice: initialises the device as a low latency device and returns the timeline
+    // semaphore its Sleep signals (the app has to wait for it). NVAPI_NO_IMPLEMENTATION when the interface is missing.
+    static NvAPI_Status ownInitLowLatencyDeviceVulkan(HANDLE vkDevice, HANDLE* signalSemaphore);
+    // The game calls Reflex through VK_NV_low_latency2 (vkSetLatencySleepModeNV, vkLatencySleepNV, vkSetLatencyMarkerNV):
+    // the game's own Reflex, as far as our low latency is concerned (it stands aside). Not for our own calls.
+    static void noteGameVulkanLowLatency2(bool setSleepMode);
     // The device is gone, or our Reflex mode is off: the fps cap no longer goes through it (setFPSLimit, update)
     static void forgetSleepDevice(IUnknown* pDev);
     static void forgetSleepDeviceVulkan(HANDLE vkDevice);

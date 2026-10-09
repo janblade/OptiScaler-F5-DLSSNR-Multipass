@@ -184,6 +184,44 @@ int main()
         CHECK(WarningFor(Shown::Off, bits & 1, bits & 2, bits & 4, true) == Warning::None);
     }
 
+    // FG only (game's upscaler): the reverse rule. Vulkan games that call an upscaler only; its own key, which comes
+    // before the motion keys; NR Pass at: off Finished Picture; Off clears it.
+    {
+        CHECK(Selectable(Mode::FrameGenerationOnly, true, true));
+        CHECK(!Selectable(Mode::FrameGenerationOnly, false, true));
+        CHECK(!Selectable(Mode::FrameGenerationOnly, true, false));
+        CHECK(!Selectable(Mode::FrameGenerationOnly, false, false));
+        CHECK(Offered(Mode::FrameGenerationOnly, true) && !Offered(Mode::FrameGenerationOnly, false));
+        CHECK(Offered(Mode::NrOnly, false) && Offered(Mode::NrAndFrameGeneration, false) && Offered(Mode::Off, false));
+        // The other modes keep their rule on Vulkan too
+        CHECK(!Selectable(Mode::NrOnly, true, true) && Selectable(Mode::NrOnly, false, true));
+
+        for (bool fp : { false, true })
+        {
+            const auto change = ForMode(Mode::FrameGenerationOnly, fp);
+            CHECK(change.keys.has_value() && change.keys->frameGenerationOnly && !change.keys->motion &&
+                  !change.keys->upscaler && !change.keys->input && !change.keys->depthFinder);
+            CHECK(change.finishedPicture.has_value() == fp && change.retryAfterFailure == fp);
+            CHECK(FromKeys(change.keys.value()) == Shown::FrameGenerationOnly);
+
+            for (Mode other : { Mode::Off, Mode::NrOnly, Mode::NrAndFrameGeneration })
+                CHECK(!ForMode(other, fp).keys->frameGenerationOnly);
+        }
+
+        Keys both = K(true, true, false, true);
+        both.frameGenerationOnly = true;
+        CHECK(FromKeys(both) == Shown::FrameGenerationOnly);
+        CHECK(!ForClick(Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, false).keys.has_value());
+        CHECK(ForClick(Mode::Off, Shown::FrameGenerationOnly, false).keys.has_value());
+
+        // Needs the game's upscaler call (where the other modes stand aside), then a D3D12 backend, then the bridge
+        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, false, false) == Warning::NeedsGameUpscaler);
+        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, false, true, false, false) == Warning::NeedsOn12Backend);
+        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, false, true, true, true) == Warning::VulkanNeedsRestart);
+        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, false, true, false, true) == Warning::None);
+        CHECK(WarningFor(Shown::FrameGenerationOnly, false, false, true, true) == Warning::None); // NR off: still FG
+    }
+
     // Which API the game is: the answer must not follow the D3D12 swapchain of a bridged Vulkan game (XeFG's presents
     // set the swapchain API to D3D12 every frame)
     {

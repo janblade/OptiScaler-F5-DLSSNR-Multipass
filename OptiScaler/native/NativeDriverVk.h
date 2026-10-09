@@ -27,6 +27,11 @@ void AfterPresent(VkSwapchainKHR swapchain);
 bool AcquireBridgeDevice(VkPhysicalDevice physical, ID3D12Device** device, ID3D12CommandQueue** queue, std::string& why);
 void ReleaseBridgeDevice();
 
+// "FG only (game's upscaler)": a Vulkan-on-D3D12 upscaler (upscalers/IFeature_VkwDx12.h) is made on the same private device
+// the bridge presents with, whichever of the two comes first, so its evaluate can feed frame generation. Made now if it
+// is not there; returned with a reference of the caller's (Release it when done), nullptr with `why` when it cannot be.
+ID3D12Device* ShareBridgeDevice(VkPhysicalDevice physical, std::string& why);
+
 // The game is destroying `device`: everything made on it goes.
 void OnDeviceDestroyed(VkDevice device);
 

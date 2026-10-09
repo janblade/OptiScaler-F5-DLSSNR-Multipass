@@ -560,6 +560,11 @@ void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, co
             if (opt == Upscaler::DLSS && !primaryGpu.dlssCapable)
                 continue;
 
+            // DLSS on D3D12 for a Vulkan game needs the GPU and the DLSS library just the same
+            if (opt == Upscaler::DLSS_on12 && api == API::Vulkan &&
+                (!primaryGpu.dlssCapable || !State::Instance().NVNGX_DLSS_Path.has_value()))
+                continue;
+
             // Not all Intel GPUs support native DX11 XeSS but don't think we have a good way to check exactly
             if (opt == Upscaler::XeSS && api == API::DX11 && primaryGpu.vendorId != VendorId::Intel)
                 continue;
@@ -589,6 +594,16 @@ void MenuCommon::AddDx12Backends(Upscaler upscaler)
 
 void MenuCommon::AddVulkanBackends(Upscaler upscaler)
 {
+    // "FG only (game's upscaler)" feeds frame generation from a Vulkan-on-D3D12 backend only: the others would leave it
+    // without inputs (upscalers/FeatureProvider_Vk.h)
+    if (Config::Instance()->DlssNrNativeFrameGenerationOnly.value_or_default())
+    {
+        RenderUpscalerCombo(API::Vulkan, upscaler, { Upscaler::DLSS_on12, Upscaler::FFX_on12, Upscaler::FSR21_on12 });
+        ShowHelpMarker("FG only (Optical F5Low) is on: frame generation runs from the upscaler's D3D12 copy, so only "
+                       "those are listed. Leave the mode to choose another.");
+        return;
+    }
+
     RenderUpscalerCombo(API::Vulkan, upscaler,
                         { Upscaler::XeSS, Upscaler::FSR21, Upscaler::FSR22, Upscaler::FFX, Upscaler::FSR21_on12,
                           Upscaler::FFX_on12, Upscaler::DLSS });

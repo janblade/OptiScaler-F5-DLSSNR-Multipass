@@ -6,6 +6,9 @@
 #include <Config.h>
 #include <dlssnr/DlssNr.h>
 #include <resource_tracking/GenericDepth_Vk.h>
+#include <inputs/FG/Upscaler_Inputs_Dx12.h>
+#include <native/NativeDriverVk.h>
+#include <native/VkPresentBridge.h>
 #include <SysUtils.h>
 
 #include <proxies/DXGI_Proxy.h>
@@ -1694,6 +1697,9 @@ bool IFeature_VkwDx12::CopyBackOutput(VkCommandBuffer InCmdBuffer)
         return false;
     }
 
+    _lastCompleteFence = dx12FenceTextureCopy[frame];
+    _lastCompleteValue = d3d12CompleteValue;
+
     result = Dx12CommandQueue->Signal(Dx12Fence, _frameCount);
     if (result != S_OK)
     {
@@ -1829,6 +1835,12 @@ void IFeature_VkwDx12::ReleaseSyncResources()
     }
 }
 
+bool IFeature_VkwDx12::FeedsFrameGeneration() const
+{
+    return _bridgeDevice != nullptr && Config::Instance()->DlssNrNativeFrameGenerationOnly.value_or_default() &&
+           State::Instance().activeFgInput == FGInput::Upscaler && VkPresentBridge::OutputActiveOn(_bridgeDevice);
+}
+
 HRESULT IFeature_VkwDx12::CreateDx12Device()
 {
     LOG_FUNC();
@@ -1839,8 +1851,28 @@ HRESULT IFeature_VkwDx12::CreateDx12Device()
     HRESULT result;
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
 
-    if (State::Instance().currentD3D12Device == nullptr ||
-        ((State::Instance().gameQuirks & GameQuirk::ForceCreateD3D12Device) && _localDx11on12Device == nullptr))
+    // FG only: on the device the Vulkan present bridge presents with, whichever of the two is made first (the mode is often
+    // picked mid-game: the game's next upscaler call remakes this feature before the bridge is up)
+    if (_bridgeDevice == nullptr && Config::Instance()->DlssNrNativeFrameGenerationOnly.value_or_default() &&
+        VulkanPhysicalDevice != VK_NULL_HANDLE)
+    {
+        std::string why;
+        _bridgeDevice = NativeMotionVk::ShareBridgeDevice(VulkanPhysicalDevice, why);
+
+        if (_bridgeDevice != nullptr)
+            LOG_INFO("FG only: the upscaler runs on the Vulkan bridge's D3D12 device, to feed frame generation");
+        else
+            LOG_WARN("FG only: the Vulkan bridge's D3D12 device could not be had ({}); the upscaler runs on its own and "
+                     "frame generation is not fed",
+                     why);
+    }
+
+    if (_bridgeDevice != nullptr)
+    {
+        _dx11on12Device = _bridgeDevice;
+    }
+    else if (State::Instance().currentD3D12Device == nullptr ||
+             ((State::Instance().gameQuirks & GameQuirk::ForceCreateD3D12Device) && _localDx11on12Device == nullptr))
     {
         IDXGIFactory2* factory = nullptr;
 
@@ -1980,6 +2012,18 @@ IFeature_VkwDx12::~IFeature_VkwDx12()
         return;
 
     ReleaseSharedResources();
+
+    // FG only: the bridge's device, once nothing of ours is on it any more
+    if (_bridgeDevice != nullptr)
+    {
+        dx12Feature.reset();
+
+        if (_dx11on12Device == _bridgeDevice)
+            _dx11on12Device = nullptr;
+
+        _bridgeDevice->Release();
+        _bridgeDevice = nullptr;
+    }
 }
 
 bool IFeature_VkwDx12::Init(VkInstance InInstance, VkPhysicalDevice InPD, VkDevice InDevice, VkCommandBuffer InCmdList,
@@ -2153,6 +2197,7 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
 
     bool dx12EvalResult = false;
     bool interopPrepared = false;
+    bool feedFrameGeneration = false;
     do
     {
         if (!ProcessVulkanTextures(InCmdBuffer, InParameters))
@@ -2177,6 +2222,28 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
         LOG_DEBUG("Dispatch!!");
         DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue, _frameCount,
                                       dx12Feature->GetUpscalerType() == Upscaler::DLSSD);
+
+        // FG only: frame generation's inputs from this call, as a D3D12 game's upscaler call gives them
+        // (inputs/NVNGX_DLSS_Dx12.cpp): the parameter block holds the D3D12 copies, motion vectors and depth in
+        // NON_PIXEL_SHADER_RESOURCE (ProcessVulkanTextures), the output a UAV. Frame generation copies them on this list.
+        feedFrameGeneration = FeedsFrameGeneration();
+
+        if (feedFrameGeneration)
+        {
+            UpscalerInputsDx12::Init(_bridgeDevice);
+            UpscalerInputsDx12::UpscaleStart(cmdList, InParameters, dx12Feature.get());
+            UpscalerInputsDx12::UpscaleEnd(cmdList, InParameters, dx12Feature.get());
+        }
+
+        static bool lastFed = false;
+
+        if (feedFrameGeneration != lastFed)
+        {
+            lastFed = feedFrameGeneration;
+            LOG_INFO("FG only: the game's upscaler call {} frame generation",
+                     feedFrameGeneration ? "feeds" : "no longer feeds");
+        }
+
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
 
         // The parameter block still holds the D3D12 resources written above -- the Vulkan handles are
@@ -2212,6 +2279,10 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
         RestoreVulkanParameters();
         return false;
     }
+
+    // Frame generation reads its copies on its own queue at the bridge's next D3D12 present: after this submission
+    if (feedFrameGeneration)
+        VkPresentBridge::FrameGenerationInputsQueued(_lastCompleteFence, _lastCompleteValue);
 
     // Not restoring the original values of NVSDK_NGX_Parameter_Color etc.
     // Unsure if that's a potential problem but in theory the game should only be setting those

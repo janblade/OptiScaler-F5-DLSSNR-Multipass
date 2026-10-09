@@ -7,6 +7,8 @@
 #include <Config.h>
 
 #include <magic_enum.hpp>
+#include <mutex>
+#include <set>
 
 #include <detours/detours.h>
 
@@ -6234,13 +6236,62 @@ static void AbortPendingD3D12Wait(const Vulkan_wDx12::PendingSubmission& pending
         LOG_ERROR("Failed to release aborted Vulkan w/Dx12 D3D12 wait: {0:x}", result);
 }
 
-static bool LegacySubmitPNextSupported(const void* pNext)
+// A VkDeviceGroupSubmitInfo that names device 0 only, for every semaphore and command buffer: what a submit without one
+// does on a single-GPU device (an engine that always attaches it, RDR2). Leaving it out of the split submits changes
+// nothing.
+static bool TrivialDeviceGroupSubmit(const VkDeviceGroupSubmitInfo& info, const VkSubmitInfo& submit)
 {
-    if (pNext == nullptr)
-        return true;
+    if (info.waitSemaphoreCount != 0 && info.waitSemaphoreCount != submit.waitSemaphoreCount)
+        return false;
 
-    const auto* first = reinterpret_cast<const VkBaseInStructure*>(pNext);
-    return first->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO && first->pNext == nullptr;
+    if (info.commandBufferCount != 0 && info.commandBufferCount != submit.commandBufferCount)
+        return false;
+
+    if (info.signalSemaphoreCount != 0 && info.signalSemaphoreCount != submit.signalSemaphoreCount)
+        return false;
+
+    for (uint32_t i = 0; info.pWaitSemaphoreDeviceIndices != nullptr && i < info.waitSemaphoreCount; i++)
+        if (info.pWaitSemaphoreDeviceIndices[i] != 0)
+            return false;
+
+    for (uint32_t i = 0; info.pCommandBufferDeviceMasks != nullptr && i < info.commandBufferCount; i++)
+        if (info.pCommandBufferDeviceMasks[i] != 1)
+            return false;
+
+    for (uint32_t i = 0; info.pSignalSemaphoreDeviceIndices != nullptr && i < info.signalSemaphoreCount; i++)
+        if (info.pSignalSemaphoreDeviceIndices[i] != 0)
+            return false;
+
+    return true;
+}
+
+// Plain, one VkTimelineSemaphoreSubmitInfo (its values are carried over), and/or a device group naming device 0 only
+// (left out). Anything else: the first sType that is not, for the log.
+static bool LegacySubmitPNextSupported(const VkSubmitInfo& submit, int32_t* unsupported)
+{
+    bool timeline = false;
+    bool deviceGroup = false;
+
+    for (auto next = reinterpret_cast<const VkBaseInStructure*>(submit.pNext); next != nullptr; next = next->pNext)
+    {
+        if (next->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO && !timeline)
+        {
+            timeline = true;
+            continue;
+        }
+
+        if (next->sType == VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO && !deviceGroup &&
+            TrivialDeviceGroupSubmit(*reinterpret_cast<const VkDeviceGroupSubmitInfo*>(next), submit))
+        {
+            deviceGroup = true;
+            continue;
+        }
+
+        *unsupported = (int32_t) next->sType;
+        return false;
+    }
+
+    return true;
 }
 
 static const VkTimelineSemaphoreSubmitInfo* FindTimelineSubmitInfo(const void* pNext)
@@ -6293,10 +6344,25 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, con
     const auto& original = pSubmits[submitIndex];
 
     // Splitting a legacy VkSubmitInfo changes command/signal counts. Submit-level extensions such as device-group or
-    // protected-submit structures can carry count-coupled semantics, so only the plain submit and the single
-    // VkTimelineSemaphoreSubmitInfo case are rewritten. Everything else is passed through unchanged.
-    if (!LegacySubmitPNextSupported(original.pNext))
+    // protected-submit structures can carry count-coupled semantics, so only the plain submit, one
+    // VkTimelineSemaphoreSubmitInfo and a device-0-only device group (single GPU) are rewritten. Everything else is passed
+    // through unchanged.
+    if (int32_t unsupported = 0; !LegacySubmitPNextSupported(original, &unsupported))
     {
+        // Said once per kind: the game submits like this every frame, from more than one thread
+        static std::mutex saidMutex;
+        static std::set<int32_t> said;
+        bool first = false;
+        {
+            std::lock_guard lock(saidMutex);
+            first = said.insert(unsupported).second;
+        }
+
+        if (first)
+            LOG_WARN("Vulkan w/Dx12: the game's VkSubmitInfo carries sType {} in its pNext chain, which the interop "
+                     "cannot split: the upscaler's copies are not synchronised (the picture will be wrong)",
+                     unsupported);
+
         AbortPendingD3D12Wait(pending, "unsupported legacy VkSubmitInfo pNext chain");
         return o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
     }
@@ -6334,7 +6400,8 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, con
     originalTimelineCopy.signalSemaphoreValueCount = 1;
     originalTimelineCopy.pSignalSemaphoreValues = &resourceCopyValue;
 
-    // LegacySubmitPNextSupported guarantees either no extension or one standalone timeline node.
+    // LegacySubmitPNextSupported allows only a timeline node (its values are copied here) and a device-0-only device group,
+    // which the split submits leave out.
     originalTimelineCopy.pNext = nullptr;
 
     VkSubmitInfo modifiedOriginal = original;

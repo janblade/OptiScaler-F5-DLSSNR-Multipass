@@ -184,6 +184,31 @@ int main()
         CHECK(WarningFor(Shown::Off, bits & 1, bits & 2, bits & 4, true) == Warning::None);
     }
 
+    // Which API the game is: the answer must not follow the D3D12 swapchain of a bridged Vulkan game (XeFG's presents
+    // set the swapchain API to D3D12 every frame)
+    {
+        using A = GameApi;
+        using P = PresentApi;
+        using I = Interop;
+
+        // The rule before the interop was part of it: Vulkan only while the last present was Vulkan's
+        auto before = [](P present, bool d3d11Device)
+        { return present == P::Vulkan ? A::Vulkan : (d3d11Device ? A::Dx11 : A::Dx12); };
+
+        CHECK(GameApiFor(P::Dx11, I::None, true) == A::Dx11);
+        CHECK(GameApiFor(P::Dx12, I::None, false) == A::Dx12);
+        CHECK(GameApiFor(P::Vulkan, I::None, false) == A::Vulkan);
+        // Vulkan bridged, right after XeFG's wrapped present wrote D3D12
+        CHECK(GameApiFor(P::Dx12, I::VkwDx12, false) == A::Vulkan);
+        CHECK(before(P::Dx12, false) != A::Vulkan); // what the menu showed
+        CHECK(GameApiFor(P::Vulkan, I::VkwDx12, false) == A::Vulkan);
+        // D3D11 bridged (the D3D12 swapchain is XeFG's; the game's device is D3D11)
+        CHECK(GameApiFor(P::Dx12, I::Dx11wDx12, true) == A::Dx11);
+        CHECK(GameApiFor(P::Dx11, I::Dx11wDx12, true) == A::Dx11);
+        // Nothing seen yet: D3D12, as before
+        CHECK(GameApiFor(P::NotSelected, I::None, false) == A::Dx12);
+    }
+
     printf(fails == 0 ? "native mode: ok\n" : "native mode: %d FAILED\n", fails);
     return fails == 0 ? 0 : 1;
 }

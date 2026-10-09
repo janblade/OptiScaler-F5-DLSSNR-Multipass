@@ -810,10 +810,25 @@ static NativeApi CurrentNativeApi()
 {
     const auto& state = State::Instance();
 
-    if (state.swapchainApi == API::Vulkan)
-        return NativeApi::Vulkan;
+    const auto present = state.swapchainApi == API::Vulkan  ? DlssNrNativeMode::PresentApi::Vulkan
+                         : state.swapchainApi == API::DX12 ? DlssNrNativeMode::PresentApi::Dx12
+                         : state.swapchainApi == API::DX11 ? DlssNrNativeMode::PresentApi::Dx11
+                                                           : DlssNrNativeMode::PresentApi::NotSelected;
+    const auto interop = state.swapchainInteropApi == SwapchainInteropApi::VkwDx12
+                             ? DlssNrNativeMode::Interop::VkwDx12
+                         : state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12
+                             ? DlssNrNativeMode::Interop::Dx11wDx12
+                             : DlssNrNativeMode::Interop::None;
 
-    return state.currentD3D11Device != nullptr ? NativeApi::Dx11 : NativeApi::Dx12;
+    switch (DlssNrNativeMode::GameApiFor(present, interop, state.currentD3D11Device != nullptr))
+    {
+    case DlssNrNativeMode::GameApi::Vulkan:
+        return NativeApi::Vulkan;
+    case DlssNrNativeMode::GameApi::Dx11:
+        return NativeApi::Dx11;
+    default:
+        return NativeApi::Dx12;
+    }
 }
 
 static bool NativeGameCallsUpscaler(NativeApi api)

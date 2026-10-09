@@ -351,7 +351,11 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         if (Util::CheckForRealObject(__FUNCTION__, cq, (IUnknown**) &realQueue))
             cq = realQueue;
 
-        State::Instance().swapchainApi = DX12;
+        // Not on the Vulkan bridge (native/VkPresentBridge.h): this is XeFG's D3D12 swapchain for a Vulkan game, whose own
+        // present sets swapchainApi to Vulkan. Writing D3D12 here made the menu flip between the two. The D3D12 queue and
+        // device below are still captured: frame generation needs them.
+        if (State::Instance().swapchainInteropApi != SwapchainInteropApi::VkwDx12)
+            State::Instance().swapchainApi = DX12;
 
         if (State::Instance().currentCommandQueue == nullptr)
             State::Instance().currentCommandQueue = cq;

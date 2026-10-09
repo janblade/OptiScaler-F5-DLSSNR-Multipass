@@ -17,6 +17,41 @@
 #include "upscalers/dlss/DLSSFeature_VkOn12.h"
 #include <misc/IdentifyGpu.h>
 
+bool FeatureProvider_Vk::IsOn12(Upscaler upscaler)
+{
+    return upscaler == Upscaler::DLSS_on12 || upscaler == Upscaler::FFX_on12 || upscaler == Upscaler::FSR21_on12;
+}
+
+Upscaler FeatureProvider_Vk::On12For(Upscaler upscaler)
+{
+    if (IsOn12(upscaler))
+        return upscaler;
+
+    switch (upscaler)
+    {
+    case Upscaler::DLSS:
+    case Upscaler::DLSSD:
+        if (IdentifyGpu::getPrimaryGpu().dlssCapable && State::Instance().NVNGX_DLSS_Path.has_value())
+            return Upscaler::DLSS_on12;
+
+        return Upscaler::FFX_on12;
+
+    case Upscaler::FSR21:
+        return Upscaler::FSR21_on12;
+
+    default:
+        return Upscaler::FFX_on12;
+    }
+}
+
+Upscaler FeatureProvider_Vk::ForFrameGenerationOnly(Upscaler upscaler)
+{
+    if (!Config::Instance()->DlssNrNativeFrameGenerationOnly.value_or_default())
+        return upscaler;
+
+    return On12For(upscaler);
+}
+
 bool FeatureProvider_Vk::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NGX_Parameter* parameters,
                                     std::unique_ptr<IFeature_Vk>* feature)
 {

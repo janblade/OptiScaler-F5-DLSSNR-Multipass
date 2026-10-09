@@ -245,7 +245,8 @@ Inputs GatherInputs(bool deviceAvailable)
 
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
+          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
     in.f5lowRunning = shown != DlssNrNativeMode::Shown::Off && !GameUpscalerCalledRecently();
 
     in.gameCallsReflex = ReflexHooks::gameCalledReflex();

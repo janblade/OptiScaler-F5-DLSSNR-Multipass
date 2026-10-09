@@ -6,6 +6,7 @@
 #include <native/NativeDriver.h>
 
 #include <Config.h>
+#include <misc/IdentifyGpu.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 
 #include <imgui/imgui.h>
@@ -46,7 +47,16 @@ ID3D12Resource* RunFrame(IDXGISwapChain* swapChain, ID3D11Device* device, bool c
 namespace NativeMotionDx11
 {
 
-void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device) { RunFrame(swapChain, device, true); }
+void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
+{
+    // DlssNrNativeDxvkVulkan: on a dxvk game this driver's shared-texture bridge stands aside for the Vulkan one
+    // (NativeDriverVk.cpp), which reads dxvk's own Vulkan calls instead. Not under OnFGPresent: Dx11wDx12SC's own D3D11
+    // bridge is untouched by that key, so frame generation keeps running through this driver as before.
+    if (IdentifyGpu::getPrimaryGpu().usesDxvk && Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default())
+        return;
+
+    RunFrame(swapChain, device, true);
+}
 
 ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
 {

@@ -38,8 +38,16 @@ namespace NativeMotionVk
 
 void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhysicalDevice physical)
 {
-    // A dxvk game presents its D3D frames through here as well; those belong to the D3D drivers.
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk)
+    // A dxvk game presents its D3D frames through here as well; those belong to the D3D drivers, unless the
+    // experimental DlssNrNativeDxvkVulkan key asks this driver to read dxvk's own Vulkan calls instead
+    // (NativeDriverDx11.cpp::OnPresent stands aside in that case).
+    if (IdentifyGpu::getPrimaryGpu().usesDxvk && !Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default())
+        return;
+
+    // Frame generation for a dxvk game (FGInput=Upscaler) runs through the D3D11 bridge (with_dx12/dx11_with_dx12_sc.h,
+    // NativeMotionDx11::OnFGPresent), untouched by DlssNrNativeDxvkVulkan: this driver stays out of its way, the same
+    // invariant NativeDriverDx11.h describes ("only one of the two drivers' OnPresent is ever fed real work").
+    if (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
         return;
 
     if (present == nullptr || present->swapchainCount != 1 || queue == VK_NULL_HANDLE || device == VK_NULL_HANDLE ||

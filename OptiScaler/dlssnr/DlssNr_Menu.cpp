@@ -800,7 +800,8 @@ static bool ResolutionTierActive(Config* config, const ResolutionTier& tier, boo
 }
 
 // Which API's Optical F5Low drivers and depth finder this game uses: a game presents with one of them. A dxvk game
-// presents its D3D frames through Vulkan, but its D3D drivers are the ones that run.
+// presents its D3D frames through Vulkan; by default its D3D drivers are still the ones that run (NativeDriverDx11.h),
+// unless the experimental DlssNrNativeDxvkVulkan key asks for dxvk's own Vulkan calls instead.
 enum class NativeApi
 {
     Dx12,
@@ -811,6 +812,9 @@ enum class NativeApi
 static NativeApi CurrentNativeApi()
 {
     const auto& state = State::Instance();
+
+    if (IdentifyGpu::getPrimaryGpu().usesDxvk && Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default())
+        return NativeApi::Vulkan;
 
     const auto present = state.swapchainApi == API::Vulkan  ? DlssNrNativeMode::PresentApi::Vulkan
                          : state.swapchainApi == API::DX12 ? DlssNrNativeMode::PresentApi::Dx12
@@ -977,7 +981,8 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         { Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, "FG only (game's upscaler)##nativemode" },
     };
 
-    const bool vulkan = api == NativeApi::Vulkan;
+    // FG only needs the Vulkan present bridge, which a dxvk game never gets (its frame generation is the D3D11 path).
+    const bool vulkan = api == NativeApi::Vulkan && !IdentifyGpu::getPrimaryGpu().usesDxvk;
     const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     ImGui::TextUnformatted("Mode:");
 
@@ -1062,9 +1067,13 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
     const Finder finder = NativeFinder(api, depthWanted);
     const bool depthRestart = DepthRestartWarning(shown, finder);
+    // A dxvk game reporting NativeApi::Vulkan has no present bridge to wait for (VkPresentBridge is a native-Vulkan-only
+    // thing): frame generation for it is the D3D11 FG path (Dx11wDx12SC), unaffected by NativeDxvkVulkan.
+    const bool vulkanNoBridge =
+        api == NativeApi::Vulkan && !IdentifyGpu::getPrimaryGpu().usesDxvk && !VkPresentBridge::IsUp();
     const Warning warning =
         WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler,
-                   api == NativeApi::Vulkan && !VkPresentBridge::IsUp(), VulkanFeatureIsOn12());
+                   vulkanNoBridge, VulkanFeatureIsOn12());
     const char* warningText = nullptr;
 
     switch (warning)

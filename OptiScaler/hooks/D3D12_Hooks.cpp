@@ -2293,16 +2293,22 @@ static void HookToDevice(ID3D12Device* InDevice)
         // that in every other game they were absent -- and the exposure scan, which needs to see the
         // game's resources, silently saw nothing at all. Neural Rendering now asks for them too.
         //
-        // The two conditions are kept apart on purpose: the spoof also needs CheckFeatureSupport and
-        // GetResourceAllocationInfo, which the scan has no use for, and attaching a detour nobody
-        // asked for is how a hook becomes a bug report in a game nobody was thinking about.
+        // This runs once, when the game's D3D12 device is hooked -- not on every frame -- so gating
+        // it on whether Neural Rendering happened to be on at that moment used to mean a game that
+        // launched with it off and turned it on later from the menu never got these hooks for the
+        // rest of the session: the scan stayed blind no matter what the config said afterwards.
+        // hkCreateCommittedResource/hkCreatePlacedResource already check DlssNrEnabled themselves
+        // before doing anything (NoteResource's own first line), so attaching them unconditionally
+        // costs nothing while the game plays with the setting still off.
         const bool wantSpoof = Config::Instance()->UESpoofIntelAtomics64.value_or_default();
-        const bool wantScan = Config::Instance()->DlssNrEnabled.value_or_default();
 
         if (wantSpoof)
         {
             LOG_DEBUG("UE spoofing for Intel Atomics64 enabled, applying detours");
 
+            // The spoof also needs CheckFeatureSupport and GetResourceAllocationInfo, which the scan
+            // has no use for: attaching a detour nobody asked for is how a hook becomes a bug report
+            // in a game nobody was thinking about.
             if (o_CheckFeatureSupport != nullptr)
                 DetourAttach(&(PVOID&) o_CheckFeatureSupport, hkCheckFeatureSupport);
 
@@ -2310,17 +2316,11 @@ static void HookToDevice(ID3D12Device* InDevice)
                 DetourAttach(&(PVOID&) o_GetResourceAllocationInfo, hkGetResourceAllocationInfo);
         }
 
-        if (wantSpoof || wantScan)
-        {
-            if (!wantSpoof)
-                LOG_DEBUG("DLSS-NR wants the resource creation hooks, applying detours");
+        if (o_CreateCommittedResource != nullptr)
+            DetourAttach(&(PVOID&) o_CreateCommittedResource, hkCreateCommittedResource);
 
-            if (o_CreateCommittedResource != nullptr)
-                DetourAttach(&(PVOID&) o_CreateCommittedResource, hkCreateCommittedResource);
-
-            if (o_CreatePlacedResource != nullptr)
-                DetourAttach(&(PVOID&) o_CreatePlacedResource, hkCreatePlacedResource);
-        }
+        if (o_CreatePlacedResource != nullptr)
+            DetourAttach(&(PVOID&) o_CreatePlacedResource, hkCreatePlacedResource);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)

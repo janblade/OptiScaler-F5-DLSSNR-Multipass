@@ -178,8 +178,94 @@ class DropReporter
         return fresh;
     }
 
+    // A new logger starts its overrun count at 0: forget what the old one reported
+    void Reset()
+    {
+        _reported = 0;
+        _lastReportMs = -1.0;
+    }
+
   private:
     size_t _reported = 0;
     double _lastReportMs = -1.0;
+};
+
+// A rebuilt logger must not join the old one's worker on the calling thread (destroying a thread pool waits for the
+// worker to write the whole backlog, seconds on a stalled disk). The old setup is parked instead: its worker finishes the
+// backlog on its own, and a thread that still holds the old logger (the log macros use a raw pointer) stays valid.
+// A menu toggle is rare, so the idle worker and queue it keeps are not a cost worth a join.
+inline void Retire(std::vector<Setup*>& retired, Setup* old)
+{
+    if (old != nullptr)
+        retired.push_back(old);
+}
+
+// The process is about to exit (ExitProcess): the worker is still alive now and gone right after, so this is the last
+// moment the queued lines can reach the disk. Only a worker-backed logger has anything to drain, once.
+inline bool ShouldDrainAtExit(Mode mode, bool alreadyDrained)
+{
+    return !alreadyDrained && mode != Mode::Sync;
+}
+
+// The unhandled-exception filters of a process. Ours (`self`) stays the one Windows calls; the filter the game sets (before
+// or after ours) is kept as `next` and called from ours once the log is drained, so a game's own crash handling still runs
+// and its answer is honoured. Header-only and templated on the pointer type so a host test needs no windows.h.
+template <class Filter> class FilterChain
+{
+  public:
+    explicit FilterChain(Filter self) : _self(self) {}
+
+    // What a game's SetUnhandledExceptionFilter(f) does once ours is installed: remember f, hand back the filter it
+    // replaces (as the real API does), leave ours in place. Our own filter handed in again is not "the game's".
+    Filter Replace(Filter f)
+    {
+        if (f == _self)
+            return _next.load(std::memory_order_acquire);
+
+        return _next.exchange(f, std::memory_order_acq_rel);
+    }
+
+    // The filter that was installed when ours went in (or took over again)
+    void Adopt(Filter previous)
+    {
+        if (previous != _self)
+            _next.store(previous, std::memory_order_release);
+    }
+
+    // The filter to call after ours, or null (never ours: it would recurse)
+    Filter Next() const
+    {
+        const Filter next = _next.load(std::memory_order_acquire);
+        return next == _self ? Filter {} : next;
+    }
+
+    // One crash handler per thread at a time: a crash inside ours skips straight to the next filter
+    class Entry
+    {
+      public:
+        Entry() : _first(!Active()) { Active() = true; }
+        ~Entry()
+        {
+            if (_first)
+                Active() = false;
+        }
+        Entry(const Entry&) = delete;
+        Entry& operator=(const Entry&) = delete;
+
+        bool First() const { return _first; }
+
+      private:
+        static bool& Active()
+        {
+            thread_local bool active = false;
+            return active;
+        }
+
+        bool _first;
+    };
+
+  private:
+    Filter _self;
+    std::atomic<Filter> _next { Filter {} };
 };
 } // namespace logasync

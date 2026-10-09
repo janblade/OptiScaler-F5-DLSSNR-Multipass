@@ -1,5 +1,6 @@
 #pragma once
 #include "SysUtils.h"
+#include "Logger.h"
 
 #include <proxies/Kernel32_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -35,6 +36,8 @@ class KernelHooks
     inline static Kernel32Proxy::PFN_CreateFileW o_K32_CreateFileW = nullptr;
     inline static Kernel32Proxy::PFN_OutputDebugStringW o_K32_OutputDebugStringW = nullptr;
     inline static Kernel32Proxy::PFN_OutputDebugStringA o_K32_OutputDebugStringA = nullptr;
+    inline static Kernel32Proxy::PFN_SetUnhandledExceptionFilter o_K32_SetUnhandledExceptionFilter = nullptr;
+    inline static Kernel32Proxy::PFN_ExitProcess o_K32_ExitProcess = nullptr;
 
     inline static KernelBaseProxy::PFN_FreeLibrary o_KB_FreeLibrary = nullptr;
     inline static KernelBaseProxy::PFN_LoadLibraryA o_KB_LoadLibraryA = nullptr;
@@ -55,6 +58,8 @@ class KernelHooks
                                             DWORD dwFlagsAndAttributes, HANDLE hTemplateFile);
     static VOID WINAPI hk_K32_OutputDebugStringW(LPCWSTR lpOutputString);
     static VOID WINAPI hk_K32_OutputDebugStringA(LPCSTR lpOutputString);
+    static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI hk_K32_SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER lpFilter);
+    static VOID WINAPI hk_K32_ExitProcess(UINT uExitCode);
 
     static HMODULE hk_K32_LoadLibraryW(LPCWSTR lpLibFileName);
     static HMODULE hk_K32_LoadLibraryA(LPCSTR lpLibFileName);
@@ -97,6 +102,19 @@ class KernelHooks
 
         if (o_K32_CreateFileW == nullptr)
             o_K32_CreateFileW = Kernel32Proxy::Hook_CreateFileW(hk_K32_CreateFileW);
+
+        // The log's crash filter must stay the top one and its queue must be written before the process exits
+        if (o_K32_SetUnhandledExceptionFilter == nullptr)
+        {
+            o_K32_SetUnhandledExceptionFilter =
+                Kernel32Proxy::Hook_SetUnhandledExceptionFilter(hk_K32_SetUnhandledExceptionFilter);
+
+            if (o_K32_SetUnhandledExceptionFilter != nullptr)
+                CrashFilterApiHooked(o_K32_SetUnhandledExceptionFilter);
+        }
+
+        if (o_K32_ExitProcess == nullptr)
+            o_K32_ExitProcess = Kernel32Proxy::Hook_ExitProcess(hk_K32_ExitProcess);
 
 #ifdef HOOK_OUTPUT_DEBUG
         if (o_K32_OutputDebugStringW == nullptr)

@@ -15,8 +15,11 @@
 #include "LogAsyncRule.h"
 
 // The logger in use and what its crash-path flush needs (LogAsyncRule.h). Left allocated at exit on purpose: destroying
-// a thread pool at process exit joins a worker that is already gone.
-static logasync::Setup* g_logSetup = nullptr;
+// a thread pool at process exit joins a worker that is already gone. A logger that was replaced (the menu's file/console
+// toggles) is parked in g_retiredSetups, never destroyed: see logasync::Retire.
+static std::atomic<logasync::Setup*> g_logSetup { nullptr };
+static std::vector<logasync::Setup*> g_retiredSetups;
+static std::mutex g_retiredMutex;
 
 static bool InitializeConsole()
 {
@@ -166,13 +169,18 @@ void PrepareLogger()
                 logasync::MakeLogger(logMode == logasync::Mode::Sync ? "multi_sink" : "multi_sink_logger", sinks,
                                      logMode, logMode == logasync::Mode::AsyncBlock ? spdlog::thread_pool() : nullptr));
             shared_logger = setup->logger;
-            std::swap(g_logSetup, setup);
-            delete setup; // an earlier logger's setup, if PrepareLogger ran before
 
             shared_logger->set_level((spdlog::level::level_enum) Config::Instance()->LogLevel.value_or_default());
             shared_logger->flush_on(spdlog::level::trace);
 
+            // New lines go to the new logger first, then the old setup is parked: its worker writes its own backlog and
+            // nothing here waits for it (a join on this thread was seconds on a stalled disk)
             spdlog::set_default_logger(shared_logger);
+
+            auto* previous = g_logSetup.exchange(setup);
+
+            std::lock_guard lock(g_retiredMutex);
+            logasync::Retire(g_retiredSetups, previous);
         }
     }
     catch (const spdlog::spdlog_ex& ex)
@@ -189,33 +197,43 @@ void PrepareLogger()
 // A bounded moment for the worker to write what is queued; never forever, the process is going down
 static constexpr auto kFlushWait = std::chrono::milliseconds(500);
 
+// Set once the queue has been drained for the exit; ExitProcess may be called more than once
+static std::atomic<bool> g_drainedForExit { false };
+
 void CloseLogger()
 {
-    bool drained = true;
-
     NoteDroppedLogLines(); // a game that never reaches a periodic report still hears of it once
 
-    if (g_logSetup != nullptr)
-        drained = logasync::FlushAndDrain(*g_logSetup, kFlushWait);
+    auto* setup = g_logSetup.load();
+
+    if (setup != nullptr)
+        logasync::FlushAndDrain(*setup, kFlushWait);
     else if (spdlog::default_logger() != nullptr)
         spdlog::default_logger()->flush();
 
     spdlog::shutdown();
 
-    // Stopping the worker waits for it: only when it is idle
-    if (drained && g_logSetup != nullptr)
-    {
-        delete g_logSetup;
-        g_logSetup = nullptr;
-    }
+    // The setup is left allocated on purpose, drained or not: destroying it joins its worker, and this runs under the
+    // loader lock (a worker blocked on a disk would hang the unload) or at process exit (the worker is already gone).
+}
+
+void DrainLogForExit()
+{
+    auto* setup = g_logSetup.load();
+
+    if (setup == nullptr || !logasync::ShouldDrainAtExit(setup->mode, g_drainedForExit.exchange(true)))
+        return;
+
+    logasync::FlushAndDrain(*setup, kFlushWait);
 }
 
 void NoteDroppedLogLines()
 {
     static std::mutex reportMutex;
     static logasync::DropReporter reporter;
+    static logasync::Setup* reportedSetup = nullptr;
 
-    auto* setup = g_logSetup;
+    auto* setup = g_logSetup.load();
 
     if (setup == nullptr || setup->mode != logasync::Mode::AsyncDropOldest || setup->pool == nullptr)
         return;
@@ -225,54 +243,126 @@ void NoteDroppedLogLines()
     if (!lock.owns_lock())
         return;
 
+    // A rebuilt logger counts its overruns from 0 again
+    if (setup != reportedSetup)
+    {
+        reporter.Reset();
+        reportedSetup = setup;
+    }
+
     if (const auto dropped = reporter.Poll(setup->pool->overrun_counter(), Util::MillisecondsNow()); dropped > 0)
         LOG_WARN("{} log lines dropped (the log could not keep up)", dropped);
 }
 
+void NoteDroppedLogLinesOnPresent()
+{
+    static std::atomic<uint32_t> presents { 0 };
+
+    if ((presents.fetch_add(1, std::memory_order_relaxed) & 255) == 255)
+        NoteDroppedLogLines();
+}
+
+// Windows calls only one unhandled-exception filter, the last one set. Ours stays that one (the hook on
+// SetUnhandledExceptionFilter keeps a game's later filter in g_filterChain instead of letting it replace ours), drains the
+// log, writes the dump, then calls the game's filter and returns its answer.
+static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo);
+
+using FilterFn = LPTOP_LEVEL_EXCEPTION_FILTER;
+using SetFilterFn = FilterFn(WINAPI*)(FilterFn);
+
+static logasync::FilterChain<FilterFn> g_filterChain(CrashDumpHandler);
+static std::atomic<bool> g_crashHandlerInstalled { false };
+// The real SetUnhandledExceptionFilter (the detour's trampoline once hooked), so our own calls are not taken for a game's
+static std::atomic<SetFilterFn> g_realSetFilter { nullptr };
+
+static FilterFn SetFilterReal(FilterFn filter)
+{
+    const SetFilterFn real = g_realSetFilter.load();
+    return real != nullptr ? real(filter) : SetUnhandledExceptionFilter(filter);
+}
+
 static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
 {
-    try
+    logasync::FilterChain<FilterFn>::Entry entry;
+
+    // A crash inside this handler: no second dump, the game's filter is next
+    if (entry.First())
     {
-        auto dumpPath = std::filesystem::path(Config::Instance()->LogFileName.value_or_default()).parent_path() /
-                        L"OptiScaler_crash.dmp";
-
-        spdlog::critical("Unhandled exception {:X} at {:X}, writing {}",
-                         (unsigned long) exceptionInfo->ExceptionRecord->ExceptionCode,
-                         (size_t) exceptionInfo->ExceptionRecord->ExceptionAddress, dumpPath.string());
-
-        // The worker writes what is queued, then the dump: a bounded wait, not a flush that could wait for a stuck disk
-        if (g_logSetup != nullptr)
-            logasync::FlushAndDrain(*g_logSetup, kFlushWait);
-        else
-            spdlog::default_logger()->flush();
-
-        HANDLE file = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                  FILE_ATTRIBUTE_NORMAL, nullptr);
-
-        if (file != INVALID_HANDLE_VALUE)
+        try
         {
-            MINIDUMP_EXCEPTION_INFORMATION mdei {};
-            mdei.ThreadId = GetCurrentThreadId();
-            mdei.ExceptionPointers = exceptionInfo;
-            mdei.ClientPointers = FALSE;
+            auto dumpPath = std::filesystem::path(Config::Instance()->LogFileName.value_or_default()).parent_path() /
+                            L"OptiScaler_crash.dmp";
 
-            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
-                              (MINIDUMP_TYPE) (MiniDumpWithDataSegs | MiniDumpWithUnloadedModules |
-                                               MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
-                              &mdei, nullptr, nullptr);
+            spdlog::critical("Unhandled exception {:X} at {:X}, writing {}",
+                             (unsigned long) exceptionInfo->ExceptionRecord->ExceptionCode,
+                             (size_t) exceptionInfo->ExceptionRecord->ExceptionAddress, dumpPath.string());
 
-            CloseHandle(file);
+            // The worker writes what is queued, then the dump: a bounded wait, not a flush that could wait for a stuck
+            // disk
+            if (auto* setup = g_logSetup.load(); setup != nullptr)
+                logasync::FlushAndDrain(*setup, kFlushWait);
+            else
+                spdlog::default_logger()->flush();
+
+            HANDLE file = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+
+            if (file != INVALID_HANDLE_VALUE)
+            {
+                MINIDUMP_EXCEPTION_INFORMATION mdei {};
+                mdei.ThreadId = GetCurrentThreadId();
+                mdei.ExceptionPointers = exceptionInfo;
+                mdei.ClientPointers = FALSE;
+
+                MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
+                                  (MINIDUMP_TYPE) (MiniDumpWithDataSegs | MiniDumpWithUnloadedModules |
+                                                   MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
+                                  &mdei, nullptr, nullptr);
+
+                CloseHandle(file);
+            }
+        }
+        catch (...)
+        {
+            // Diagnostic aid only: never let this handler itself change how the crash is reported.
         }
     }
-    catch (...)
-    {
-        // Diagnostic aid only: never let this handler itself change how the crash is reported.
-    }
+
+    // The game's own filter (its dump, its message box) still runs, and its answer decides
+    if (const auto next = g_filterChain.Next(); next != nullptr)
+        return next(exceptionInfo);
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
 void InstallCrashHandler()
 {
-    SetUnhandledExceptionFilter(CrashDumpHandler);
+    // Whatever filter was there first stays in the chain
+    g_filterChain.Adopt(SetFilterReal(CrashDumpHandler));
+    g_crashHandlerInstalled = true;
+}
+
+LPTOP_LEVEL_EXCEPTION_FILTER CrashFilterFromGame(LPTOP_LEVEL_EXCEPTION_FILTER filter, SetFilterFn original)
+{
+    // The detour is live but its original is not stored yet (a call between attach and the assignment): calling the API
+    // here would come straight back
+    if (original == nullptr)
+        return nullptr;
+
+    g_realSetFilter = original;
+
+    // Ours is not in yet: InstallCrashHandler will pick this one up as the filter that was already there
+    if (!g_crashHandlerInstalled)
+        return SetFilterReal(filter);
+
+    return g_filterChain.Replace(filter);
+}
+
+void CrashFilterApiHooked(LPTOP_LEVEL_EXCEPTION_FILTER(WINAPI* original)(LPTOP_LEVEL_EXCEPTION_FILTER))
+{
+    g_realSetFilter = original;
+
+    // A game may have set its filter after ours and before this hook went in: put ours back on top and keep its
+    if (g_crashHandlerInstalled)
+        g_filterChain.Adopt(SetFilterReal(CrashDumpHandler));
 }

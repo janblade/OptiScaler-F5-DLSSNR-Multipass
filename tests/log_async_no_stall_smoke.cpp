@@ -176,6 +176,87 @@ int main()
         CHECK(Ms(start, Clock::now()) < 150.0);
     }
 
+    // Rebuilding the logger: the old setup is parked, not destroyed, so the caller never joins its stuck worker; the new
+    // logger works at once and the drop reporter starts again from 0
+    {
+        auto stuck = std::make_shared<SlowSink>(1500, 0);
+        auto* oldSetup = new Setup(MakeLogger("t_old", { stuck }, Mode::AsyncDropOldest));
+
+        for (int i = 0; i < 100; ++i)
+            oldSetup->logger->info("old {}", i);
+
+        std::vector<Setup*> retired;
+        DropReporter reporter;
+        CHECK(reporter.Poll(40, 0.0) == 40);
+
+        const auto start = Clock::now();
+        auto fresh = std::make_shared<SlowSink>(0, 0);
+        auto newSetup = MakeLogger("t_new", { fresh }, Mode::AsyncDropOldest);
+        Retire(retired, oldSetup);
+        Retire(retired, nullptr); // the first build has no previous setup
+        reporter.Reset();
+        newSetup.logger->info("new line");
+        const double took = Ms(start, Clock::now());
+        printf("rebuild: switching took %.1f ms\n", took);
+        CHECK(took < 100.0);
+        CHECK(retired.size() == 1 && retired[0] == oldSetup);
+        CHECK(FlushAndDrain(newSetup, std::chrono::milliseconds(1000)));
+        CHECK(Real(fresh->lines).size() == 1);
+
+        // After the reset a new logger's first overflow is reported, not swallowed by the old count
+        CHECK(reporter.Poll(3, 100000.0) == 3);
+    }
+
+    // The exit rule: a worker-backed logger drains once; a synchronous one has nothing to drain
+    CHECK(ShouldDrainAtExit(Mode::AsyncDropOldest, false));
+    CHECK(ShouldDrainAtExit(Mode::AsyncBlock, false));
+    CHECK(!ShouldDrainAtExit(Mode::Sync, false));
+    CHECK(!ShouldDrainAtExit(Mode::AsyncDropOldest, true));
+
+    // The unhandled-exception filter chain
+    {
+        using Filter = int (*)(int);
+        static Filter self = +[](int v) { return v; };
+        static Filter gameA = +[](int v) { return v + 1; };
+        static Filter gameB = +[](int v) { return v + 2; };
+
+        FilterChain<Filter> chain(self);
+        CHECK(chain.Next() == nullptr);
+
+        // Ours went in over the game's first filter: it is chained after ours
+        chain.Adopt(gameA);
+        CHECK(chain.Next() == gameA);
+
+        // The game sets another one later: the previous one is returned (as the API does), the new one is chained
+        CHECK(chain.Replace(gameB) == gameA);
+        CHECK(chain.Next() == gameB);
+        CHECK(chain.Next()(10) == 12); // the game's answer is what comes back
+
+        // Our own filter handed in (a game restoring "the previous") is never chained to itself
+        CHECK(chain.Replace(self) == gameB);
+        CHECK(chain.Next() == gameB);
+        chain.Adopt(self);
+        CHECK(chain.Next() == gameB);
+
+        // The game clears its filter
+        CHECK(chain.Replace(nullptr) == gameB);
+        CHECK(chain.Next() == nullptr);
+
+        // A crash inside the handler: only the first entry on a thread does the work
+        {
+            FilterChain<Filter>::Entry outer;
+            CHECK(outer.First());
+            {
+                FilterChain<Filter>::Entry inner;
+                CHECK(!inner.First());
+            }
+            FilterChain<Filter>::Entry again;
+            CHECK(!again.First()); // the outer one is still handling
+        }
+        FilterChain<Filter>::Entry afterwards;
+        CHECK(afterwards.First()); // the flag is back once the handler returned
+    }
+
     printf(fails == 0 ? "PASS\n" : "FAILED %d\n", fails);
     return fails == 0 ? 0 : 1;
 }

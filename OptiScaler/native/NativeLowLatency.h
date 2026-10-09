@@ -34,7 +34,9 @@ void OnPresentEnd(IUnknown* device, PresentSource source = PresentSource::SwapCh
 // no earlier queue-submit hook on this path either, so OnPresentBeginVulkan's own fallback (as OnPresentBegin's) sends
 // SIMULATION_END/RENDERSUBMIT_START too, right before RENDERSUBMIT_END/PRESENT_START: no OnFirstSubmit equivalent
 // needed. Calls the Vulkan-flavoured Reflex entry points (NvAPI_Vulkan_*), never the D3D ones, even when a D3D12 device
-// happens to share this process (dxvk): the two share no state.
+// happens to share this process (dxvk): the two share no state. While the Vulkan present bridge is up the game's present
+// is paced on the bridge's private D3D12 device through OnPresentBegin/OnPresentEnd instead (hooks/Vulkan_Hooks.cpp,
+// NativeLowLatencyRule.h PresentTarget), so XeFG's XeLL routing applies; each call carries its own API.
 void OnPresentBeginVulkan(VkDevice device);
 void OnPresentEndVulkan(VkDevice device);
 

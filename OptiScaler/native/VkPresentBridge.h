@@ -57,6 +57,9 @@ bool Active(VkSwapchainKHR swapchain);
 // Any bridge is up (the menu, the frame limiter and the Vulkan menu overlay ask).
 bool IsUp();
 
+// The bridge's private D3D12 device while its output is up, else null. Not a reference: it lives as long as the bridge.
+ID3D12Device* Device();
+
 // The frame source has processed this present: puts the shared picture into the D3D12 swapchain's back buffer. `picture`
 // (null: none this frame) is ready once `copied` is reached on `fence` and the producer's `doneFence` (null: none) has
 // reached `doneValue`; `signalValue` is signalled on `fence` once the copy is done. False when the copy could not be queued.

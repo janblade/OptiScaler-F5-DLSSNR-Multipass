@@ -66,6 +66,36 @@ inline Decision Decide(const Inputs& in)
     return Decision::Run;
 }
 
+// Which Reflex surface a call goes through: the D3D-flavoured NVAPI entry points (NvAPI_D3D_*, also what XeFG's routing
+// to XeLL hangs off) or the Vulkan-flavoured ones (NvAPI_Vulkan_*). Each call carries its own: nothing is remembered
+// between calls, so a D3D12 device pointer can never reach a Vulkan entry point or the other way round.
+enum class Api
+{
+    D3D,
+    Vulkan
+};
+
+struct Target
+{
+    Api api = Api::D3D;
+    const void* device = nullptr; // null: nothing to call
+};
+
+// A Vulkan game's present while the frame-generation bridge is up is the bridge's D3D12 swapchain's, on the bridge's
+// private D3D12 device: its low latency goes through the D3D surface on that device (so XeFG's XeLL routing reaches it,
+// as for a D3D11 game's hidden present) and no Vulkan NVAPI call is made. Without the bridge a Vulkan game's own
+// VkDevice goes through the Vulkan surface. A D3D game's present is always D3D.
+inline Target PresentTarget(bool vulkanGame, bool bridged, const void* gameDevice, const void* bridgeDevice12)
+{
+    if (!vulkanGame)
+        return { Api::D3D, gameDevice };
+
+    if (bridged)
+        return { Api::D3D, bridgeDevice12 };
+
+    return { Api::Vulkan, gameDevice };
+}
+
 // Plain words for the menu when we do not run. Run has no text here: the path in use names it.
 // Where a present was seen. With OptiScaler's frame generation on a D3D12 game, the game presents to frame
 // generation's swap chain (FGHooks::FGPresent) and frame generation then presents every shown frame, real and

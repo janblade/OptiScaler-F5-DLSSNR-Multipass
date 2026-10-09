@@ -29,11 +29,13 @@ enum class Table
 
 std::atomic<bool> g_running = false;    // markers are being sent
 std::atomic<bool> g_submitSent = false; // this frame's SIMULATION_END / RENDERSUBMIT_START went out
-// `device` is the game's D3D11/D3D12 device, or -- g_isVulkan -- its VkDevice reinterpreted as the same pointer-sized
-// token: never dereferenced as a COM interface here, only ever passed back to whichever API's own Reflex calls stored
-// it (ReflexHooks::own*/own*Vulkan). A game is one API for its whole life, so this never flips once set.
-std::atomic<bool> g_isVulkan = false;
+// `device` is a D3D11/D3D12 device (the game's, or the Vulkan bridge's private D3D12 device) or -- Api::Vulkan -- the
+// game's VkDevice reinterpreted as the same pointer-sized token: never dereferenced as a COM interface here, only passed
+// back to the Reflex calls of its own API. Every call carries its Api; nothing is remembered between calls but the Api
+// each stored device was seen with (for the callers that bring no device: the first submit, the status line).
+std::atomic<Api> g_deviceApi = Api::D3D;
 std::atomic<IUnknown*> g_device = nullptr;
+std::atomic<Api> g_sleepModeApi = Api::D3D;
 std::atomic<IUnknown*> g_sleepModeDevice = nullptr;   // the device our Reflex mode was set on
 std::atomic<const void*> g_gameQueue = nullptr;       // the queue the game's frame is submitted to (D3D12)
 std::atomic<double> g_frameGenerationPresentAt = 0.0; // last PresentSource::FrameGeneration call, ms
@@ -73,9 +75,9 @@ NV_VULKAN_LATENCY_MARKER_TYPE VulkanMarkerType(NV_LATENCY_MARKER_TYPE type)
     }
 }
 
-void Marker(IUnknown* device, NV_LATENCY_MARKER_TYPE type)
+void Marker(Api api, IUnknown* device, NV_LATENCY_MARKER_TYPE type)
 {
-    if (g_isVulkan.load(std::memory_order_relaxed))
+    if (api == Api::Vulkan)
     {
         NV_VULKAN_LATENCY_MARKER_PARAMS params {};
         params.version = NV_VULKAN_LATENCY_MARKER_PARAMS_VER;
@@ -92,9 +94,9 @@ void Marker(IUnknown* device, NV_LATENCY_MARKER_TYPE type)
     ReflexHooks::ownSetLatencyMarker(device, &params);
 }
 
-void SetSleepMode(IUnknown* device, bool on)
+void SetSleepMode(Api api, IUnknown* device, bool on)
 {
-    if (g_isVulkan.load(std::memory_order_relaxed))
+    if (api == Api::Vulkan)
     {
         NV_VULKAN_SET_SLEEP_MODE_PARAMS params {};
         params.version = NV_VULKAN_SET_SLEEP_MODE_PARAMS_VER;
@@ -179,18 +181,18 @@ Decision Evaluate()
 }
 
 // Our Reflex mode is turned off again, unless the game has set its own (its call is the later word)
-void Stop(IUnknown* device)
+void Stop(Api api, IUnknown* device)
 {
     g_running = false;
 
     if (g_presentStarted && device != nullptr && !ReflexHooks::gameCalledReflex())
-        Marker(device, PRESENT_END);
+        Marker(api, device, PRESENT_END);
 
     g_presentStarted = false;
 
     if (auto sleepModeDevice = g_sleepModeDevice.exchange(nullptr);
         g_sleepModeSent && sleepModeDevice != nullptr && !ReflexHooks::gameCalledSetSleepMode())
-        SetSleepMode(sleepModeDevice, false);
+        SetSleepMode(g_sleepModeApi.load(), sleepModeDevice, false);
 
     g_sleepModeSent = false;
 }
@@ -222,9 +224,12 @@ const void* GameQueue()
     return state.currentCommandQueue;
 }
 
-const char* PathText()
+const char* PathText(Api api)
 {
-    const bool viaFakenvapi = fakenvapi::isUsingAsMainNvapi() || State::Instance().activeFgOutput == FGOutput::XeFG;
+    // XeFG's XeLL routing hangs off the D3D entry points: a Vulkan game gets it through the bridge's D3D12 device, but
+    // not through the Vulkan ones
+    const bool viaFakenvapi =
+        fakenvapi::isUsingAsMainNvapi() || (State::Instance().activeFgOutput == FGOutput::XeFG && api == Api::D3D);
 
     if (!viaFakenvapi)
         return "NVIDIA Reflex";
@@ -243,9 +248,8 @@ const char* PathText()
         return fakenvapi::isUsingAsMainNvapi() ? "fakenvapi (no method active yet)" : "NVIDIA Reflex";
     }
 }
-} // namespace
 
-void OnPresentBegin(IUnknown* device, PresentSource source)
+void PresentBegin(Api api, IUnknown* device, PresentSource source)
 {
     // Ignored first: a FrameGeneration call must be noted even before we run, ahead of frame generation's own presents
     if (Ignored(source) || !g_running.load(std::memory_order_relaxed) || device == nullptr ||
@@ -254,21 +258,22 @@ void OnPresentBegin(IUnknown* device, PresentSource source)
         return;
     }
 
+    g_deviceApi = api;
     g_device = device;
 
     // No submit hook fired (D3D12 sees it only where the queue hook is installed): the frame's work is all behind us
     if (!g_submitSent.exchange(true))
     {
-        Marker(device, SIMULATION_END);
-        Marker(device, RENDERSUBMIT_START);
+        Marker(api, device, SIMULATION_END);
+        Marker(api, device, RENDERSUBMIT_START);
     }
 
-    Marker(device, RENDERSUBMIT_END);
-    Marker(device, PRESENT_START);
+    Marker(api, device, RENDERSUBMIT_END);
+    Marker(api, device, PRESENT_START);
     g_presentStarted = true;
 }
 
-void OnPresentEnd(IUnknown* device, PresentSource source)
+void PresentEnd(Api api, IUnknown* device, PresentSource source)
 {
     if (device == nullptr || State::Instance().isShuttingDown || Ignored(source))
         return;
@@ -281,31 +286,34 @@ void OnPresentEnd(IUnknown* device, PresentSource source)
         if (g_running.load(std::memory_order_relaxed))
         {
             LOG_INFO("Optical F5Low low latency: stopped ({})", DecisionText(decision));
-            Stop(device);
+            Stop(api, device);
         }
 
         return;
     }
 
-    if (!g_running.load(std::memory_order_relaxed) || g_sleepModeDevice.load() != device)
+    if (!g_running.load(std::memory_order_relaxed) || g_sleepModeDevice.load() != device ||
+        g_sleepModeApi.load() != api)
     {
         // Once, and again when the device is a new one
-        SetSleepMode(device, true);
+        SetSleepMode(api, device, true);
         g_sleepModeSent = true;
+        g_sleepModeApi = api;
         g_sleepModeDevice = device;
 
         if (!g_running.load(std::memory_order_relaxed))
-            LOG_INFO("Optical F5Low low latency: started ({})", PathText());
+            LOG_INFO("Optical F5Low low latency: started ({})", PathText(api));
     }
 
     if (g_presentStarted)
-        Marker(device, PRESENT_END);
+        Marker(api, device, PRESENT_END);
 
     g_presentStarted = false;
+    g_deviceApi = api;
     g_device = device;
     g_gameQueue = GameQueue();
 
-    if (g_isVulkan.load(std::memory_order_relaxed))
+    if (api == Api::Vulkan)
         ReflexHooks::ownSleepVulkan(reinterpret_cast<HANDLE>(device), g_frameId);
     else
         ReflexHooks::ownSleep(device);
@@ -313,24 +321,37 @@ void OnPresentEnd(IUnknown* device, PresentSource source)
     ++g_frameId;
     g_submitSent = false;
     g_running = true;
-    Marker(device, SIMULATION_START);
+    Marker(api, device, SIMULATION_START);
+}
+} // namespace
+
+void OnPresentBegin(IUnknown* device, PresentSource source)
+{
+    PresentBegin(Api::D3D, device, source);
+}
+
+void OnPresentEnd(IUnknown* device, PresentSource source)
+{
+    PresentEnd(Api::D3D, device, source);
 }
 
 void OnPresentBeginVulkan(VkDevice device)
 {
-    g_isVulkan = true;
-    OnPresentBegin(reinterpret_cast<IUnknown*>(device));
+    PresentBegin(Api::Vulkan, reinterpret_cast<IUnknown*>(device), PresentSource::SwapChain);
 }
 
 void OnPresentEndVulkan(VkDevice device)
 {
-    g_isVulkan = true;
-    OnPresentEnd(reinterpret_cast<IUnknown*>(device));
+    PresentEnd(Api::Vulkan, reinterpret_cast<IUnknown*>(device), PresentSource::SwapChain);
 }
 
 void OnFirstSubmit(const void* queue)
 {
     if (!g_running.load(std::memory_order_relaxed) || g_submitSent.load(std::memory_order_relaxed))
+        return;
+
+    // A D3D12 queue submit or D3D11 draw says nothing about a frame being paced on the Vulkan surface
+    if (g_deviceApi.load(std::memory_order_relaxed) != Api::D3D)
         return;
 
     // OptiScaler's own queues and frame generation's do not start the game's frame
@@ -348,8 +369,8 @@ void OnFirstSubmit(const void* queue)
     if (device == nullptr || ReflexHooks::gameCalledReflex())
         return;
 
-    Marker(device, SIMULATION_END);
-    Marker(device, RENDERSUBMIT_START);
+    Marker(Api::D3D, device, SIMULATION_END);
+    Marker(Api::D3D, device, RENDERSUBMIT_START);
 }
 
 void OnDeviceReleased(IUnknown* device)
@@ -390,7 +411,8 @@ Status GetStatus()
     if (status.decision != Decision::Run || !g_running.load(std::memory_order_relaxed))
         return status;
 
-    status.path = PathText();
+    const auto api = g_deviceApi.load();
+    status.path = PathText(api);
 
     auto device = g_device.load();
 
@@ -402,7 +424,7 @@ Status GetStatus()
         g_latencyAskedAt = now;
         g_hasLatency = false;
 
-        if (g_isVulkan.load(std::memory_order_relaxed))
+        if (api == Api::Vulkan)
         {
             static NV_VULKAN_LATENCY_RESULT_PARAMS results {};
             results.version = NV_VULKAN_LATENCY_RESULT_PARAMS_VER;

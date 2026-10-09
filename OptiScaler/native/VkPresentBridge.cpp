@@ -506,6 +506,12 @@ bool IsUp()
     return g_bridge != nullptr && g_bridge->outputUp;
 }
 
+ID3D12Device* Device()
+{
+    std::lock_guard lock(g_mutex);
+    return g_bridge != nullptr && g_bridge->outputUp ? g_bridge->device12 : nullptr;
+}
+
 bool CopyToOutput(ID3D12Resource* picture, ID3D12Fence* fence, uint64_t copied, ID3D12Fence* doneFence,
                   uint64_t doneValue, uint64_t signalValue)
 {

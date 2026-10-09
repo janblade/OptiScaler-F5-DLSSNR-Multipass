@@ -100,6 +100,32 @@ int main()
     CHECK(!SwapChainPresentIgnored(5000.0, 5000.0 - kFrameGenerationPresentHoldMs));
     CHECK(!SwapChainPresentIgnored(9000.0, 4990.0));
 
+    // Which Reflex surface a game's present goes through: decided per call from what the caller says, never remembered
+    // from an earlier call (a D3D call after a Vulkan one is D3D; no D3D12 device pointer reaches the Vulkan calls).
+    {
+        int vkDevice = 0, bridgeDevice12 = 0, d3dDevice = 0;
+
+        // A Vulkan game, not bridged: its VkDevice through the Vulkan surface
+        auto t = PresentTarget(true, false, &vkDevice, &bridgeDevice12);
+        CHECK(t.api == Api::Vulkan && t.device == &vkDevice);
+
+        // Then a D3D game's present (the Vulkan one before it leaves nothing behind)
+        t = PresentTarget(false, false, &d3dDevice, nullptr);
+        CHECK(t.api == Api::D3D && t.device == &d3dDevice);
+
+        // A bridged Vulkan game: the bridge's private D3D12 device through the D3D surface; no Vulkan call at all
+        t = PresentTarget(true, true, &vkDevice, &bridgeDevice12);
+        CHECK(t.api == Api::D3D && t.device == &bridgeDevice12);
+
+        // The bridge's device is gone mid-present: nothing to call (and still not the VkDevice through the D3D calls)
+        t = PresentTarget(true, true, &vkDevice, nullptr);
+        CHECK(t.device == nullptr);
+
+        // And back to the unbridged Vulkan game
+        t = PresentTarget(true, false, &vkDevice, &bridgeDevice12);
+        CHECK(t.api == Api::Vulkan && t.device == &vkDevice);
+    }
+
     printf(fails == 0 ? "nr_native_low_latency_smoke: PASS\n" : "nr_native_low_latency_smoke: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

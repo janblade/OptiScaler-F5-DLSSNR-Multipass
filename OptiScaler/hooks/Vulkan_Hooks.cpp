@@ -717,13 +717,33 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     ReflexHooks::update(false, true);
 
-    // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present, on the game's
-    // Vulkan device. This call is the game's own present whether or not the frame-generation bridge is up -- bridged,
-    // it is on the hidden window (native/VkPresentBridge.h); the D3D12 swapchain's own present, through FGHooks, is a
-    // separate thing frame generation drives on its own thread, the same relationship Dx11wDx12SC::Present has to its
-    // hidden D3D11 present. Not under dxvk: its D3D11 device already gets this through wrapped_swapchain.cpp's present
-    // hook, unconditionally.
-    const bool lowLatency = !IdentifyGpu::getPrimaryGpu().usesDxvk;
+    // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present. This call is the
+    // game's own present whether or not the frame-generation bridge is up -- bridged, it is on the hidden window
+    // (native/VkPresentBridge.h); the D3D12 swapchain's own present, through FGHooks, is a separate thing frame generation
+    // drives on its own thread, which stays out of it. Bridged, the markers and the sleep go through the D3D entry points
+    // on the bridge's private D3D12 device -- the same relationship Dx11wDx12SC::Present has to its hidden D3D11 present
+    // -- so XeFG's XeLL routing (ReflexHooks) reaches them; the Vulkan NVAPI belongs to a game with no bridge. Not under
+    // dxvk: its D3D11 device already gets this through wrapped_swapchain.cpp's present hook, unconditionally.
+    const auto lowLatencyTarget = native::lowlatency::PresentTarget(
+        true, bridged, _device, bridged ? static_cast<IUnknown*>(VkPresentBridge::Device()) : nullptr);
+    const bool lowLatency = !IdentifyGpu::getPrimaryGpu().usesDxvk && lowLatencyTarget.device != nullptr;
+
+    const auto lowLatencyBegin = [&]
+    {
+        if (lowLatencyTarget.api == native::lowlatency::Api::Vulkan)
+            native::lowlatency::OnPresentBeginVulkan(_device);
+        else
+            native::lowlatency::OnPresentBegin(
+                const_cast<IUnknown*>(static_cast<const IUnknown*>(lowLatencyTarget.device)));
+    };
+    const auto lowLatencyEnd = [&]
+    {
+        if (lowLatencyTarget.api == native::lowlatency::Api::Vulkan)
+            native::lowlatency::OnPresentEndVulkan(_device);
+        else
+            native::lowlatency::OnPresentEnd(
+                const_cast<IUnknown*>(static_cast<const IUnknown*>(lowLatencyTarget.device)));
+    };
 
     // The sleep is inside OnPresentEnd, so the low-latency time is both calls together
     double lowLatencyMs = 0.0;
@@ -731,7 +751,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     if (lowLatency)
     {
         const auto begin = Util::MillisecondsNow();
-        native::lowlatency::OnPresentBeginVulkan(_device);
+        lowLatencyBegin();
         lowLatencyMs = Util::MillisecondsNow() - begin;
     }
 
@@ -749,7 +769,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     if (lowLatency)
     {
         const auto begin = Util::MillisecondsNow();
-        native::lowlatency::OnPresentEndVulkan(_device);
+        lowLatencyEnd();
         lowLatencyMs += Util::MillisecondsNow() - begin;
     }
 

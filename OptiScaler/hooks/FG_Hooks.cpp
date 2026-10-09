@@ -20,6 +20,7 @@
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeLowLatency.h>
+#include <native/PresentStageTiming.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -1361,10 +1362,32 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     }
 
     HRESULT result;
+    const auto presentStartMs = Util::MillisecondsNow();
+
     if (pPresentParameters == nullptr)
         result = o_FGSCPresent(This, SyncInterval, Flags);
     else
         result = o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);
+
+    // Where a stall sits when the game's present is held up inside frame generation's own (the game's present thread
+    // only; native/PresentStageTiming.h)
+    if (willPresent)
+    {
+        static native::presenttiming::StageTiming presentTiming;
+
+        const auto now = Util::MillisecondsNow();
+        presentTiming.Record(native::presenttiming::Stage::FrameGenerationPresent, now - presentStartMs);
+        const auto outcome = presentTiming.EndPresent(now);
+
+        if (outcome.stall)
+            LOG_WARN("Frame generation present stall: {}", presentTiming.StallLine());
+
+        if (outcome.summary)
+        {
+            LOG_INFO("Frame generation present timing, {}", presentTiming.SummaryLine());
+            presentTiming.Restart();
+        }
+    }
 
     if (result == S_OK)
     {

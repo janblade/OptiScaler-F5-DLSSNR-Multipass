@@ -21,6 +21,7 @@
 #include <dlssnr/DlssNrFeature_Vk.h>
 #include <native/NativeDriverVk.h>
 #include <native/NativeLowLatency.h>
+#include <native/PresentStageTiming.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
 #include <resource_tracking/GenericDepth_Vk.h>
@@ -648,10 +649,33 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     return result;
 }
 
+// Where a present spends its time, so a stall in a log names the stage that holds it (native/PresentStageTiming.h).
+// The game's present thread only.
+static native::presenttiming::StageTiming _presentTiming;
+
+static void NotePresentTiming(double hookStartMs)
+{
+    const auto now = Util::MillisecondsNow();
+    _presentTiming.Record(native::presenttiming::Stage::Hook, now - hookStartMs);
+    const auto outcome = _presentTiming.EndPresent(now);
+
+    if (outcome.stall)
+        LOG_WARN("Vulkan present stall: {}", _presentTiming.StallLine());
+
+    if (outcome.summary)
+    {
+        LOG_INFO("Vulkan present timing, {}", _presentTiming.SummaryLine());
+        _presentTiming.Restart();
+    }
+}
+
 VALIDATE_HOOK(hkvkQueuePresentKHR, PFN_vkQueuePresentKHR)
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
     LOG_FUNC();
+
+    using native::presenttiming::Stage;
+    const auto hookStartMs = Util::MillisecondsNow();
 
     State::Instance().vulkanPresentCount.fetch_add(1, std::memory_order_relaxed);
 
@@ -676,7 +700,9 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     memcpy(&localPresentInfo, pPresentInfo, sizeof(VkPresentInfoKHR));
 
     // Optical F5Low: the picture through NR before the menu is drawn over it. May replace the wait list.
+    const auto motionStartMs = Util::MillisecondsNow();
     NativeMotionVk::OnPresent(queue, &localPresentInfo, _device, _PD);
+    _presentTiming.Record(Stage::NativeMotion, Util::MillisecondsNow() - motionStartMs);
 
     // The game's swapchain is on the bridge's hidden window: the menu and the frame limiter are the D3D12 swapchain's
     const bool bridged = pPresentInfo->swapchainCount == 1 && VkPresentBridge::Active(pPresentInfo->pSwapchains[0]);
@@ -685,6 +711,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     if (!bridged && !MenuOverlayVk::QueuePresent(queue, &localPresentInfo))
     {
         LOG_ERROR("QueuePresent: false!");
+        NotePresentTiming(hookStartMs);
         return VK_ERROR_OUT_OF_DATE_KHR;
     }
 
@@ -698,24 +725,42 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // hook, unconditionally.
     const bool lowLatency = !IdentifyGpu::getPrimaryGpu().usesDxvk;
 
+    // The sleep is inside OnPresentEnd, so the low-latency time is both calls together
+    double lowLatencyMs = 0.0;
+
     if (lowLatency)
+    {
+        const auto begin = Util::MillisecondsNow();
         native::lowlatency::OnPresentBeginVulkan(_device);
+        lowLatencyMs = Util::MillisecondsNow() - begin;
+    }
 
     // original call
     VkResult result;
+    const auto presentStartMs = Util::MillisecondsNow();
 
     {
         ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
         result = o_QueuePresentKHR(queue, &localPresentInfo);
     }
 
+    _presentTiming.Record(Stage::Present, Util::MillisecondsNow() - presentStartMs);
+
     if (lowLatency)
+    {
+        const auto begin = Util::MillisecondsNow();
         native::lowlatency::OnPresentEndVulkan(_device);
+        lowLatencyMs += Util::MillisecondsNow() - begin;
+    }
+
+    _presentTiming.Record(Stage::LowLatency, lowLatencyMs);
 
     if (bridged)
     {
         // Paced by the D3D12 present (and frame generation's limiter inside it)
+        const auto bridgeStartMs = Util::MillisecondsNow();
         NativeMotionVk::AfterPresent(pPresentInfo->pSwapchains[0]);
+        _presentTiming.Record(Stage::BridgePresent, Util::MillisecondsNow() - bridgeStartMs);
 
         // The window changed size and the hidden swapchain does not know: the game recreates when its present says so.
         if (result == VK_SUCCESS && VkPresentBridge::WindowResized())
@@ -724,6 +769,8 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // Unsure about Vulkan Reflex fps limit and if that could be causing an issue here
     else if (!State::Instance().reflexLimitsFps)
         FrameLimit::sleep(false);
+
+    NotePresentTiming(hookStartMs);
 
     LOG_FUNC_RESULT(result);
     return result;

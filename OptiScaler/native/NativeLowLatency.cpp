@@ -29,6 +29,10 @@ enum class Table
 
 std::atomic<bool> g_running = false;    // markers are being sent
 std::atomic<bool> g_submitSent = false; // this frame's SIMULATION_END / RENDERSUBMIT_START went out
+// `device` is the game's D3D11/D3D12 device, or -- g_isVulkan -- its VkDevice reinterpreted as the same pointer-sized
+// token: never dereferenced as a COM interface here, only ever passed back to whichever API's own Reflex calls stored
+// it (ReflexHooks::own*/own*Vulkan). A game is one API for its whole life, so this never flips once set.
+std::atomic<bool> g_isVulkan = false;
 std::atomic<IUnknown*> g_device = nullptr;
 std::atomic<IUnknown*> g_sleepModeDevice = nullptr;   // the device our Reflex mode was set on
 std::atomic<const void*> g_gameQueue = nullptr;       // the queue the game's frame is submitted to (D3D12)
@@ -46,8 +50,41 @@ double g_latencyAskedAt = 0.0;
 bool g_hasLatency = false;
 float g_latencyMs = 0.0f;
 
+// NV_LATENCY_MARKER_TYPE and NV_VULKAN_LATENCY_MARKER_TYPE share the same ordinals for every value used here, but are
+// unrelated enum types in the SDK: translated explicitly rather than cast, so a future SDK change cannot silently
+// mismatch them.
+NV_VULKAN_LATENCY_MARKER_TYPE VulkanMarkerType(NV_LATENCY_MARKER_TYPE type)
+{
+    switch (type)
+    {
+    case SIMULATION_START:
+        return VULKAN_SIMULATION_START;
+    case SIMULATION_END:
+        return VULKAN_SIMULATION_END;
+    case RENDERSUBMIT_START:
+        return VULKAN_RENDERSUBMIT_START;
+    case RENDERSUBMIT_END:
+        return VULKAN_RENDERSUBMIT_END;
+    case PRESENT_START:
+        return VULKAN_PRESENT_START;
+    case PRESENT_END:
+    default:
+        return VULKAN_PRESENT_END;
+    }
+}
+
 void Marker(IUnknown* device, NV_LATENCY_MARKER_TYPE type)
 {
+    if (g_isVulkan.load(std::memory_order_relaxed))
+    {
+        NV_VULKAN_LATENCY_MARKER_PARAMS params {};
+        params.version = NV_VULKAN_LATENCY_MARKER_PARAMS_VER;
+        params.frameID = g_frameId;
+        params.markerType = VulkanMarkerType(type);
+        ReflexHooks::ownSetLatencyMarkerVulkan(reinterpret_cast<HANDLE>(device), &params);
+        return;
+    }
+
     NV_LATENCY_MARKER_PARAMS params {};
     params.version = NV_LATENCY_MARKER_PARAMS_VER;
     params.frameID = g_frameId;
@@ -57,6 +94,17 @@ void Marker(IUnknown* device, NV_LATENCY_MARKER_TYPE type)
 
 void SetSleepMode(IUnknown* device, bool on)
 {
+    if (g_isVulkan.load(std::memory_order_relaxed))
+    {
+        NV_VULKAN_SET_SLEEP_MODE_PARAMS params {};
+        params.version = NV_VULKAN_SET_SLEEP_MODE_PARAMS_VER;
+        params.bLowLatencyMode = on;
+        params.bLowLatencyBoost = false;
+        params.minimumIntervalUs = 0;
+        ReflexHooks::ownSetSleepModeVulkan(reinterpret_cast<HANDLE>(device), &params);
+        return;
+    }
+
     NV_SET_SLEEP_MODE_PARAMS params {};
     params.version = NV_SET_SLEEP_MODE_PARAMS_VER;
     params.bLowLatencyMode = on;
@@ -257,12 +305,27 @@ void OnPresentEnd(IUnknown* device, PresentSource source)
     g_device = device;
     g_gameQueue = GameQueue();
 
-    ReflexHooks::ownSleep(device);
+    if (g_isVulkan.load(std::memory_order_relaxed))
+        ReflexHooks::ownSleepVulkan(reinterpret_cast<HANDLE>(device), g_frameId);
+    else
+        ReflexHooks::ownSleep(device);
 
     ++g_frameId;
     g_submitSent = false;
     g_running = true;
     Marker(device, SIMULATION_START);
+}
+
+void OnPresentBeginVulkan(VkDevice device)
+{
+    g_isVulkan = true;
+    OnPresentBegin(reinterpret_cast<IUnknown*>(device));
+}
+
+void OnPresentEndVulkan(VkDevice device)
+{
+    g_isVulkan = true;
+    OnPresentEnd(reinterpret_cast<IUnknown*>(device));
 }
 
 void OnFirstSubmit(const void* queue)
@@ -304,6 +367,21 @@ void OnDeviceReleased(IUnknown* device)
     ReflexHooks::forgetSleepDevice(device);
 }
 
+void OnDeviceReleasedVulkan(VkDevice device)
+{
+    if (device == nullptr)
+        return;
+
+    auto* token = reinterpret_cast<IUnknown*>(device);
+    auto expected = token;
+    g_device.compare_exchange_strong(expected, nullptr);
+
+    expected = token;
+    g_sleepModeDevice.compare_exchange_strong(expected, nullptr);
+
+    ReflexHooks::forgetSleepDeviceVulkan(device);
+}
+
 Status GetStatus()
 {
     Status status;
@@ -322,20 +400,40 @@ Status GetStatus()
     if (const auto now = Util::MillisecondsNow(); now - g_latencyAskedAt >= 500.0)
     {
         g_latencyAskedAt = now;
-
-        static NV_LATENCY_RESULT_PARAMS results {};
-        results.version = NV_LATENCY_RESULT_PARAMS_VER;
         g_hasLatency = false;
 
-        if (ReflexHooks::ownGetLatency(device, &results) == NVAPI_OK)
+        if (g_isVulkan.load(std::memory_order_relaxed))
         {
-            // The newest report is the last; times are in microseconds
-            const auto& report = results.frameReport[63];
+            static NV_VULKAN_LATENCY_RESULT_PARAMS results {};
+            results.version = NV_VULKAN_LATENCY_RESULT_PARAMS_VER;
 
-            if (report.frameID != 0 && report.simStartTime != 0 && report.gpuRenderEndTime > report.simStartTime)
+            if (ReflexHooks::ownGetLatencyVulkan(reinterpret_cast<HANDLE>(device), &results) == NVAPI_OK)
             {
-                g_latencyMs = (float) (report.gpuRenderEndTime - report.simStartTime) / 1000.0f;
-                g_hasLatency = true;
+                // The newest report is the last; times are in microseconds
+                const auto& report = results.frameReport[63];
+
+                if (report.frameID != 0 && report.simStartTime != 0 && report.gpuRenderEndTime > report.simStartTime)
+                {
+                    g_latencyMs = (float) (report.gpuRenderEndTime - report.simStartTime) / 1000.0f;
+                    g_hasLatency = true;
+                }
+            }
+        }
+        else
+        {
+            static NV_LATENCY_RESULT_PARAMS results {};
+            results.version = NV_LATENCY_RESULT_PARAMS_VER;
+
+            if (ReflexHooks::ownGetLatency(device, &results) == NVAPI_OK)
+            {
+                // The newest report is the last; times are in microseconds
+                const auto& report = results.frameReport[63];
+
+                if (report.frameID != 0 && report.simStartTime != 0 && report.gpuRenderEndTime > report.simStartTime)
+                {
+                    g_latencyMs = (float) (report.gpuRenderEndTime - report.simStartTime) / 1000.0f;
+                    g_hasLatency = true;
+                }
             }
         }
     }

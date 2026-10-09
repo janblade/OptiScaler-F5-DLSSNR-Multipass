@@ -20,6 +20,7 @@
 #include <dlssnr/DlssNr_VkExtensions.h>
 #include <dlssnr/DlssNrFeature_Vk.h>
 #include <native/NativeDriverVk.h>
+#include <native/NativeLowLatency.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
 #include <resource_tracking/GenericDepth_Vk.h>
@@ -689,6 +690,16 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     ReflexHooks::update(false, true);
 
+    // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present, on the game's
+    // Vulkan device. Not while bridged: frame generation's own present (native/VkPresentBridge.h, through FGHooks) is
+    // not wired to this yet, unlike the D3D11 bridge's (with_dx12/dx11_with_dx12_sc.cpp calls OnPresentBegin/End
+    // itself). Not under dxvk either: its D3D11 device already gets this through wrapped_swapchain.cpp's present hook,
+    // unconditionally.
+    const bool lowLatency = !bridged && !IdentifyGpu::getPrimaryGpu().usesDxvk;
+
+    if (lowLatency)
+        native::lowlatency::OnPresentBeginVulkan(_device);
+
     // original call
     VkResult result;
 
@@ -696,6 +707,9 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
         ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
         result = o_QueuePresentKHR(queue, &localPresentInfo);
     }
+
+    if (lowLatency)
+        native::lowlatency::OnPresentEndVulkan(_device);
 
     if (bridged)
     {
@@ -879,6 +893,7 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         VkPresentBridge::OnDeviceDestroying(device);
         NativeMotionVk::OnDeviceDestroyed(device);
         GenericDepthVk::OnDeviceDestroyed(device);
+        native::lowlatency::OnDeviceReleasedVulkan(device);
     }
 
     if (o_vkDestroyDevice != nullptr)

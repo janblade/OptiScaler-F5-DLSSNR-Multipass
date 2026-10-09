@@ -1264,7 +1264,7 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
         "Optical F5Low works out how the picture moves by itself, the way a game's motion vectors would tell "
         "it: it compares each frame with the last, uses the game's depth when it can find it, keeps a "
         "still HUD still and notices scene cuts. NR, and in the second mode OptiScaler's upscaler and "
-        "frame generation, run on that motion. D3D11 and D3D12 games.");
+        "frame generation, run on that motion. D3D11, D3D12 and Vulkan games.");
 
     bool finishedPicture = nr.finishedPicture;
     RenderNativeMode(config, nr.enabled, finishedPicture);

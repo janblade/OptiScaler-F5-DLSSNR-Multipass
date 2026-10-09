@@ -1121,6 +1121,13 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
         {
             ImGui::TextWrapped("Disable Generate before SR, apply after SR (DLSS) to use native Vulkan NR.");
         }
+        else if (enabled && finishedPicture)
+        {
+            // On the finished picture (Optical F5Low's NR only among them) there is no upscaler to wait for: what NR
+            // says about the picture is the reason it has not started (only the log had it).
+            const std::string status = DlssNr::FinishedPictureStatus();
+            ImGui::TextWrapped("%s", status.empty() ? "Waiting for a finished picture." : status.c_str());
+        }
         else if (enabled)
             ImGui::TextUnformatted("Waiting for the upscaler to run.");
     }

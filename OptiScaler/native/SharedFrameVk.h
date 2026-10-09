@@ -177,12 +177,14 @@ void RecordBufferToDepthTexture(ID3D12GraphicsCommandList* list, ID3D12Resource*
 //
 // In: the game's image (in `layout`, left in it) is copied into the shared image, which is then handed to the D3D12
 // queue. Its old contents are discarded.
+// `swizzle`: the game's image is B8G8R8A8 and the shared one R8G8B8A8 (NR on the finished picture takes RGBA only): a
+// blit, which converts the channel order, instead of a copy, which would not. Needs a graphics queue.
 void RecordCopyToShared(VkCommandBuffer cmd, VkImage source, VkImageLayout layout, const SharedImageVk& shared,
-                        uint32_t family);
+                        uint32_t family, bool swizzle = false);
 
 // Out: the shared image, as the D3D12 queue left it, is taken back and copied into the game's image (in `layout`, left
 // in it).
 void RecordCopyFromShared(VkCommandBuffer cmd, const SharedImageVk& shared, VkImage target, VkImageLayout layout,
-                          uint32_t family);
+                          uint32_t family, bool swizzle = false);
 
 } // namespace native

@@ -140,6 +140,7 @@ class VkFrameSource : public IFrameSource
 
     // The bridged presents.
     bool _bridged = false;
+    bool _swizzle = false; // the shared picture is RGBA for a BGRA swapchain (Acquire)
     bool _pinned = false;
     ID3D12Resource* _acquiredPicture = nullptr; // the shared picture of the frame being processed, null if none
     uint64_t _copied = 0;     // the copy in's value on the shared fence

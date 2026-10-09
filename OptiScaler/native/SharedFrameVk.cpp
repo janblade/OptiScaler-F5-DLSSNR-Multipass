@@ -576,10 +576,31 @@ VkImageCopy WholeImage(uint32_t width, uint32_t height)
     return region;
 }
 
+// Both images the same size; `swizzle` blits (B8G8R8A8 <-> R8G8B8A8, both UNORM: the values are not converted, only
+// the channel order), otherwise copies.
+void CopyWhole(VkCommandBuffer cmd, VkImage source, VkImage target, uint32_t width, uint32_t height, bool swizzle)
+{
+    if (!swizzle)
+    {
+        const VkImageCopy region = WholeImage(width, height);
+        vkCmdCopyImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &region);
+        return;
+    }
+
+    VkImageBlit region {};
+    region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.srcOffsets[1] = { (int32_t) width, (int32_t) height, 1 };
+    region.dstOffsets[1] = { (int32_t) width, (int32_t) height, 1 };
+    vkCmdBlitImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                   &region, VK_FILTER_NEAREST);
+}
+
 } // namespace
 
 void RecordCopyToShared(VkCommandBuffer cmd, VkImage source, VkImageLayout layout, const SharedImageVk& shared,
-                        uint32_t family)
+                        uint32_t family, bool swizzle)
 {
     // The game's image was last written by the game's work before the present's semaphores, which the submit waits on:
     // every earlier write is visible to the transfer that follows.
@@ -592,9 +613,7 @@ void RecordCopyToShared(VkCommandBuffer cmd, VkImage source, VkImageLayout layou
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 2, before);
 
-    const VkImageCopy region = WholeImage(shared.Width(), shared.Height());
-    vkCmdCopyImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, shared.Image(),
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    CopyWhole(cmd, source, shared.Image(), shared.Width(), shared.Height(), swizzle);
 
     // The shared image goes to the D3D12 queue (an external queue family); the game's image back to its layout.
     VkImageMemoryBarrier after[2] = {
@@ -607,7 +626,7 @@ void RecordCopyToShared(VkCommandBuffer cmd, VkImage source, VkImageLayout layou
 }
 
 void RecordCopyFromShared(VkCommandBuffer cmd, const SharedImageVk& shared, VkImage target, VkImageLayout layout,
-                          uint32_t family)
+                          uint32_t family, bool swizzle)
 {
     // Taken back from the D3D12 queue (the submit waits on its signal), and the game's image made ready to be written.
     VkImageMemoryBarrier before[2] = {
@@ -619,9 +638,7 @@ void RecordCopyFromShared(VkCommandBuffer cmd, const SharedImageVk& shared, VkIm
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 2, before);
 
-    const VkImageCopy region = WholeImage(shared.Width(), shared.Height());
-    vkCmdCopyImage(cmd, shared.Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    CopyWhole(cmd, shared.Image(), target, shared.Width(), shared.Height(), swizzle);
 
     VkImageMemoryBarrier after =
         Barrier(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layout, VK_ACCESS_TRANSFER_WRITE_BIT,

@@ -691,11 +691,12 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     ReflexHooks::update(false, true);
 
     // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present, on the game's
-    // Vulkan device. Not while bridged: frame generation's own present (native/VkPresentBridge.h, through FGHooks) is
-    // not wired to this yet, unlike the D3D11 bridge's (with_dx12/dx11_with_dx12_sc.cpp calls OnPresentBegin/End
-    // itself). Not under dxvk either: its D3D11 device already gets this through wrapped_swapchain.cpp's present hook,
-    // unconditionally.
-    const bool lowLatency = !bridged && !IdentifyGpu::getPrimaryGpu().usesDxvk;
+    // Vulkan device. This call is the game's own present whether or not the frame-generation bridge is up -- bridged,
+    // it is on the hidden window (native/VkPresentBridge.h); the D3D12 swapchain's own present, through FGHooks, is a
+    // separate thing frame generation drives on its own thread, the same relationship Dx11wDx12SC::Present has to its
+    // hidden D3D11 present. Not under dxvk: its D3D11 device already gets this through wrapped_swapchain.cpp's present
+    // hook, unconditionally.
+    const bool lowLatency = !IdentifyGpu::getPrimaryGpu().usesDxvk;
 
     if (lowLatency)
         native::lowlatency::OnPresentBeginVulkan(_device);

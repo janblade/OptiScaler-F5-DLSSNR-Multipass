@@ -130,8 +130,13 @@ VkImageUsageFlags VkFrameSource::SwapchainUsage(VkPhysicalDevice physical, const
 {
     constexpr VkImageUsageFlags kCopies = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-    if (!Config::Instance()->DlssNrEnabled.value_or_default() || physical == VK_NULL_HANDLE ||
-        (info.imageUsage & kCopies) == kCopies)
+    // Not gated on DlssNrEnabled: a swapchain's image usage is fixed for its whole life, and this call is the one
+    // chance to ask for it. Turning Neural Rendering on later, after the game already made its swapchain without
+    // DlssNrEnabled true at that moment, used to mean Optical F5Low could never copy a picture out of it for the
+    // rest of that swapchain's life -- NR looked like it did nothing until the game remade its swapchain (a resize,
+    // a fullscreen toggle, or a restart). Asking for the two usage bits is free when the surface supports them,
+    // which the capability check below already guards.
+    if (physical == VK_NULL_HANDLE || (info.imageUsage & kCopies) == kCopies)
         return info.imageUsage;
 
     VkSurfaceCapabilitiesKHR caps {};

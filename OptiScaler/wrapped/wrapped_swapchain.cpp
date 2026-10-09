@@ -370,11 +370,15 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
+    // On the Vulkan bridge (native/VkPresentBridge.h) this is frame generation's D3D12 swapchain for a Vulkan game, whose
+    // own present also calls update() with isVulkan: the same answer from both, or reflexLimitsFps flips every frame
+    // and setFPSLimit resends the cap each time
+    const bool vulkanGame = State::Instance().swapchainInteropApi == SwapchainInteropApi::VkwDx12;
     auto fg = State::Instance().currentFG;
     if (willPresent && fg != nullptr)
-        ReflexHooks::update(fg->IsActive(), false);
+        ReflexHooks::update(fg->IsActive(), vulkanGame);
     else
-        ReflexHooks::update(false, false);
+        ReflexHooks::update(false, vulkanGame);
 
     XellHooks::update();
 

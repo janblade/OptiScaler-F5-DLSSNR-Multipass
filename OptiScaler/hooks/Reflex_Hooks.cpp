@@ -413,12 +413,18 @@ NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_SetSleepMode(HANDLE vkDevice,
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+    std::scoped_lock lock(_sleepModeMutex);
 
     if (isGameCall(_ReturnAddress()))
     {
         _gameCalledReflex = true;
         _gameCalledSetSleepMode = true;
     }
+
+    // Our own calls: as in hkNvAPI_D3D_SetSleepMode, not stored, so the fps cap stays with OptiScaler's own limiter.
+    // Stored, update() would see a Vulkan sleep device and hand the cap to Reflex.
+    if (_ownCall)
+        return o_NvAPI_Vulkan_SetSleepMode(vkDevice, pSetSleepModeParams);
 
     // Store for later so we can adjust the fps whenever we want
     memcpy(&_lastVkSleepParams, pSetSleepModeParams, sizeof(NV_VULKAN_SET_SLEEP_MODE_PARAMS));

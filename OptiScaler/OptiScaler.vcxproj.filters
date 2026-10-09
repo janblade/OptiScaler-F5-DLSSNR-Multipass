@@ -515,6 +515,18 @@
     <ClInclude Include="native\NativeLowLatencyRule.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\NativeLowLatencyVkSync.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\PresentStageTiming.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\VkPresentCopyRule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LogAsyncRule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>

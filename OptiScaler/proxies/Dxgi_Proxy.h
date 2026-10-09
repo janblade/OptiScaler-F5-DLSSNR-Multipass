@@ -73,6 +73,35 @@ class DxgiProxy
 
     static bool InsideFactoryCreation() { return _factoryCreationDepth > 0; }
 
+    // Windows' own DXGI factory, for a swapchain on a real D3D12 queue when the loaded dxgi.dll is a layer that cannot
+    // make one: dxvk's returns DXGI_ERROR_UNSUPPORTED, so frame generation's D3D12 swapchain for a dxvk game
+    // (native/VkPresentBridge.h, NativeDxvkVulkan) comes from here. Loaded from System32 the way OptiScaler loads it for
+    // itself as dxgi.dll. Not hooked: its methods are called directly. The caller owns the reference; null when the
+    // system DLL cannot be told apart from the loaded one or the factory fails.
+    static IDXGIFactory2* CreateSystemFactory2()
+    {
+        static const PFN_CreateDxgiFactory2 create = []() -> PFN_CreateDxgiFactory2
+        {
+            auto module = NtdllProxy::LoadLibraryExW_Ldr(L"dxgi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+            if (module == nullptr || module == _dll)
+                return nullptr;
+
+            return (PFN_CreateDxgiFactory2) KernelBaseProxy::GetProcAddress_()(module, "CreateDXGIFactory2");
+        }();
+
+        if (create == nullptr)
+            return nullptr;
+
+        IDXGIFactory2* factory = nullptr;
+        ScopedFactoryCreation factoryCreation {};
+
+        if (FAILED(create(0, __uuidof(IDXGIFactory2), &factory)))
+            return nullptr;
+
+        return factory;
+    }
+
     static PFN_CreateDxgiFactory CreateDxgiFactory_() { return _CreateDxgiFactory; }
     static PFN_CreateDxgiFactory1 CreateDxgiFactory1_() { return _CreateDxgiFactory1; }
     static PFN_CreateDxgiFactory2 CreateDxgiFactory2_() { return _CreateDxgiFactory2; }

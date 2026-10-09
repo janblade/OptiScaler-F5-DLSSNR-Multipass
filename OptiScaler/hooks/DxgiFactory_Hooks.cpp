@@ -25,6 +25,14 @@
 #include <magic_enum.hpp>
 #endif
 
+// NativeDxvkVulkan: a dxvk game's frame generation is the Vulkan present bridge (native/VkPresentBridge.h) on dxvk's own
+// Vulkan swapchain, not the D3D11 bridge (Dx11wDx12SC). That one cannot work on dxvk: dxvk's shared fence and texture
+// handles do not open on a native D3D12 device (OpenSharedHandle E_HANDLE, then a crash in Batman: Arkham Knight).
+static bool DxvkFrameGenerationViaVulkan()
+{
+    return IdentifyGpu::getPrimaryGpu().usesDxvk && Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default();
+}
+
 static bool IsTearingSupported(IDXGIFactory* factory)
 {
     if (factory == nullptr)
@@ -354,7 +362,8 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
 }
 
 HRESULT DxgiFactoryHooks::CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue,
-                                                    DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain4** out, bool* realFG)
+                                                    DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain4** out, bool* realFG,
+                                                    bool systemFactory)
 {
     *out = nullptr;
     *realFG = false;
@@ -363,7 +372,9 @@ HRESULT DxgiFactoryHooks::CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D1
         return E_INVALIDARG;
 
     // A Vulkan game never made a DXGI factory of its own: frame generation's swapchain is made through this hooked one.
-    HookToFactory(factory);
+    // Not Windows' own beside dxvk's: the hooks' originals (o_*) are dxvk's methods, which must not be called on it.
+    if (!systemFactory)
+        HookToFactory(factory);
 
     if (!PrepareDx12InteropDesc(*desc, IsTearingSupported(factory)))
         return E_INVALIDARG;
@@ -383,7 +394,8 @@ HRESULT DxgiFactoryHooks::CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D1
         LOG_WARN("Vulkan bridge FG swapchain creation failed: {:X}; creating plain DX12 swapchain", (UINT) result);
 
         ScopedSkipParentWrapping skipParentWrapping {};
-        result = o_CreateSwapChain(factory, queue, desc, &swapChain);
+        result = systemFactory ? factory->CreateSwapChain(queue, desc, &swapChain)
+                               : o_CreateSwapChain(factory, queue, desc, &swapChain);
     }
 
     if (SUCCEEDED(result) && swapChain != nullptr)
@@ -619,7 +631,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
             if (!_skipFGSwapChainCreation && State::Instance().activeFgInput == FGInput::Upscaler &&
                 State::Instance().activeFgOutput != FGOutput::NoFG &&
-                State::Instance().activeFgInput != FGInput::NvngxFG)
+                State::Instance().activeFgInput != FGInput::NvngxFG && !DxvkFrameGenerationViaVulkan())
             {
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
 
@@ -1022,7 +1034,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
             if (!_skipFGSwapChainCreation && State::Instance().activeFgInput == FGInput::Upscaler &&
                 State::Instance().activeFgOutput != FGOutput::NoFG &&
-                State::Instance().activeFgInput != FGInput::NvngxFG)
+                State::Instance().activeFgInput != FGInput::NvngxFG && !DxvkFrameGenerationViaVulkan())
             {
                 // For dx11 swapchain
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();

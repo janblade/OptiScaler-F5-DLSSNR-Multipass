@@ -44,9 +44,10 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
     if (IdentifyGpu::getPrimaryGpu().usesDxvk && !Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default())
         return;
 
-    // Frame generation for a dxvk game (FGInput=Upscaler) runs through the D3D11 bridge (with_dx12/dx11_with_dx12_sc.h,
-    // NativeMotionDx11::OnFGPresent), untouched by DlssNrNativeDxvkVulkan: this driver stays out of its way, the same
-    // invariant NativeDriverDx11.h describes ("only one of the two drivers' OnPresent is ever fed real work").
+    // Whenever the D3D11 bridge (with_dx12/dx11_with_dx12_sc.h, NativeMotionDx11::OnFGPresent) owns the frame, this
+    // driver stays out of its way, the invariant NativeDriverDx11.h describes ("only one of the two drivers' OnPresent is
+    // ever fed real work"). With DlssNrNativeDxvkVulkan on it is never made for a dxvk game: that game's frame generation
+    // is the Vulkan present bridge, as for a native Vulkan game (hooks/DxgiFactory_Hooks.cpp).
     if (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
         return;
 

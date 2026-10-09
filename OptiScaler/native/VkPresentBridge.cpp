@@ -77,6 +77,11 @@ std::unordered_map<VkSurfaceKHR, HWND> g_windows;
 std::unique_ptr<Bridge> g_bridge;
 std::vector<std::unique_ptr<Bridge>> g_retired; // output gone, hidden surface kept until their swapchains are destroyed
 
+// "FG only (game's upscaler)": the game's upscaler call, on a Vulkan-on-D3D12 feature, copied this frame's motion
+// vectors and depth for frame generation on its own queue; frame generation's queue waits for that before it reads them.
+ComPtr<ID3D12Fence> g_feedFence;
+uint64_t g_feedValue = 0;
+
 void LogOnce(const std::string& text)
 {
     static std::string last;
@@ -119,10 +124,16 @@ bool FrameGenerationChosen()
     return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG;
 }
 
-// OptiFG's Upscaler input is fed by Optical F5Low's virtual upscaler: without the mode there is nothing for it to read.
+// OptiFG's Upscaler input is fed by Optical F5Low's virtual upscaler ("NR + upscaler & frame generation"), or by the
+// game's own upscaler call through a Vulkan-on-D3D12 backend ("FG only (game's upscaler)",
+// upscalers/IFeature_VkwDx12.cpp): without one of the two there is nothing for it to read.
 bool ModeOn()
 {
     auto* config = Config::Instance();
+
+    if (config->DlssNrNativeFrameGenerationOnly.value_or_default())
+        return true;
+
     return config->DlssNrEnabled.value_or_default() && config->DlssNrNativeMotion.value_or_default() &&
            config->DlssNrNativeUpscaler.value_or_default();
 }
@@ -137,8 +148,8 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
 
     if (!ModeOn())
     {
-        why = "frame generation is chosen, but the \"NR + upscaler & frame generation\" mode is not on: the game "
-              "presents as it is";
+        why = "frame generation is chosen, but neither \"NR + upscaler & frame generation\" nor \"FG only\" is on: "
+              "the game presents as it is";
         return false;
     }
 
@@ -678,9 +689,16 @@ void PresentOutput()
     UINT sync = 0;
     UINT flags = 0;
     native::VkCopyFailureRule::Decision copy;
+    ComPtr<ID3D12Fence> feedFence;
+    uint64_t feedValue = 0;
 
     {
         std::lock_guard lock(g_mutex);
+
+        // Taken whether or not this present goes ahead: the next one is the next frame's
+        feedFence = std::move(g_feedFence);
+        feedValue = g_feedValue;
+        g_feedValue = 0;
 
         if (g_bridge == nullptr || !g_bridge->outputUp)
             return;
@@ -724,6 +742,10 @@ void PresentOutput()
     if (fgQueue != nullptr && fgQueue != queue12 && copyFence != nullptr && copyValue != 0)
         fgQueue->Wait(copyFence, copyValue);
 
+    // The game's motion vectors and depth, copied for frame generation by its upscaler call (FG only)
+    if (feedFence != nullptr && feedValue != 0)
+        (fgQueue != nullptr ? fgQueue : queue12)->Wait(feedFence.Get(), feedValue);
+
     // A frame generation swapchain draws the menu itself; a plain one gets it here, as a D3D11 game's bridge does.
     const bool fgHookedPresenter = state.currentFGSwapchain == output.Get() && !FGHooks::IsDx12InteropPresentSC(output.Get());
 
@@ -751,6 +773,19 @@ void PresentOutput()
             }
         }
     }
+}
+
+bool OutputActiveOn(ID3D12Device* device)
+{
+    std::lock_guard lock(g_mutex);
+    return device != nullptr && g_bridge != nullptr && g_bridge->outputUp && g_bridge->device12 == device;
+}
+
+void FrameGenerationInputsQueued(ID3D12Fence* fence, uint64_t value)
+{
+    std::lock_guard lock(g_mutex);
+    g_feedFence = fence;
+    g_feedValue = fence != nullptr ? value : 0;
 }
 
 bool WantsNewSwapchain(VkSwapchainKHR swapchain)

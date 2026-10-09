@@ -1096,7 +1096,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
 
     const auto backend = deviceContext->GetUpscalerType();
     const bool bridged = backend == Upscaler::XeSS_on12 || backend == Upscaler::FSR21_on12 ||
-                         backend == Upscaler::FSR22_on12 || backend == Upscaler::FFX_on12;
+                         backend == Upscaler::FSR22_on12 || backend == Upscaler::FFX_on12 ||
+                         backend == Upscaler::DLSS_on12;
     const bool rayReconstruction = backend == Upscaler::DLSSD;
     void* originalColor = nullptr;
     InParameters->Get(NVSDK_NGX_Parameter_Color, &originalColor);

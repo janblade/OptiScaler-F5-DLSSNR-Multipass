@@ -158,6 +158,19 @@ void ReleaseBridgeDevice()
     g_source.PinD3D12(false);
 }
 
+ID3D12Device* ShareBridgeDevice(VkPhysicalDevice physical, std::string& why)
+{
+    // The game's render thread (its upscaler feature being made) while the present thread may be in OnPresent
+    std::lock_guard lock(g_runMutex);
+
+    if (!g_source.EnsureD3D12(physical, why))
+        return nullptr;
+
+    ID3D12Device* device = g_source.Device12();
+    device->AddRef();
+    return device;
+}
+
 void OnDeviceDestroyed(VkDevice device)
 {
     std::lock_guard lock(g_runMutex);

@@ -915,9 +915,18 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
         if (result == VK_SUCCESS && VkPresentBridge::WindowResized())
             result = VK_ERROR_OUT_OF_DATE_KHR;
     }
-    // Unsure about Vulkan Reflex fps limit and if that could be causing an issue here
-    else if (!State::Instance().reflexLimitsFps)
-        FrameLimit::sleep(false);
+    else
+    {
+        // "NR + upscaler & frame generation" was switched on after the game made its swapchain: the bridge is only made
+        // with a swapchain, so the game is told to make a new one (once).
+        if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && pPresentInfo->swapchainCount == 1 &&
+            VkPresentBridge::WantsNewSwapchain(pPresentInfo->pSwapchains[0]))
+            result = VK_ERROR_OUT_OF_DATE_KHR;
+
+        // Unsure about Vulkan Reflex fps limit and if that could be causing an issue here
+        if (!State::Instance().reflexLimitsFps)
+            FrameLimit::sleep(false);
+    }
 
     NotePresentTiming(hookStartMs);
 
@@ -1051,11 +1060,12 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         _device = device;
         LOG_DEBUG("_device captured: {0:X}", (UINT64) _device);
 
-        // The menu is drawn on the D3D12 swapchain of the bridge, not on the hidden Vulkan one.
+        // The menu is drawn on the D3D12 swapchain of the bridge, not on the hidden Vulkan one. Before that swapchain's
+        // first present, which is where the D3D12 menu starts.
         if (!bridged)
             MenuOverlayVk::CreateSwapchain(device, _PD, _instance, _hwnd, pCreateInfo, pAllocator, pSwapchain);
         else
-            MenuOverlayVk::DestroyVulkanObjects(false);
+            MenuOverlayVk::HandOverToBridge();
     }
 
     LOG_FUNC_RESULT(result);

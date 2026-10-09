@@ -9,8 +9,9 @@ void CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInstance instance, 
                      const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator,
                      VkSwapchainKHR* pSwapchain);
 bool QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo);
-// The Vulkan menu has taken ImGui's renderer backend: a D3D12 menu cannot start under it (menu_overlay_dx.cpp only sets up
-// its descriptors when no backend is there), so a Vulkan present bridge made now would crash on its first frame.
-bool IsUp();
+// The game's swapchain went onto the frame-generation bridge (native/VkPresentBridge.h): the menu moves to the D3D12
+// swapchain. Lets go of ImGui's Vulkan renderer backend too, if one was made: the D3D12 menu sets up its own only when no
+// renderer backend is there (menu_overlay_dx.cpp), and drawing under the Vulkan one crashed in the driver.
+void HandOverToBridge();
 void DestroyVulkanObjects(bool shutdown);
 } // namespace MenuOverlayVk

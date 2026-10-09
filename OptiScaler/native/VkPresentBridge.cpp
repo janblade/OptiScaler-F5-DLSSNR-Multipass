@@ -108,20 +108,34 @@ bool IsBridgedSwapchain(VkSwapchainKHR swapchain)
 
 // Whether this swapchain is one to bridge. An empty reason: not a case worth a line in the log (frame generation is not
 // chosen at all). Called with g_mutex held.
-bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
+// Frame generation is chosen and nothing rules the bridge out before a swapchain is looked at.
+bool FrameGenerationChosen()
 {
     auto& state = State::Instance();
-    auto* config = Config::Instance();
 
     if (state.vulkanSkipHooks || IdentifyGpu::getPrimaryGpu().usesDxvk)
         return false;
 
-    if (state.activeFgInput != FGInput::Upscaler || state.activeFgOutput == FGOutput::NoFG)
+    return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG;
+}
+
+// OptiFG's Upscaler input is fed by Optical F5Low's virtual upscaler: without the mode there is nothing for it to read.
+bool ModeOn()
+{
+    auto* config = Config::Instance();
+    return config->DlssNrEnabled.value_or_default() && config->DlssNrNativeMotion.value_or_default() &&
+           config->DlssNrNativeUpscaler.value_or_default();
+}
+
+// The game was told once to make a new swapchain for the bridge since the mode was last switched on.
+bool g_newSwapchainAsked = false;
+
+bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
+{
+    if (!FrameGenerationChosen())
         return false;
 
-    // OptiFG's Upscaler input is fed by Optical F5Low's virtual upscaler: without the mode there is nothing for it to read.
-    if (!config->DlssNrEnabled.value_or_default() || !config->DlssNrNativeMotion.value_or_default() ||
-        !config->DlssNrNativeUpscaler.value_or_default())
+    if (!ModeOn())
     {
         why = "frame generation is chosen, but the \"NR + upscaler & frame generation\" mode is not on: the game "
               "presents as it is";
@@ -131,15 +145,6 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
     if (window == nullptr)
     {
         why = "the swapchain's surface is not one OptiScaler saw being made on a window";
-        return false;
-    }
-
-    // The mode was switched on after the game started and the game then made a new swapchain: the Vulkan menu is already
-    // drawing, and the D3D12 menu cannot take over from it (it crashed the game in the driver on its first frame).
-    if (MenuOverlayVk::IsUp())
-    {
-        why = "frame generation on Vulkan starts with the game: the Vulkan menu is already up, so the game presents as "
-              "it is (set the mode, save, restart)";
         return false;
     }
 
@@ -746,6 +751,28 @@ void PresentOutput()
             }
         }
     }
+}
+
+bool WantsNewSwapchain(VkSwapchainKHR swapchain)
+{
+    std::lock_guard lock(g_mutex);
+
+    if (!FrameGenerationChosen() || !ModeOn())
+    {
+        g_newSwapchainAsked = false;
+        return false;
+    }
+
+    // Already on the bridge, or the game was told and made one the bridge would not take (the reason is in the log):
+    // asked again only once the mode is switched off and on
+    if (g_newSwapchainAsked || (g_bridge != nullptr && g_bridge->swapchains.contains(swapchain)) ||
+        IsBridgedSwapchain(swapchain))
+        return false;
+
+    g_newSwapchainAsked = true;
+    LOG_INFO("Vulkan bridge: \"NR + upscaler & frame generation\" was switched on after the game made its swapchain: "
+             "the game is told its swapchain is out of date, so it makes a new one for the bridge");
+    return true;
 }
 
 bool WindowResized()

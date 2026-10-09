@@ -78,4 +78,9 @@ void PresentOutput();
 // The real window is not the swapchain's size and the game has not recreated the swapchain yet: its present should say so.
 bool WindowResized();
 
+// The game presents on a swapchain of its own window while the bridge is wanted (the mode was switched on after the
+// swapchain was made): its present should say the swapchain is out of date, so the game makes one the bridge can take.
+// True once per switching on of the mode.
+bool WantsNewSwapchain(VkSwapchainKHR swapchain);
+
 } // namespace VkPresentBridge

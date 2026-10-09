@@ -1374,8 +1374,9 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         result = o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);
 
     // Where a stall sits when the game's present is held up inside frame generation's own (the game's present thread
-    // only; native/PresentStageTiming.h)
-    if (willPresent)
+    // only; native/PresentStageTiming.h). Only for the Vulkan bridge: other games log nothing of this.
+    if (willPresent &&
+        native::presenttiming::FrameGenerationTimingWanted(state.swapchainInteropApi == SwapchainInteropApi::VkwDx12))
     {
         static native::presenttiming::StageTiming presentTiming;
 
@@ -1392,7 +1393,6 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         {
             LOG_INFO("Frame generation present timing, {}", presentTiming.SummaryLine());
             presentTiming.Restart();
-            NoteDroppedLogLines();
         }
     }
 

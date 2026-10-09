@@ -790,7 +790,6 @@ static void NotePresentTiming(double hookStartMs)
     {
         LOG_INFO("Vulkan present timing, {}", _presentTiming.SummaryLine());
         _presentTiming.Restart();
-        NoteDroppedLogLines();
     }
 }
 
@@ -803,6 +802,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     const auto hookStartMs = Util::MillisecondsNow();
 
     State::Instance().vulkanPresentCount.fetch_add(1, std::memory_order_relaxed);
+    NoteDroppedLogLinesOnPresent();
 
     // get upscaler time
     UpscalerTimeVk::ReadUpscalingTime(_device);

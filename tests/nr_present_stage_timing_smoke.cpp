@@ -122,6 +122,9 @@ int main()
         CHECK(TakeFrameGenerationMutexWait() == 0.0); // a frame whose present never reached FGPresent
     }
 
+    // Only a bridged Vulkan game gets the frame generation present timing
+    static_assert(FrameGenerationTimingWanted(true) && !FrameGenerationTimingWanted(false));
+
     printf(fails == 0 ? "PASS\n" : "FAILED\n");
     return fails == 0 ? 0 : 1;
 }

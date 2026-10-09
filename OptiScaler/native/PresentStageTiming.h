@@ -54,6 +54,13 @@ inline constexpr uint32_t kReportEveryPresents = 300;
 inline constexpr double kStallMs = 50.0;
 inline constexpr double kStallLogIntervalMs = 1000.0;
 
+// FGPresent's own timing is a diagnostic of the Vulkan bridge (a game on D3D12 or D3D11 frame generation would log a
+// summary every 300 presents and a warning for every loading screen): only a bridged Vulkan game gets it.
+inline constexpr bool FrameGenerationTimingWanted(bool vulkanBridgeInterop)
+{
+    return vulkanBridgeInterop;
+}
+
 // How long this thread's last FGPresent waited for frame generation's mutex. FGPresent sets it on every call (0 when it
 // took no lock); the game's present hook takes it after the bridge's present (the same thread) and records it as a stage.
 inline double& ThreadMutexWaitMs()

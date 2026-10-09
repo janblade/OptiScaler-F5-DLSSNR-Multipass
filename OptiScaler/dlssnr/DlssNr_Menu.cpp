@@ -21,6 +21,7 @@
 #include <framegen/IFGFeature.h>
 #include <native/NativeLowLatency.h>
 #include <misc/IdentifyGpu.h>
+#include <upscalers/FeatureProvider_Vk.h>
 #include <nvapi/fakenvapi.h>
 
 #include <imgui/imgui.h>
@@ -906,17 +907,12 @@ static bool NativeNrOnlyRunning(NativeApi api)
 }
 
 // "FG only (game's upscaler)": frame generation is fed from a Vulkan-on-D3D12 backend's evaluate
-// (upscalers/IFeature_VkwDx12.cpp), so the game's Vulkan upscaler call has to run through one.
-static bool IsOn12Backend(Upscaler upscaler)
-{
-    return upscaler == Upscaler::DLSS_on12 || upscaler == Upscaler::FFX_on12 || upscaler == Upscaler::FSR21_on12;
-}
-
-// (A Vulkan-on-D3D12 feature reports API::DX12: its upscaler type is what says so.)
+// (upscalers/IFeature_VkwDx12.cpp), so the game's Vulkan upscaler call has to run through one. (Such a feature reports
+// API::DX12: its upscaler type is what says so.)
 static bool VulkanFeatureIsOn12()
 {
     const auto feature = State::Instance().currentFeature;
-    return feature != nullptr && IsOn12Backend(feature->GetUpscalerType());
+    return feature != nullptr && FeatureProvider_Vk::IsOn12(feature->GetUpscalerType());
 }
 
 // The backend frame generation only runs the game's upscaler on, and the one to go back to when the mode is left.
@@ -937,19 +933,14 @@ static void EnterFrameGenerationOnly(Config* config)
 {
     const Upscaler current = config->VulkanUpscaler.value_or_default();
 
-    // Already a D3D12 one: rebuilt all the same, so it is made on the bridge's device (IFeature_VkwDx12::CreateDx12Device)
-    if (IsOn12Backend(current))
-    {
-        SwitchVulkanBackend(config, current);
-        return;
-    }
+    // The same DLSS on D3D12 where the game's DLSS could run, FSR otherwise (FeatureProvider_Vk::On12For). Already a
+    // D3D12 one: rebuilt all the same, so it is made on the bridge's device (IFeature_VkwDx12::CreateDx12Device).
+    const Upscaler target = FeatureProvider_Vk::On12For(current);
 
-    g_backendBeforeFrameGenerationOnly = current;
+    if (target != current)
+        g_backendBeforeFrameGenerationOnly = current;
 
-    // The same DLSS on D3D12 where the game's DLSS could run; FSR otherwise (any GPU)
-    const auto& state = State::Instance();
-    const bool dlss = IdentifyGpu::getPrimaryGpu().dlssCapable && state.NVNGX_DLSS_Path.has_value();
-    SwitchVulkanBackend(config, dlss ? Upscaler::DLSS_on12 : Upscaler::FFX_on12);
+    SwitchVulkanBackend(config, target);
 }
 
 static void LeaveFrameGenerationOnly(Config* config)

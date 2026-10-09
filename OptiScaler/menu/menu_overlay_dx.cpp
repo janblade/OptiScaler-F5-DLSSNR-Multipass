@@ -95,6 +95,22 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
 
     for (UINT i = 0; i < sd.BufferCount; ++i)
     {
+        // The descriptors are made with ImGui's D3D12 backend (RenderImGui_DX12); with another backend already holding
+        // ImGui they stay empty, and a view created at address 0 crashes in the driver
+        if (i >= NUM_BACK_BUFFERS || g_mainRenderTargetDescriptor[i].ptr == 0)
+        {
+            static bool warned = false;
+
+            if (!warned)
+            {
+                warned = true;
+                LOG_WARN("The menu's D3D12 render target descriptors are not set up (another ImGui backend is active): "
+                         "no menu on this swapchain");
+            }
+
+            return;
+        }
+
         ID3D12Resource* pBackBuffer = nullptr;
         auto result = pSwapChain->GetBuffer(i, IID_PPV_ARGS(&pBackBuffer));
 

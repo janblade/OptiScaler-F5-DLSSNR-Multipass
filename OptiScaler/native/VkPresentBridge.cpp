@@ -134,6 +134,15 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
         return false;
     }
 
+    // The mode was switched on after the game started and the game then made a new swapchain: the Vulkan menu is already
+    // drawing, and the D3D12 menu cannot take over from it (it crashed the game in the driver on its first frame).
+    if (MenuOverlayVk::IsUp())
+    {
+        why = "frame generation on Vulkan starts with the game: the Vulkan menu is already up, so the game presents as "
+              "it is (set the mode, save, restart)";
+        return false;
+    }
+
     DXGI_FORMAT dxgi;
 
     if (!native::BridgeSwapchainFormat(in.imageFormat, &dxgi))

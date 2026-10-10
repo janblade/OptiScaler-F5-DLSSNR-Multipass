@@ -95,6 +95,18 @@ template <class Device> InteropVerdict JudgeInteropDevice(Device held, Device pr
     return held == present ? InteropVerdict::Keep : InteropVerdict::Refuse;
 }
 
+// Whether `destroyed` going takes what the frame source holds with it (interop, shared picture, fence, and an unpinned
+// D3D12 device). The device it holds them for, yes. The last present's device only when nothing is loaded yet (D3D12
+// objects made for it alone): it may be a second device that was refused, and its going must leave the held ones alone.
+template <class Device>
+bool ReleasedWithDevice(Device destroyed, Device held, Device lastPresent, bool hasDevice12)
+{
+    if (destroyed == Device {})
+        return false;
+
+    return destroyed == held || (held == Device {} && destroyed == lastPresent && hasDevice12);
+}
+
 // Whether the Vulkan bridge is concerned with the destruction of `destroyed`: it is the device the bridge presents on, or
 // of one already let go of that still waits for its hidden swapchains. Any other device going leaves the bridge, the
 // interop state and the shared D3D12 device alone.

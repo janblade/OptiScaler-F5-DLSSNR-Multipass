@@ -810,8 +810,9 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     VkPhysicalDevice presentPhysical = _PD;
     native::VkFrameSource::DeviceOfQueue(queue, &presentDevice, &presentPhysical);
 
-    // get upscaler time
-    UpscalerTimeVk::ReadUpscalingTime(presentDevice);
+    // get upscaler time (no device when the queue is unknown and the last device made is gone)
+    if (presentDevice != VK_NULL_HANDLE)
+        UpscalerTimeVk::ReadUpscalingTime(presentDevice);
 
     // ??? TODO: if we are hooking dxvk's vulkan calls then this present call could be either coming from dxvk or from a
     // native vk game
@@ -1129,6 +1130,11 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         std::lock_guard lock(_timelineDevicesMutex);
         _timelineDevices.erase(device);
     }
+
+    // The present path falls back to the last device made when its queue is not known (hkvkQueuePresentKHR): that must
+    // never be a device that is gone (a probe device made and destroyed after the swapchain)
+    if (device != VK_NULL_HANDLE && _device == device)
+        _device = VK_NULL_HANDLE;
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);

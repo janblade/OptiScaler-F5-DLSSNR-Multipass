@@ -297,12 +297,12 @@ bool VkFrameSource::EnsureDevices(std::string& why)
 
     if (verdict == InteropVerdict::Refuse)
     {
-        _refusal = "Optical F5Low runs on the first Vulkan device the game presents with. This present comes from "
-                   "another device, so it is left alone.";
-
+        // Remembered until that device is destroyed (OnDeviceDestroyed): a game that really presents from two devices
+        // alternates between them every frame, and the log and the menu must not alternate with it.
         if (_refusedDevice != _device)
         {
             _refusedDevice = _device;
+            _refusal = "The game also shows pictures from a second graphics device. Optical F5Low stays on the first one.";
             LOG_WARN("Native motion (Vulkan): a present from another Vulkan device ({:X}) is left alone; Optical F5Low "
                      "keeps running on device {:X}",
                      (size_t) _device, (size_t) _interop.device);
@@ -319,7 +319,7 @@ bool VkFrameSource::EnsureDevices(std::string& why)
 
         if (!loaded.Load(_physical, _device, why))
         {
-            _refusal = why;
+            _refusal = "This graphics device cannot share its pictures with Optical F5Low.";
             return false;
         }
 
@@ -327,8 +327,9 @@ bool VkFrameSource::EnsureDevices(std::string& why)
         _interop = loaded;
     }
 
-    _refusal.clear();
-    _refusedDevice = VK_NULL_HANDLE;
+    // A second device's refusal stays up while that device lives; a failed load on this one is over
+    if (_refusedDevice == VK_NULL_HANDLE)
+        _refusal.clear();
 
     if (!EnsureD3D12(_physical, why))
         return false;
@@ -471,10 +472,17 @@ void VkFrameSource::PinD3D12(bool pin)
 
 void VkFrameSource::OnDeviceDestroyed(VkDevice device)
 {
-    if (_interop.device == device || (_device == device && _device12 != nullptr))
-    {
+    // What this source holds goes only with the device it holds it for (VkDeviceRules.h)
+    if (ReleasedWithDevice(device, _interop.device, _device, _device12 != nullptr))
         Release();
+
+    if (_device == device)
         _device = VK_NULL_HANDLE;
+
+    if (_refusedDevice == device)
+    {
+        _refusedDevice = VK_NULL_HANDLE;
+        _refusal.clear();
     }
 
     std::lock_guard lock(g_registryMutex);

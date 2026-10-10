@@ -9,7 +9,8 @@
 //   - the present is answered with A (the queue's own device), never with the device made last,
 //   - nothing is loaded on, or acted on for, any other device: no interop load, the interop and the shared picture and
 //     fence survive, the bridge stays up, the current D3D12 device stays the bridge's,
-//   - a present that does come from another live device is refused (and loads nothing),
+//   - a present that does come from another live device is refused (and loads nothing), and that device going again
+//     leaves the held interop alone,
 //   - the bridge gives up its D3D12 swapchain when the device is gone or its present keeps failing, not before.
 //
 // Built with -DVK_MULTI_DEVICE_OLD the same test takes the decisions the code took before the fix (the last device made is
@@ -154,6 +155,7 @@ struct FrameSlot
     native::SharedFenceVk fence;
     native::SharedImageVk picture;
     std::map<VkDevice, int> loads;
+    VkDevice lastPresent = VK_NULL_HANDLE; // VkFrameSource's _device: the last present's device, refused or not
 
     void Release()
     {
@@ -165,6 +167,8 @@ struct FrameSlot
     // VkFrameSource::EnsureDevices
     bool Ensure(VkPhysicalDevice physical, VkDevice presentDevice, std::string& why)
     {
+        lastPresent = presentDevice;
+
 #ifdef VK_MULTI_DEVICE_OLD
         // Before the fix: whatever device the present is on replaces the held one, whether or not it is alive
         if (interop.device != presentDevice)
@@ -233,8 +237,15 @@ struct FrameSlot
     // VkFrameSource::OnDeviceDestroyed
     void OnDeviceDestroyed(VkDevice device)
     {
-        if (interop.device == device)
+#ifdef VK_MULTI_DEVICE_OLD
+        if (interop.device == device || (lastPresent == device && device12 != nullptr))
+#else
+        if (native::ReleasedWithDevice(device, interop.device, lastPresent, device12 != nullptr))
+#endif
             Release();
+
+        if (lastPresent == device)
+            lastPresent = VK_NULL_HANDLE;
     }
 };
 
@@ -416,30 +427,59 @@ int main()
         Check("nothing was loaded for it, and device A's interop is untouched",
               slot.loads[other] == 0 && slot.interop.device == deviceA && slot.fence.Ready());
 
-        // The held device goes: the other one may be taken on
-        slot.OnDeviceDestroyed(deviceA);
-        Check("when device A is destroyed the interop is released", slot.interop.device == VK_NULL_HANDLE);
-        Check("the other device is then taken on (one load)",
-              slot.Ensure(vk.physical, presentDevice(otherQueue), why) && slot.interop.device == other &&
-                  slot.loads[other] == 1);
-        slot.Release();
+        // The refused device goes again while A is held: the last present came from it, and the rule before the review
+        // fix (`_device == device && _device12 != nullptr`) released A's interop, picture and fence with it
+        Check("the rule before the review fix would have released A's interop here",
+              slot.interop.device == deviceA && slot.lastPresent == other && slot.device12 != nullptr);
+        slot.OnDeviceDestroyed(other);
+        Check("the refused device going leaves device A's interop, picture and fence alone",
+              slot.interop.device == deviceA && slot.fence.Ready() && slot.picture.Matches(256, 144, VK_FORMAT_B8G8R8A8_UNORM));
         registry.Forget(other);
         vkDestroyDevice(other, nullptr);
+        Check("device A is still answered and kept", slot.Ensure(vk.physical, presentDevice(queueA), why) &&
+                                                         slot.interop.device == deviceA && slot.loads[deviceA] == 1);
+
+        // The held device goes: another one may be taken on
+        VkDevice third = VK_NULL_HANDLE;
+        VkQueue thirdQueue = VK_NULL_HANDLE;
+
+        if (vk.MakeDevice(&third, &thirdQueue))
+        {
+            registry.NoteDevice(third, vk.physical);
+            registry.NoteQueue(thirdQueue, third, vk.family);
+            Check("a third device presenting is refused while A is held",
+                  !slot.Ensure(vk.physical, presentDevice(thirdQueue), why) && slot.loads[third] == 0);
+            slot.OnDeviceDestroyed(deviceA);
+            Check("when device A is destroyed the interop is released", slot.interop.device == VK_NULL_HANDLE);
+            Check("the third device is then taken on (one load)",
+                  slot.Ensure(vk.physical, presentDevice(thirdQueue), why) && slot.interop.device == third &&
+                      slot.loads[third] == 1);
+            slot.Release();
+            registry.Forget(third);
+            vkDestroyDevice(third, nullptr);
+        }
     }
 #endif
 
     printf("The bridge gives up its D3D12 swapchain\n");
     {
         native::VkOutputFailureRule rule;
-        Check("a present that works does not give up", !rule.OnPresent(false, false));
-        Check("one failure does not", !rule.OnPresent(true, false));
-        Check("a success in between starts the count again", !rule.OnPresent(false, false) && !rule.OnPresent(true, false) &&
-                                                                !rule.OnPresent(true, false));
-        Check("the third failure in a row gives up", rule.OnPresent(true, false));
-        Check("and stays given up", rule.OnPresent(false, false));
+        Check("a present that works does not give up", !rule.OnPresent(false, false, 0));
+        Check("one failure does not", !rule.OnPresent(true, false, 10));
+        Check("a success in between starts the count again", !rule.OnPresent(false, false, 20) &&
+                                                                !rule.OnPresent(true, false, 30) &&
+                                                                !rule.OnPresent(true, false, 40));
+        Check("a third failure in a row within a second does not (a swapchain being remade)",
+              !rule.OnPresent(true, false, 50));
+        Check("failures that go on for a second give up", !rule.OnPresent(true, false, 900) && rule.OnPresent(true, false, 1031));
+        Check("and stays given up", rule.OnPresent(false, false, 1040));
+
+        native::VkOutputFailureRule brief;
+        Check("two failures a second apart are not enough on their own",
+              !brief.OnPresent(true, false, 0) && !brief.OnPresent(true, false, 2000));
 
         native::VkOutputFailureRule gone;
-        Check("a removed device gives up at once", gone.OnPresent(true, true));
+        Check("a removed device gives up at once", gone.OnPresent(true, true, 0));
     }
 
     slot.Release();

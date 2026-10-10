@@ -20,6 +20,7 @@
 #include "DlssNr_Common.h"
 #include "DlssNr_DetailReuseConstants.h"
 #include "DlssNr_LutConstants.h"
+#include "DlssNr_Spatial.h"
 
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
@@ -42,6 +43,7 @@
 
 // Goes through the same constant-buffer ring as DlssNrConstants.
 static_assert(sizeof(DlssNrDetailReuseConstants) == sizeof(DlssNrConstants));
+static_assert(sizeof(DlssNr::Spatial::Constants) == sizeof(DlssNrConstants));
 
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 {
@@ -86,6 +88,12 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // failed to build.
     ID3D12PipelineState* _detailReusePipelineState = nullptr;
     bool _detailReusePipelineFailed = false;
+
+    // Compress screen edges (dlssnr_spatial.hlsl): the colour pack / unpack and the depth + motion pack are two
+    // pipelines of one shader, built on first use the same way. Not retried once they failed to build.
+    ID3D12PipelineState* _spatialPipelineState = nullptr;
+    ID3D12PipelineState* _spatialGuidesPipelineState = nullptr;
+    bool _spatialPipelineFailed = false;
 
     // The LUT pass (dlssnr_lut.hlsl, LUT-apply epic Story 2: dlssnr-lut-apply).
     // Its own root signature, PSO and small descriptor-heap ring -- not the shared table above -- because it
@@ -186,6 +194,18 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                              unsigned int Width, unsigned int Height, ID3D12Resource* In0, ID3D12Resource* In1,
                              ID3D12Resource* In2, ID3D12Resource* In3, ID3D12Resource* In4, ID3D12Resource* OutTarget,
                              ID3D12Resource* OutSecond, ID3D12Resource* InHistoryDistrust = nullptr);
+
+    // Compress screen edges (dlssnr_spatial.hlsl, DlssNr_Spatial.h). SpatialReady builds the pipelines on first use and
+    // says whether there are any; DispatchSpatial is false (no-op) without them. Same descriptor table shape as
+    // DispatchPass; Width x Height threads come from the constants. By mode:
+    //   100  In0 the encoded colour (native size)                               -> Out0 the packed colour
+    //   101  In1 depth, In2 motion (a null In0 gets In1)                        -> Out0 R32F depth, Out1 RG32F motion
+    //   102  In0 the packed model input, In1 the model's answer                 -> Out0 the unpacked input, Out1 the answer
+    // The sampler is the shared linear clamp. Resources are left in the state they arrived in.
+    bool SpatialReady();
+    bool DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Spatial::Constants& InConstants,
+                         ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2, ID3D12Resource* Out0,
+                         ID3D12Resource* Out1 = nullptr);
 
     // The LUT pass (dlssnr_lut.hlsl, DlssNr_Lut.h, LUT-apply epic Story 2:
     // dlssnr-lut-apply). Grades InSource (Width x Height, already in the colour

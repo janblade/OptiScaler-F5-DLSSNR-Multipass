@@ -58,6 +58,8 @@
 #include "precompile/dlssnr_finished_color_Shader.h"
 #include "precompile/dlssnr_detail_stats_Shader.h"
 #include "precompile/dlssnr_detail_reuse_Shader.h"
+#include "precompile/dlssnr_spatial_Shader.h"
+#include "precompile/dlssnr_spatial_guides_Shader.h"
 #include "precompile/dlssnr_exposure_adapt_Shader.h"
 #include "precompile/dlssnr_lut_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
@@ -2205,6 +2207,10 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _exposureAdaptPipelineState->Release();
     if (_detailReusePipelineState)
         _detailReusePipelineState->Release();
+    if (_spatialPipelineState)
+        _spatialPipelineState->Release();
+    if (_spatialGuidesPipelineState)
+        _spatialGuidesPipelineState->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -2639,6 +2645,81 @@ bool DlssNr_Dx12::DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList,
     InCmdList->SetPipelineState(_detailReusePipelineState);
     InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
     InCmdList->Dispatch((Width + _numThreadsX - 1) / _numThreadsX, (Height + _numThreadsY - 1) / _numThreadsY, 1);
+
+    return true;
+}
+
+bool DlssNr_Dx12::SpatialReady()
+{
+    if (!_spatialPipelineFailed && _init && (!_spatialPipelineState || !_spatialGuidesPipelineState))
+    {
+        if (!_spatialPipelineState)
+            CreateComputePipeline(_device, &_spatialPipelineState, dlssnr_spatial_cso, sizeof(dlssnr_spatial_cso),
+                                  nullptr);
+        if (!_spatialGuidesPipelineState)
+            CreateComputePipeline(_device, &_spatialGuidesPipelineState, dlssnr_spatial_guides_cso,
+                                  sizeof(dlssnr_spatial_guides_cso), nullptr);
+
+        if (!_spatialPipelineState || !_spatialGuidesPipelineState)
+        {
+            _spatialPipelineFailed = true;
+            LOG_WARN("DLSS-NR: the Compress screen edges passes could not be built; NR runs on the whole picture");
+        }
+    }
+
+    return _init && _spatialPipelineState != nullptr && _spatialGuidesPipelineState != nullptr;
+}
+
+bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Spatial::Constants& InConstants,
+                                  ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2,
+                                  ID3D12Resource* Out0, ID3D12Resource* Out1)
+{
+    if (!SpatialReady() || InCmdList == nullptr || _device == nullptr || Out0 == nullptr || InConstants.width == 0 ||
+        InConstants.height == 0)
+        return false;
+
+    const bool guides = InConstants.mode == 101;
+    ID3D12Resource* const first = In0 != nullptr ? In0 : In1;
+
+    if (first == nullptr)
+        return false;
+
+    const uint32_t slot = _heapIndex;
+    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+
+    FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
+
+    // The shader reads t0..t2 only. The rest of the table gets t0 as a stand-in so no descriptor in it is unbound.
+    ID3D12Resource* const srvs[kSrvCount] = {
+        first,
+        In1 != nullptr ? In1 : first,
+        In2 != nullptr ? In2 : first,
+        first,
+        first,
+        first,
+    };
+
+    for (uint32_t i = 0; i < kSrvCount; ++i)
+        CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
+
+    ID3D12Resource* const uavs[kUavCount] = { Out0, Out1 != nullptr ? Out1 : Out0 };
+
+    for (uint32_t i = 0; i < kUavCount; ++i)
+        CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
+
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+    {
+        LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
+    InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+    InCmdList->SetComputeRootSignature(_rootSignature);
+    InCmdList->SetPipelineState(guides ? _spatialGuidesPipelineState : _spatialPipelineState);
+    InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
+    InCmdList->Dispatch((InConstants.width + _numThreadsX - 1) / _numThreadsX,
+                        (InConstants.height + _numThreadsY - 1) / _numThreadsY, 1);
 
     return true;
 }

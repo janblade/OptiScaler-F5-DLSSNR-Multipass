@@ -44,6 +44,10 @@ review for its change type below, against the specs here.**
    is not what is committed); its SPIR-V uses the dlssnr recipe (`dlssnr_detail_reuse_spv`). Both rebuild
    byte-identically from the committed source with dxc 1.9. Run from `precompile/`: it and `dlssnr.hlsl` share
    `dlssnr_replace_curve.hlsli` (sRGB, Neutwo, the hybrid, `kRatioFloor`), so a change there means rebuilding both.
+   `dlssnr_spatial_Shader.*` and `dlssnr_spatial_guides_Shader.*` (Compress screen edges: colour pack / unpack, and depth +
+   motion pack; DXIL `.cso`/`.h` and SPIR-V `_Vk.spv`/`_Vk.h`, arrays `dlssnr_spatial_cso`, `dlssnr_spatial_guides_cso`,
+   `dlssnr_spatial_spv`, `dlssnr_spatial_guides_spv`) all come from `precompile/build_spatial.bat` (dxc 1.9; the guides
+   variant is `-D SPATIAL_GUIDES`, the SPIR-V ones `-D VK_MODE`), and share `dlssnr_spatial_warp.hlsli`.
    `dlssnr_detail_stats_Shader.cso` / `.h` (Tune's statistics) are dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL (the
    header with `-Fh -Vn dlssnr_detail_stats_cso`), which reproduces the committed binary byte-identically; its SPIR-V
    uses the dlssnr recipe (`dlssnr_detail_stats_spv`).

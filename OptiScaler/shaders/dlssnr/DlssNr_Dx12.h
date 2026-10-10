@@ -38,6 +38,8 @@
 // layers themselves are NGX evaluates and do not consume this ring; their A/B resources and feature histories are
 // persistent. Reuse detail between frames (DlssNr_DetailReuse.inl) adds up to four more on a full frame (compose,
 // estimate, steady, capture) and four on a reused one (estimate, fill, save motion, capture), which skips the clamps.
+// Compress screen edges (DlssNr_Spatial.inl) adds three (colour pack, depth + motion pack, unpack), and replaces Reuse
+// detail's, which does not run beside it.
 // Sixty-four slots leave four or more such frames before descriptor/constant reuse; many more passes leave fewer.
 #define DLSSNR_NUM_OF_HEAPS 64
 

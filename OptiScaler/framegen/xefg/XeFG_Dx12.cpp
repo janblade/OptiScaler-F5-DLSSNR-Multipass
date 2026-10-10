@@ -2,6 +2,7 @@
 #include "XeFG_Dx12.h"
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
+#include <misc/REFrameworkCompat.h>
 #include <resource_tracking/ResTrack_dx12.h>
 
 #include <nvapi/fakenvapi.h>
@@ -1647,6 +1648,11 @@ bool XeFG_Dx12::ReleaseSwapchain(HWND hwnd)
         return false;
 
     LOG_DEBUG("");
+
+    // Every teardown of XeFG's swapchain comes through here (a new swapchain in CreateSwapchain/CreateSwapchain1,
+    // FGHooks::hkFGRelease, the wrapped swapchain's Release): a REFramework drawing on it lets go first. Before frame
+    // generation's lock: REFramework takes its own lock in there, and the fork's author saw the other order deadlock
+    REFrameworkCompat::BeforeXeFGSwapchainRetire(State::Instance().currentFGSwapchain, _swapChainContext, hwnd);
 
     if (Config::Instance()->FGUseMutexForSwapchain.value_or_default())
     {

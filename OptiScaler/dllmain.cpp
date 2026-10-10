@@ -43,6 +43,7 @@
 #include <nvapi/NvApiHooks.h>
 
 #include "spoofing/User32_Spoofing.h"
+#include <misc/REFrameworkCompat.h>
 
 #include <cwctype>
 #include <magic_enum.hpp>
@@ -1323,6 +1324,9 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::XeFGBridgeResizeAsCreated)
         stringQuirks.push_back("XeFG bridge resizes as created");
 
+    if (quirks & GameQuirk::REFrameworkCompat)
+        stringQuirks.push_back("REFramework compatibility (XeFG)");
+
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
         spdlog::info("Quirk: {}", stringQuirk);
@@ -1554,6 +1558,30 @@ static void CheckQuirks(bool isNvidia)
     }
     else
         quirks.reset(GameQuirk::DoNotPreserveFGSwapChain);
+
+    // misc/REFrameworkCompat.h, decided before the menu quirk below that it changes
+    REFrameworkCompat::Init(quirks[GameQuirk::REFrameworkCompat]);
+
+    if (REFrameworkCompat::Active())
+    {
+        // The old overlay menu switches frame generation off, and that REFramework is there to draw on XeFG's frames
+        if (quirks & GameQuirk::OldOverlayMenu && !Config::Instance()->OverlayMenu.has_value())
+        {
+            quirks.reset(GameQuirk::OldOverlayMenu);
+            LOG_INFO("REFramework compatibility: old overlay menu quirk not applied (it turns frame generation off)");
+        }
+
+        // REFramework's menu is on Insert as well: with both on one key it misses every other press in some games
+        if (!Config::Instance()->ShortcutKey.has_value())
+        {
+            Config::Instance()->ShortcutKey.set_volatile_value(VK_HOME);
+            LOG_INFO("REFramework compatibility: menu key is Home (REFramework uses Insert; ShortcutKey changes it)");
+        }
+    }
+    else
+    {
+        quirks.reset(GameQuirk::REFrameworkCompat);
+    }
 
     if (quirks & GameQuirk::OldOverlayMenu && !Config::Instance()->OverlayMenu.has_value())
     {

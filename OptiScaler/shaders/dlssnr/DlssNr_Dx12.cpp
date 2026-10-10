@@ -20,6 +20,7 @@
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include "DlssNr_Dx12.h"
+#include "DlssNr_SurfaceFormats.h"
 #include "DlssNr_ActiveColor.h"
 #include "DlssNr_Guides.h"
 #include "DlssNr_SeamClock.h"
@@ -957,14 +958,21 @@ void ForgetCalibration()
     g_nr.calibWhy = "measuring...";
 }
 
-// needed is the model surfaces' format: the game's, or RGBA16F while Compress screen edges packs the picture.
-void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
+// modelFormat is the model surfaces' format: the game's, or RGBA16F while Compress screen edges packs the picture.
+// colourFormat is the game's colour format, which colorCopy, hdrCopy, colorSmall, activeColor, lutScratch and outputNative
+// are made in (hdrCopy may be RGBA16F instead, and is checked again at its creation). Both are checked: with compression
+// on the model format does not move when the game's does (DlssNr_SurfaceFormats.h).
+void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT colourFormat)
 {
-    if (g_nr.output == nullptr || g_nr.output->GetDesc().Format == needed)
+    const DXGI_FORMAT haveModel = g_nr.output != nullptr ? g_nr.output->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
+    const DXGI_FORMAT haveColour = g_nr.colorCopy != nullptr ? g_nr.colorCopy->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
+
+    if (!DlssNr::SurfacesStale((int) haveModel, (int) modelFormat, (int) haveColour, (int) colourFormat))
         return;
 
-    LOG_INFO("DLSS-NR rebuilding surfaces: format {} -> {} (inject point or Compress screen edges changed)",
-             (int) g_nr.output->GetDesc().Format, (int) needed);
+    LOG_INFO("DLSS-NR rebuilding surfaces: model format {} -> {}, colour format {} -> {} (inject point or Compress "
+             "screen edges changed)",
+             (int) haveModel, (int) modelFormat, (int) haveColour, (int) colourFormat);
 
     ForgetCalibration();
 
@@ -3020,7 +3028,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool replaceCorrection =
         spatial && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
 
-    ReleaseSurfacesIfFormatChanged(modelFormat);
+    ReleaseSurfacesIfFormatChanged(modelFormat, desc.Format);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
                                    g_nr.workWidth != modelWidth || g_nr.workHeight != modelHeight;

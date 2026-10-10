@@ -2798,8 +2798,21 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     RenderExposureSection(config, menuResScale);
 }
 
+// The model resolution NR applies, as a percentage: the slider, or with Auto (post-SR only) the
+// ratio the runtime derived from render:output. The same rule the Input page uses for its slider.
+static float AppliedModelScale(Config* config, const NrCommon& nr)
+{
+    const bool beforeSr = config->DlssNrRunBeforeSr.value_or_default() ||
+                          (nr.finishedPicture && config->DlssNrDeferredDlss.value_or_default());
+    const auto activeFeature = State::Instance().currentFeature;
+    const bool rayReconstruction = activeFeature && activeFeature->GetUpscalerType() == Upscaler::DLSSD;
+    const bool autoActive = config->DlssNrModelResolutionAuto.value_or_default() && (!beforeSr || rayReconstruction);
+
+    return autoActive ? DlssNr::CurrentModelResolutionPercent() / 100.0f : config->DlssNrWorkingScale.value_or_default();
+}
+
 // NR Output, including Effect strength.
-static void RenderOutputPage(Config* config, float menuResScale)
+static void RenderOutputPage(Config* config, float menuResScale, const NrCommon& nr)
 {
     ImGui::PushItemWidth(220.0f * menuResScale);
 
@@ -2809,7 +2822,8 @@ static void RenderOutputPage(Config* config, float menuResScale)
     // supersampling composites its down-legged answer at native -- the residual collapses to the
     // model's own picture and the two modes are identical, so the control says so by going grey.
     {
-        const bool reduced = config->DlssNrWorkingScale.value_or_default() < 0.999f;
+        // The applied scale, not the slider: with Auto after SR the slider can say 100% while NR runs smaller.
+        const bool reduced = AppliedModelScale(config, nr) < 0.999f;
 
         if (!reduced)
             ImGui::BeginDisabled();
@@ -3367,7 +3381,7 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
         RenderInputPage(config, menuResScale, nr);
         break;
     case Page::NrOutput:
-        RenderOutputPage(config, menuResScale);
+        RenderOutputPage(config, menuResScale, nr);
         break;
     case Page::NrPasses:
         RenderPassesPage(config, menuResScale);

@@ -493,6 +493,20 @@ class Config
     // overridden by Ray Reconstruction); the manual slider applies as usual.
     CustomOptional<bool> DlssNrModelResolutionAuto { false };
 
+    // Compress screen edges (shaders/dlssnr/DlssNr_Spatial.h): NR works on a smaller picture whose middle stays 1:1 and
+    // whose edges are squeezed, and the answer is stretched back. Off by default. Centre and work are percentages of the
+    // frame on each axis (centre < work <= 100); offset moves the centre band and shift moves pixels between the two
+    // edges, both in percent of the frame. Out-of-range values leave compression off (the menu says why).
+    CustomOptional<bool> DlssNrSpatialCompression { false };
+    CustomOptional<float> DlssNrSpatialCenterX { 80.0f };
+    CustomOptional<float> DlssNrSpatialCenterY { 80.0f };
+    CustomOptional<float> DlssNrSpatialWorkX { 90.0f };
+    CustomOptional<float> DlssNrSpatialWorkY { 90.0f };
+    CustomOptional<float> DlssNrSpatialOffsetX { 0.0f };
+    CustomOptional<float> DlssNrSpatialOffsetY { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftX { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftY { 0.0f };
+
     // Filter used for NR supersampling (working scale > 1): the model runs above native, and this is
     // the downscaler that averages its answer back to native. Independent of OutputScalingDownscaler
     // so NR and Output Scaling can run different filters at once. Lanczos3 is the sharp default.

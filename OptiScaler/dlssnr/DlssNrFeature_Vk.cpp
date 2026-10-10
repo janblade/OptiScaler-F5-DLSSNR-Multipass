@@ -26,8 +26,12 @@
 #include <dlssnr/DlssNr_VkExtensions.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
 #include <shaders/dlssnr/DlssNrDetailReuse_Vk.h>
+#include <shaders/dlssnr/DlssNrSpatial_Vk.h>
+#include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
+
+#include <dlssnr/DlssNr_RetryRequest.h>
 
 #include <algorithm>
 #include <chrono>
@@ -262,13 +266,20 @@ struct VkLockMark
     ~VkLockMark() { t_vkLockHeld = false; }
 };
 
-void Fail(const char* why)
+// What a retry cannot fix: the model has no usable Vulkan surface, or NGX will not start on this device. Anything else
+// (a file that was missing, a surface that could not be allocated, a failed dispatch) a retry may.
+bool g_vkFailurePermanent = false;
+DlssNr::RetryRequest g_vkRetry;
+unsigned int g_vkRetryHandled = 0;
+
+void Fail(const char* why, bool permanent = false)
 {
     if (g_vk.failed)
         return;
 
     g_vk.failed = true;
     g_vk.reason = why;
+    g_vkFailurePermanent = permanent;
     LOG_ERROR("DLSS-NR Vulkan unavailable: {}", why);
 }
 
@@ -651,14 +662,29 @@ std::optional<std::filesystem::path> FindSnippet()
 
 #include "DlssNr_ExposureCalibrate_Vk.inl"
 #include "DlssNr_DetailReuse_Vk.inl"
+#include "DlssNr_Spatial_Vk.inl"
 
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
 
+void ReleaseNrObjects(); // below, with ShutdownVk
+
 bool IsRunningVk() { return g_vk.feature != nullptr && !g_vk.failed; }
 
 const char* FailureReasonVk() { return g_vk.failed ? g_vk.reason : ""; }
+
+bool RetryableVk() { return g_vk.failed && !g_vkFailurePermanent; }
+
+void RequestRetryVk() { g_vkRetry.Request(); }
+
+// Read from the menu thread without the lock: the model's size is two words that only change in the resize block, and a
+// torn read costs one wrong frame of a text line.
+void CurrentModelSizeVk(unsigned int& width, unsigned int& height)
+{
+    width = g_vk.workWidth;
+    height = g_vk.workHeight;
+}
 
 unsigned long long FramesVk() { return g_vk.frames; }
 
@@ -698,6 +724,8 @@ std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
 
 DetailReuseInfo DetailReuseStatusVk() { return DetailReuseVk::Published(); }
 
+Spatial::Published EdgeCompressionStatusVk() { return EdgeCompressionVk::Published(); }
+
 unsigned long long VkFrameClock()
 {
     const unsigned long long presents = State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
@@ -735,6 +763,36 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     std::lock_guard<std::mutex> lock(g_vkMutex);
     VkLockMark lockMark;
+
+    // A retry the menu asked for: here, on the thread that records NR, never from the menu. Drain the device, let go of
+    // what NR made (ReleaseNrObjects, which also clears the compression fallback), and start over; a failure that
+    // cannot be retried stays. If the device will not go idle the retry itself fails and says so.
+    const RetryStep retryStep = DecideRetry(g_vkRetry.Consume(g_vkRetryHandled), g_vk.failed, g_vkFailurePermanent,
+                                            g_vk.device != VK_NULL_HANDLE, g_vk.device != device);
+
+    // The game made a new device since the failure: the old one is gone with everything NR made on it, so no call goes to
+    // it (no wait, no destroy); the handles are forgotten and the code below adopts the new device.
+    if (retryStep == RetryStep::Abandon)
+    {
+        LOG_INFO("DLSS-NR Vulkan: retrying after \"{}\" on a new device", g_vk.reason);
+        ShutdownVk(false);
+        g_vk.failed = false;
+        g_vk.reason = "";
+    }
+    else if (retryStep == RetryStep::Release)
+    {
+        if (g_vk.device != VK_NULL_HANDLE && vkDeviceWaitIdle(g_vk.device) != VK_SUCCESS)
+        {
+            g_vk.failed = false; // Fail() keeps the first reason otherwise
+            Fail("the Vulkan device could not retire work for retry");
+            return;
+        }
+
+        LOG_INFO("DLSS-NR Vulkan: retrying after \"{}\"", g_vk.reason);
+        ReleaseNrObjects();
+        g_vk.failed = false;
+        g_vk.reason = "";
+    }
 
     if (g_vk.failed)
         return;
@@ -1043,7 +1101,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (probe != 15)
         {
             LOG_ERROR("DLSS-NR Vulkan: the model's Vulkan surface is incomplete (probe {})", probe);
-            Fail("the model does not expose a complete Vulkan surface");
+            Fail("the model does not expose a complete Vulkan surface", true);
             return;
         }
 
@@ -1055,7 +1113,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}{}", result,
                       g_vk.deviceLosses > 0 ? " (a re-init after the previous device was lost)" : "");
-            Fail("the model would not initialise on this Vulkan device");
+            Fail("the model would not initialise on this Vulkan device", true);
             return;
         }
 
@@ -1117,6 +1175,33 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         }
     }
 
+    // Compress screen edges (DlssNr_Spatial_Vk.inl): whether the model works on a packed picture this frame, and at what
+    // size. The model's surfaces, its features and the guides it is handed follow the packed size; the encode, the
+    // resolve and the frame stay at the ordinary ones.
+    bool spatialReset = false;
+    bool spatial = EdgeCompressionVk::Begin(
+        cfg, width, height, workScale,
+        EdgeCompressionVk::SignatureOf(colour->Resource.ImageViewInfo.Format, depth, motion), spatialReset);
+
+    if (spatialReset)
+        g_vk.reset = true;
+
+    if (spatial && !EdgeCompressionVk::PassReady(device, physicalDevice))
+    {
+        EdgeCompressionVk::TurnOff(Spatial::Status::TurnedOffResources);
+        g_vk.reset = true;
+        spatial = false;
+    }
+
+    // The Replace curves take the model's answer as the picture and never read the proxy, so the unpack's loss at the edges
+    // would land on screen with nothing to cancel it. The unpack then adds it back, measured against the picture the
+    // uncompressed path would have shown the model (mode 103), which is built below the way that path builds it.
+    const bool replaceCorrection =
+        spatial && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
+
+    const uint32_t modelWidth = spatial ? EdgeCompressionVk::Layout().modelW : workWidth;
+    const uint32_t modelHeight = spatial ? EdgeCompressionVk::Layout().modelH : workHeight;
+
     // Resize. The feature is built for a size and has to be rebuilt when the frame OR the working
     // size changes -- moving the slider is a rebuild, which is why it is compared here.
     bool profileChanged = g_vk.activePasses != passes;
@@ -1124,9 +1209,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         profileChanged |= g_vk.builtTuning[pass] != Profiles::PassTuning(cfg, pass) ||
                           g_vk.builtPreset[pass] != Profiles::PassPreset(cfg, pass) ||
                           g_vk.builtStyle[pass] != Profiles::PassStyle(cfg, pass);
-    if (g_vk.width != width || g_vk.height != height || g_vk.workWidth != workWidth ||
-        g_vk.workHeight != workHeight || g_vk.beforeSr != beforeSr ||
-        g_vk.rayReconstruction != rayReconstruction || profileChanged)
+    if (g_vk.width != width || g_vk.height != height || g_vk.workWidth != modelWidth ||
+        g_vk.workHeight != modelHeight || g_vk.beforeSr != beforeSr ||
+        g_vk.rayReconstruction != rayReconstruction || profileChanged ||
+        EdgeCompressionVk::Stale(spatial, EdgeCompressionVk::Layout(), workScale > 1.0f, replaceCorrection))
     {
         // This block releases the feature and frees the surfaces below IMMEDIATELY. A frame-size
         // change is already fenced by the game -- it recreates the swapchain around it -- but moving
@@ -1183,13 +1269,21 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         // outputNative is the native buffer either the supersample down-leg averages the answer into,
         // or the reduced up-leg's SGSR1 answer enlarge writes into -- shared between the two legs
         // since workScale is a single scalar (never both > 1 and < 1 in the same frame).
-        const bool ok = CreateImage(g_vk.output, workWidth, workHeight, working, true) &&
-                        (passes == 1 || CreateImage(g_vk.scratch, workWidth, workHeight, working, true)) &&
+        // Packed, the model input comes from the colour pack instead of a shrunk copy, and the supersample down-leg
+        // averages into Compress screen edges' own native pair.
+        EdgeCompressionVk::DestroyImages();
+
+        const bool ok = CreateImage(g_vk.output, modelWidth, modelHeight, working, true) &&
+                        (passes == 1 || CreateImage(g_vk.scratch, modelWidth, modelHeight, working, true)) &&
                         CreateImage(g_vk.proxy, width, height, working, true) &&
                         CreateImage(g_vk.keep, width, height, working, true) &&
                         (!beforeSr || CreateImage(g_vk.preColor, width, height, working, false)) &&
-                        (!reduced || CreateImage(g_vk.proxySmall, workWidth, workHeight, working, true)) &&
-                        (workScale == 1.0f || CreateImage(g_vk.outputNative, width, height, working, true));
+                        (!reduced || (spatial && !replaceCorrection) ||
+                         CreateImage(g_vk.proxySmall, workWidth, workHeight, working, true)) &&
+                        (workScale == 1.0f || (spatial && workScale > 1.0f) ||
+                         CreateImage(g_vk.outputNative, width, height, working, true)) &&
+                        (!spatial ||
+                         EdgeCompressionVk::CreateImages(EdgeCompressionVk::Layout(), workScale > 1.0f, replaceCorrection));
 
         if (!ok)
         {
@@ -1199,8 +1293,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
         g_vk.width = width;
         g_vk.height = height;
-        g_vk.workWidth = workWidth;
-        g_vk.workHeight = workHeight;
+        g_vk.workWidth = modelWidth;
+        g_vk.workHeight = modelHeight;
         g_vk.beforeSr = beforeSr;
         g_vk.rayReconstruction = rayReconstruction;
         g_vk.activePasses = passes;
@@ -1220,7 +1314,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (feature)
             continue;
         const auto tuning = Profiles::PassTuning(cfg, pass);
-        feature = g_vk.create((void*) cmdBuffer, g_vk.capabilityParams, workWidth, workHeight,
+        feature = g_vk.create((void*) cmdBuffer, g_vk.capabilityParams, modelWidth, modelHeight,
                              (int) Profiles::PassPreset(cfg, pass), tuning.intensity,
                              (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone,
                              tuning.skin, tuning.autoMask ? 1 : 0, 1);
@@ -1231,7 +1325,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         }
 
         LOG_INFO("DLSS-NR Vulkan: pass {} built at {}x{} (frame {}x{}, {} SR)", pass + 1,
-                 workWidth, workHeight, width, height, beforeSr ? "before" : "after");
+                 modelWidth, modelHeight, width, height, beforeSr ? "before" : "after");
         created = true;
         g_vk.reset = true;
     }
@@ -1797,7 +1891,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // downsample makes the small one the model actually reads.
     OwnedImage* modelInput = &g_vk.proxy;
 
-    if (reduced && g_vk.proxySmall.Valid())
+    if (reduced && (!spatial || replaceCorrection) && g_vk.proxySmall.Valid())
     {
         bool built = false;
 
@@ -1944,9 +2038,65 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvX);
     params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvY);
     const float gameMvX = mvX, gameMvY = mvY;
-    // Match D3D12: preserve the game's vector encoding, then adjust only for the NR working scale.
-    mvX *= (float) workWidth / width;
-    mvY *= (float) workHeight / height;
+
+    // Compress screen edges: pack the proxy, the depth and the motion into the smaller picture the model works on. The
+    // vectors are taken to native pixels with the game's scale first, and the packed ones are exact in packed pixels,
+    // so the model's scale is 1. A failed pack gives the frame up (the game's picture stays as the upscaler left it);
+    // compression is what is turned off.
+    NVSDK_NGX_Resource_VK* modelDepth = depth;
+    NVSDK_NGX_Resource_VK* modelMotion = motion;
+
+    // What the uncompressed path would show the model at this Model resolution, on the ordinary grid: the encoded proxy
+    // itself at 100%, else the picture built above the way that path builds it (box downsample below 100%, the NR
+    // upscaler above). Only Replace needs it.
+    OwnedImage* spatialReference = modelInput;
+
+    if (spatial)
+    {
+        using DlssNr::Spatial::MakeConstants;
+        const auto& spatialLayout = EdgeCompressionVk::Layout();
+        const auto depthRead = EdgeCompressionVk::DepthRead(device, depth);
+        const DlssNrSpatial_Vk::Read motionRead { motion->Resource.ImageViewInfo.ImageView,
+                                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+        Transition(cmdBuffer, g_vk.proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmdBuffer, EdgeCompressionVk::color, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmdBuffer, EdgeCompressionVk::depth, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmdBuffer, EdgeCompressionVk::motion, VK_IMAGE_LAYOUT_GENERAL);
+
+        const DlssNrSpatial_Vk::Read colourReads[3] = { { g_vk.proxy.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                                         {}, {} };
+        const DlssNrSpatial_Vk::Read guideReads[3] = { {}, depthRead, motionRead };
+
+        const bool packed =
+            depthRead.view != VK_NULL_HANDLE &&
+            EdgeCompressionVk::pass->Dispatch(cmdBuffer, MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f),
+                                              colourReads, EdgeCompressionVk::color.view, VK_NULL_HANDLE) &&
+            EdgeCompressionVk::pass->Dispatch(cmdBuffer, MakeConstants(spatialLayout, 101, guides, gameMvX, gameMvY),
+                                              guideReads, EdgeCompressionVk::depth.view, EdgeCompressionVk::motion.view);
+
+        if (!packed)
+        {
+            EdgeCompressionVk::TurnOff(Spatial::Status::TurnedOffDispatch);
+            g_vk.reset = true;
+            return;
+        }
+
+        modelInput = &EdgeCompressionVk::color;
+        modelDepth = &EdgeCompressionVk::depth.ngx;
+        modelMotion = &EdgeCompressionVk::motion.ngx;
+        Transition(cmdBuffer, EdgeCompressionVk::depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmdBuffer, EdgeCompressionVk::motion, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        mvX = mvY = 1.0f;
+    }
+    else
+    {
+        // Match D3D12: preserve the game's vector encoding, then adjust only for the NR working scale.
+        mvX *= (float) workWidth / width;
+        mvY *= (float) workHeight / height;
+    }
+
     OwnedImage* answer = &g_vk.output;
     OwnedImage* input = modelInput;
     int evaluated = 1;
@@ -1974,6 +2124,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     reuseFrame.mvScaleX = gameMvX;
     reuseFrame.mvScaleY = gameMvY;
     reuseFrame.modelReset = g_vk.reset;
+    reuseFrame.edgeCompression = spatial; // the two do not run together; Reuse detail says so in the menu
     // A Tune step pins the white point; a Measure detail run measures Reuse bottleneck as it runs.
     reuseFrame.blocked = calibrationPinned;
     reuseFrame.vulkan = true;
@@ -2025,9 +2176,12 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                     nullptr, false);
         evaluated = g_vk.evaluate(
             (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
-            &input->ngx, depth, reusePlan.motion, &answer->ngx, workWidth, workHeight, guideWidth, guideHeight,
-            guides.motion.width, guides.motion.height, guides.depth.x, guides.depth.y,
-            reusePlan.motionBaseX, reusePlan.motionBaseY, depthInverted ? 1 : 0, passReset ? 1 : 0, tuning.intensity,
+            &input->ngx, modelDepth, spatial ? modelMotion : reusePlan.motion, &answer->ngx, modelWidth, modelHeight,
+            spatial ? modelWidth : guideWidth, spatial ? modelHeight : guideHeight,
+            spatial ? modelWidth : guides.motion.width, spatial ? modelHeight : guides.motion.height,
+            spatial ? 0u : guides.depth.x, spatial ? 0u : guides.depth.y,
+            spatial ? 0u : reusePlan.motionBaseX, spatial ? 0u : reusePlan.motionBaseY, depthInverted ? 1 : 0,
+            passReset ? 1 : 0, tuning.intensity,
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
         if (DlssNrNative::EndEvaluate(nullptr))
@@ -2080,8 +2234,54 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     if (evaluated != 1)
     {
         LOG_ERROR("DLSS-NR Vulkan: evaluate returned {}", evaluated);
+
+        if (spatial)
+        {
+            // The model would not take the packed picture. NR is fine; compression is what is turned off.
+            EdgeCompressionVk::TurnOff(Spatial::Status::TurnedOffModel);
+            g_vk.reset = true;
+            return;
+        }
+
         Fail("the model refused to evaluate");
         return;
+    }
+
+    // Compress screen edges: the packed model input and the model's answer back to the ordinary grid, both through the
+    // same resampling, so what the resolve takes from the pair is the model's change. The resolve, the SGSR1 up-leg and
+    // the supersample down-leg below work on these two instead of the packed ones.
+    OwnedImage* ordinaryProxy = modelInput;
+    OwnedImage* ordinaryAnswer = answer;
+
+    if (spatial)
+    {
+        Transition(cmdBuffer, *modelInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmdBuffer, EdgeCompressionVk::proxy, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmdBuffer, EdgeCompressionVk::answer, VK_IMAGE_LAYOUT_GENERAL);
+
+        if (replaceCorrection)
+            Transition(cmdBuffer, *spatialReference, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        const DlssNrSpatial_Vk::Read reads[3] = { { modelInput->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                                   { answer->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                                   { replaceCorrection ? spatialReference->view : VK_NULL_HANDLE,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
+
+        if (!EdgeCompressionVk::pass->Dispatch(
+                cmdBuffer,
+                DlssNr::Spatial::MakeConstants(EdgeCompressionVk::Layout(), replaceCorrection ? 103 : 102, guides, 1.0f,
+                                               1.0f),
+                reads,
+                EdgeCompressionVk::proxy.view, EdgeCompressionVk::answer.view))
+        {
+            EdgeCompressionVk::TurnOff(Spatial::Status::TurnedOffDispatch);
+            g_vk.reset = true;
+            return;
+        }
+
+        ordinaryProxy = &EdgeCompressionVk::proxy;
+        ordinaryAnswer = &EdgeCompressionVk::answer;
     }
 
     // -----------------------------------------------------------------------------------------
@@ -2095,8 +2295,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // filter so the resolve composites a native answer against the native proxy 1:1 -- not the single
     // bilinear tap the Nx answer would otherwise get, which aliases the model's detail into noise. On
     // failure it falls back to the Nx pair (modelInput + output), the old behaviour.
-    OwnedImage* resolveProxy = modelInput;
-    OwnedImage* resolveAnswer = answer;
+    OwnedImage* resolveProxy = ordinaryProxy;
+    OwnedImage* resolveAnswer = ordinaryAnswer;
 
     // Reduced up-leg (working scale < 1), mirroring D3D12's NrState::sgsr1UpAnswer block exactly.
     // DlssNrReducedUpscaleMethod: 0 Bilinear (answer not enlarged -- resolveAnswer above already
@@ -2123,10 +2323,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
             if (g_vk.sgsr1UpAnswer && g_vk.sgsr1UpAnswer->IsInit())
             {
-                Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                Transition(cmdBuffer, *ordinaryAnswer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 Transition(cmdBuffer, g_vk.outputNative, VK_IMAGE_LAYOUT_GENERAL);
 
-                VkImageInfo upAnswerIn = ImageInfoOf(*answer);
+                VkImageInfo upAnswerIn = ImageInfoOf(*ordinaryAnswer);
                 VkImageInfo upAnswerOut = ImageInfoOf(g_vk.outputNative);
 
                 if (g_vk.sgsr1UpAnswer->Dispatch(cmdBuffer, upAnswerIn, upAnswerOut, resolve.ReversibleMode,
@@ -2167,7 +2367,63 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     if (sgsrAnswerOk)
         resolveAnswer = &g_vk.outputNative;
 
-    if (workScale > 1.0f && g_vk.superDown && g_vk.superDown->IsInit() && g_vk.outputNative.Valid())
+    if (spatial && workScale > 1.0f)
+    {
+        // The proxy goes through the same filter as the answer, so the resolve compares like with like. If either
+        // fails, the unpacked pair goes to the resolve as it is (both halves through the resolve's own tap).
+        const Scaler wantScaler = cfg.DlssNrScalingDownscaler.value_or_default();
+        if (g_vk.nrScaler != wantScaler)
+        {
+            // As the filter change below: the old scalers' pipelines are still bound by frames in flight.
+            if (g_vk.device != VK_NULL_HANDLE)
+                vkDeviceWaitIdle(g_vk.device);
+            g_vk.superUp.reset();
+            g_vk.superDown.reset();
+            EdgeCompressionVk::proxyDown.reset();
+            EdgeCompressionVk::proxyDownScaler = Scaler::Count;
+            g_vk.nrScaler = wantScaler;
+        }
+        if (!g_vk.superDown)
+            g_vk.superDown = std::make_unique<OS_Vk>("DLSS-NR VK supersample down", device, physicalDevice, false,
+                                                     wantScaler);
+        // The proxy's filter has to be the answer's: compression off and on again around a change of the NR downscaler
+        // would otherwise leave it on the old one (superDown is rebuilt by the other path). Drained first, as above.
+        if (EdgeCompressionVk::proxyDown && EdgeCompressionVk::proxyDownScaler != wantScaler)
+        {
+            if (g_vk.device != VK_NULL_HANDLE)
+                vkDeviceWaitIdle(g_vk.device);
+            EdgeCompressionVk::proxyDown.reset();
+        }
+        if (!EdgeCompressionVk::proxyDown)
+        {
+            EdgeCompressionVk::proxyDown = std::make_unique<OS_Vk>("DLSS-NR VK compress screen edges proxy down", device,
+                                                                   physicalDevice, false, wantScaler);
+            EdgeCompressionVk::proxyDownScaler = wantScaler;
+        }
+
+        if (g_vk.superDown && g_vk.superDown->IsInit() && EdgeCompressionVk::proxyDown &&
+            EdgeCompressionVk::proxyDown->IsInit() && EdgeCompressionVk::proxyNative.Valid() &&
+            EdgeCompressionVk::answerNative.Valid())
+        {
+            Transition(cmdBuffer, *ordinaryProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, *ordinaryAnswer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, EdgeCompressionVk::proxyNative, VK_IMAGE_LAYOUT_GENERAL);
+            Transition(cmdBuffer, EdgeCompressionVk::answerNative, VK_IMAGE_LAYOUT_GENERAL);
+
+            VkImageInfo proxyIn = ImageInfoOf(*ordinaryProxy);
+            VkImageInfo proxyOut = ImageInfoOf(EdgeCompressionVk::proxyNative);
+            VkImageInfo answerIn = ImageInfoOf(*ordinaryAnswer);
+            VkImageInfo answerOut = ImageInfoOf(EdgeCompressionVk::answerNative);
+
+            if (EdgeCompressionVk::proxyDown->Dispatch(cmdBuffer, proxyIn, proxyOut) &&
+                g_vk.superDown->Dispatch(cmdBuffer, answerIn, answerOut))
+            {
+                resolveProxy = &EdgeCompressionVk::proxyNative;
+                resolveAnswer = &EdgeCompressionVk::answerNative;
+            }
+        }
+    }
+    else if (workScale > 1.0f && g_vk.superDown && g_vk.superDown->IsInit() && g_vk.outputNative.Valid())
     {
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmdBuffer, g_vk.outputNative, VK_IMAGE_LAYOUT_GENERAL);
@@ -2202,7 +2458,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, g_vk.preColor, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     CalibrationVkMeasure(cmdBuffer, beforeSr ? g_vk.preColor.view : colour->Resource.ImageViewInfo.ImageView,
-                         beforeSr ? g_vk.preColor.layout : VK_IMAGE_LAYOUT_GENERAL, *modelInput, width, height);
+                         beforeSr ? g_vk.preColor.layout : VK_IMAGE_LAYOUT_GENERAL, *ordinaryProxy, width, height);
     applied = true;
 
     // Close it, and read the pair from three frames ago -- retired by now, so the read does not wait.
@@ -2272,6 +2528,62 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, Vk
     EvaluateAtSeamVk(cmd, params, instance, pd, device, false, rayReconstruction, applied);
 }
 
+// Everything NR itself made on a live device: the model's features, its images, passes and rings. Not NGX on the device,
+// the parameter block, the forwarder or the device handle, and nothing the present path owns (Optical F5Low's frame
+// source, the Vulkan-on-D3D12 bridge): those are not in g_vk. The device must be idle. Shared by the full shutdown and by
+// Retry, which is why Retry is not ShutdownVk: shutting NGX down under a game that is still using the device would be
+// worse than the failure being retried.
+void ReleaseNrObjects()
+{
+    CalibrationVkShutdown(true);
+    DetailReuseVk::Release(true);
+    EdgeCompressionVk::Release(true);
+
+    if (g_vk.feature != nullptr && g_vk.release != nullptr)
+        g_vk.release(g_vk.feature);
+
+    g_vk.feature = nullptr;
+
+    for (auto& feature : g_vk.laterFeatures)
+    {
+        if (feature && g_vk.release)
+            g_vk.release(feature);
+        feature = nullptr;
+    }
+    g_vk.activePasses = 0;
+    if (g_vk.creationReady != VK_NULL_HANDLE)
+        vkDestroyEvent(g_vk.device, g_vk.creationReady, nullptr);
+    g_vk.creationReady = VK_NULL_HANDLE;
+    g_vk.creationPending = false;
+
+    DestroyImage(g_vk.output);
+    DestroyImage(g_vk.scratch);
+    DestroyImage(g_vk.proxy);
+    DestroyImage(g_vk.proxySmall);
+    DestroyImage(g_vk.outputNative);
+    DestroyImage(g_vk.keep);
+    DestroyImage(g_vk.preColor);
+    DestroyImage(g_vk.meter);
+    DestroyImage(g_vk.autoExposure);
+    DestroyImage(g_vk.autoExposureRaw);
+    DestroyImage(g_vk.lutScratch);
+    g_vk.lutScratchFailed = false;
+    g_vk.autoExposureAdapter.Invalidate();
+    DestroyMeterReadback();
+
+    g_vk.pass.reset();
+    g_vk.lutPass.reset(); // frees the 3D image, its staging buffer and the pass's own rings
+    g_vk.superUp.reset();
+    g_vk.superDown.reset();
+    g_vk.sgsr1UpAnswer.reset();
+    g_vk.nrScaler = Scaler::Count;
+    g_vk.width = 0; // the next frame rebuilds its surfaces and features
+    g_vk.height = 0;
+    g_vk.workWidth = 0;
+    g_vk.workHeight = 0;
+    g_vk.reset = true;
+}
+
 void ShutdownVk(bool deviceAlive)
 {
     if (!deviceAlive)
@@ -2313,6 +2625,7 @@ void ShutdownVk(bool deviceAlive)
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
         DetailReuseVk::Release(false);
+        EdgeCompressionVk::Release(false);
         // The model's kernels went with the device without their destroy calls.
         DlssNrNative::VkDeviceLost();
 
@@ -2348,47 +2661,7 @@ void ShutdownVk(bool deviceAlive)
     if (g_vk.device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(g_vk.device);
 
-    CalibrationVkShutdown(true);
-    DetailReuseVk::Release(true);
-
-    if (g_vk.feature != nullptr && g_vk.release != nullptr)
-        g_vk.release(g_vk.feature);
-
-    g_vk.feature = nullptr;
-
-    for (auto& feature : g_vk.laterFeatures)
-    {
-        if (feature && g_vk.release)
-            g_vk.release(feature);
-        feature = nullptr;
-    }
-    g_vk.activePasses = 0;
-    if (g_vk.creationReady != VK_NULL_HANDLE)
-        vkDestroyEvent(g_vk.device, g_vk.creationReady, nullptr);
-    g_vk.creationReady = VK_NULL_HANDLE;
-    g_vk.creationPending = false;
-
-    DestroyImage(g_vk.output);
-    DestroyImage(g_vk.scratch);
-    DestroyImage(g_vk.proxy);
-    DestroyImage(g_vk.proxySmall);
-    DestroyImage(g_vk.outputNative);
-    DestroyImage(g_vk.keep);
-    DestroyImage(g_vk.preColor);
-    DestroyImage(g_vk.meter);
-    DestroyImage(g_vk.autoExposure);
-    DestroyImage(g_vk.autoExposureRaw);
-    DestroyImage(g_vk.lutScratch);
-    g_vk.lutScratchFailed = false;
-    g_vk.autoExposureAdapter.Invalidate();
-    DestroyMeterReadback();
-
-    g_vk.pass.reset();
-    g_vk.lutPass.reset(); // frees the 3D image, its staging buffer and the pass's own rings
-    g_vk.superUp.reset();
-    g_vk.superDown.reset();
-    g_vk.sgsr1UpAnswer.reset();
-    g_vk.nrScaler = Scaler::Count;
+    ReleaseNrObjects();
 
     if (g_vk.capabilityParams != nullptr)
     {

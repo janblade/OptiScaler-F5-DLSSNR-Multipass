@@ -256,6 +256,7 @@ copy "$(SolutionDir)Licenses\MFGUnlock_LICENSE.txt" $(SolutionDir)x64\Release\a\
 copy "$(SolutionDir)Licenses\ReShade_GenericDepth_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 copy "$(SolutionDir)Licenses\DLSS5Feeder_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 copy "$(SolutionDir)Licenses\Inter_OFL.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
+copy "$(SolutionDir)Licenses\PeripheralWarp_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 md $(SolutionDir)x64\Release\a\OptiScaler
 copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
@@ -445,6 +446,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\DlssNr_Vk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_LutVk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNrDetailReuse_Vk.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNrSpatial_Vk.h" />
     <ClInclude Include="shaders\dlssnr\precompile\dlssnr_detail_reuse_Shader_Vk.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
@@ -976,6 +978,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_LutVk.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNrDetailReuse_Vk.cpp" />
+    <ClCompile Include="shaders\dlssnr\DlssNrSpatial_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />

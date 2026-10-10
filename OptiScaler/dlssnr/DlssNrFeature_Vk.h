@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
+#include <shaders/dlssnr/DlssNr_Spatial.h>
 
 #include <optional>
 #include <nvsdk_ngx.h>
@@ -56,6 +57,15 @@ NVSDK_NGX_Resource_VK* EvaluateBeforeUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_
 bool IsRunningVk();
 const char* FailureReasonVk();
 
+// Whether a retry could help with the failure FailureReasonVk reports (not when the model has no usable Vulkan surface
+// or NGX will not start on the device). RequestRetryVk asks for one; the next evaluate does it on the NR thread: drains
+// the device, lets go of NR's own objects (never the present path's), clears the failure and any compression fallback.
+bool RetryableVk();
+void RequestRetryVk();
+
+// The size the model works on (the packed size while Compress screen edges is on), or 0x0 before the first frame.
+void CurrentModelSizeVk(unsigned int& width, unsigned int& height);
+
 // How many frames it has actually composed. The menu needs this to tell "up but nothing has come
 // through yet" apart from "running", and the D3D12 counters say nothing about this path.
 unsigned long long FramesVk();
@@ -71,6 +81,10 @@ unsigned long long VkFrameClock();
 // Reuse detail between frames on this path (DlssNr_DetailReuse_Vk.inl), in the shape the D3D12 accessor returns.
 struct DetailReuseInfo;
 DetailReuseInfo DetailReuseStatusVk();
+
+// Compress screen edges on this path (DlssNr_Spatial_Vk.inl), in the shape the D3D12 accessor returns
+// (DlssNr::EdgeCompressionStatus): the status code, the sizes and the boxes, as of the last frame NR ran.
+Spatial::Published EdgeCompressionStatusVk();
 
 // Whether the game offers an exposure texture on this path. Observed only: it is not read, because
 // binding the game's image means naming a layout this side cannot know. For the menu, and to settle

@@ -66,6 +66,10 @@ that PR and keeps its own, still-symmetric bound for a different reason.
 
 Several ideas in the optical flow and in Detail Reuse come from reading [AeonSR](https://github.com/BarbatosAWLS/AeonSR) (MIT, Barbatos AWLS, commit `85a26f8`): a brightness-proof matching cost, matching only within a pixel's own surface, a whole-picture motion candidate in the flow, rejecting moved detail where the motion at its source disagrees, and rounding away sub-step differences when steadying reused frames. They are implemented from the ideas in this fork's own code; no AeonSR code was copied.
 
+## Compress screen edges
+
+The layout and mapping behind Compress screen edges (the sharp middle, the squeezed edges, and the rational curve that packs and unpacks them) are adapted from [Yuri Grib / @BeliyG3's Optimizer FPS for DLSS5](https://github.com/BeliyG3/optimizer-fps-dlss5/tree/64902dd6a02460e5f6b778504ec2a4005faf4d9c) (MIT, Copyright (c) 2026 Yuri Grib), pinned at commit `64902dd6`. The way to apply it to NR (pack the colour, depth and motion, run the model on the packed picture, unpack the model's input and answer through the same resampling) follows [wilsjo2's fork](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass), v0.8.9 (OptiScaler-DLSSNR-PreSR-Multipass, commit [`be229250`](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/commit/be2292501f)), adapted onto this fork's own NR code. See the [licence](../Licenses/PeripheralWarp_LICENSE.txt).
+
 ## OptiScaler contributors
 
 These credits are retained from the original OptiScaler README:

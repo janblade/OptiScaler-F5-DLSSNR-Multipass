@@ -175,10 +175,13 @@ struct Layout {
     float globalScale = 1;
     pw::Layout warp{};
     Rect centerBounds{}, workBounds{};
+    // The same geometry, not the same float: the applied scale of Auto model resolution drifts by a hair under dynamic
+    // resolution, and a layout that comes out the same sizes is the same layout (nothing to rebuild or reset).
     bool operator==(const Layout& o) const {
-        return settings == o.settings && nativeW == o.nativeW && nativeH == o.nativeH &&
-               (globalScale == o.globalScale || (std::isnan(globalScale) && std::isnan(o.globalScale))) &&
-               active == o.active && modelW == o.modelW && modelH == o.modelH;
+        return settings == o.settings && nativeW == o.nativeW && nativeH == o.nativeH && status == o.status &&
+               active == o.active && ordinaryW == o.ordinaryW && ordinaryH == o.ordinaryH && modelW == o.modelW &&
+               modelH == o.modelH && (!active || (warp.x.rawExtent == o.warp.x.rawExtent &&
+                                                  warp.y.rawExtent == o.warp.y.rawExtent));
     }
     bool operator!=(const Layout& o) const { return !(*this == o); }
 };
@@ -344,7 +347,8 @@ class Tracker
 
         if (valid_ && (layout_ != next || signature_ != signature))
         {
-            frame.resetHistory = layout_.requested || next.requested;
+            // The model's history is the packed picture's: it starts over only when one was or is being packed.
+            frame.resetHistory = layout_.active || next.active;
             fallback_ = Status::Off;
         }
 

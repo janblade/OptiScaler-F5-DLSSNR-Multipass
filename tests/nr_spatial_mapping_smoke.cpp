@@ -386,6 +386,49 @@ int main()
         CHECK(!frame.changed && !frame.resetHistory);
 
         CHECK(Mix(Mix(0, 1), 2) != Mix(Mix(0, 2), 1));
+
+        // A hair of drift in the applied scale (Auto model resolution under dynamic resolution) that leaves every size as
+        // it was is no change at all: no reset, nothing lifted. Same when nothing is applied.
+        Tracker drift;
+        Settings d = On();
+        frame = drift.Begin(d, 2560, 1440, 0.8000f, true, false, 3);
+        CHECK(frame.active && !frame.resetHistory);
+        frame = drift.Begin(d, 2560, 1440, 0.8003f, true, false, 3);
+        CHECK(frame.active && !frame.resetHistory && !frame.changed);
+        drift.TurnOff(Status::TurnedOffDispatch);
+        frame = drift.Begin(d, 2560, 1440, 0.8004f, true, false, 3);
+        CHECK(frame.status == Status::TurnedOffDispatch); // a held fallback is not lifted by a hair either
+        // A real change of size still resets.
+        frame = drift.Begin(d, 2560, 1440, 0.6f, true, false, 3);
+        CHECK(frame.active && frame.resetHistory);
+
+        Tracker idle;
+        Settings tiny = On();
+        tiny.workX = tiny.workY = 90;
+        frame = idle.Begin(tiny, 1920, 1080, 0.25f, true, false, 3); // under a quarter: TooSmall
+        CHECK(frame.status == Status::TooSmall);
+        frame = idle.Begin(tiny, 1920, 1080, 0.2502f, true, false, 3);
+        CHECK(!frame.resetHistory);
+        frame = idle.Begin(tiny, 1920, 1080, 0.26f, true, false, 3); // still not applied: still nothing to reset
+        CHECK(!frame.resetHistory);
+
+        // The reviewer's probe: 1920x1080 Balanced near 50% moves the ordinary size and not the packed one.
+        // Seen by scanning the scales a slider or Auto can land on: such steps exist, so the packed size alone cannot say
+        // whether a surface made at the ordinary size (the Replace reference) is still the right one.
+        int sameModelOtherOrdinary = 0;
+        Layout previous = Build(On(), 1920, 1080, 0.40f);
+        for (int i = 1; i <= 400; ++i)
+        {
+            const Layout next = Build(On(), 1920, 1080, 0.40f + 0.0005f * i);
+            if (previous.active && next.active && previous.modelW == next.modelW && previous.modelH == next.modelH &&
+                (previous.ordinaryW != next.ordinaryW || previous.ordinaryH != next.ordinaryH))
+            {
+                ++sameModelOtherOrdinary;
+                CHECK(previous != next); // a different ordinary grid is a different layout, though the packed size is the same
+            }
+            previous = next;
+        }
+        CHECK(sameModelOtherOrdinary > 0);
     }
 
     if (fails == 0)

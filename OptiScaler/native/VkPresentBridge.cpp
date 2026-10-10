@@ -23,6 +23,7 @@
 #include <with_dx12/with_dx12.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -71,6 +72,7 @@ struct Bridge
     bool copied = false; // CopyToOutput queued this frame's picture; PresentOutput follows
     native::VkCopyOutcome outcome = native::VkCopyOutcome::NoPicture; // what CopyToOutput did this frame
     native::VkCopyFailureRule copyRule;
+    native::VkOutputFailureRule outputRule; // this output's presents only, under g_mutex
     uint64_t presents = 0;
 };
 
@@ -160,12 +162,9 @@ bool g_newSwapchainAsked = false;
 // The D3D12 swapchain was given up because its present kept failing (GiveUpOutput): no new bridge for the rest of the
 // session, and the game is told its hidden swapchain is out of date a few times so it makes one on its own window.
 bool g_outputGivenUp = false;
-std::string g_giveUpReason;
+std::string g_giveUpReason; // for the menu, plain; the log has the code
 int g_giveUpAsks = 0;
 constexpr int kGiveUpAsksMax = 60;
-
-// Only the present thread (PresentOutput) uses it
-native::VkOutputFailureRule g_outputRule;
 
 bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
 {
@@ -427,7 +426,7 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
             FGHooks::SetDx12InteropPresentSC(out.Get(), self->window);
 
         self->outputUp = true;
-        g_outputRule = native::VkOutputFailureRule {};
+        self->outputRule = native::VkOutputFailureRule {};
         ++g_outputsActive;
         LOG_INFO("Vulkan bridge: D3D12 swapchain {:X} on window {:X} ({}x{}, format {}, {} buffers, {})",
                  (size_t) out.Get(), (size_t) self->window, desc.BufferDesc.Width, desc.BufferDesc.Height,
@@ -681,7 +680,9 @@ void OnDeviceDestroying(VkDevice device)
     if (!native::BridgeConcernedBy(device, g_bridge != nullptr ? g_bridge->device : VkDevice {}, retiredDevices))
         return;
 
-    if (g_bridge != nullptr && g_bridge->device == device)
+    const bool liveBridge = g_bridge != nullptr && g_bridge->device == device;
+
+    if (liveBridge)
     {
         g_bridge->core.ReleaseOutput();
         g_retired.push_back(std::move(g_bridge));
@@ -692,6 +693,11 @@ void OnDeviceDestroying(VkDevice device)
         if (retired->device == device)
             retired->core.ReleaseOutput();
     }
+
+    // Only a retired bridge's device went while a newer bridge is up on another one: that bridge keeps its interop state
+    // and its D3D12 device
+    if (!liveBridge && g_bridge != nullptr && g_bridge->outputUp)
+        return;
 
     auto& state = State::Instance();
 
@@ -786,21 +792,37 @@ namespace
 // swapchain (the real window is free again, the same way a switched-off mode ends the bridge), refuse a new bridge, and tell
 // the game its swapchain is out of date (WantsNewSwapchain) so it makes the next one on its own window and presents there.
 // Until it does, the window keeps the last picture, but the game is no longer held up on a present that cannot work.
-void GiveUpOutput(const std::string& reason)
+// `reason` goes to the log (with the code), `plain` to the menu.
+void GiveUpOutput(const std::string& reason, const std::string& plain)
 {
-    // Frame generation is out of the way before the bridge's own mutex is taken (ResizeHold)
-    const auto hold = BeginResize();
+    {
+        std::lock_guard lock(g_mutex);
+
+        if (g_bridge == nullptr || !g_bridge->outputUp || g_outputGivenUp)
+            return;
+
+        g_outputGivenUp = true;
+        g_giveUpReason = plain;
+        g_giveUpAsks = 0;
+    }
+
+    LOG_ERROR("Vulkan bridge: {}. The D3D12 swapchain is given up; the game is told to make a new swapchain on its own "
+              "window, and frame generation stays off until the game is restarted",
+              reason);
+
+    // The resize hold only drains frame generation: it is switched off, its present in flight finishes, and its next one no
+    // longer takes the shared side of the resize lock (the interop is no longer this bridge's). The hold must be let go
+    // BEFORE the swapchain is retired: retiring destroys XeFG's swapchain, which waits for XeFG's present thread, and that
+    // thread would be waiting for the shared side of the very lock held here (the order OnCreateSwapchain keeps too).
+    {
+        const auto hold = BeginResize();
+        State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+    }
+
     std::lock_guard lock(g_mutex);
 
     if (g_bridge == nullptr || !g_bridge->outputUp)
         return;
-
-    g_outputGivenUp = true;
-    g_giveUpReason = reason;
-    g_giveUpAsks = 0;
-    LOG_ERROR("Vulkan bridge: {}. The D3D12 swapchain is given up; the game is told to make a new swapchain on its own "
-              "window, and frame generation stays off until the game is restarted",
-              reason);
 
     Retire(g_bridge);
     NativeMotionVk::ReleaseBridgeDevice();
@@ -911,11 +933,31 @@ void PresentOutput()
         }
     }
 
-    if (g_outputRule.OnPresent(presentFailed, deviceGone))
+    bool giveUp = false;
+    uint64_t failures = 0;
     {
-        GiveUpOutput(deviceGone ? std::format("the D3D12 device was removed (Present returned 0x{:X})", (unsigned) hr)
-                                : std::format("the D3D12 swapchain's Present keeps failing (0x{:X}, {} times in a row)",
-                                              (unsigned) hr, g_outputRule.Failures()));
+        std::lock_guard lock(g_mutex);
+
+        // This output's own rule: a bridge made again in the meantime starts its count afresh
+        if (g_bridge != nullptr && g_bridge->outputUp && g_bridge->core.Output() == output.Get())
+        {
+            const uint64_t nowMs = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count();
+            giveUp = g_bridge->outputRule.OnPresent(presentFailed, deviceGone, nowMs);
+            failures = g_bridge->outputRule.Failures();
+        }
+    }
+
+    if (giveUp)
+    {
+        if (deviceGone)
+            GiveUpOutput(std::format("the D3D12 device was removed (Present returned 0x{:X})", (unsigned) hr),
+                         "the graphics device used for frame generation stopped working");
+        else
+            GiveUpOutput(std::format("the D3D12 swapchain's Present keeps failing (0x{:X}, {} times in a row)",
+                                     (unsigned) hr, failures),
+                         "frame generation's window could not be shown any more");
     }
 }
 

@@ -139,7 +139,11 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
         g_refusal = g_source.Refusal();
     }
 
-    if (g_source.Error() != lastError)
+    // A refused second device has its own line (once per device, VkFrameSource::EnsureDevices): its presents alternate with
+    // the held device's, and would flip this one every frame
+    const bool refused = !g_source.Refusal().empty() && g_source.Error() == g_source.Refusal();
+
+    if (!refused && g_source.Error() != lastError)
     {
         lastError = g_source.Error();
 
@@ -194,6 +198,10 @@ void OnDeviceDestroyed(VkDevice device)
 {
     std::lock_guard lock(g_runMutex);
     g_source.OnDeviceDestroyed(device);
+
+    // A refusal for that device is over; the menu would otherwise keep it until the next present gets this far
+    std::lock_guard refusalLock(g_refusalMutex);
+    g_refusal = g_source.Refusal();
 }
 
 void DrawStatus()
@@ -202,20 +210,18 @@ void DrawStatus()
     if (const std::string given = VkPresentBridge::FailureReason(); !given.empty())
     {
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f),
-                           "Frame generation stopped: %s. The game was asked to present on its own window again. "
-                           "Restart the game to try frame generation again.",
+                           "Frame generation stopped: %s. The game was asked to show its pictures on its own window "
+                           "again. Restart the game to try frame generation again.",
                            given.c_str());
         return;
     }
 
+    // Under the status, not instead of it: Optical F5Low still runs on the first device. Only while it is on: a refusal
+    // copied before it was switched off would otherwise stay.
+    std::string refusal;
     {
         std::lock_guard lock(g_refusalMutex);
-
-        if (!g_refusal.empty())
-        {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "%s", g_refusal.c_str());
-            return;
-        }
+        refusal = g_refusal;
     }
 
     if (g_frameGenerationMode)
@@ -223,10 +229,14 @@ void DrawStatus()
         ImGui::TextDisabled("Waiting for the game to make a new swapchain for frame generation (it was told to). If "
                             "nothing changes, switch the game's window mode or resolution once. OptiFG (Upscaler) and "
                             "an output must be set when the game starts.");
-        return;
+    }
+    else
+    {
+        g_driver.DrawStatus();
     }
 
-    g_driver.DrawStatus();
+    if (!refusal.empty() && g_driver.Enabled())
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f), "%s", refusal.c_str());
 }
 
 bool NrOnlyRunning() { return g_driver.NrOnlyRunning(); }

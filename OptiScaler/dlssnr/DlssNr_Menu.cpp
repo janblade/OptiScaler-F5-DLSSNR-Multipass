@@ -2877,7 +2877,7 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
                "squeezed into the rest of the space, then NR's result is stretched back. The edges lose a little "
                "sharpness and can shimmer a little in motion; the middle is untouched. NR costs less because it has fewer "
                "pixels to work on.\nModel resolution still scales the whole picture first. Reuse detail between frames "
-               "does not run while this is on. Not used with the driver-proxy backend. Applies at once.");
+               "does not run while this is applied. Not used with the driver-proxy backend. Applies at once.");
 
     if (!on)
         return;
@@ -2928,8 +2928,10 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
     const float slot = StatusSlotBegin();
     EdgeCompressionDrawText(EdgeCompressionText(config, nr));
 
-    if (config->DlssNrDetailReuse.value_or_default())
-        ImGui::TextDisabled("Reuse detail between frames does not run while this is on.");
+    // Only while compression is applied: when it is not (too small, a thin edge, turned itself off) Reuse detail runs.
+    if (config->DlssNrDetailReuse.value_or_default() && nr.enabled &&
+        EdgeCompressionNow(nr).status == Sp::Status::Active)
+        ImGui::TextDisabled("Reuse detail between frames does not run while this is applied.");
 
     StatusSlotEnd(slot, 2);
 
@@ -3086,14 +3088,9 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     {
         config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
         pendingScale = -1;
-
-        // Compress screen edges keeps the NR picture at a quarter of the frame or more, counting this scale.
-        if (config->DlssNrSpatialCompression.value_or_default())
-        {
-            auto edited = DlssNr::Spatial::ReadSettings(*config);
-            DlssNr::Spatial::Constrain(edited, config->DlssNrWorkingScale.value_or_default());
-            StoreSpatialSettings(config, edited);
-        }
+        // The saved layout is not rewritten for a Model resolution: Strong at 30% would become a permanent Custom. When the
+        // NR picture would be too small the status line says so and compression is not applied (Constrain is for edits to
+        // the layout's own sliders).
     }
 
     HelpMarker("NR resolution relative to the image it processes. 50% halves width and height; 100% uses the full size.\nLower values reduce cost and fine detail. Above 100% increases cost. Game output resolution is unchanged.\nThe model averages its input 2x2 before its main network runs, so that network always works at half of this size: cost follows the halved size, and so does the finest detail it can add.");

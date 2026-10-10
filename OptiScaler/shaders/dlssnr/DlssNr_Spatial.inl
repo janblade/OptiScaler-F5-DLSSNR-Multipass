@@ -10,7 +10,9 @@
 //
 // Motion is packed by its end points (Pack(p + v) - Pack(p)), so the packed vectors are exact in packed pixels and the
 // model gets a scale of 1. The packed textures are RGBA16F, also the model's own input and output surfaces: the answer
-// is a resample of a resample, not something the swap chain's format should quantise.
+// is a resample of a resample, not something the swap chain's format should quantise. (So against no compression an 8 or
+// 10-bit game's model works on RGBA16F; what is bit-identical is the 1:1 middle between the Replace correction, mode 103,
+// and the plain unpack, mode 102.)
 //
 // Anything that goes wrong turns compression off (Status::TurnedOff*), not NR: the next frame runs the ordinary path,
 // and a change of layout (or Retry) tries again. Reuse detail between frames does not run while this does.

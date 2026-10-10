@@ -142,8 +142,12 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
         const DXGI_COLOR_SPACE_TYPE type = frame.space == ColorSpace::ScRgb ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
                                            : frame.space == ColorSpace::Pq  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
                                                                             : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        const uint64_t epoch =
+            PresentEpoch(source.GetApi(), State::Instance().frameCount,
+                         State::Instance().vulkanPresentCount.load(std::memory_order_relaxed));
         return DlssNr::ApplyNativeInput(source.Queue(), cmd, frame.color, frame.depth, frame.motion,
-                                        frame.historyDistrust, frame.depthReversed, frame.reset, type, frame.pictureState);
+                                        frame.historyDistrust, frame.depthReversed, frame.reset, type, frame.pictureState,
+                                        epoch);
     };
 
     FrameOutput output;

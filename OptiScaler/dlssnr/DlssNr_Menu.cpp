@@ -808,7 +808,8 @@ static bool ResolutionTierActive(Config* config, const ResolutionTier& tier, boo
 }
 
 // Which API's Optical F5Low drivers and depth finder this game uses: a game presents with one of them. A dxvk game
-// presents its D3D frames through Vulkan, but its D3D drivers are the ones that run.
+// presents its D3D frames through Vulkan; by default its D3D drivers are still the ones that run (NativeDriverDx11.h),
+// unless the experimental DlssNrNativeDxvkVulkan key asks for dxvk's own Vulkan calls instead.
 enum class NativeApi
 {
     Dx12,
@@ -819,6 +820,9 @@ enum class NativeApi
 static NativeApi CurrentNativeApi()
 {
     const auto& state = State::Instance();
+
+    if (VkPresentBridge::DxvkThroughVulkan())
+        return NativeApi::Vulkan;
 
     const auto present = state.swapchainApi == API::Vulkan  ? DlssNrNativeMode::PresentApi::Vulkan
                          : state.swapchainApi == API::DX12 ? DlssNrNativeMode::PresentApi::Dx12
@@ -985,7 +989,9 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         { Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, "FG only (game's upscaler)##nativemode" },
     };
 
-    const bool vulkan = api == NativeApi::Vulkan;
+    // FG only feeds frame generation from the game's Vulkan upscaler call through a Vulkan-on-D3D12 backend; a dxvk
+    // game's upscaler calls are D3D11 ones, so it is not offered there.
+    const bool vulkan = api == NativeApi::Vulkan && !VkPresentBridge::DxvkGame();
     const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     ImGui::TextUnformatted("Mode:");
 
@@ -1070,9 +1076,12 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
     const Finder finder = NativeFinder(api, depthWanted);
     const bool depthRestart = DepthRestartWarning(shown, finder);
+    // A dxvk game reporting NativeApi::Vulkan (NativeDxvkVulkan) gets its frame generation from the same present bridge as
+    // a native Vulkan game, on dxvk's own Vulkan swapchain.
+    const bool vulkanNoBridge = api == NativeApi::Vulkan && !VkPresentBridge::IsUp();
     const Warning warning =
         WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler,
-                   api == NativeApi::Vulkan && !VkPresentBridge::IsUp(), VulkanFeatureIsOn12());
+                   vulkanNoBridge, VulkanFeatureIsOn12());
     const char* warningText = nullptr;
 
     switch (warning)

@@ -65,6 +65,9 @@ struct Bridge
     std::set<VkSwapchainKHR> swapchains; // the game's, made on the hidden surface and not yet destroyed
     bool outputUp = false;
     bool realFG = false;
+    // The D3D12 swapchain came from Windows' own DXGI beside dxvk's (MakeFactory). XeFG's inner swapchain is then not
+    // wrapped (that factory is not hooked), so nothing draws the menu on it: PresentOutput does.
+    bool systemFactory = false;
     bool copied = false; // CopyToOutput queued this frame's picture; PresentOutput follows
     native::VkCopyOutcome outcome = native::VkCopyOutcome::NoPicture; // what CopyToOutput did this frame
     native::VkCopyFailureRule copyRule;
@@ -113,6 +116,10 @@ bool IsBridgedSwapchain(VkSwapchainKHR swapchain)
     return false;
 }
 
+// The game runs on dxvk (IdentifyGpu's usesDxvk), asked once the GPU is identified: getAllGpus builds its list on every
+// call, and this is asked on every present. -1: not known yet (nothing identified, e.g. too early in the process).
+std::atomic<int> g_dxvkGame { -1 };
+
 // Whether this swapchain is one to bridge. An empty reason: not a case worth a line in the log (frame generation is not
 // chosen at all). Called with g_mutex held.
 // Frame generation is chosen and nothing rules the bridge out before a swapchain is looked at.
@@ -120,7 +127,12 @@ bool FrameGenerationChosen()
 {
     auto& state = State::Instance();
 
-    if (state.vulkanSkipHooks || IdentifyGpu::getPrimaryGpu().usesDxvk)
+    if (state.vulkanSkipHooks)
+        return false;
+
+    // A dxvk game's Vulkan swapchain is dxvk's, for its D3D11 one. Bridged only with NativeDxvkVulkan on, where it is
+    // that game's frame generation (the D3D11 bridge cannot work on dxvk, hooks/DxgiFactory_Hooks.cpp).
+    if (DxvkGame() && !DxvkThroughVulkan())
         return false;
 
     return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG;
@@ -133,7 +145,9 @@ bool ModeOn()
 {
     auto* config = Config::Instance();
 
-    if (config->DlssNrNativeFrameGenerationOnly.value_or_default())
+    // Not for a dxvk game: its upscaler calls are D3D11 ones, so nothing would feed OptiFG (the menu does not offer it;
+    // this covers a NativeFrameGenerationOnly left in the ini).
+    if (config->DlssNrNativeFrameGenerationOnly.value_or_default() && !DxvkGame())
         return true;
 
     return config->DlssNrEnabled.value_or_default() && config->DlssNrNativeMotion.value_or_default() &&
@@ -192,9 +206,29 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
     return true;
 }
 
-bool MakeFactory(ComPtr<IDXGIFactory2>& factory)
+// *system: the factory is Windows' own beside dxvk's DXGI, which makes no swapchain for a real D3D12 queue
+// (DXGI_ERROR_UNSUPPORTED). It is not hooked (DxgiFactoryHooks::CreateDx12BridgeSwapChain).
+bool MakeFactory(ComPtr<IDXGIFactory2>& factory, bool* system = nullptr)
 {
     ScopedSkipSpoofingGlobal skipSpoofing {};
+
+    if (system != nullptr)
+        *system = false;
+
+    if (DxvkThroughVulkan())
+    {
+        factory.Attach(DxgiProxy::CreateSystemFactory2());
+
+        if (factory != nullptr)
+        {
+            if (system != nullptr)
+                *system = true;
+
+            return true;
+        }
+
+        LOG_WARN("Vulkan bridge: no system DXGI factory beside dxvk's; trying dxvk's");
+    }
 
     const HRESULT hr = DxgiProxy::Module() == nullptr
                            ? CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))
@@ -355,8 +389,9 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
     {
         auto& state = State::Instance();
         ComPtr<IDXGIFactory2> factory;
+        bool systemFactory = false;
 
-        if (!MakeFactory(factory))
+        if (!MakeFactory(factory, &systemFactory))
         {
             reason = "could not make a DXGI factory";
             return false;
@@ -371,7 +406,7 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
 
         bool realFG = false;
         const HRESULT hr =
-            DxgiFactoryHooks::CreateDx12BridgeSwapChain(factory.Get(), self->queue12, &desc, &out, &realFG);
+            DxgiFactoryHooks::CreateDx12BridgeSwapChain(factory.Get(), self->queue12, &desc, &out, &realFG, systemFactory);
 
         state.vulkanCreatingSC = creatingSC;
 
@@ -382,6 +417,7 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
         }
 
         self->realFG = realFG;
+        self->systemFactory = systemFactory;
         state.currentSwapchainDesc = desc;
         state.currentD3D12Device = self->device12;
         state.currentCommandQueue = self->queue12;
@@ -405,6 +441,27 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
 }
 
 } // namespace
+
+bool DxvkGame()
+{
+    int known = g_dxvkGame.load(std::memory_order_relaxed);
+
+    if (known < 0)
+    {
+        if (IdentifyGpu::getAllGpus().empty())
+            return false;
+
+        known = IdentifyGpu::getPrimaryGpu().usesDxvk ? 1 : 0;
+        g_dxvkGame.store(known, std::memory_order_relaxed);
+    }
+
+    return known == 1;
+}
+
+bool DxvkThroughVulkan()
+{
+    return DxvkGame() && Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default();
+}
 
 int32_t* FullScreenExclusiveMode(const void* chain, bool* readOnly)
 {
@@ -764,6 +821,7 @@ void PresentOutput()
     native::VkCopyFailureRule::Decision copy;
     ComPtr<ID3D12Fence> feedFence;
     uint64_t feedValue = 0;
+    bool menuHere = false;
 
     {
         std::lock_guard lock(g_mutex);
@@ -784,6 +842,7 @@ void PresentOutput()
         window = g_bridge->window;
         sync = g_bridge->core.SyncInterval();
         flags = g_bridge->core.PresentFlags();
+        menuHere = g_bridge->systemFactory;
         copy = g_bridge->copyRule.OnFrame(g_bridge->copied ? native::VkCopyOutcome::Copied : g_bridge->outcome);
         g_bridge->copied = false;
         g_bridge->outcome = native::VkCopyOutcome::NoPicture;
@@ -820,10 +879,12 @@ void PresentOutput()
     if (feedFence != nullptr && feedValue != 0)
         (fgQueue != nullptr ? fgQueue : queue12)->Wait(feedFence.Get(), feedValue);
 
-    // A frame generation swapchain draws the menu itself; a plain one gets it here, as a D3D11 game's bridge does.
+    // A frame generation swapchain draws the menu itself; a plain one gets it here, as a D3D11 game's bridge does. So does
+    // frame generation's swapchain from the system DXGI (a dxvk game), whose inner swapchain is not wrapped: the menu is
+    // then in the picture frame generation reads.
     const bool fgHookedPresenter = state.currentFGSwapchain == output.Get() && !FGHooks::IsDx12InteropPresentSC(output.Get());
 
-    if (!fgHookedPresenter)
+    if (!fgHookedPresenter || menuHere)
         MenuOverlayDx::Present(output.Get(), sync, flags, nullptr, queue12, window, false);
 
     const HRESULT hr = output->Present(sync, flags);

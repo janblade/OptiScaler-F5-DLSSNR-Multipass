@@ -99,11 +99,12 @@ bool NativeInputBlockedBySwapChainInterop();
 // PRESENT. False when it did not run (the reason is in FinishedPictureStatus()).
 // `colorSpace` is what the picture's values mean (NativeInputColourSpace() reads it off a swap chain); `pictureState` is the
 // state `color` is in on entry and is left in. `historyDistrust` (optional) is the producer's trust mask
-// (DlssNrFrameInfo::HistoryDistrust).
+// (DlssNrFrameInfo::HistoryDistrust). `epoch` numbers the frame: one present count of the API the picture came from, so it
+// moves by exactly 1 per presented frame and keeps moving on frames NR skips (native::PresentEpoch).
 bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
                       ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
                       bool depthReversed, bool reset,
-                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState);
+                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState, unsigned long long epoch);
 // The colour space of a swap chain's picture, from what the game set (SDR when it set nothing), for a native-input frame.
 DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);

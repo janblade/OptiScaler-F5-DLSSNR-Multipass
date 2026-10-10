@@ -557,7 +557,7 @@ bool NativeInputBlockedBySwapChainInterop()
 bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
                       ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
                       bool depthReversed, bool reset,
-                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState)
+                      DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState, unsigned long long epoch)
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
@@ -632,11 +632,10 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
     frame.HistoryDistrust = historyDistrust;
     frame.IndependentCommands = true;
     frame.OutputArrivalState = pictureState;
-    // The first evaluate waits for the epoch to move past the frame the model was made on. frameCount counts DXGI
-    // presents only: a Vulkan game without the bridge (Optical F5Low's NR only) has none, so NR stayed on "Preparing"
-    // for good. Its presents count too; each comes after the frame source executed the previous frame's list.
-    frame.SubmissionEpoch =
-        State::Instance().frameCount + State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
+    // The first evaluate waits for the epoch to move past the frame the model was made on, and detail reuse numbers
+    // frames by it (a step over 1 is a skipped frame). The caller's present count (native::PresentEpoch): each comes
+    // after the frame source executed the previous frame's list.
+    frame.SubmissionEpoch = epoch;
 
     DlssNrNative::SetPrecision(Config::Instance()->DlssNrPrecision.value_or_default());
     const auto before = g_nr.successfulDispatches;

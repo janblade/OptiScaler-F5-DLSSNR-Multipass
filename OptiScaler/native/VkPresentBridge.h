@@ -22,6 +22,14 @@
 namespace VkPresentBridge
 {
 
+// A D3D11 game running on dxvk with [DlssNr] NativeDxvkVulkan on: Optical F5Low reads dxvk's own Vulkan presents and
+// frame generation is this bridge on dxvk's Vulkan swapchain. The D3D11 side then stands aside: no D3D11 frame
+// generation bridge (Dx11wDx12SC, which cannot work on dxvk), and the game's wrapped D3D11 swapchain leaves frame
+// generation, the menu and the swapchain State to the bridge. Cached once the GPU is identified (the key is startup only).
+bool DxvkThroughVulkan();
+// The game runs on dxvk, key or not (IdentifyGpu's usesDxvk), cached the same way: it is asked on every present.
+bool DxvkGame();
+
 // The fullScreenExclusive mode of a VkSurfaceFullScreenExclusiveInfoEXT in a create info's chain, or null. The swapchain
 // made on the hidden surface is asked for DISALLOWED through it (and the game's value put back after the call): the hidden
 // window must never take the screen, and the D3D12 swapchain on the real window handles full screen as for a D3D12 game.

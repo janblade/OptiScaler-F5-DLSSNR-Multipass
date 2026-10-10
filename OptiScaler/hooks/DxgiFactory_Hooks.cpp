@@ -11,6 +11,7 @@
 #include <spoofing/Dxgi_Spoofing.h>
 
 #include <misc/HiddenWindow.h>
+#include <native/VkPresentBridge.h>
 #include <with_dx12/with_dx12.h>
 #include <wrapped/wrapped_swapchain.h>
 #include <with_dx12/dx11_with_dx12_sc.h>
@@ -24,6 +25,21 @@
 #ifdef DETAILED_SC_LOGS
 #include <magic_enum.hpp>
 #endif
+
+// NativeDxvkVulkan: a dxvk game's frame generation is the Vulkan present bridge (native/VkPresentBridge.h) on dxvk's own
+// Vulkan swapchain, not the D3D11 bridge (Dx11wDx12SC). That one cannot work on dxvk: dxvk's shared fence and texture
+// handles do not open on a native D3D12 device (OpenSharedHandle E_HANDLE, then a crash in Batman: Arkham Knight).
+static bool DxvkFrameGenerationViaVulkan() { return VkPresentBridge::DxvkThroughVulkan(); }
+
+// A plain (wrapped) game swapchain has no interop. Except a dxvk game's D3D11 one while the Vulkan present bridge carries
+// its frames: the bridge's VkwDx12 stays (a dxvk that makes its Vulkan swapchain inside CreateSwapChain sets it first).
+static void SetPlainSwapchainInterop()
+{
+    if (VkPresentBridge::DxvkThroughVulkan() && VkPresentBridge::IsUp())
+        return;
+
+    State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+}
 
 static bool IsTearingSupported(IDXGIFactory* factory)
 {
@@ -354,7 +370,8 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
 }
 
 HRESULT DxgiFactoryHooks::CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue,
-                                                    DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain4** out, bool* realFG)
+                                                    DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain4** out, bool* realFG,
+                                                    bool systemFactory)
 {
     *out = nullptr;
     *realFG = false;
@@ -363,7 +380,9 @@ HRESULT DxgiFactoryHooks::CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D1
         return E_INVALIDARG;
 
     // A Vulkan game never made a DXGI factory of its own: frame generation's swapchain is made through this hooked one.
-    HookToFactory(factory);
+    // Not Windows' own beside dxvk's: the hooks' originals (o_*) are dxvk's methods, which must not be called on it.
+    if (!systemFactory)
+        HookToFactory(factory);
 
     if (!PrepareDx12InteropDesc(*desc, IsTearingSupported(factory)))
         return E_INVALIDARG;
@@ -383,7 +402,8 @@ HRESULT DxgiFactoryHooks::CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D1
         LOG_WARN("Vulkan bridge FG swapchain creation failed: {:X}; creating plain DX12 swapchain", (UINT) result);
 
         ScopedSkipParentWrapping skipParentWrapping {};
-        result = o_CreateSwapChain(factory, queue, desc, &swapChain);
+        result = systemFactory ? factory->CreateSwapChain(queue, desc, &swapChain)
+                               : o_CreateSwapChain(factory, queue, desc, &swapChain);
     }
 
     if (SUCCEEDED(result) && swapChain != nullptr)
@@ -619,7 +639,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
             if (!_skipFGSwapChainCreation && State::Instance().activeFgInput == FGInput::Upscaler &&
                 State::Instance().activeFgOutput != FGOutput::NoFG &&
-                State::Instance().activeFgInput != FGInput::NvngxFG)
+                State::Instance().activeFgInput != FGInput::NvngxFG && !DxvkFrameGenerationViaVulkan())
             {
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
 
@@ -765,7 +785,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
             }
 
             State::Instance().currentSwapchainDesc = localDesc;
-            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+            SetPlainSwapchainInterop();
 
             // Check for SL proxy
             IDXGISwapChain* realSC = nullptr;
@@ -1022,7 +1042,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
             if (!_skipFGSwapChainCreation && State::Instance().activeFgInput == FGInput::Upscaler &&
                 State::Instance().activeFgOutput != FGOutput::NoFG &&
-                State::Instance().activeFgInput != FGInput::NvngxFG)
+                State::Instance().activeFgInput != FGInput::NvngxFG && !DxvkFrameGenerationViaVulkan())
             {
                 // For dx11 swapchain
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
@@ -1170,7 +1190,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
         if (result == S_OK)
         {
-            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+            SetPlainSwapchainInterop();
 
             // check for SL proxy
             IDXGISwapChain1* realSC = nullptr;
@@ -1389,7 +1409,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForComposition(IDXGIFactory2* realFacto
     State::Instance().currentRealSwapchain = created;
     State::Instance().currentSwapchain = wrapped;
     State::Instance().currentWrappedSwapchain = wrapped;
-    State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+    SetPlainSwapchainInterop();
     State::Instance().SCAllowTearing = (resolved.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
     State::Instance().SCLastFlags = resolved.Flags;
     State::Instance().realExclusiveFullscreen = false;

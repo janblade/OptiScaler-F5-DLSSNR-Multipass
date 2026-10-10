@@ -57,6 +57,51 @@ class DxgiProxy
 
     static HMODULE Module() { return _dll; }
 
+    // Marks this thread as inside a DXGI factory creation OptiScaler made or hooked. A DXGI that is a layer on Vulkan
+    // (dxvk) creates its Vulkan instance inside CreateDXGIFactory, holding a lock it cannot take twice, and the Vulkan
+    // loader can load an overlay's Vulkan layer right there. That layer's DLL loads reach LibraryLoadHooks' overlay
+    // branch, which must then not call CreateDXGIFactory again on this thread: Batman: Arkham Knight on dxvk with the
+    // Steam overlay hung at startup on exactly that (IdentifyGpu -> dxvk -> vkCreateInstance -> Steam overlay layer ->
+    // overlay DLL load -> CreateDXGIFactory -> the same dxvk lock).
+    struct ScopedFactoryCreation
+    {
+        ScopedFactoryCreation() { ++_factoryCreationDepth; }
+        ~ScopedFactoryCreation() { --_factoryCreationDepth; }
+        ScopedFactoryCreation(const ScopedFactoryCreation&) = delete;
+        ScopedFactoryCreation& operator=(const ScopedFactoryCreation&) = delete;
+    };
+
+    static bool InsideFactoryCreation() { return _factoryCreationDepth > 0; }
+
+    // Windows' own DXGI factory, for a swapchain on a real D3D12 queue when the loaded dxgi.dll is a layer that cannot
+    // make one: dxvk's returns DXGI_ERROR_UNSUPPORTED, so frame generation's D3D12 swapchain for a dxvk game
+    // (native/VkPresentBridge.h, NativeDxvkVulkan) comes from here. Loaded from System32 the way OptiScaler loads it for
+    // itself as dxgi.dll. Not hooked: its methods are called directly. The caller owns the reference; null when the
+    // system DLL cannot be told apart from the loaded one or the factory fails.
+    static IDXGIFactory2* CreateSystemFactory2()
+    {
+        static const PFN_CreateDxgiFactory2 create = []() -> PFN_CreateDxgiFactory2
+        {
+            auto module = NtdllProxy::LoadLibraryExW_Ldr(L"dxgi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+            if (module == nullptr || module == _dll)
+                return nullptr;
+
+            return (PFN_CreateDxgiFactory2) KernelBaseProxy::GetProcAddress_()(module, "CreateDXGIFactory2");
+        }();
+
+        if (create == nullptr)
+            return nullptr;
+
+        IDXGIFactory2* factory = nullptr;
+        ScopedFactoryCreation factoryCreation {};
+
+        if (FAILED(create(0, __uuidof(IDXGIFactory2), &factory)))
+            return nullptr;
+
+        return factory;
+    }
+
     static PFN_CreateDxgiFactory CreateDxgiFactory_() { return _CreateDxgiFactory; }
     static PFN_CreateDxgiFactory1 CreateDxgiFactory1_() { return _CreateDxgiFactory1; }
     static PFN_CreateDxgiFactory2 CreateDxgiFactory2_() { return _CreateDxgiFactory2; }
@@ -190,6 +235,7 @@ class DxgiProxy
 
   private:
     inline static HMODULE _dll = nullptr;
+    inline static thread_local int _factoryCreationDepth = 0;
 
     inline static PFN_CreateDxgiFactory _CreateDxgiFactory = nullptr;
     inline static PFN_CreateDxgiFactory1 _CreateDxgiFactory1 = nullptr;

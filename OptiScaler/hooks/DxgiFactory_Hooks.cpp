@@ -11,6 +11,7 @@
 #include <spoofing/Dxgi_Spoofing.h>
 
 #include <misc/HiddenWindow.h>
+#include <native/VkPresentBridge.h>
 #include <with_dx12/with_dx12.h>
 #include <wrapped/wrapped_swapchain.h>
 #include <with_dx12/dx11_with_dx12_sc.h>
@@ -28,9 +29,16 @@
 // NativeDxvkVulkan: a dxvk game's frame generation is the Vulkan present bridge (native/VkPresentBridge.h) on dxvk's own
 // Vulkan swapchain, not the D3D11 bridge (Dx11wDx12SC). That one cannot work on dxvk: dxvk's shared fence and texture
 // handles do not open on a native D3D12 device (OpenSharedHandle E_HANDLE, then a crash in Batman: Arkham Knight).
-static bool DxvkFrameGenerationViaVulkan()
+static bool DxvkFrameGenerationViaVulkan() { return VkPresentBridge::DxvkThroughVulkan(); }
+
+// A plain (wrapped) game swapchain has no interop. Except a dxvk game's D3D11 one while the Vulkan present bridge carries
+// its frames: the bridge's VkwDx12 stays (a dxvk that makes its Vulkan swapchain inside CreateSwapChain sets it first).
+static void SetPlainSwapchainInterop()
 {
-    return IdentifyGpu::getPrimaryGpu().usesDxvk && Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default();
+    if (VkPresentBridge::DxvkThroughVulkan() && VkPresentBridge::IsUp())
+        return;
+
+    State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
 }
 
 static bool IsTearingSupported(IDXGIFactory* factory)
@@ -777,7 +785,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
             }
 
             State::Instance().currentSwapchainDesc = localDesc;
-            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+            SetPlainSwapchainInterop();
 
             // Check for SL proxy
             IDXGISwapChain* realSC = nullptr;
@@ -1182,7 +1190,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
         if (result == S_OK)
         {
-            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+            SetPlainSwapchainInterop();
 
             // check for SL proxy
             IDXGISwapChain1* realSC = nullptr;
@@ -1401,7 +1409,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForComposition(IDXGIFactory2* realFacto
     State::Instance().currentRealSwapchain = created;
     State::Instance().currentSwapchain = wrapped;
     State::Instance().currentWrappedSwapchain = wrapped;
-    State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+    SetPlainSwapchainInterop();
     State::Instance().SCAllowTearing = (resolved.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
     State::Instance().SCLastFlags = resolved.Flags;
     State::Instance().realExclusiveFullscreen = false;

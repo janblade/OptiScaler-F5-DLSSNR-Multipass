@@ -848,10 +848,12 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // drives on its own thread, which stays out of it. Bridged, the markers and the sleep go through the D3D entry points
     // on the bridge's private D3D12 device -- the same relationship Dx11wDx12SC::Present has to its hidden D3D11 present
     // -- so XeFG's XeLL routing (ReflexHooks) reaches them; the Vulkan NVAPI belongs to a game with no bridge. Not under
-    // dxvk: its D3D11 device already gets this through wrapped_swapchain.cpp's present hook, unconditionally.
+    // dxvk unbridged: these are dxvk's presents, not the game's. Bridged (NativeDxvkVulkan), it is the same as a native
+    // Vulkan game: the game's wrapped D3D11 present stands aside for dxvk (wrapped_swapchain.cpp), so nothing else sends them.
     const auto lowLatencyTarget = native::lowlatency::PresentTarget(
         true, bridged, _device, bridged ? static_cast<IUnknown*>(VkPresentBridge::Device()) : nullptr);
-    const bool lowLatency = !IdentifyGpu::getPrimaryGpu().usesDxvk && lowLatencyTarget.device != nullptr;
+    const bool lowLatency = (!IdentifyGpu::getPrimaryGpu().usesDxvk || (bridged && VkPresentBridge::DxvkThroughVulkan())) &&
+                            lowLatencyTarget.device != nullptr;
 
     const auto lowLatencyBegin = [&]
     {

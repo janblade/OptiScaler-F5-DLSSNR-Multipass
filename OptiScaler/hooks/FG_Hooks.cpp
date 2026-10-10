@@ -21,6 +21,7 @@
 #include <native/NativeDriverDx12.h>
 #include <native/NativeLowLatency.h>
 #include <native/PresentStageTiming.h>
+#include <native/VkPresentBridge.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -1420,8 +1421,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (state.swapchainInteropApi == SwapchainInteropApi::None)
         Hudfix_Dx12::PresentEnd();
 
+    // A dxvk game's frame generation through the Vulkan present bridge (NativeDxvkVulkan) presents a real D3D12 swapchain
+    // here, as a native Vulkan game's does: the limiter applies to it.
     if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
-        !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+        (!IdentifyGpu::getPrimaryGpu().usesDxvk || VkPresentBridge::DxvkThroughVulkan()) && !XellHooks::canLimit())
     {
         FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
     }

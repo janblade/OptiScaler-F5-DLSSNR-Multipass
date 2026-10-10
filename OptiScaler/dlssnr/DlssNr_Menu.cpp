@@ -813,7 +813,7 @@ static NativeApi CurrentNativeApi()
 {
     const auto& state = State::Instance();
 
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk && Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default())
+    if (VkPresentBridge::DxvkThroughVulkan())
         return NativeApi::Vulkan;
 
     const auto present = state.swapchainApi == API::Vulkan  ? DlssNrNativeMode::PresentApi::Vulkan
@@ -983,7 +983,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
 
     // FG only feeds frame generation from the game's Vulkan upscaler call through a Vulkan-on-D3D12 backend; a dxvk
     // game's upscaler calls are D3D11 ones, so it is not offered there.
-    const bool vulkan = api == NativeApi::Vulkan && !IdentifyGpu::getPrimaryGpu().usesDxvk;
+    const bool vulkan = api == NativeApi::Vulkan && !VkPresentBridge::DxvkGame();
     const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     ImGui::TextUnformatted("Mode:");
 

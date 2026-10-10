@@ -759,7 +759,13 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
         OwnedLockGuard lock(_localMutex, 999);
 #endif
 
-        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+        // A dxvk game whose frames the Vulkan present bridge carries (VkPresentBridge::DxvkThroughVulkan): the menu and frame
+        // generation are the bridge's, on this same window, and it lets go of them itself when dxvk's Vulkan swapchain goes
+        // (in _real->Release() below). Tearing them down here would pull XeFG out from under its queued presents.
+        const bool bridgeOwns = VkPresentBridge::DxvkThroughVulkan();
+
+        if (!bridgeOwns)
+            MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
         if (State::Instance().currentSwapchain == this)
             State::Instance().currentSwapchain = nullptr;
@@ -768,7 +774,7 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
             State::Instance().currentRealSwapchain = nullptr;
 
         auto fg = State::Instance().currentFG;
-        if (fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
+        if (!bridgeOwns && fg != nullptr && fg->Mutex.getOwner() != 1 && fg->SwapchainContext() != nullptr)
         {
             fg->Deactivate();
             fg->ReleaseSwapchain(_handle);
@@ -969,7 +975,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         State::Instance().fgChanged = true;
     }
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    // Not on a dxvk game whose menu the Vulkan present bridge draws (see Release).
+    if (!VkPresentBridge::DxvkThroughVulkan())
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
     State::Instance().scChanged = true;
 
@@ -1415,7 +1423,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         State::Instance().fgChanged = true;
     }
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    // Not on a dxvk game whose menu the Vulkan present bridge draws (see Release).
+    if (!VkPresentBridge::DxvkThroughVulkan())
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
     State::Instance().scChanged = true;
 

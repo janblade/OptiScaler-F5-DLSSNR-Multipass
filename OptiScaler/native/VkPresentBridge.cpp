@@ -114,6 +114,10 @@ bool IsBridgedSwapchain(VkSwapchainKHR swapchain)
     return false;
 }
 
+// The game runs on dxvk (IdentifyGpu's usesDxvk), asked once the GPU is identified: getAllGpus builds its list on every
+// call, and this is asked on every present. -1: not known yet (nothing identified, e.g. too early in the process).
+std::atomic<int> g_dxvkGame { -1 };
+
 // Whether this swapchain is one to bridge. An empty reason: not a case worth a line in the log (frame generation is not
 // chosen at all). Called with g_mutex held.
 // Frame generation is chosen and nothing rules the bridge out before a swapchain is looked at.
@@ -126,7 +130,7 @@ bool FrameGenerationChosen()
 
     // A dxvk game's Vulkan swapchain is dxvk's, for its D3D11 one. Bridged only with NativeDxvkVulkan on, where it is
     // that game's frame generation (the D3D11 bridge cannot work on dxvk, hooks/DxgiFactory_Hooks.cpp).
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk && !Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default())
+    if (DxvkGame() && !DxvkThroughVulkan())
         return false;
 
     return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG;
@@ -139,7 +143,9 @@ bool ModeOn()
 {
     auto* config = Config::Instance();
 
-    if (config->DlssNrNativeFrameGenerationOnly.value_or_default())
+    // Not for a dxvk game: its upscaler calls are D3D11 ones, so nothing would feed OptiFG (the menu does not offer it;
+    // this covers a NativeFrameGenerationOnly left in the ini).
+    if (config->DlssNrNativeFrameGenerationOnly.value_or_default() && !DxvkGame())
         return true;
 
     return config->DlssNrEnabled.value_or_default() && config->DlssNrNativeMotion.value_or_default() &&
@@ -193,7 +199,7 @@ bool MakeFactory(ComPtr<IDXGIFactory2>& factory, bool* system = nullptr)
     if (system != nullptr)
         *system = false;
 
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk)
+    if (DxvkThroughVulkan())
     {
         factory.Attach(DxgiProxy::CreateSystemFactory2());
 
@@ -418,6 +424,27 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
 }
 
 } // namespace
+
+bool DxvkGame()
+{
+    int known = g_dxvkGame.load(std::memory_order_relaxed);
+
+    if (known < 0)
+    {
+        if (IdentifyGpu::getAllGpus().empty())
+            return false;
+
+        known = IdentifyGpu::getPrimaryGpu().usesDxvk ? 1 : 0;
+        g_dxvkGame.store(known, std::memory_order_relaxed);
+    }
+
+    return known == 1;
+}
+
+bool DxvkThroughVulkan()
+{
+    return DxvkGame() && Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default();
+}
 
 int32_t* FullScreenExclusiveMode(const void* chain, bool* readOnly)
 {

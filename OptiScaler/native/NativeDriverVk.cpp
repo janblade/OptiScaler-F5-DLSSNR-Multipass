@@ -41,7 +41,7 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
     // A dxvk game presents its D3D frames through here as well; those belong to the D3D drivers, unless the
     // experimental DlssNrNativeDxvkVulkan key asks this driver to read dxvk's own Vulkan calls instead
     // (NativeDriverDx11.cpp::OnPresent stands aside in that case).
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk && !Config::Instance()->DlssNrNativeDxvkVulkan.value_or_default())
+    if (VkPresentBridge::DxvkGame() && !VkPresentBridge::DxvkThroughVulkan())
         return;
 
     // Whenever the D3D11 bridge (with_dx12/dx11_with_dx12_sc.h, NativeMotionDx11::OnFGPresent) owns the frame, this

@@ -16,4 +16,13 @@ constexpr bool SurfacesStale(int haveModel, int wantModel, int haveColour, int w
 {
     return (haveModel != 0 && haveModel != wantModel) || (haveColour != 0 && haveColour != wantColour);
 }
+
+// A surface made at the ordinary (uncompressed) size: stale when that size is not the one wanted now. Under Compress
+// screen edges the change check sees only the packed size, which can stay put while the ordinary size moves by a 16-pixel
+// step (1920x1080, Balanced, scale 0.50 to 0.504: 960x544 -> 976x544, packed 864x496 either way), so the surface has to
+// be asked for itself.
+constexpr bool SizeStale(unsigned haveW, unsigned haveH, unsigned wantW, unsigned wantH)
+{
+    return haveW != 0 && (haveW != wantW || haveH != wantH);
+}
 } // namespace DlssNr

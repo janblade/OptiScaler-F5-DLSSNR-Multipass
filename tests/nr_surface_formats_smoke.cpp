@@ -26,6 +26,12 @@ int main()
     check(!SurfacesStale(kRgba16f, kRgba16f, kRgba16f, kRgba16f), "compression on, nothing changed: kept");
     check(SurfacesStale(kRgba16f, kRgba8, kRgba8, kRgba8), "compression switched off");
 
+    // The reviewer's probe: the ordinary size moved 960x544 -> 976x544 while the packed one did not.
+    check(DlssNr::SizeStale(960, 544, 976, 544), "ordinary size moved, packed size did not");
+    check(DlssNr::SizeStale(976, 544, 976, 560), "height moved");
+    check(!DlssNr::SizeStale(976, 544, 976, 544), "same ordinary size: kept");
+    check(!DlssNr::SizeStale(0, 0, 976, 544), "no surface yet");
+
     if (fails == 0)
         std::puts("PASS: nr_surface_formats_smoke");
     return fails != 0;

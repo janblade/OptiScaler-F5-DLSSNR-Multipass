@@ -3168,6 +3168,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Packed, the model input comes from the colour pack instead, straight from the full-size proxy.
     // Replace keeps the ordinary reduced picture (below or above 100%) as the reference for the unpack.
+    //
+    // colorSmall is made at the ordinary size, which can move while the packed size (all resolutionChanged sees under
+    // compression) stays, so its own size is checked: the downsample would write past a smaller one and the unpack would
+    // read zeros there.
+    if (g_nr.colorSmall != nullptr)
+    {
+        const D3D12_RESOURCE_DESC smallDesc = g_nr.colorSmall->GetDesc();
+
+        if (DlssNr::SizeStale((unsigned) smallDesc.Width, smallDesc.Height, workWidth, workHeight))
+            ParkNrResource(g_nr.colorSmall);
+    }
+
     if (spatial && !replaceCorrection)
         ParkNrResource(g_nr.colorSmall);
     else if (reduced && g_nr.colorSmall == nullptr)

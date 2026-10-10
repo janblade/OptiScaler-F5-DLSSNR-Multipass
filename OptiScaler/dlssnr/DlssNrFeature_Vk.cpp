@@ -767,7 +767,19 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // A retry the menu asked for: here, on the thread that records NR, never from the menu. Drain the device, let go of
     // what NR made (ReleaseNrObjects, which also clears the compression fallback), and start over; a failure that
     // cannot be retried stays. If the device will not go idle the retry itself fails and says so.
-    if (g_vkRetry.Consume(g_vkRetryHandled) && g_vk.failed && !g_vkFailurePermanent)
+    const RetryStep retryStep = DecideRetry(g_vkRetry.Consume(g_vkRetryHandled), g_vk.failed, g_vkFailurePermanent,
+                                            g_vk.device != VK_NULL_HANDLE, g_vk.device != device);
+
+    // The game made a new device since the failure: the old one is gone with everything NR made on it, so no call goes to
+    // it (no wait, no destroy); the handles are forgotten and the code below adopts the new device.
+    if (retryStep == RetryStep::Abandon)
+    {
+        LOG_INFO("DLSS-NR Vulkan: retrying after \"{}\" on a new device", g_vk.reason);
+        ShutdownVk(false);
+        g_vk.failed = false;
+        g_vk.reason = "";
+    }
+    else if (retryStep == RetryStep::Release)
     {
         if (g_vk.device != VK_NULL_HANDLE && vkDeviceWaitIdle(g_vk.device) != VK_SUCCESS)
         {

@@ -30,6 +30,16 @@ int main()
     check(request.Consume(other), "another consumer has its own record");
     check(!request.Consume(other), "which is also spent");
 
+    // What a retry does about the device: never call the old one once the game has made a new one.
+    using DlssNr::RetryStep;
+    using DlssNr::DecideRetry;
+    check(DecideRetry(true, true, false, true, false) == RetryStep::Release, "same device: drain and release");
+    check(DecideRetry(true, true, false, true, true) == RetryStep::Abandon, "new device: abandon, call nothing");
+    check(DecideRetry(true, true, false, false, true) == RetryStep::Release, "no device kept: nothing to call either way");
+    check(DecideRetry(false, true, false, true, true) == RetryStep::None, "no request");
+    check(DecideRetry(true, false, false, true, true) == RetryStep::None, "nothing failed");
+    check(DecideRetry(true, true, true, true, false) == RetryStep::None, "a failure a retry cannot fix");
+
     if (fails == 0)
         std::puts("PASS: nr_retry_request_smoke");
     return fails != 0;

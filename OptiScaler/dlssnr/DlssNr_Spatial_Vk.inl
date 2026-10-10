@@ -115,8 +115,6 @@ void TurnOff(Sp::Status why)
     LOG_WARN("DLSS-NR Vulkan compress screen edges turned itself off: {}; NR continues without it", Sp::Describe(why));
 }
 
-void Retry() { tracker.Retry(); }
-
 // Whether the images made last time are not the ones this layout needs.
 bool Stale(bool spatial, const Sp::Layout& l, bool supersample, bool replace)
 {

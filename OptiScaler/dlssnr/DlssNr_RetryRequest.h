@@ -8,6 +8,19 @@
 
 namespace DlssNr
 {
+// What a consumed retry does about the device it finds. Release: the device the failure happened on is still the game's,
+// so drain it and let go of NR's objects. Abandon: the game made a new device since (the old one is destroyed and took
+// every handle with it), so nothing may be called on it; the handles are only forgotten. None: nothing to retry.
+enum class RetryStep { None, Release, Abandon };
+
+constexpr RetryStep DecideRetry(bool requested, bool failed, bool permanent, bool haveDevice, bool deviceChanged)
+{
+    if (!requested || !failed || permanent)
+        return RetryStep::None;
+
+    return haveDevice && deviceChanged ? RetryStep::Abandon : RetryStep::Release;
+}
+
 class RetryRequest
 {
   public:

@@ -20,9 +20,17 @@ void DepthCopyDx11::Release()
     _stage.Reset();
     _stageWidth = _stageHeight = 0;
     _stageFormat = DXGI_FORMAT_UNKNOWN;
+    _stageSamples = { 1, 0 };
     _stageFailed = false;
     _shader.Reset();
     _shaderFailed = false;
+
+    for (int i = 0; i < 2; ++i)
+    {
+        _resolve[i].Reset();
+        _resolveFailed[i] = false;
+    }
+
     _device.Reset();
     _taken = false;
 }
@@ -44,6 +52,26 @@ ID3D11ComputeShader* DepthCopyDx11::Shader()
     }
 
     return _shader.Get();
+}
+
+ID3D11ComputeShader* DepthCopyDx11::ResolveShader(bool reversed)
+{
+    auto& shader = _resolve[reversed ? 1 : 0];
+    bool& failed = _resolveFailed[reversed ? 1 : 0];
+
+    if (shader != nullptr || failed)
+        return shader.Get();
+
+    const auto* code = F5LowShaderBytecode::Find("DepthResolve", reversed ? "NearestReversed" : "NearestStandard");
+
+    if (code == nullptr ||
+        FAILED(_device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader)))
+    {
+        shader.Reset();
+        failed = true;
+    }
+
+    return shader.Get();
 }
 
 const char* DepthCopyDx11::MakeCopy(uint32_t width, uint32_t height)
@@ -86,9 +114,11 @@ const char* DepthCopyDx11::MakeCopy(uint32_t width, uint32_t height)
     return nullptr;
 }
 
-const char* DepthCopyDx11::MakeStage(uint32_t width, uint32_t height, DXGI_FORMAT typeless, DXGI_FORMAT view)
+const char* DepthCopyDx11::MakeStage(uint32_t width, uint32_t height, DXGI_FORMAT typeless, DXGI_FORMAT view,
+                                     DXGI_SAMPLE_DESC samples)
 {
-    const bool same = _stageWidth == width && _stageHeight == height && _stageFormat == typeless;
+    const bool same = _stageWidth == width && _stageHeight == height && _stageFormat == typeless &&
+                      _stageSamples.Count == samples.Count && _stageSamples.Quality == samples.Quality;
 
     if (_stage != nullptr && same)
         return nullptr;
@@ -101,6 +131,7 @@ const char* DepthCopyDx11::MakeStage(uint32_t width, uint32_t height, DXGI_FORMA
     _stageWidth = width;
     _stageHeight = height;
     _stageFormat = typeless;
+    _stageSamples = samples;
     _stageFailed = false;
 
     D3D11_TEXTURE2D_DESC desc {};
@@ -109,14 +140,23 @@ const char* DepthCopyDx11::MakeStage(uint32_t width, uint32_t height, DXGI_FORMA
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = typeless;
-    desc.SampleDesc.Count = 1;
+    // A copy between multisampled textures needs the same samples on both sides.
+    desc.SampleDesc = samples;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc {};
     srvDesc.Format = view;
-    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
+
+    if (samples.Count > 1)
+    {
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+    }
+    else
+    {
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+    }
 
     if (FAILED(_device->CreateTexture2D(&desc, nullptr, &_stage)) ||
         FAILED(_device->CreateShaderResourceView(_stage.Get(), &srvDesc, &_stageSrv)))
@@ -130,7 +170,7 @@ const char* DepthCopyDx11::MakeStage(uint32_t width, uint32_t height, DXGI_FORMA
     return nullptr;
 }
 
-const char* DepthCopyDx11::Take(ID3D11DeviceContext* context, ID3D11Resource* source)
+const char* DepthCopyDx11::Take(ID3D11DeviceContext* context, ID3D11Resource* source, bool reversed)
 {
     // Every way out below but the last leaves no copy for this buffer: the copy of an earlier one is not offered for it.
     _taken = false;
@@ -152,9 +192,7 @@ const char* DepthCopyDx11::Take(ID3D11DeviceContext* context, ID3D11Resource* so
     if (!SharedDepthFormats(sourceDesc.Format, &typeless, &view))
         return "the picked buffer's format does not map to a depth format that can be read";
 
-    // A multisampled buffer would need a resolve.
-    if (sourceDesc.SampleDesc.Count > 1)
-        return "the picked buffer is multisampled";
+    const bool multisampled = sourceDesc.SampleDesc.Count > 1;
 
     // What is kept between copies is made on the device the buffer was made on, and made again when the game makes a new one.
     ComPtr<ID3D11Device> device;
@@ -170,11 +208,12 @@ const char* DepthCopyDx11::Take(ID3D11DeviceContext* context, ID3D11Resource* so
     }
 
     // An R32 depth (D32_FLOAT, R32_TYPELESS: the most common) is already the copy's format family: copied straight, no pass.
-    const bool direct = typeless == DXGI_FORMAT_R32_TYPELESS;
-    ID3D11ComputeShader* shader = direct ? nullptr : Shader();
+    // A multisampled one is resolved by the pass whatever its format.
+    const bool direct = typeless == DXGI_FORMAT_R32_TYPELESS && !multisampled;
+    ID3D11ComputeShader* shader = direct ? nullptr : multisampled ? ResolveShader(reversed) : Shader();
 
     if (!direct && shader == nullptr)
-        return "making the conversion pass failed";
+        return multisampled ? "making the resolve pass failed" : "making the conversion pass failed";
 
     if (const char* failed = MakeCopy(sourceDesc.Width, sourceDesc.Height))
         return failed;
@@ -186,10 +225,11 @@ const char* DepthCopyDx11::Take(ID3D11DeviceContext* context, ID3D11Resource* so
         context->CopySubresourceRegion(_copy.Get(), 0, 0, 0, 0, source, 0, nullptr);
         _taken = true;
         _converted = false;
+        _samples = 1;
         return nullptr;
     }
 
-    if (const char* failed = MakeStage(sourceDesc.Width, sourceDesc.Height, typeless, view))
+    if (const char* failed = MakeStage(sourceDesc.Width, sourceDesc.Height, typeless, view, sourceDesc.SampleDesc))
         return failed;
 
     context->CopySubresourceRegion(_stage.Get(), 0, 0, 0, 0, source, 0, nullptr);
@@ -226,6 +266,7 @@ const char* DepthCopyDx11::Take(ID3D11DeviceContext* context, ID3D11Resource* so
 
     _taken = true;
     _converted = true;
+    _samples = sourceDesc.SampleDesc.Count;
     return nullptr;
 }
 } // namespace native

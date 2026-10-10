@@ -437,10 +437,19 @@
     <ClInclude Include="motion\OpticalFlow_Hlsl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="motion\SceneCut_Hlsl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="motion\Luma_Hlsl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="motion\TrustMask_Hlsl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\DepthCopyDx11_Hlsl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\DepthResolve_Hlsl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\F5LowShaderBytecode.h">
@@ -453,6 +462,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="motion\OpticalFlow_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="motion\SceneCut_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\DepthFinderCore.h">
@@ -470,10 +482,34 @@
     <ClInclude Include="native\DepthCopyDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\DepthResolveDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\SharedFrame.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\Dx11FrameSource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\SharedFrameVk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\VkFrameSource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\VkPresentBridgeCore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\VkPresentBridge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\NativeDriverVk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="resource_tracking\GenericDepth_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="resource_tracking\GenericDepth_VkEvents.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\VirtualUpscalerDriver.h">
@@ -486,6 +522,18 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\NativeLowLatencyRule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\NativeLowLatencyVkSync.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\PresentStageTiming.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\VkPresentCopyRule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LogAsyncRule.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="resource_tracking\GenericDepth_Dx12.h">
@@ -1319,6 +1367,9 @@
     <ClCompile Include="motion\OpticalFlow_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="motion\SceneCut_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="native\DepthFinderCore.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1331,10 +1382,31 @@
     <ClCompile Include="native\DepthCopyDx11.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="native\DepthResolveDx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="native\SharedFrame.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\Dx11FrameSource.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\SharedFrameVk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\VkFrameSource.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\VkPresentBridgeCore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\VkPresentBridge.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\NativeDriverVk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="resource_tracking\GenericDepth_Vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\VirtualUpscalerDriver.cpp">

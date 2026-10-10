@@ -305,6 +305,11 @@ class Config
     // pause, so that is the top of the range. (DlssNrDetailReuse::MotionGuard; the default is from in-game
     // measurements: a Witcher 3 run measured 3% while calm and 21% while running.)
     CustomOptional<float> DlssNrDetailReuseMaxDropped { 10.0f };
+    // Scene cuts the game does not flag (dlssnr/DlssNrSceneCut.h, shaders/dlssnr/DlssNr_SceneCut.inl), D3D12 game input:
+    // 0 off, 1 found and counted only (log, menu; the picture is untouched), 2 also acted on (Reuse detail drops the
+    // moved detail on the cut frame, and the model resets when the answer arrives, a few frames later). 1 by default
+    // until in-game counts show how often games leave cuts unflagged and that nothing else reads as one.
+    CustomOptional<uint32_t> DlssNrSceneCut { 1 };
     CustomOptional<bool> DlssNrResidualFgApproxCamera { false }; // forced off, as DlssNrResidualFg
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
@@ -587,6 +592,11 @@ class Config
     // game's depth" under the menu's Advanced section. See resource_tracking/GenericDepth_Dx12.h and
     // GenericDepth_Dx11.h.
     CustomOptional<bool> DlssNrNativeDepthFinder { false };
+    // NativeDepthVkCopyUsage: Vulkan only. With NativeDepthFinder on, depth images the game makes for rendering are made
+    // copyable (TRANSFER_SRC added to their usage), or the finder could not copy the scene's depth: a Vulkan game seldom
+    // asks for that itself. Can cost a little depth compression on some GPUs. Off: Vulkan depth reads as not readable,
+    // and Optical F5Low runs on motion only. Startup only (images are made once). See resource_tracking/GenericDepth_Vk.h.
+    CustomOptional<bool> DlssNrNativeDepthVkCopyUsage { true };
     // NativeDepthWarmupFrames: presented frames to watch before the finder trusts that the game makes no upscaler call of its
     // own (it stands down for good the moment one is seen). NativeDepthOverlay: debug; copies the picked depth buffer at its
     // busiest clear and shows it in the DLSS-NR menu (D3D12 only; no preview round-trip exists for D3D11 yet). That copy is
@@ -621,6 +631,12 @@ class Config
     // sets NativeDepthFinder, NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished
     // Picture if it was on (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
+    // NativeFrameGenerationOnly: a Vulkan game that calls DLSS, FSR or XeSS of its own gets OptiScaler's frame generation
+    // from that call. The Vulkan present bridge (native/VkPresentBridge.h) puts frame generation's D3D12 swapchain on the
+    // window, and the game's upscaler runs through a Vulkan-on-D3D12 backend (DLSS_on12, FFX_on12, FSR21_on12) on the
+    // bridge's device, whose evaluate hands frame generation the game's motion vectors, depth and output
+    // (upscalers/IFeature_VkwDx12.cpp). No Optical F5Low motion. The Optical F5Low page's "FG only (game's upscaler)" Mode.
+    CustomOptional<bool> DlssNrNativeFrameGenerationOnly { false };
     // NativeLowLatency: Optical F5Low calls the Reflex API itself, since a game that makes no upscaler call makes no
     // Reflex call either (see native/NativeLowLatency.h). Real Reflex on NVIDIA; fakenvapi answers elsewhere (Anti-Lag
     // 2, XeLL or LatencyFlex, chosen by the fakenvapi settings). auto: on while an Optical F5Low mode runs; true: also

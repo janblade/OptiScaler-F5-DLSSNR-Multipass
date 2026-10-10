@@ -38,6 +38,10 @@ class WithDx12
     static void SetD3D12Objects(ID3D12Device* InDevice, ID3D12CommandQueue* InCommandQueue,
                                 D3D12_COMMAND_LIST_TYPE InCommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT);
 
+    // The device is going away (the Vulkan present bridge's private one): if it is the one held, it and its queue are let
+    // go, here and in State, so nothing reaches them afterwards.
+    static void ForgetD3D12Device(ID3D12Device* device);
+
     static ID3D12Device* GetD3D12Device();
     static ID3D12CommandQueue* GetD3D12CommandQueue();
     static D3D12_COMMAND_LIST_TYPE GetD3D12CommandListType();

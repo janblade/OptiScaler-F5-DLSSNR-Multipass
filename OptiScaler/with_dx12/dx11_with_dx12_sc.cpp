@@ -136,6 +136,45 @@ bool IsSame(IDXGISwapChain* swapchain, UINT bufferCount, UINT width, UINT height
     return resolvedBufferCount == desc.BufferCount && resolvedWidth == desc.BufferDesc.Width &&
            resolvedHeight == desc.BufferDesc.Height && resolvedFormat == desc.BufferDesc.Format && flags == desc.Flags;
 }
+
+struct FgResizeArgs
+{
+    UINT bufferCount;
+    DXGI_FORMAT format;
+    UINT flags;
+};
+
+// What the game's resize becomes for the FG swapchain. With the XeFGBridgeResizeAsCreated quirk, the same changes as
+// when the bridge created it (DxgiFactory_Hooks' PrepareDx12InteropDesc): an SRGB format as its UNORM one, and fewer
+// than 2 buffers as the count it has. Under XeFG the flags are the swapchain's own, since FGHooks::hkResizeBuffers
+// keeps them anyway, so a resize that only differs there is skipped too. Without the quirk, the game's values as-is.
+FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI_FORMAT format, UINT flags)
+{
+    FgResizeArgs args { bufferCount, format, flags };
+
+    if (!State::Instance().gameQuirks[GameQuirk::XeFGBridgeResizeAsCreated])
+        return args;
+
+    if (args.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+        args.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    else if (args.format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+        args.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
+    if (args.bufferCount == 1)
+        args.bufferCount = 0;
+
+    DXGI_SWAP_CHAIN_DESC desc {};
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && fgSwapChain != nullptr &&
+        SUCCEEDED(fgSwapChain->GetDesc(&desc)))
+    {
+        args.flags = desc.Flags;
+    }
+
+    LOG_INFO("XeFG bridge resize as created: count {} -> {}, format {} -> {}, flags {:X} -> {:X}", bufferCount,
+             args.bufferCount, (UINT) format, (UINT) args.format, flags, args.flags);
+
+    return args;
+}
 } // namespace
 
 Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags)
@@ -494,7 +533,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+    const auto fgArgs = ResizeArgsForFg(_fgSwapChain, BufferCount, NewFormat, SwapChainFlags);
+    const bool skipFgResize = IsSame(_fgSwapChain, fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -538,7 +578,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
         }
     }
 
@@ -741,7 +781,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (_real3 == nullptr)
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
 
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, Format, SwapChainFlags);
+    const auto fgArgs = ResizeArgsForFg(_fgSwapChain, BufferCount, Format, SwapChainFlags);
+    const bool skipFgResize = IsSame(_fgSwapChain, fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -786,7 +827,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
         }
     }
 

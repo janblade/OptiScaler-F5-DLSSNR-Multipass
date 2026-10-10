@@ -97,9 +97,11 @@ bool NativeInputBlockedBySwapChainInterop();
 // full-resolution pixels towards the previous frame). Records onto `cmd`, a list of the caller's own, and leaves `color` in
 // PRESENT. False when it did not run (the reason is in FinishedPictureStatus()).
 // `colorSpace` is what the picture's values mean (NativeInputColourSpace() reads it off a swap chain); `pictureState` is the
-// state `color` is in on entry and is left in.
+// state `color` is in on entry and is left in. `historyDistrust` (optional) is the producer's trust mask
+// (DlssNrFrameInfo::HistoryDistrust).
 bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
-                      ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
+                      ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
+                      bool depthReversed, bool reset,
                       DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState);
 // The colour space of a swap chain's picture, from what the game set (SDR when it set nothing), for a native-input frame.
 DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format);
@@ -279,6 +281,18 @@ struct DetailReuseInfo
     float dropped = -1.0f;  // share of the last measured frame that had no detail to move, or negative if unmeasured
 };
 DetailReuseInfo DetailReuseStatus();
+
+// Scene cuts the game does not flag (dlssnr/DlssNrSceneCut.h), on D3D12 game input: cuts the detector found since the
+// game started, how many the game flagged too, how many it did not, and the model resets made for those (SceneCut=2).
+// lateBy: how many evaluates after its frame the last answer arrived. running: the detector ran on the last NR
+// evaluate (not on Optical F5Low's native input, nor with SceneCut=0); failed: it could not be made.
+struct SceneCutInfo
+{
+    unsigned long long found = 0, flagged = 0, silent = 0, resets = 0, lateBy = 0;
+    bool running = false;
+    bool failed = false;
+};
+SceneCutInfo SceneCutStatus();
 
 // What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
 std::optional<double> LastGpuTime();

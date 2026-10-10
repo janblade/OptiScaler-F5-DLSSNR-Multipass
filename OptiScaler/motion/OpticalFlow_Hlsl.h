@@ -1,6 +1,9 @@
 #pragma once
 
-// The optical flow's compute shaders (motion/OpticalFlow_Dx12.cpp): kSource, and kSceneSource for the scene-cut passes.
+#include "Luma_Hlsl.h"
+
+// The optical flow's compute shaders (motion/OpticalFlow_Dx12.cpp). The scene-cut passes are in motion/SceneCut_Hlsl.h,
+// and the luma both use is in motion/Luma_Hlsl.h.
 // Compiled ahead of time into native/F5LowShaderBytecode.h by tests/nr_shader_bytecode_smoke.cpp (run it with --write
 // after changing anything here; without, it checks the embedded bytecode is current).
 
@@ -53,48 +56,9 @@ RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
 RWTexture2D<uint>   OutAge : register(u1);
 
-// PQ (SMPTE ST 2084) to linear light, 1.0 being 10000 nits.
-float3 PqToLinear(float3 v)
-{
-    const float3 p = pow(saturate(v), 1.0 / 78.84375);
-    return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
-}
-
-// The luma of one colour for the match, in one of four ways (LUMA_MODE, a different pipeline for each). 0, the old one: Rec.601
-// weights and l / (1 + l) on the values as they are. 1, a gamma-encoded SDR colour: already a perceptual one, so it is
-// used as it is (the same weights, without the compression). 2 and 3, a linear scRGB or a PQ colour: made linear light
-// relative to the white (its Rec.709 or Rec.2020 luminance over whiteNits) and put through the CIE lightness curve, 0..1
-// from black to white and above 1 for highlights. Equal steps of it look alike, so the match weighs a dark detail like a
-// bright one.
-// The match's thresholds (lambda, the confidence knee) are in these units, and 1, 2 and 3 reach white at 1.0, twice the
-// old one's 0.5. Much of what the newer ones gain comes from that: the old luma doubled matches as well on a dark HDR
-// pan, and mode 1 halved loses nearly all of the grain tally. Mode 1's gain on thin bright lines is its own (no
-// compression).
-#ifndef LUMA_MODE
-#define LUMA_MODE 0
-#endif
-
-float LumaOf(float3 c)
-{
-    c = max(c, 0.0);
-
-#if LUMA_MODE == 0
-    const float l = dot(c, float3(0.299, 0.587, 0.114));
-    return l / (1.0 + l);
-#elif LUMA_MODE == 1
-    return dot(min(c, 4.0), float3(0.299, 0.587, 0.114));
-#else
-#if LUMA_MODE == 2
-    const float y = dot(c, float3(0.2126, 0.7152, 0.0722)) * (80.0 / whiteNits);
-#else
-    const float y = dot(PqToLinear(c), float3(0.2627, 0.6780, 0.0593)) * (10000.0 / whiteNits);
-#endif
-    const float yc = min(y, 64.0);
-    return 0.01 * (yc <= 216.0 / 24389.0 ? yc * (24389.0 / 27.0) : 116.0 * pow(yc, 1.0 / 3.0) - 16.0);
-#endif
-}
-
-// Luma of the colour, averaged over 2x2 into the first level.
+)HLSL"
+                      F5LOW_LUMA_HLSL
+                      R"HLSL(// Luma of the colour, averaged over 2x2 into the first level.
 [numthreads(8, 8, 1)]
 void Luma(uint3 id : SV_DispatchThreadID)
 {
@@ -707,177 +671,6 @@ void Smooth(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 loca
         }
 
     OutFlow[id.xy] = float4(sum / total, centre.z, 1.0);
-}
-)HLSL";
-
-// The scene-cut detector: brightness histograms of the half-resolution luma in a 3x3 grid, compared with the last
-// frame's.
-inline constexpr const char* kSceneSource = R"HLSL(
-cbuffer S : register(b0)
-{
-    uint2 size;       // the luma's size
-    uint hasPrevious; // the last frame's smoothed histograms are in the state, to compare with
-    float threshold;  // the divergence past which the frame is a cut
-};
-
-Texture2D<float> Luma : register(t0);
-RWTexture2D<uint> State : register(u0); // x is the bin; row t (0..8) holds tile t's counts, row 9 + t its last smoothed histogram
-                                        // (float bits), row 18 the scratch: a sum for each shift, and at x = 255 the count of
-                                        // finished groups
-RWTexture2D<uint> Cut : register(u1);   // texel 0 the flag, texel 1 the divergence (float bits)
-
-// The bins are equal steps of the luma's logarithm, nine stops of it over 256 bins, so a brightness change of the whole picture
-// (exposure, a fade) moves every histogram the same number of bins sideways, whatever the picture holds.
-static const float kStops = 9.0;
-static const int kMaxShift = 48; // bins, either way: the sideways shifts tried are -48 .. 48 (97), about 1.7 stops of luma
-static const uint kShifts = 2 * kMaxShift + 1;
-static const uint kCopies = 8; // each group counts in eight copies of its histogram, so lanes that hit one bin do not queue
-groupshared uint gCounts[kCopies * 256];
-
-// The counts of one tile: eight groups per tile each take a strip of its rows and add what they counted into the state.
-[numthreads(256, 1, 1)]
-void SceneHist(uint3 group : SV_GroupID, uint t : SV_GroupIndex)
-{
-    for (uint k = t; k < kCopies * 256; k += 256)
-        gCounts[k] = 0;
-    GroupMemoryBarrierWithGroupSync();
-
-    const uint2 tile = size / 3;
-    const uint2 origin = uint2(group.y % 3, group.y / 3) * tile;
-    const uint rows = (tile.y + 7) / 8;
-    const uint y0 = group.x * rows, y1 = min(y0 + rows, tile.y);
-    const uint lx = t % 32, ly = t / 32;
-    const uint copy = lx % kCopies;
-
-    for (uint y = y0 + ly; y < y1; y += 8)
-        for (uint x = lx; x < tile.x; x += 32)
-        {
-            const float l = max(Luma.Load(int3(int2(origin + uint2(x, y)), 0)), 1.0e-6);
-            const uint bin = (uint) clamp((log2(l) + kStops) * (255.0 / kStops), 0.0, 255.0);
-            InterlockedAdd(gCounts[copy * 256 + bin], 1);
-        }
-
-    GroupMemoryBarrierWithGroupSync();
-
-    uint sum = 0;
-    for (uint c = 0; c < kCopies; ++c)
-        sum += gCounts[c * 256 + t];
-
-    if (sum != 0)
-        InterlockedAdd(State[uint2(t, group.y)], sum);
-}
-
-static const float kKernel[6] = { 0.0088122291, 0.027143577, 0.065114059, 0.12164907, 0.17699835, 0.20056541 };
-
-groupshared float gCounted[256];
-groupshared float gSmooth[256];
-groupshared float gBefore[256];
-groupshared float gSum[256];
-groupshared uint gLast;
-
-// One group per tile. The counts are smoothed (an 11-tap bell, and one added to every bin so nothing is empty) and made into
-// a distribution. Its symmetric KL divergence to the last frame's distribution is taken for every sideways shift of the new one
-// from -48 to 48 bins (a bin that shifts in from outside the range counts one), a thread for each shift, and the smallest
-// counts: a brightness step of the whole picture only moves the histograms sideways and must not read as a cut, while a cut that
-// changes what is where (the sky now below, a dark tile now bright) cannot be undone by one shift for every tile. Each tile's
-// value for a shift, 1 - exp(-divergence), is added into the scratch (a ninth of it each); the last group to finish takes the
-// smallest sum and sets the flag.
-[numthreads(256, 1, 1)]
-void SceneDiverge(uint3 group : SV_GroupID, uint i : SV_GroupIndex)
-{
-    const uint tile = group.x;
-
-    gCounted[i] = (float) State[uint2(i, tile)];
-    State[uint2(i, tile)] = 0; // ready for the next frame's counts
-    GroupMemoryBarrierWithGroupSync();
-
-    float v = 1.0;
-    [unroll] for (int k = -5; k <= 5; ++k)
-        v += kKernel[5 - abs(k)] * gCounted[clamp(int(i) + k, 0, 255)];
-    gSmooth[i] = v;
-    gSum[i] = v;
-    GroupMemoryBarrierWithGroupSync();
-
-    for (uint s = 128; s > 0; s >>= 1)
-    {
-        if (i < s)
-            gSum[i] += gSum[i + s];
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    const float total = gSum[0];
-    const float before = hasPrevious != 0 ? asfloat(State[uint2(i, 9 + tile)]) : v / total;
-    gBefore[i] = before;
-    GroupMemoryBarrierWithGroupSync(); // everyone has read the old histogram and has what it needs of this one
-    State[uint2(i, 9 + tile)] = asuint(v / total);
-
-    if (hasPrevious == 0)
-    {
-        if (group.x == 0 && i == 0)
-        {
-            Cut[uint2(0, 0)] = 0;
-            Cut[uint2(1, 0)] = 0;
-        }
-        return;
-    }
-
-    if (i < kShifts)
-    {
-        // This thread's shift: the new histogram's bin j + shift is compared with the old one's bin j.
-        const int shift = int(i) - kMaxShift;
-        float sum = total;
-
-        for (int d = 0; d < abs(shift); ++d)
-            sum += 1.0 - gSmooth[shift > 0 ? d : 255 - d];
-
-        const float inverse = 1.0 / sum;
-        float divergence = 0.0;
-
-        for (int j = 0; j < 256; ++j)
-        {
-            const int from = j + shift;
-            const float p = (from < 0 || from > 255 ? 1.0 : gSmooth[from]) * inverse;
-            const float q = gBefore[j];
-            divergence += (p - q) * log(p / q); // p log(p/q) + q log(q/p)
-        }
-
-        InterlockedAdd(State[uint2(i, 18)], (uint) ((1.0 - exp(-abs(divergence))) / 9.0 * 1000000.0));
-    }
-
-    DeviceMemoryBarrier();
-    GroupMemoryBarrierWithGroupSync();
-
-    if (i == 0)
-    {
-        uint finished;
-        InterlockedAdd(State[uint2(255, 18)], 1, finished);
-        gLast = finished == 8 ? 1 : 0;
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (gLast == 0)
-        return;
-
-    // The last group: the smallest of the shifts' sums (the scratch is cleared as it is read).
-    uint sumHere = 0;
-    if (i < kShifts)
-        InterlockedExchange(State[uint2(i, 18)], 0, sumHere);
-    gSum[i] = i < kShifts ? (float) sumHere / 1000000.0 : 2.0;
-    GroupMemoryBarrierWithGroupSync();
-
-    for (uint r = 128; r > 0; r >>= 1)
-    {
-        if (i < r)
-            gSum[i] = min(gSum[i], gSum[i + r]);
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    if (i == 0)
-    {
-        Cut[uint2(0, 0)] = gSum[0] > threshold ? 1 : 0;
-        Cut[uint2(1, 0)] = asuint(gSum[0]);
-        State[uint2(255, 18)] = 0;
-    }
 }
 )HLSL";
 } // namespace OpticalFlowHlsl

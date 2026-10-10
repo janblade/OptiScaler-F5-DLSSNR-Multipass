@@ -1,11 +1,14 @@
 #include <pch.h>
 
 #include "VulkanwDx12_Hooks.h"
+#include <resource_tracking/GenericDepth_Vk.h>
 
 #include <State.h>
 #include <Config.h>
 
 #include <magic_enum.hpp>
+#include <mutex>
+#include <set>
 
 #include <detours/detours.h>
 
@@ -359,6 +362,7 @@ void Vulkan_wDx12::hk_vkCmdSetViewport(VkCommandBuffer commandBuffer, uint32_t f
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Viewport(commandBuffer, firstViewport, viewportCount, pViewports);
     o_vkCmdSetViewport(cmdBuffer, firstViewport, viewportCount, pViewports);
 }
 
@@ -633,6 +637,7 @@ void Vulkan_wDx12::hk_vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCo
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Draw(commandBuffer, vertexCount, instanceCount);
     o_vkCmdDraw(cmdBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -654,6 +659,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t i
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Draw(commandBuffer, indexCount, instanceCount);
     o_vkCmdDrawIndexed(cmdBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
@@ -675,6 +681,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer 
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, drawCount);
     o_vkCmdDrawIndirect(cmdBuffer, buffer, offset, drawCount, stride);
 }
 
@@ -696,6 +703,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, Vk
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, drawCount);
     o_vkCmdDrawIndexedIndirect(cmdBuffer, buffer, offset, drawCount, stride);
 }
 
@@ -933,6 +941,7 @@ void Vulkan_wDx12::hk_vkCmdClearDepthStencilImage(VkCommandBuffer commandBuffer,
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::ClearDepthStencilImage(commandBuffer, image, imageLayout, pDepthStencil, rangeCount, pRanges);
     o_vkCmdClearDepthStencilImage(cmdBuffer, image, imageLayout, pDepthStencil, rangeCount, pRanges);
 }
 
@@ -955,6 +964,7 @@ void Vulkan_wDx12::hk_vkCmdClearAttachments(VkCommandBuffer commandBuffer, uint3
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::ClearAttachments(commandBuffer, attachmentCount, pAttachments);
     o_vkCmdClearAttachments(cmdBuffer, attachmentCount, pAttachments, rectCount, pRects);
 }
 
@@ -1299,6 +1309,7 @@ void Vulkan_wDx12::hk_vkCmdBeginRenderPass(VkCommandBuffer commandBuffer, const 
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::BeginRenderPass(commandBuffer, pRenderPassBegin);
     o_vkCmdBeginRenderPass(cmdBuffer, pRenderPassBegin, contents);
 }
 
@@ -1319,6 +1330,7 @@ void Vulkan_wDx12::hk_vkCmdNextSubpass(VkCommandBuffer commandBuffer, VkSubpassC
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::NextSubpass(commandBuffer);
     o_vkCmdNextSubpass(cmdBuffer, contents);
 }
 
@@ -1344,6 +1356,7 @@ void Vulkan_wDx12::hk_vkCmdEndRenderPass(VkCommandBuffer commandBuffer)
 #endif
 
     o_vkCmdEndRenderPass(cmdBuffer);
+    GenericDepthVk::EndRenderPass(commandBuffer);
 }
 
 void Vulkan_wDx12::hk_vkCmdSetDeviceMask(VkCommandBuffer commandBuffer, uint32_t deviceMask)
@@ -1407,6 +1420,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndirectCount(VkCommandBuffer commandBuffer, VkBu
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, maxDrawCount);
     o_vkCmdDrawIndirectCount(cmdBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
 }
 
@@ -1429,6 +1443,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffe
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, maxDrawCount);
     o_vkCmdDrawIndexedIndirectCount(cmdBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
 }
 
@@ -1451,6 +1466,7 @@ void Vulkan_wDx12::hk_vkCmdBeginRenderPass2(VkCommandBuffer commandBuffer,
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::BeginRenderPass(commandBuffer, pRenderPassBegin);
     o_vkCmdBeginRenderPass2(cmdBuffer, pRenderPassBegin, pSubpassBeginInfo);
 }
 
@@ -1472,6 +1488,7 @@ void Vulkan_wDx12::hk_vkCmdNextSubpass2(VkCommandBuffer commandBuffer, const VkS
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::NextSubpass(commandBuffer);
     o_vkCmdNextSubpass2(cmdBuffer, pSubpassBeginInfo, pSubpassEndInfo);
 }
 
@@ -1493,6 +1510,7 @@ void Vulkan_wDx12::hk_vkCmdEndRenderPass2(VkCommandBuffer commandBuffer, const V
 #endif
 
     o_vkCmdEndRenderPass2(cmdBuffer, pSubpassEndInfo);
+    GenericDepthVk::EndRenderPass(commandBuffer);
 }
 
 void Vulkan_wDx12::hk_vkCmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
@@ -1737,6 +1755,7 @@ void Vulkan_wDx12::hk_vkCmdBeginRendering(VkCommandBuffer commandBuffer, const V
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::BeginRendering(commandBuffer, pRenderingInfo);
     o_vkCmdBeginRendering(cmdBuffer, pRenderingInfo);
 }
 
@@ -1758,6 +1777,7 @@ void Vulkan_wDx12::hk_vkCmdEndRendering(VkCommandBuffer commandBuffer)
 #endif
 
     o_vkCmdEndRendering(cmdBuffer);
+    GenericDepthVk::EndRendering(commandBuffer);
 }
 
 void Vulkan_wDx12::hk_vkCmdSetCullMode(VkCommandBuffer commandBuffer, VkCullModeFlags cullMode)
@@ -1850,6 +1870,7 @@ void Vulkan_wDx12::hk_vkCmdSetViewportWithCount(VkCommandBuffer commandBuffer, u
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Viewport(commandBuffer, 0, viewportCount, pViewports);
     o_vkCmdSetViewportWithCount(cmdBuffer, viewportCount, pViewports);
 }
 
@@ -2413,6 +2434,7 @@ void Vulkan_wDx12::hk_vkCmdBeginRenderingKHR(VkCommandBuffer commandBuffer, cons
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::BeginRendering(commandBuffer, pRenderingInfo);
     o_vkCmdBeginRenderingKHR(cmdBuffer, pRenderingInfo);
 }
 
@@ -2434,6 +2456,7 @@ void Vulkan_wDx12::hk_vkCmdEndRenderingKHR(VkCommandBuffer commandBuffer)
 #endif
 
     o_vkCmdEndRenderingKHR(cmdBuffer);
+    GenericDepthVk::EndRendering(commandBuffer);
 }
 
 void Vulkan_wDx12::hk_vkCmdSetDeviceMaskKHR(VkCommandBuffer commandBuffer, uint32_t deviceMask)
@@ -2541,6 +2564,7 @@ void Vulkan_wDx12::hk_vkCmdBeginRenderPass2KHR(VkCommandBuffer commandBuffer,
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::BeginRenderPass(commandBuffer, pRenderPassBegin);
     o_vkCmdBeginRenderPass2KHR(cmdBuffer, pRenderPassBegin, pSubpassBeginInfo);
 }
 
@@ -2562,6 +2586,7 @@ void Vulkan_wDx12::hk_vkCmdNextSubpass2KHR(VkCommandBuffer commandBuffer, const 
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::NextSubpass(commandBuffer);
     o_vkCmdNextSubpass2KHR(cmdBuffer, pSubpassBeginInfo, pSubpassEndInfo);
 }
 
@@ -2583,6 +2608,7 @@ void Vulkan_wDx12::hk_vkCmdEndRenderPass2KHR(VkCommandBuffer commandBuffer, cons
 #endif
 
     o_vkCmdEndRenderPass2KHR(cmdBuffer, pSubpassEndInfo);
+    GenericDepthVk::EndRenderPass(commandBuffer);
 }
 
 void Vulkan_wDx12::hk_vkCmdDrawIndirectCountKHR(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
@@ -2604,6 +2630,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndirectCountKHR(VkCommandBuffer commandBuffer, V
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, maxDrawCount);
     o_vkCmdDrawIndirectCountKHR(cmdBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
 }
 
@@ -2627,6 +2654,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndexedIndirectCountKHR(VkCommandBuffer commandBu
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, maxDrawCount);
     o_vkCmdDrawIndexedIndirectCountKHR(cmdBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
 }
 
@@ -3394,6 +3422,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndirectCountAMD(VkCommandBuffer commandBuffer, V
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, maxDrawCount);
     o_vkCmdDrawIndirectCountAMD(cmdBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
 }
 
@@ -3417,6 +3446,7 @@ void Vulkan_wDx12::hk_vkCmdDrawIndexedIndirectCountAMD(VkCommandBuffer commandBu
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, maxDrawCount);
     o_vkCmdDrawIndexedIndirectCountAMD(cmdBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
 }
 
@@ -4129,6 +4159,7 @@ void Vulkan_wDx12::hk_vkCmdSetViewportWithCountEXT(VkCommandBuffer commandBuffer
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Viewport(commandBuffer, 0, viewportCount, pViewports);
     o_vkCmdSetViewportWithCountEXT(cmdBuffer, viewportCount, pViewports);
 }
 
@@ -6032,6 +6063,7 @@ void Vulkan_wDx12::hk_vkCmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer, uint3
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, 1);
     o_vkCmdDrawMeshTasksEXT(cmdBuffer, groupCountX, groupCountY, groupCountZ);
 }
 
@@ -6053,6 +6085,7 @@ void Vulkan_wDx12::hk_vkCmdDrawMeshTasksIndirectEXT(VkCommandBuffer commandBuffe
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, drawCount);
     o_vkCmdDrawMeshTasksIndirectEXT(cmdBuffer, buffer, offset, drawCount, stride);
 }
 
@@ -6076,6 +6109,7 @@ void Vulkan_wDx12::hk_vkCmdDrawMeshTasksIndirectCountEXT(VkCommandBuffer command
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
+    GenericDepthVk::Indirect(commandBuffer, maxDrawCount);
     o_vkCmdDrawMeshTasksIndirectCountEXT(cmdBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount,
                                          stride);
 }
@@ -6120,6 +6154,7 @@ void Vulkan_wDx12::hk_vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32
         cmdBuffer = mappedVirtualCmdBuffer;
     }
 
+    GenericDepthVk::ExecuteCommands(commandBuffer, commandBufferCount, pCommandBuffers);
     o_vkCmdExecuteCommands(cmdBuffer, commandBufferCount, pCommandBuffers);
 }
 
@@ -6201,13 +6236,62 @@ static void AbortPendingD3D12Wait(const Vulkan_wDx12::PendingSubmission& pending
         LOG_ERROR("Failed to release aborted Vulkan w/Dx12 D3D12 wait: {0:x}", result);
 }
 
-static bool LegacySubmitPNextSupported(const void* pNext)
+// A VkDeviceGroupSubmitInfo that names device 0 only, for every semaphore and command buffer: what a submit without one
+// does on a single-GPU device (an engine that always attaches it, RDR2). Leaving it out of the split submits changes
+// nothing.
+static bool TrivialDeviceGroupSubmit(const VkDeviceGroupSubmitInfo& info, const VkSubmitInfo& submit)
 {
-    if (pNext == nullptr)
-        return true;
+    if (info.waitSemaphoreCount != 0 && info.waitSemaphoreCount != submit.waitSemaphoreCount)
+        return false;
 
-    const auto* first = reinterpret_cast<const VkBaseInStructure*>(pNext);
-    return first->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO && first->pNext == nullptr;
+    if (info.commandBufferCount != 0 && info.commandBufferCount != submit.commandBufferCount)
+        return false;
+
+    if (info.signalSemaphoreCount != 0 && info.signalSemaphoreCount != submit.signalSemaphoreCount)
+        return false;
+
+    for (uint32_t i = 0; info.pWaitSemaphoreDeviceIndices != nullptr && i < info.waitSemaphoreCount; i++)
+        if (info.pWaitSemaphoreDeviceIndices[i] != 0)
+            return false;
+
+    for (uint32_t i = 0; info.pCommandBufferDeviceMasks != nullptr && i < info.commandBufferCount; i++)
+        if (info.pCommandBufferDeviceMasks[i] != 1)
+            return false;
+
+    for (uint32_t i = 0; info.pSignalSemaphoreDeviceIndices != nullptr && i < info.signalSemaphoreCount; i++)
+        if (info.pSignalSemaphoreDeviceIndices[i] != 0)
+            return false;
+
+    return true;
+}
+
+// Plain, one VkTimelineSemaphoreSubmitInfo (its values are carried over), and/or a device group naming device 0 only
+// (left out). Anything else: the first sType that is not, for the log.
+static bool LegacySubmitPNextSupported(const VkSubmitInfo& submit, int32_t* unsupported)
+{
+    bool timeline = false;
+    bool deviceGroup = false;
+
+    for (auto next = reinterpret_cast<const VkBaseInStructure*>(submit.pNext); next != nullptr; next = next->pNext)
+    {
+        if (next->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO && !timeline)
+        {
+            timeline = true;
+            continue;
+        }
+
+        if (next->sType == VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO && !deviceGroup &&
+            TrivialDeviceGroupSubmit(*reinterpret_cast<const VkDeviceGroupSubmitInfo*>(next), submit))
+        {
+            deviceGroup = true;
+            continue;
+        }
+
+        *unsupported = (int32_t) next->sType;
+        return false;
+    }
+
+    return true;
 }
 
 static const VkTimelineSemaphoreSubmitInfo* FindTimelineSubmitInfo(const void* pNext)
@@ -6260,10 +6344,25 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, con
     const auto& original = pSubmits[submitIndex];
 
     // Splitting a legacy VkSubmitInfo changes command/signal counts. Submit-level extensions such as device-group or
-    // protected-submit structures can carry count-coupled semantics, so only the plain submit and the single
-    // VkTimelineSemaphoreSubmitInfo case are rewritten. Everything else is passed through unchanged.
-    if (!LegacySubmitPNextSupported(original.pNext))
+    // protected-submit structures can carry count-coupled semantics, so only the plain submit, one
+    // VkTimelineSemaphoreSubmitInfo and a device-0-only device group (single GPU) are rewritten. Everything else is passed
+    // through unchanged.
+    if (int32_t unsupported = 0; !LegacySubmitPNextSupported(original, &unsupported))
     {
+        // Said once per kind: the game submits like this every frame, from more than one thread
+        static std::mutex saidMutex;
+        static std::set<int32_t> said;
+        bool first = false;
+        {
+            std::lock_guard lock(saidMutex);
+            first = said.insert(unsupported).second;
+        }
+
+        if (first)
+            LOG_WARN("Vulkan w/Dx12: the game's VkSubmitInfo carries sType {} in its pNext chain, which the interop "
+                     "cannot split: the upscaler's copies are not synchronised (the picture will be wrong)",
+                     unsupported);
+
         AbortPendingD3D12Wait(pending, "unsupported legacy VkSubmitInfo pNext chain");
         return o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
     }
@@ -6301,7 +6400,8 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, con
     originalTimelineCopy.signalSemaphoreValueCount = 1;
     originalTimelineCopy.pSignalSemaphoreValues = &resourceCopyValue;
 
-    // LegacySubmitPNextSupported guarantees either no extension or one standalone timeline node.
+    // LegacySubmitPNextSupported allows only a timeline node (its values are copied here) and a device-0-only device group,
+    // which the split submits leave out.
     originalTimelineCopy.pNext = nullptr;
 
     VkSubmitInfo modifiedOriginal = original;
@@ -6590,6 +6690,7 @@ VkResult Vulkan_wDx12::hk_vkBeginCommandBuffer(VkCommandBuffer commandBuffer,
     LOG_DEBUG("commandBuffer: {:X}", (size_t) commandBuffer);
 #endif
 
+    GenericDepthVk::BeginCommandBuffer(commandBuffer, pBeginInfo);
     return o_vkBeginCommandBuffer(commandBuffer, pBeginInfo);
 }
 
@@ -6611,6 +6712,7 @@ VkResult Vulkan_wDx12::hk_vkEndCommandBuffer(VkCommandBuffer commandBuffer)
                   magic_enum::enum_name(result));
     }
 
+    GenericDepthVk::EndCommandBuffer(commandBuffer);
     return o_vkEndCommandBuffer(commandBuffer);
 }
 
@@ -6623,6 +6725,7 @@ VkResult Vulkan_wDx12::hk_vkResetCommandBuffer(VkCommandBuffer commandBuffer, Vk
     if (GetVirtualCommandBuffer(commandBuffer) == VK_NULL_HANDLE)
         cmdBufferStateTracker.OnReset(commandBuffer);
 
+    GenericDepthVk::ForgetCommandBuffers(1, &commandBuffer);
     return o_vkResetCommandBuffer(commandBuffer, flags);
 }
 
@@ -6638,6 +6741,7 @@ void Vulkan_wDx12::hk_vkFreeCommandBuffers(VkDevice device, VkCommandPool comman
     cmdBufferStateTracker.OnFreeCommandBuffers(commandPool, commandBufferCount, pCommandBuffers);
 
     // Call original function
+    GenericDepthVk::ForgetCommandBuffers(commandBufferCount, pCommandBuffers);
     o_vkFreeCommandBuffers(device, commandPool, commandBufferCount, pCommandBuffers);
 }
 

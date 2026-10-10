@@ -353,6 +353,48 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
     }
 }
 
+HRESULT DxgiFactoryHooks::CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue,
+                                                    DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain4** out, bool* realFG)
+{
+    *out = nullptr;
+    *realFG = false;
+
+    if (factory == nullptr || queue == nullptr || desc == nullptr)
+        return E_INVALIDARG;
+
+    // A Vulkan game never made a DXGI factory of its own: frame generation's swapchain is made through this hooked one.
+    HookToFactory(factory);
+
+    if (!PrepareDx12InteropDesc(*desc, IsTearingSupported(factory)))
+        return E_INVALIDARG;
+
+    IDXGISwapChain* swapChain = nullptr;
+    HRESULT result = E_FAIL;
+
+    {
+        ScopedSkipFGSCCreation skipFGSCCreation {};
+        result = FGHooks::CreateSwapChain(factory, queue, desc, &swapChain);
+        *realFG = SUCCEEDED(result) && swapChain != nullptr;
+    }
+
+    if (FAILED(result) || swapChain == nullptr)
+    {
+        *realFG = false;
+        LOG_WARN("Vulkan bridge FG swapchain creation failed: {:X}; creating plain DX12 swapchain", (UINT) result);
+
+        ScopedSkipParentWrapping skipParentWrapping {};
+        result = o_CreateSwapChain(factory, queue, desc, &swapChain);
+    }
+
+    if (SUCCEEDED(result) && swapChain != nullptr)
+    {
+        result = swapChain->QueryInterface(IID_PPV_ARGS(out));
+        swapChain->Release();
+    }
+
+    return result;
+}
+
 void DxgiFactoryHooks::HookToDLSSGFactory(IDXGIFactory* pFactory)
 {
     if (pFactory == nullptr || o_DLSSGCreateSwapChain != nullptr)

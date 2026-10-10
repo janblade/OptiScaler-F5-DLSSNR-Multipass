@@ -18,6 +18,9 @@ namespace native
 // R32_FLOAT copy. An R32 depth buffer is already the copy's format family and is copied straight into it. Only the first
 // subresource (top mip, first slice) is copied.
 //
+// A multisampled buffer is copied as it is into a read copy with the same samples, and the pass resolves it: each pixel gets
+// the nearest of its samples (native/DepthResolve_Hlsl.h), so edges follow the surface in front.
+//
 // The game's compute shader (with its class instances), CS read view 0 and CS write view 0 are put back after the pass; nothing
 // else of the game's state is touched. Not thread-safe: the caller guards it.
 class DepthCopyDx11
@@ -27,11 +30,12 @@ class DepthCopyDx11
     DepthCopyDx11(const DepthCopyDx11&) = delete;
     DepthCopyDx11& operator=(const DepthCopyDx11&) = delete;
 
-    // Copies `source` (a depth buffer made on the device `context` belongs to) into the copy. Returns nullptr when the copy was
+    // Copies `source` (a depth buffer made on the device `context` belongs to) into the copy. `reversed` says which way its
+    // depth runs (near is 1), which decides the nearest sample of a multisampled buffer. Returns nullptr when the copy was
     // taken, otherwise why not (a fixed string: the same reason gives the same pointer, so a caller can log each one once); a
     // copy not taken is not offered (Taken() is false) until a later Take succeeds. What is kept between copies is made again
     // when the size, format or device changes; a texture that could not be made is not tried again until one of those changes.
-    const char* Take(ID3D11DeviceContext* context, ID3D11Resource* source);
+    const char* Take(ID3D11DeviceContext* context, ID3D11Resource* source, bool reversed);
 
     // Lets go of everything made on the device, and of the device.
     void Release();
@@ -45,11 +49,14 @@ class DepthCopyDx11
     uint32_t Height() const { return _copyHeight; }
     // Whether the copy just taken went through the conversion pass (false: copied straight).
     bool Converted() const { return _converted; }
+    // How many samples the buffer just copied had (1: not multisampled; more: the copy is its resolve).
+    uint32_t Samples() const { return _samples; }
 
   private:
     const char* MakeCopy(uint32_t width, uint32_t height);
-    const char* MakeStage(uint32_t width, uint32_t height, DXGI_FORMAT typeless, DXGI_FORMAT view);
+    const char* MakeStage(uint32_t width, uint32_t height, DXGI_FORMAT typeless, DXGI_FORMAT view, DXGI_SAMPLE_DESC samples);
     ID3D11ComputeShader* Shader();
+    ID3D11ComputeShader* ResolveShader(bool reversed);
 
     Microsoft::WRL::ComPtr<ID3D11Device> _device; // what everything below was made on
     Microsoft::WRL::ComPtr<ID3D11Texture2D> _copy;
@@ -61,10 +68,14 @@ class DepthCopyDx11
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> _stageSrv;
     uint32_t _stageWidth = 0, _stageHeight = 0;
     DXGI_FORMAT _stageFormat = DXGI_FORMAT_UNKNOWN;
-    bool _stageFailed = false; // making the read copy at the size and format above failed
+    DXGI_SAMPLE_DESC _stageSamples { 1, 0 };
+    bool _stageFailed = false; // making the read copy at the size, format and samples above failed
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> _shader; // made on _device
     bool _shaderFailed = false;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> _resolve[2]; // [reversed]: the multisampled resolve, made on _device
+    bool _resolveFailed[2] = {};
+    uint32_t _samples = 1;
 
     bool _taken = false;
     bool _converted = false;

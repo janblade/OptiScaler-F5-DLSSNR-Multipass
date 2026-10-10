@@ -101,6 +101,16 @@ class IFeature_VkwDx12 : public virtual IFeature_Vk
     PFN_vkGetMemoryWin32HandlePropertiesKHR vkGetMemoryWin32HandlePropertiesKHR = nullptr;
     PFN_vkImportSemaphoreWin32HandleKHR vkImportSemaphoreWin32HandleKHR = nullptr;
 
+    // "FG only (game's upscaler)" ([DlssNr] NativeFrameGenerationOnly): the feature runs on the Vulkan present bridge's
+    // private device (a reference of ours, native/NativeDriverVk.h ShareBridgeDevice), and its evaluate hands frame
+    // generation the game's motion vectors and depth (inputs/FG/Upscaler_Inputs_Dx12.h), as a D3D12 game's upscaler call
+    // does.
+    ID3D12Device* _bridgeDevice = nullptr;
+    // The last D3D12 submission's completion point on the shared fence (CopyBackOutput)
+    ID3D12Fence* _lastCompleteFence = nullptr;
+    uint64_t _lastCompleteValue = 0;
+    bool FeedsFrameGeneration() const;
+
     // Helper methods
     HRESULT CreateDx12Device();
 

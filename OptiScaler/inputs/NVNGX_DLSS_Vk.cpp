@@ -863,6 +863,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_CreateFeature1(VkDevice InDevice
         if (Config::Instance()->VulkanUpscaler.has_value())
             upscalerChoice = Config::Instance()->VulkanUpscaler.value();
 
+        // FG only feeds frame generation from a Vulkan-on-D3D12 backend: the ini's choice is mapped onto one
+        upscalerChoice = FeatureProvider_Vk::ForFrameGenerationOnly(upscalerChoice);
+
         LOG_INFO("Creating new {} upscaler", UpscalerDisplayName(upscalerChoice));
 
         VkContexts[handleId] = {};
@@ -1096,7 +1099,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
 
     const auto backend = deviceContext->GetUpscalerType();
     const bool bridged = backend == Upscaler::XeSS_on12 || backend == Upscaler::FSR21_on12 ||
-                         backend == Upscaler::FSR22_on12 || backend == Upscaler::FFX_on12;
+                         backend == Upscaler::FSR22_on12 || backend == Upscaler::FFX_on12 ||
+                         backend == Upscaler::DLSS_on12;
     const bool rayReconstruction = backend == Upscaler::DLSSD;
     void* originalColor = nullptr;
     InParameters->Get(NVSDK_NGX_Parameter_Color, &originalColor);

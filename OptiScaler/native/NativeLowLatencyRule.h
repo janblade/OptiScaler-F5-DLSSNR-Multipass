@@ -25,6 +25,7 @@ struct Inputs
     bool forceXell = false;                 // fakenvapi's Force XeLL (it takes the frame generation slot and runs XeLL)
     bool otherFrameGenerationOwner = false; // frame generation that runs Reflex itself (DLSS FG, an external owner)
     bool apiAvailable = true;               // the Reflex function table could be found
+    bool deviceAvailable = true;            // the device can do it (a Vulkan device without a working sleep semaphore cannot)
 };
 
 enum class Decision
@@ -36,7 +37,8 @@ enum class Decision
     ForceReflexDisabled,
     ForceXell,
     FrameGenerationOwnsReflex,
-    NoApi
+    NoApi,
+    DeviceUnavailable
 };
 
 // Order matters: what the player can change comes first, then what stops us for another reason.
@@ -63,7 +65,40 @@ inline Decision Decide(const Inputs& in)
     if (!in.apiAvailable)
         return Decision::NoApi;
 
+    if (!in.deviceAvailable)
+        return Decision::DeviceUnavailable;
+
     return Decision::Run;
+}
+
+// Which Reflex surface a call goes through: the D3D-flavoured NVAPI entry points (NvAPI_D3D_*, also what XeFG's routing
+// to XeLL hangs off) or the Vulkan-flavoured ones (NvAPI_Vulkan_*). Each call carries its own: nothing is remembered
+// between calls, so a D3D12 device pointer can never reach a Vulkan entry point or the other way round.
+enum class Api
+{
+    D3D,
+    Vulkan
+};
+
+struct Target
+{
+    Api api = Api::D3D;
+    const void* device = nullptr; // null: nothing to call
+};
+
+// A Vulkan game's present while the frame-generation bridge is up is the bridge's D3D12 swapchain's, on the bridge's
+// private D3D12 device: its low latency goes through the D3D surface on that device (so XeFG's XeLL routing reaches it,
+// as for a D3D11 game's hidden present) and no Vulkan NVAPI call is made. Without the bridge a Vulkan game's own
+// VkDevice goes through the Vulkan surface. A D3D game's present is always D3D.
+inline Target PresentTarget(bool vulkanGame, bool bridged, const void* gameDevice, const void* bridgeDevice12)
+{
+    if (!vulkanGame)
+        return { Api::D3D, gameDevice };
+
+    if (bridged)
+        return { Api::D3D, bridgeDevice12 };
+
+    return { Api::Vulkan, gameDevice };
 }
 
 // Plain words for the menu when we do not run. Run has no text here: the path in use names it.
@@ -124,6 +159,8 @@ inline const char* DecisionText(Decision decision)
         return "The frame generation in use runs Reflex itself";
     case Decision::NoApi:
         return "No Reflex or fakenvapi interface could be found";
+    case Decision::DeviceUnavailable:
+        return "Unavailable on this device";
     default:
         return "";
     }

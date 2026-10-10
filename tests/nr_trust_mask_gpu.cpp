@@ -10,7 +10,8 @@
 //     distrust everywhere on that frame (not only a couple of frames later through the readback).
 //
 //   vcvars64, then from the repo root:
-//   cl /std:c++20 /EHsc /O2 tests\nr_trust_mask_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
+//   cl /std:c++20 /EHsc /O2 tests\nr_trust_mask_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp
+//   OptiScaler\motion\SceneCut_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN

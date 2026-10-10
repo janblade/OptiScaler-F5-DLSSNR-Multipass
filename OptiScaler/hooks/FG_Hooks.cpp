@@ -20,6 +20,7 @@
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeLowLatency.h>
+#include <native/PresentStageTiming.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -744,7 +745,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
         // Let's try Dx11 like approach on Dx12
         std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
         if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+            State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
         {
             resizeLock.lock();
         }
@@ -982,7 +983,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
         // Let's try Dx11 like approach on Dx12
         std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
         if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+            State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
         {
             resizeLock.lock();
         }
@@ -1155,7 +1156,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         // Let's try Dx11 like approach on Dx12
         std::shared_lock<std::shared_mutex> resizeLock(_resizeMutex, std::defer_lock);
         if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-            State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+            State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
         {
             resizeLock.lock();
         }
@@ -1218,7 +1219,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             // gameQueue names (WithDx12's paired one).
             const bool pureDx12Feature = currentFeature->Api() == API::DX12 && !currentFeature->IsWithDx12();
 
-            if (pureDx12Feature && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
+            if (pureDx12Feature && state.swapchainInteropApi != SwapchainInteropApi::None)
             {
                 if (gameQueue != nullptr)
                 {
@@ -1261,11 +1262,15 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     }
 
     bool mutexUsed = false;
+    native::presenttiming::NoteFrameGenerationMutexWait(0.0);
     if (willPresent && fg != nullptr && fg->IsActive() && !fg->IsPaused() &&
         config->FGUseMutexForSwapchain.value_or_default() && fg->Mutex.getOwner() != 2)
     {
         LOG_TRACE("Waiting FG->Mutex 2, current: {}", fg->Mutex.getOwner());
+        const auto mutexWaitStartMs = Util::MillisecondsNow();
         fg->Mutex.lock(2);
+        // For the stall timing: on the Vulkan game's present thread this is the wait inside the bridge's present
+        native::presenttiming::NoteFrameGenerationMutexWait(Util::MillisecondsNow() - mutexWaitStartMs);
         mutexUsed = true;
         LOG_TRACE("Accuired FG->Mutex: {}", fg->Mutex.getOwner());
     }
@@ -1361,10 +1366,35 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     }
 
     HRESULT result;
+    const auto presentStartMs = Util::MillisecondsNow();
+
     if (pPresentParameters == nullptr)
         result = o_FGSCPresent(This, SyncInterval, Flags);
     else
         result = o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);
+
+    // Where a stall sits when the game's present is held up inside frame generation's own (the game's present thread
+    // only; native/PresentStageTiming.h). Only for the Vulkan bridge: other games log nothing of this.
+    if (willPresent &&
+        native::presenttiming::FrameGenerationTimingWanted(state.swapchainInteropApi == SwapchainInteropApi::VkwDx12))
+    {
+        static native::presenttiming::StageTiming presentTiming;
+
+        const auto now = Util::MillisecondsNow();
+        presentTiming.Record(native::presenttiming::Stage::FrameGenerationPresent, now - presentStartMs);
+        presentTiming.Record(native::presenttiming::Stage::FrameGenerationMutexWait,
+                             native::presenttiming::PeekFrameGenerationMutexWait());
+        const auto outcome = presentTiming.EndPresent(now);
+
+        if (outcome.stall)
+            LOG_WARN("Frame generation present stall: {}", presentTiming.StallLine());
+
+        if (outcome.summary)
+        {
+            LOG_INFO("Frame generation present timing, {}", presentTiming.SummaryLine());
+            presentTiming.Restart();
+        }
+    }
 
     if (result == S_OK)
     {

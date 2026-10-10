@@ -91,21 +91,21 @@ static void Invalidations()
         f.reset = true;
         const Decision d = c.Next(f);
         CHECK(d.kind == Kind::Full && d.captureHistory && !d.historyUsable && !d.composeMotion);
-        CHECK(c.Fallback() == 1);
+        CHECK(c.Fallback() == 1 && c.Causes().reset == 1 && c.Causes().gap == 0);
     }
     {
         Cadence c;
         afterOneFull(c);
         const Decision d = c.Next(Facts(101, 2)); // settings changed
         CHECK(d.kind == Kind::Full && !d.historyUsable);
-        CHECK(c.Fallback() == 1);
+        CHECK(c.Fallback() == 1 && c.Causes().changed == 1);
     }
     {
         Cadence c;
         afterOneFull(c);
         const Decision d = c.Next(Facts(103)); // NR did not run on 101 and 102
         CHECK(d.kind == Kind::Full && !d.historyUsable);
-        CHECK(c.Fallback() == 1);
+        CHECK(c.Fallback() == 1 && c.Causes().gap == 1 && c.Causes().lastGapStep == 3 && c.Causes().lastMaxStep == 1);
     }
     {
         Cadence c;
@@ -209,6 +209,7 @@ static void StepTolerance()
     c.Captured(true);
     f.frame = 21; // the same frame again is not continuous either
     CHECK(c.Next(f).kind == Kind::Full && c.Fallback() == 2);
+    CHECK(c.Causes().gap == 2 && c.Causes().lastGapStep == 0 && c.Causes().lastMaxStep == 4);
 }
 
 // Held off while the picture moves too fast: the frame runs the model, its history stays usable (so the measurement
@@ -358,8 +359,57 @@ static void FrameRate()
     CHECK(h.Update(1.0 / 15.0, 25.0));
 }
 
+// Where NR runs decides whether reuse is offered at all. A finished picture needs vectors measured on it (Optical
+// F5Low's native input); the game's own vectors leave it blocked, as before.
+static void Route()
+{
+    CHECK(UnavailableOnRoute(false, false, false) == nullptr);
+    CHECK(UnavailableOnRoute(false, false, true) == nullptr);
+    CHECK(UnavailableOnRoute(true, false, false) != nullptr);
+    CHECK(UnavailableOnRoute(true, false, true) != nullptr); // before SR stays out, whatever the vectors
+    CHECK(UnavailableOnRoute(false, true, false) != nullptr);
+    CHECK(UnavailableOnRoute(false, true, true) == nullptr);
+}
+
+// The normal step under frame generation is learnt, so a multiplier above 4x is not a gap on every frame (Witcher 3,
+// 2026-10-08), while a frame NR really skipped (twice the step) still is.
+static void LearntStep()
+{
+    StepTracker t;
+    CHECK(t.Typical() == 1);
+    CHECK(MaxStepFor(false, 6) == 1);
+    CHECK(MaxStepFor(true, 1) == 4 && MaxStepFor(true, 2) == 4 && MaxStepFor(true, 4) == 6 && MaxStepFor(true, 6) == 9);
+
+    // 6x: the present counter steps by 6, with a skipped frame (12) and a short one (5) among them.
+    unsigned long long frame = 100;
+    for (int i = 0; i < 20; ++i)
+    {
+        frame += i == 7 ? 12 : i == 11 ? 5 : 6;
+        t.Add(frame);
+    }
+    CHECK(t.Typical() == 6);
+    t.Add(frame); // the same frame again is not a step
+    CHECK(t.Typical() == 6);
+
+    // Through the cadence: at 6x every frame alternates full and reuse; a skipped frame (12) falls back as a gap.
+    Cadence c;
+    FrameFacts f = Facts(1000);
+    f.maxStep = MaxStepFor(true, 6);
+    c.Next(f);
+    c.Captured(true);
+    f.frame += 6;
+    CHECK(c.Next(f).kind == Kind::Reuse);
+    c.Captured(true);
+    f.frame += 6;
+    CHECK(c.Next(f).kind == Kind::Full && c.Fallback() == 0);
+    c.Captured(true);
+    f.frame += 12;
+    CHECK(c.Next(f).kind == Kind::Full && c.Fallback() == 1 && c.Causes().gap == 1);
+}
+
 int main()
 {
+    Route();
     Alternates();
     NoDoubleReuse();
     FailedCaptureDropsHistory();
@@ -369,6 +419,7 @@ int main()
     ReuseFailedCounts();
     Disabled();
     StepTolerance();
+    LearntStep();
     HeldWhileMoving();
     HeldCountsOnlyLostReuse();
     Motion();

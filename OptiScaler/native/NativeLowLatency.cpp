@@ -10,10 +10,14 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <hooks/LibraryLoad_Hooks.h>
 #include <hooks/Reflex_Hooks.h>
+#include <hooks/Vulkan_Hooks.h>
 #include <nvapi/NvApiHooks.h>
 #include <nvapi/fakenvapi.h>
 
+#include "NativeLowLatencyVkSync.h"
+
 #include <atomic>
+#include <mutex>
 
 namespace native::lowlatency
 {
@@ -29,7 +33,13 @@ enum class Table
 
 std::atomic<bool> g_running = false;    // markers are being sent
 std::atomic<bool> g_submitSent = false; // this frame's SIMULATION_END / RENDERSUBMIT_START went out
+// `device` is a D3D11/D3D12 device (the game's, or the Vulkan bridge's private D3D12 device) or -- Api::Vulkan -- the
+// game's VkDevice reinterpreted as the same pointer-sized token: never dereferenced as a COM interface here, only passed
+// back to the Reflex calls of its own API. Every call carries its Api; nothing is remembered between calls but the Api
+// each stored device was seen with (for the callers that bring no device: the first submit, the status line).
+std::atomic<Api> g_deviceApi = Api::D3D;
 std::atomic<IUnknown*> g_device = nullptr;
+std::atomic<Api> g_sleepModeApi = Api::D3D;
 std::atomic<IUnknown*> g_sleepModeDevice = nullptr;   // the device our Reflex mode was set on
 std::atomic<const void*> g_gameQueue = nullptr;       // the queue the game's frame is submitted to (D3D12)
 std::atomic<double> g_frameGenerationPresentAt = 0.0; // last PresentSource::FrameGeneration call, ms
@@ -46,8 +56,41 @@ double g_latencyAskedAt = 0.0;
 bool g_hasLatency = false;
 float g_latencyMs = 0.0f;
 
-void Marker(IUnknown* device, NV_LATENCY_MARKER_TYPE type)
+// NV_LATENCY_MARKER_TYPE and NV_VULKAN_LATENCY_MARKER_TYPE share the same ordinals for every value used here, but are
+// unrelated enum types in the SDK: translated explicitly rather than cast, so a future SDK change cannot silently
+// mismatch them.
+NV_VULKAN_LATENCY_MARKER_TYPE VulkanMarkerType(NV_LATENCY_MARKER_TYPE type)
 {
+    switch (type)
+    {
+    case SIMULATION_START:
+        return VULKAN_SIMULATION_START;
+    case SIMULATION_END:
+        return VULKAN_SIMULATION_END;
+    case RENDERSUBMIT_START:
+        return VULKAN_RENDERSUBMIT_START;
+    case RENDERSUBMIT_END:
+        return VULKAN_RENDERSUBMIT_END;
+    case PRESENT_START:
+        return VULKAN_PRESENT_START;
+    case PRESENT_END:
+    default:
+        return VULKAN_PRESENT_END;
+    }
+}
+
+void Marker(Api api, IUnknown* device, NV_LATENCY_MARKER_TYPE type)
+{
+    if (api == Api::Vulkan)
+    {
+        NV_VULKAN_LATENCY_MARKER_PARAMS params {};
+        params.version = NV_VULKAN_LATENCY_MARKER_PARAMS_VER;
+        params.frameID = g_frameId;
+        params.markerType = VulkanMarkerType(type);
+        ReflexHooks::ownSetLatencyMarkerVulkan(reinterpret_cast<HANDLE>(device), &params);
+        return;
+    }
+
     NV_LATENCY_MARKER_PARAMS params {};
     params.version = NV_LATENCY_MARKER_PARAMS_VER;
     params.frameID = g_frameId;
@@ -55,8 +98,19 @@ void Marker(IUnknown* device, NV_LATENCY_MARKER_TYPE type)
     ReflexHooks::ownSetLatencyMarker(device, &params);
 }
 
-void SetSleepMode(IUnknown* device, bool on)
+void SetSleepMode(Api api, IUnknown* device, bool on)
 {
+    if (api == Api::Vulkan)
+    {
+        NV_VULKAN_SET_SLEEP_MODE_PARAMS params {};
+        params.version = NV_VULKAN_SET_SLEEP_MODE_PARAMS_VER;
+        params.bLowLatencyMode = on;
+        params.bLowLatencyBoost = false;
+        params.minimumIntervalUs = 0;
+        ReflexHooks::ownSetSleepModeVulkan(reinterpret_cast<HANDLE>(device), &params);
+        return;
+    }
+
     NV_SET_SLEEP_MODE_PARAMS params {};
     params.version = NV_SET_SLEEP_MODE_PARAMS_VER;
     params.bLowLatencyMode = on;
@@ -92,7 +146,96 @@ bool FindTable()
     return ReflexHooks::ensureTable(queryInterface);
 }
 
-Inputs GatherInputs()
+// The Vulkan sleep pair (NativeLowLatencyVkSync.h) of the game's VkDevice. The game's present thread, and the thread that
+// destroys the device.
+std::mutex g_vkMutex;
+VkSleepSync g_vkSync;
+VkDevice g_vkSyncDevice = VK_NULL_HANDLE;
+bool g_vkUnavailableLogged = false;
+
+VkSleepCalls VulkanSleepCalls(VkDevice device)
+{
+    VkSleepCalls calls;
+    calls.timelineSemaphoresOn = [device] { return VulkanHooks::TimelineSemaphoresOn(device); };
+    calls.init = [device](void** semaphore)
+    {
+        HANDLE handle = nullptr;
+        const auto status = ReflexHooks::ownInitLowLatencyDeviceVulkan(reinterpret_cast<HANDLE>(device), &handle);
+        *semaphore = handle;
+        return static_cast<int>(status);
+    };
+    calls.sleep = [device](uint64_t value)
+    { return static_cast<int>(ReflexHooks::ownSleepVulkan(reinterpret_cast<HANDLE>(device), value)); };
+    calls.wait = [device](void* semaphore, uint64_t value, uint64_t timeoutNs)
+    { return VulkanHooks::WaitTimelineSemaphore(device, reinterpret_cast<VkSemaphore>(semaphore), value, timeoutNs); };
+    return calls;
+}
+
+const char* VulkanWhyText(VkSleepWhy why)
+{
+    switch (why)
+    {
+    case VkSleepWhy::NoTimelineSemaphores:
+        return "the device was made without timeline semaphores";
+    case VkSleepWhy::InitFailed:
+        return "NvAPI_Vulkan_InitLowLatencyDevice failed";
+    case VkSleepWhy::NoSemaphore:
+        return "NvAPI_Vulkan_InitLowLatencyDevice returned no semaphore";
+    case VkSleepWhy::WaitTimedOut:
+        return "the sleep's semaphore never reached its value";
+    default:
+        return "";
+    }
+}
+
+// The device can do the Vulkan sleep: initialised once, and no Vulkan NVAPI call is made on one that cannot (fakenvapi
+// signals a null semaphore in a Sleep that never had an init). Logs why, once per device.
+bool VulkanDeviceReady(VkDevice device)
+{
+    std::lock_guard lock(g_vkMutex);
+
+    if (g_vkSyncDevice != device)
+    {
+        g_vkSync = {};
+        g_vkSyncDevice = device;
+        g_vkUnavailableLogged = false;
+    }
+
+    const bool ready = VkSleepReady(g_vkSync, VulkanSleepCalls(device));
+
+    if (!ready && !g_vkUnavailableLogged)
+    {
+        g_vkUnavailableLogged = true;
+        LOG_WARN("Optical F5Low low latency: unavailable on this Vulkan device ({}; NvAPI status {})",
+                 VulkanWhyText(g_vkSync.why), g_vkSync.initStatus);
+    }
+
+    return ready;
+}
+
+// One frame's NvAPI_Vulkan_Sleep and the wait for the semaphore value it signals
+void VulkanSleep(VkDevice device)
+{
+    std::lock_guard lock(g_vkMutex);
+
+    if (g_vkSyncDevice != device)
+        return;
+
+    bool firstTimeout = false;
+    VkSleepFrame(g_vkSync, VulkanSleepCalls(device), &firstTimeout);
+
+    if (firstTimeout)
+        LOG_WARN("Optical F5Low low latency: the Vulkan sleep's semaphore did not reach its value within {} ms",
+                 kVkSleepWaitNs / 1000000);
+
+    if (g_vkSync.state == VkSleepState::Unavailable && !g_vkUnavailableLogged)
+    {
+        g_vkUnavailableLogged = true;
+        LOG_WARN("Optical F5Low low latency: unavailable on this Vulkan device ({})", VulkanWhyText(g_vkSync.why));
+    }
+}
+
+Inputs GatherInputs(bool deviceAvailable)
 {
     auto config = Config::Instance();
     auto& state = State::Instance();
@@ -102,7 +245,8 @@ Inputs GatherInputs()
 
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
+          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
     in.f5lowRunning = shown != DlssNrNativeMode::Shown::Off && !GameUpscalerCalledRecently();
 
     in.gameCallsReflex = ReflexHooks::gameCalledReflex();
@@ -110,12 +254,13 @@ Inputs GatherInputs()
     in.forceXell = config->ForceXeLL.value_or_default() || state.activeFgInput == FGInput::ForceXeLL;
     in.otherFrameGenerationOwner = state.externalFrameGeneration || state.activeFgOutput == FGOutput::DLSSG;
     in.apiAvailable = g_table != Table::Missing;
+    in.deviceAvailable = deviceAvailable;
     return in;
 }
 
-Decision Evaluate()
+Decision Evaluate(Api api, IUnknown* device)
 {
-    auto decision = Decide(GatherInputs());
+    auto decision = Decide(GatherInputs(true));
 
     if (decision == Decision::Run && g_table == Table::Unknown)
     {
@@ -124,25 +269,29 @@ Decision Evaluate()
         if (g_table == Table::Missing)
             LOG_WARN("Optical F5Low low latency: no Reflex or fakenvapi interface found, it stays off");
 
-        decision = Decide(GatherInputs());
+        decision = Decide(GatherInputs(true));
     }
+
+    // Only a Vulkan device can fail to do it, and only once everything else says go
+    if (decision == Decision::Run && api == Api::Vulkan && !VulkanDeviceReady(reinterpret_cast<VkDevice>(device)))
+        decision = Decide(GatherInputs(false));
 
     return decision;
 }
 
 // Our Reflex mode is turned off again, unless the game has set its own (its call is the later word)
-void Stop(IUnknown* device)
+void Stop(Api api, IUnknown* device)
 {
     g_running = false;
 
     if (g_presentStarted && device != nullptr && !ReflexHooks::gameCalledReflex())
-        Marker(device, PRESENT_END);
+        Marker(api, device, PRESENT_END);
 
     g_presentStarted = false;
 
     if (auto sleepModeDevice = g_sleepModeDevice.exchange(nullptr);
         g_sleepModeSent && sleepModeDevice != nullptr && !ReflexHooks::gameCalledSetSleepMode())
-        SetSleepMode(sleepModeDevice, false);
+        SetSleepMode(g_sleepModeApi.load(), sleepModeDevice, false);
 
     g_sleepModeSent = false;
 }
@@ -174,9 +323,12 @@ const void* GameQueue()
     return state.currentCommandQueue;
 }
 
-const char* PathText()
+const char* PathText(Api api)
 {
-    const bool viaFakenvapi = fakenvapi::isUsingAsMainNvapi() || State::Instance().activeFgOutput == FGOutput::XeFG;
+    // XeFG's XeLL routing hangs off the D3D entry points: a Vulkan game gets it through the bridge's D3D12 device, but
+    // not through the Vulkan ones
+    const bool viaFakenvapi =
+        fakenvapi::isUsingAsMainNvapi() || (State::Instance().activeFgOutput == FGOutput::XeFG && api == Api::D3D);
 
     if (!viaFakenvapi)
         return "NVIDIA Reflex";
@@ -195,9 +347,8 @@ const char* PathText()
         return fakenvapi::isUsingAsMainNvapi() ? "fakenvapi (no method active yet)" : "NVIDIA Reflex";
     }
 }
-} // namespace
 
-void OnPresentBegin(IUnknown* device, PresentSource source)
+void PresentBegin(Api api, IUnknown* device, PresentSource source)
 {
     // Ignored first: a FrameGeneration call must be noted even before we run, ahead of frame generation's own presents
     if (Ignored(source) || !g_running.load(std::memory_order_relaxed) || device == nullptr ||
@@ -206,26 +357,27 @@ void OnPresentBegin(IUnknown* device, PresentSource source)
         return;
     }
 
+    g_deviceApi = api;
     g_device = device;
 
     // No submit hook fired (D3D12 sees it only where the queue hook is installed): the frame's work is all behind us
     if (!g_submitSent.exchange(true))
     {
-        Marker(device, SIMULATION_END);
-        Marker(device, RENDERSUBMIT_START);
+        Marker(api, device, SIMULATION_END);
+        Marker(api, device, RENDERSUBMIT_START);
     }
 
-    Marker(device, RENDERSUBMIT_END);
-    Marker(device, PRESENT_START);
+    Marker(api, device, RENDERSUBMIT_END);
+    Marker(api, device, PRESENT_START);
     g_presentStarted = true;
 }
 
-void OnPresentEnd(IUnknown* device, PresentSource source)
+void PresentEnd(Api api, IUnknown* device, PresentSource source)
 {
     if (device == nullptr || State::Instance().isShuttingDown || Ignored(source))
         return;
 
-    const auto decision = Evaluate();
+    const auto decision = Evaluate(api, device);
     g_decision = decision;
 
     if (decision != Decision::Run)
@@ -233,41 +385,72 @@ void OnPresentEnd(IUnknown* device, PresentSource source)
         if (g_running.load(std::memory_order_relaxed))
         {
             LOG_INFO("Optical F5Low low latency: stopped ({})", DecisionText(decision));
-            Stop(device);
+            Stop(api, device);
         }
 
         return;
     }
 
-    if (!g_running.load(std::memory_order_relaxed) || g_sleepModeDevice.load() != device)
+    if (!g_running.load(std::memory_order_relaxed) || g_sleepModeDevice.load() != device ||
+        g_sleepModeApi.load() != api)
     {
         // Once, and again when the device is a new one
-        SetSleepMode(device, true);
+        SetSleepMode(api, device, true);
         g_sleepModeSent = true;
+        g_sleepModeApi = api;
         g_sleepModeDevice = device;
 
         if (!g_running.load(std::memory_order_relaxed))
-            LOG_INFO("Optical F5Low low latency: started ({})", PathText());
+            LOG_INFO("Optical F5Low low latency: started ({})", PathText(api));
     }
 
     if (g_presentStarted)
-        Marker(device, PRESENT_END);
+        Marker(api, device, PRESENT_END);
 
     g_presentStarted = false;
+    g_deviceApi = api;
     g_device = device;
     g_gameQueue = GameQueue();
 
-    ReflexHooks::ownSleep(device);
+    if (api == Api::Vulkan)
+        VulkanSleep(reinterpret_cast<VkDevice>(device));
+    else
+        ReflexHooks::ownSleep(device);
 
     ++g_frameId;
     g_submitSent = false;
     g_running = true;
-    Marker(device, SIMULATION_START);
+    Marker(api, device, SIMULATION_START);
+}
+} // namespace
+
+void OnPresentBegin(IUnknown* device, PresentSource source)
+{
+    PresentBegin(Api::D3D, device, source);
+}
+
+void OnPresentEnd(IUnknown* device, PresentSource source)
+{
+    PresentEnd(Api::D3D, device, source);
+}
+
+void OnPresentBeginVulkan(VkDevice device)
+{
+    PresentBegin(Api::Vulkan, reinterpret_cast<IUnknown*>(device), PresentSource::SwapChain);
+}
+
+void OnPresentEndVulkan(VkDevice device)
+{
+    PresentEnd(Api::Vulkan, reinterpret_cast<IUnknown*>(device), PresentSource::SwapChain);
 }
 
 void OnFirstSubmit(const void* queue)
 {
     if (!g_running.load(std::memory_order_relaxed) || g_submitSent.load(std::memory_order_relaxed))
+        return;
+
+    // A D3D12 queue submit or D3D11 draw says nothing about a frame being paced on the Vulkan surface
+    if (g_deviceApi.load(std::memory_order_relaxed) != Api::D3D)
         return;
 
     // OptiScaler's own queues and frame generation's do not start the game's frame
@@ -285,8 +468,8 @@ void OnFirstSubmit(const void* queue)
     if (device == nullptr || ReflexHooks::gameCalledReflex())
         return;
 
-    Marker(device, SIMULATION_END);
-    Marker(device, RENDERSUBMIT_START);
+    Marker(Api::D3D, device, SIMULATION_END);
+    Marker(Api::D3D, device, RENDERSUBMIT_START);
 }
 
 void OnDeviceReleased(IUnknown* device)
@@ -304,6 +487,31 @@ void OnDeviceReleased(IUnknown* device)
     ReflexHooks::forgetSleepDevice(device);
 }
 
+void OnDeviceReleasedVulkan(VkDevice device)
+{
+    if (device == nullptr)
+        return;
+
+    auto* token = reinterpret_cast<IUnknown*>(device);
+    auto expected = token;
+    g_device.compare_exchange_strong(expected, nullptr);
+
+    expected = token;
+    g_sleepModeDevice.compare_exchange_strong(expected, nullptr);
+
+    ReflexHooks::forgetSleepDeviceVulkan(device);
+
+    // The device's sleep state goes with it (a new device is initialised again)
+    std::lock_guard lock(g_vkMutex);
+
+    if (g_vkSyncDevice == device)
+    {
+        g_vkSync = {};
+        g_vkSyncDevice = VK_NULL_HANDLE;
+        g_vkUnavailableLogged = false;
+    }
+}
+
 Status GetStatus()
 {
     Status status;
@@ -312,7 +520,8 @@ Status GetStatus()
     if (status.decision != Decision::Run || !g_running.load(std::memory_order_relaxed))
         return status;
 
-    status.path = PathText();
+    const auto api = g_deviceApi.load();
+    status.path = PathText(api);
 
     auto device = g_device.load();
 
@@ -322,20 +531,40 @@ Status GetStatus()
     if (const auto now = Util::MillisecondsNow(); now - g_latencyAskedAt >= 500.0)
     {
         g_latencyAskedAt = now;
-
-        static NV_LATENCY_RESULT_PARAMS results {};
-        results.version = NV_LATENCY_RESULT_PARAMS_VER;
         g_hasLatency = false;
 
-        if (ReflexHooks::ownGetLatency(device, &results) == NVAPI_OK)
+        if (api == Api::Vulkan)
         {
-            // The newest report is the last; times are in microseconds
-            const auto& report = results.frameReport[63];
+            static NV_VULKAN_LATENCY_RESULT_PARAMS results {};
+            results.version = NV_VULKAN_LATENCY_RESULT_PARAMS_VER;
 
-            if (report.frameID != 0 && report.simStartTime != 0 && report.gpuRenderEndTime > report.simStartTime)
+            if (ReflexHooks::ownGetLatencyVulkan(reinterpret_cast<HANDLE>(device), &results) == NVAPI_OK)
             {
-                g_latencyMs = (float) (report.gpuRenderEndTime - report.simStartTime) / 1000.0f;
-                g_hasLatency = true;
+                // The newest report is the last; times are in microseconds
+                const auto& report = results.frameReport[63];
+
+                if (report.frameID != 0 && report.simStartTime != 0 && report.gpuRenderEndTime > report.simStartTime)
+                {
+                    g_latencyMs = (float) (report.gpuRenderEndTime - report.simStartTime) / 1000.0f;
+                    g_hasLatency = true;
+                }
+            }
+        }
+        else
+        {
+            static NV_LATENCY_RESULT_PARAMS results {};
+            results.version = NV_LATENCY_RESULT_PARAMS_VER;
+
+            if (ReflexHooks::ownGetLatency(device, &results) == NVAPI_OK)
+            {
+                // The newest report is the last; times are in microseconds
+                const auto& report = results.frameReport[63];
+
+                if (report.frameID != 0 && report.simStartTime != 0 && report.gpuRenderEndTime > report.simStartTime)
+                {
+                    g_latencyMs = (float) (report.gpuRenderEndTime - report.simStartTime) / 1000.0f;
+                    g_hasLatency = true;
+                }
             }
         }
     }

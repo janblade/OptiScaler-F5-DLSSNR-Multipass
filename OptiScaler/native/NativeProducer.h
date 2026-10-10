@@ -31,6 +31,9 @@ struct NativeFrame
     ID3D12Resource* depth = nullptr;  // the guides (TrustMaskDx12::BuildGuides): picture-sized, unjittered, and in
     ID3D12Resource* motion = nullptr; // NON_PIXEL_SHADER_RESOURCE, which the consumer must leave them in. depth
                                       // is null on a frame without depth.
+    ID3D12Resource* historyDistrust = nullptr; // the trust mask (TrustMaskDx12::Mask()): how little the last frame's
+                                               // history can be trusted at each pixel, R8_UNORM at the flow's size,
+                                               // in a state readable by a non-pixel shader, which the consumer leaves
     bool depthReversed = false;
     bool reset = false;               // the frame does not continue the last one
 };

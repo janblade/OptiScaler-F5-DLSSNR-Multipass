@@ -14,9 +14,9 @@
 // frames next to each other differ less.
 //
 // Separate from dlssnr.hlsl so the shared shader and every ordinary pass stay as they are. It reuses that shader's
-// root signature and descriptor table (t0..t4, u0..u1, b0, s0 = linear clamp) through
+// root signature and descriptor table (t0..t5, u0..u1, b0, s0 = linear clamp) through
 // DlssNr_Dx12::DispatchDetailReuse. On Vulkan (VK_MODE) it has its own pass and descriptor set layout,
-// DlssNrDetailReuse_Vk, one binding per register: 0 b0, 1-5 t0-t4, 6-7 u0-u1, 8 s0. The storage images carry no
+// DlssNrDetailReuse_Vk, one binding per register: 0 b0, 1-5 t0-t4, 6-7 u0-u1, 8 s0, 9 t5. The storage images carry no
 // fixed format (what they write varies by mode), which needs shaderStorageImageWriteWithoutFormat; they are never read.
 // Modes and bindings: DlssNr_DetailReuseConstants.h.
 //
@@ -72,6 +72,7 @@ cbuffer Params : register(b0)
     uint replaceCurve; // DlssNrReplaceCurve: 0 none, 1 Neutwo, 2 hybrid (see the header)
     float motionReject;
     float steadyDeadZone;
+    uint historyDistrust; // t5 holds an outside opinion of this pixel's history (see OutsideTrust); 0: none
 };
 
 #ifdef VK_MODE
@@ -87,6 +88,7 @@ DR_BINDING(2) Texture2D<float4> t1 : register(t1);
 DR_BINDING(3) Texture2D<float4> t2 : register(t2);
 DR_BINDING(4) Texture2D<float4> t3 : register(t3);
 DR_BINDING(5) Texture2D<float4> t4 : register(t4);
+DR_BINDING(9) Texture2D<float4> t5 : register(t5);
 DR_BINDING(6) DR_ANY_FORMAT RWTexture2D<float4> u0 : register(u0);
 DR_BINDING(7) DR_ANY_FORMAT RWTexture2D<float4> u1 : register(u1);
 DR_BINDING(8) SamplerState gLinear : register(s0);
@@ -301,9 +303,21 @@ float4 MovedFrom(float2 previousUv, float2 raw, float depthNow, float3 mean, flo
     return float4(moved, saturate(depthTrust * colourTrust * motionTrust));
 }
 
-// The moved detail for work pixel p (rgb), how far it is trusted (a, 0..1), and the saved picture it came from. Reads
-// t0 input, t1 saved detail, t2 saved colour + depth, t3 motion guide, t4 depth guide.
-float4 MovedDetailFrom(uint2 p, out float3 source, out float byMotion)
+// How far an outside opinion trusts this pixel's history (DlssNrFrameInfo::HistoryDistrust): t5 holds distrust 0..1 in
+// .r at any size, read at the pixel's position. On native input it is Optical F5Low's trust mask, which checks what the
+// tests here cannot: whether the flow agrees with itself from frame to frame, and whether a nearer surface has just
+// moved off this pixel. Without one, or where it reads as no number, it says nothing (1).
+float OutsideTrust(float2 uv)
+{
+    if (historyDistrust == 0u)
+        return 1.0;
+    const float distrust = t5.SampleLevel(gLinear, uv, 0).r;
+    return isfinite(distrust) ? 1.0 - saturate(distrust) : 1.0;
+}
+
+// The moved detail for work pixel p (rgb), how far its own tests trust it (a, 0..1), and the saved picture it came
+// from. Reads t0 input, t1 saved detail, t2 saved colour + depth, t3 motion guide, t4 depth guide.
+float4 MovedDetailCandidate(uint2 p, out float3 source, out float byMotion)
 {
     source = 0.0; // matches MovedFrom's own convention; keeps every exit, including the one below, defined
     byMotion = 0.0;
@@ -364,6 +378,15 @@ float4 MovedDetailFrom(uint2 p, out float3 source, out float byMotion)
         return near;
     }
     return own;
+}
+
+// The better of the pixel's candidates, with the outside opinion applied once (it is about this pixel, not about
+// either candidate). Everything downstream -- Reproject, Fill, Steady, Coverage, the debug view -- reads its trust.
+float4 MovedDetailFrom(uint2 p, out float3 source, out float byMotion)
+{
+    float4 moved = MovedDetailCandidate(p, source, byMotion);
+    moved.a *= OutsideTrust(WorkUv(p));
+    return moved;
 }
 
 // MovedDetailFrom, landed on this pixel's input in Replace modes (see the header), so everything that adds it --

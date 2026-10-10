@@ -45,6 +45,11 @@ struct Snapshot
 
 Snapshot BestSnapshot();
 
+// The same, with a multisampled buffer's copies resolved (once per frame) on a list of our own submitted to `queue`,
+// which must be the queue the copies are read on, so that its order puts the resolve before their reader. What the
+// producer reads.
+Snapshot ResolvedSnapshot(ID3D12CommandQueue* queue);
+
 // Records the copy the menu's preview shows onto the menu's own list (call after it is reset, before it is submitted). Does
 // nothing unless the overlay is on.
 void RecordPreviewCopy(ID3D12GraphicsCommandList* list);

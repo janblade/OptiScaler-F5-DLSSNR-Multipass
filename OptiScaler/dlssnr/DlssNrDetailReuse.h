@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 // Reuse detail between frames: run the model on one frame, and on the next add the saved detail of that frame
@@ -55,6 +56,63 @@ struct Decision
     bool saveMotion = false;     // reuse frame: keep this frame's motion for the next full frame to compose
 };
 
+// How far the frame number steps between two NR frames when NR runs on every rendered frame. With frame generation
+// the present counter also counts the generated frames, so the step is the multiplier: 2 at 2x, 4 at 4x, more with an
+// unlocked multiplier. A fixed limit of 4 made every frame above 4x look like a gap, and reuse fell back on all of
+// them (Witcher 3, 2026-10-08). The normal step is learnt instead: the median of the last 16 forward steps, so the odd
+// skipped frame does not move it. A frame NR really skipped doubles the step, which stays a gap.
+class StepTracker
+{
+    static constexpr unsigned kKept = 16;
+    unsigned long long steps[kKept] = {};
+    unsigned count = 0, next = 0;
+    unsigned long long last = 0;
+    bool hasLast = false;
+
+public:
+    void Add(unsigned long long frame)
+    {
+        if (hasLast && frame > last)
+        {
+            steps[next++ % kKept] = frame - last;
+            count = (std::min)(count + 1, kKept);
+        }
+        last = frame;
+        hasLast = true;
+    }
+
+    // The normal step, 1 before any was seen.
+    unsigned long long Typical() const
+    {
+        if (count == 0)
+            return 1;
+        unsigned long long sorted[kKept];
+        std::copy(steps, steps + count, sorted);
+        std::sort(sorted, sorted + count);
+        return sorted[count / 2];
+    }
+};
+
+// The largest step between two NR frames that is not a gap. Without frame generation every present is a rendered
+// frame. With it, at least 4 (what the fixed limit was), and half again the normal step, which a skipped frame (twice
+// the step) still passes.
+inline unsigned long long MaxStepFor(bool withFg, unsigned long long typical)
+{
+    return withFg ? (std::max)(4ull, typical + typical / 2) : 1ull;
+}
+
+// Why reuse frames fell back to the model (Cadence::Fallback), for the log: the first of these that held.
+struct FallbackCauses
+{
+    unsigned long long reset = 0;       // the model started over
+    unsigned long long blocked = 0;     // a frame that must see the real model, or the one after it
+    unsigned long long gap = 0;         // NR did not run in between (the frame number stepped past maxStep)
+    unsigned long long changed = 0;     // something that changes the model's answer changed
+    unsigned long long notRecorded = 0; // decided, but the caller ran the model instead (ReuseFailed)
+    unsigned long long lastGapStep = 0; // the frame number's step at the last gap (0: it did not go forward)
+    unsigned long long lastMaxStep = 0; // ... and the largest step allowed then
+};
+
 class Cadence
 {
     bool historyValid = false; // the previous frame's detail is saved
@@ -65,6 +123,7 @@ class Cadence
     unsigned long long lastFrame = 0;
     unsigned long long lastRevision = 0;
     unsigned long long full = 0, reused = 0, fallback = 0, held = 0;
+    FallbackCauses causes;
 
 public:
     Decision Next(const FrameFacts& f)
@@ -105,7 +164,21 @@ public:
         else
         {
             if (wouldReuse && invalid)
+            {
                 ++fallback;
+                if (f.reset)
+                    ++causes.reset;
+                else if (f.blocked || lastBlocked)
+                    ++causes.blocked;
+                else if (gap)
+                {
+                    ++causes.gap;
+                    causes.lastGapStep = f.frame > lastFrame ? f.frame - lastFrame : 0;
+                    causes.lastMaxStep = f.maxStep;
+                }
+                else
+                    ++causes.changed;
+            }
             else if (wouldReuse && f.hold)
                 ++held; // counted only where a reuse was given up: comparable with Reused()
 
@@ -155,6 +228,7 @@ public:
         {
             --reused;
             ++fallback;
+            ++causes.notRecorded;
         }
         Drop();
     }
@@ -163,7 +237,21 @@ public:
     unsigned long long Reused() const { return reused; }
     unsigned long long Fallback() const { return fallback; }
     unsigned long long Held() const { return held; }
+    const FallbackCauses& Causes() const { return causes; }
 };
+
+// Why reuse cannot run where NR runs, or null when it can. Before SR it is not offered. On a finished picture it needs
+// vectors that describe that picture: a game's own vectors are rendered for its scene, and the HUD and post-processing
+// on top of it are not in them, so detail would be moved where nothing moved. Optical F5Low's native input measures the
+// motion on the finished picture itself, which is what motionMatchesPicture says.
+inline const char* UnavailableOnRoute(bool beforeUpscale, bool finishedPicture, bool motionMatchesPicture)
+{
+    if (beforeUpscale)
+        return "unavailable while NR runs before SR";
+    if (finishedPicture && !motionMatchesPicture)
+        return "unavailable in Finished Picture without Optical F5Low";
+    return nullptr;
+}
 
 // Whether the real frame rate is high enough for reuse. Moved detail errs by how far things move between two real
 // frames, so at a low frame rate the trails around moving bodies grow. Fed the time between two NR frames (one per

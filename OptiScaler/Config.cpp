@@ -380,6 +380,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrDetailReuseSigmaFloor.set_from_config(readFloat("DlssNr", "DetailReuseSigmaFloor"));
             DlssNrDetailReuseWithFg.set_from_config(readBool("DlssNr", "DetailReuseWithFG"));
             DlssNrDetailReuseMinFps.set_from_config(readFloat("DlssNr", "DetailReuseMinFps"));
+            DlssNrSceneCut.set_from_config(readUInt("DlssNr", "SceneCut"));
+            if (DlssNrSceneCut.value_or_default() > 2u)
+                DlssNrSceneCut = 2u;
             DlssNrDetailReuseMaxDropped.set_from_config(readFloat("DlssNr", "DetailReuseMaxDropped"));
             if (DlssNrDetailReuseMaxDropped.has_value() &&
                 (!std::isfinite(DlssNrDetailReuseMaxDropped.value()) || DlssNrDetailReuseMaxDropped.value() < 0.0f ||
@@ -479,12 +482,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrAutoExposureMeterLowPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterLowPercent"));
             DlssNrAutoExposureMeterHighPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterHighPercent"));
             DlssNrNativeDepthFinder.set_from_config(readBool("DlssNr", "NativeDepthFinder"));
+            DlssNrNativeDepthVkCopyUsage.set_from_config(readBool("DlssNr", "NativeDepthVkCopyUsage"));
             DlssNrNativeDepthWarmupFrames.set_from_config(readUInt("DlssNr", "NativeDepthWarmupFrames"));
             DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
             DlssNrNativeDebugView.set_from_config(readBool("DlssNr", "NativeDebugView"));
             DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
             DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
             DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
+            DlssNrNativeFrameGenerationOnly.set_from_config(readBool("DlssNr", "NativeFrameGenerationOnly"));
             if (auto lowLatency = readString("DlssNr", "NativeLowLatency", true); lowLatency.has_value())
             {
                 if (lowLatency.value() == "auto")
@@ -1455,6 +1460,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "DetailReuseClipFalloff", GetFloatValue(Instance()->DlssNrDetailReuseClipFalloff.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseSigmaFloor", GetFloatValue(Instance()->DlssNrDetailReuseSigmaFloor.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SceneCut", GetIntValue(Instance()->DlssNrSceneCut.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DetailReuseMaxDropped", GetFloatValue(Instance()->DlssNrDetailReuseMaxDropped.value_for_config()).c_str());
     {
@@ -1518,6 +1524,8 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrAutoExposureMeterHighPercent.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthFinder",
                  GetBoolValue(Instance()->DlssNrNativeDepthFinder.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthVkCopyUsage",
+                 GetBoolValue(Instance()->DlssNrNativeDepthVkCopyUsage.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthWarmupFrames",
                  GetIntValue(Instance()->DlssNrNativeDepthWarmupFrames.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthOverlay",
@@ -1528,6 +1536,8 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeUpscaler",
                  GetBoolValue(Instance()->DlssNrNativeUpscaler.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeFrameGenerationOnly",
+                 GetBoolValue(Instance()->DlssNrNativeFrameGenerationOnly.value_for_config()).c_str());
     {
         const char* lowLatency = "auto";
 

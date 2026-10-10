@@ -44,6 +44,23 @@ void WithDx12::SetD3D12Objects(ID3D12Device* InDevice, ID3D12CommandQueue* InCom
     LOG_DEBUG("Using D3D12 objects, device: {:X}, queue: {:X}", (size_t) _d3d12Device, (size_t) _d3d12CommandQueue);
 }
 
+void WithDx12::ForgetD3D12Device(ID3D12Device* device)
+{
+    if (device == nullptr || _d3d12Device != device)
+        return;
+
+    auto& state = State::Instance();
+
+    if (state.currentD3D12Device == _d3d12Device)
+        state.currentD3D12Device = nullptr;
+
+    if (state.currentCommandQueue == _d3d12CommandQueue)
+        state.currentCommandQueue = nullptr;
+
+    _d3d12Device = nullptr;
+    _d3d12CommandQueue = nullptr;
+}
+
 bool WithDx12::PrepareD3D12ForD3D11(ID3D11Device* InDx11Device, D3D_FEATURE_LEVEL InFeatureLevel)
 {
     if (IsInited())

@@ -233,6 +233,7 @@ void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
     if (g_ngxTime) g_ngxTime->ResetRecording(cmd);
     // Reuse's coverage readbacks: a recording thrown away frees its slot, since no fence will ever be signalled for it.
     DetailReuse::ResetRecording(cmd);
+    SceneCut::ResetRecording(cmd); // the scene-cut flag's readbacks, the same way
     if (!Late::tracking.load()) return;
     for (auto& slot : Late::slots)
         if (slot.pending && !slot.submitted && slot.producer == cmd)
@@ -281,6 +282,7 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     if (g_ngxTime) g_ngxTime->Submitted(queue, count, lists);
     // Reuse's coverage readbacks: a copy is safe to read once the list it was recorded on has been executed.
     DetailReuse::Submitted(queue, count, lists);
+    SceneCut::Submitted(queue, count, lists); // the scene-cut flag's readbacks, the same way
     if (!Late::tracking.load()) return;
     for (auto& slot : Late::slots)
         if (slot.pending && !slot.submitted)
@@ -553,7 +555,8 @@ bool NativeInputBlockedBySwapChainInterop()
 }
 
 bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
-                      ID3D12Resource* depth, ID3D12Resource* motion, bool depthReversed, bool reset,
+                      ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
+                      bool depthReversed, bool reset,
                       DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState)
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
@@ -589,7 +592,12 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
         Config::Instance()->DlssNrColourEncoding.value_or_default(), screenPq || screenScrgb || screenSdr,
         screenPq ? Screen::Pq : screenScrgb ? Screen::Scrgb : Screen::Sdr,
         desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
-        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+        // BGRA too: a Vulkan swapchain is usually B8G8R8A8 (DOOM Eternal's), and Optical F5Low's shared picture keeps
+        // it, since swapping the channels on the game's queue needs a blit and the game may present from a compute queue
+        // (a blit there is a GPU fault). The pass reads it through views, which order the channels, and its scratch
+        // copies take the picture's own format.
+        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ||
+            desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM);
     DlssNr::ReportColourEncoding(screenChoice.choice, DiagFormatName(desc.Format), "native input");
     if (!screenChoice.supported)
     {
@@ -619,9 +627,16 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
     frame.OutputWidth = (unsigned) desc.Width;
     frame.OutputHeight = desc.Height;
     frame.FinishedPicture = true;
+    // Optical F5Low measured the motion on this picture, so detail reuse may move detail with it.
+    frame.MotionMatchesPicture = true;
+    frame.HistoryDistrust = historyDistrust;
     frame.IndependentCommands = true;
     frame.OutputArrivalState = pictureState;
-    frame.SubmissionEpoch = State::Instance().frameCount;
+    // The first evaluate waits for the epoch to move past the frame the model was made on. frameCount counts DXGI
+    // presents only: a Vulkan game without the bridge (Optical F5Low's NR only) has none, so NR stayed on "Preparing"
+    // for good. Its presents count too; each comes after the frame source executed the previous frame's list.
+    frame.SubmissionEpoch =
+        State::Instance().frameCount + State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
 
     DlssNrNative::SetPrecision(Config::Instance()->DlssNrPrecision.value_or_default());
     const auto before = g_nr.successfulDispatches;

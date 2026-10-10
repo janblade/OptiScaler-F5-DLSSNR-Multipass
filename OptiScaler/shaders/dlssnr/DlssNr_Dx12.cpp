@@ -10,6 +10,8 @@
 #include <dlssnr/ResidualFg.h>
 #include <dlssnr/DlssNrDetailReuse.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
+#include <dlssnr/DlssNrSceneCut.h>
+#include <motion/SceneCut_Dx12.h>
 #include <DirectXMath.h>
 
 
@@ -2063,6 +2065,7 @@ void ReportSkipOnce(const char* reason)
 }
 
 #include "DlssNr_DetailReuse.inl"
+#include "DlssNr_SceneCut.inl"
 
 } // namespace
 
@@ -2082,7 +2085,8 @@ DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice)
 
     LOG_DEBUG("{0} start!", _name);
 
-    // Five inputs, two outputs, one constant buffer, and a clamped linear sampler.
+    // Six inputs (the sixth is read by the detail reuse pass only), two outputs, one constant buffer, and a clamped
+    // linear sampler.
     //
     // The sampler exists because the model may be run below full resolution, in which case its answer
     // has to be read back at a different size from the frame it is being transferred onto.
@@ -2151,6 +2155,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
         InOriginal != nullptr ? InOriginal : InSource,
         InMotion != nullptr ? InMotion : InSource,
         InPrevEdit != nullptr ? InPrevEdit : InSource,
+        InSource,
     };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
@@ -2492,7 +2497,7 @@ bool DlssNr_Dx12::DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, cons
 
     FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
 
-    ID3D12Resource* const srvs[kSrvCount] = { InOutput, InPrevOutput, InInput, InPrevInput, InProxy };
+    ID3D12Resource* const srvs[kSrvCount] = { InOutput, InPrevOutput, InInput, InPrevInput, InProxy, InOutput };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
         CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
@@ -2593,7 +2598,8 @@ bool DlssNr_Dx12::DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList,
                                       const DlssNrDetailReuseConstants& InConstants, unsigned int Width,
                                       unsigned int Height, ID3D12Resource* In0, ID3D12Resource* In1,
                                       ID3D12Resource* In2, ID3D12Resource* In3, ID3D12Resource* In4,
-                                      ID3D12Resource* OutTarget, ID3D12Resource* OutSecond)
+                                      ID3D12Resource* OutTarget, ID3D12Resource* OutSecond,
+                                      ID3D12Resource* InHistoryDistrust)
 {
     if (!DetailReuseReady() || InCmdList == nullptr || _device == nullptr || In0 == nullptr ||
         OutTarget == nullptr || Width == 0 || Height == 0)
@@ -2610,6 +2616,7 @@ bool DlssNr_Dx12::DispatchDetailReuse(ID3D12GraphicsCommandList* InCmdList,
         In2 != nullptr ? In2 : In0,
         In3 != nullptr ? In3 : In0,
         In4 != nullptr ? In4 : In0,
+        InHistoryDistrust != nullptr ? InHistoryDistrust : In0,
     };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
@@ -2654,13 +2661,14 @@ bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList,
 
     FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
 
-    // Same table shape as DispatchPass: the finished-colour shader reads t0..t3 + u0, and t4/u1 get
+    // Same table shape as DispatchPass: the finished-colour shader reads t0..t3 + u0, and t4/t5/u1 get
     // the source as a stand-in so no descriptor in the table is left unbound.
     ID3D12Resource* const srvs[kSrvCount] = {
         InSource,
         InModel != nullptr ? InModel : InSource,
         InOriginal != nullptr ? InOriginal : InSource,
         InMotion != nullptr ? InMotion : InSource,
+        InSource,
         InSource,
     };
 
@@ -2809,6 +2817,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (resets <= 3 || resets % 100 == 0)
             LOG_INFO("DLSS-NR: the game asked for a history reset ({} so far)", resets);
     }
+
+    // A scene cut the game did not flag, found a few evaluates ago (DlssNr_SceneCut.inl; SceneCut=2 only).
+    if (SceneCut::BeginFrame(cfg, frame.Reset))
+        g_nr.reset = true;
 
     // Logged whenever it changes, not once per session.
     //
@@ -3911,6 +3923,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // The transitions double as the wait for the encode's writes.
     Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // Is this frame a cut from the last one (DlssNr_SceneCut.inl)? Judged on the frame the encode just wrote, which is
+    // display-referred whatever the game's encoding. With SceneCut=2, Reuse detail reads the answer as its distrust.
+    ID3D12Resource* const sceneCutDistrust =
+        SceneCut::Run(cmdList, device, cfg, frame, g_nr.colorCopy,
+                      TranslateTypelessFormats(g_nr.colorCopy->GetDesc().Format));
     // Measure the buffer's scale from the copy the encode just kept -- untouched, so there is no path
     // (Calibration pass removed: it produced only a menu suggestion nothing consumed, at the cost
     // of a 4096-thread dispatch, a readback and an nth_element every frame.)
@@ -4174,12 +4192,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Reuse detail between frames (DlssNr_DetailReuse.inl): every other frame skips the model and moves the previous
     // frame's detail onto this frame's input instead. On such a frame the answer lands in g_nr.output (at rest, UAV).
+    // The frame as reuse sees it: a scene cut's distrust where the frame has no history distrust of its own.
+    DlssNrFrameInfo reuseInfo = frame;
+    if (reuseInfo.HistoryDistrust == nullptr && sceneCutDistrust != nullptr)
+        reuseInfo.HistoryDistrust = sceneCutDistrust;
+
     DetailReuse::Frame reuseFrame;
     reuseFrame.pass = this;
     reuseFrame.cmdList = cmdList;
     reuseFrame.device = device;
     reuseFrame.cfg = &cfg;
-    reuseFrame.info = &frame;
+    reuseFrame.info = &reuseInfo;
     reuseFrame.answerFormat = desc.Format;
     reuseFrame.workWidth = workWidth;
     reuseFrame.workHeight = workHeight;
@@ -4746,9 +4769,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 if (reusePlan.active)
                 {
                     const auto status = DetailReuse::Status();
+                    const auto& why = DetailReuse::cadence.Causes();
                     LOG_INFO("DLSS-NR detail reuse: {:.2f} ms per frame on average ({:.2f} to {:.2f}) over the last 16; "
-                             "full {}, reused {}, fallback {}, held {}", status.averageMs, status.lightMs,
-                             status.heavyMs, status.full, status.reused, status.fallback, status.held);
+                             "full {}, reused {}, fallback {}, held {}; fallbacks: reset {}, blocked {}, gap {} (last "
+                             "step {} of {} allowed), settings changed {}, not recorded {}",
+                             status.averageMs, status.lightMs, status.heavyMs, status.full, status.reused,
+                             status.fallback, status.held, why.reset, why.blocked, why.gap, why.lastGapStep,
+                             why.lastMaxStep, why.changed, why.notRecorded);
                 }
             }
         }
@@ -5402,6 +5429,9 @@ FollowGameStatus FollowGameExposureStatus()
 // at the end of each BeforeModel.
 DetailReuseInfo DetailReuseStatus() { return DetailReuse::Published(); }
 
+// A copy published as each evaluate's scene-cut work ends (DlssNr_SceneCut.inl): the menu never waits for g_nrMutex.
+SceneCutInfo SceneCutStatus() { return SceneCut::Status(); }
+
 int CurrentModelResolutionPercent() { return (int) lroundf(g_nr.appliedWorkScale * 100.0f); }
 
 void CurrentModelSize(unsigned int& width, unsigned int& height)
@@ -5463,6 +5493,7 @@ void Shutdown()
     }
 
     DetailReuse::Release();
+    SceneCut::Release();
 
     if (g_nr.passScratch != nullptr)
     {

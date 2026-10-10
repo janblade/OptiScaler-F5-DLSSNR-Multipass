@@ -560,6 +560,11 @@ void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, co
             if (opt == Upscaler::DLSS && !primaryGpu.dlssCapable)
                 continue;
 
+            // DLSS on D3D12 for a Vulkan game needs the GPU and the DLSS library just the same
+            if (opt == Upscaler::DLSS_on12 && api == API::Vulkan &&
+                (!primaryGpu.dlssCapable || !State::Instance().NVNGX_DLSS_Path.has_value()))
+                continue;
+
             // Not all Intel GPUs support native DX11 XeSS but don't think we have a good way to check exactly
             if (opt == Upscaler::XeSS && api == API::DX11 && primaryGpu.vendorId != VendorId::Intel)
                 continue;
@@ -589,6 +594,16 @@ void MenuCommon::AddDx12Backends(Upscaler upscaler)
 
 void MenuCommon::AddVulkanBackends(Upscaler upscaler)
 {
+    // "FG only (game's upscaler)" feeds frame generation from a Vulkan-on-D3D12 backend only: the others would leave it
+    // without inputs (upscalers/FeatureProvider_Vk.h)
+    if (Config::Instance()->DlssNrNativeFrameGenerationOnly.value_or_default())
+    {
+        RenderUpscalerCombo(API::Vulkan, upscaler, { Upscaler::DLSS_on12, Upscaler::FFX_on12, Upscaler::FSR21_on12 });
+        ShowHelpMarker("FG only (Optical F5Low) is on: frame generation runs from the upscaler's D3D12 copy, so only "
+                       "those are listed. Leave the mode to choose another.");
+        return;
+    }
+
     RenderUpscalerCombo(API::Vulkan, upscaler,
                         { Upscaler::XeSS, Upscaler::FSR21, Upscaler::FSR22, Upscaler::FFX, Upscaler::FSR21_on12,
                           Upscaler::FFX_on12, Upscaler::DLSS });
@@ -2126,7 +2141,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 switch (state.swapchainApi)
                 {
                 case Vulkan:
-                    api = "VLK";
+                    api = state.swapchainInteropApi == SwapchainInteropApi::VkwDx12 ? "VLK w/DX12" : "VLK";
                     break;
 
                 case DX11:
@@ -3556,6 +3571,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     auto& menuResScale = ctx.menuResScale;
     auto& primaryGpu = *ctx.primaryGpu;
 
+    // A Vulkan game gets OptiFG and the outputs through the present bridge (native/VkPresentBridge.h), which is made when the
+    // game starts: they are offered while it is up, and before it while Optical F5Low can make one (choose, save, restart).
+    const bool vulkanNoFg = state.swapchainApi == API::Vulkan && state.swapchainInteropApi != SwapchainInteropApi::VkwDx12 &&
+                            (IdentifyGpu::getPrimaryGpu().usesDxvk || !config->DlssNrEnabled.value_or_default());
+
     /// FG INPUTS
     bool adaUnlock = config->FGDLSSGAdaMfgUnlock.value_or_default();
     const bool disableAda = ampereActive || state.externalFrameGeneration;
@@ -3722,7 +3742,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // OptiFG requirements
     auto constexpr optiFgIndex = (uint32_t) FGInput::Upscaler;
-    inputOptions[optiFgIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+    inputOptions[optiFgIndex].set_disabled(vulkanNoFg, "Unsupported API");
 
     if (!inputOptions[optiFgIndex].disabled && state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady() &&
         !ffxInitTried)
@@ -3783,7 +3803,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             "No real DLSSG, unsupported hardware\nOnly Nvngx FG replacements available";
     }
 
-    outputOptions[dlssgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+    outputOptions[dlssgOutputIndex].set_disabled(vulkanNoFg, "Unsupported API");
     outputOptions[dlssgOutputIndex].set_disabled(!supportsDlssg && !hasDlssgReplacement,
                                                  "Unsupported hardware and no replacements");
 
@@ -3796,11 +3816,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // FSR FG output requirements
     auto constexpr fsrfgOutputIndex = (uint32_t) FGOutput::FSRFG;
-    outputOptions[fsrfgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+    outputOptions[fsrfgOutputIndex].set_disabled(vulkanNoFg, "Unsupported API");
 
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
-    outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+    outputOptions[xefgOutputIndex].set_disabled(vulkanNoFg, "Unsupported API");
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&
@@ -7339,7 +7359,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
     auto& menuResScale = ctx.menuResScale;
 
     // DX11 & DX12 -----------------------------
-    if (state.swapchainApi != Vulkan)
+    if (state.swapchainApi != Vulkan || state.swapchainInteropApi == SwapchainInteropApi::VkwDx12)
     {
         // V-SYNC -----------------------------
         ImGui::Spacing();

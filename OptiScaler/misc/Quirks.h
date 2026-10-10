@@ -65,6 +65,7 @@ enum class GameQuirk : uint64_t
     ForceFGRenderSizeMVs,
     CreateSLOnThe2ndDevice,
     Kcd2DlssgHdr10,
+    XeFGBridgeResizeAsCreated,
     // Don't forget to add the new entry to printQuirks
     _
 };
@@ -93,6 +94,10 @@ static const QuirkEntry quirkTable[] = {
 
     // Native DLSSG requires HDR10; the game's HDR toggle otherwise restores scRGB.
     QUIRK_ENTRY("kingdomcome.exe", GameQuirk::Kcd2DlssgHdr10),
+
+    // Metal Gear Solid V: The Phantom Pain resizes with an SRGB format and 1 buffer, which XeFG's flip swapchain
+    // rejects through the D3D11 bridge.
+    QUIRK_ENTRY("mgsvtpp.exe", GameQuirk::XeFGBridgeResizeAsCreated),
 
     // Red Dead Redemption 2
     // Spoofing causes FSR2 inputs crash, DLSS inputs need OptiPatcher to avoid artifacts/crashes anyway
@@ -568,6 +573,11 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("acodyssey.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
     // The Game Pass build runs this exe instead (its log shows the elevation still firing under this name)
     QUIRK_ENTRY("acodyssey_plus.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+
+    // Assassin's Creed Unity and Assassin's Creed Syndicate
+    // The same D3D11CreateDevice error at startup with the elevation to 11_1 (same engine as Odyssey)
+    QUIRK_ENTRY("acu.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+    QUIRK_ENTRY("acs.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
     // Batman: Arkham Knight
     // Asks for 11_0 and gets elevated to 11_1; with that, native input / the virtual upscaler did not take effect under

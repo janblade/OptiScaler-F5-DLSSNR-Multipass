@@ -27,6 +27,19 @@ static VkRenderPass _vkRenderPass = VK_NULL_HANDLE;
 static uint32_t _scImageCount;
 static ULONG64 _frameCount;
 
+// ImGui's renderer backend is the Vulkan one. Not a given: with the frame-generation bridge (native/VkPresentBridge.h)
+// the menu moves to the D3D12 swapchain and its backend, and when the game then makes a swapchain the bridge does not
+// take, ImGui_ImplVulkan_Shutdown with no Vulkan backend reads through a null pointer (RDR2, FG only).
+static bool VulkanBackendIsUp()
+{
+    if (ImGui::GetCurrentContext() == nullptr)
+        return false;
+
+    const ImGuiIO& io = ImGui::GetIO();
+    return io.BackendRendererUserData != nullptr && io.BackendRendererName != nullptr &&
+           strcmp(io.BackendRendererName, "imgui_impl_vulkan") == 0;
+}
+
 static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType objectType, uint64_t objectHandle,
                             const char* name)
 {
@@ -62,7 +75,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     {
         LOG_DEBUG("_vulkanObjectsCreated, releasing objects");
 
-        if (ImGui::GetIO().BackendRendererUserData != nullptr)
+        if (VulkanBackendIsUp())
             ImGui_ImplVulkan_Shutdown(false);
 
         MenuOverlayVk::DestroyVulkanObjects(false);
@@ -368,6 +381,15 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         _ImVulkan_Info.Allocator = NULL;
         _ImVulkan_Info.RenderPass = _vkRenderPass;
 
+        // Another renderer backend still owns ImGui (the bridge's D3D12 menu was not let go): starting the Vulkan one
+        // over it would leave both pointing at one context. No menu on this swapchain rather than a crash.
+        if (ImGui::GetIO().BackendRendererUserData != nullptr && !VulkanBackendIsUp())
+        {
+            LOG_WARN("Vulkan menu: ImGui's renderer backend is still {}; the menu is not drawn on this swapchain",
+                     ImGui::GetIO().BackendRendererName != nullptr ? ImGui::GetIO().BackendRendererName : "another one");
+            return;
+        }
+
         bool initResult = ImGui_ImplVulkan_Init(&_ImVulkan_Info);
         LOG_DEBUG("ImGui_ImplVulkan_Init result: {}", initResult);
 
@@ -605,6 +627,38 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     return true;
 }
 
+void MenuOverlayVk::HandOverToBridge()
+{
+    // Bridged from the game's first swapchain: no Vulkan menu was made, only what a previous one left
+    if (!_vulkanObjectsCreated)
+    {
+        DestroyVulkanObjects(false);
+        return;
+    }
+
+    LOG_INFO("Vulkan bridge: the menu moves from the game's Vulkan swapchain to the D3D12 one");
+
+    // The backend frees its textures' descriptor sets from our pool, so it goes first; nothing of it may be in flight
+    if (_ImVulkan_Info.Device != VK_NULL_HANDLE)
+        vkDeviceWaitIdle(_ImVulkan_Info.Device);
+
+    if (VulkanBackendIsUp())
+        ImGui_ImplVulkan_Shutdown(false); // the font texture is made again by the D3D12 backend
+
+    // Render pass and descriptor pool included: the next Vulkan menu (if the bridge ever ends) makes its own
+    DestroyVulkanObjects(true);
+
+    IM_FREE(_ImVulkan_Frames);
+    _ImVulkan_Frames = nullptr;
+    IM_FREE(_ImVulkan_Semaphores);
+    _ImVulkan_Semaphores = nullptr;
+    _vkRenderPass = VK_NULL_HANDLE;
+    _scImageCount = 0;
+
+    _vulkanObjectsCreated = false;
+    _isInited = false;
+}
+
 void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInstance instance, HWND hwnd,
                                     const VkSwapchainCreateInfoKHR* pCreateInfo,
                                     const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain)
@@ -617,7 +671,9 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
 
         if (MenuOverlayBase::IsInited())
         {
-            ImGui_ImplVulkan_Shutdown(false);
+            if (VulkanBackendIsUp())
+                ImGui_ImplVulkan_Shutdown(false);
+
             LOG_DEBUG("MenuOverlayBase::Shutdown();");
             MenuOverlayBase::Shutdown();
         }

@@ -15,8 +15,13 @@
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
+#include <native/NativeDriverVk.h>
+#include <native/VkPresentBridge.h>
+#include <resource_tracking/GenericDepth_Vk.h>
 #include <framegen/IFGFeature.h>
 #include <native/NativeLowLatency.h>
+#include <misc/IdentifyGpu.h>
+#include <upscalers/FeatureProvider_Vk.h>
 #include <nvapi/fakenvapi.h>
 
 #include <imgui/imgui.h>
@@ -794,15 +799,169 @@ static bool ResolutionTierActive(Config* config, const ResolutionTier& tier, boo
            config->DlssNrReversibleMode.value_or_default() == tier.composition;
 }
 
+// Which API's Optical F5Low drivers and depth finder this game uses: a game presents with one of them. A dxvk game
+// presents its D3D frames through Vulkan, but its D3D drivers are the ones that run.
+enum class NativeApi
+{
+    Dx12,
+    Dx11,
+    Vulkan
+};
+
+static NativeApi CurrentNativeApi()
+{
+    const auto& state = State::Instance();
+
+    const auto present = state.swapchainApi == API::Vulkan  ? DlssNrNativeMode::PresentApi::Vulkan
+                         : state.swapchainApi == API::DX12 ? DlssNrNativeMode::PresentApi::Dx12
+                         : state.swapchainApi == API::DX11 ? DlssNrNativeMode::PresentApi::Dx11
+                                                           : DlssNrNativeMode::PresentApi::NotSelected;
+    const auto interop = state.swapchainInteropApi == SwapchainInteropApi::VkwDx12
+                             ? DlssNrNativeMode::Interop::VkwDx12
+                         : state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12
+                             ? DlssNrNativeMode::Interop::Dx11wDx12
+                             : DlssNrNativeMode::Interop::None;
+
+    switch (DlssNrNativeMode::GameApiFor(present, interop, state.currentD3D11Device != nullptr))
+    {
+    case DlssNrNativeMode::GameApi::Vulkan:
+        return NativeApi::Vulkan;
+    case DlssNrNativeMode::GameApi::Dx11:
+        return NativeApi::Dx11;
+    default:
+        return NativeApi::Dx12;
+    }
+}
+
+static bool NativeGameCallsUpscaler(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        return GenericDepthDx11::GameCallsUpscaler();
+    case NativeApi::Vulkan:
+        return GenericDepthVk::GameCallsUpscaler();
+    default:
+        return GenericDepthDx12::GameCallsUpscaler();
+    }
+}
+
+static DlssNrNativeMode::Finder NativeFinder(NativeApi api, bool depthWanted)
+{
+    using DlssNrNativeMode::FinderFor;
+
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        return FinderFor(depthWanted, GenericDepthDx11::Installed(), GenericDepthDx11::InstallFailed());
+    case NativeApi::Vulkan:
+        return FinderFor(depthWanted, GenericDepthVk::Installed(), GenericDepthVk::InstallFailed());
+    default:
+        return FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
+    }
+}
+
+static void NativeDepthStatus(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        GenericDepthDx11::DrawStatus();
+        break;
+    case NativeApi::Vulkan:
+        GenericDepthVk::DrawStatus();
+        break;
+    default:
+        GenericDepthDx12::DrawStatus();
+        break;
+    }
+}
+
+static void NativeMotionStatus(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        NativeMotionDx11::DrawStatus();
+        break;
+    case NativeApi::Vulkan:
+        NativeMotionVk::DrawStatus();
+        break;
+    default:
+        NativeMotionDx12::DrawStatus();
+        break;
+    }
+}
+
+static bool NativeNrOnlyRunning(NativeApi api)
+{
+    switch (api)
+    {
+    case NativeApi::Dx11:
+        return NativeMotionDx11::NrOnlyRunning();
+    case NativeApi::Vulkan:
+        return NativeMotionVk::NrOnlyRunning();
+    default:
+        return NativeMotionDx12::NrOnlyRunning();
+    }
+}
+
+// "FG only (game's upscaler)": frame generation is fed from a Vulkan-on-D3D12 backend's evaluate
+// (upscalers/IFeature_VkwDx12.cpp), so the game's Vulkan upscaler call has to run through one. (Such a feature reports
+// API::DX12: its upscaler type is what says so.)
+static bool VulkanFeatureIsOn12()
+{
+    const auto feature = State::Instance().currentFeature;
+    return feature != nullptr && FeatureProvider_Vk::IsOn12(feature->GetUpscalerType());
+}
+
+// The backend frame generation only runs the game's upscaler on, and the one to go back to when the mode is left.
+static std::optional<Upscaler> g_backendBeforeFrameGenerationOnly;
+
+static void SwitchVulkanBackend(Config* config, Upscaler backend)
+{
+    auto& state = State::Instance();
+    config->VulkanUpscaler = backend;
+    state.newBackend = backend;
+
+    // A live feature is rebuilt on the game's next evaluate (inputs/NVNGX_DLSS_Vk.cpp); a later one is made with it.
+    for (auto& changeBackend : state.changeBackend)
+        changeBackend.second = true;
+}
+
+static void EnterFrameGenerationOnly(Config* config)
+{
+    const Upscaler current = config->VulkanUpscaler.value_or_default();
+
+    // The same DLSS on D3D12 where the game's DLSS could run, FSR otherwise (FeatureProvider_Vk::On12For). Already a
+    // D3D12 one: rebuilt all the same, so it is made on the bridge's device (IFeature_VkwDx12::CreateDx12Device).
+    const Upscaler target = FeatureProvider_Vk::On12For(current);
+
+    if (target != current)
+        g_backendBeforeFrameGenerationOnly = current;
+
+    SwitchVulkanBackend(config, target);
+}
+
+static void LeaveFrameGenerationOnly(Config* config)
+{
+    if (!g_backendBeforeFrameGenerationOnly.has_value())
+        return;
+
+    SwitchVulkanBackend(config, g_backendBeforeFrameGenerationOnly.value());
+    g_backendBeforeFrameGenerationOnly.reset();
+}
+
 static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPicture)
 {
     using namespace DlssNrNativeMode;
 
-    const bool dx11 = State::Instance().currentD3D11Device != nullptr;
-    const bool gameUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
+    const NativeApi api = CurrentNativeApi();
+    const bool gameUpscaler = NativeGameCallsUpscaler(api);
     const Shown shown =
         FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
+          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
 
     struct ModeChoice
     {
@@ -815,13 +974,18 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         { Mode::Off, Shown::Off, "Off##nativemode" },
         { Mode::NrOnly, Shown::NrOnly, "NR only##nativemode" },
         { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + upscaler & frame generation##nativemode" },
+        { Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, "FG only (game's upscaler)##nativemode" },
     };
 
+    const bool vulkan = api == NativeApi::Vulkan;
     const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     ImGui::TextUnformatted("Mode:");
 
     for (const auto& choice : kModes)
     {
+        if (!Offered(choice.mode, vulkan))
+            continue;
+
         const float width = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
                             ImGui::CalcTextSize(choice.label, nullptr, true).x;
         ImGui::SameLine();
@@ -829,7 +993,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         if (ImGui::GetCursorScreenPos().x + width > rowRight)
             ImGui::NewLine();
 
-        const bool selectable = Selectable(choice.mode, gameUpscaler);
+        const bool selectable = Selectable(choice.mode, gameUpscaler, vulkan);
         ImGui::BeginDisabled(!selectable);
         const bool clicked = ImGui::RadioButton(choice.label, shown == choice.shown);
         ImGui::EndDisabled();
@@ -844,6 +1008,12 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                 config->DlssNrNativeMotion = change.keys->motion;
                 config->DlssNrNativeInput = change.keys->input;
                 config->DlssNrNativeUpscaler = change.keys->upscaler;
+                config->DlssNrNativeFrameGenerationOnly = change.keys->frameGenerationOnly;
+
+                if (change.keys->frameGenerationOnly)
+                    EnterFrameGenerationOnly(config);
+                else if (shown == Shown::FrameGenerationOnly)
+                    LeaveFrameGenerationOnly(config);
             }
 
             if (change.retryAfterFailure)
@@ -870,24 +1040,31 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         "game started, restart the game to use it.\n"
         "NR runs only with Enable Neural Rendering on. Changes apply at once.\n"
         "Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode "
-        "already on stands aside.");
+        "already on stands aside.\n"
+        "FG only (game's upscaler), Vulkan games only: the reverse, for a game that calls DLSS, FSR or XeSS of its "
+        "own. Frame generation runs from that call, with the game's own motion and depth; no motion is estimated. "
+        "The game's upscaler runs through a D3D12 copy of it (DLSS on D3D12 where DLSS can run, FSR otherwise), "
+        "chosen for you; leaving the mode puts your upscaler back.\n"
+        "D3D11, D3D12 and Vulkan games. On Vulkan, frame generation needs the Frame Generation input (OptiFG, "
+        "Upscaler) and an output set when the game starts; the mode itself can be switched on later.");
 
     if (shown == Shown::Off)
     {
         if (gameUpscaler)
-            ImGui::TextWrapped("The game is calling an upscaler of its own, so NR runs on that call; this is not "
-                               "needed.");
+            ImGui::TextWrapped(vulkan ? "The game is calling an upscaler of its own, so NR runs on that call. For "
+                                        "frame generation, choose FG only (game's upscaler)."
+                                      : "The game is calling an upscaler of its own, so NR runs on that call; this "
+                                        "is not needed.");
 
         return;
     }
 
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
-    const Finder finder =
-        dx11 ? FinderFor(depthWanted, GenericDepthDx11::Installed(), GenericDepthDx11::InstallFailed())
-             : FinderFor(depthWanted, GenericDepthDx12::Installed(), GenericDepthDx12::InstallFailed());
+    const Finder finder = NativeFinder(api, depthWanted);
     const bool depthRestart = DepthRestartWarning(shown, finder);
     const Warning warning =
-        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler);
+        WarningFor(shown, nrEnabled, finishedPicture, DlssNr::NativeInputBlockedBySwapChainInterop(), gameUpscaler,
+                   api == NativeApi::Vulkan && !VkPresentBridge::IsUp(), VulkanFeatureIsOn12());
     const char* warningText = nullptr;
 
     switch (warning)
@@ -899,6 +1076,20 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     case Warning::Dx11FrameGeneration:
         warningText = "NR only does nothing while OptiScaler's frame generation has replaced this D3D11 game's swap "
                       "chain. Choose NR + upscaler & frame generation.";
+        break;
+    case Warning::VulkanNeedsRestart:
+        warningText = "Waiting for the game to make a new swapchain for frame generation (it was told to). If nothing "
+                      "changes, switch the game's window mode or resolution once; if it still does not start, the Frame "
+                      "Generation input (OptiFG, Upscaler) and output were not set when the game started: set them, "
+                      "save the settings and restart the game.";
+        break;
+    case Warning::NeedsGameUpscaler:
+        warningText = "The game is not calling an upscaler now: turn DLSS, FSR or XeSS on in the game's settings. (In "
+                      "its menus a game often makes no upscaler call; frame generation starts in play.)";
+        break;
+    case Warning::NeedsOn12Backend:
+        warningText = "Switching the game's upscaler to its D3D12 copy (DLSS or FSR on D3D12), which feeds frame "
+                      "generation; it is rebuilt on the game's next upscaler call.";
         break;
     case Warning::NrDisabled:
         warningText = shown == Shown::NrOnly ? "Enable Neural Rendering (above) is off, so NR does not run."
@@ -925,23 +1116,26 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
 
     ImGui::PopStyleColor();
 
-    if (!depthRestart)
+    if (shown == Shown::FrameGenerationOnly)
     {
-        if (dx11)
-            GenericDepthDx11::DrawStatus();
-        else
-            GenericDepthDx12::DrawStatus();
+        if (warning == Warning::None)
+        {
+            const auto feature = State::Instance().currentFeature;
+            ImGui::TextDisabled("Frame generation from the game's upscaler (%s on D3D12).",
+                                feature != nullptr ? feature->Name().c_str() : "upscaler");
+        }
+
+        StatusSlotEnd(slot, 4);
+        return;
     }
+
+    if (!depthRestart)
+        NativeDepthStatus(api);
 
     if (shown == Shown::MotionOnly)
         ImGui::TextDisabled("Estimating motion only; nothing uses it.");
     else if (shown == Shown::NrAndFrameGeneration || warning == Warning::None)
-    {
-        if (dx11)
-            NativeMotionDx11::DrawStatus();
-        else
-            NativeMotionDx12::DrawStatus();
-    }
+        NativeMotionStatus(api);
 
     StatusSlotEnd(slot, 4);
 }
@@ -1015,6 +1209,13 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
         else if (nativeVk && config->DlssNrDeferredDlss.value_or_default())
         {
             ImGui::TextWrapped("Disable Generate before SR, apply after SR (DLSS) to use native Vulkan NR.");
+        }
+        else if (enabled && finishedPicture)
+        {
+            // On the finished picture (Optical F5Low's NR only among them) there is no upscaler to wait for: what NR
+            // says about the picture is the reason it has not started (only the log had it).
+            const std::string status = DlssNr::FinishedPictureStatus();
+            ImGui::TextWrapped("%s", status.empty() ? "Waiting for a finished picture." : status.c_str());
         }
         else if (enabled)
             ImGui::TextUnformatted("Waiting for the upscaler to run.");
@@ -1097,9 +1298,76 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
         return "NR + upscaler & frame generation";
     case DlssNrNativeMode::Shown::MotionOnly:
         return "motion only";
+    case DlssNrNativeMode::Shown::FrameGenerationOnly:
+        return "FG only (game's upscaler)";
     default:
         return "Off";
     }
+}
+
+// The "Reuse detail between frames" checkbox and its help, on the NR Options page; the Optical F5Low page shows its
+// state and links here. Returns whether it is on.
+static bool RenderDetailReuseToggle(Config* config)
+{
+    bool detailReuse = config->DlssNrDetailReuse.value_or_default();
+    if (ImGui::Checkbox("Reuse detail between frames (experimental)", &detailReuse))
+        config->DlssNrDetailReuse = detailReuse;
+    HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
+               "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
+               "any pass count. Detail can pop where objects move and reveal new areas.\n"
+               "Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to "
+               "move times how much the model changes the picture, and passes build on each other, so with two or "
+               "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
+               "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
+               "D3D12 and Vulkan with NR after SR, and with Optical F5Low (D3D11, D3D12 and Vulkan games), which also tells "
+               "it where the last frame cannot be trusted. Not with NR before SR, nor in Finished Picture without "
+               "Optical F5Low. Reuse bottleneck is off while this runs.\n"
+               "It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and "
+               "reused frames cost differently, so the game's frame times alternate: a limiter just below the "
+               "average rate evens them out.");
+    return detailReuse;
+}
+
+// Scene cuts the game does not flag (shaders/dlssnr/DlssNr_SceneCut.inl), on the NR Options page. The detector runs from
+// SceneCut=1, where it only counts; the checkbox is 2, where it also acts. 0 (nothing runs) is set in the ini.
+static void RenderSceneCutToggle(Config* config)
+{
+    if (DlssNr::IsRunningVk())
+    {
+        ImGui::TextDisabled("Scene cuts the game does not flag: D3D12 games only");
+        return;
+    }
+
+    const uint32_t setting = config->DlssNrSceneCut.value_or_default();
+    bool act = setting >= 2;
+
+    ImGui::BeginDisabled(setting == 0);
+    if (ImGui::Checkbox("Reset NR on scene cuts the game does not flag (experimental)", &act))
+        config->DlssNrSceneCut = act ? 2u : 1u;
+    ImGui::EndDisabled();
+
+    HelpMarker("Finds hard cuts in the picture (a camera cut, a new scene) on the frame they happen, by comparing how "
+               "bright each of nine areas of the picture is with the last frame. Fades, exposure changes and fast "
+               "pans are not cuts.\nMost games tell NR about their cuts. In one that does not, the old scene fades "
+               "out of NR's picture over several frames. With this on, NR starts over a few frames after such a cut, "
+               "and Reuse detail between frames drops the moved detail on the cut frame itself.\nOff, the cuts are "
+               "only counted below, which shows whether this game needs it. D3D12 games; not with Optical F5Low, "
+               "which finds its own cuts. SceneCut=0 in OptiScaler.ini stops the counting too.");
+
+    const DlssNr::SceneCutInfo status = DlssNr::SceneCutStatus();
+
+    if (setting == 0)
+        ImGui::TextDisabled("Scene cuts: off (SceneCut=0)");
+    else if (status.failed)
+        ImGui::TextDisabled("Scene cuts: the detector could not start (see the log)");
+    else if (status.found == 0)
+        ImGui::TextDisabled(status.running ? "Scene cuts: none found yet" : "Scene cuts: not running on this input");
+    else if (act)
+        ImGui::TextDisabled("Scene cuts: %llu found, %llu flagged by the game, %llu reset by NR", status.found,
+                            status.flagged, status.resets);
+    else
+        ImGui::TextDisabled("Scene cuts: %llu found, %llu flagged by the game, %llu not", status.found, status.flagged,
+                            status.silent);
 }
 
 // Optical F5Low's own Reflex calls (native/NativeLowLatency.h): the switch, the method in use and, where the driver
@@ -1151,12 +1419,34 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
         "Optical F5Low works out how the picture moves by itself, the way a game's motion vectors would tell "
         "it: it compares each frame with the last, uses the game's depth when it can find it, keeps a "
         "still HUD still and notices scene cuts. NR, and in the second mode OptiScaler's upscaler and "
-        "frame generation, run on that motion. D3D11 and D3D12 games.");
+        "frame generation, run on that motion. D3D11, D3D12 and Vulkan games.");
 
     bool finishedPicture = nr.finishedPicture;
     RenderNativeMode(config, nr.enabled, finishedPicture);
 
     RenderLowLatencySection(config);
+
+    // Detail reuse on Optical F5Low's motion: shown here because this is where its saving matters most (NR on the whole
+    // finished picture). Only its state: the checkbox and its fine-tuning live on the NR Options page.
+    ImGui::SeparatorText("Lighter NR");
+    if (!config->DlssNrDetailReuse.value_or_default())
+        ImGui::TextUnformatted("Reuse detail between frames: Off");
+    else
+    {
+        const auto status = DlssNr::DetailReuseStatus();
+        if (!status.why.empty())
+            ImGui::TextWrapped("Reuse detail between frames: On, %s", status.why.c_str());
+        else if (status.active)
+            ImGui::Text("Reuse detail between frames: On (full %llu | reused %llu%s)", status.full, status.reused,
+                        status.holding ? " | paused while moving fast" : "");
+        else
+            ImGui::TextUnformatted("Reuse detail between frames: On");
+    }
+    HelpMarker("Runs the model every other frame and moves the last result's detail onto the frames in between, "
+               "which roughly halves NR's GPU cost. With Optical F5Low it also uses the trust mask to drop detail "
+               "where the last frame cannot be trusted.\nTurned on and tuned on the NR Options page.");
+    if (ImGui::SmallButton("Set in NR Options##f5lowdetailreuse"))
+        MenuPages::RequestPage(MenuPages::Page::NrOptions);
 
     // The page is Optical F5Low's own, so every control shows and the section starts open.
     if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
@@ -1172,15 +1462,20 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
                               "GPU work while they are shown; D3D12 games). The picked depth also needs \"Show the\n"
                               "picked depth here\" below and a restart.");
 
-        if (State::Instance().currentD3D11Device != nullptr)
+        switch (CurrentNativeApi())
         {
+        case NativeApi::Dx11:
             GenericDepthDx11::DrawAdvancedUi();
             NativeMotionDx11::DrawAdvancedUi();
-        }
-        else
-        {
+            break;
+        case NativeApi::Vulkan:
+            GenericDepthVk::DrawAdvancedUi();
+            NativeMotionVk::DrawAdvancedUi();
+            break;
+        default:
             GenericDepthDx12::DrawAdvancedUi();
             NativeMotionDx12::DrawAdvancedUi();
+            break;
         }
 
         ImGui::TreePop();
@@ -1192,7 +1487,8 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
 {
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
+          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
 
     ImGui::Text("Optical F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
     ImGui::SameLine();
@@ -2142,19 +2438,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
     else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
         ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
-    if (ImGui::Checkbox("Reuse detail between frames (experimental)", &detailReuse))
-        config->DlssNrDetailReuse = detailReuse;
-    HelpMarker("Runs the model every other frame. In between, the last result's detail is moved onto the new frame "
-               "with the motion vectors, and dropped where depth or colour disagree.\nRoughly halves NR's GPU cost at "
-               "any pass count. Detail can pop where objects move and reveal new areas.\n"
-               "Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to "
-               "move times how much the model changes the picture, and passes build on each other, so with two or "
-               "three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there "
-               "with frame generation on). Pause while moving fast, under Debug, is what limits it.\n"
-               "D3D12 and Vulkan, with NR after SR only. Reuse bottleneck is off while this runs.\n"
-               "It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and "
-               "reused frames cost differently, so the game's frame times alternate: a limiter just below the "
-               "average rate evens them out.");
+    detailReuse = RenderDetailReuseToggle(config);
     if (detailReuse)
     {
         // Debugging and A/B testing only; the defaults are the tuned values.
@@ -2269,6 +2553,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
             ImGui::TreePop();
         }
     }
+    RenderSceneCutToggle(config);
     if (precisionChoice > 0 && DlssNr::IsRunningVk())
     {
         // The hybrid rewrites the model's kernels through NvAPI's D3D12 entry points; on Vulkan the model runs
@@ -2889,20 +3174,20 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     using namespace HeaderBanner;
 
     const auto& state = State::Instance();
-    const bool dx11 = state.currentD3D11Device != nullptr;
+    const NativeApi api = CurrentNativeApi();
 
     Inputs in;
     in.feature = feature;
     in.upscalerFiles = upscalerFiles;
-    in.gameCallsUpscaler = dx11 ? GenericDepthDx11::GameCallsUpscaler() : GenericDepthDx12::GameCallsUpscaler();
+    in.gameCallsUpscaler = NativeGameCallsUpscaler(api);
     in.mode = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
-    // Optical F5Low is for D3D11 and D3D12 games, and only helps where NR is switched on and has not failed this
-    // session.
-    in.nrAvailable =
-        config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0 && state.swapchainApi != API::Vulkan;
-    in.f5lowNrOnlyRunning = dx11 ? NativeMotionDx11::NrOnlyRunning() : NativeMotionDx12::NrOnlyRunning();
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
+          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
+    // Optical F5Low is for D3D11, D3D12 and Vulkan games, and only helps where NR is switched on and has not failed
+    // this session.
+    in.nrAvailable = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
+    in.f5lowNrOnlyRunning = NativeNrOnlyRunning(api);
     in.nrEnabled = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
     in.frameGeneration = state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused();
     return in;
@@ -2914,7 +3199,7 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
 {
     using namespace HeaderBanner;
 
-    const bool dx11 = State::Instance().currentD3D11Device != nullptr;
+    const NativeApi api = CurrentNativeApi();
     const Banner banner = Decide(HeaderInputs(config, feature, upscalerFiles));
 
     switch (banner.line)
@@ -2958,11 +3243,7 @@ bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upsc
     case Line::F5LowStatus:
         ImGui::TextDisabled("Optical F5Low:");
         ImGui::SameLine();
-
-        if (dx11)
-            NativeMotionDx11::DrawStatus();
-        else
-            NativeMotionDx12::DrawStatus();
+        NativeMotionStatus(api);
         break;
     }
 

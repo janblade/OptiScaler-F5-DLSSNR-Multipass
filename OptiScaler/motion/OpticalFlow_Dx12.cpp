@@ -9,18 +9,16 @@
 namespace
 {
 
-constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs and two UAVs (the scene-cut passes use three of the ten)
+constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs and two UAVs
 constexpr uint32_t kPassesPerFrame = 1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
 constexpr DXGI_FORMAT kStateFormat = DXGI_FORMAT_R32_UINT; // typed atomics on this are required of every device
 constexpr DXGI_FORMAT kAgeFormat = DXGI_FORMAT_R8_UINT;    // the still age: typed UAV stores of this are required too
-constexpr uint32_t kSceneStateRows = 19; // nine tiles' counts, nine previous histograms, one row of scratch
 
 // The shaders are compiled ahead of time (motion/OpticalFlow_Hlsl.h -> native/F5LowShaderBytecode.h): a compile here
-// ran on the present thread when Optical F5Low started. `group` is "OpticalFlow", or "OpticalFlowScene" for the
-// scene-cut passes; `lumaMode` is LUMA_MODE's value for a Luma variant.
+// ran on the present thread when Optical F5Low started. `lumaMode` is LUMA_MODE's value for a Luma variant.
 const F5LowShaderBytecode::Shader* Compile(const char* entry, std::string* error, const char* group = "OpticalFlow",
                                            const char* lumaMode = "")
 {
@@ -39,14 +37,12 @@ OpticalFlowDx12::~OpticalFlowDx12()
     ReleaseTextures();
 
     for (ID3D12PipelineState** pso : { &_luma, &_lumaSdr, &_lumaScRgb, &_lumaPq, &_down, &_match, &_median, &_smooth,
-                                       &_visualise, &_global, &_sceneHist, &_sceneDiverge })
+                                       &_visualise, &_global })
         if (*pso != nullptr)
             (*pso)->Release();
 
     if (_rootSignature != nullptr)
         _rootSignature->Release();
-    if (_sceneRoot != nullptr)
-        _sceneRoot->Release();
     if (_heap != nullptr)
         _heap->Release();
 }
@@ -180,72 +176,10 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
         }
     }
 
-    // The scene-cut passes: the luma (one SRV), the state and the flag (two UAVs) and their own constants.
+    if (!_sceneCut.Init(device))
     {
-        D3D12_DESCRIPTOR_RANGE sceneRanges[2] {};
-        sceneRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        sceneRanges[0].NumDescriptors = 1;
-        sceneRanges[0].BaseShaderRegister = 0;
-        sceneRanges[0].OffsetInDescriptorsFromTableStart = 0;
-        sceneRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        sceneRanges[1].NumDescriptors = 2;
-        sceneRanges[1].BaseShaderRegister = 0;
-        sceneRanges[1].OffsetInDescriptorsFromTableStart = 1;
-
-        D3D12_ROOT_PARAMETER sceneParams[2] {};
-        sceneParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        sceneParams[0].DescriptorTable.NumDescriptorRanges = 2;
-        sceneParams[0].DescriptorTable.pDescriptorRanges = sceneRanges;
-        sceneParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        sceneParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        sceneParams[1].Constants.ShaderRegister = 0;
-        sceneParams[1].Constants.Num32BitValues = sizeof(SceneConstants) / 4;
-        sceneParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-        D3D12_ROOT_SIGNATURE_DESC sceneDesc {};
-        sceneDesc.NumParameters = 2;
-        sceneDesc.pParameters = sceneParams;
-
-        ID3DBlob* sceneSerialized = nullptr;
-        ID3DBlob* sceneMessages = nullptr;
-        HRESULT sceneResult =
-            D3D12SerializeRootSignature(&sceneDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sceneSerialized, &sceneMessages);
-
-        if (SUCCEEDED(sceneResult))
-            sceneResult = device->CreateRootSignature(0, sceneSerialized->GetBufferPointer(),
-                                                      sceneSerialized->GetBufferSize(), IID_PPV_ARGS(&_sceneRoot));
-
-        if (sceneSerialized != nullptr)
-            sceneSerialized->Release();
-        if (sceneMessages != nullptr)
-            sceneMessages->Release();
-
-        if (FAILED(sceneResult))
-        {
-            _error = "creating the scene-cut root signature";
-            return false;
-        }
-
-        for (const Entry& entry : { Entry { "SceneHist", &_sceneHist }, Entry { "SceneDiverge", &_sceneDiverge } })
-        {
-            const auto* code = Compile(entry.name, &_error, "OpticalFlowScene");
-
-            if (code == nullptr)
-                return false;
-
-            D3D12_COMPUTE_PIPELINE_STATE_DESC pso {};
-            pso.pRootSignature = _sceneRoot;
-            pso.CS = { code->GetBufferPointer(), code->GetBufferSize() };
-
-            const HRESULT hr = device->CreateComputePipelineState(&pso, IID_PPV_ARGS(entry.target));
-            code->Release();
-
-            if (FAILED(hr))
-            {
-                _error = std::string("creating the pipeline ") + entry.name;
-                return false;
-            }
-        }
+        _error = _sceneCut.Error();
+        return false;
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC heap {};
@@ -312,8 +246,6 @@ void OpticalFlowDx12::ReleaseTextures()
     release(_globalFlow);
     release(_flow);
     release(_preview);
-    release(_sceneState);
-    release(_cutFlag);
 
     for (Tex& age : _age)
         release(age);
@@ -329,7 +261,7 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
     ReleaseTextures();
     _havePrevious = false;
     _globalReady = false;
-    _scenePrevValid = false;
+    _sceneCut.Reset();
     _sceneCutRan = false;
     _ageValid = false;
     _flowValid = false;
@@ -357,9 +289,7 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
         if (!CreateTexture(age, (width + 1) / 2, (height + 1) / 2, kAgeFormat, L"OpticalFlow_StillAge"))
             return false;
 
-    return CreateTexture(_sceneState, 256, kSceneStateRows, kStateFormat, L"OpticalFlow_SceneState") &&
-           CreateTexture(_cutFlag, 2, 1, kStateFormat, L"OpticalFlow_SceneCut") &&
-           CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
+    return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
            CreateTexture(_globalFlow, 1, 1, kFlowFormat, L"OpticalFlow_Global") &&
            CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
            CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -464,73 +394,20 @@ void OpticalFlowDx12::StampBegin(ID3D12GraphicsCommandList* list)
     }
 }
 
-void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso)
+void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, const char* name)
 {
     if (_timeHeap == nullptr || _timeCount == 0 || _timeCount >= _timeCapacity || _timeCount >= 64)
         return;
 
     list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
-    _timeNames[_timeCount++] = pso == _luma || pso == _lumaSdr || pso == _lumaScRgb || pso == _lumaPq ? "luma"
+    _timeNames[_timeCount++] = name != nullptr ? name
+                               : pso == _luma || pso == _lumaSdr || pso == _lumaScRgb || pso == _lumaPq ? "luma"
                                : pso == _down                                                         ? "down"
                                : pso == _match                                                        ? "match"
                                : pso == _median                                                       ? "median"
                                : pso == _smooth                                                       ? "smooth"
                                : pso == _global                                                       ? "global"
-                               : pso == _sceneHist                                                    ? "scenehist"
-                               : pso == _sceneDiverge                                                 ? "scenecut"
                                                                                                       : "other";
-}
-
-void OpticalFlowDx12::ScenePass(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, ID3D12Resource* luma,
-                                uint32_t groupsX, uint32_t groupsY, const SceneConstants& constants)
-{
-    StampBegin(list);
-
-    // The state stays a UAV for good (the two passes only write it); the flag is one while the passes run and a texture
-    // after.
-    Transition(list, _sceneState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    Transition(list, _cutFlag, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    const UINT first = _heapCursor;
-    _heapCursor = (_heapCursor + kDescriptorsPerPass) % (kDescriptorsPerPass * kPassesPerFrame * kFramesInFlight);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu = _heap->GetCPUDescriptorHandleForHeapStart();
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu = _heap->GetGPUDescriptorHandleForHeapStart();
-    cpu.ptr += (SIZE_T) first * _descriptorSize;
-    gpu.ptr += (UINT64) first * _descriptorSize;
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
-    srv.Format = kLumaFormat;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Texture2D.MipLevels = 1;
-    _device->CreateShaderResourceView(luma, &srv, cpu);
-    cpu.ptr += _descriptorSize;
-
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uav {};
-    uav.Format = kStateFormat;
-    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    _device->CreateUnorderedAccessView(_sceneState.resource, nullptr, &uav, cpu);
-    cpu.ptr += _descriptorSize;
-    _device->CreateUnorderedAccessView(_cutFlag.resource, nullptr, &uav, cpu);
-
-    ID3D12DescriptorHeap* heaps[] = { _heap };
-    list->SetDescriptorHeaps(1, heaps);
-    list->SetComputeRootSignature(_sceneRoot);
-    list->SetPipelineState(pso);
-    list->SetComputeRootDescriptorTable(0, gpu);
-    list->SetComputeRoot32BitConstants(1, sizeof(SceneConstants) / 4, &constants, 0);
-    list->Dispatch(groupsX, groupsY, 1);
-
-    // The next pass reads what this one wrote.
-    D3D12_RESOURCE_BARRIER barriers[2] {};
-    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    barriers[0].UAV.pResource = _sceneState.resource;
-    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    barriers[1].UAV.pResource = _cutFlag.resource;
-    list->ResourceBarrier(2, barriers);
-
-    StampEnd(list, pso);
 }
 
 bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
@@ -571,19 +448,12 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
     if (_settings.sceneCutDetector)
     {
-        SceneConstants scene {};
-        scene.sizeX = current[0].width;
-        scene.sizeY = current[0].height;
-        scene.hasPrevious = _scenePrevValid ? 1 : 0;
-        scene.threshold = _settings.sceneCutThreshold;
-        ScenePass(list, _sceneHist, current[0].resource, 8, 9, scene);
-        ScenePass(list, _sceneDiverge, current[0].resource, 9, 1, scene);
-        Transition(list, _cutFlag, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        _sceneCutRan = true;
-        _scenePrevValid = true;
+        StampBegin(list);
+        _sceneCutRan = _sceneCut.Detect(list, current[0].resource, _settings.sceneCutThreshold);
+        StampEnd(list, nullptr, "scenecut");
     }
     else
-        _scenePrevValid = false;
+        _sceneCut.Reset();
 
     for (int level = 1; level < kLevels; ++level)
     {
@@ -662,7 +532,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
                  coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat,
                  constants, (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat,
                  depthMatching ? depth : nullptr, depthFormat, _globalReady ? _globalFlow.resource : nullptr,
-                 kFlowFormat, _sceneCutRan ? _cutFlag.resource : nullptr, kStateFormat);
+                 kFlowFormat, _sceneCutRan ? _sceneCut.Flag() : nullptr, kStateFormat);
 
             if (keepAge)
             {

@@ -4,6 +4,7 @@
 #include <hooks/DxgiSwapchainSizing.h>
 
 #include <Util.h>
+#include <Logger.h>
 #include <Config.h>
 
 #include <nvapi/fakenvapi.h>
@@ -15,6 +16,7 @@
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeLowLatency.h>
+#include <native/VkPresentBridge.h>
 
 #include <misc/FrameLimit.h>
 
@@ -287,13 +289,14 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     // This lock will delay/prevent release of buffers while present is ongoing
     std::shared_lock<std::shared_mutex> dx11wDx12PresentLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
-    if (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::None &&
         State::Instance().activeFgOutput == FGOutput::XeFG)
     {
         dx11wDx12PresentLock.lock();
     }
 
     LOG_DEBUG("{}", _frameCounter);
+    NoteDroppedLogLinesOnPresent();
 
     HRESULT presentResult;
 
@@ -351,9 +354,15 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         if (Util::CheckForRealObject(__FUNCTION__, cq, (IUnknown**) &realQueue))
             cq = realQueue;
 
-        State::Instance().swapchainApi = DX12;
+        // Not on the Vulkan bridge (native/VkPresentBridge.h): this is XeFG's D3D12 swapchain for a Vulkan game, whose own
+        // present sets swapchainApi to Vulkan. Writing D3D12 here made the menu flip between the two. The D3D12 queue and
+        // device below are still captured: frame generation needs them.
+        if (State::Instance().swapchainInteropApi != SwapchainInteropApi::VkwDx12)
+            State::Instance().swapchainApi = DX12;
 
-        if (State::Instance().currentCommandQueue == nullptr)
+        // Not while a Vulkan bridge's output is up or being let go of: this is XeFG's present on the bridge's private
+        // queue, and the state's pointer to it is cleared on purpose when the output goes (native/VkPresentBridge.cpp)
+        if (State::Instance().currentCommandQueue == nullptr && !VkPresentBridge::OutputActive())
             State::Instance().currentCommandQueue = cq;
 
         if (cq->GetDevice(IID_PPV_ARGS(&device12)) == S_OK)
@@ -370,11 +379,15 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
+    // On the Vulkan bridge (native/VkPresentBridge.h) this is frame generation's D3D12 swapchain for a Vulkan game, whose
+    // own present also calls update() with isVulkan: the same answer from both, or reflexLimitsFps flips every frame
+    // and setFPSLimit resends the cap each time
+    const bool vulkanGame = State::Instance().swapchainInteropApi == SwapchainInteropApi::VkwDx12;
     auto fg = State::Instance().currentFG;
     if (willPresent && fg != nullptr)
-        ReflexHooks::update(fg->IsActive(), false);
+        ReflexHooks::update(fg->IsActive(), vulkanGame);
     else
-        ReflexHooks::update(false, false);
+        ReflexHooks::update(false, vulkanGame);
 
     XellHooks::update();
 
@@ -567,7 +580,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     IUnknown* lowLatencyDevice = nullptr;
 
     // (A D3D11 game behind OptiScaler's D3D12 bridge is covered in Dx11wDx12SC::Present, the game's own present.)
-    if (willPresent && State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+    if (willPresent && State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
     {
         if (isD3D11)
             lowLatencyDevice = device;

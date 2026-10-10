@@ -31,6 +31,8 @@
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
 
+#include <dlssnr/DlssNr_RetryRequest.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -264,13 +266,20 @@ struct VkLockMark
     ~VkLockMark() { t_vkLockHeld = false; }
 };
 
-void Fail(const char* why)
+// What a retry cannot fix: the model has no usable Vulkan surface, or NGX will not start on this device. Anything else
+// (a file that was missing, a surface that could not be allocated, a failed dispatch) a retry may.
+bool g_vkFailurePermanent = false;
+DlssNr::RetryRequest g_vkRetry;
+unsigned int g_vkRetryHandled = 0;
+
+void Fail(const char* why, bool permanent = false)
 {
     if (g_vk.failed)
         return;
 
     g_vk.failed = true;
     g_vk.reason = why;
+    g_vkFailurePermanent = permanent;
     LOG_ERROR("DLSS-NR Vulkan unavailable: {}", why);
 }
 
@@ -659,9 +668,23 @@ std::optional<std::filesystem::path> FindSnippet()
 
 // ---------------------------------------------------------------------------------------------
 
+void ReleaseNrObjects(); // below, with ShutdownVk
+
 bool IsRunningVk() { return g_vk.feature != nullptr && !g_vk.failed; }
 
 const char* FailureReasonVk() { return g_vk.failed ? g_vk.reason : ""; }
+
+bool RetryableVk() { return g_vk.failed && !g_vkFailurePermanent; }
+
+void RequestRetryVk() { g_vkRetry.Request(); }
+
+// Read from the menu thread without the lock: the model's size is two words that only change in the resize block, and a
+// torn read costs one wrong frame of a text line.
+void CurrentModelSizeVk(unsigned int& width, unsigned int& height)
+{
+    width = g_vk.workWidth;
+    height = g_vk.workHeight;
+}
 
 unsigned long long FramesVk() { return g_vk.frames; }
 
@@ -740,6 +763,24 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     std::lock_guard<std::mutex> lock(g_vkMutex);
     VkLockMark lockMark;
+
+    // A retry the menu asked for: here, on the thread that records NR, never from the menu. Drain the device, let go of
+    // what NR made (ReleaseNrObjects, which also clears the compression fallback), and start over; a failure that
+    // cannot be retried stays. If the device will not go idle the retry itself fails and says so.
+    if (g_vkRetry.Consume(g_vkRetryHandled) && g_vk.failed && !g_vkFailurePermanent)
+    {
+        if (g_vk.device != VK_NULL_HANDLE && vkDeviceWaitIdle(g_vk.device) != VK_SUCCESS)
+        {
+            g_vk.failed = false; // Fail() keeps the first reason otherwise
+            Fail("the Vulkan device could not retire work for retry");
+            return;
+        }
+
+        LOG_INFO("DLSS-NR Vulkan: retrying after \"{}\"", g_vk.reason);
+        ReleaseNrObjects();
+        g_vk.failed = false;
+        g_vk.reason = "";
+    }
 
     if (g_vk.failed)
         return;
@@ -1048,7 +1089,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (probe != 15)
         {
             LOG_ERROR("DLSS-NR Vulkan: the model's Vulkan surface is incomplete (probe {})", probe);
-            Fail("the model does not expose a complete Vulkan surface");
+            Fail("the model does not expose a complete Vulkan surface", true);
             return;
         }
 
@@ -1060,7 +1101,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}{}", result,
                       g_vk.deviceLosses > 0 ? " (a re-init after the previous device was lost)" : "");
-            Fail("the model would not initialise on this Vulkan device");
+            Fail("the model would not initialise on this Vulkan device", true);
             return;
         }
 
@@ -2443,6 +2484,62 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, Vk
     EvaluateAtSeamVk(cmd, params, instance, pd, device, false, rayReconstruction, applied);
 }
 
+// Everything NR itself made on a live device: the model's features, its images, passes and rings. Not NGX on the device,
+// the parameter block, the forwarder or the device handle, and nothing the present path owns (Optical F5Low's frame
+// source, the Vulkan-on-D3D12 bridge): those are not in g_vk. The device must be idle. Shared by the full shutdown and by
+// Retry, which is why Retry is not ShutdownVk: shutting NGX down under a game that is still using the device would be
+// worse than the failure being retried.
+void ReleaseNrObjects()
+{
+    CalibrationVkShutdown(true);
+    DetailReuseVk::Release(true);
+    EdgeCompressionVk::Release(true);
+
+    if (g_vk.feature != nullptr && g_vk.release != nullptr)
+        g_vk.release(g_vk.feature);
+
+    g_vk.feature = nullptr;
+
+    for (auto& feature : g_vk.laterFeatures)
+    {
+        if (feature && g_vk.release)
+            g_vk.release(feature);
+        feature = nullptr;
+    }
+    g_vk.activePasses = 0;
+    if (g_vk.creationReady != VK_NULL_HANDLE)
+        vkDestroyEvent(g_vk.device, g_vk.creationReady, nullptr);
+    g_vk.creationReady = VK_NULL_HANDLE;
+    g_vk.creationPending = false;
+
+    DestroyImage(g_vk.output);
+    DestroyImage(g_vk.scratch);
+    DestroyImage(g_vk.proxy);
+    DestroyImage(g_vk.proxySmall);
+    DestroyImage(g_vk.outputNative);
+    DestroyImage(g_vk.keep);
+    DestroyImage(g_vk.preColor);
+    DestroyImage(g_vk.meter);
+    DestroyImage(g_vk.autoExposure);
+    DestroyImage(g_vk.autoExposureRaw);
+    DestroyImage(g_vk.lutScratch);
+    g_vk.lutScratchFailed = false;
+    g_vk.autoExposureAdapter.Invalidate();
+    DestroyMeterReadback();
+
+    g_vk.pass.reset();
+    g_vk.lutPass.reset(); // frees the 3D image, its staging buffer and the pass's own rings
+    g_vk.superUp.reset();
+    g_vk.superDown.reset();
+    g_vk.sgsr1UpAnswer.reset();
+    g_vk.nrScaler = Scaler::Count;
+    g_vk.width = 0; // the next frame rebuilds its surfaces and features
+    g_vk.height = 0;
+    g_vk.workWidth = 0;
+    g_vk.workHeight = 0;
+    g_vk.reset = true;
+}
+
 void ShutdownVk(bool deviceAlive)
 {
     if (!deviceAlive)
@@ -2520,48 +2617,7 @@ void ShutdownVk(bool deviceAlive)
     if (g_vk.device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(g_vk.device);
 
-    CalibrationVkShutdown(true);
-    DetailReuseVk::Release(true);
-    EdgeCompressionVk::Release(true);
-
-    if (g_vk.feature != nullptr && g_vk.release != nullptr)
-        g_vk.release(g_vk.feature);
-
-    g_vk.feature = nullptr;
-
-    for (auto& feature : g_vk.laterFeatures)
-    {
-        if (feature && g_vk.release)
-            g_vk.release(feature);
-        feature = nullptr;
-    }
-    g_vk.activePasses = 0;
-    if (g_vk.creationReady != VK_NULL_HANDLE)
-        vkDestroyEvent(g_vk.device, g_vk.creationReady, nullptr);
-    g_vk.creationReady = VK_NULL_HANDLE;
-    g_vk.creationPending = false;
-
-    DestroyImage(g_vk.output);
-    DestroyImage(g_vk.scratch);
-    DestroyImage(g_vk.proxy);
-    DestroyImage(g_vk.proxySmall);
-    DestroyImage(g_vk.outputNative);
-    DestroyImage(g_vk.keep);
-    DestroyImage(g_vk.preColor);
-    DestroyImage(g_vk.meter);
-    DestroyImage(g_vk.autoExposure);
-    DestroyImage(g_vk.autoExposureRaw);
-    DestroyImage(g_vk.lutScratch);
-    g_vk.lutScratchFailed = false;
-    g_vk.autoExposureAdapter.Invalidate();
-    DestroyMeterReadback();
-
-    g_vk.pass.reset();
-    g_vk.lutPass.reset(); // frees the 3D image, its staging buffer and the pass's own rings
-    g_vk.superUp.reset();
-    g_vk.superDown.reset();
-    g_vk.sgsr1UpAnswer.reset();
-    g_vk.nrScaler = Scaler::Count;
+    ReleaseNrObjects();
 
     if (g_vk.capabilityParams != nullptr)
     {

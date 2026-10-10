@@ -69,6 +69,13 @@ static bool HaveGameExposure()
 
 static void HelpMarker(const char* tip);
 
+// Retry after a failure, on whichever backend failed: Direct3D 12 at once, native Vulkan on its next frame.
+static void RetryNr()
+{
+    DlssNr::RetryAfterFailure();
+    DlssNr::RequestRetryVk();
+}
+
 // A stretch of the menu that shows status text which comes and goes, or re-wraps as it changes (a warning that appears, a
 // line that only shows while something is happening). Without a slot everything below it moves when that happens, and a click
 // aimed at a button lands on the next control. The slot takes `lines` lines of height whatever is in it: text drawn between
@@ -762,7 +769,7 @@ static void ApplyResolutionTier(Config* config, int& pendingScale, const Resolut
 {
     // Same rule as the "NR Pass at:" combo: leaving Finished Picture clears a session failure.
     if (config->DlssNrFinishedPicture.value_or_default())
-        DlssNr::RetryAfterFailure();
+        RetryNr();
     config->DlssNrFinishedPicture = false;
     config->DlssNrRunBeforeSr = beforeSuperResolution;
     config->DlssNrDeferredDlss = false;
@@ -1018,7 +1025,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
             }
 
             if (change.retryAfterFailure)
-                DlssNr::RetryAfterFailure();
+                RetryNr();
 
             if (change.finishedPicture.has_value())
             {
@@ -1198,10 +1205,10 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "Off for this session: %s.", reason);
             ImGui::SameLine();
 
-            if (nativeVk)
-                ImGui::TextUnformatted("Restart the game to retry native Vulkan NR.");
+            if (nativeVk && !DlssNr::RetryableVk())
+                ImGui::TextUnformatted("A retry cannot fix this; restart the game.");
             else if (ImGui::SmallButton("Retry"))
-                DlssNr::RetryAfterFailure();
+                RetryNr();
         }
         else if (feature && feature->Api() == API::DX11 && !feature->IsWithDx12())
         {
@@ -2477,7 +2484,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         if (placement == 0)
         {
             if (finishedPicture)
-                DlssNr::RetryAfterFailure();
+                RetryNr();
             finishedPicture = false;
             beforeSr = false;
             config->DlssNrFinishedPicture = false;
@@ -2486,7 +2493,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         else if (placement == 1)
         {
             if (finishedPicture)
-                DlssNr::RetryAfterFailure();
+                RetryNr();
             finishedPicture = false;
             beforeSr = true;
             config->DlssNrFinishedPicture = false;
@@ -2495,7 +2502,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         else
         {
             if (!finishedPicture)
-                DlssNr::RetryAfterFailure();
+                RetryNr();
             finishedPicture = true;
             config->DlssNrFinishedPicture = true;
         }
@@ -3094,7 +3101,12 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     {
         unsigned int modelWidth = 0;
         unsigned int modelHeight = 0;
-        DlssNr::CurrentModelSize(modelWidth, modelHeight);
+
+        // Native Vulkan keeps its own; the network pools 2x2 in the same model on both.
+        if (nr.vulkan)
+            DlssNr::CurrentModelSizeVk(modelWidth, modelHeight);
+        else
+            DlssNr::CurrentModelSize(modelWidth, modelHeight);
 
         if (modelWidth != 0 && modelHeight != 0)
             ImGui::TextDisabled("Model input %ux%u; its main network runs at %ux%u.", modelWidth, modelHeight,

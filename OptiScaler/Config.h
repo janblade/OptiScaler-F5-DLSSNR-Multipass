@@ -611,6 +611,14 @@ class Config
     // asks for that itself. Can cost a little depth compression on some GPUs. Off: Vulkan depth reads as not readable,
     // and Optical F5Low runs on motion only. Startup only (images are made once). See resource_tracking/GenericDepth_Vk.h.
     CustomOptional<bool> DlssNrNativeDepthVkCopyUsage { true };
+    // NativeDxvkVulkan: experimental. A D3D11 game running on dxvk (doitsujin/dxvk: its D3D11 calls become Vulkan ones)
+    // normally gets Optical F5Low's D3D11 driver (native/NativeDriverDx11.h), the same shared-texture bridge to a private
+    // D3D12 device a real D3D11 game gets. On: that D3D11 driver stands aside, and the Vulkan driver (native/NativeDriverVk.h,
+    // resource_tracking/GenericDepth_Vk.h -- the same code a native Vulkan game uses) reads dxvk's own Vulkan calls instead,
+    // and frame generation (FGInput=Upscaler) goes through the Vulkan present bridge (native/VkPresentBridge.h) on dxvk's
+    // Vulkan swapchain, its D3D12 swapchain from Windows' own DXGI, instead of the D3D11 bridge, which cannot work on dxvk
+    // (dxvk's shared handles do not open on a native D3D12 device). Off by default. See misc/IdentifyGpu.h (usesDxvk).
+    CustomOptional<bool> DlssNrNativeDxvkVulkan { false };
     // NativeDepthWarmupFrames: presented frames to watch before the finder trusts that the game makes no upscaler call of its
     // own (it stands down for good the moment one is seen). NativeDepthOverlay: debug; copies the picked depth buffer at its
     // busiest clear and shows it in the DLSS-NR menu (D3D12 only; no preview round-trip exists for D3D11 yet). That copy is

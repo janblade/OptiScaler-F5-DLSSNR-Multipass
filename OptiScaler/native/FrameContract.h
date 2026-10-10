@@ -24,6 +24,16 @@ enum class Api
     Vulkan
 };
 
+// The frame number native input hands to NR (DlssNr::ApplyNativeInput's epoch): the present count of the API the picture
+// came from, `dxgiPresents` (State::frameCount) or `vulkanPresents` (State::vulkanPresentCount). Neither a sum nor the
+// larger of the two moves by exactly 1 per frame: a dxvk game ticks both, on different threads, and a native Vulkan game
+// bridged to frame generation ticks the DXGI one for every generated frame. Detail reuse reads any other step as a
+// skipped frame, and a count that stops moving keeps a new NR model on "Preparing".
+inline uint64_t PresentEpoch(Api api, uint64_t dxgiPresents, uint64_t vulkanPresents)
+{
+    return api == Api::Vulkan ? vulkanPresents : dxgiPresents;
+}
+
 // What the picture's values mean. The producer supports Srgb (SDR) and ScRgb (linear, 1.0 = 80 nits) today; Pq (HDR10) is
 // reported, not processed.
 enum class ColorSpace

@@ -22,11 +22,13 @@
 #include <magic_enum.hpp>
 #endif
 #include <misc/IdentifyGpu.h>
+#include <native/VkPresentBridge.h>
 
 static bool ShouldCreateDx11wDx12Swapchain()
 {
     return State::Instance().activeFgInput == FGInput::Upscaler && State::Instance().activeFgOutput != FGOutput::NoFG &&
-           State::Instance().activeFgInput != FGInput::NvngxFG;
+           State::Instance().activeFgInput != FGInput::NvngxFG &&
+           !VkPresentBridge::DxvkThroughVulkan();
 }
 
 static bool PrepareDx12InteropDesc(DXGI_SWAP_CHAIN_DESC& desc)
@@ -370,7 +372,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
         if (result == S_OK)
         {
             State::Instance().currentSwapchainDesc = localDesc;
-            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+            if (!(VkPresentBridge::DxvkThroughVulkan() && VkPresentBridge::IsUp()))
+                State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
 
             // Check for SL proxy
             IDXGISwapChain* realSC = nullptr;
@@ -769,7 +772,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
 
         if (result == S_OK)
         {
-            State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
+            if (!(VkPresentBridge::DxvkThroughVulkan() && VkPresentBridge::IsUp()))
+                State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
 
             // check for SL proxy
             IDXGISwapChain1* realSC = nullptr;

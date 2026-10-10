@@ -530,6 +530,12 @@
     <ClInclude Include="native\PresentStageTiming.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\VkDeviceRules.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\VkOutputFailureRule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\VkPresentCopyRule.h">
       <Filter>Header Files</Filter>
     </ClInclude>

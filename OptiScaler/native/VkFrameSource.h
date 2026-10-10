@@ -83,12 +83,20 @@ class VkFrameSource : public IFrameSource
     ID3D12Device* Device() const override { return _device12; }
     ID3D12CommandQueue* Queue() const override { return _queue12; }
     const std::string& Error() const { return _error; }
+    // Why the present's device was not taken on (a second Vulkan device, or one without the interop functions); empty
+    // while the device in use is the one Optical F5Low runs on. For the menu.
+    const std::string& Refusal() const { return _refusal; }
 
     // Everything made on `device` goes (the game is destroying it).
     void OnDeviceDestroyed(VkDevice device);
 
     // From the hooks. A device's queues by family, as created.
-    static void NoteDevice(VkDevice device, const VkDeviceCreateInfo& info);
+    static void NoteDevice(VkPhysicalDevice physical, VkDevice device, const VkDeviceCreateInfo& info);
+    // The device a queue belongs to and the physical device it was made on, as seen at vkCreateDevice. False for a queue
+    // that was not seen (the caller keeps what it had).
+    static bool DeviceOfQueue(VkQueue queue, VkDevice* device, VkPhysicalDevice* physical);
+    // The physical device a Vulkan device was made on; null when it was not seen.
+    static VkPhysicalDevice PhysicalDeviceOf(VkDevice device);
     // The usage a swapchain is made with: TRANSFER_SRC and TRANSFER_DST added when the surface allows them and NR is on.
     static VkImageUsageFlags SwapchainUsage(VkPhysicalDevice physical, const VkSwapchainCreateInfoKHR& info);
     // A swapchain was made: its images, format and colour space. The one it replaces is forgotten.
@@ -169,6 +177,8 @@ class VkFrameSource : public IFrameSource
     uint64_t _depthSlotValue[kRing] = {};
     uint64_t _frame = 0;
     std::string _error;
+    std::string _refusal;
+    VkDevice _refusedDevice = VK_NULL_HANDLE; // logged once
 };
 
 } // namespace native

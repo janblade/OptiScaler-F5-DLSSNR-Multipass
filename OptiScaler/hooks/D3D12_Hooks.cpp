@@ -10,6 +10,8 @@
 #include <resource_tracking/ResTrack_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
 #include <native/NativeLowLatency.h>
+#include <native/VkDeviceRules.h>
+#include <native/VkPresentBridge.h>
 
 #include <proxies/D3D12_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
@@ -1526,12 +1528,20 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
     if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE && !nonPrimaryGpu)
     {
         LOG_DEBUG("Device captured: {0:X}", (size_t) *ppDevice);
-        State::Instance().currentD3D12Device = (ID3D12Device*) *ppDevice;
+        auto* const createdDevice = (ID3D12Device*) *ppDevice;
+
+        // The Vulkan bridge's D3D12 swapchain runs on its own device, which is what State holds while it is up. A device
+        // the game makes after that (a Vulkan or dxvk game probing feature levels) is not the one the D3D12 side works on.
+        if (native::AdoptNewD3D12Device(VkPresentBridge::OutputActive()))
+            State::Instance().currentD3D12Device = createdDevice;
+        else
+            LOG_INFO("D3D12 device {:X} made while the Vulkan bridge is up: the bridge's device stays the current one",
+                     (size_t) createdDevice);
 
         if (desc.VendorId == VendorId::Intel && Config::Instance()->UESpoofIntelAtomics64.value_or_default())
         {
-            IGDExtProxy::EnableAtomicSupport(State::Instance().currentD3D12Device);
-            _intelD3D12Device = State::Instance().currentD3D12Device;
+            IGDExtProxy::EnableAtomicSupport(createdDevice);
+            _intelD3D12Device = createdDevice;
             _intelD3D12DeviceRefTarget = _intelD3D12Device->AddRef();
 
             if (o_D3D12DeviceRelease == nullptr)
@@ -1561,7 +1571,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
             lastDevice = *ppDevice;
         }
 
-        HookToDevice(State::Instance().currentD3D12Device);
+        HookToDevice(createdDevice);
         _d3d12Captured = true;
 
         State::Instance().d3d12Devices.push_back((ID3D12Device*) *ppDevice);
@@ -1573,7 +1583,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
         if (infoQueue1 != nullptr)
             infoQueue1->Release();
 
-        if (State::Instance().currentD3D12Device->QueryInterface(IID_PPV_ARGS(&infoQueue)) == S_OK)
+        if (createdDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)) == S_OK)
         {
             LOG_DEBUG("infoQueue accuired");
 
@@ -1676,12 +1686,20 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
     if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE)
     {
         LOG_DEBUG("Device captured: {0:X}", (size_t) *ppDevice);
-        State::Instance().currentD3D12Device = (ID3D12Device*) *ppDevice;
+        auto* const createdDevice = (ID3D12Device*) *ppDevice;
+
+        // The Vulkan bridge's D3D12 swapchain runs on its own device, which is what State holds while it is up. A device
+        // the game makes after that (a Vulkan or dxvk game probing feature levels) is not the one the D3D12 side works on.
+        if (native::AdoptNewD3D12Device(VkPresentBridge::OutputActive()))
+            State::Instance().currentD3D12Device = createdDevice;
+        else
+            LOG_INFO("D3D12 device {:X} made while the Vulkan bridge is up: the bridge's device stays the current one",
+                     (size_t) createdDevice);
 
         if (desc.VendorId == VendorId::Intel && Config::Instance()->UESpoofIntelAtomics64.value_or_default())
         {
-            IGDExtProxy::EnableAtomicSupport(State::Instance().currentD3D12Device);
-            _intelD3D12Device = State::Instance().currentD3D12Device;
+            IGDExtProxy::EnableAtomicSupport(createdDevice);
+            _intelD3D12Device = createdDevice;
             _intelD3D12DeviceRefTarget = _intelD3D12Device->AddRef();
 
             if (o_D3D12DeviceRelease == nullptr)
@@ -1690,7 +1708,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
                 o_D3D12DeviceRelease(_intelD3D12Device);
         }
 
-        HookToDevice(State::Instance().currentD3D12Device);
+        HookToDevice(createdDevice);
         _d3d12Captured = true;
 
         State::Instance().d3d12Devices.push_back((ID3D12Device*) *ppDevice);
@@ -1702,7 +1720,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
         if (infoQueue1 != nullptr)
             infoQueue1->Release();
 
-        if (State::Instance().currentD3D12Device->QueryInterface(IID_PPV_ARGS(&infoQueue)) == S_OK)
+        if (createdDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)) == S_OK)
         {
             LOG_DEBUG("infoQueue accuired");
 

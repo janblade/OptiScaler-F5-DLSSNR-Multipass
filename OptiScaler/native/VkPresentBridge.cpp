@@ -2,6 +2,8 @@
 
 #include "VkPresentBridge.h"
 #include "VkPresentBridgeCore.h"
+#include "VkDeviceRules.h"
+#include "VkOutputFailureRule.h"
 #include "VkPresentCopyRule.h"
 
 #include <native/NativeDriverVk.h>
@@ -141,9 +143,23 @@ bool ModeOn()
 // The game was told once to make a new swapchain for the bridge since the mode was last switched on.
 bool g_newSwapchainAsked = false;
 
+// The D3D12 swapchain was given up because its present kept failing (GiveUpOutput): no new bridge for the rest of the
+// session, and the game is told its hidden swapchain is out of date a few times so it makes one on its own window.
+bool g_outputGivenUp = false;
+std::string g_giveUpReason;
+int g_giveUpAsks = 0;
+constexpr int kGiveUpAsksMax = 60;
+
+// Only the present thread (PresentOutput) uses it
+native::VkOutputFailureRule g_outputRule;
+
 bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
 {
     if (!FrameGenerationChosen())
+        return false;
+
+    // Said when it was given up
+    if (g_outputGivenUp)
         return false;
 
     if (!ModeOn())
@@ -375,6 +391,7 @@ bool CreateBridge(Bridge& bridge, const VkSwapchainCreateInfoKHR& in, std::strin
             FGHooks::SetDx12InteropPresentSC(out.Get(), self->window);
 
         self->outputUp = true;
+        g_outputRule = native::VkOutputFailureRule {};
         ++g_outputsActive;
         LOG_INFO("Vulkan bridge: D3D12 swapchain {:X} on window {:X} ({}x{}, format {}, {} buffers, {})",
                  (size_t) out.Get(), (size_t) self->window, desc.BufferDesc.Width, desc.BufferDesc.Height,
@@ -596,6 +613,17 @@ void OnDeviceDestroying(VkDevice device)
 {
     std::lock_guard lock(g_mutex);
 
+    // Only the bridge's own device (or a bridge already let go of, still waiting for its hidden swapchains) is of
+    // concern. A game that makes more Vulkan devices after its swapchain (a probe per feature level, as dxvk does) and
+    // destroys them again must leave the bridge, frame generation and the shared D3D12 device alone.
+    std::vector<VkDevice> retiredDevices;
+
+    for (const auto& retired : g_retired)
+        retiredDevices.push_back(retired->device);
+
+    if (!native::BridgeConcernedBy(device, g_bridge != nullptr ? g_bridge->device : VkDevice {}, retiredDevices))
+        return;
+
     if (g_bridge != nullptr && g_bridge->device == device)
     {
         g_bridge->core.ReleaseOutput();
@@ -693,9 +721,40 @@ bool CopyToOutput(ID3D12Resource* picture, ID3D12Fence* fence, uint64_t copied, 
     return true;
 }
 
+namespace
+{
+
+// The D3D12 swapchain's present keeps failing: the bridge is turned off instead of presenting into it for ever. The game's
+// swapchain sits on a hidden window, so it cannot simply go on presenting; what can be done safely is to let go of the D3D12
+// swapchain (the real window is free again, the same way a switched-off mode ends the bridge), refuse a new bridge, and tell
+// the game its swapchain is out of date (WantsNewSwapchain) so it makes the next one on its own window and presents there.
+// Until it does, the window keeps the last picture, but the game is no longer held up on a present that cannot work.
+void GiveUpOutput(const std::string& reason)
+{
+    // Frame generation is out of the way before the bridge's own mutex is taken (ResizeHold)
+    const auto hold = BeginResize();
+    std::lock_guard lock(g_mutex);
+
+    if (g_bridge == nullptr || !g_bridge->outputUp)
+        return;
+
+    g_outputGivenUp = true;
+    g_giveUpReason = reason;
+    g_giveUpAsks = 0;
+    LOG_ERROR("Vulkan bridge: {}. The D3D12 swapchain is given up; the game is told to make a new swapchain on its own "
+              "window, and frame generation stays off until the game is restarted",
+              reason);
+
+    Retire(g_bridge);
+    NativeMotionVk::ReleaseBridgeDevice();
+}
+
+} // namespace
+
 void PresentOutput()
 {
     ComPtr<IDXGISwapChain4> output;
+    ID3D12Device* device12 = nullptr;
     ID3D12CommandQueue* queue12 = nullptr;
     ID3D12Fence* copyFence = nullptr;
     uint64_t copyValue = 0;
@@ -718,6 +777,7 @@ void PresentOutput()
             return;
 
         output = g_bridge->core.Output();
+        device12 = g_bridge->device12;
         queue12 = g_bridge->queue12;
         copyFence = g_bridge->core.CopyFence();
         copyValue = g_bridge->copied ? g_bridge->core.LastCopyValue() : 0;
@@ -767,8 +827,10 @@ void PresentOutput()
         MenuOverlayDx::Present(output.Get(), sync, flags, nullptr, queue12, window, false);
 
     const HRESULT hr = output->Present(sync, flags);
+    const bool presentFailed = FAILED(hr) && hr != DXGI_ERROR_WAS_STILL_DRAWING;
+    const bool deviceGone = presentFailed && device12 != nullptr && FAILED(device12->GetDeviceRemovedReason());
 
-    if (FAILED(hr) && hr != DXGI_ERROR_WAS_STILL_DRAWING)
+    if (presentFailed)
     {
         static int logged = 0;
 
@@ -787,6 +849,13 @@ void PresentOutput()
             }
         }
     }
+
+    if (g_outputRule.OnPresent(presentFailed, deviceGone))
+    {
+        GiveUpOutput(deviceGone ? std::format("the D3D12 device was removed (Present returned 0x{:X})", (unsigned) hr)
+                                : std::format("the D3D12 swapchain's Present keeps failing (0x{:X}, {} times in a row)",
+                                              (unsigned) hr, g_outputRule.Failures()));
+    }
 }
 
 bool OutputActiveOn(ID3D12Device* device)
@@ -802,9 +871,20 @@ void FrameGenerationInputsQueued(ID3D12Fence* fence, uint64_t value)
     g_feedValue = fence != nullptr ? value : 0;
 }
 
+std::string FailureReason()
+{
+    std::lock_guard lock(g_mutex);
+    return g_outputGivenUp ? g_giveUpReason : std::string {};
+}
+
 bool WantsNewSwapchain(VkSwapchainKHR swapchain)
 {
     std::lock_guard lock(g_mutex);
+
+    // The bridge was given up (GiveUpOutput): the game's swapchain is still on the hidden window, and it is told until it
+    // makes one on its own (a game that never does is left alone after a while)
+    if (g_outputGivenUp)
+        return IsBridgedSwapchain(swapchain) && ++g_giveUpAsks <= kGiveUpAsksMax;
 
     if (!FrameGenerationChosen() || !ModeOn())
     {

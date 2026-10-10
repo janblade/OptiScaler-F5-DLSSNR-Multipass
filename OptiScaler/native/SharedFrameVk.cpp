@@ -18,7 +18,9 @@ bool VkInterop::Load(VkPhysicalDevice physicalDevice, VkDevice vkDevice, std::st
 
     if (getMemoryWin32HandleProperties == nullptr || importSemaphoreWin32Handle == nullptr)
     {
-        error = "the Vulkan device was made without VK_KHR_external_memory_win32 and VK_KHR_external_semaphore_win32";
+        // Also what a device that is already destroyed answers: the message names both
+        error = "the Vulkan device has no VK_KHR_external_memory_win32 / VK_KHR_external_semaphore_win32 functions (it "
+                "was made without the extensions, or it is gone)";
         device = VK_NULL_HANDLE;
         return false;
     }

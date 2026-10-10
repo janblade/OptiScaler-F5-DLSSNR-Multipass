@@ -27,6 +27,7 @@
 #include <imgui/imgui.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <shaders/dlssnr/DlssNr_GameScale.h>
+#include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
@@ -1305,6 +1306,119 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
     }
 }
 
+// Compress screen edges (shaders/dlssnr/DlssNr_Spatial.h): what the backend that is running last published, and the
+// words for it. The runtime only publishes a status code; every word is here. Grey is "not running / not available",
+// green is "on", amber is "not applied" or "turned itself off" -- never red, because NR itself is still running.
+static DlssNr::Spatial::Published EdgeCompressionNow(const NrCommon& nr)
+{
+    return nr.vulkan ? DlssNr::EdgeCompressionStatusVk() : DlssNr::EdgeCompressionStatus();
+}
+
+// The model resolution NR applies, as a fraction: what the layout was built for when a frame has run (Auto included),
+// else the slider.
+static float EdgeCompressionScale(const Config* config, const NrCommon& nr)
+{
+    const auto published = EdgeCompressionNow(nr);
+
+    if (published.nativeW != 0 && std::isfinite(published.scale) && published.scale > 0.0f)
+        return published.scale;
+
+    return config->DlssNrWorkingScale.value_or_default();
+}
+
+struct EdgeCompressionLine
+{
+    enum class Tone { Grey, Green, Amber } tone = Tone::Grey;
+    std::string text;
+};
+
+static EdgeCompressionLine EdgeCompressionText(const Config* config, const NrCommon& nr)
+{
+    using DlssNr::Spatial::Status;
+    EdgeCompressionLine line;
+
+    if (!nr.enabled)
+    {
+        line.text = "NR is off.";
+        return line;
+    }
+
+    const auto published = EdgeCompressionNow(nr);
+    char buffer[256];
+
+    switch (published.status)
+    {
+    case Status::Off:
+        line.text = "Waiting for NR to run a frame.";
+        break;
+    case Status::Proxy:
+        line.text = "Not available with the driver-proxy backend.";
+        break;
+    case Status::Active:
+    {
+        const double share = 100.0 * published.modelW * published.modelH /
+                             std::max(1.0, (double) published.ordinaryW * (double) published.ordinaryH);
+        std::snprintf(buffer, sizeof(buffer), "NR works on %ux%u instead of %ux%u (%.0f%% of the pixels).",
+                      published.modelW, published.modelH, published.ordinaryW, published.ordinaryH, share);
+        line.tone = EdgeCompressionLine::Tone::Green;
+        line.text = buffer;
+        break;
+    }
+    case Status::BadSettings:
+        line.tone = EdgeCompressionLine::Tone::Amber;
+        line.text = "Not applied: a layout value is out of range. Pick a layout, or press Reset on the advanced values.";
+        break;
+    case Status::TooSmall:
+        line.tone = EdgeCompressionLine::Tone::Amber;
+        line.text = "Not applied: NR would work on under a quarter of the picture. Raise Model resolution or the NR "
+                    "picture size.";
+        break;
+    case Status::NothingToCompress:
+        line.tone = EdgeCompressionLine::Tone::Amber;
+        line.text = "Not applied: the NR picture is the whole frame in both directions, so there is nothing to compress.";
+        break;
+    case Status::ThinEdge:
+        line.tone = EdgeCompressionLine::Tone::Amber;
+        line.text = "Not applied: the edges would be left with less than a pixel. Make the sharp middle smaller or the "
+                    "NR picture larger.";
+        break;
+    case Status::TurnedOffResources:
+        line.tone = EdgeCompressionLine::Tone::Amber;
+        line.text = "Turned itself off: its shader or textures could not be created. NR carries on without it.";
+        break;
+    case Status::TurnedOffDispatch:
+        line.tone = EdgeCompressionLine::Tone::Amber;
+        line.text = "Turned itself off: one of its steps failed on this GPU. NR carries on without it; changing the "
+                    "layout tries again.";
+        break;
+    case Status::TurnedOffModel:
+        line.tone = EdgeCompressionLine::Tone::Amber;
+        line.text = "Turned itself off: NR would not take the packed picture. NR carries on without it; changing the "
+                    "layout tries again.";
+        break;
+    }
+
+    // Asked for and nothing published yet is "waiting"; anything published while it is off in the settings is stale.
+    if (!config->DlssNrSpatialCompression.value_or_default())
+    {
+        line.tone = EdgeCompressionLine::Tone::Grey;
+        line.text = "Off.";
+    }
+
+    return line;
+}
+
+static void EdgeCompressionDrawText(const EdgeCompressionLine& line)
+{
+    using Tone = EdgeCompressionLine::Tone;
+    const ImVec4 colour = line.tone == Tone::Green   ? ImVec4(0.45f, 0.85f, 0.45f, 1.0f)
+                          : line.tone == Tone::Amber ? ImVec4(1.0f, 0.85f, 0.3f, 1.0f)
+                                                     : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+    ImGui::PushStyleColor(ImGuiCol_Text, colour);
+    ImGui::TextWrapped("%s", line.text.c_str());
+    ImGui::PopStyleColor();
+}
+
 // The "Reuse detail between frames" checkbox and its help, on the NR Options page; the Optical F5Low page shows its
 // state and links here. Returns whether it is on.
 static bool RenderDetailReuseToggle(Config* config)
@@ -1447,6 +1561,19 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
                "where the last frame cannot be trusted.\nTurned on and tuned on the NR Options page.");
     if (ImGui::SmallButton("Set in NR Options##f5lowdetailreuse"))
         MenuPages::RequestPage(MenuPages::Page::NrOptions);
+
+    // Compress screen edges is another way to lighten NR; it works on the finished picture too. Only its state here.
+    {
+        const bool compress = config->DlssNrSpatialCompression.value_or_default();
+        const EdgeCompressionLine line = EdgeCompressionText(config, nr);
+        const std::string text = std::string("Compress screen edges: ") + (compress ? line.text : std::string("Off"));
+        EdgeCompressionDrawText({ compress ? line.tone : EdgeCompressionLine::Tone::Grey, text });
+        HelpMarker("NR works on a smaller picture: the middle of the screen stays sharp and the edges are squeezed, "
+                   "then the result is stretched back. It costs a little softness at the edges and saves GPU time.\n"
+                   "Turned on and tuned on the NR Input page.");
+        if (ImGui::SmallButton("Set in NR Input##f5lowcompress"))
+            MenuPages::RequestPage(MenuPages::Page::NrInput);
+    }
 
     // The page is Optical F5Low's own, so every control shows and the section starts open.
     if (ImGui::TreeNodeEx("Advanced##nativeinputadvanced", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2696,6 +2823,207 @@ static void RenderLutSection(Config* config)
     }
 }
 
+// Compress screen edges, in the NR Input "Size" group after the Downscaler. The checkbox, the layout, what is happening,
+// the on-screen layout, and the advanced values. The runtime rebuilds on any change (a layout change resets NR's
+// history once); every edit goes through Spatial::Constrain, the same limits the runtime checks against.
+static void StoreSpatialSettings(Config* config, const DlssNr::Spatial::Settings& s)
+{
+    config->DlssNrSpatialCenterX = s.centerX;
+    config->DlssNrSpatialCenterY = s.centerY;
+    config->DlssNrSpatialWorkX = s.workX;
+    config->DlssNrSpatialWorkY = s.workY;
+    config->DlssNrSpatialOffsetX = s.offsetX;
+    config->DlssNrSpatialOffsetY = s.offsetY;
+    config->DlssNrSpatialShiftX = s.shiftX;
+    config->DlssNrSpatialShiftY = s.shiftY;
+}
+
+// Draws exactly the boxes the runtime published, as fractions of the frame: cyan for the sharp middle, orange for the
+// part of the frame NR works on. Behind the menu, never in what the model is shown. Not saved; only while the menu is
+// open (this runs from the menu).
+static void DrawEdgeCompressionBoxes(const DlssNr::Spatial::Published& published, float menuResScale)
+{
+    const ImVec2 size = ImGui::GetIO().DisplaySize;
+    ImDrawList* list = ImGui::GetBackgroundDrawList();
+    const float thickness = std::max(1.0f, 2.0f * menuResScale);
+
+    const auto box = [&](const DlssNr::Spatial::Rect& r, ImU32 colour)
+    {
+        list->AddRect(ImVec2(r.left * size.x, r.top * size.y), ImVec2(r.right * size.x, r.bottom * size.y), colour, 0.0f,
+                      0, thickness);
+    };
+
+    box(published.work, IM_COL32(255, 150, 0, 230));
+    box(published.center, IM_COL32(0, 230, 255, 230));
+}
+
+static void RenderEdgeCompression(Config* config, float menuResScale, const NrCommon& nr)
+{
+    namespace Sp = DlssNr::Spatial;
+
+    bool on = config->DlssNrSpatialCompression.value_or_default();
+
+    if (ImGui::Checkbox("Compress screen edges (experimental)", &on))
+        config->DlssNrSpatialCompression = on;
+
+    HelpMarker("NR works on a smaller picture: the middle of the screen stays at full sharpness and the edges are "
+               "squeezed into the rest of the space, then NR's result is stretched back. The edges lose a little "
+               "sharpness and can shimmer a little in motion; the middle is untouched. NR costs less because it has fewer "
+               "pixels to work on.\nModel resolution still scales the whole picture first. Reuse detail between frames "
+               "does not run while this is on. Not used with the driver-proxy backend. Applies at once.");
+
+    if (!on)
+        return;
+
+    Sp::Settings settings = Sp::ReadSettings(*config);
+    const float scale = EdgeCompressionScale(config, nr);
+    const int matched = Sp::MatchedLayout(settings);
+
+    char preview[48];
+    if (matched >= 0)
+        std::snprintf(preview, sizeof(preview), "%s (%.0f / %.0f)", Sp::kNamedLayouts[matched].name,
+                      Sp::kNamedLayouts[matched].center, Sp::kNamedLayouts[matched].work);
+    else
+        std::snprintf(preview, sizeof(preview), "Custom");
+
+    if (ImGui::BeginCombo("Layout", preview))
+    {
+        for (int i = 0; i != 3; ++i)
+        {
+            char item[48];
+            std::snprintf(item, sizeof(item), "%s (%.0f / %.0f)", Sp::kNamedLayouts[i].name, Sp::kNamedLayouts[i].center,
+                          Sp::kNamedLayouts[i].work);
+
+            if (ImGui::Selectable(item, matched == i))
+            {
+                // Picking a layout is also the reset: it puts every advanced value back to that layout's own.
+                Sp::ApplyNamedLayout(settings, i);
+                Sp::Constrain(settings, scale);
+                StoreSpatialSettings(config, settings);
+            }
+        }
+
+        // What the advanced values add up to when they are none of the above; shown, not picked.
+        ImGui::BeginDisabled();
+        ImGui::Selectable("Custom", matched < 0);
+        ImGui::EndDisabled();
+        ImGui::EndCombo();
+    }
+
+    HelpMarker("How much of the picture stays sharp, and how much of it NR works on. The first number is the sharp "
+               "middle's share of the width and of the height, the second is the share NR works on; the rest is the "
+               "squeezed edge. At full Model resolution Light works on about 90% of the pixels, Balanced about 81% and "
+               "Strong about 64%. How much GPU time that saves has not been measured for every layout yet.\nPicking one "
+               "puts every advanced value back to that layout's own. Custom is what the advanced values below add up "
+               "to; it cannot be picked.");
+
+    // What is happening. A slot of two lines, so the controls below do not move when this changes length.
+    const float slot = StatusSlotBegin();
+    EdgeCompressionDrawText(EdgeCompressionText(config, nr));
+
+    if (config->DlssNrDetailReuse.value_or_default())
+        ImGui::TextDisabled("Reuse detail between frames does not run while this is on.");
+
+    StatusSlotEnd(slot, 2);
+
+    // The layout on screen: not saved, and only while the menu is open.
+    static bool showLayout = false;
+    ImGui::Checkbox("Show the layout on screen##edgecompression", &showLayout);
+    HelpMarker("Draws two outlines over the game while this menu is open: cyan around the sharp middle, orange around the "
+               "part of the picture NR works on. Outside the orange line the picture is not used by NR's model at all. "
+               "It is not saved and never appears in what NR is shown.");
+
+    if (showLayout)
+    {
+        const auto published = EdgeCompressionNow(nr);
+
+        if (published.status == Sp::Status::Active)
+            DrawEdgeCompressionBoxes(published, menuResScale);
+        else
+            ImGui::TextDisabled("Nothing to show: compression is not running.");
+    }
+
+    // The eight values behind the layout, each committed on release (a change rebuilds NR's model) with its own Reset.
+    if (ImGui::TreeNode("Advanced layout##edgecompression"))
+    {
+        const float minimumWork = Sp::MinimumWorkPercent(scale);
+        bool changed = false;
+
+        // Limits from the values as they stand; Constrain below keeps every pair consistent after an edit.
+        const auto xShift = Sp::WorkShiftLimits(settings, false);
+        const auto yShift = Sp::WorkShiftLimits(settings, true);
+        const float xOffset = Sp::MaxCenterOffset(settings.centerX);
+        const float yOffset = Sp::MaxCenterOffset(settings.centerY);
+        const auto range = [](float low, float high) { return std::pair<float, float> { low, std::max(low, high) }; };
+
+        {
+            const auto r = range(1.0f, settings.workX - 0.5f);
+            changed |= DeferredSlider("Sharp middle width", &config->DlssNrSpatialCenterX, r.first, r.second, 80.0f,
+                                      "%.1f%%");
+            HelpMarker("How wide the part of the picture is that stays at full sharpness, as a share of the frame. "
+                       "Wider keeps more of the picture sharp and saves less.");
+        }
+        {
+            const auto r = range(1.0f, settings.workY - 0.5f);
+            changed |= DeferredSlider("Sharp middle height", &config->DlssNrSpatialCenterY, r.first, r.second, 80.0f,
+                                      "%.1f%%");
+            HelpMarker("How tall the part of the picture is that stays at full sharpness, as a share of the frame.");
+        }
+        {
+            const auto r = range(std::max(minimumWork, settings.centerX + 0.5f), 100.0f);
+            changed |= DeferredSlider("NR picture width", &config->DlssNrSpatialWorkX, r.first, r.second, 90.0f,
+                                      "%.1f%%");
+            HelpMarker("How much of the width NR works on, as a share of the frame. Smaller saves more and squeezes the "
+                       "edges harder. The lowest value keeps the whole NR picture at a quarter of the frame or more, "
+                       "counting Model resolution.");
+        }
+        {
+            const auto r = range(std::max(minimumWork, settings.centerY + 0.5f), 100.0f);
+            changed |= DeferredSlider("NR picture height", &config->DlssNrSpatialWorkY, r.first, r.second, 90.0f,
+                                      "%.1f%%");
+            HelpMarker("How much of the height NR works on, as a share of the frame.");
+        }
+        {
+            const auto r = range(-xOffset, xOffset);
+            changed |= DeferredSlider("Move the middle left/right", &config->DlssNrSpatialOffsetX, r.first, r.second,
+                                      0.0f, "%+.1f%%");
+            HelpMarker("Moves the sharp middle sideways, as a share of the frame. Negative is left, positive is right. "
+                       "Useful when the part of the picture you look at is not in the centre.");
+        }
+        {
+            const auto r = range(-yOffset, yOffset);
+            changed |= DeferredSlider("Move the middle up/down", &config->DlssNrSpatialOffsetY, r.first, r.second, 0.0f,
+                                      "%+.1f%%");
+            HelpMarker("Moves the sharp middle up or down, as a share of the frame. Negative is up, positive is down.");
+        }
+        {
+            const auto r = range(xShift.first, xShift.second);
+            changed |= DeferredSlider("Edge pixels left/right", &config->DlssNrSpatialShiftX, r.first, r.second, 0.0f,
+                                      "%+.1f%%");
+            HelpMarker("Gives one side edge more of NR's pixels and the other fewer; the total stays the same. "
+                       "Positive gives the right edge more and the left edge fewer, negative the other way round. The "
+                       "ends of the range leave one edge with almost nothing and compression then turns off, and says "
+                       "so above.");
+        }
+        {
+            const auto r = range(yShift.first, yShift.second);
+            changed |= DeferredSlider("Edge pixels top/bottom", &config->DlssNrSpatialShiftY, r.first, r.second, 0.0f,
+                                      "%+.1f%%");
+            HelpMarker("The same for the top and bottom edges. Positive gives the bottom edge more of NR's pixels and "
+                       "the top edge fewer, negative the other way round.");
+        }
+
+        if (changed)
+        {
+            Sp::Settings edited = Sp::ReadSettings(*config);
+            Sp::Constrain(edited, scale);
+            StoreSpatialSettings(config, edited);
+        }
+
+        ImGui::TreePop();
+    }
+}
+
 // NR Input.
 static void RenderInputPage(Config* config, float menuResScale, const NrCommon& nr)
 {
@@ -2751,6 +3079,14 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     {
         config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
         pendingScale = -1;
+
+        // Compress screen edges keeps the NR picture at a quarter of the frame or more, counting this scale.
+        if (config->DlssNrSpatialCompression.value_or_default())
+        {
+            auto edited = DlssNr::Spatial::ReadSettings(*config);
+            DlssNr::Spatial::Constrain(edited, config->DlssNrWorkingScale.value_or_default());
+            StoreSpatialSettings(config, edited);
+        }
     }
 
     HelpMarker("NR resolution relative to the image it processes. 50% halves width and height; 100% uses the full size.\nLower values reduce cost and fine detail. Above 100% increases cost. Game output resolution is unchanged.\nThe model averages its input 2x2 before its main network runs, so that network always works at half of this size: cost follows the halved size, and so does the finest detail it can add.");
@@ -2789,6 +3125,8 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
         HelpMarker("Filter used to reduce NR output when Model resolution exceeds 100%.\nSharper filters may introduce ringing around edges.");
     }
+
+    RenderEdgeCompression(config, menuResScale, nr);
 
     RenderLutSection(config);
 

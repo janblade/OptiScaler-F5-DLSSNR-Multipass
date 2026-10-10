@@ -4812,8 +4812,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
             if (g_nr.superDown == nullptr)
                 g_nr.superDown = new OS_Dx12("DLSS-NR supersample down", device, false, nrScaler);
+            // The proxy's filter has to be the answer's. Compression off and on again around a change of the NR
+            // downscaler would otherwise leave this one on the old filter (superDown is rebuilt by the other path).
+            if (EdgeCompression::proxyDown != nullptr && EdgeCompression::proxyDownScaler != nrScaler)
+                EdgeCompression::ReleaseDown();
             if (EdgeCompression::proxyDown == nullptr)
-                EdgeCompression::proxyDown = new OS_Dx12("DLSS-NR compress screen edges proxy down", device, false, nrScaler);
+            {
+                EdgeCompression::proxyDown =
+                    new OS_Dx12("DLSS-NR compress screen edges proxy down", device, false, nrScaler);
+                EdgeCompression::proxyDownScaler = nrScaler;
+            }
 
             pairDownOk = g_nr.superDown != nullptr && EdgeCompression::proxyDown != nullptr &&
                          EdgeCompression::proxyDown->Dispatch(cmdList, ordinaryProxy, EdgeCompression::proxyNative) &&

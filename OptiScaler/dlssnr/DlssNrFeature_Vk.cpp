@@ -2380,14 +2380,26 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             g_vk.superUp.reset();
             g_vk.superDown.reset();
             EdgeCompressionVk::proxyDown.reset();
+            EdgeCompressionVk::proxyDownScaler = Scaler::Count;
             g_vk.nrScaler = wantScaler;
         }
         if (!g_vk.superDown)
             g_vk.superDown = std::make_unique<OS_Vk>("DLSS-NR VK supersample down", device, physicalDevice, false,
                                                      wantScaler);
+        // The proxy's filter has to be the answer's: compression off and on again around a change of the NR downscaler
+        // would otherwise leave it on the old one (superDown is rebuilt by the other path). Drained first, as above.
+        if (EdgeCompressionVk::proxyDown && EdgeCompressionVk::proxyDownScaler != wantScaler)
+        {
+            if (g_vk.device != VK_NULL_HANDLE)
+                vkDeviceWaitIdle(g_vk.device);
+            EdgeCompressionVk::proxyDown.reset();
+        }
         if (!EdgeCompressionVk::proxyDown)
+        {
             EdgeCompressionVk::proxyDown = std::make_unique<OS_Vk>("DLSS-NR VK compress screen edges proxy down", device,
                                                                    physicalDevice, false, wantScaler);
+            EdgeCompressionVk::proxyDownScaler = wantScaler;
+        }
 
         if (g_vk.superDown && g_vk.superDown->IsInit() && EdgeCompressionVk::proxyDown &&
             EdgeCompressionVk::proxyDown->IsInit() && EdgeCompressionVk::proxyNative.Valid() &&

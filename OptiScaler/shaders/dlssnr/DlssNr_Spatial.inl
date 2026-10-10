@@ -36,6 +36,7 @@ ID3D12Resource* answer = nullptr; // the model's answer, unpacked the same way
 ID3D12Resource* proxyNative = nullptr;  // supersampling only: both averaged down to native
 ID3D12Resource* answerNative = nullptr;
 OS_Dx12* proxyDown = nullptr; // the down-leg for the proxy; the answer goes through g_nr.superDown, the same filter
+Scaler proxyDownScaler = Scaler::Count; // the filter proxyDown was built with: it must be the answer's, or halos
 unsigned int madeFor[6] = {}; // packed w/h, ordinary w/h, native w/h the textures above were made for
 bool madeSuper = false;
 
@@ -62,6 +63,7 @@ void ReleaseDown()
 {
     delete proxyDown;
     proxyDown = nullptr;
+    proxyDownScaler = Scaler::Count;
 }
 
 // What makes last frame's packed picture a different one besides the layout: the formats and sizes that are packed.

@@ -35,6 +35,7 @@ OwnedImage proxy;  // the packed model input unpacked to the ordinary grid, RGBA
 OwnedImage answer; // the model's answer unpacked the same way
 OwnedImage proxyNative;  // supersampling only: both averaged down to native
 OwnedImage answerNative;
+Scaler proxyDownScaler = Scaler::Count; // the filter proxyDown was built with: it must be the answer's, or halos
 std::unique_ptr<OS_Vk> proxyDown; // the down-leg for the proxy; the answer goes through g_vk.superDown, the same filter
 unsigned int madeFor[6] = {}; // packed w/h, ordinary w/h, native w/h the images above were made for
 bool madeSuper = false;

@@ -66,6 +66,7 @@ enum class GameQuirk : uint64_t
     CreateSLOnThe2ndDevice,
     Kcd2DlssgHdr10,
     XeFGBridgeResizeAsCreated,
+    REFrameworkCompat, // misc/REFrameworkCompat.h, resolved with [Hotfix] REFrameworkCompat
     // Don't forget to add the new entry to printQuirks
     _
 };
@@ -213,6 +214,30 @@ static const QuirkEntry quirkTable[] = {
                 GameQuirk::RestoreComputeSigOnNvidia),
     QUIRK_ENTRY("onimushawots.exe", GameQuirk::RestoreComputeSigOnNonNvidia, GameQuirk::DisableDxgiSpoofing,
                 GameQuirk::RestoreComputeSigOnNvidia),
+
+    // Capcom RE Engine games: [Hotfix] REFrameworkCompat=auto turns misc/REFrameworkCompat.h on in these when dinput8.dll
+    // is the REFramework fork that draws on XeFG (onehoon). Entries add up with the ones above and below.
+    QUIRK_ENTRY("re2.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("re3.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("re4.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("re7.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("re8.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("re9.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("re9demo.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("devilmaycry5.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("streetfighter6.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("dd2.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("dd2ccs.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("monsterhunterwilds.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("monsterhunterrise.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("monster_hunter_stories_3_twisted_reflection.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("pragmata.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("pragmata_sketchbook.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("drdr.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("kunitsugami.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("kunitsugamidemo.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("onimushawots.exe", GameQuirk::REFrameworkCompat),
+    QUIRK_ENTRY("onimushawots_demo.exe", GameQuirk::REFrameworkCompat),
 
     // REF PDUpscaler branch
     // Old menu needed to avoid the invisible overlay while upscaling is active

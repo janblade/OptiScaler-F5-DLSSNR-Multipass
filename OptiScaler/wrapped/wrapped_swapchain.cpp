@@ -23,6 +23,7 @@
 #include <d3d11.h>
 #include <d3d12.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/REFrameworkCompat.h>
 #include <hooks/Xell_Hooks.h>
 
 #include <magic_enum.hpp>
@@ -755,6 +756,16 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
 
     if (ret == 0)
     {
+        // The teardown below asks REFramework to let go of frame generation's swapchain, and it can take and drop a
+        // reference to this one while it does: that second final release would tear down and delete this twice
+        const bool nested = _finalReleaseInProgress.exchange(true);
+
+        if (nested && REFrameworkCompat::Active())
+        {
+            LOG_DEBUG("Nested final release while this swapchain is being released, left to the first one");
+            return 0;
+        }
+
 #ifdef USE_LOCAL_MUTEX
         OwnedLockGuard lock(_localMutex, 999);
 #endif

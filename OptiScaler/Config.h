@@ -904,6 +904,8 @@ class Config
     // Hotfixes
     CustomOptional<bool> CheckForUpdate { true };
     CustomOptional<bool, SoftDefault> DisableOverlays { false };
+    // misc/REFrameworkCompat.h; auto (no value) = on in RE Engine games with the REFramework fork that follows XeFG
+    CustomOptional<bool, NoDefault> REFrameworkCompat; // true / false kept as set; no value = auto
 
     CustomOptional<bool> SimulateWaitableObject { false };
 

@@ -2989,14 +2989,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Compress screen edges (DlssNr_Spatial.inl): whether the model works on a packed picture this frame, and at what
     // size. Everything about the model below (its features, its surfaces, the guides it is handed) follows the packed
     // size; the encode, the resolve and the frame stay at the ordinary ones.
-    EdgeCompression::Signature spatialSignature;
-    spatialSignature.colour = desc.Format;
-    spatialSignature.depth = depth != nullptr ? guideDesc.Format : DXGI_FORMAT_UNKNOWN;
-    spatialSignature.depthW = depth != nullptr ? (unsigned int) guideDesc.Width : 0u;
-    spatialSignature.depthH = depth != nullptr ? guideDesc.Height : 0u;
-    spatialSignature.motion = motionDesc.Format;
-    spatialSignature.motionW = (unsigned int) motionDesc.Width;
-    spatialSignature.motionH = motionDesc.Height;
+    const uint64_t spatialSignature = EdgeCompression::SignatureOf(
+        desc.Format, depth != nullptr ? guideDesc.Format : DXGI_FORMAT_UNKNOWN,
+        depth != nullptr ? (unsigned int) guideDesc.Width : 0u, depth != nullptr ? guideDesc.Height : 0u,
+        motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
 
     bool spatialReset = false;
     bool spatial = EdgeCompression::Begin(cfg, width, height, workScale, proxyBackend, spatialSignature, spatialReset);
@@ -3004,7 +3000,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatialReset)
         g_nr.reset = true;
 
-    if (spatial && (!SpatialReady() || !EdgeCompression::Prepare(device, EdgeCompression::layout, workScale > 1.0f)))
+    if (spatial && (!SpatialReady() || !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f)))
     {
         EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffResources);
         g_nr.reset = true;
@@ -3014,8 +3010,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!spatial)
         EdgeCompression::Release();
 
-    const unsigned int modelWidth = spatial ? EdgeCompression::layout.modelW : workWidth;
-    const unsigned int modelHeight = spatial ? EdgeCompression::layout.modelH : workHeight;
+    const unsigned int modelWidth = spatial ? EdgeCompression::Layout().modelW : workWidth;
+    const unsigned int modelHeight = spatial ? EdgeCompression::Layout().modelH : workHeight;
     const DXGI_FORMAT modelFormat = spatial ? EdgeCompression::kFormat : desc.Format;
 
     ReleaseSurfacesIfFormatChanged(modelFormat);
@@ -4158,7 +4154,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatial)
     {
         using DlssNr::Spatial::MakeConstants;
-        const auto& spatialLayout = EdgeCompression::layout;
+        const auto& spatialLayout = EdgeCompression::Layout();
         auto guideConstants = MakeConstants(spatialLayout, 101, guides, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
 
         if (!guides.depth.valid())
@@ -4564,7 +4560,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatial && result == NVSDK_NGX_Result_Success && finalAnswer != nullptr)
     {
         spatialUnpacked =
-            DispatchSpatial(cmdList, DlssNr::Spatial::MakeConstants(EdgeCompression::layout, 102, guides, 1.0f, 1.0f),
+            DispatchSpatial(cmdList, DlssNr::Spatial::MakeConstants(EdgeCompression::Layout(), 102, guides, 1.0f, 1.0f),
                             modelInput, finalAnswer, nullptr, EdgeCompression::proxy, EdgeCompression::answer);
 
         if (spatialUnpacked)
@@ -5087,7 +5083,7 @@ void RetryAfterFailure()
     g_nr.failed = false;
     g_nr.reason = "";
     g_nr.reset = true;
-    EdgeCompression::fallback = Spatial::Status::Off;
+    EdgeCompression::tracker.Retry();
 
 }
 

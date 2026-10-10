@@ -344,6 +344,50 @@ int main()
         CHECK(p.status == Status::TurnedOffDispatch && p.modelW == 0 && p.ordinaryW == 2560);
     }
 
+    // The bookkeeping both backends share: a change of layout or of what is packed resets the model's history and
+    // lifts a held fallback; the same frame again changes nothing; Retry lifts it too; the proxy backend keeps it off.
+    {
+        Tracker tracker;
+        Settings s = On();
+        auto frame = tracker.Begin(s, 1920, 1080, 1.0f, true, false, 7);
+        CHECK(frame.active && frame.status == Status::Active && !frame.resetHistory && frame.changed);
+        frame = tracker.Begin(s, 1920, 1080, 1.0f, true, false, 7);
+        CHECK(frame.active && !frame.resetHistory && !frame.changed);
+
+        tracker.TurnOff(Status::TurnedOffDispatch);
+        frame = tracker.Begin(s, 1920, 1080, 1.0f, true, false, 7);
+        CHECK(!frame.active && frame.status == Status::TurnedOffDispatch && !frame.resetHistory && frame.changed);
+        frame = tracker.Begin(s, 1920, 1080, 1.0f, true, false, 7);
+        CHECK(!frame.active && frame.status == Status::TurnedOffDispatch && !frame.changed); // held, not retried
+
+        s.workX = s.workY = 85;
+        frame = tracker.Begin(s, 1920, 1080, 1.0f, true, false, 7);
+        CHECK(frame.active && frame.resetHistory); // a new layout gets its try, with a fresh history
+        tracker.TurnOff(Status::TurnedOffModel);
+        frame = tracker.Begin(s, 1920, 1080, 1.0f, true, false, 8);
+        CHECK(frame.active && frame.resetHistory); // so does a different input format or size
+        tracker.TurnOff(Status::TurnedOffModel);
+        tracker.Retry();
+        frame = tracker.Begin(s, 1920, 1080, 1.0f, true, false, 8);
+        CHECK(frame.active && !frame.resetHistory);
+
+        frame = tracker.Begin(s, 1920, 1080, 1.0f, true, true, 8);
+        CHECK(!frame.active && frame.status == Status::Proxy);
+        frame = tracker.Begin(Settings {}, 1920, 1080, 1.0f, true, true, 8);
+        CHECK(!frame.active && frame.status == Status::Off && frame.resetHistory); // switched off: history restarts
+
+        // A request that is invalid from the start never reset anything, and says why once.
+        Tracker invalid;
+        Settings bad = On();
+        bad.workX = 120;
+        frame = invalid.Begin(bad, 1920, 1080, 1.0f, true, false, 1);
+        CHECK(!frame.active && frame.status == Status::BadSettings && frame.changed);
+        frame = invalid.Begin(bad, 1920, 1080, 1.0f, true, false, 1);
+        CHECK(!frame.changed && !frame.resetHistory);
+
+        CHECK(Mix(Mix(0, 1), 2) != Mix(Mix(0, 2), 1));
+    }
+
     if (fails == 0)
         std::puts("PASS: NR compress screen edges layout (16 grid, 1:1 middle, round trips, offsets, shifts, limits, "
                   "invalid values, named layouts, constants)");

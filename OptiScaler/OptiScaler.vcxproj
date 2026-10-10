@@ -445,6 +445,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\DlssNr_Vk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_LutVk.h" />
     <ClInclude Include="shaders\dlssnr\DlssNrDetailReuse_Vk.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNrSpatial_Vk.h" />
     <ClInclude Include="shaders\dlssnr\precompile\dlssnr_detail_reuse_Shader_Vk.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
@@ -976,6 +977,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_LutVk.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNrDetailReuse_Vk.cpp" />
+    <ClCompile Include="shaders\dlssnr\DlssNrSpatial_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />

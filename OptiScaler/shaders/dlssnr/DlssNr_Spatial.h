@@ -295,6 +295,95 @@ inline Published Publish(const Layout& layout, Status status, bool vulkan)
     return p;
 }
 
+// A word for what the log says about a status (the menu has its own, longer ones).
+inline const char* Describe(Status status)
+{
+    switch (status)
+    {
+    case Status::Off: return "off";
+    case Status::Active: return "on";
+    case Status::Proxy: return "not used with the driver-proxy backend";
+    case Status::BadSettings: return "a setting is outside its range";
+    case Status::TooSmall: return "the packed picture would be under a quarter of the frame";
+    case Status::NothingToCompress: return "the working size is 100% on both axes";
+    case Status::ThinEdge: return "the layout leaves less than one pixel at an edge";
+    case Status::TurnedOffResources: return "its shader or textures could not be created";
+    case Status::TurnedOffDispatch: return "a compute pass failed";
+    case Status::TurnedOffModel: return "NR rejected the packed picture";
+    }
+    return "?";
+}
+
+// A running hash, for a backend to fold the formats and sizes of what it packs into one number.
+inline uint64_t Mix(uint64_t hash, uint64_t value)
+{
+    return (hash ^ value) * 1099511628211ull + 0x9E3779B97F4A7C15ull;
+}
+
+// The frame-to-frame bookkeeping both backends share: this frame's layout, whether compression runs, and the fallback
+// that holds it off after something went wrong. A change of layout, or of the formats and sizes that were packed (the
+// backend's signature), makes last frame's packed picture a different one: the model's history starts over and a held
+// fallback is lifted so the new layout gets its try. Retry lifts it too.
+class Tracker
+{
+  public:
+    struct Frame
+    {
+        Status status = Status::Off;
+        bool active = false;       // the picture is packed this frame
+        bool resetHistory = false; // the model's history starts over
+        bool changed = false;      // the status, or the packed size, differs from the last frame's (for the log)
+    };
+
+    // backendOff: this backend does not take compression (the driver-proxy backend runs one pass of its own).
+    Frame Begin(const Settings& settings, uint32_t nativeW, uint32_t nativeH, float globalScale, bool gridOrdinary,
+                bool backendOff, uint64_t signature)
+    {
+        const Layout next = Build(settings, nativeW, nativeH, globalScale, gridOrdinary);
+        Frame frame;
+
+        if (valid_ && (layout_ != next || signature_ != signature))
+        {
+            frame.resetHistory = layout_.requested || next.requested;
+            fallback_ = Status::Off;
+        }
+
+        layout_ = next;
+        signature_ = signature;
+        valid_ = true;
+
+        frame.status = next.status;
+
+        if (settings.enabled && backendOff)
+            frame.status = Status::Proxy;
+        else if (next.active && fallback_ != Status::Off)
+            frame.status = fallback_;
+
+        frame.active = frame.status == Status::Active;
+        const uint32_t w = frame.active ? next.modelW : 0, h = frame.active ? next.modelH : 0;
+        frame.changed = frame.status != loggedStatus_ || w != loggedW_ || h != loggedH_;
+        loggedStatus_ = frame.status;
+        loggedW_ = w;
+        loggedH_ = h;
+        return frame;
+    }
+
+    void TurnOff(Status why) { fallback_ = why; }
+    void Retry() { fallback_ = Status::Off; }
+    void Reset() { *this = Tracker {}; }
+
+    const Layout& layout() const { return layout_; }
+    Status fallback() const { return fallback_; }
+
+  private:
+    Layout layout_{};
+    Status fallback_ = Status::Off;
+    uint64_t signature_ = 0;
+    bool valid_ = false;
+    Status loggedStatus_ = Status::Off;
+    uint32_t loggedW_ = 0, loggedH_ = 0;
+};
+
 struct alignas(16) Constants {
     uint32_t mode = 0;
     float unused = 0;

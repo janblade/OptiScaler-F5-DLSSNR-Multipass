@@ -17,30 +17,16 @@
 //
 // Included inside DlssNr_Dx12.cpp's anonymous namespace, after DlssNr_SceneCut.inl. Dispatch calls Begin where it
 // decides the frame, Prepare once the layout is known to be wanted, and the rest around the model, all under g_nrMutex.
-// The menu reads Published(), a copy made under a lock of its own.
+// The menu reads published, a copy made under a lock of its own.
 namespace EdgeCompression
 {
 namespace Sp = DlssNr::Spatial;
 
 constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
-// Everything that makes last frame's packed picture a different picture from this frame's: the layout, and the formats
-// and sizes of what is packed.
-struct Signature
-{
-    DXGI_FORMAT colour = DXGI_FORMAT_UNKNOWN, depth = DXGI_FORMAT_UNKNOWN, motion = DXGI_FORMAT_UNKNOWN;
-    unsigned int depthW = 0, depthH = 0, motionW = 0, motionH = 0;
-    bool operator==(const Signature& o) const
-    {
-        return colour == o.colour && depth == o.depth && motion == o.motion && depthW == o.depthW &&
-               depthH == o.depthH && motionW == o.motionW && motionH == o.motionH;
-    }
-};
+Sp::Tracker tracker;
 
-Sp::Layout layout;                      // this frame's
-Sp::Status fallback = Sp::Status::Off;  // why compression turned itself off; held until the layout changes or Retry
-Signature signature;
-bool signatureValid = false;
+const Sp::Layout& Layout() { return tracker.layout(); }
 
 ID3D12Resource* color = nullptr;  // the packed colour (model input)
 ID3D12Resource* depth = nullptr;  // R32F
@@ -78,64 +64,34 @@ void ReleaseDown()
     proxyDown = nullptr;
 }
 
-// Why compression is not applied or has turned itself off, for the log (the menu has its own words).
-const char* Describe(Sp::Status status)
+// What makes last frame's packed picture a different one besides the layout: the formats and sizes that are packed.
+uint64_t SignatureOf(DXGI_FORMAT colour, DXGI_FORMAT depthFormat, unsigned int depthW, unsigned int depthH,
+                     DXGI_FORMAT motionFormat, unsigned int motionW, unsigned int motionH)
 {
-    switch (status)
-    {
-    case Sp::Status::Off: return "off";
-    case Sp::Status::Active: return "on";
-    case Sp::Status::Proxy: return "not used with the driver-proxy backend";
-    case Sp::Status::BadSettings: return "a setting is outside its range";
-    case Sp::Status::TooSmall: return "the packed picture would be under a quarter of the frame";
-    case Sp::Status::NothingToCompress: return "the working size is 100% on both axes";
-    case Sp::Status::ThinEdge: return "the layout leaves less than one pixel at an edge";
-    case Sp::Status::TurnedOffResources: return "its shader or textures could not be created";
-    case Sp::Status::TurnedOffDispatch: return "a compute pass failed";
-    case Sp::Status::TurnedOffModel: return "NR rejected the packed picture";
-    }
-    return "?";
+    uint64_t hash = 0;
+    for (const uint64_t v : { (uint64_t) colour, (uint64_t) depthFormat, (uint64_t) depthW, (uint64_t) depthH,
+                              (uint64_t) motionFormat, (uint64_t) motionW, (uint64_t) motionH })
+        hash = Sp::Mix(hash, v);
+    return hash;
 }
 
 // Decides this frame. Returns whether the picture is packed. resetHistory is set when the packed picture is a different
-// one from last frame's, which also lifts a held fallback so the new layout gets its try.
+// one from last frame's.
 bool Begin(const Config& cfg, unsigned int width, unsigned int height, float scale, bool proxyBackend,
-           const Signature& now, bool& resetHistory)
+           uint64_t signature, bool& resetHistory)
 {
     const Sp::Settings settings = Sp::ReadSettings(cfg);
-    const Sp::Layout next = Sp::Build(settings, width, height, scale, true);
+    const Sp::Tracker::Frame frame = tracker.Begin(settings, width, height, scale, true, proxyBackend, signature);
+    const Sp::Layout& next = tracker.layout();
 
-    if (signatureValid && (layout != next || !(signature == now)))
+    if (frame.resetHistory)
+        resetHistory = true;
+
+    Publish(next, frame.status);
+
+    if (frame.changed)
     {
-        if (layout.requested || next.requested)
-            resetHistory = true;
-        fallback = Sp::Status::Off;
-    }
-
-    layout = next;
-    signature = now;
-    signatureValid = true;
-
-    Sp::Status status = next.status;
-
-    if (settings.enabled && proxyBackend)
-        status = Sp::Status::Proxy;
-    else if (next.active && fallback != Sp::Status::Off)
-        status = fallback;
-
-    const bool active = status == Sp::Status::Active;
-    Publish(next, status);
-
-    static Sp::Status loggedStatus = Sp::Status::Off;
-    static unsigned int loggedW = 0, loggedH = 0;
-
-    if (status != loggedStatus || (active && (loggedW != next.modelW || loggedH != next.modelH)))
-    {
-        loggedStatus = status;
-        loggedW = active ? next.modelW : 0;
-        loggedH = active ? next.modelH : 0;
-
-        if (active)
+        if (frame.active)
             LOG_INFO("DLSS-NR compress screen edges: on, the model works on {}x{} instead of {}x{} ({:.0f}% of the "
                      "pixels), middle {:.0f}%x{:.0f}% of the frame",
                      next.modelW, next.modelH, next.ordinaryW, next.ordinaryH,
@@ -143,20 +99,20 @@ bool Begin(const Config& cfg, unsigned int width, unsigned int height, float sca
                      100.0 * (next.centerBounds.right - next.centerBounds.left),
                      100.0 * (next.centerBounds.bottom - next.centerBounds.top));
         else if (settings.enabled)
-            LOG_INFO("DLSS-NR compress screen edges: not applied ({})", Describe(status));
+            LOG_INFO("DLSS-NR compress screen edges: not applied ({})", Sp::Describe(frame.status));
         else
             LOG_INFO("DLSS-NR compress screen edges: off");
     }
 
-    return active;
+    return frame.active;
 }
 
 // Compression turned itself off; NR carries on from the next frame without it.
 void TurnOff(Sp::Status why)
 {
-    fallback = why;
-    Publish(layout, why);
-    LOG_WARN("DLSS-NR compress screen edges turned itself off: {}; NR continues without it", Describe(why));
+    tracker.TurnOff(why);
+    Publish(tracker.layout(), why);
+    LOG_WARN("DLSS-NR compress screen edges turned itself off: {}; NR continues without it", Sp::Describe(why));
 }
 
 bool Make(ID3D12Resource*& slot, ID3D12Device* device, DXGI_FORMAT format, unsigned int w, unsigned int h)
@@ -197,7 +153,7 @@ bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample)
     return true;
 }
 
-// Dispatch went away or NR was shut down.
+// NR was shut down.
 void Shutdown()
 {
     for (ID3D12Resource** r : { &color, &depth, &motion, &proxy, &answer, &proxyNative, &answerNative })
@@ -211,9 +167,7 @@ void Shutdown()
         v = 0;
 
     ReleaseDown();
-    layout = {};
-    fallback = Sp::Status::Off;
-    signatureValid = false;
+    tracker.Reset();
     std::lock_guard<std::mutex> lock(publishedLock);
     published = {};
 }

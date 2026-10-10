@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
+#include <shaders/dlssnr/DlssNr_Spatial.h>
 
 #include <optional>
 #include <nvsdk_ngx.h>
@@ -71,6 +72,10 @@ unsigned long long VkFrameClock();
 // Reuse detail between frames on this path (DlssNr_DetailReuse_Vk.inl), in the shape the D3D12 accessor returns.
 struct DetailReuseInfo;
 DetailReuseInfo DetailReuseStatusVk();
+
+// Compress screen edges on this path (DlssNr_Spatial_Vk.inl), in the shape the D3D12 accessor returns
+// (DlssNr::EdgeCompressionStatus): the status code, the sizes and the boxes, as of the last frame NR ran.
+Spatial::Published EdgeCompressionStatusVk();
 
 // Whether the game offers an exposure texture on this path. Observed only: it is not read, because
 // binding the game's image means naming a layout this side cannot know. For the menu, and to settle

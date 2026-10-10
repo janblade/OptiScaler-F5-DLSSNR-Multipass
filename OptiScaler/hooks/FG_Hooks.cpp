@@ -21,6 +21,7 @@
 #include <native/NativeDriverDx12.h>
 #include <native/NativeLowLatency.h>
 #include <native/PresentStageTiming.h>
+#include <native/VkPresentBridge.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -1200,8 +1201,12 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
     // Native input runs here, on the game's picture and queue, ahead of frame generation and before its lock below: when it
     // presents to the virtual upscaler, that call feeds frame generation (UpscaleStart takes the same lock).
+    //
+    // Not under the Vulkan bridge's D3D12 swapchain: its picture belongs to the Vulkan driver (hooks/Vulkan_Hooks.cpp), which
+    // runs the same step on the Vulkan game's presents. The interop state alone is not enough to tell: it is reset when a
+    // device of the game's is destroyed, and this driver then ran on the bridge's own D3D12 device.
     if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None && gameQueue != nullptr &&
-        state.currentD3D12Device != nullptr)
+        state.currentD3D12Device != nullptr && !VkPresentBridge::OutputActive())
     {
         NativeMotionDx12::OnFGPresent(This, gameQueue, state.currentD3D12Device);
     }

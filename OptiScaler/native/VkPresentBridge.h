@@ -17,6 +17,7 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <string>
 
 namespace VkPresentBridge
 {
@@ -86,6 +87,10 @@ bool WantsNewSwapchain(VkSwapchainKHR swapchain);
 // The D3D12 swapchain is up on `device` (FG only: a Vulkan-on-D3D12 upscaler feeds frame generation only when it runs on
 // the bridge's device).
 bool OutputActiveOn(ID3D12Device* device);
+
+// Why the bridge was turned off for the rest of the session because its D3D12 swapchain could not present; empty while it
+// was not. For the menu.
+std::string FailureReason();
 
 // FG only: the game's upscaler call, run on a Vulkan-on-D3D12 feature, queued frame generation's copies of its motion
 // vectors and depth; they are done once `fence` reaches `value`. Frame generation's queue waits for it before the next

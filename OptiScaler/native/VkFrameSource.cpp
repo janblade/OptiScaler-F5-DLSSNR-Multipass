@@ -2,6 +2,7 @@
 
 #include "VkFrameSource.h"
 #include "DepthFinderCore.h"
+#include "VkDeviceRules.h"
 
 #include <resource_tracking/GenericDepth_Vk.h>
 
@@ -45,13 +46,9 @@ struct Retired
 constexpr uint64_t kRetireAfterPresents = 8;
 
 std::mutex g_registryMutex;
-struct QueueRecord
-{
-    VkDevice device = VK_NULL_HANDLE;
-    uint32_t family = 0;
-};
-
-std::unordered_map<VkQueue, QueueRecord> g_queues;
+// The queues and the physical device of every Vulkan device the game made: a game that makes more devices after its swapchain
+// (a probe per feature level, as dxvk does) must be answered per device, not with whichever was made last.
+VkDeviceRegistry<VkDevice, VkPhysicalDevice, VkQueue> g_devices;
 std::unordered_map<VkSwapchainKHR, SwapchainRecord> g_swapchains;
 std::vector<Retired> g_retired;
 
@@ -102,9 +99,10 @@ ColorSpace ToColorSpace(VkColorSpaceKHR space, VkFormat format)
 
 } // namespace
 
-void VkFrameSource::NoteDevice(VkDevice device, const VkDeviceCreateInfo& info)
+void VkFrameSource::NoteDevice(VkPhysicalDevice physical, VkDevice device, const VkDeviceCreateInfo& info)
 {
     std::lock_guard lock(g_registryMutex);
+    g_devices.NoteDevice(device, physical);
 
     for (uint32_t i = 0; i < info.queueCreateInfoCount; ++i)
     {
@@ -121,9 +119,28 @@ void VkFrameSource::NoteDevice(VkDevice device, const VkDeviceCreateInfo& info)
             vkGetDeviceQueue(device, queues.queueFamilyIndex, index, &queue);
 
             if (queue != VK_NULL_HANDLE)
-                g_queues[queue] = { device, queues.queueFamilyIndex };
+                g_devices.NoteQueue(queue, device, queues.queueFamilyIndex);
         }
     }
+}
+
+bool VkFrameSource::DeviceOfQueue(VkQueue queue, VkDevice* device, VkPhysicalDevice* physical)
+{
+    std::lock_guard lock(g_registryMutex);
+    VkDeviceRegistry<VkDevice, VkPhysicalDevice, VkQueue>::Entry entry;
+
+    if (!g_devices.OfQueue(queue, &entry) || entry.physical == VK_NULL_HANDLE)
+        return false;
+
+    *device = entry.device;
+    *physical = entry.physical;
+    return true;
+}
+
+VkPhysicalDevice VkFrameSource::PhysicalDeviceOf(VkDevice device)
+{
+    std::lock_guard lock(g_registryMutex);
+    return g_devices.PhysicalOf(device);
 }
 
 VkImageUsageFlags VkFrameSource::SwapchainUsage(VkPhysicalDevice physical, const VkSwapchainCreateInfoKHR& info)
@@ -273,13 +290,45 @@ bool VkFrameSource::EnsureD3D12(VkPhysicalDevice physical, std::string& why)
 
 bool VkFrameSource::EnsureDevices(std::string& why)
 {
-    if (_interop.device != _device)
-    {
-        Release();
+    // Optical F5Low runs on one Vulkan device. A game that makes more devices (probes, a second window) while this one
+    // lives gets them left alone: loading the other device's functions here used to throw away the working interop and
+    // then fail on a device that was already gone.
+    const auto verdict = JudgeInteropDevice(_interop.device, _device);
 
-        if (!_interop.Load(_physical, _device, why))
-            return false;
+    if (verdict == InteropVerdict::Refuse)
+    {
+        _refusal = "Optical F5Low runs on the first Vulkan device the game presents with. This present comes from "
+                   "another device, so it is left alone.";
+
+        if (_refusedDevice != _device)
+        {
+            _refusedDevice = _device;
+            LOG_WARN("Native motion (Vulkan): a present from another Vulkan device ({:X}) is left alone; Optical F5Low "
+                     "keeps running on device {:X}",
+                     (size_t) _device, (size_t) _interop.device);
+        }
+
+        why = _refusal;
+        return false;
     }
+
+    if (verdict == InteropVerdict::Load)
+    {
+        // Loaded into a temporary: a failure leaves whatever is held as it was
+        VkInterop loaded;
+
+        if (!loaded.Load(_physical, _device, why))
+        {
+            _refusal = why;
+            return false;
+        }
+
+        Release();
+        _interop = loaded;
+    }
+
+    _refusal.clear();
+    _refusedDevice = VK_NULL_HANDLE;
 
     if (!EnsureD3D12(_physical, why))
         return false;
@@ -442,7 +491,7 @@ void VkFrameSource::OnDeviceDestroyed(VkDevice device)
     }
 
     DestroyRetiredLocked(true, device);
-    std::erase_if(g_queues, [&](const auto& entry) { return entry.second.device == device; });
+    g_devices.Forget(device);
 }
 
 AcquireStatus VkFrameSource::Acquire(FrameInput& input)
@@ -482,8 +531,8 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
             usage = it->second.usage;
         }
 
-        if (auto it = g_queues.find(_queue); it != g_queues.end())
-            family = it->second.family;
+        if (VkDeviceRegistry<VkDevice, VkPhysicalDevice, VkQueue>::Entry entry; g_devices.OfQueue(_queue, &entry))
+            family = entry.family;
     }
 
     if (image == VK_NULL_HANDLE)

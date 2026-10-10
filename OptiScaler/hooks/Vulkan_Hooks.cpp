@@ -698,7 +698,7 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     if (result == VK_SUCCESS && pDevice != nullptr && *pDevice != VK_NULL_HANDLE)
     {
-        native::VkFrameSource::NoteDevice(*pDevice, localCreteInfo);
+        native::VkFrameSource::NoteDevice(physicalDevice, *pDevice, localCreteInfo);
         GenericDepthVk::OnDevice(*pDevice, physicalDevice);
     }
 
@@ -804,8 +804,14 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     State::Instance().vulkanPresentCount.fetch_add(1, std::memory_order_relaxed);
     NoteDroppedLogLinesOnPresent();
 
+    // The device this present is on: the queue's own, not the last one the game made. A game that makes more devices after
+    // its swapchain (probes) leaves _device and _PD on one of those.
+    VkDevice presentDevice = _device;
+    VkPhysicalDevice presentPhysical = _PD;
+    native::VkFrameSource::DeviceOfQueue(queue, &presentDevice, &presentPhysical);
+
     // get upscaler time
-    UpscalerTimeVk::ReadUpscalingTime(_device);
+    UpscalerTimeVk::ReadUpscalingTime(presentDevice);
 
     // ??? TODO: if we are hooking dxvk's vulkan calls then this present call could be either coming from dxvk or from a
     // native vk game
@@ -826,7 +832,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     // Optical F5Low: the picture through NR before the menu is drawn over it. May replace the wait list.
     const auto motionStartMs = Util::MillisecondsNow();
-    NativeMotionVk::OnPresent(queue, &localPresentInfo, _device, _PD);
+    NativeMotionVk::OnPresent(queue, &localPresentInfo, presentDevice, presentPhysical);
     _presentTiming.Record(Stage::NativeMotion, Util::MillisecondsNow() - motionStartMs);
 
     // The game's swapchain is on the bridge's hidden window: the menu and the frame limiter are the D3D12 swapchain's
@@ -850,13 +856,13 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // -- so XeFG's XeLL routing (ReflexHooks) reaches them; the Vulkan NVAPI belongs to a game with no bridge. Not under
     // dxvk: its D3D11 device already gets this through wrapped_swapchain.cpp's present hook, unconditionally.
     const auto lowLatencyTarget = native::lowlatency::PresentTarget(
-        true, bridged, _device, bridged ? static_cast<IUnknown*>(VkPresentBridge::Device()) : nullptr);
+        true, bridged, presentDevice, bridged ? static_cast<IUnknown*>(VkPresentBridge::Device()) : nullptr);
     const bool lowLatency = !IdentifyGpu::getPrimaryGpu().usesDxvk && lowLatencyTarget.device != nullptr;
 
     const auto lowLatencyBegin = [&]
     {
         if (lowLatencyTarget.api == native::lowlatency::Api::Vulkan)
-            native::lowlatency::OnPresentBeginVulkan(_device);
+            native::lowlatency::OnPresentBeginVulkan(presentDevice);
         else
             native::lowlatency::OnPresentBegin(
                 const_cast<IUnknown*>(static_cast<const IUnknown*>(lowLatencyTarget.device)));
@@ -864,7 +870,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     const auto lowLatencyEnd = [&]
     {
         if (lowLatencyTarget.api == native::lowlatency::Api::Vulkan)
-            native::lowlatency::OnPresentEndVulkan(_device);
+            native::lowlatency::OnPresentEndVulkan(presentDevice);
         else
             native::lowlatency::OnPresentEnd(
                 const_cast<IUnknown*>(static_cast<const IUnknown*>(lowLatencyTarget.device)));
@@ -947,6 +953,12 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     // allows it (native/VkFrameSource.cpp).
     VkSwapchainCreateInfoKHR localCreateInfo {};
 
+    const auto swapchainPhysicalDevice = [&]
+    {
+        const VkPhysicalDevice physical = native::VkFrameSource::PhysicalDeviceOf(device);
+        return physical != VK_NULL_HANDLE ? physical : _PD;
+    };
+
     // With frame generation chosen the swapchain is made on a hidden window and the real one gets a D3D12 swapchain
     // (native/VkPresentBridge.h). The usage is then asked of the hidden surface.
     bool bridged = false;
@@ -957,8 +969,10 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 
         if (!State::Instance().vulkanSkipHooks)
         {
-            bridged = VkPresentBridge::OnCreateSwapchain(_instance, _PD, device, *pCreateInfo, &localCreateInfo);
-            localCreateInfo.imageUsage = native::VkFrameSource::SwapchainUsage(_PD, localCreateInfo);
+            // The physical device this swapchain's own device was made on (not the last one the game made)
+            const VkPhysicalDevice physical = swapchainPhysicalDevice();
+            bridged = VkPresentBridge::OnCreateSwapchain(_instance, physical, device, *pCreateInfo, &localCreateInfo);
+            localCreateInfo.imageUsage = native::VkFrameSource::SwapchainUsage(physical, localCreateInfo);
         }
     }
 
@@ -993,7 +1007,8 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         {
             bridged = false;
             localCreateInfo = *pCreateInfo;
-            localCreateInfo.imageUsage = native::VkFrameSource::SwapchainUsage(_PD, localCreateInfo);
+            localCreateInfo.imageUsage =
+                native::VkFrameSource::SwapchainUsage(swapchainPhysicalDevice(), localCreateInfo);
 
             if (VkPresentBridge::Owns(pCreateInfo->oldSwapchain))
                 localCreateInfo.oldSwapchain = VK_NULL_HANDLE;
@@ -1063,7 +1078,8 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         // The menu is drawn on the D3D12 swapchain of the bridge, not on the hidden Vulkan one. Before that swapchain's
         // first present, which is where the D3D12 menu starts.
         if (!bridged)
-            MenuOverlayVk::CreateSwapchain(device, _PD, _instance, _hwnd, pCreateInfo, pAllocator, pSwapchain);
+            MenuOverlayVk::CreateSwapchain(device, swapchainPhysicalDevice(), _instance, _hwnd, pCreateInfo, pAllocator,
+                                           pSwapchain);
         else
             MenuOverlayVk::HandOverToBridge();
     }

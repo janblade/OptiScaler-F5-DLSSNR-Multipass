@@ -31,6 +31,11 @@ VkSemaphore g_presentWait = VK_NULL_HANDLE;
 // The mode with frame generation is chosen but the game's swapchain was made without the bridge.
 bool g_frameGenerationMode = false;
 
+// Why the frame source left the present's Vulkan device alone (a second device the game made), for the menu. Copied out of
+// the frame source under the run mutex; the menu thread reads it under its own.
+std::mutex g_refusalMutex;
+std::string g_refusal;
+
 } // namespace
 
 namespace NativeMotionVk
@@ -120,6 +125,11 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
     // Why a frame could not be handed over, once each time the reason changes.
     static std::string lastError;
 
+    {
+        std::lock_guard lock(g_refusalMutex);
+        g_refusal = g_source.Refusal();
+    }
+
     if (g_source.Error() != lastError)
     {
         lastError = g_source.Error();
@@ -179,6 +189,26 @@ void OnDeviceDestroyed(VkDevice device)
 
 void DrawStatus()
 {
+    // The bridge was turned off because its D3D12 swapchain could not present (VkPresentBridge::PresentOutput)
+    if (const std::string given = VkPresentBridge::FailureReason(); !given.empty())
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f),
+                           "Frame generation stopped: %s. The game was asked to present on its own window again. "
+                           "Restart the game to try frame generation again.",
+                           given.c_str());
+        return;
+    }
+
+    {
+        std::lock_guard lock(g_refusalMutex);
+
+        if (!g_refusal.empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "%s", g_refusal.c_str());
+            return;
+        }
+    }
+
     if (g_frameGenerationMode)
     {
         ImGui::TextDisabled("Waiting for the game to make a new swapchain for frame generation (it was told to). If "

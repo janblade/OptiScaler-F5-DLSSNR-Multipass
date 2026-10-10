@@ -395,13 +395,14 @@ static_assert(sizeof(Constants) == 256);
 static_assert(offsetof(Constants, warp) == 16);
 
 // Modes: 100 packs the encoded colour, 101 packs depth (point-sampled) and motion (by its end points), 102 unpacks the
-// packed model input and the model's answer back to the ordinary grid.
+// packed model input and the model's answer back to the ordinary grid, and 103 does that and adds what the round trip took
+// from the model input (a third input: the picture the model would be shown without compression), for the Replace curves.
 // mvX / mvY take the game's motion units to native pixels (the guide scale NR already applies to its vectors).
 inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideRegions& regions, float mvX, float mvY) {
     Constants c{};
     c.mode = mode;
-    c.width = mode == 102 ? layout.ordinaryW : layout.modelW;
-    c.height = mode == 102 ? layout.ordinaryH : layout.modelH;
+    c.width = mode >= 102 ? layout.ordinaryW : layout.modelW;
+    c.height = mode >= 102 ? layout.ordinaryH : layout.modelH;
     c.warp = pw::MakeShaderConstants(layout.warp);
     c.depthRect[0] = static_cast<float>(regions.depth.x);
     c.depthRect[1] = static_cast<float>(regions.depth.y);

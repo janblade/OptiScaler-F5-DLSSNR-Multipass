@@ -116,13 +116,23 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         float2 nativePixel = PwUnpack(pixel);
         gTarget0[id.xy] = SamplePackedColour(nativePixel, pixel);
     }
-    else if (gMode == 102)
+    else if (gMode == 102 || gMode == 103)
     {
         // The existing enlargement pass consumes this ordinary uniform grid.
         float2 nativePixel = pixel * gNativeWorkSize.xy / float2(gWidth, gHeight);
         float2 packedUv = PwPack(nativePixel) / gNativeWorkSize.zw;
-        gTarget0[id.xy] = gSource0.SampleLevel(gLinearClamp, packedUv, 0);
-        gTarget1[id.xy] = gSource1.SampleLevel(gLinearClamp, packedUv, 0);
+        float4 proxy = gSource0.SampleLevel(gLinearClamp, packedUv, 0);
+        float4 answer = gSource1.SampleLevel(gLinearClamp, packedUv, 0);
+        if (gMode == 103)
+        {
+            // Replace curves take the answer as the picture and never look at the proxy, so nothing cancels the loss of
+            // packing and unpacking the edges. Put it back: the answer plus what the round trip took from the model's
+            // input, measured against the picture the model would have been shown without compression (gSource2, on this
+            // grid). Zero where the unpack is 1:1, and for a model that changes nothing the result is that picture.
+            answer.rgb += gSource2.Load(int3(id.xy, 0)).rgb - proxy.rgb;
+        }
+        gTarget0[id.xy] = proxy;
+        gTarget1[id.xy] = answer;
     }
 #endif
 }

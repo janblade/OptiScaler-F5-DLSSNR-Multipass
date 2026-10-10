@@ -583,6 +583,101 @@ void RunGuides(Gpu& gpu, const Sp::Settings& settings, float scale, const char* 
         CHECK(edgeChecked > 20);
     }
 }
+// A picture with sharp one-pixel text-like edges in the periphery (a HUD), smooth elsewhere.
+Image TextPicture(UINT w, UINT h)
+{
+    Image img = SmoothPicture(w, h);
+    for (UINT y = 0; y < h; ++y)
+        for (UINT x = 0; x < w; ++x)
+        {
+            const bool periphery = x < w / 10 || x >= w - w / 10 || y >= h - h / 8 || y < h / 12;
+            if (periphery && ((x + y * 3) % 2 == 0 || (x / 3 + y) % 4 == 0))
+            {
+                float* p = img.at(x, y);
+                p[0] = p[1] = p[2] = (x ^ y) & 1 ? 0.95f : 0.05f;
+            }
+        }
+    return img;
+}
+
+// Bilinear resample, the reference picture on the ordinary grid when that is not the native one.
+Image Resample(const Image& src, UINT w, UINT h)
+{
+    Image out;
+    out.w = w;
+    out.h = h;
+    out.v.resize((size_t) w * h * 4);
+    for (UINT y = 0; y < h; ++y)
+        for (UINT x = 0; x < w; ++x)
+        {
+            const float fx = std::clamp(((float) x + 0.5f) * src.w / w - 0.5f, 0.0f, (float) src.w - 1);
+            const float fy = std::clamp(((float) y + 0.5f) * src.h / h - 0.5f, 0.0f, (float) src.h - 1);
+            const UINT x0 = (UINT) fx, y0 = (UINT) fy, x1 = std::min(x0 + 1, src.w - 1), y1 = std::min(y0 + 1, src.h - 1);
+            const float tx = fx - x0, ty = fy - y0;
+            for (int c = 0; c < 4; ++c)
+            {
+                const float a = src.at(x0, y0)[c] * (1 - tx) + src.at(x1, y0)[c] * tx;
+                const float b = src.at(x0, y1)[c] * (1 - tx) + src.at(x1, y1)[c] * tx;
+                out.at(x, y)[c] = a * (1 - ty) + b * ty;
+            }
+        }
+    return out;
+}
+
+// The Replace curves take the unpacked answer as the picture. With a model that changes nothing (answer == packed input) that
+// picture must be the one the uncompressed path shows the model, or the edges' round trip lands on screen. Mode 102 alone
+// fails that on sharp edges; mode 103, given the reference, does not, and leaves the 1:1 middle bit-identical to 102.
+void RunReplace(Gpu& gpu, const Sp::Settings& settings, float scale, const char* label)
+{
+    constexpr UINT W = 320, H = 192;
+    const Sp::Layout layout = Sp::Build(settings, W, H, scale);
+    CHECK(layout.active);
+
+    const Image source = TextPicture(W, H);
+    const Image reference = layout.ordinaryW == W ? source : Resample(source, layout.ordinaryW, layout.ordinaryH);
+    auto src = gpu.Upload(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, 8, ToHalves(source).data());
+    auto ref = gpu.Upload(DXGI_FORMAT_R16G16B16A16_FLOAT, layout.ordinaryW, layout.ordinaryH, 8, ToHalves(reference).data());
+    auto packed = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, layout.modelW, layout.modelH, true);
+    const DlssNr::GuideRegions none { { 0, 0, W, H }, { 0, 0, W, H } };
+    gpu.Dispatch(Sp::MakeConstants(layout, 100, none, 1, 1), src.Get(), nullptr, nullptr, packed.Get(), nullptr);
+    gpu.Read(packed.Get(), 8); // leaves it readable
+
+    auto proxy102 = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, layout.ordinaryW, layout.ordinaryH, true);
+    auto answer102 = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, layout.ordinaryW, layout.ordinaryH, true);
+    gpu.Dispatch(Sp::MakeConstants(layout, 102, none, 1, 1), packed.Get(), packed.Get(), nullptr, proxy102.Get(), answer102.Get());
+    auto proxy103 = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, layout.ordinaryW, layout.ordinaryH, true);
+    auto answer103 = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, layout.ordinaryW, layout.ordinaryH, true);
+    gpu.Dispatch(Sp::MakeConstants(layout, 103, none, 1, 1), packed.Get(), packed.Get(), ref.Get(), proxy103.Get(), answer103.Get());
+
+    const Image a102 = FromHalves(gpu.Read(answer102.Get(), 8), layout.ordinaryW, layout.ordinaryH);
+    const Image a103 = FromHalves(gpu.Read(answer103.Get(), 8), layout.ordinaryW, layout.ordinaryH);
+    double worst102 = 0, worst103 = 0;
+    int centreDiffers = 0, centreChecked = 0;
+    for (UINT y = 0; y < layout.ordinaryH; ++y)
+        for (UINT x = 0; x < layout.ordinaryW; ++x)
+        {
+            for (int c = 0; c < 3; ++c)
+            {
+                worst102 = std::max(worst102, (double) std::abs(a102.at(x, y)[c] - reference.at(x, y)[c]));
+                worst103 = std::max(worst103, (double) std::abs(a103.at(x, y)[c] - reference.at(x, y)[c]));
+            }
+            const float u = ((float) x + 0.5f) / layout.ordinaryW, v = ((float) y + 0.5f) / layout.ordinaryH;
+            if (layout.ordinaryW == W && u > layout.centerBounds.left + 0.01f && u < layout.centerBounds.right - 0.01f &&
+                v > layout.centerBounds.top + 0.01f && v < layout.centerBounds.bottom - 0.01f)
+            {
+                ++centreChecked;
+                if (std::memcmp(a102.at(x, y), a103.at(x, y), 3 * sizeof(float)) != 0)
+                    ++centreDiffers;
+            }
+        }
+    std::printf("%s: model %ux%u ordinary %ux%u; against the uncompressed picture: mode 102 off by %.4f, mode 103 off by "
+                "%.5f; middle texels that differ between them %d/%d\n",
+                label, layout.modelW, layout.modelH, layout.ordinaryW, layout.ordinaryH, worst102, worst103, centreDiffers,
+                centreChecked);
+    CHECK(worst102 > 0.1);   // without the correction the sharp edges are lost (this is what the user saw)
+    CHECK(worst103 < 0.002); // with it the picture is the uncompressed one, to half precision
+    CHECK(centreDiffers == 0);
+}
 } // namespace
 
 int main()
@@ -608,6 +703,10 @@ int main()
     RunGuides(gpu, defaults, 1.0f, "guides default 100%");
     RunGuides(gpu, lopsided, 1.0f, "guides lopsided 100%");
     RunGuides(gpu, defaults, 0.75f, "guides default 75%");
+    RunReplace(gpu, defaults, 1.0f, "replace default 100%");
+    RunReplace(gpu, defaults, 0.8f, "replace default 80%");
+    RunReplace(gpu, defaults, 1.5f, "replace default 150%");
+    RunReplace(gpu, lopsided, 1.0f, "replace lopsided 100%");
 
     if (fails == 0)
         std::puts("PASS: NR compress screen edges D3D12 pack / unpack (colour, depth point-sampled, motion end points)");

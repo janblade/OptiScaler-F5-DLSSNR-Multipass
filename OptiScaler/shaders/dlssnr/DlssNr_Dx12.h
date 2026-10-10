@@ -203,6 +203,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     //   100  In0 the encoded colour (native size)                               -> Out0 the packed colour
     //   101  In1 depth, In2 motion (a null In0 gets In1)                        -> Out0 R32F depth, Out1 RG32F motion
     //   102  In0 the packed model input, In1 the model's answer                 -> Out0 the unpacked input, Out1 the answer
+    //   103  as 102, and In2 the picture the uncompressed path would show the model (ordinary grid): the answer gets
+    //        In2 minus the unpacked input added (the Replace curves, which never read the proxy)
     // The sampler is the shared linear clamp. Resources are left in the state they arrived in.
     bool SpatialReady();
     bool DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Spatial::Constants& InConstants,

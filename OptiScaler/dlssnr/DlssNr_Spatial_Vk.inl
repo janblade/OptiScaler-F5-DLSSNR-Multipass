@@ -39,6 +39,7 @@ std::unique_ptr<OS_Vk> proxyDown; // the down-leg for the proxy; the answer goes
 unsigned int madeFor[6] = {}; // packed w/h, ordinary w/h, native w/h the images above were made for
 bool madeSuper = false;
 bool madeActive = false;
+bool madeReplace = false; // the reference picture (proxySmall below 100%/above) was kept for the Replace curves
 
 OwnedImage depthOnly; // a depth-only view of the game's depth, when its own view covers stencil too
 bool depthWarned = false, depthLogged = false;
@@ -117,14 +118,14 @@ void TurnOff(Sp::Status why)
 void Retry() { tracker.Retry(); }
 
 // Whether the images made last time are not the ones this layout needs.
-bool Stale(bool spatial, const Sp::Layout& l, bool supersample)
+bool Stale(bool spatial, const Sp::Layout& l, bool supersample, bool replace)
 {
     if (!spatial)
         return color.Valid() || madeActive;
 
     const unsigned int want[6] = { l.modelW, l.modelH, l.ordinaryW, l.ordinaryH, l.nativeW, l.nativeH };
     return !madeActive || !color.Valid() || !std::equal(std::begin(want), std::end(want), std::begin(madeFor)) ||
-           madeSuper != supersample;
+           madeSuper != supersample || madeReplace != replace;
 }
 
 void DestroyImages()
@@ -139,7 +140,7 @@ void DestroyImages()
 }
 
 // The images for this layout, in the resize block (the device is drained). False if one could not be made.
-bool CreateImages(const Sp::Layout& l, bool supersample)
+bool CreateImages(const Sp::Layout& l, bool supersample, bool replace)
 {
     DestroyImages();
     const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -161,6 +162,7 @@ bool CreateImages(const Sp::Layout& l, bool supersample)
     const unsigned int want[6] = { l.modelW, l.modelH, l.ordinaryW, l.ordinaryH, l.nativeW, l.nativeH };
     std::copy(std::begin(want), std::end(want), std::begin(madeFor));
     madeSuper = supersample;
+    madeReplace = replace;
     madeActive = true;
     return true;
 }
@@ -249,6 +251,7 @@ void Release(bool deviceAlive)
         v = 0;
 
     madeActive = false;
+    madeReplace = false;
     passFailed = false;
     tracker.Reset();
     std::lock_guard<std::mutex> lock(publishedLock);

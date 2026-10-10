@@ -129,22 +129,24 @@ int main() try {
         Check(vkBindBufferMemory(device, b.handle, b.memory, 0));
         Check(vkMapMemory(device, b.memory, 0, size, 0, &b.mapped)); return b;
     };
-    enum { Colour, Depth, Motion, PackedColour, PackedDepth, PackedMotion, UnpackedProxy, UnpackedAnswer, ImageCount };
+    enum { Colour, Depth, Motion, PackedColour, PackedDepth, PackedMotion, UnpackedProxy, UnpackedAnswer,
+           Reference, ReplacedProxy, ReplacedAnswer, ImageCount };
     std::array<TestImage, ImageCount> images{};
     const VkFormat formats[] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT,
         VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT};
-    const uint32_t widths[] = {N, DA, MA, M, M, M, N, N};
-    const uint32_t heights[] = {N, DA, MA, M, M, M, N, N};
+        VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT};
+    const uint32_t widths[] = {N, DA, MA, M, M, M, N, N, N, N, N};
+    const uint32_t heights[] = {N, DA, MA, M, M, M, N, N, N, N, N};
     for (int i = 0; i < ImageCount; ++i)
         if (!images[i].Ensure(device, physical, widths[i], heights[i], formats[i]))
             throw std::runtime_error("Image creation failed");
 
     const DlssNr::GuideRegions regions{{2, 3, N, N}, {4, 5, N, N}};
-    std::array<Buffer, 3> uniform{};
-    for (int i = 0; i < 3; ++i) {
+    std::array<Buffer, 4> uniform{};
+    for (int i = 0; i < 4; ++i) {
         uniform[i] = makeBuffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-        const auto c = MakeConstants(layout, i == 0 ? 100 : i == 1 ? 101 : 102,
+        const auto c = MakeConstants(layout, 100 + i,
                                      regions, 1.25f, -.75f);
         std::memcpy(uniform[i].mapped, &c, sizeof(c));
     }
@@ -163,6 +165,19 @@ int main() try {
     Buffer motionRead = makeBuffer(M * M * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     Buffer unpackRead = makeBuffer(N * N * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     Buffer answerRead = makeBuffer(N * N * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    // The picture the uncompressed path would show the model, for the Replace curves' correction (mode 103): any pattern.
+    const auto referenceValue = [](int x, int y) { return (float) ((x * 7 + y * 13) % 32) / 32.0f; };
+    const auto toHalf = [](float f) -> uint16_t { // exact for the k/32 values used here
+        if (f == 0.0f) return 0;
+        int e = 0; float m = std::frexp(f, &e); // f = m * 2^e, m in [0.5, 1)
+        return (uint16_t) (((e + 14) << 10) | ((int) ((m * 2.0f - 1.0f) * 1024.0f) & 1023));
+    };
+    Buffer referenceUpload = makeBuffer(N * N * 8, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    for (int y = 0; y < (int) N; ++y) for (int x = 0; x < (int) N; ++x) {
+        auto* texel = static_cast<uint16_t*>(referenceUpload.mapped) + (y * N + x) * 4;
+        texel[0] = texel[1] = texel[2] = toHalf(referenceValue(x, y)); texel[3] = toHalf(1.0f);
+    }
+    Buffer replacedRead = makeBuffer(N * N * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
     std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
     for (uint32_t i = 0; i < 8; ++i)
@@ -179,21 +194,22 @@ int main() try {
     sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VkSampler sampler{}; Check(vkCreateSampler(device, &sci, nullptr, &sampler));
-    VkDescriptorPoolSize poolSizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 3}};
+    VkDescriptorPoolSize poolSizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 4}};
     VkDescriptorPoolCreateInfo dpci {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpci.maxSets = 3; dpci.poolSizeCount = 4; dpci.pPoolSizes = poolSizes;
+    dpci.maxSets = 4; dpci.poolSizeCount = 4; dpci.pPoolSizes = poolSizes;
     VkDescriptorPool pool{}; Check(vkCreateDescriptorPool(device, &dpci, nullptr, &pool));
-    VkDescriptorSetLayout layouts[] = {setLayout, setLayout, setLayout}; VkDescriptorSet sets[3]{};
+    VkDescriptorSetLayout layouts[] = {setLayout, setLayout, setLayout, setLayout}; VkDescriptorSet sets[4]{};
     VkDescriptorSetAllocateInfo dsai {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dsai.descriptorPool = pool; dsai.descriptorSetCount = 3; dsai.pSetLayouts = layouts;
+    dsai.descriptorPool = pool; dsai.descriptorSetCount = 4; dsai.pSetLayouts = layouts;
     Check(vkAllocateDescriptorSets(device, &dsai, sets));
     const int source[][4] = {{Colour, Depth, Motion, Colour}, {Colour, Depth, Motion, Colour},
-                             {PackedColour, PackedColour, Motion, Colour}};
+                             {PackedColour, PackedColour, Motion, Colour},
+                             {PackedColour, PackedColour, Reference, Colour}};
     const int target[][2] = {{PackedColour, PackedColour}, {PackedDepth, PackedMotion},
-                             {UnpackedProxy, UnpackedAnswer}};
-    for (int pass = 0; pass < 3; ++pass) {
+                             {UnpackedProxy, UnpackedAnswer}, {ReplacedProxy, ReplacedAnswer}};
+    for (int pass = 0; pass < 4; ++pass) {
         VkDescriptorBufferInfo bi {uniform[pass].handle, 0, 256};
         std::array<VkDescriptorImageInfo, 7> ii{};
         std::array<VkWriteDescriptorSet, 8> writes{};
@@ -246,17 +262,17 @@ int main() try {
         c.imageExtent = {widths[i], heights[i], 1};
         vkCmdCopyBufferToImage(command, b.handle, images[i].info.Image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     };
-    uploadImage(depthUpload, Depth); uploadImage(motionUpload, Motion);
+    uploadImage(depthUpload, Depth); uploadImage(motionUpload, Motion); uploadImage(referenceUpload, Reference);
     auto barrier = [&](VkAccessFlags before, VkAccessFlags after) {
         VkMemoryBarrier b {VK_STRUCTURE_TYPE_MEMORY_BARRIER}; b.srcAccessMask = before; b.dstAccessMask = after;
         vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                              0, 1, &b, 0, nullptr, 0, nullptr);
     };
     barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-    for (int pass = 0; pass < 3; ++pass) {
+    for (int pass = 0; pass < 4; ++pass) {
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[pass == 1 ? 1 : 0]);
         vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &sets[pass], 0, nullptr);
-        const uint32_t w = pass == 2 ? N : M;
+        const uint32_t w = pass >= 2 ? N : M;
         vkCmdDispatch(command, (w + 7) / 8, (w + 7) / 8, 1);
         barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     }
@@ -267,7 +283,7 @@ int main() try {
     };
     copyImage(PackedColour, colourRead); copyImage(PackedDepth, depthRead);
     copyImage(PackedMotion, motionRead); copyImage(UnpackedProxy, unpackRead);
-    copyImage(UnpackedAnswer, answerRead);
+    copyImage(UnpackedAnswer, answerRead); copyImage(ReplacedAnswer, replacedRead);
     barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
     Check(vkEndCommandBuffer(command));
     VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO}; submit.commandBufferCount = 1; submit.pCommandBuffers = &command;
@@ -300,10 +316,20 @@ int main() try {
         Near(Half(unpacked[i * 4]), .25f); Near(Half(unpacked[i * 4 + 1]), .5f);
         Near(Half(answer[i * 4]), .25f); Near(Half(answer[i * 4 + 1]), .5f);
     }
-    std::cout << "PASS: Vulkan spatial colour, typed depth/motion, guide rects, motion endpoints, unpack\n";
+    // Replace correction (mode 103): the model changed nothing (answer == packed input), so the answer must be exactly the
+    // picture the uncompressed path would show it, wherever it is, while mode 102 above gave the packed constant.
+    {
+        const auto replaced = static_cast<const uint16_t*>(replacedRead.mapped);
+        for (int y : {0, 1, 5, 31, 50, (int) N - 2, (int) N - 1}) for (int x : {0, 1, 7, 31, 63, (int) N - 2, (int) N - 1}) {
+            const size_t i = static_cast<size_t>(y) * N + x;
+            Near(Half(replaced[i * 4]), referenceValue(x, y));
+            Near(Half(replaced[i * 4 + 1]), referenceValue(x, y));
+        }
+    }
+    std::cout << "PASS: Vulkan spatial colour, typed depth/motion, guide rects, motion endpoints, unpack, Replace correction\n";
     for (auto& image : images) image.Destroy(device);
     for (auto* b : {&depthUpload, &motionUpload, &colourRead, &depthRead, &motionRead, &unpackRead, &answerRead,
-                    &uniform[0], &uniform[1], &uniform[2]}) {
+                    &referenceUpload, &replacedRead, &uniform[0], &uniform[1], &uniform[2], &uniform[3]}) {
         vkUnmapMemory(device, b->memory); vkDestroyBuffer(device, b->handle, nullptr); vkFreeMemory(device, b->memory, nullptr);
     }
     vkDestroyCommandPool(device, commandPool, nullptr);

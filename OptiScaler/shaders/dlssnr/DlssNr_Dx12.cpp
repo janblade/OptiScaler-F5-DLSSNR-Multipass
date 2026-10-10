@@ -3014,6 +3014,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const unsigned int modelHeight = spatial ? EdgeCompression::Layout().modelH : workHeight;
     const DXGI_FORMAT modelFormat = spatial ? EdgeCompression::kFormat : desc.Format;
 
+    // The Replace curves take the model's answer as the picture and never read the proxy, so the unpack's loss at the
+    // edges would land on screen with nothing to cancel it. The unpack then adds it back, measured against the picture the
+    // uncompressed path would have shown the model (mode 103), which is built below the way that path builds it.
+    const bool replaceCorrection =
+        spatial && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
+
     ReleaseSurfacesIfFormatChanged(modelFormat);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
@@ -3153,7 +3159,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // Packed, the model input comes from the colour pack instead, straight from the full-size proxy.
-    if (spatial)
+    // Replace keeps the ordinary reduced picture (below or above 100%) as the reference for the unpack.
+    if (spatial && !replaceCorrection)
         ParkNrResource(g_nr.colorSmall);
     else if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
@@ -4059,7 +4066,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // enlarged during the resolve while the frame underneath stays full size and untouched.
     ID3D12Resource* modelInput = g_nr.colorCopy;
 
-    if (reduced && !spatial && g_nr.colorSmall != nullptr)
+    if (reduced && (!spatial || replaceCorrection) && g_nr.colorSmall != nullptr)
     {
         bool built = false;
 
@@ -4150,6 +4157,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // vectors are taken to native pixels with the game's scale first, and the packed ones are exact in packed pixels.
     ID3D12Resource* modelDepth = depthIn;
     ID3D12Resource* modelMotion = motionIn;
+
+    // What the uncompressed path would show the model at this Model resolution, on the ordinary grid: the encoded proxy
+    // itself at 100%, else the picture built just above the way that path builds it (box downsample below 100%, the NR
+    // upscaler above), from the same encoded proxy. Only Replace needs it.
+    ID3D12Resource* spatialReference = modelInput;
 
     if (spatial)
     {
@@ -4560,8 +4572,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatial && result == NVSDK_NGX_Result_Success && finalAnswer != nullptr)
     {
         spatialUnpacked =
-            DispatchSpatial(cmdList, DlssNr::Spatial::MakeConstants(EdgeCompression::Layout(), 102, guides, 1.0f, 1.0f),
-                            modelInput, finalAnswer, nullptr, EdgeCompression::proxy, EdgeCompression::answer);
+            DispatchSpatial(cmdList,
+                            DlssNr::Spatial::MakeConstants(EdgeCompression::Layout(), replaceCorrection ? 103 : 102,
+                                                           guides, 1.0f, 1.0f),
+                            modelInput, finalAnswer, replaceCorrection ? spatialReference : nullptr,
+                            EdgeCompression::proxy, EdgeCompression::answer);
 
         if (spatialUnpacked)
         {
@@ -5061,7 +5076,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
-    if (reduced && !spatial && g_nr.colorSmall != nullptr)
+    if (reduced && (!spatial || replaceCorrection) && g_nr.colorSmall != nullptr)
         Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 

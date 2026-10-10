@@ -1181,6 +1181,12 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         spatial = false;
     }
 
+    // The Replace curves take the model's answer as the picture and never read the proxy, so the unpack's loss at the edges
+    // would land on screen with nothing to cancel it. The unpack then adds it back, measured against the picture the
+    // uncompressed path would have shown the model (mode 103), which is built below the way that path builds it.
+    const bool replaceCorrection =
+        spatial && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
+
     const uint32_t modelWidth = spatial ? EdgeCompressionVk::Layout().modelW : workWidth;
     const uint32_t modelHeight = spatial ? EdgeCompressionVk::Layout().modelH : workHeight;
 
@@ -1194,7 +1200,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     if (g_vk.width != width || g_vk.height != height || g_vk.workWidth != modelWidth ||
         g_vk.workHeight != modelHeight || g_vk.beforeSr != beforeSr ||
         g_vk.rayReconstruction != rayReconstruction || profileChanged ||
-        EdgeCompressionVk::Stale(spatial, EdgeCompressionVk::Layout(), workScale > 1.0f))
+        EdgeCompressionVk::Stale(spatial, EdgeCompressionVk::Layout(), workScale > 1.0f, replaceCorrection))
     {
         // This block releases the feature and frees the surfaces below IMMEDIATELY. A frame-size
         // change is already fenced by the game -- it recreates the swapchain around it -- but moving
@@ -1260,10 +1266,12 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                         CreateImage(g_vk.proxy, width, height, working, true) &&
                         CreateImage(g_vk.keep, width, height, working, true) &&
                         (!beforeSr || CreateImage(g_vk.preColor, width, height, working, false)) &&
-                        (!reduced || spatial || CreateImage(g_vk.proxySmall, workWidth, workHeight, working, true)) &&
+                        (!reduced || (spatial && !replaceCorrection) ||
+                         CreateImage(g_vk.proxySmall, workWidth, workHeight, working, true)) &&
                         (workScale == 1.0f || (spatial && workScale > 1.0f) ||
                          CreateImage(g_vk.outputNative, width, height, working, true)) &&
-                        (!spatial || EdgeCompressionVk::CreateImages(EdgeCompressionVk::Layout(), workScale > 1.0f));
+                        (!spatial ||
+                         EdgeCompressionVk::CreateImages(EdgeCompressionVk::Layout(), workScale > 1.0f, replaceCorrection));
 
         if (!ok)
         {
@@ -1871,7 +1879,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // downsample makes the small one the model actually reads.
     OwnedImage* modelInput = &g_vk.proxy;
 
-    if (reduced && !spatial && g_vk.proxySmall.Valid())
+    if (reduced && (!spatial || replaceCorrection) && g_vk.proxySmall.Valid())
     {
         bool built = false;
 
@@ -2025,6 +2033,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // compression is what is turned off.
     NVSDK_NGX_Resource_VK* modelDepth = depth;
     NVSDK_NGX_Resource_VK* modelMotion = motion;
+
+    // What the uncompressed path would show the model at this Model resolution, on the ordinary grid: the encoded proxy
+    // itself at 100%, else the picture built above the way that path builds it (box downsample below 100%, the NR
+    // upscaler above). Only Replace needs it.
+    OwnedImage* spatialReference = modelInput;
 
     if (spatial)
     {
@@ -2235,12 +2248,19 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, EdgeCompressionVk::proxy, VK_IMAGE_LAYOUT_GENERAL);
         Transition(cmdBuffer, EdgeCompressionVk::answer, VK_IMAGE_LAYOUT_GENERAL);
 
+        if (replaceCorrection)
+            Transition(cmdBuffer, *spatialReference, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
         const DlssNrSpatial_Vk::Read reads[3] = { { modelInput->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                                                    { answer->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
-                                                   {} };
+                                                   { replaceCorrection ? spatialReference->view : VK_NULL_HANDLE,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
 
         if (!EdgeCompressionVk::pass->Dispatch(
-                cmdBuffer, DlssNr::Spatial::MakeConstants(EdgeCompressionVk::Layout(), 102, guides, 1.0f, 1.0f), reads,
+                cmdBuffer,
+                DlssNr::Spatial::MakeConstants(EdgeCompressionVk::Layout(), replaceCorrection ? 103 : 102, guides, 1.0f,
+                                               1.0f),
+                reads,
                 EdgeCompressionVk::proxy.view, EdgeCompressionVk::answer.view))
         {
             EdgeCompressionVk::TurnOff(Spatial::Status::TurnedOffDispatch);

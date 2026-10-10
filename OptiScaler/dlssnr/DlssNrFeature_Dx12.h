@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
+#include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <nvsdk_ngx.h>
 #include <menu/MenuPages.h>
 #include <menu/HeaderBanner.h>
@@ -253,6 +254,11 @@ void DismissExposureCalibration();
 // the manual slider, or (post-SR + Auto) the derived render:output ratio. So the menu can show the
 // live value instead of the stale manual one while Auto is overriding it.
 int CurrentModelResolutionPercent();
+
+// Compress screen edges (shaders/dlssnr/DlssNr_Spatial.h), as of the last frame NR ran on Direct3D 12: a status code, the
+// size the model works on and the one it would have without it, and the boxes to draw on screen (fractions of the
+// frame). Status::Off until a frame has run since the setting changed. The menu owns every word for it.
+Spatial::Published EdgeCompressionStatus();
 
 // The size NR hands the model, in pixels, or 0x0 before the first frame. The network pools that 2x2 before
 // its body runs, so the body sees half of it (rounded up); the menu and log show both so tuning is not

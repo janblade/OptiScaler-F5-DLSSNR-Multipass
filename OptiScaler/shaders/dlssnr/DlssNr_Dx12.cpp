@@ -957,12 +957,13 @@ void ForgetCalibration()
     g_nr.calibWhy = "measuring...";
 }
 
+// needed is the model surfaces' format: the game's, or RGBA16F while Compress screen edges packs the picture.
 void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
 {
     if (g_nr.output == nullptr || g_nr.output->GetDesc().Format == needed)
         return;
 
-    LOG_INFO("DLSS-NR rebuilding surfaces: format {} -> {} (inject point changed)",
+    LOG_INFO("DLSS-NR rebuilding surfaces: format {} -> {} (inject point or Compress screen edges changed)",
              (int) g_nr.output->GetDesc().Format, (int) needed);
 
     ForgetCalibration();
@@ -1954,23 +1955,11 @@ constexpr unsigned long long kSettleFrames = 30;
 // Only a size we are already resampling to is rounded. A native-size pass (WorkingScale 1.0, or a scale
 // that rounds back to native) is left alone: rounding 1080 to 1088 would turn a 1:1 pass into a
 // resample of the frame, which is worse than a ragged border window.
+//
+// The rule lives in DlssNr_Spatial.h, which Compress screen edges sizes its packed picture by too.
 unsigned int AlignWorkSize(unsigned int size, unsigned int native)
 {
-    constexpr unsigned int kGrid = 16;
-
-    if (size == native)
-        return size;
-
-    unsigned int aligned = (size + kGrid / 2) / kGrid * kGrid;
-
-    if (aligned < kGrid)
-        aligned = kGrid;
-
-    // Shrinking never rounds up past the native size (that would enlarge what was meant to be reduced).
-    if (size < native && aligned > native)
-        aligned = native;
-
-    return aligned;
+    return DlssNr::Spatial::AlignedExtent(size, native);
 }
 
 // The extras the official integration sets: global tone (read at create) and the interface inputs.
@@ -2068,6 +2057,7 @@ void ReportSkipOnce(const char* reason)
 
 #include "DlssNr_DetailReuse.inl"
 #include "DlssNr_SceneCut.inl"
+#include "DlssNr_Spatial.inl"
 
 } // namespace
 
@@ -2996,10 +2986,42 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
-    ReleaseSurfacesIfFormatChanged(desc.Format);
+    // Compress screen edges (DlssNr_Spatial.inl): whether the model works on a packed picture this frame, and at what
+    // size. Everything about the model below (its features, its surfaces, the guides it is handed) follows the packed
+    // size; the encode, the resolve and the frame stay at the ordinary ones.
+    EdgeCompression::Signature spatialSignature;
+    spatialSignature.colour = desc.Format;
+    spatialSignature.depth = depth != nullptr ? guideDesc.Format : DXGI_FORMAT_UNKNOWN;
+    spatialSignature.depthW = depth != nullptr ? (unsigned int) guideDesc.Width : 0u;
+    spatialSignature.depthH = depth != nullptr ? guideDesc.Height : 0u;
+    spatialSignature.motion = motionDesc.Format;
+    spatialSignature.motionW = (unsigned int) motionDesc.Width;
+    spatialSignature.motionH = motionDesc.Height;
+
+    bool spatialReset = false;
+    bool spatial = EdgeCompression::Begin(cfg, width, height, workScale, proxyBackend, spatialSignature, spatialReset);
+
+    if (spatialReset)
+        g_nr.reset = true;
+
+    if (spatial && (!SpatialReady() || !EdgeCompression::Prepare(device, EdgeCompression::layout, workScale > 1.0f)))
+    {
+        EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffResources);
+        g_nr.reset = true;
+        spatial = false;
+    }
+
+    if (!spatial)
+        EdgeCompression::Release();
+
+    const unsigned int modelWidth = spatial ? EdgeCompression::layout.modelW : workWidth;
+    const unsigned int modelHeight = spatial ? EdgeCompression::layout.modelH : workHeight;
+    const DXGI_FORMAT modelFormat = spatial ? EdgeCompression::kFormat : desc.Format;
+
+    ReleaseSurfacesIfFormatChanged(modelFormat);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
-                                   g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
+                                   g_nr.workWidth != modelWidth || g_nr.workHeight != modelHeight;
     const bool placementChanged = g_nr.feature != nullptr &&
         (g_nr.beforeUpscale != frame.BeforeUpscale ||
          g_nr.rayReconstruction != frame.RayReconstruction);
@@ -3063,10 +3085,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_nr.output == nullptr)
     {
-        g_nr.output = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.output = CreateScratch(device, modelFormat, modelWidth, modelHeight);
         g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
-        g_nr.workWidth = workWidth;
-        g_nr.workHeight = workHeight;
+        g_nr.workWidth = modelWidth;
+        g_nr.workHeight = modelHeight;
     }
 
     if (g_nr.hdrCopy == nullptr)
@@ -3096,7 +3118,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     else if (g_nr.passScratch == nullptr && !g_nr.passScratchFailed)
     {
-        g_nr.passScratch = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.passScratch = CreateScratch(device, modelFormat, modelWidth, modelHeight);
         g_nr.passScratchFailed = g_nr.passScratch == nullptr;
 
         if (g_nr.passScratchFailed)
@@ -3105,7 +3127,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (requestedPasses > 1 && g_nr.passClampScratch == nullptr && !g_nr.passClampScratchFailed)
     {
-        g_nr.passClampScratch = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.passClampScratch = CreateScratch(device, modelFormat, modelWidth, modelHeight);
         g_nr.passClampScratchFailed = g_nr.passClampScratch == nullptr;
 
         if (g_nr.passClampScratchFailed)
@@ -3121,7 +3143,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // caps the chain one pass short at that second boundary (the pass loop's own null-target check).
     if (requestedPasses > 2 && g_nr.passClampScratch2 == nullptr && !g_nr.passClampScratch2Failed)
     {
-        g_nr.passClampScratch2 = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.passClampScratch2 = CreateScratch(device, modelFormat, modelWidth, modelHeight);
         g_nr.passClampScratch2Failed = g_nr.passClampScratch2 == nullptr;
 
         if (g_nr.passClampScratch2Failed)
@@ -3134,13 +3156,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.passClampScratch2Failed = false;
     }
 
-    if (reduced && g_nr.colorSmall == nullptr)
+    // Packed, the model input comes from the colour pack instead, straight from the full-size proxy.
+    if (spatial)
+        ParkNrResource(g_nr.colorSmall);
+    else if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
 
     // The up/down-leg target is native (the answer is brought back to frame size before the
     // resolve) -- shared by both the supersampling down-leg (> 1) and the reduced up-leg (< 1),
     // mutually exclusive per frame.
-    if (workScale != 1.0f && g_nr.outputNative == nullptr)
+    // Packed and supersampling, the pair is averaged into Compress screen edges' own native pair instead.
+    if (workScale != 1.0f && !(spatial && workScale > 1.0f) && g_nr.outputNative == nullptr)
         g_nr.outputNative = CreateScratch(device, desc.Format, width, height);
 
     if (g_nr.meter == nullptr)
@@ -3227,7 +3253,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const auto tuning = PassTuning(cfg, 0);
         g_nr.feature =
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                        device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
+                        device, cmdList, g_nr.capabilityParams, modelWidth, modelHeight,
                         (int) PassPreset(cfg, 0),
                         tuning.intensity, (int) PassStyle(cfg, 0),
                         tuning.structure, tuning.tone, tuning.skin,
@@ -3270,7 +3296,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  "(preset {}, intensity {}, style {}, build epoch {})",
                  frame.RayReconstruction ? (frame.BeforeUpscale ? "before RR+SR" : "after RR+SR") :
                      (frame.BeforeUpscale ? "before SR" : "after SR"),
-                 width, height, workWidth, workHeight, (workWidth + 1) / 2, (workHeight + 1) / 2,
+                 width, height, modelWidth, modelHeight, (modelWidth + 1) / 2, (modelHeight + 1) / 2,
                  guideWidth, guideHeight, g_nr.builtPreset[0], g_nr.builtIntensity, g_nr.builtStyle[0],
                  frame.SubmissionEpoch);
 
@@ -3368,7 +3394,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 const auto tuning = PassTuning(cfg, pass);
                 g_nr.passFeature[pass] = g_nr.create(
                     snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                    device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
+                    device, cmdList, g_nr.capabilityParams, modelWidth, modelHeight,
                     (int) PassPreset(cfg, pass), tuning.intensity,
                     (int) PassStyle(cfg, pass),
                     tuning.structure, tuning.tone, tuning.skin,
@@ -4037,7 +4063,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // enlarged during the resolve while the frame underneath stays full size and untouched.
     ID3D12Resource* modelInput = g_nr.colorCopy;
 
-    if (reduced && g_nr.colorSmall != nullptr)
+    if (reduced && !spatial && g_nr.colorSmall != nullptr)
     {
         bool built = false;
 
@@ -4122,6 +4148,65 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         FinishColor(false);
         device->Release();
         return;
+    }
+
+    // Compress screen edges: pack the proxy, the depth and the motion into the smaller picture the model works on. The
+    // vectors are taken to native pixels with the game's scale first, and the packed ones are exact in packed pixels.
+    ID3D12Resource* modelDepth = depthIn;
+    ID3D12Resource* modelMotion = motionIn;
+
+    if (spatial)
+    {
+        using DlssNr::Spatial::MakeConstants;
+        const auto& spatialLayout = EdgeCompression::layout;
+        auto guideConstants = MakeConstants(spatialLayout, 101, guides, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
+
+        if (!guides.depth.valid())
+        {
+            guideConstants.depthRect[0] = guideConstants.depthRect[1] = 0.0f;
+            guideConstants.depthRect[2] = guideConstants.depthRect[3] = 1.0f;
+        }
+
+        const bool packedColor =
+            DispatchSpatial(cmdList, MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f), g_nr.colorCopy, nullptr,
+                            nullptr, EdgeCompression::color);
+        const bool packedGuides = packedColor && DispatchSpatial(cmdList, guideConstants, g_nr.colorCopy, depthIn,
+                                                                 motionIn, EdgeCompression::depth,
+                                                                 EdgeCompression::motion);
+
+        if (!packedGuides)
+        {
+            // The frame is given up, not NR: put everything back as the next frame finds it, and run it ordinary.
+            EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffDispatch);
+            g_nr.reset = true;
+            Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            FinishColor(false);
+
+            if (g_gpuTime != nullptr)
+                g_gpuTime->End(cmdList);
+
+            if (g_nr.depthClone != nullptr && depthIn == g_nr.depthClone)
+                Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_COPY_DEST);
+
+            if (g_nr.motionClone != nullptr && motionIn == g_nr.motionClone)
+                Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_COPY_DEST);
+
+            device->Release();
+            return;
+        }
+
+        for (ID3D12Resource* packed : { EdgeCompression::color, EdgeCompression::depth, EdgeCompression::motion })
+            Barrier(cmdList, packed, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        modelInput = EdgeCompression::color;
+        modelDepth = depth != nullptr ? EdgeCompression::depth : nullptr;
+        modelMotion = EdgeCompression::motion;
     }
 
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
@@ -4271,6 +4356,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     int result = NVSDK_NGX_Result_Success;
 
+    // What the model is handed as its guides: the game's, at the game's sizes and scale; or packed, where all three are
+    // the packed picture's own (motion in packed pixels, so a scale of 1).
+    const unsigned int evalGuideW = spatial ? modelWidth : guideWidth;
+    const unsigned int evalGuideH = spatial ? modelHeight : guideHeight;
+    const unsigned int evalMotionW = spatial ? modelWidth : motionWidth;
+    const unsigned int evalMotionH = spatial ? modelHeight : motionHeight;
+    const unsigned int evalDepthX = spatial ? 0u : depthBaseX;
+    const unsigned int evalDepthY = spatial ? 0u : depthBaseY;
+    const float evalMvScaleX = spatial ? 1.0f : g_nr.guideMvScaleX * mvToWorkX;
+    const float evalMvScaleY = spatial ? 1.0f : g_nr.guideMvScaleY * mvToWorkY;
+
     // Reuse detail between frames (DlssNr_DetailReuse.inl): every other frame skips the model and moves the previous
     // frame's detail onto this frame's input instead. On such a frame the answer lands in g_nr.output (at rest, UAV).
     // The frame as reuse sees it: a scene cut's distrust where the frame has no history distrust of its own.
@@ -4307,6 +4403,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     reuseFrame.depth = depthIn;
     reuseFrame.output = g_nr.output;
     reuseFrame.modelReset = g_nr.reset;
+    reuseFrame.edgeCompression = spatial; // the two do not run together; Reuse detail says so in the menu
     // A Tune step pins the white point (calibrationPinned); a Measure detail run copies and measures without pinning,
     // and measures Reuse bottleneck as it runs.
     reuseFrame.blocked = calibrationPinned || g_nr.heldActive;
@@ -4358,14 +4455,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
                                     cfg.DlssNrKernelProfile.value_or_default());
         result = g_nr.evaluate(
-            cmdList, passFeature, g_nr.capabilityParams, passInput, depthIn, reusePlan.motion, passOutput,
-            workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight,
-            depthBaseX, depthBaseY, reusePlan.motionBaseX, reusePlan.motionBaseY, g_nr.guideDepthInverted ? 1 : 0,
+            cmdList, passFeature, g_nr.capabilityParams, passInput, modelDepth, spatial ? modelMotion : reusePlan.motion,
+            passOutput, modelWidth, modelHeight, evalGuideW, evalGuideH, evalMotionW, evalMotionH,
+            evalDepthX, evalDepthY, spatial ? 0u : reusePlan.motionBaseX, spatial ? 0u : reusePlan.motionBaseY,
+            g_nr.guideDepthInverted ? 1 : 0,
             passReset ? 1 : 0, tuning.intensity,
             (int) PassStyle(cfg, pass), tuning.structure,
             tuning.tone, tuning.skin,
-            tuning.autoMask ? 1 : 0, g_nr.guideMvScaleX * mvToWorkX,
-            g_nr.guideMvScaleY * mvToWorkY);
+            tuning.autoMask ? 1 : 0, evalMvScaleX,
+            evalMvScaleY);
         if (DlssNrNative::EndEvaluate(cmdList))
             LOG_WARN("DLSS-NR: the model's kernel launches were not in the expected order; Reuse bottleneck is off for "
                      "this session");
@@ -4414,8 +4512,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             MakeModelWritable(passClampTarget);
             DlssNrConstants clampParams {};
             clampParams.Mode = DlssNrMode_ClampProxy;
-            clampParams.Width = workWidth;
-            clampParams.Height = workHeight;
+            clampParams.Width = modelWidth;
+            clampParams.Height = modelHeight;
             // Clamped here, not trusted from the ini: the shader treats PassFeedback as a convex
             // blend weight between two values it has already guaranteed are in the unit cube, and
             // that guarantee only holds for a weight in [0,1]. A hand-edited value outside it would
@@ -4455,19 +4553,51 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.reset = false;
 
+    // Compress screen edges: the packed model input and the model's answer back to the ordinary grid, both through the
+    // same resampling, so what the resolve takes from the pair is the model's change. The resolve, the enlargement and
+    // the supersample down-leg below work on these two instead of the packed ones.
+    ID3D12Resource* ordinaryProxy = modelInput;
+    ID3D12Resource* ordinaryAnswer = finalAnswer;
+    bool spatialUnpacked = false;
+    bool spatialFailed = false;
+
+    if (spatial && result == NVSDK_NGX_Result_Success && finalAnswer != nullptr)
+    {
+        spatialUnpacked =
+            DispatchSpatial(cmdList, DlssNr::Spatial::MakeConstants(EdgeCompression::layout, 102, guides, 1.0f, 1.0f),
+                            modelInput, finalAnswer, nullptr, EdgeCompression::proxy, EdgeCompression::answer);
+
+        if (spatialUnpacked)
+        {
+            for (ID3D12Resource* unpacked : { EdgeCompression::proxy, EdgeCompression::answer })
+                Barrier(cmdList, unpacked, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ordinaryProxy = EdgeCompression::proxy;
+            ordinaryAnswer = EdgeCompression::answer;
+        }
+        else
+        {
+            EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffDispatch);
+            g_nr.reset = true;
+            spatialFailed = true;
+        }
+    }
+
     // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
     // accepts a super-native evaluate and what it returns. Once per working-size change, or on any error.
-    if (workWidth > width || workHeight > height)
+    if (modelWidth > width || modelHeight > height)
     {
         static unsigned int lastSuper = 0;
-        if (lastSuper != workWidth || result != 1)
+        if (lastSuper != modelWidth || result != 1)
         {
-            lastSuper = workWidth;
+            lastSuper = modelWidth;
             LOG_INFO("DLSS-NR SUPERSAMPLE: model at {}x{} = {:.2f}x native {}x{}, evaluate result {} ({})",
-                     workWidth, workHeight, (float) workWidth / (float) width, width, height, result,
+                     modelWidth, modelHeight, (float) modelWidth / (float) width, width, height, result,
                      NgxResultName((unsigned int) result));
         }
     }
+
+    bool composed = false;
 
     // Once, a few seconds in, so it lands after the values have been written at least once.
     static bool tuningReported = false;
@@ -4515,7 +4645,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  PassStyle(cfg, 0));
     }
 
-    if (result == NVSDK_NGX_Result_Success)
+    if (result == NVSDK_NGX_Result_Success && !spatialFailed)
     {
         // Resolve takes the difference between what the model returned and what it was shown, and adds
         // that back to the frame. At strength zero the result is what the upscaler produced, exactly, and
@@ -4630,8 +4760,38 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // resolve reads the native proxy (colorCopy) and native answer (outputNative); on failure it
         // falls back to the Nx pair. finalAnswer is NPSR here; outputNative is UAV from last frame.
         bool superDownOk = false;
-        if (workScale > 1.0f && g_nr.superDown != nullptr && g_nr.outputNative != nullptr &&
-            g_nr.superDown->Dispatch(cmdList, finalAnswer, g_nr.outputNative))
+        bool pairDownOk = false; // packed and supersampling: the unpacked pair, both halves averaged to native
+        if (spatial && workScale > 1.0f)
+        {
+            // The proxy goes through the same filter as the answer, so the resolve compares like with like. If either
+            // fails, the unpacked pair goes to the resolve as it is (both halves through the resolve's own tap).
+            const Scaler nrScaler = cfg.DlssNrScalingDownscaler.value_or_default();
+            if (g_nr.nrScaler != nrScaler)
+            {
+                if (g_nr.superUp != nullptr)   { delete g_nr.superUp;   g_nr.superUp = nullptr; }
+                if (g_nr.superDown != nullptr) { delete g_nr.superDown; g_nr.superDown = nullptr; }
+                EdgeCompression::ReleaseDown();
+                g_nr.nrScaler = nrScaler;
+            }
+            if (g_nr.superDown == nullptr)
+                g_nr.superDown = new OS_Dx12("DLSS-NR supersample down", device, false, nrScaler);
+            if (EdgeCompression::proxyDown == nullptr)
+                EdgeCompression::proxyDown = new OS_Dx12("DLSS-NR compress screen edges proxy down", device, false, nrScaler);
+
+            pairDownOk = g_nr.superDown != nullptr && EdgeCompression::proxyDown != nullptr &&
+                         EdgeCompression::proxyDown->Dispatch(cmdList, ordinaryProxy, EdgeCompression::proxyNative) &&
+                         g_nr.superDown->Dispatch(cmdList, ordinaryAnswer, EdgeCompression::answerNative);
+
+            if (pairDownOk)
+            {
+                for (ID3D12Resource* native : { EdgeCompression::proxyNative, EdgeCompression::answerNative })
+                    Barrier(cmdList, native, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                superDownOk = true;
+            }
+        }
+        else if (workScale > 1.0f && g_nr.superDown != nullptr && g_nr.outputNative != nullptr &&
+                 g_nr.superDown->Dispatch(cmdList, ordinaryAnswer, g_nr.outputNative))
         {
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -4666,7 +4826,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     g_nr.sgsr1UpAnswer = new SGSR1_Dx12("DLSS-NR SGSR1 up (answer)", device);
 
                 if (g_nr.sgsr1UpAnswer != nullptr &&
-                    g_nr.sgsr1UpAnswer->Dispatch(cmdList, finalAnswer, g_nr.outputNative,
+                    g_nr.sgsr1UpAnswer->Dispatch(cmdList, ordinaryAnswer, g_nr.outputNative,
                                                  resolveParams.ReversibleMode, resolveParams.Passthrough,
                                                  sgsr1EdgeThreshold, sgsr1EdgeSharpness))
                 {
@@ -4687,7 +4847,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 LOG_INFO("DLSS-NR SGSR1 up-leg: answer {} (method {}, workScale {:.3f}, "
                          "{}x{} -> {}x{})",
                          sgsrAnswerOk ? "engaged" : "NOT engaged",
-                         upscaleMethod, workScale, g_nr.workWidth, g_nr.workHeight, width, height);
+                         upscaleMethod, workScale, workWidth, workHeight, width, height);
                 lastLoggedState = state;
                 hasLoggedSgsrUp = true;
             }
@@ -4702,13 +4862,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             {
                 LOG_INFO("DLSS-NR reduced up-leg: Bilinear selected, SGSR1 skipped entirely "
                          "(workScale {:.3f}, {}x{} -> {}x{})",
-                         workScale, g_nr.workWidth, g_nr.workHeight, width, height);
+                         workScale, workWidth, workHeight, width, height);
                 hasLoggedBilinear = true;
             }
         }
 
-        ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : modelInput;
-        ID3D12Resource* resolveAnswer = (superDownOk || sgsrAnswerOk) ? g_nr.outputNative : finalAnswer;
+        ID3D12Resource* resolveProxy = pairDownOk ? EdgeCompression::proxyNative
+                                       : superDownOk ? g_nr.colorCopy : ordinaryProxy;
+        ID3D12Resource* resolveAnswer = pairDownOk ? EdgeCompression::answerNative
+                                        : (superDownOk || sgsrAnswerOk) ? g_nr.outputNative : ordinaryAnswer;
 
         // Pre-SR Color is not guaranteed to have UAV support. Write directly when legal; otherwise
         // resolve into hdrCopy while the original Color remains readable, then copy the result back.
@@ -4728,6 +4890,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal, motionIn,
                     exposureTex, resolveTarget, nullptr);
+        composed = true;
 
         if (!targetSupportsUav)
         {
@@ -4745,7 +4908,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             const D3D12_RESOURCE_STATES priorTargetState = targetState;
             TransitionTarget(D3D12_RESOURCE_STATE_COPY_SOURCE);
-            CalibrationMeasure(this, cmdList, device, target, modelInput, width, height);
+            CalibrationMeasure(this, cmdList, device, target, ordinaryProxy, width, height);
             TransitionTarget(priorTargetState);
         }
 
@@ -4757,7 +4920,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (g_nr.passClampScratch2 != nullptr)
             MakeModelWritable(g_nr.passClampScratch2);
 
-        if (superDownOk || sgsrAnswerOk)
+        if (pairDownOk)
+        {
+            for (ID3D12Resource* native : { EdgeCompression::proxyNative, EdgeCompression::answerNative })
+                Barrier(cmdList, native, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+        else if (superDownOk || sgsrAnswerOk)
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -4774,6 +4943,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (g_capture.readyToWrite() && g_captureWriteAtFrame == 0)
                 g_captureWriteAtFrame = g_frames + 8;
         }
+    }
+    else if (spatialFailed)
+    {
+        // The unpack failed and has already turned compression off; this frame keeps the game's picture.
+    }
+    else if (spatial)
+    {
+        // The model would not take the packed picture. NR is fine; compression is what is turned off.
+        EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffModel);
+        g_nr.reset = true;
+        LOG_WARN("DLSS-NR compress screen edges: evaluate returned 0x{:X} ({}) on the packed picture", (uint32_t) result,
+                 NgxResultName((unsigned int) result));
     }
     else
     {
@@ -4803,10 +4984,22 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    if (spatial)
+    {
+        for (ID3D12Resource* packed : { EdgeCompression::color, EdgeCompression::depth, EdgeCompression::motion })
+            Barrier(cmdList, packed, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        if (spatialUnpacked)
+            for (ID3D12Resource* unpacked : { EdgeCompression::proxy, EdgeCompression::answer })
+                Barrier(cmdList, unpacked, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
     // Failed evaluations leave the game's original image intact. A successful copy-back writes
     // only the active rectangle and restores both resources before DLSS consumes the image.
-    FinishColor(result == NVSDK_NGX_Result_Success);
-    if (result == NVSDK_NGX_Result_Success)
+    FinishColor(composed);
+    if (composed)
         ++g_nr.successfulDispatches;
 
     if (g_gpuTime != nullptr)
@@ -4872,7 +5065,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
-    if (reduced && g_nr.colorSmall != nullptr)
+    if (reduced && !spatial && g_nr.colorSmall != nullptr)
         Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -4894,6 +5087,7 @@ void RetryAfterFailure()
     g_nr.failed = false;
     g_nr.reason = "";
     g_nr.reset = true;
+    EdgeCompression::fallback = Spatial::Status::Off;
 
 }
 
@@ -5515,6 +5709,12 @@ SceneCutInfo SceneCutStatus() { return SceneCut::Status(); }
 
 int CurrentModelResolutionPercent() { return (int) lroundf(g_nr.appliedWorkScale * 100.0f); }
 
+Spatial::Published EdgeCompressionStatus()
+{
+    std::lock_guard<std::mutex> lock(EdgeCompression::publishedLock);
+    return EdgeCompression::published;
+}
+
 void CurrentModelSize(unsigned int& width, unsigned int& height)
 {
     width = g_nr.workWidth;
@@ -5538,6 +5738,7 @@ void Shutdown()
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     DeferredSr::Shutdown();
     CalibrationShutdown();
+    EdgeCompression::Shutdown();
 
     for (auto& r : g_nrRetired)
     {

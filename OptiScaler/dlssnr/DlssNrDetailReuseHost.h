@@ -42,6 +42,7 @@ struct HostFrame
     float mvScaleX = 1.0f, mvScaleY = 1.0f; // the game's own scale
     bool modelReset = false;                // the model starts over this frame
     bool blocked = false;                   // Tune or frame hold: the real model must run
+    bool edgeCompression = false;           // Compress screen edges is packing the picture: the two do not run together
     unsigned long long frameNumber = 0;     // the present counter, or NR's own frame count
     unsigned long long present = 0;         // the API's frame clock (DXGI presents, DlssNr::VkFrameClock on Vulkan)
     bool vulkan = false;                    // which DLSS-G stamp goes with that clock
@@ -145,7 +146,9 @@ class Host
         w.hold = _motionGuard.Update(std::exchange(_dropped, -1.0f), maxDropped, sinceLast);
         if (!w.measure)
             _droppedLast = -1.0f; // nothing is being measured: the menu must not show an old reading
-        const char* whyNot = UnavailableOnRoute(f.beforeUpscale, f.finishedPicture, f.motionMatchesPicture);
+        const char* whyNot = f.edgeCompression
+                                 ? kEdgeCompression
+                                 : UnavailableOnRoute(f.beforeUpscale, f.finishedPicture, f.motionMatchesPicture);
         if (whyNot == nullptr)
         {
             if (fg != nullptr && !w.withFg)
@@ -358,6 +361,9 @@ class Host
 
   private:
     static constexpr const char* kBelowMinimumFps = "off below the minimum frame rate";
+    // The moved detail lives in the model's own picture; with the edges compressed that picture is packed, and the two
+    // do not combine (yet).
+    static constexpr const char* kEdgeCompression = "unavailable while Compress screen edges is on";
     StepTracker _steps; // the frame number's normal step between two NR frames (see Decide)
     static constexpr unsigned long long kStalePresents = 30;
     // Frame generation pauses briefly and often (menu, loading, some games toggle it): the textures stay through this

@@ -7,8 +7,9 @@
 // Pages of the main menu's navigation pane. Pure data, no ImGui, so it can be unit tested on the host.
 namespace MenuPages
 {
-// Neural Rendering is a nav group, not a page: clicking it opens NrStatus. Optical F5Low is listed first in the group;
-// saved page names are by name, so an older MenuPage value (nr.status ...) still opens the same page.
+// Neural Rendering is a nav group, not a page: clicking it opens NrStatus. Optical F5Low is a page of its own, listed
+// after Upscaler: it feeds NR, the upscaler and frame generation of a game that makes no upscaler call, and one of its
+// modes (FG only) runs no NR at all. Saved page names are by name, so an older MenuPage value still opens its page.
 enum class Page : unsigned char
 {
     Upscaler,
@@ -18,10 +19,11 @@ enum class Page : unsigned char
     OverlayLook,
     Input,
     Misc,
-    NrF5Low, // first under Neural Rendering: NR for a game that makes no upscaler call
+    F5Low, // Optical F5Low, for a game that makes no upscaler call
     NrStatus,
     NrOptions,
     NrInput,
+    NrBrightness,
     NrOutput,
     NrPasses,
     NrDebug,
@@ -42,18 +44,19 @@ inline constexpr PageInfo kPages[] = {
     { "overlay", "Overlay & Look" },
     { "input", "Input" },
     { "misc", "Misc" },
-    { "nr.f5low", "Optical F5Low" },
+    { "f5low", "Optical F5Low" },
     { "nr.status", "Status & Presets" },
     { "nr.options", "NR Options" },
     { "nr.input", "NR Input" },
+    { "nr.brightness", "Brightness & Colour" },
     { "nr.output", "NR Output" },
-    { "nr.passes", "Passes & Colour" },
+    { "nr.passes", "Passes & Skin" },
     { "nr.debug", "Compare & Debug" },
 };
 
 inline constexpr size_t kPageCount = sizeof(kPages) / sizeof(kPages[0]);
 
-inline constexpr bool IsNeuralRendering(Page page) { return page >= Page::NrF5Low; }
+inline constexpr bool IsNeuralRendering(Page page) { return page >= Page::NrStatus; }
 
 inline constexpr const PageInfo& Info(Page page)
 {
@@ -72,6 +75,10 @@ inline constexpr Page PageFromName(std::string_view name)
         if (name == kPages[i].name)
             return static_cast<Page>(i);
     }
+
+    // Saved while Optical F5Low was listed under Neural Rendering
+    if (name == "nr.f5low")
+        return Page::F5Low;
 
     return Page::Upscaler;
 }

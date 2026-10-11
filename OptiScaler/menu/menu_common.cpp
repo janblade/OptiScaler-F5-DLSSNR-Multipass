@@ -7813,6 +7813,8 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
         };
 
         navItem(Page::Upscaler);
+        // Upscaler is for a game that calls one, Optical F5Low for a game that does not
+        navItem(Page::F5Low);
         navItem(Page::FrameGeneration);
         navItem(Page::Framerate);
 
@@ -7842,7 +7844,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
 
         if (nrNodeOpen)
         {
-            for (int p = static_cast<int>(Page::NrF5Low); p < static_cast<int>(MenuPages::kPageCount); p++)
+            for (int p = static_cast<int>(Page::NrStatus); p < static_cast<int>(MenuPages::kPageCount); p++)
                 navItem(static_cast<Page>(p));
 
             ImGui::TreePop();
@@ -7913,10 +7915,11 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             section(RenderLoggingSettings, true);
             section(RenderApiAndTextureSettings, true);
             break;
-        case Page::NrF5Low:
+        case Page::F5Low:
         case Page::NrStatus:
         case Page::NrOptions:
         case Page::NrInput:
+        case Page::NrBrightness:
         case Page::NrOutput:
         case Page::NrPasses:
         case Page::NrDebug:

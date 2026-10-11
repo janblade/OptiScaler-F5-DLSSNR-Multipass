@@ -59,11 +59,11 @@ Runs the model every other frame. In between, the last result's detail is moved 
 
 Roughly halves NR's GPU cost at any pass count. Detail can pop where objects move and reveal new areas.
 
-Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to move times how much the model changes the picture, and passes build on each other, so with two or three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there with frame generation on). Pause while moving fast, under Debug, is what limits it.
+Best with one pass. What a reused frame can get wrong is the part of the picture with no detail to move times how much the model changes the picture, and passes build on each other, so with two or three passes the same dropped areas flicker visibly in fast motion (The Witcher 3; not seen there with frame generation on). Pause while moving fast (NR Options) is what limits it.
 
 D3D12 and Vulkan with NR after SR, and with Optical F5Low (D3D11, D3D12 and Vulkan games), which also tells it where the last frame cannot be trusted. Not with NR before SR, nor in Finished Picture without Optical F5Low. Reuse bottleneck is off while this runs.
 
-It keeps running while frame generation is on (Debug > Keep on with frame generation). Full and reused frames cost differently, so the game's frame times alternate: a limiter just below the average rate evens them out.
+It keeps running while frame generation is on (NR Options > Keep on with frame generation). Full and reused frames cost differently, so the game's frame times alternate: a limiter just below the average rate evens them out.
 
 ## Reset NR on scene cuts the game does not flag
 

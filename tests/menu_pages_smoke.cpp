@@ -38,11 +38,13 @@ int main()
               "NR pages are exactly the nr.* names ('" + name + "')");
     }
 
-    Check(kPageCount == 14, "7 categories plus 7 Neural Rendering sub-pages");
-    Check(std::string(Name(Page::NrF5Low)) == "nr.f5low", "the Optical F5Low page has its ini name");
-    Check(static_cast<int>(Page::NrF5Low) + 1 == static_cast<int>(Page::NrStatus),
-          "Optical F5Low comes first in the Neural Rendering group, right before Status & Presets");
-    Check(!IsNeuralRendering(Page::Misc) && IsNeuralRendering(Page::NrF5Low), "the group starts at Optical F5Low");
+    Check(kPageCount == 15, "8 categories plus 7 Neural Rendering sub-pages");
+    Check(std::string(Name(Page::F5Low)) == "f5low", "the Optical F5Low page has its ini name");
+    Check(!IsNeuralRendering(Page::F5Low), "Optical F5Low is a page of its own, not under Neural Rendering");
+    Check(PageFromName("nr.f5low") == Page::F5Low, "a saved nr.f5low (when it was under NR) still opens Optical F5Low");
+    Check(!IsNeuralRendering(Page::Misc) && IsNeuralRendering(Page::NrStatus), "the group starts at Status & Presets");
+    Check(std::string(Name(Page::NrBrightness)) == "nr.brightness" && IsNeuralRendering(Page::NrBrightness),
+          "Brightness & Colour is in the Neural Rendering group");
     Check(PageFromName("nr.status") == Page::NrStatus, "an older saved nr.status still opens Status & Presets");
     Check(std::string(Name(Page::NrOutput)) == "nr.output", "the NR Output page keeps its documented ini name");
     Check(std::string(Name(Page::Upscaler)) == "upscaler", "the Upscaler page keeps its documented ini name");

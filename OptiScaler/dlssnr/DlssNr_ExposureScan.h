@@ -60,7 +60,10 @@ struct Candidate
 // Called from the resource tracker every time the game creates an unordered access view. Cheap and
 // silent for everything that does not match; the shape being looked for is rare enough that the
 // filter rejects almost every call on its first comparison.
-void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc);
+//
+// `caller` (both entry points): the hook's return address. Resources made by OptiScaler or by upscaler / frame
+// generation middleware are not the game's and are skipped (DlssNr_ExposureScanSource.h).
+void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc, void* caller);
 
 // Called from the device's resource creation hooks, which is the detection point that actually
 // works. The unordered access view hook above only exists inside the frame generation HUD fix and is
@@ -68,7 +71,7 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
 // which is why the first version of this found nothing anywhere. Creation is also the better place:
 // the description is right there, it happens before anything else, and it catches a resource whose
 // view is made through a descriptor copy rather than through CreateUnorderedAccessView.
-void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource);
+void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource, void* caller);
 
 // How many resources have been looked at. The number that distinguishes "this game has no exposure
 // buffer" from "the hook is not running", which are the same empty list and very different problems.

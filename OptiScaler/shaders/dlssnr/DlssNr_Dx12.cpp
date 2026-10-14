@@ -5901,10 +5901,13 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             {
                 loggedScan = scanned;
 
-                if (g_nr.gameExposure > 1e-6f)
+                // Read on Game exposure, paired on Automatic while scanning
+                const float gameNow = g_nr.gameExposure > 1e-6f ? g_nr.gameExposure : g_nr.autoPairGameExposure;
+
+                if (gameNow > 1e-6f)
                     LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  the "
                              "game's own exposure is {:.5f}  |  ratio {:.4f}",
-                             which, scanned, low, high, g_nr.gameExposure, scanned / g_nr.gameExposure);
+                             which, scanned, low, high, gameNow, scanned / gameNow);
                 else
                     LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  this "
                              "game supplies no exposure to compare against",

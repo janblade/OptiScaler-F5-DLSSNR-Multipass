@@ -2,6 +2,9 @@
 
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_ExposureScanRecord.h"
+#include "DlssNr_ExposureScanSource.h"
+
+#include <SysUtils.h>
 
 #include <Config.h>
 #include <Util.h>
@@ -12,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <unordered_map>
 #include <mutex>
 #include <string>
 
@@ -115,6 +119,25 @@ bool PlausibleFormat(DXGI_FORMAT f, unsigned int* outBytes, const char** outName
     case DXGI_FORMAT_R16G16_FLOAT:
         *outBytes = 2;
         *outName = "R16G16_FLOAT";
+        return true;
+    // Typeless: the view decides the type, so the texture says nothing more than its channel sizes. NBA 2K27 hands DLSS
+    // a 1x1 R32_TYPELESS exposure (2026-10-14), which the float-only list missed. Read as float; an integer in there
+    // reads as a tiny or huge float and stays outside the plausible range.
+    case DXGI_FORMAT_R32_TYPELESS:
+        *outBytes = 4;
+        *outName = "R32_TYPELESS";
+        return true;
+    case DXGI_FORMAT_R16_TYPELESS:
+        *outBytes = 2;
+        *outName = "R16_TYPELESS";
+        return true;
+    case DXGI_FORMAT_R32G32_TYPELESS:
+        *outBytes = 4;
+        *outName = "R32G32_TYPELESS";
+        return true;
+    case DXGI_FORMAT_R16G16_TYPELESS:
+        *outBytes = 2;
+        *outName = "R16G16_TYPELESS";
         return true;
     default:
         return false;
@@ -221,6 +244,32 @@ bool Wanted()
 {
     return Config::Instance()->DlssNrWhitePointSource.value_or_default() == 2 ||
            Config::Instance()->DlssNrScanExposure.value_or_default();
+}
+
+// Whether the resource came from the game (DlssNr_ExposureScanSource.h). Asked only for resources that already look
+// like an exposure, so the module lookup is rare; cached per module and logged once per skipped module. Under
+// g_scanMutex.
+bool FromGameLocked(void* caller)
+{
+    static std::unordered_map<HMODULE, bool> known;
+
+    const HMODULE module = caller != nullptr ? Util::GetCallerModule(caller) : nullptr;
+
+    if (module == nullptr)
+        return true;
+
+    if (const auto it = known.find(module); it != known.end())
+        return it->second;
+
+    const std::string name = Util::WhoIsTheCaller(caller);
+    const bool fromGame = DlssNrExposureScanSource::FromGame(name, module == dllModule);
+    known.emplace(module, fromGame);
+
+    if (!fromGame)
+        LOG_INFO("DLSS-NR exposure scan: skipping small resources made by {} (not the game's)",
+                 module == dllModule ? std::string("OptiScaler") : name);
+
+    return fromGame;
 }
 
 // The recording's file: the log's name with ".exposurescan.csv", in the log's folder, started over each session.
@@ -390,7 +439,7 @@ void Adopt(ID3D12Resource* resource, const std::string& shape, unsigned int byte
     LOG_INFO("DLSS-NR exposure scan: candidate {} -- {}", g_scan.tracked.size(), shape);
 }
 
-void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource)
+void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource, void* caller)
 {
     // Gated on the scan being wanted, not just NR being on -- see NoteUav for why.
     if (!Config::Instance()->DlssNrEnabled.value_or_default() || !Wanted())
@@ -426,6 +475,9 @@ void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource)
         return;
     }
 
+    if (!FromGameLocked(caller))
+        return;
+
     Adopt(resource, shape, bytes, isBuffer, fmt);
 }
 
@@ -435,7 +487,7 @@ unsigned int Examined()
     return g_scan.examined;
 }
 
-void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc)
+void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc, void* caller)
 {
     // Gated on the scan being wanted (WhitePointSource 2 or ScanExposure), not just on NR being on.
     //
@@ -468,6 +520,9 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
     g_scan.examined++;
 
     if (!LooksLikeANumber(rd, &shape, &bytes, &isBuffer, &fmt))
+        return;
+
+    if (!FromGameLocked(caller))
         return;
 
     Adopt(resource, shape, bytes, isBuffer, fmt);

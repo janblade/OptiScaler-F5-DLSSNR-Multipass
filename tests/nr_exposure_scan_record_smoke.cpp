@@ -1,6 +1,8 @@
-// Host check of DlssNr_ExposureScanRecord.h: the exposure scan's CSV lines. No GPU and no game needed.
+// Host check of DlssNr_ExposureScanRecord.h (the exposure scan's CSV lines) and DlssNr_ExposureScanSource.h (whose
+// resources it adopts). No GPU and no game needed.
 // cl /std:c++20 /EHsc tests/nr_exposure_scan_record_smoke.cpp
 #include "../OptiScaler/dlssnr/DlssNr_ExposureScanRecord.h"
+#include "../OptiScaler/dlssnr/DlssNr_ExposureScanSource.h"
 
 #include <cstdio>
 
@@ -46,6 +48,19 @@ int main()
 
     s.values.clear();
     CHECK(Row(s) == "12.346,600,0.125,1.3195,1");
+
+    // Whose resource: only the game's own
+    using DlssNrExposureScanSource::FromGame;
+    CHECK(FromGame("NBA2K27.exe", false));
+    CHECK(FromGame("Cyberpunk2077.exe", false));
+    CHECK(FromGame("", false));         // no module found: not known to be someone else's
+    CHECK(!FromGame("dxgi.dll", true)); // OptiScaler itself, whatever it is named
+    CHECK(!FromGame("nvngx_dlss.dll", false));
+    CHECK(!FromGame("NVNGX_DLSSG.DLL", false));
+    CHECK(!FromGame("sl.dlss_g.dll", false));
+    CHECK(!FromGame("libxess_fg.dll", false));
+    CHECK(!FromGame("amd_fidelityfx_upscaler_dx12.dll", false));
+    CHECK(!FromGame("ffx_fsr3upscaler_x64.dll", false));
 
     printf(fails == 0 ? "nr_exposure_scan_record_smoke: PASS\n" : "nr_exposure_scan_record_smoke: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;

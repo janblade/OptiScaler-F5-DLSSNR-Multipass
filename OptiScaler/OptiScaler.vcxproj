@@ -467,6 +467,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\precompile\dlssnr_detail_reuse_Shader_Vk.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
+    <ClInclude Include="dlssnr\DlssNr_ExposureScanRecord.h" />
     <ClInclude Include="dlssnr\DlssNr_ColourEncodingStatus.h" />
     <ClInclude Include="dlssnr\DlssNr_NativeMode.h" />
     <ClInclude Include="dlssnr\DlssNr_LutStatus.h" />

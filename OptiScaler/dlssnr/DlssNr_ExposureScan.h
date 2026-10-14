@@ -82,7 +82,18 @@ float BestValue(int* outIndex = nullptr, float* outLowest = nullptr, float* outH
 
 // Called once per frame from the Neural Rendering pass, on its command list. Copies one value out of
 // each candidate and reads back the copies taken a few frames ago.
-void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
+//
+// `frame` is what is known about this frame's brightness, for the recording (DlssNr_ExposureScanRecord.h) and to mark
+// the candidate that is the game's own exposure texture.
+struct FrameExposure
+{
+    ID3D12Resource* handed = nullptr; // the ExposureTexture on the upscaler call, if any
+    float meter = 0.0f;               // Automatic's raw reading, 0 when Automatic is not running
+    float game = 0.0f;                // the game's exposure as last read, 0 when none
+    float pre = 1.0f;                 // DLSS.Pre.Exposure
+};
+
+void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame);
 
 // What the scan has to say right now, in one line, for an indicator that can be read while playing.
 enum class Verdict

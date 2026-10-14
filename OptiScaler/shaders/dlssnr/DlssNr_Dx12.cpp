@@ -3849,7 +3849,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // needs the two from the same frame. The meter's tiles have been reduced already; nothing else reads them now.
         // Same rule as Vulkan: only while following the game's exposure (DlssNr_GameDefaults.h), so nothing is learned
         // while it is off (switching it on later starts learning at that moment).
-        const bool pairGameExposure = frame.ExposureTexture != nullptr && DlssNr::FollowGameOn(cfg);
+        // Also while the exposure scan runs: its recording needs the game's exposure beside Automatic's reading.
+        const bool pairGameExposure =
+            frame.ExposureTexture != nullptr && (DlssNr::FollowGameOn(cfg) || DlssNr::ExposureScan::Scanning());
 
         if (pairGameExposure)
         {
@@ -4295,8 +4297,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         modelInput = g_nr.colorSmall;
     }
 
-    // Read the exposure scan's candidates on the pass's own command list, once a frame.
-    DlssNr::ExposureScan::Tick(device, cmdList);
+    // Read the exposure scan's candidates on the pass's own command list, once a frame, with what is known about the
+    // frame's brightness for its recording: Automatic's raw reading (Automatic only) and the game's exposure (read on
+    // Game exposure, paired on Automatic while scanning).
+    {
+        DlssNr::ExposureScan::FrameExposure scanFrame;
+        scanFrame.handed = (ID3D12Resource*) frame.ExposureTexture;
+        scanFrame.meter = whitePointSource == 3 ? g_nr.autoExposureRawValue : 0.0f;
+        scanFrame.game = whitePointSource == 1   ? g_nr.gameExposure
+                         : whitePointSource == 3 ? g_nr.autoPairGameExposure
+                                                 : 0.0f;
+        scanFrame.pre = frame.PreExposure;
+        DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
+    }
 
     // No depth gives depthIn == nullptr; only a depth that could not be cloned is a failure.
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);

@@ -1,13 +1,17 @@
 #include "pch.h"
 
 #include "DlssNr_ExposureScan.h"
+#include "DlssNr_ExposureScanRecord.h"
 
 #include <Config.h>
 #include <Util.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 
@@ -57,6 +61,7 @@ struct Tracked
     unsigned int reads = 0;
     unsigned int inRange = 0;   // reads that could plausibly be an exposure
     bool moves = false;
+    bool handed = false; // this is the exposure texture the game hands to the upscaler: the known answer
 };
 
 struct ScanState
@@ -68,6 +73,14 @@ struct ScanState
     const char* status = "not started";
     bool complained = false;
     unsigned int nearMissLogged = 0;   // bounded diagnostic; see NoteResource
+
+    // The recording (DlssNr_ExposureScanRecord.h). `namedCount` / `namedHanded` are what the last names line said, so
+    // a new line is written only when the list changes.
+    std::FILE* record = nullptr;
+    bool recordFailed = false;
+    size_t namedCount = 0;
+    int namedHanded = -1;
+    std::chrono::steady_clock::time_point recordStart;
 };
 
 ScanState g_scan;
@@ -208,6 +221,80 @@ bool Wanted()
 {
     return Config::Instance()->DlssNrWhitePointSource.value_or_default() == 2 ||
            Config::Instance()->DlssNrScanExposure.value_or_default();
+}
+
+// The recording's file: the log's name with ".exposurescan.csv", in the log's folder, started over each session.
+std::FILE* RecordFile()
+{
+    if (g_scan.record != nullptr || g_scan.recordFailed)
+        return g_scan.record;
+
+    std::filesystem::path path(Config::Instance()->LogFileName.value_or_default());
+    path.replace_extension(L".exposurescan.csv");
+
+    if (_wfopen_s(&g_scan.record, path.c_str(), L"w") != 0 || g_scan.record == nullptr)
+    {
+        g_scan.record = nullptr;
+        g_scan.recordFailed = true;
+        LOG_WARN("DLSS-NR exposure scan: could not open the recording {}", path.string());
+        return nullptr;
+    }
+
+    g_scan.recordStart = std::chrono::steady_clock::now();
+    LOG_INFO("DLSS-NR exposure scan: recording every candidate to {}", path.string());
+    return g_scan.record;
+}
+
+// One row of the recording, every kEveryFrames frames. Under g_scanMutex.
+void RecordLocked(const FrameExposure& frame)
+{
+    using namespace DlssNrExposureScanRecord;
+
+    if (!Due(g_scan.frames))
+        return;
+
+    std::FILE* file = RecordFile();
+
+    if (file == nullptr)
+        return;
+
+    int handed = -1;
+
+    for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+    {
+        if (g_scan.tracked[i].handed)
+            handed = (int) i;
+    }
+
+    if (g_scan.tracked.size() != g_scan.namedCount || handed != g_scan.namedHanded)
+    {
+        std::vector<Named> names;
+        names.reserve(g_scan.tracked.size());
+
+        for (const Tracked& t : g_scan.tracked)
+            names.push_back({ t.shape, t.handed });
+
+        std::fprintf(file, "%s\n%s\n", NamesLine(names).c_str(), ColumnsLine(names.size()).c_str());
+        g_scan.namedCount = g_scan.tracked.size();
+        g_scan.namedHanded = handed;
+    }
+
+    Sample s;
+    s.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_scan.recordStart).count();
+    s.frame = g_scan.frames;
+    s.meter = frame.meter;
+    s.game = frame.game;
+    s.pre = frame.pre;
+    s.values.reserve(g_scan.tracked.size());
+
+    for (const Tracked& t : g_scan.tracked)
+        s.values.push_back(std::isfinite(t.latest) ? t.latest : 0.0f);
+
+    std::fprintf(file, "%s\n", Row(s).c_str());
+
+    // About once a second, so a crash loses little and the file can be read while the game runs
+    if (g_scan.frames % (kEveryFrames * 10) == 0)
+        std::fflush(file);
 }
 
 } // namespace
@@ -386,7 +473,7 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
     Adopt(resource, shape, bytes, isBuffer, fmt);
 }
 
-void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
+void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame)
 {
     if (!Wanted())
         return;
@@ -494,6 +581,41 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList)
             old->Unmap(0, &nothingWritten);
         }
     }
+
+    // Which candidate, if any, is the exposure texture the game hands to the upscaler. In a game that hands one over,
+    // that is the known answer the scan is checked against; not finding it among the candidates means the filter
+    // misses what an exposure looks like in this game.
+    {
+        bool found = false;
+
+        for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+        {
+            Tracked& t = g_scan.tracked[i];
+            const bool handed = frame.handed != nullptr && t.resource == frame.handed;
+
+            if (handed && !t.handed)
+                LOG_INFO("DLSS-NR exposure scan: candidate {} ({}) is the exposure the game hands to the upscaler",
+                         (unsigned int) (i + 1), t.shape);
+
+            t.handed = handed;
+            found = found || handed;
+        }
+
+        static bool saidMissing = false;
+
+        if (frame.handed != nullptr && !found && !saidMissing && g_scan.frames >= 600)
+        {
+            saidMissing = true;
+            const D3D12_RESOURCE_DESC rd = ((ID3D12Resource*) frame.handed)->GetDesc();
+            LOG_WARN(
+                "DLSS-NR exposure scan: the game hands over an exposure texture ({}x{} format {}, dim {}, flags {:#x}) "
+                "that is not among the {} candidates: the filter misses it",
+                (unsigned int) rd.Width, rd.Height, (int) rd.Format, (int) rd.Dimension, (unsigned int) rd.Flags,
+                (unsigned int) g_scan.tracked.size());
+        }
+    }
+
+    RecordLocked(frame);
 
     // Periodic movement readout. The menu's Advanced panel shows which candidate tracks the light, but
     // the log did not -- so a game the scan is being taught (Cyberpunk) could not be cracked from a log
@@ -971,6 +1093,7 @@ void ReleaseTrackedResources()
 
     g_scan.tracked.clear();
     g_scan.complained = false;
+    g_scan.namedCount = (size_t) -1; // the recording names the next list afresh, even at the same count
 }
 
 void Shutdown()
@@ -996,6 +1119,12 @@ void Shutdown()
 
     g_scan.frames = 0;
     g_scan.status = "not started";
+
+    if (g_scan.record != nullptr)
+    {
+        std::fclose(g_scan.record);
+        g_scan.record = nullptr;
+    }
 }
 
 } // namespace ExposureScan

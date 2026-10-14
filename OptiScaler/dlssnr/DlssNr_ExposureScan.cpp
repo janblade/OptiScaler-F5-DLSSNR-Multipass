@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <unordered_map>
 #include <mutex>
+#include <thread>
 #include <string>
 
 namespace DlssNr
@@ -80,8 +81,7 @@ struct ScanState
 
     // The recording (DlssNr_ExposureScanRecord.h). `namedCount` / `namedHanded` are what the last names line said, so
     // a new line is written only when the list changes.
-    std::FILE* record = nullptr;
-    bool recordFailed = false;
+    bool recording = false;
     size_t namedCount = 0;
     int namedHanded = -1;
     std::chrono::steady_clock::time_point recordStart;
@@ -272,27 +272,76 @@ bool FromGameLocked(void* caller)
     return fromGame;
 }
 
-// The recording's file: the log's name with ".exposurescan.csv", in the log's folder, started over each session.
-std::FILE* RecordFile()
+// The recording's file writer. The render thread only appends text; a thread of its own opens the file (the log's name
+// with ".exposurescan.csv", in the log's folder, started over each session), writes and flushes once a second. Writing
+// and flushing on the render thread made NBA 2K27 stutter (2026-10-14: gone with the scan off, NR's GPU cost
+// unchanged). Made once and never freed, so the detached thread never outlives it.
+class RecordWriter
 {
-    if (g_scan.record != nullptr || g_scan.recordFailed)
-        return g_scan.record;
-
-    std::filesystem::path path(Config::Instance()->LogFileName.value_or_default());
-    path.replace_extension(L".exposurescan.csv");
-
-    if (_wfopen_s(&g_scan.record, path.c_str(), L"w") != 0 || g_scan.record == nullptr)
+  public:
+    static RecordWriter& Instance()
     {
-        g_scan.record = nullptr;
-        g_scan.recordFailed = true;
-        LOG_WARN("DLSS-NR exposure scan: could not open the recording {}", path.string());
-        return nullptr;
+        static RecordWriter* writer = new RecordWriter();
+        return *writer;
     }
 
-    g_scan.recordStart = std::chrono::steady_clock::now();
-    LOG_INFO("DLSS-NR exposure scan: recording every candidate to {}", path.string());
-    return g_scan.record;
-}
+    void Append(std::string text)
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+
+        if (_failed)
+            return;
+
+        _pending += text;
+
+        if (!_started)
+        {
+            _started = true;
+            std::filesystem::path path(Config::Instance()->LogFileName.value_or_default());
+            path.replace_extension(L".exposurescan.csv");
+            std::thread([this, path] { Run(path); }).detach();
+        }
+    }
+
+  private:
+    void Run(const std::filesystem::path& path)
+    {
+        std::FILE* file = nullptr;
+
+        if (_wfopen_s(&file, path.c_str(), L"w") != 0 || file == nullptr)
+        {
+            LOG_WARN("DLSS-NR exposure scan: could not open the recording {}", path.string());
+            std::lock_guard<std::mutex> lock(_mutex);
+            _failed = true;
+            _pending.clear();
+            return;
+        }
+
+        LOG_INFO("DLSS-NR exposure scan: recording every candidate to {}", path.string());
+
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            std::string text;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                text.swap(_pending);
+            }
+
+            if (!text.empty())
+            {
+                std::fwrite(text.data(), 1, text.size(), file);
+                std::fflush(file);
+            }
+        }
+    }
+
+    std::mutex _mutex;
+    std::string _pending;
+    bool _started = false;
+    bool _failed = false;
+};
 
 // One row of the recording, every kEveryFrames frames. Under g_scanMutex.
 void RecordLocked(const FrameExposure& frame)
@@ -302,10 +351,13 @@ void RecordLocked(const FrameExposure& frame)
     if (!Due(g_scan.frames))
         return;
 
-    std::FILE* file = RecordFile();
+    if (!g_scan.recording)
+    {
+        g_scan.recording = true;
+        g_scan.recordStart = std::chrono::steady_clock::now();
+    }
 
-    if (file == nullptr)
-        return;
+    std::string text;
 
     int handed = -1;
 
@@ -323,7 +375,7 @@ void RecordLocked(const FrameExposure& frame)
         for (const Tracked& t : g_scan.tracked)
             names.push_back({ t.shape, t.handed });
 
-        std::fprintf(file, "%s\n%s\n", NamesLine(names).c_str(), ColumnsLine(names.size()).c_str());
+        text = NamesLine(names) + "\n" + ColumnsLine(names.size()) + "\n";
         g_scan.namedCount = g_scan.tracked.size();
         g_scan.namedHanded = handed;
     }
@@ -339,11 +391,8 @@ void RecordLocked(const FrameExposure& frame)
     for (const Tracked& t : g_scan.tracked)
         s.values.push_back(std::isfinite(t.latest) ? t.latest : 0.0f);
 
-    std::fprintf(file, "%s\n", Row(s).c_str());
-
-    // About once a second, so a crash loses little and the file can be read while the game runs
-    if (g_scan.frames % (kEveryFrames * 10) == 0)
-        std::fflush(file);
+    text += Row(s) + "\n";
+    RecordWriter::Instance().Append(std::move(text));
 }
 
 } // namespace
@@ -1174,12 +1223,6 @@ void Shutdown()
 
     g_scan.frames = 0;
     g_scan.status = "not started";
-
-    if (g_scan.record != nullptr)
-    {
-        std::fclose(g_scan.record);
-        g_scan.record = nullptr;
-    }
 }
 
 } // namespace ExposureScan

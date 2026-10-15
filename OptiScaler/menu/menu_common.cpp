@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "menu_common.h"
 #include "MenuPages.h"
+#include <framegen/dlssg/DlssgTelemetry.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include <algorithm>
@@ -3456,6 +3457,38 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
     }
 }
 
+// One line under "Override DLSSG Ratio". The combo says what was requested; this says whether it
+// happened: what the game asked for, what was sent on after any override, and what Streamline reports it
+// presented at the last check. Nothing is drawn while DLSS-G is off.
+static void RenderDlssgTelemetry()
+{
+    const auto& telemetry = DlssgTelemetry::Get();
+
+    if (!telemetry.optionsSeen.load(std::memory_order_acquire) || !telemetry.active.load(std::memory_order_relaxed))
+        return;
+
+    if (!telemetry.stateSeen.load(std::memory_order_acquire))
+    {
+        ImGui::TextDisabled("DLSSG: waiting for Streamline state...");
+        return;
+    }
+
+    const unsigned int requestedX = telemetry.requested.load(std::memory_order_relaxed) + 1;
+    const unsigned int sentX = telemetry.sent.load(std::memory_order_relaxed) + 1;
+    const unsigned int presented = telemetry.presented.load(std::memory_order_relaxed);
+    const unsigned int result = telemetry.result.load(std::memory_order_relaxed);
+
+    const bool agrees = result == 0 && presented == sentX;
+    const ImVec4 green(0.4f, 0.9f, 0.5f, 1.0f);
+    const ImVec4 amber(0.95f, 0.70f, 0.20f, 1.0f);
+
+    ImGui::TextColored(agrees ? green : amber, "Game asked %uX, sent %uX, Streamline presented %u (max seen %u)",
+                       requestedX, sentX, presented, telemetry.maxPresented.load(std::memory_order_relaxed));
+
+    if (result != 0)
+        ImGui::TextColored(amber, "slDLSSGSetOptions returned sl::Result %u for that request.", result);
+}
+
 void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -3811,6 +3844,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         }
 
         ImGui::EndDisabled();
+
+        if (state.dlssgMfgMax.has_value() && state.dlssgMfgMax.value() >= 1 && !dlssgInputOrOutput)
+            RenderDlssgTelemetry();
 
         if (state.dlssgGameDMFGSupported && !dlssgInputOrOutput)
         {

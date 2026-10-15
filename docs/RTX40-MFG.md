@@ -63,6 +63,8 @@ The unlocker may limit the request to a supported multiplier; inspect its log.
 For a report, include the GPU, driver, game and unlocker versions, loader filenames, `OptiScaler.ini`,
 `OptiScaler.log` and `%TEMP%\MfgUnlock-<PID>.log`. Remove personal paths before posting publicly.
 
+## Built-in unlock (removed)
+
 OptiScaler itself has no built-in MFG unlock since 0.1.32: the in-memory RTX 40 patch (`[DLSSG] AdaMfgUnlock`)
 and the RTX 20/30 `dlssg_sm86` loader (`[DLSSG] AmpereMfgUnlock`) were removed. Those keys are ignored, and the
 log says so once at startup. Use an external unlocker with `[FrameGen] External=true` as described above.

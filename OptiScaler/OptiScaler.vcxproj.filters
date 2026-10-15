@@ -950,6 +950,9 @@
     <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\dlssg\DlssgTelemetry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="framegen\dlssg\Kcd2Hdr.h">
       <Filter>Header Files</Filter>
     </ClInclude>

@@ -1101,9 +1101,10 @@ class Config
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
     CustomOptional<bool> ExternalFrameGeneration { false };
-    // [DLSSG] AdaMfgUnlock or AmpereMfgUnlock is still true in the ini: the built-in MFG unlocks were removed in
-    // 0.1.32, and startup says so once. Read only, never saved.
-    bool RemovedMfgUnlockSet = false;
+    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: the built-in MFG unlocks were removed in 0.1.32,
+    // and startup says so once. Read only, never saved.
+    bool RemovedAdaMfgUnlockSet = false;
+    bool RemovedAmpereMfgUnlockSet = false;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
     // Keeps Streamline from picking up the driver's OTA/downloaded plugins; only files in
     // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll

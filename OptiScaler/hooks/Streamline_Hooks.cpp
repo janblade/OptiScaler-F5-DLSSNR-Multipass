@@ -12,6 +12,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/dlssg/DlssgTelemetry.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <proxies/Streamline_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -470,7 +471,7 @@ static void FillDlssgInputState(sl::DLSSGState& state)
 
     // Before our FG swapchain exists nothing is known yet. XeFG's max needs an XeFG context, and a throwaway one here
     // would race ours (Intel R5), so it is reported once our XeFG exists.
-    const int reported = FGFollowGame::ReportedMax(fg != nullptr ? fg->GetMaxInterpolationCount() : 0, 0);
+    const int reported = FGFollowGame::ReportedMax(fg != nullptr ? fg->GetMaxInterpolationCount() : 0);
     state.numFramesToGenerateMax = reported;
 
     // GetState runs every frame: log a change only
@@ -1309,6 +1310,9 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     newOptions.structVersion = newStructVer;
 
+    // What the game asked for, before any override. A struct too old to carry the field reads as 1 (2X).
+    const unsigned int requestedCount = newOptions.numFramesToGenerate;
+
     auto& state = State::Instance();
 
     // A game that reached the real plugin's SetOptions (not our slGetFeatureFunction stand-in) is followed the same way
@@ -1399,7 +1403,12 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     state.dlssgLastSetMode = newOptions.mode;
 
-    return o_slDLSSGSetOptions(viewport, newOptions);
+    const auto result = o_slDLSSGSetOptions(viewport, newOptions);
+
+    DlssgTelemetry::RecordSetOptions(requestedCount, newOptions.numFramesToGenerate,
+                                     newOptions.mode != sl::DLSSGMode::eOff, static_cast<unsigned int>(result));
+
+    return result;
 }
 
 sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
@@ -1436,6 +1445,11 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         }
 
         State::Instance().dlssgGameDMFGSupported = newState.bIsDynamicMFGSupported == sl::eTrue;
+
+        // The real DLSS-G's count, unless our own frame generation stands in for it (it writes its own
+        // count further down).
+        if (State::Instance().activeFgInput != FGInput::DLSSG)
+            DlssgTelemetry::RecordState(newState.numFramesActuallyPresented);
     }
     else
     {
@@ -1443,6 +1457,9 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         if (result != sl::Result::eOk)
             return result;
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
+
+        if (State::Instance().activeFgInput != FGInput::DLSSG)
+            DlssgTelemetry::RecordState(state.numFramesActuallyPresented);
     }
 
     if (!State::Instance().dlssgGameDMFGSupported)

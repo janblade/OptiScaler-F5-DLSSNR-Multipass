@@ -71,8 +71,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGEnabled.set_from_config(readBool("FrameGen", "Enabled"));
             ExternalFrameGeneration.set_from_config(readBool("FrameGen", "External"));
             // The built-in MFG unlocks were removed in 0.1.32: their keys are only read to say so once at startup
-            RemovedMfgUnlockSet = readBool("DLSSG", "AdaMfgUnlock").value_or(false) ||
-                                  readBool("DLSSG", "AmpereMfgUnlock").value_or(false);
+            RemovedAdaMfgUnlockSet = readBool("DLSSG", "AdaMfgUnlock").value_or(false);
+            RemovedAmpereMfgUnlockSet = readBool("DLSSG", "AmpereMfgUnlock").value_or(false);
             FGDebugView.set_from_config(readBool("FrameGen", "DebugView"));
 
             if (auto FGInputString = readString("FrameGen", "FGInput"); FGInputString.has_value())

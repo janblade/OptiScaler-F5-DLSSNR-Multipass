@@ -64,6 +64,9 @@ composition, residual FG or async-latest NR**. Exposure scanning remains D3D12-o
 
 ### Built-in Ada MFG unlock: experimental, off by default
 
+> Removed in 0.1.32; this section is kept as history. Use an external unlocker with `[FrameGen] External=true`
+> ([RTX40-MFG.md](RTX40-MFG.md)).
+
 Adapted from the reviewed fork's `MfgUnlock.cpp/.h`, with unique-signature checks, bounds validation
 and narrower hardware/ownership guards. This is an **alternative** to the external unlocker.
 

@@ -59,11 +59,10 @@ int main()
     CHECK(Count(false, gameOn3, 5, 3) == 3);
     CHECK(Count(false, gameOn3, 0, 3) == 1);
 
-    // Max told to the game: live output first, early knowledge (MFG unlock) before it, never below 1
-    CHECK(ReportedMax(0, 0) == 1);
-    CHECK(ReportedMax(1, 3) == 3);
-    CHECK(ReportedMax(3, 0) == 3);
-    CHECK(ReportedMax(2, 3) == 3);
+    // Max told to the game: the live output's, never below 1
+    CHECK(ReportedMax(0) == 1);
+    CHECK(ReportedMax(1) == 1);
+    CHECK(ReportedMax(3) == 3);
 
     CHECK(Presented(false, 2) == 1);
     CHECK(Presented(true, 2) == 3);

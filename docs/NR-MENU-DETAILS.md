@@ -233,15 +233,10 @@ If you used Tune, run it again after changing the curve.
 
 Composed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.
 
-## RTX 40 MFG unlock
+## MFG unlockers
 
-Optional RTX 40 (Ada) unlock. Save Settings and restart to enable or remove it.
-
-Requires a supported DLSSG runtime and Streamline 2.7.1+ for multiplier overrides.
-
-Do not combine with another MFG unlocker. Does not add FG to an unsupported game.
-
-Not validated on RTX 40 hardware here; RTX 20/30/50 are left unchanged.
+OptiScaler has no built-in MFG unlock since 0.1.32. To use an external unlocker, tick **External frame generation /
+MFG unlocker**, Save Settings and restart; see [RTX40-MFG.md](RTX40-MFG.md).
 
 ## Optical F5Low: frames unchanged before it counts as still
 

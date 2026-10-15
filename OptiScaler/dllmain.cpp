@@ -26,7 +26,6 @@
 #include "inputs/FG/FSR3_Dx12_FG.h"
 
 #include <fsr4/FSR4ModelSelection.h>
-#include <framegen/dlssg/AmpereMfgLoader.h>
 
 #include <hooks/Dxgi_Hooks.h>
 #include <hooks/D3D11_Hooks.h>
@@ -1795,10 +1794,6 @@ DWORD WINAPI getGpuInfo(LPVOID hModuleVoid)
     if (hModuleVoid)
         IdentifyGpu::updateD3d12Capabilities();
 
-    // This existing worker runs after DLL_PROCESS_ATTACH has returned. GPU
-    // enumeration and loading another graphics proxy must not run in DllMain.
-    AmpereMfgLoader::TrySetup();
-
     return 0;
 }
 
@@ -1905,8 +1900,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
         // Initial state of FG
-        State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default() ||
-                                                    Config::Instance()->FGDLSSGAmpereMfgUnlock.value_or_default();
+        State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default();
+
+        if (Config::Instance()->RemovedMfgUnlockSet)
+            spdlog::warn("[DLSSG] AdaMfgUnlock/AmpereMfgUnlock is set, but the built-in MFG unlock was removed in "
+                         "0.1.32 and these keys are ignored. Use an external MFG unlocker with [FrameGen] "
+                         "External=true.");
+
         if (State::Instance().externalFrameGeneration)
         {
             // Only runtime overrides: preserve the user's OptiFG configuration for the next

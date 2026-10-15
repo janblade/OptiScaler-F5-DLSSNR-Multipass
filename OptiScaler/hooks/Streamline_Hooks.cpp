@@ -12,7 +12,6 @@
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
-#include <framegen/dlssg/MfgUnlock.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <proxies/Streamline_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -469,10 +468,9 @@ static void FillDlssgInputState(sl::DLSSGState& state)
     if (state.structVersion < 2)
         return;
 
-    // Before our FG swapchain exists only the MFG unlock is known (OptiScaler's DLSSG output). XeFG's max needs an
-    // XeFG context, and a throwaway one here would race ours (Intel R5), so it is reported once our XeFG exists.
-    const int earlyMax = optiState.activeFgOutput == FGOutput::DLSSG ? static_cast<int>(MfgUnlock::UnlockedMax()) : 0;
-    const int reported = FGFollowGame::ReportedMax(fg != nullptr ? fg->GetMaxInterpolationCount() : 0, earlyMax);
+    // Before our FG swapchain exists nothing is known yet. XeFG's max needs an XeFG context, and a throwaway one here
+    // would race ours (Intel R5), so it is reported once our XeFG exists.
+    const int reported = FGFollowGame::ReportedMax(fg != nullptr ? fg->GetMaxInterpolationCount() : 0, 0);
     state.numFramesToGenerateMax = reported;
 
     // GetState runs every frame: log a change only
@@ -1311,9 +1309,6 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     newOptions.structVersion = newStructVer;
 
-    // What the game asked for, before any override. A struct too old to carry the field reads as 1 (2X).
-    const unsigned int requestedCount = newOptions.numFramesToGenerate;
-
     auto& state = State::Instance();
 
     // A game that reached the real plugin's SetOptions (not our slGetFeatureFunction stand-in) is followed the same way
@@ -1354,26 +1349,13 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     if (dlssgPotentiallyActive && state.streamlineVersion >= feature_version { 2, 7, 1 })
     {
-        // Before the read, so the count this captures is the patched one. Five stays under the
-        // sanity bound below.
-        MfgUnlock::TryApply();
-
-        // nvngx_dlssg.dll can load after this runs, and the ceiling read before it does is Ada's
-        // 1. Caching that holds it for the session and clamps the override to it. ModuleFound
-        // means the patches have been attempted, so from there the answer is final either way.
-        const bool unlockPending = MfgUnlock::Pending();
-
         // Populate dlssgMfgMax once
-        if (!state.dlssgMfgMax.has_value() && !unlockPending)
+        if (!state.dlssgMfgMax.has_value())
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
             if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk)
             {
-                // A wrapper ahead of the snippet can answer a lower ceiling than the patched one.
-                if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > localState.numFramesToGenerateMax)
-                    localState.numFramesToGenerateMax = unlockedMax;
-
                 if (localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
                 {
                     state.dlssgMfgMax = localState.numFramesToGenerateMax;
@@ -1417,20 +1399,12 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     state.dlssgLastSetMode = newOptions.mode;
 
-    const auto result = o_slDLSSGSetOptions(viewport, newOptions);
-
-    MfgUnlock::RecordSetOptions(requestedCount, newOptions.numFramesToGenerate,
-                                newOptions.mode != sl::DLSSGMode::eOff, static_cast<unsigned int>(result));
-
-    return result;
+    return o_slDLSSGSetOptions(viewport, newOptions);
 }
 
 sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
                                               const sl::DLSSGOptions* options)
 {
-    // Ahead of every read of numFramesToGenerateMax, which is the value the patch raises.
-    MfgUnlock::TryApply();
-
     sl::Result result {};
 
     const auto originalStructVersion = state.structVersion;
@@ -1452,12 +1426,6 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
             state.numFramesToGenerateMax = newState.numFramesToGenerateMax;
             state.bReserved4 = newState.bReserved4;
             state.bIsVsyncSupportAvailable = newState.bIsVsyncSupportAvailable;
-
-            // nvngx_dlssg.dll answers the real ceiling, but a Streamline wrapper between here and the
-            // snippet can carry a lower one of its own. Publish the unlocked count. Struct version 1
-            // ends ahead of this field, so the raise stays inside this branch.
-            if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > state.numFramesToGenerateMax)
-                state.numFramesToGenerateMax = unlockedMax;
         }
 
         if (originalStructVersion >= 3)
@@ -1468,11 +1436,6 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         }
 
         State::Instance().dlssgGameDMFGSupported = newState.bIsDynamicMFGSupported == sl::eTrue;
-
-        // The real DLSS-G's count, unless our own frame generation stands in for it (it writes its own
-        // count further down).
-        if (State::Instance().activeFgInput != FGInput::DLSSG)
-            MfgUnlock::RecordState(newState.numFramesActuallyPresented);
     }
     else
     {
@@ -1480,13 +1443,6 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         if (result != sl::Result::eOk)
             return result;
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
-
-        if (State::Instance().activeFgInput != FGInput::DLSSG)
-            MfgUnlock::RecordState(state.numFramesActuallyPresented);
-
-        // The wrapper's ceiling, replaced by the unlocked count.
-        if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > state.numFramesToGenerateMax)
-            state.numFramesToGenerateMax = unlockedMax;
     }
 
     if (!State::Instance().dlssgGameDMFGSupported)
@@ -1498,19 +1454,12 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
 
     if (optiState.streamlineVersion >= feature_version { 2, 7, 1 })
     {
-        // Provisional until the snippet has been seen. See the note in hkslDLSSGSetOptions.
-        const bool unlockPending = MfgUnlock::Pending();
-
-        if (!optiState.dlssgMfgMax.has_value() && !unlockPending)
+        if (!optiState.dlssgMfgMax.has_value())
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
             if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk)
             {
-                // A wrapper ahead of the snippet can answer a lower ceiling than the patched one.
-                if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > localState.numFramesToGenerateMax)
-                    localState.numFramesToGenerateMax = unlockedMax;
-
                 if (localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
                 {
                     optiState.dlssgMfgMax = localState.numFramesToGenerateMax;
@@ -2358,9 +2307,6 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
         LOG_WARN("Dlssg module in NULL");
         return;
     }
-
-    // The game's copy or the driver's OTA one; both come through here.
-    MfgUnlock::OnStreamlinePluginLoaded(slDlssg);
 
     if (o_dlssg_slGetPluginFunction)
         unhookDlssg();

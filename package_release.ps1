@@ -19,8 +19,6 @@ param(
     [switch]$SkipBuild,
     [switch]$IncludeDlssFrameGeneration,
     [switch]$AcceptNvidiaLicenses,
-    [switch]$IncludeAmpereMfg,
-    [switch]$AcceptAmpereMfgLicenses,
     [string]$HybridAssetsDirectory,
     [string]$StreamlineArchive,
     [string]$PortBackendDll,
@@ -47,7 +45,6 @@ if ($PSBoundParameters.ContainsKey('Version') -and $Version -match '(\d+\.\d+\.\
 # silently packages the other one's build output while reporting success.
 $root = Split-Path -Parent $PSCommandPath
 $flavour = if ($IncludeDlssFrameGeneration) { '-with-dlss-fg' } else { '' }
-if ($IncludeAmpereMfg) { $flavour += '-with-sm86-mfg' }
 $stage = "$root\release\$Version$flavour"
 $zip = "$root\release\OptiScaler-DLSSNR-F5-$Version$flavour.zip"
 if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $zip)) {
@@ -58,12 +55,6 @@ if ($IncludeDlssFrameGeneration -and -not $AcceptNvidiaLicenses) {
 }
 if ($IncludeDlssFrameGeneration) {
     Write-Warning 'LOCAL USE ONLY: this DLL-containing package has not been cleared for redistribution. Publish the downloader-only variant instead; see docs/DLSS-FRAME-GENERATION.md.'
-}
-if ($IncludeAmpereMfg -and -not $AcceptAmpereMfgLicenses) {
-    throw 'Bundling Ampere SM86 MFG binaries requires -AcceptAmpereMfgLicenses.'
-}
-if ($IncludeAmpereMfg) {
-    Write-Warning 'Ampere SM86 MFG proxy DLL will be bundled from dlssg_for_sm86.'
 }
 
 if (-not $SkipBuild) {
@@ -224,7 +215,7 @@ if ($on) {
 
 Write-Host "ini verified: nothing switched on by default"
 
-foreach ($key in @('FinishedPicture', 'DeferredDLSS', 'ResidualFG', 'ResidualFGApproxCamera', 'UnlockPasses', 'AdaMfgUnlock', 'AmpereMfgUnlock')) {
+foreach ($key in @('FinishedPicture', 'DeferredDLSS', 'ResidualFG', 'ResidualFGApproxCamera', 'UnlockPasses')) {
     if ($ini -match "(?mi)^$key=true\s*$") {
         throw "REFUSING: experimental option $key is enabled in the portable package"
     }
@@ -272,26 +263,6 @@ if ($HybridAssetsDirectory) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
         Copy-Item -LiteralPath $source -Destination $target
     }
-}
-
-if ($IncludeAmpereMfg) {
-    $sm86Src = "$root\dlssg_for_sm86"
-    $sm86Dll = "$sm86Src\version.dll"
-    if (-not (Test-Path -LiteralPath $sm86Dll)) {
-        throw "Ampere/Turing SM86/SM75 binary not found at $sm86Dll"
-    }
-    $sm86DestDir = "$stage\OptiScaler\dlssg_sm86"
-    New-Item -ItemType Directory -Force -Path $sm86DestDir | Out-Null
-    Copy-Item -LiteralPath $sm86Dll -Destination "$sm86DestDir\dlssg_sm86.dll"
-    $sm86Ini = "$sm86Src\dlssg_sm86.ini"
-    if (Test-Path -LiteralPath $sm86Ini) {
-        Copy-Item -LiteralPath $sm86Ini -Destination "$sm86DestDir\dlssg_sm86.ini"
-    }
-    $notices = "$sm86Src\THIRD_PARTY_NOTICES.txt"
-    if (Test-Path -LiteralPath $notices) {
-        Copy-Item -LiteralPath $notices -Destination "$sm86DestDir\THIRD_PARTY_NOTICES.txt"
-    }
-    Write-Host "RTX 20/30 (SM75/SM86) MFG: dlssg_sm86.dll, dlssg_sm86.ini, and notices staged"
 }
 
 if ($PortBackendDll) {

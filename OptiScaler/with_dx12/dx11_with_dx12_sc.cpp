@@ -607,7 +607,19 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         LOG_WARN("continuing ResizeBuffers after FG/present queue wait failure");
     }
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    // A real size change can't hold the present barrier for the whole call: frame generation's own resize waits for its
+    // present thread, which takes the shared side. That thread draws the menu overlay, and tearing the overlay down
+    // under it freed ImGui's viewport data while it was in use (Mad Max, XeFG). Hold the barrier for the teardown
+    // only, and keep the overlay off until the resize is done.
+    Dx11wDx12Sync::ScopedResize resizing {};
+    {
+        std::unique_lock<std::shared_mutex> overlayLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
+        if (!presentResizeLock.owns_lock() && State::Instance().activeFgOutput == FGOutput::XeFG)
+            overlayLock.lock();
+
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    }
+
     _ReleaseInteropBackBuffers();
 
     HRESULT realResult = _real != nullptr ? _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags)
@@ -865,7 +877,19 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         LOG_WARN("continuing ResizeBuffers1 after FG/present queue wait failure");
     }
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    // A real size change can't hold the present barrier for the whole call: frame generation's own resize waits for its
+    // present thread, which takes the shared side. That thread draws the menu overlay, and tearing the overlay down
+    // under it freed ImGui's viewport data while it was in use (Mad Max, XeFG). Hold the barrier for the teardown
+    // only, and keep the overlay off until the resize is done.
+    Dx11wDx12Sync::ScopedResize resizing {};
+    {
+        std::unique_lock<std::shared_mutex> overlayLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
+        if (!presentResizeLock.owns_lock() && State::Instance().activeFgOutput == FGOutput::XeFG)
+            overlayLock.lock();
+
+        MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    }
+
     _ReleaseInteropBackBuffers();
 
     HRESULT realResult =

@@ -65,7 +65,6 @@ enum class GameQuirk : uint64_t
     ForceFGRenderSizeMVs,
     CreateSLOnThe2ndDevice,
     Kcd2DlssgHdr10,
-    XeFGBridgeResizeAsCreated,
     REFrameworkCompat, // misc/REFrameworkCompat.h, resolved with [Hotfix] REFrameworkCompat
     // Don't forget to add the new entry to printQuirks
     _
@@ -95,10 +94,6 @@ static const QuirkEntry quirkTable[] = {
 
     // Native DLSSG requires HDR10; the game's HDR toggle otherwise restores scRGB.
     QUIRK_ENTRY("kingdomcome.exe", GameQuirk::Kcd2DlssgHdr10),
-
-    // Metal Gear Solid V: The Phantom Pain resizes with an SRGB format and 1 buffer, which XeFG's flip swapchain
-    // rejects through the D3D11 bridge.
-    QUIRK_ENTRY("mgsvtpp.exe", GameQuirk::XeFGBridgeResizeAsCreated),
 
     // Red Dead Redemption 2
     // Spoofing causes FSR2 inputs crash, DLSS inputs need OptiPatcher to avoid artifacts/crashes anyway
@@ -318,9 +313,8 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("graphadapterdesc.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
     // Mad Max
-    // Runs on its own D3D11 feature level; tested with the elevation off. Resizes with an SRGB format, which XeFG's
-    // flip swapchain rejects through the D3D11 bridge (it then stays at the old size and the GPU hangs on the copy).
-    QUIRK_ENTRY("madmax.exe", GameQuirk::SkipD3D11FeatureLevelElevation, GameQuirk::XeFGBridgeResizeAsCreated),
+    // Runs on its own D3D11 feature level; tested with the elevation off
+    QUIRK_ENTRY("madmax.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
     // Prey 2017
     // Requires Prey Luma Remastered mod for upscalers

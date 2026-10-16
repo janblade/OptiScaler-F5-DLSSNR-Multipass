@@ -144,16 +144,15 @@ struct FgResizeArgs
     UINT flags;
 };
 
-// What the game's resize becomes for the FG swapchain. With the XeFGBridgeResizeAsCreated quirk, the same changes as
-// when the bridge created it (DxgiFactory_Hooks' PrepareDx12InteropDesc): an SRGB format as its UNORM one, and fewer
-// than 2 buffers as the count it has. Under XeFG the flags are the swapchain's own, since FGHooks::hkResizeBuffers
-// keeps them anyway, so a resize that only differs there is skipped too. Without the quirk, the game's values as-is.
+// What the game's resize becomes for the FG swapchain: the same changes as when the bridge created it
+// (DxgiFactory_Hooks' PrepareDx12InteropDesc), an SRGB format as its UNORM one and fewer than 2 buffers as the count it
+// has. The FG swapchain is a flip one, which rejects both (E_INVALIDARG); it then kept its old size while the bridge
+// copied the new-size picture into it, and the GPU hung (MGS V and Mad Max resize with an SRGB format, MGS V with 1
+// buffer). Under XeFG the flags are the swapchain's own, since FGHooks::hkResizeBuffers keeps them anyway, so a resize
+// that only differs there is skipped too.
 FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI_FORMAT format, UINT flags)
 {
     FgResizeArgs args { bufferCount, format, flags };
-
-    if (!State::Instance().gameQuirks[GameQuirk::XeFGBridgeResizeAsCreated])
-        return args;
 
     if (args.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
         args.format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -170,8 +169,11 @@ FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI
         args.flags = desc.Flags;
     }
 
-    LOG_INFO("XeFG bridge resize as created: count {} -> {}, format {} -> {}, flags {:X} -> {:X}", bufferCount,
-             args.bufferCount, (UINT) format, (UINT) args.format, flags, args.flags);
+    if (args.bufferCount != bufferCount || args.format != format || args.flags != flags)
+    {
+        LOG_INFO("FG swapchain resizes as created: count {} -> {}, format {} -> {}, flags {:X} -> {:X}", bufferCount,
+                 args.bufferCount, (UINT) format, (UINT) args.format, flags, args.flags);
+    }
 
     return args;
 }

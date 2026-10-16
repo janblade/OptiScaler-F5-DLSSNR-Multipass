@@ -134,10 +134,44 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
     LOG_INFO("done!");
 }
 
+// Waits until the overlay's queue has finished what was submitted to it. Everything a full teardown releases can still
+// be in use by overlay work the GPU hasn't run yet: with long frames (DLSS-NR on) the last overlay draw was still queued
+// when a D3D11 bridge resize freed its buffers, the GPU faulted on the freed memory and hung (Mad Max, D3D12 DRED: the
+// "Menu overlay" list stopped at its first draw, page fault on a recently freed resource). Bounded, so a lost device or
+// a stuck queue can't hold the caller for good.
+static void WaitForOverlayQueue()
+{
+    auto queue = static_cast<ID3D12CommandQueue*>(currentSCCommandQueue);
+
+    if (queue == nullptr || g_pd3dDeviceParam == nullptr)
+        return;
+
+    ID3D12Fence* fence = nullptr;
+
+    if (FAILED(g_pd3dDeviceParam->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) || fence == nullptr)
+        return;
+
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+    if (event != nullptr && SUCCEEDED(queue->Signal(fence, 1)) && SUCCEEDED(fence->SetEventOnCompletion(1, event)) &&
+        WaitForSingleObject(event, 2000) != WAIT_OBJECT_0)
+    {
+        LOG_WARN("The overlay's queue did not finish within 2 s; releasing its resources anyway");
+    }
+
+    if (event != nullptr)
+        CloseHandle(event);
+
+    fence->Release();
+}
+
 static void CleanupRenderTargetDx12(bool clearQueue)
 {
     if (!_isInited || !_dx12Device || State::Instance().isShuttingDown)
         return;
+
+    if (clearQueue)
+        WaitForOverlayQueue();
 
     for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
     {

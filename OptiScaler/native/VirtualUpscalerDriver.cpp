@@ -486,8 +486,8 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     const auto inDepth = usesSettings ? fgDepth : kRead;
     const auto inOutput = usesSettings ? fgOutput : kWrite;
 
-    // What NR does with this frame (VirtualUpscalerMode.h): nothing (off), runs on the picture in place with the backend
-    // only counted, or runs around the backend's pass as for a game's call.
+    // What happens to the picture this frame (VirtualUpscalerMode.h): nothing (NR off, no pass asked for), NR on it in place
+    // with the backend only counted, or the backend's pass with NR (when on) around it as for a game's call.
     const auto route = DecideVuNrRoute(
         cfg.DlssNrEnabled.value_or_default(),
         VuPassSettingFromIni(cfg.DlssNrNativeUpscalerPass.has_value(), cfg.DlssNrNativeUpscalerPass.value_or_default()));
@@ -572,10 +572,10 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
 
     state.currentFeature = _feature.get();
 
-    // NR off, or NR on the picture itself: the call is here for frame generation, which takes motion and depth from it, not
-    // for an upscale. The picture is already full size and antialiased, so the backend's pass (1.5-3 ms at 1440p-4K on a
-    // mid-range card, more with FSR 4 or XeSS off Intel) is skipped and the picture goes on as the game made it, with NR's
-    // changes when NR ran on it above. The HUD fix still reads Output as its HUD-less picture (UpscaleEnd, recorded before
+    // No pass asked for (NR off, or NR on the picture itself): the call is here for frame generation, which takes motion
+    // and depth from it, not for an upscale. The picture is already full size and antialiased, so the backend's pass
+    // (1.5-3 ms at 1440p-4K on a mid-range card, more with FSR 4 or XeSS off Intel) is skipped and the picture goes on as
+    // the game made it, with NR's changes when NR ran on it above. The HUD fix still reads Output as its HUD-less picture (UpscaleEnd, recorded before
     // the backend's pass would run): the picture is copied there for it, as it will be presented.
     const bool passThrough = route != VuNrRoute::BackendPass;
     _backendPass.store(!passThrough, std::memory_order_relaxed);
@@ -631,7 +631,8 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
                                                "no upscaler pass"
                  : route == VuNrRoute::InPlace ? "Neural Rendering runs on the game's picture; the backend only feeds "
                                                  "frame generation, no upscaler pass"
-                                              : "upscaler pass on");
+                 : cfg.DlssNrEnabled.value_or_default() ? "upscaler pass on, Neural Rendering on its output"
+                                                        : "upscaler pass on (Neural Rendering is off)");
     }
 
     if (_evaluations < 8 || _evaluations % 300 == 0)

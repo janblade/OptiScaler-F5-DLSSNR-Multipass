@@ -565,8 +565,9 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         if (cq && (fg == nullptr || !fg->IsActive() || fg->IsPaused()))
             DlssNr::ApplyToFinishedPicture(pSwapChain, cq);
 
-        // Draw overlay
-        MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
+        // Draw overlay, not while the D3D11 bridge resizes (it tears the overlay down on the game's thread)
+        if (Dx11wDx12Sync::ResizeInProgress().load() == 0)
+            MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
 
 #ifdef LOW_LATENCY_INPUTS
         if (State::Instance().activeFgOutput == FGOutput::FSRFG)

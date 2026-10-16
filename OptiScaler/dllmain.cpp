@@ -1327,9 +1327,6 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::Kcd2DlssgHdr10)
         stringQuirks.push_back("KCD2 native HDR10 for DLSSG");
 
-    if (quirks & GameQuirk::XeFGBridgeResizeAsCreated)
-        stringQuirks.push_back("XeFG bridge resizes as created");
-
     if (quirks & GameQuirk::REFrameworkCompat)
         stringQuirks.push_back("REFramework compatibility (XeFG)");
 

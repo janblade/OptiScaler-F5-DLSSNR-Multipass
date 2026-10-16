@@ -25,13 +25,27 @@ NativeProducer::~NativeProducer()
         CloseHandle(_event);
 }
 
-void NativeProducer::WaitFor(UINT64 value)
+bool NativeProducer::WaitFor(UINT64 value)
 {
-    if (_fence == nullptr || value == 0 || _fence->GetCompletedValue() >= value)
-        return;
+    if (_fence == nullptr || value == 0)
+        return true;
 
-    _fence->SetEventOnCompletion(value, _event);
-    WaitForSingleObject(_event, 1000);
+    const auto completed = _fence->GetCompletedValue();
+    if (completed == UINT64_MAX) return false; // device removal is not successful completion
+    if (completed >= value) return true;
+
+    if (FAILED(_fence->SetEventOnCompletion(value, _event))) return false;
+    if (WaitForSingleObject(_event, 1000) != WAIT_OBJECT_0) return false;
+    const auto after = _fence->GetCompletedValue();
+    return after != UINT64_MAX && after >= value;
+}
+
+bool NativeProducer::Drain()
+{
+    if (!WaitFor(_signalled)) return false;
+    for (auto& slot : _inputLeases)
+        for (auto& resource : slot) resource.Reset();
+    return true;
 }
 
 bool NativeProducer::Init(ID3D12Device* device)
@@ -70,6 +84,7 @@ bool NativeProducer::Init(ID3D12Device* device)
     }
 
     _list->Close();
+    _list->SetName(L"F5Low native input producer");
 
     if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_fence))))
     {
@@ -98,12 +113,18 @@ bool NativeProducer::Init(ID3D12Device* device)
         }
 
     _event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (_event == nullptr)
+    {
+        _error = "creating the fence event";
+        return false;
+    }
     _device = device;
     return true;
 }
 
 void NativeProducer::Reset()
 {
+    _previewReady = false;
     if (_flow)
         _flow->Reset();
     if (_trust)
@@ -128,7 +149,13 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     // The previous work may still be reading the textures a new size replaces.
     if (input.width != _width || input.height != _height)
     {
-        WaitFor(_signalled);
+        if (!WaitFor(_signalled))
+        {
+            result.stoppedAt = "waiting for resize fence";
+            result.stoppedHr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            result.deviceRemoved = _device->GetDeviceRemovedReason();
+            return result;
+        }
         _width = input.width;
         _height = input.height;
         Reset();
@@ -139,7 +166,18 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         Reset();
 
     const UINT slot = (UINT) (_frame % kRing);
-    WaitFor(_values[slot]);
+    if (!WaitFor(_values[slot]))
+    {
+        // A timed out allocator is still owned by the GPU. Resetting it corrupts submitted work.
+        result.stoppedAt = "waiting for allocator fence";
+        result.stoppedHr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+        result.deviceRemoved = _device->GetDeviceRemovedReason();
+        return result;
+    }
+
+    _inputLeases[slot][0] = input.picture;
+    for (int i = 0; i < FrameInput::kMaxDepthCopies; ++i)
+        _inputLeases[slot][i + 1] = i < input.depthCount ? input.depth[i] : nullptr;
 
     // The flow's own cut flag of the frames the GPU has finished since (usually the last one): a cut found there resets
     // the consumer's history now, a couple of frames before the trust mask's count could say so. Until the consumer has
@@ -241,7 +279,8 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         result.flowValid = true;
 
         if (options.flowPreview)
-            _previewReady = _flow->Visualise(list, options.previewMaxSpeed) || _previewReady;
+            _previewReady = _flow->Visualise(list, options.previewMaxSpeed, options.previewView,
+                                             input.picture, input.pictureFormat);
 
         // The trust mask uses the scene's depth as the adapter copied it this frame; without any it runs on flow and luma.
         TrustMaskDx12::Inputs in;
@@ -325,6 +364,18 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     if (SUCCEEDED(closeHr))
     {
+        if (_previewReadFence != nullptr)
+        {
+            const HRESULT readHr = queue->Wait(_previewReadFence.Get(), _previewReadValue);
+            if (FAILED(readHr))
+            {
+                result.stoppedAt = "waiting for diagnostic reader";
+                result.stoppedHr = readHr;
+                result.deviceRemoved = _device->GetDeviceRemovedReason();
+                return result;
+            }
+            _previewReadFence.Reset();
+        }
         if (input.ready.fence != nullptr)
             queue->Wait(input.ready.fence, input.ready.value);
 

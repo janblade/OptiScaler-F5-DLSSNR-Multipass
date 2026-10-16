@@ -50,6 +50,8 @@
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
 #include "DlssNr_WatchedLists.h"
+#include "DlssNr_ExternalSubmission.h"
+#include <dlssnr/DlssNr_ProxyLifetime.h>
 #include "DlssNr_GpuTime.h"
 
 #include <atomic>
@@ -214,6 +216,13 @@ using DlssNr::Profiles::PassPreset;
 using DlssNr::Profiles::PassStyle;
 using DlssNr::Profiles::PassTuning;
 
+struct NrCreateCompletion
+{
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    HRESULT error = S_OK;
+};
+using NrCreateTracker = DlssNrExternalSubmission<NrCreateCompletion>;
+
 struct NrState
 {
     unsigned long long successfulDispatches = 0;
@@ -221,6 +230,7 @@ struct NrState
     PFN_NrCreate create = nullptr;
     PFN_NrEvaluate evaluate = nullptr;
     PFN_NrRelease release = nullptr;
+    int (*shutdownDevice)(ID3D12Device*) = nullptr;
     PFN_NrSetExtras setExtras = nullptr;
     PFN_NrSetFloatSlot setFloatSlot = nullptr;
     PFN_NrProbeFloat probeFloat = nullptr;
@@ -240,6 +250,7 @@ struct NrState
     bool isPort = false;
     void* feature = nullptr;
     bool featurePendingSubmission = false;
+    NrCreateTracker::Ticket featureCreateTicket;
     unsigned long long featureCreateEpoch = 0;
 
     // A feature per extra pass, each with its own temporal history.
@@ -260,6 +271,7 @@ struct NrState
     bool passNeedsReset[DlssNr::MaxPassCount] = {};
     bool passCreateFailed[DlssNr::MaxPassCount] = {};
     bool passPendingSubmission[DlssNr::MaxPassCount] = {};
+    NrCreateTracker::Ticket passCreateTicket[DlssNr::MaxPassCount];
     unsigned long long passCreateEpoch[DlssNr::MaxPassCount] = {};
 
     // The model cannot read and write one resource, so the frame is staged through these.
@@ -525,6 +537,39 @@ struct NrState
 };
 
 NrState g_nr;
+NrCreateTracker g_nrCreates;
+std::atomic<bool> g_nrRunning { false };
+uint64_t g_nrSubmittedEpoch = 0; // real watched D3D12 submissions; not DXGI Presents
+
+NrCreateTracker::Ticket TrackNrCreate(ID3D12GraphicsCommandList* cmd, ID3D12Device* device)
+{
+    if (DlssNr::RetainDeviceProxyModule(device))
+        LOG_INFO("DLSS-NR: retained the ReShade D3D12 proxy module for cached NGX device interfaces");
+    // Must be installed BEFORE CreateFeature, which can return with a build-only list.
+    ResTrack_Dx12::HookLateNrQueue(device);
+    ID3D12GraphicsCommandList* real = nullptr;
+    ID3D12CommandList* identity = Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**)&real) ? real : cmd;
+    DlssNrWatchedLists::Add(identity);
+    return g_nrCreates.Record(identity);
+}
+
+bool NrCreateReady(const NrCreateTracker::Ticket& ticket)
+{
+    if (!ticket || ticket->status != NrCreateTracker::Status::Submitted) return false;
+    const auto& completed = ticket->completion;
+    if (FAILED(completed.error) || !completed.fence || completed.fence->GetCompletedValue() == UINT64_MAX)
+    {
+        g_nr.failed = true;
+        g_nrRunning = false;
+        g_nr.reason = "the GPU could not confirm model creation submission";
+        LOG_ERROR("DLSS-NR creation recording {}: completion failed (0x{:X})", ticket->serial,
+                  (unsigned int)completed.error);
+        return false;
+    }
+    // No CPU wait and no cross-queue assumption. Until the GPU build completes, keep
+    // the clean original frame. This check runs only during feature initialization.
+    return completed.fence->GetCompletedValue() >= 1;
+}
 
 // Automatic's own base white point (PreExposure / its metered exposure, never the followed game's), from the CPU
 // readbacks a few frames behind the shader's live value. 0 when there is no reading yet.
@@ -731,6 +776,7 @@ bool EnsureForwarder()
     g_nr.create = (PFN_NrCreate) GetProcAddress(g_nr.forwarder, "dlssnr_call_create");
     g_nr.evaluate = (PFN_NrEvaluate) GetProcAddress(g_nr.forwarder, "dlssnr_call_evaluate_v2");
     g_nr.release = (PFN_NrRelease) GetProcAddress(g_nr.forwarder, "dlssnr_call_release");
+    g_nr.shutdownDevice = (int (*)(ID3D12Device*)) GetProcAddress(g_nr.forwarder, "dlssnr_call_shutdown");
     // Optional: an older forwarder simply lacks it, and the model runs as before.
     g_nr.setExtras = (PFN_NrSetExtras) GetProcAddress(g_nr.forwarder, "dlssnr_call_set_extras");
     g_nr.setFloatSlot = (PFN_NrSetFloatSlot) GetProcAddress(g_nr.forwarder, "dlssnr_call_set_float_slot");
@@ -1008,7 +1054,9 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT colourF
     ForgetCalibration();
 
     ParkNrFeature(g_nr.feature);
+    g_nrRunning = false;
     g_nr.featurePendingSubmission = false;
+    g_nr.featureCreateTicket.reset();
 
     // The extras go with it: they were built for this raster and this tuning too.
     for (unsigned int i = 1; i < DlssNr::MaxPassCount; ++i)
@@ -1017,6 +1065,7 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT colourF
         g_nr.passNeedsReset[i] = false;
         g_nr.passCreateFailed[i] = false;
         g_nr.passPendingSubmission[i] = false;
+        g_nr.passCreateTicket[i].reset();
     }
 
     for (ID3D12Resource** r :
@@ -3045,6 +3094,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!EnsureForwarder() || (!g_nr.isPort && !EnsureCapabilityParams(device)))
     {
         g_nr.failed = true;
+        g_nrRunning = false;
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         device->Release();
         return;
@@ -3148,7 +3198,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Parked rather than released: with frame generation the GPU can still be several frames
         // deep in work that references all of it.
         ParkNrFeature(g_nr.feature);
+        g_nrRunning = false;
         g_nr.featurePendingSubmission = false;
+        g_nr.featureCreateTicket.reset();
 
         for (unsigned int i = 1; i < DlssNr::MaxPassCount; ++i)
         {
@@ -3156,6 +3208,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.passNeedsReset[i] = false;
             g_nr.passCreateFailed[i] = false;
             g_nr.passPendingSubmission[i] = false;
+            g_nr.passCreateTicket[i].reset();
         }
 
         // Resolution and seam changes invalidate the scratch state. Tuning does not, and throwing
@@ -3212,6 +3265,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (cropColor && g_nr.activeColor == nullptr)
     {
         g_nr.failed = true;
+        g_nrRunning = false;
         g_nr.reason = "the pre-SR active colour staging texture could not be allocated";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         device->Release();
@@ -3361,6 +3415,28 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_WARN("DLSS-NR: could not allocate the eye adaptation texture; Automatic follows every frame at once");
     }
 
+    // Reset discarded the exact build recording. Its feature can never become ready;
+    // retire that generation and build a fresh one instead of waiting indefinitely.
+    if (g_nr.featurePendingSubmission && g_nr.featureCreateTicket &&
+        g_nr.featureCreateTicket->status == NrCreateTracker::Status::Discarded)
+    {
+        LOG_WARN("DLSS-NR: discarded primary creation recording {}; rebuilding", g_nr.featureCreateTicket->serial);
+        ParkNrFeature(g_nr.feature);
+        g_nrRunning = false;
+        g_nr.featurePendingSubmission = false;
+        g_nr.featureCreateTicket.reset();
+    }
+    for (unsigned pass = 1; pass < DlssNr::MaxPassCount; ++pass)
+        if (g_nr.passPendingSubmission[pass] && g_nr.passCreateTicket[pass] &&
+            g_nr.passCreateTicket[pass]->status == NrCreateTracker::Status::Discarded)
+        {
+            LOG_WARN("DLSS-NR: discarded pass {} creation recording; rebuilding", pass + 1);
+            ParkNrFeature(g_nr.passFeature[pass]);
+            g_nr.passPendingSubmission[pass] = false;
+            g_nr.passCreateTicket[pass].reset();
+            g_nr.passNeedsReset[pass] = true;
+        }
+
     if (g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr &&
         g_nr.hdrCopy != nullptr)
     {
@@ -3369,6 +3445,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (!snippet.has_value())
         {
             g_nr.failed = true;
+            g_nrRunning = false;
             g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
             device->Release();
@@ -3379,6 +3456,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const auto tuning = PassTuning(cfg, 0);
         // Not at the same moment as a game's vkCreateDevice (native/DriverInitGate.h)
         native::DriverInitScope driverInit;
+        g_nrRunning = false;
+        g_nr.featureCreateTicket = TrackNrCreate(cmdList, device);
         g_nr.feature =
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
                         device, cmdList, g_nr.capabilityParams, modelWidth, modelHeight,
@@ -3393,7 +3472,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (g_nr.feature == nullptr)
         {
             g_nr.featurePendingSubmission = false;
+            g_nr.featureCreateTicket.reset();
             g_nr.failed = true;
+            g_nrRunning = false;
             g_nr.reason = "the model would not initialise";
             if (g_nr.lastModelError && *g_nr.lastModelError())
             {
@@ -3420,7 +3501,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.featureCreateEpoch = frame.SubmissionEpoch;
         RecordBuiltPrimaryTuning(cfg);
         LOG_INFO("DLSS-NR model feature created from {}", snippet->string());
-        LOG_INFO("DLSS-NR running {}: target {}x{}, model input {}x{} (main network {}x{}), guides {}x{} "
+        LOG_INFO("DLSS-NR built {}: target {}x{}, model input {}x{} (main network {}x{}), guides {}x{} "
                  "(preset {}, intensity {}, style {}, build epoch {})",
                  frame.RayReconstruction ? (frame.BeforeUpscale ? "before RR+SR" : "after RR+SR") :
                      (frame.BeforeUpscale ? "before SR" : "after SR"),
@@ -3441,20 +3522,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
-    // A later function call is not proof that the command list containing CreateFeature was
-    // submitted: some engines record more than one upscale on the same list. Native DX12 supplies
-    // the wrapped Present count and the bridges supply their post-Execute frame counter, so an epoch
-    // change is the first point at which evaluating the feature is safe.
+    // Presentation counters cannot prove submission on a private Feeder device,
+    // and another command-list recording cannot make this feature ready.
     if (g_nr.featurePendingSubmission)
     {
-        if (frame.SubmissionEpoch == g_nr.featureCreateEpoch)
+        if (!NrCreateReady(g_nr.featureCreateTicket))
         {
             device->Release();
             return;
         }
-
+        LOG_INFO("DLSS-NR: primary feature ready after GPU completion of recording {}",
+                 g_nr.featureCreateTicket->serial);
         g_nr.featurePendingSubmission = false;
-        LOG_INFO("DLSS-NR: primary feature ready after submitted epoch {}", g_nr.featureCreateEpoch);
+        g_nr.featureCreateTicket.reset();
     }
 
     // Park no-longer-requested feature histories immediately (their actual release remains deferred),
@@ -3467,24 +3547,25 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.passNeedsReset[pass] = false;
             g_nr.passCreateFailed[pass] = false;
             g_nr.passPendingSubmission[pass] = false;
+            g_nr.passCreateTicket[pass].reset();
         }
     }
 
-    // Do not create another feature, and do not evaluate any feature, while a requested layer still
-    // belongs to the current submission epoch. This keeps multiple upscaler evaluations recorded on
-    // one command list from recreating the historical create/evaluate GPU hang.
+    // Every additional feature has its own creation-recording completion. A different
+    // Evaluate or submission cannot release this build/evaluate guard.
     for (unsigned int pass = 1; pass < requestedPasses; ++pass)
     {
         if (!g_nr.passPendingSubmission[pass])
             continue;
 
-        if (frame.SubmissionEpoch == g_nr.passCreateEpoch[pass])
+        if (!NrCreateReady(g_nr.passCreateTicket[pass]))
         {
             device->Release();
             return;
         }
 
         g_nr.passPendingSubmission[pass] = false;
+        g_nr.passCreateTicket[pass].reset();
         LOG_INFO("DLSS-NR: feature for pass {} ready after submitted epoch {}", pass + 1,
                  g_nr.passCreateEpoch[pass]);
     }
@@ -3521,6 +3602,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
                 const auto tuning = PassTuning(cfg, pass);
                 native::DriverInitScope driverInit;
+                g_nr.passCreateTicket[pass] = TrackNrCreate(cmdList, device);
                 g_nr.passFeature[pass] = g_nr.create(
                     snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
                     device, cmdList, g_nr.capabilityParams, modelWidth, modelHeight,
@@ -3545,6 +3627,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 else
                 {
                     g_nr.passPendingSubmission[pass] = false;
+                    g_nr.passCreateTicket[pass].reset();
                     g_nr.passCreateFailed[pass] = true;
                     LOG_ERROR("DLSS-NR: feature for pass {} failed to build; using {} ready pass(es)",
                               pass + 1, pass);
@@ -3597,6 +3680,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!haveCodec)
     {
         g_nr.failed = true;
+        g_nrRunning = false;
         g_nr.reason = "the colour codec would not compile";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         device->Release();
@@ -4299,6 +4383,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (motionIn == nullptr || (depth != nullptr && depthIn == nullptr))
     {
         g_nr.failed = true;
+        g_nrRunning = false;
         g_nr.reason = motionIn == nullptr ? "the game's motion vectors could not be made readable"
                                           : "the game's depth could not be made readable";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
@@ -4495,6 +4580,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (proxyResult != 1)
         {
             g_nr.failed = true;
+            g_nrRunning = false;
             g_nr.reason = "the proxy path could not run the model";
             LOG_ERROR("DLSS-NR (proxy): evaluate returned 0x{:X} ({}), disabling for this session",
                       proxyResult, NgxResultName(proxyResult));
@@ -5331,6 +5417,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     else
     {
         g_nr.failed = true;
+        g_nrRunning = false;
         g_nr.reason = "the model refused to run";
         if (g_nr.lastModelError && *g_nr.lastModelError())
         {
@@ -5372,7 +5459,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // only the active rectangle and restores both resources before DLSS consumes the image.
     FinishColor(composed);
     if (composed)
+    {
         ++g_nr.successfulDispatches;
+        if (!g_nrRunning.exchange(true))
+            LOG_INFO("DLSS-NR running: successful model evaluation and composition (ApplyModel={}, submission={})",
+                     cfg.DlssNrApplyModel.value_or_default(), frame.SubmissionEpoch);
+    }
 
     if (g_gpuTime != nullptr)
     {
@@ -5386,7 +5478,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         auto* queue = timingQueue != nullptr ? timingQueue
                                              : (ID3D12CommandQueue*) State::Instance().currentCommandQueue;
 
-        if (queue != nullptr)
         {
             if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
                 g_lastGpuTime = ms;
@@ -5545,7 +5636,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     {
         if (cmdList != nullptr && params != nullptr)
         {
-            const auto submitted = timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount;
+            const auto submitted = timingQueue != nullptr ? submissionEpoch : g_nrSubmittedEpoch;
             const auto epoch = g_nrSeamClock.AtSeam(beforeUpscale, timingQueue != nullptr, submitted);
             if (beforeUpscale)
                 DeferredSr::Before(cmdList, params, epoch, submitted, timingQueue);
@@ -5717,7 +5808,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     }
     frame.BeforeUpscale = beforeUpscale;
     frame.RayReconstruction = rayReconstruction;
-    frame.SubmissionEpoch = timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount;
+    frame.SubmissionEpoch = timingQueue != nullptr ? submissionEpoch : g_nrSubmittedEpoch;
 
     // Color and Output may use different formats even though DLSS treats them as the same frame colour
     // space. Output is the stable authority across injection points; target is only a fallback for a
@@ -6036,7 +6127,7 @@ CalibrationReading Calibration()
     return r;
 }
 
-bool IsRunning() { return g_nr.feature != nullptr && !g_nr.failed; }
+bool IsRunning() { return g_nrRunning.load(std::memory_order_acquire); }
 
 const char* FailureReason() { return g_nr.failed ? g_nr.reason : ""; }
 
@@ -6122,6 +6213,37 @@ void RequestCacheDump(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+void ShutdownForDevice(ID3D12Device* device)
+{
+    std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    Microsoft::WRL::ComPtr<ID3D12Device> deviceLease;
+    if (device) deviceLease = device;
+    else if (g_nr.output) g_nr.output->GetDevice(IID_PPV_ARGS(&deviceLease));
+    if (device != nullptr && g_nr.output != nullptr)
+    {
+        Microsoft::WRL::ComPtr<ID3D12Device> owner;
+        if (FAILED(g_nr.output->GetDevice(IID_PPV_ARGS(&owner)))) return;
+        ID3D12Device* real = nullptr;
+        if (Util::CheckForRealObject(__FUNCTION__, device, (IUnknown**)&real)) device = real;
+        Microsoft::WRL::ComPtr<IUnknown> ownerIdentity, requestedIdentity;
+        if (FAILED(owner.As(&ownerIdentity)) || FAILED(device->QueryInterface(IID_PPV_ARGS(&requestedIdentity))) ||
+            ownerIdentity.Get() != requestedIdentity.Get()) return;
+        deviceLease = owner; // exact model-init device, not its caller's proxy identity
+    }
+    LOG_INFO("DLSS-NR: releasing D3D12 model before NGX device shutdown");
+    Shutdown();
+    if (deviceLease && g_nr.shutdownDevice)
+        LOG_INFO("DLSS-NR: model device shutdown returned 0x{:X}",
+                 (unsigned int)g_nr.shutdownDevice(deviceLease.Get()));
+    else if (deviceLease && g_nr.forwarder && !g_nr.isPort)
+        LOG_WARN("DLSS-NR: update nvngx.dll_dlssnr.dll for model device cleanup before unloading API layers");
+    if (g_nr.capabilityParams && NVNGXProxy::D3D12_DestroyParameters())
+        NVNGXProxy::D3D12_DestroyParameters()(g_nr.capabilityParams);
+    g_nr.capabilityParams = nullptr;
+    g_nr.floatSlotKnown = false;
+    g_nr.failed = false;
+}
+
 void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
@@ -6143,7 +6265,10 @@ void Shutdown()
         g_nr.release(g_nr.feature);
 
     g_nr.feature = nullptr;
+    g_nrRunning = false;
+    g_nrCreates.Clear();
     g_nr.featurePendingSubmission = false;
+    g_nr.featureCreateTicket.reset();
 
     for (unsigned int pass = 1; pass < DlssNr::MaxPassCount; ++pass)
     {
@@ -6155,6 +6280,7 @@ void Shutdown()
         g_nr.passNeedsReset[pass] = false;
         g_nr.passCreateFailed[pass] = false;
         g_nr.passPendingSubmission[pass] = false;
+        g_nr.passCreateTicket[pass].reset();
     }
 
     if (g_nr.output != nullptr)

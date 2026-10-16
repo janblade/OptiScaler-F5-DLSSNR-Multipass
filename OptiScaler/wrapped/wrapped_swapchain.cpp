@@ -991,6 +991,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height,
                                                                 DXGI_FORMAT NewFormat, UINT SwapChainFlags)
 {
+    if (!NativeMotionDx12::WaitForPendingFrame())
+        return DXGI_ERROR_WAS_STILL_DRAWING;
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
     LOG_DEBUG("");
@@ -1432,6 +1434,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
                                                                  const UINT* pCreationNodeMask,
                                                                  IUnknown* const* ppPresentQueue)
 {
+    if (!NativeMotionDx12::WaitForPendingFrame())
+        return DXGI_ERROR_WAS_STILL_DRAWING;
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
     LOG_DEBUG("");

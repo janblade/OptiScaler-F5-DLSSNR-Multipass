@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -570,6 +571,77 @@ int main()
 
         const auto r = frame(Scene { 7, 330, 20.0f, 5.0f }, kRead, true, true, true, output, nullptr, nullptr);
         ok &= Check("the flow restarts: no flow on that frame", !r.flowValid);
+    }
+
+    printf("pending GPU work and diagnostic readers\n");
+    {
+        native::NativeProducer stalled;
+        if (!stalled.Init(gpu.device.Get())) return 2;
+        auto picture = Colour(gpu, Scene { 7, 300, 20.0f, 5.0f });
+        native::FrameInput input;
+        input.picture = picture.Get(); input.pictureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        input.pictureState = kRead; input.width = kWidth; input.height = kHeight;
+        native::NativeProducer::Options options;
+        native::FrameOutput pending;
+        ComPtr<ID3D12Fence> gate;
+        if (FAILED(gpu.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)))) return 2;
+        gpu.queue->Wait(gate.Get(),1);
+        for (int i=0;i<3;++i)
+            ok &= Check("an unused allocator may be submitted", stalled.Run(gpu.queue.Get(),input,options,{},pending).submitted);
+        ok &= Check("drain refuses to release in-flight inputs", !stalled.Drain());
+        ++input.width;
+        auto r = stalled.Run(gpu.queue.Get(),input,options,{},pending);
+        ok &= Check("resize timeout does not release live textures", !r.submitted && r.stoppedAt &&
+                    strcmp(r.stoppedAt,"waiting for resize fence")==0);
+        --input.width;
+        r = stalled.Run(gpu.queue.Get(),input,options,{},pending);
+        ok &= Check("allocator timeout skips reset and submission", !r.submitted && r.stoppedAt &&
+                    strcmp(r.stoppedAt,"waiting for allocator fence")==0);
+        gate->Signal(1);
+        gpu.Submit();
+        r = stalled.Run(gpu.queue.Get(),input,options,{},pending);
+        gpu.Submit();
+        ok &= Check("producer recovers when the GPU completes", r.submitted);
+        stalled.PreviewReadSubmitted(gate.Get(),2);
+        r = stalled.Run(gpu.queue.Get(),input,options,{},pending);
+        const bool blocked = pending.done.fence && pending.done.fence->GetCompletedValue() < pending.done.value;
+        gate->Signal(2);
+        gpu.Submit();
+        ok &= Check("producer waits for an external diagnostic reader", r.submitted && blocked &&
+                    pending.done.fence->GetCompletedValue() >= pending.done.value);
+        ok &= Check("device remains healthy", SUCCEEDED(gpu.device->GetDeviceRemovedReason()));
+        ok &= Check("drain releases completed input leases", stalled.Drain());
+    }
+
+    printf("DXGI resize after injected work\n");
+    {
+        WNDCLASSW wc {};
+        wc.lpfnWndProc=DefWindowProcW;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"F5LowResizeFixture";
+        RegisterClassW(&wc);
+        HWND window=CreateWindowExW(0,wc.lpszClassName,L"F5Low hidden resize fixture",WS_OVERLAPPED,
+                                    0,0,320,180,nullptr,nullptr,wc.hInstance,nullptr);
+        ComPtr<IDXGIFactory4> factory;
+        ComPtr<IDXGISwapChain1> chain;
+        DXGI_SWAP_CHAIN_DESC1 desc {};
+        desc.Width=320;desc.Height=180;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count=1;desc.BufferCount=2;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        if(!window || FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+           FAILED(factory->CreateSwapChainForHwnd(gpu.queue.Get(),window,&desc,nullptr,nullptr,&chain))) return 2;
+        native::NativeProducer resizeProducer;
+        if(!resizeProducer.Init(gpu.device.Get())) return 2;
+        ComPtr<ID3D12Resource> backBuffer;
+        if(FAILED(chain->GetBuffer(0,IID_PPV_ARGS(&backBuffer)))) return 2;
+        native::FrameInput input;
+        input.picture=backBuffer.Get();input.pictureFormat=desc.Format;
+        input.pictureState=D3D12_RESOURCE_STATE_PRESENT;input.width=desc.Width;input.height=desc.Height;
+        native::FrameOutput done;
+        ok &= Check("injected first frame submitted", resizeProducer.Run(gpu.queue.Get(),input,{}, {},done).submitted);
+        backBuffer.Reset();
+        ok &= Check("drain finishes work and drops the backbuffer lease", resizeProducer.Drain());
+        const HRESULT resized=chain->ResizeBuffers(2,321,181,desc.Format,0);
+        ok &= Check("DXGI resize succeeds after drain", SUCCEEDED(resized));
+        chain.Reset();DestroyWindow(window);UnregisterClassW(wc.lpszClassName,wc.hInstance);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

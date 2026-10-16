@@ -10,7 +10,7 @@ namespace
 {
 
 constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs and two UAVs
-constexpr uint32_t kPassesPerFrame = 1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1;
+constexpr uint32_t kPassesPerFrame = 1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1 + 2;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
@@ -37,7 +37,7 @@ OpticalFlowDx12::~OpticalFlowDx12()
     ReleaseTextures();
 
     for (ID3D12PipelineState** pso : { &_luma, &_lumaSdr, &_lumaScRgb, &_lumaPq, &_down, &_match, &_median, &_smooth,
-                                       &_visualise, &_global })
+                                       &_visualise, &_global, &_fitGeometry, &_fuseGeometry })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -56,6 +56,8 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
     }
 
     _device = device;
+    wchar_t dred[2] {};
+    _debugEvents = GetEnvironmentVariableW(L"F5LOW_DRED", dred, 2) == 1 && dred[0] == L'1';
 
     // One table (eight SRVs, two UAVs) and the root constants.
     D3D12_DESCRIPTOR_RANGE ranges[2] {};
@@ -124,7 +126,8 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
 
     for (const Entry& entry : { Entry { "Luma", &_luma }, Entry { "Down", &_down }, Entry { "Match", &_match },
                                 Entry { "Median", &_median }, Entry { "Smooth", &_smooth },
-                                Entry { "Visualise", &_visualise }, Entry { "Global", &_global } })
+                                Entry { "Global", &_global },
+                                Entry { "FitGeometry", &_fitGeometry }, Entry { "FuseGeometry", &_fuseGeometry } })
     {
         const auto* code = Compile(entry.name, &_error);
 
@@ -245,6 +248,9 @@ void OpticalFlowDx12::ReleaseTextures()
     release(_flowMedian);
     release(_globalFlow);
     release(_flow);
+    release(_flowFused);
+    release(_geometryModel);
+    release(_fusionInfo);
     release(_preview);
 
     for (Tex& age : _age)
@@ -291,9 +297,10 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
 
     return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
            CreateTexture(_globalFlow, 1, 1, kFlowFormat, L"OpticalFlow_Global") &&
-           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
-           CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM,
-                         L"OpticalFlow_Preview");
+           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowRaw") &&
+           CreateTexture(_flowFused, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowFused") &&
+           CreateTexture(_geometryModel, 3, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, L"OpticalFlow_GeometryModel") &&
+           CreateTexture(_fusionInfo, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FusionInfo");
 }
 
 void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state)
@@ -315,10 +322,20 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
                            DXGI_FORMAT format0, ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2,
                            DXGI_FORMAT format2, Tex& dst, DXGI_FORMAT dstFormat, const Constants& constants,
                            ID3D12Resource* src3, DXGI_FORMAT format3, ID3D12Resource* src4, DXGI_FORMAT format4,
-                           ID3D12Resource* src5, DXGI_FORMAT format5, ID3D12Resource* src6, DXGI_FORMAT format6)
+                           ID3D12Resource* src5, DXGI_FORMAT format5, ID3D12Resource* src6, DXGI_FORMAT format6,
+                           DXGI_FORMAT auxUavFormat)
 {
     Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    if (_debugEvents)
+    {
+        const char* label = pso == _fitGeometry ? "F5Low FitGeometry" : pso == _fuseGeometry ? "F5Low FuseGeometry" :
+                        pso == _visualise ? "F5Low Visualise" : pso == _match ? "F5Low Match" :
+                        pso == _smooth ? "F5Low Smooth" : pso == _median ? "F5Low Median" :
+                        pso == _global ? "F5Low Global" : pso == _down ? "F5Low Down" : "F5Low Luma";
+        // DRED records the label beside its dispatch breadcrumbs when explicitly enabled.
+        list->BeginEvent(1, label, (UINT) std::strlen(label) + 1);
+    }
     StampBegin(list);
 
     const UINT first = _heapCursor;
@@ -365,7 +382,7 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
 
     // The second UAV is the still age the finest match writes; every other pass gets a view of nothing.
     D3D12_UNORDERED_ACCESS_VIEW_DESC ageUav {};
-    ageUav.Format = kAgeFormat;
+    ageUav.Format = auxUavFormat;
     ageUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
 
@@ -381,6 +398,7 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     Transition(list, dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     StampEnd(list, pso);
+    if (_debugEvents) list->EndEvent();
 }
 
 // The test's timing: a timestamp before the first pass of a frame, then one after each (the barrier at the end of a
@@ -407,6 +425,8 @@ void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineSt
                                : pso == _median                                                       ? "median"
                                : pso == _smooth                                                       ? "smooth"
                                : pso == _global                                                       ? "global"
+                               : pso == _fitGeometry                                                  ? "fit"
+                               : pso == _fuseGeometry                                                 ? "fusion"
                                                                                                       : "other";
 }
 
@@ -556,6 +576,31 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, nullptr,
              DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
 
+        // Fit the normalized eight-parameter current-to-previous homography from robustly
+        // supported flow samples, then choose or blend the local hypotheses per pixel.
+        constants = Constants {};
+        constants.sizeX = _geometryModel.width;
+        constants.sizeY = _geometryModel.height;
+        constants.auxX = (uint32_t) colorDesc.Width;
+        constants.auxY = colorDesc.Height;
+        Pass(list, _fitGeometry, _flow.resource, kFlowFormat, current[0].resource, kLumaFormat,
+             nullptr, DXGI_FORMAT_UNKNOWN, _geometryModel, DXGI_FORMAT_R32G32B32A32_FLOAT, constants,
+             nullptr, DXGI_FORMAT_UNKNOWN, previous[0].resource, kLumaFormat);
+
+        constants = Constants {};
+        constants.sizeX = _flowFused.width;
+        constants.sizeY = _flowFused.height;
+        constants.auxX = (uint32_t) colorDesc.Width;
+        constants.auxY = colorDesc.Height;
+        Transition(list, _fusionInfo, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        _passAgeOut = _fusionInfo.resource;
+        Pass(list, _fuseGeometry, _flow.resource, kFlowFormat, current[0].resource, kLumaFormat,
+             nullptr, DXGI_FORMAT_UNKNOWN, _flowFused, kFlowFormat, constants,
+             _geometryModel.resource, DXGI_FORMAT_R32G32B32A32_FLOAT, previous[0].resource, kLumaFormat,
+             nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN, kFlowFormat);
+        _passAgeOut = nullptr;
+        Transition(list, _fusionInfo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
         if (_settings.globalCandidate)
         {
             // What the whole frame did, for the next one to try everywhere (see Global).
@@ -578,7 +623,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     }
 
     // The flow can be read by a pixel shader too (the menu preview, a consumer's sampling).
-    Transition(list, _flow,
+    Transition(list, _flowFused,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     // The ages this frame wrote are next frame's last ones, if the match wrote them (taken from what ran, not from the
@@ -590,22 +635,57 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     return true;
 }
 
-bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, float maxSpeed)
+bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, float maxSpeed, int view,
+                               ID3D12Resource* color, DXGI_FORMAT colorFormat)
 {
-    if (!_flowValid || _preview.resource == nullptr || list == nullptr)
+    if (!_flowValid || list == nullptr)
+        return false;
+
+    // Diagnostics must not create a pipeline or allocate their image while disabled. This also
+    // avoids compiling a newly selected visualizer during the game's initial swapchain setup.
+    if (_visualise == nullptr)
+    {
+        const auto* code = Compile("Visualise", &_error);
+        if (!code) return false;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pso {};
+        pso.pRootSignature = _rootSignature;
+        pso.CS = { code->GetBufferPointer(), code->GetBufferSize() };
+        if (FAILED(_device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&_visualise))))
+        {
+            _error = "creating the diagnostic visualizer pipeline";
+            return false;
+        }
+    }
+    if (_preview.resource == nullptr &&
+        !CreateTexture(_preview, _flowFused.width, _flowFused.height, DXGI_FORMAT_R8G8B8A8_UNORM, L"OpticalFlow_Preview"))
         return false;
 
     // The flow rests in the combined read state; the pass wants the non-pixel one it was written to.
-    Transition(list, _flow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Tex& shownFlow = view == 6 ? _flow : _flowFused;
+    Transition(list, shownFlow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     Constants constants {};
     constants.sizeX = _preview.width;
     constants.sizeY = _preview.height;
     constants.scale = maxSpeed;
-    Pass(list, _visualise, _flow.resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN,
-         _preview, DXGI_FORMAT_R8G8B8A8_UNORM, constants);
+    constants.radius = std::clamp(view, 0, 9);
+    constants.auxX = _width;
+    constants.auxY = _height;
+    constants.knee = std::clamp(_debugSettings.spacing, 16.0f, 128.0f);
+    constants.lambda = std::clamp(_debugSettings.gain, 0.25f, 8.0f);
+    constants.zeroMargin = std::clamp(_debugSettings.minimumMotion, 0.05f, 4.0f);
+    constants.lookRange = std::clamp(_debugSettings.thickness, 0.5f, 3.0f);
+    constants.lookDistance = std::clamp(_debugSettings.gridOpacity, 0.0f, 0.5f);
+    constants.whiteNits = std::clamp(_debugSettings.opacity, 0.0f, 1.0f);
+    const bool background = view == 7 && _debugSettings.background && color && colorFormat != DXGI_FORMAT_UNKNOWN;
+    constants.hasPrediction = background ? 1 : 0;
+    Pass(list, _visualise, shownFlow.resource, kFlowFormat, background ? color : nullptr,
+         background ? colorFormat : DXGI_FORMAT_UNKNOWN,
+         nullptr, DXGI_FORMAT_UNKNOWN, _preview, DXGI_FORMAT_R8G8B8A8_UNORM, constants,
+         _geometryModel.resource, DXGI_FORMAT_R32G32B32A32_FLOAT, nullptr, DXGI_FORMAT_UNKNOWN,
+         _fusionInfo.resource, kFlowFormat);
 
-    Transition(list, _flow,
+    Transition(list, shownFlow,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     Transition(list, _preview, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return true;

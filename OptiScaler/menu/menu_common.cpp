@@ -11,6 +11,9 @@
 #include <dlssnr/DlssNr.h>
 #include <native/VirtualUpscalerDriver.h>
 #include <native/NativeLowLatency.h>
+#include <native/NativeDriverDx12.h>
+#include <native/NativeDriverDx11.h>
+#include <native/NativeDriverVk.h>
 #include <native/VkPresentBridge.h>
 
 #include "input/input_system.h"
@@ -1832,6 +1835,8 @@ void MenuCommon::BeginMenuFrameIfNeeded(RenderMenuContext& ctx)
 
     if ((!config->DisableSplash.value_or_default() && now > splashStart && now < splashLimit) ||
         config->ShowFps.value_or_default() || _isVisible || ImGui::notifications.size() > 0 || scanIndicator ||
+        NativeMotionDx12::ExpandedPreviewVisible() || NativeMotionDx11::ExpandedPreviewVisible() ||
+        NativeMotionVk::ExpandedPreviewVisible() ||
         (config->DlssNrCompare.value_or_default() != 0 && config->DlssNrCompareTags.value_or_default()))
     {
         if (!_isUWP)
@@ -8895,6 +8900,13 @@ bool MenuCommon::RenderMenu()
 
     // 4) Draw the full settings menu last so popups and child windows keep their existing behavior.
     RenderMainMenuWindow(ctx);
+
+    if (ctx.newFrame)
+    {
+        NativeMotionDx12::DrawExpandedPreview();
+        NativeMotionDx11::DrawExpandedPreview();
+        NativeMotionVk::DrawExpandedPreview();
+    }
 
     if (ctx.newFrame)
         ImGui::EndFrame();

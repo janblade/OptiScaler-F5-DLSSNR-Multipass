@@ -52,7 +52,7 @@ void NativeDriver::LogDiagnostics()
              _diagNative, _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
 }
 
-NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview)
+NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView)
 {
     RunResult out;
 
@@ -133,6 +133,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
     options.flowPreview = flowPreview;
     options.previewMaxSpeed = kPreviewMaxSpeed;
+    options.previewView = flowPreviewView;
 
     const auto apply = [this, &source, useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, const NativeFrame& frame)
     {

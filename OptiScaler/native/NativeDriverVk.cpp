@@ -5,6 +5,10 @@
 #include <native/NativeDriver.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
+#include <native/DebugPreviewVk.h>
+#include <native/FlowDiagnosticUi.h>
+#include <native/NativeDebugLease.h>
+#include <imgui/imgui_impl_vulkan.h>
 
 #include <Config.h>
 #include <misc/IdentifyGpu.h>
@@ -15,8 +19,7 @@
 #include <mutex>
 
 // The Vulkan counterpart of native/NativeDriverDx11.cpp: the same shared frame step (native::NativeDriver), a different
-// adapter (native::VkFrameSource). No flow/trust pictures: they are D3D12 textures and the Vulkan menu renders with
-// ImGui_ImplVulkan. The status line and the flow tuning work the same as on the other APIs.
+// adapter (native::VkFrameSource), plus a fenced diagnostic-image return path to the Vulkan menu.
 
 namespace
 {
@@ -24,6 +27,27 @@ namespace
 native::NativeDriver g_driver("Native motion (Vulkan)", ", on a private D3D12 device on the Vulkan device's adapter");
 native::VkFrameSource g_source;
 std::mutex g_runMutex;
+native::DebugPreviewVk g_preview;
+native::FlowDiagnosticUi g_ui;
+native::NativeDebugLease g_dx12Lease;
+
+ImTextureID DiagnosticTexture(ID3D12Resource* texture,DXGI_FORMAT format,bool gray)
+{
+    if(native::DebugRenderer("imgui_impl_dx12"))return g_dx12Lease.Texture(texture,format,gray);
+    if(!native::DebugRenderer("imgui_impl_vulkan"))return 0;
+    const auto state=gray?D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE|D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE:
+                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    auto* image=g_preview.Export(g_source.Queue12(),texture,format,state,gray);
+    if(!image)return 0;
+    if(!image->descriptor)image->descriptor=ImGui_ImplVulkan_AddTexture(g_preview.Sampler(),image->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if(g_driver.Producer())g_driver.Producer()->PreviewReadSubmitted(g_preview.CopyFence(),g_preview.WaitValue());
+    return (ImTextureID)image->descriptor;
+}
+bool ShowDiagnostic(ID3D12Resource* texture,DXGI_FORMAT format,bool gray,float width,float height)
+{
+    const auto id=DiagnosticTexture(texture,format,gray);if(!id)return false;
+    ImGui::Image(id,ImVec2(width,height));return true;
+}
 
 // What the present waits on once the frame was processed: VkPresentInfoKHR keeps a pointer to it.
 VkSemaphore g_presentWait = VK_NULL_HANDLE;
@@ -101,7 +125,7 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
 
     if (producing)
     {
-        g_driver.RunFrame(g_source, false);
+        g_driver.RunFrame(g_source,g_ui.TakeRequest(),g_ui.View());
     }
     else
     {
@@ -197,6 +221,7 @@ ID3D12Device* ShareBridgeDevice(VkPhysicalDevice physical, std::string& why)
 void OnDeviceDestroyed(VkDevice device)
 {
     std::lock_guard lock(g_runMutex);
+    g_preview.Reset();g_ui.Reset();
     g_source.OnDeviceDestroyed(device);
 
     // A refusal for that device is over; the menu would otherwise keep it until the next present gets this far
@@ -206,6 +231,12 @@ void OnDeviceDestroyed(VkDevice device)
 
 void DrawStatus()
 {
+    std::unique_lock lock(g_runMutex, std::defer_lock);
+    if (!g_dx12Lease.Held() && !lock.try_lock())
+    {
+        ImGui::TextDisabled("Motion processing in progress.");
+        return;
+    }
     // The bridge was turned off because its D3D12 swapchain could not present (VkPresentBridge::PresentOutput)
     if (const std::string given = VkPresentBridge::FailureReason(); !given.empty())
     {
@@ -239,19 +270,41 @@ void DrawStatus()
         ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f), "%s", refusal.c_str());
 }
 
-bool NrOnlyRunning() { return g_driver.NrOnlyRunning(); }
+bool NrOnlyRunning()
+{
+    if (g_dx12Lease.Held()) return g_driver.NrOnlyRunning();
+    std::unique_lock lock(g_runMutex, std::try_to_lock);
+    return lock.owns_lock() && g_driver.NrOnlyRunning();
+}
 
 void DrawAdvancedUi()
 {
+    std::unique_lock lock(g_runMutex,std::defer_lock);
+    if(!g_dx12Lease.Held() && !lock.try_lock()){ImGui::TextDisabled("Motion processing in progress.");return;}
     g_driver.DrawFlowTuning();
+    g_ui.DrawAdvanced(g_driver,ShowDiagnostic);
+    if(!g_preview.Error().empty())ImGui::TextWrapped("Diagnostic: %s",g_preview.Error().c_str());
+}
 
-    if (!Config::Instance()->DlssNrNativeDebugView.value_or_default() ||
-        g_driver.GetStatus() != native::NativeDriver::Status::Running)
-        return;
-
-    ImGui::TextDisabled("Running (%llu frames). Trust: %s (%llu cuts seen).", (unsigned long long) g_driver.Frame(),
-                        g_driver.TrustRecent() ? "running" : "waiting for the motion estimate",
-                        (unsigned long long) g_driver.Cuts());
+void BeginDebugFrame(VkDevice device,VkPhysicalDevice physical,uint32_t family,uint32_t slot)
+{
+    std::lock_guard lock(g_runMutex);
+    if(Config::Instance()->DlssNrNativeDebugView.value_or_default())
+        g_preview.BeginFrame(device,physical,family,slot,ImGui_ImplVulkan_RemoveTexture);
+    else g_preview.SkipFrame();
+}
+void RecordDebugTransfers(VkCommandBuffer commands){std::lock_guard lock(g_runMutex);g_preview.RecordTransfers(commands);}
+VkSemaphore DebugWaitSemaphore(){return g_preview.WaitSemaphore();}
+uint64_t DebugWaitValue(){return g_preview.WaitValue();}
+void ReleaseDebugViews(){std::lock_guard lock(g_runMutex);g_preview.Reset();}
+void BeginDx12DebugFrame(ID3D12CommandQueue* queue){g_dx12Lease.Begin(g_runMutex,g_driver,queue);}
+void EndDx12DebugFrame(ID3D12Fence* fence,UINT64 value){g_dx12Lease.End(fence,value);}
+bool ExpandedPreviewVisible(){return g_ui.Expanded();}
+void DrawExpandedPreview()
+{
+    std::unique_lock lock(g_runMutex,std::defer_lock);
+    if(!g_dx12Lease.Held() && !lock.try_lock())return;
+    g_ui.DrawExpanded(g_driver,DiagnosticTexture);
 }
 
 } // namespace NativeMotionVk

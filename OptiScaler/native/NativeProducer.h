@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <wrl/client.h>
 
 namespace native
 {
@@ -76,6 +77,7 @@ class NativeProducer
         bool apply = false;           // run the consumer (needs flow; depth is optional); off: flow and trust mask only
         bool flowPreview = false;     // also draw the flow picture for the menu
         float previewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
+        int previewView = 0;          // OpticalFlowDx12::Visualise view; used by the F5Low diagnostics tab
     };
 
     struct Result
@@ -115,16 +117,29 @@ class NativeProducer
     OpticalFlowDx12* Flow() { return _flow.get(); }
     TrustMaskDx12* Trust() { return _trust.get(); }
     bool PreviewReady() const { return _previewReady; }
+    // Drain injected work before DXGI destroys/replaces a back buffer, then drop its COM leases.
+    bool Drain();
+    SyncPoint LastSubmission() const { return { _fence, _signalled }; }
+    // The menu reads our textures on another queue. Its submission must finish before
+    // our next GPU write; the menu retains the textures independently across resize.
+    void PreviewReadSubmitted(ID3D12Fence* fence, UINT64 value)
+    {
+        _previewReadFence = fence;
+        _previewReadValue = value;
+    }
 
   private:
     static constexpr uint32_t kRing = 3;
 
-    void WaitFor(UINT64 value);
+    bool WaitFor(UINT64 value);
 
     std::unique_ptr<OpticalFlowDx12> _flow;
     std::unique_ptr<TrustMaskDx12> _trust;
     ID3D12Device* _device = nullptr;
     ID3D12CommandAllocator* _allocators[kRing] = {};
+    // Adapters may retire their snapshots immediately after Return(). Retain every
+    // input referenced by a submitted list until the owning ring slot's fence completes.
+    Microsoft::WRL::ComPtr<ID3D12Resource> _inputLeases[kRing][1 + FrameInput::kMaxDepthCopies];
     ID3D12GraphicsCommandList* _list = nullptr;
     ID3D12Fence* _fence = nullptr;
     HANDLE _event = nullptr;
@@ -140,6 +155,8 @@ class NativeProducer
     uint32_t _width = 0;
     uint32_t _height = 0;
     bool _previewReady = false;
+    Microsoft::WRL::ComPtr<ID3D12Fence> _previewReadFence;
+    UINT64 _previewReadValue = 0;
     std::string _error;
 };
 

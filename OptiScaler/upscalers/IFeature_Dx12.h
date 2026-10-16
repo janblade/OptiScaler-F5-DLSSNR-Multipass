@@ -63,6 +63,7 @@ class IFeature_Dx12 : public virtual IFeature
     virtual bool EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) = 0;
 
   public:
+    ID3D12Device* GetDevice() const { return Device; }
     bool Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
     bool Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
 

@@ -70,6 +70,7 @@ void setAutomaticMask(void *params, int enabled) {
 using PFN_NrCreate = int(__cdecl *)(ID3D12GraphicsCommandList *, int, const void *, void **);
 using PFN_NrEvaluate = int(__cdecl *)(ID3D12GraphicsCommandList *, const void *, const void *, void *);
 using PFN_NrRelease = int(__cdecl *)(void *);
+using PFN_NrShutdown1 = int(__cdecl *)(ID3D12Device *);
 
 struct Snippet {
     HMODULE module = nullptr;
@@ -77,6 +78,7 @@ struct Snippet {
     PFN_NrCreate create = nullptr;
     PFN_NrEvaluate evaluate = nullptr;
     PFN_NrRelease release = nullptr;
+    PFN_NrShutdown1 shutdown = nullptr;
     std::unordered_set<ID3D12Device*> initialisedDevices;
 
 };
@@ -84,6 +86,7 @@ struct Snippet {
 std::recursive_mutex g_snippetMutex;
 std::map<std::wstring, Snippet> g_snippets;
 std::unordered_map<void*, Snippet*> g_featureOwners;
+std::unordered_map<void*, ID3D12Device*> g_featureDevices;
 thread_local std::string g_modelError;
 
 void recordModelError(Snippet* snippet, const char* fallback) {
@@ -108,6 +111,7 @@ Snippet* loadSnippet(const wchar_t *path) {
     snippet.create = (PFN_NrCreate) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_CreateFeature");
     snippet.evaluate = (PFN_NrEvaluate) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_EvaluateFeature");
     snippet.release = (PFN_NrRelease) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_ReleaseFeature");
+    snippet.shutdown = (PFN_NrShutdown1) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_Shutdown1");
 
 
     return snippet.create && snippet.evaluate && snippet.release ? &snippet : nullptr;
@@ -845,7 +849,10 @@ __declspec(dllexport) void *dlssnr_call_create(const wchar_t *snippetPath, const
     setUInt(capabilityParams, "DLSSNR.UICorrection", (unsigned int) uiCorrection);
     void *handle = nullptr;
     dlssnr_call_last_create = snippet->create(cmd, 18, capabilityParams, &handle);
-    if (dlssnr_call_last_create == 1 && handle) g_featureOwners[handle] = snippet;
+    if (dlssnr_call_last_create == 1 && handle) {
+        g_featureOwners[handle] = snippet;
+        g_featureDevices[handle] = device;
+    }
     else recordModelError(snippet, "model feature creation failed");
     // Match the DX11/Vulkan paths: a partial handle on failure is not usable.
     return dlssnr_call_last_create == 1 ? handle : nullptr;
@@ -967,7 +974,31 @@ __declspec(dllexport) void dlssnr_call_release(void *feature) {
         volatile int result = owner->second->release(feature); // retain this module's caller frame
         (void) result;
         g_featureOwners.erase(owner);
+        g_featureDevices.erase(feature);
     }
+}
+
+// ReleaseFeature alone leaves the snippet's per-device runtime caches alive. A
+// Vulkan layer can unload before process exit; cached proxy-device vtables then
+// become dangling. The host calls this after releasing all features on a drained
+// device, while the caller's API interposers are still loaded.
+__declspec(dllexport) int dlssnr_call_shutdown(ID3D12Device *device) {
+    if (!device) return 0;
+    std::lock_guard<std::recursive_mutex> lock(g_snippetMutex);
+    for (const auto& feature : g_featureDevices)
+        if (feature.second == device) return -1; // another live owner still needs it
+    int result = 1;
+    bool knownDevice = false;
+    for (auto& entry : g_snippets) {
+        auto& snippet = entry.second;
+        if (!snippet.initialisedDevices.count(device)) continue;
+        knownDevice = true;
+        if (!snippet.shutdown) { result = 0; continue; }
+        volatile int stopped = snippet.shutdown(device); // preserve the required caller frame
+        if (stopped == 1) snippet.initialisedDevices.erase(device);
+        else result = stopped;
+    }
+    return knownDevice ? result : 0;
 }
 
 } // extern "C"

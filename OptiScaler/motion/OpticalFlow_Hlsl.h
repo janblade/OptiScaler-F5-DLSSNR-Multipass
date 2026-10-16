@@ -9,7 +9,8 @@
 
 namespace OpticalFlowHlsl
 {
-inline constexpr const char* kSource = R"HLSL(
+inline constexpr const char* kSource =
+    R"HLSL(
 cbuffer P : register(b0)
 {
     uint2 size;      // the size of what is written
@@ -38,6 +39,7 @@ cbuffer P : register(b0)
     uint lookWeights;       // Match, finest level, no depth: the window's samples count by how near their luma is to the pixel's
     float lookRange;        // ... within this much luma
     float lookDistance;     // ... and a little less with their distance from it, in this level's pixels
+    float2 jitter;          // Luma: the scene's offset in the colour's pixels (0 = none)
 };
 
 SamplerState Linear : register(s0);
@@ -56,14 +58,51 @@ RWTexture2D<float>  OutLuma : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
 RWTexture2D<uint>   OutAge : register(u1);
 
-)HLSL"
-                      F5LOW_LUMA_HLSL
-                      R"HLSL(// Luma of the colour, averaged over 2x2 into the first level.
+)HLSL" F5LOW_LUMA_HLSL
+    R"HLSL(// Cubic B-spline reconstruction, widened by the 2:1 luma reduction. Unlike a bilinear
+// de-jitter followed by a box, it rejects detail above the luma Nyquist before decimation, and its
+// bandwidth barely changes with sample phase. Positive adjacent taps combine into one bilinear read.
+float CubicBSpline(float x)
+{
+    x = abs(x);
+    if (x < 1.0)
+        return (4.0 + x * x * (3.0 * x - 6.0)) / 6.0;
+    float t = max(2.0 - x, 0.0);
+    return t * t * t / 6.0;
+}
+
+void LumaTaps(float phase, out float4 weights, out float4 positions)
+{
+    [unroll] for (int i = 0; i < 4; ++i)
+    {
+        float at = 2.0 * i - 3.0;
+        float a = CubicBSpline((at - phase) * 0.5);
+        float b = CubicBSpline((at + 1.0 - phase) * 0.5);
+        weights[i] = (a + b) * 0.5;
+        positions[i] = at + b / (a + b);
+    }
+}
+
+// Luma of the colour, reduced 2:1 into the first level.
 [numthreads(8, 8, 1)]
 void Luma(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= size.x || id.y >= size.y)
         return;
+
+    if (any(jitter != 0))
+    {
+        float4 wx, wy, px, py;
+        LumaTaps(0.5 + jitter.x, wx, px);
+        LumaTaps(0.5 + jitter.y, wy, py);
+        float3 color = 0.0;
+        [unroll] for (int y = 0; y < 4; ++y)
+            [unroll] for (int x = 0; x < 4; ++x)
+                color += wx[x] * wy[y] * Color.SampleLevel(Linear,
+                    (float2(id.xy) * 2.0 + float2(px[x], py[y]) + 0.5) / float2(aux), 0).rgb;
+        OutLuma[id.xy] = LumaOf(color);
+        return;
+    }
 
     float sum = 0.0;
     [unroll] for (int j = 0; j < 2; ++j)
@@ -166,7 +205,7 @@ float LargestChange(int2 p, float cur[16])
     return largest;
 }
 )HLSL" // the compiler limits one string literal to 16 KB; the source goes on in a second one
-                      R"HLSL(
+    R"HLSL(
 // How much a sample with luma l counts beside the centre pixel's lc: about 1 where the look is alike, little across an edge
 // that changes it, and a little less with the distance from the centre (offset, in pixels of this level).
 float LookWeight(float l, float lc, float2 offset)
@@ -175,7 +214,7 @@ float LookWeight(float l, float lc, float2 offset)
     return max(exp(-dl * dl - 0.5 * dot(offset, offset) / (lookDistance * lookDistance)), 0.02);
 }
 )HLSL"
-                      R"HLSL(
+    R"HLSL(
 
 // Block matching at one level: look around the coarser level's answer (doubled, it is in that level's pixels) for the offset
 // into the previous frame with the smallest difference, then a few gradient steps for the part of a pixel.
@@ -463,7 +502,7 @@ void Match(uint3 id : SV_DispatchThreadID)
 }
 
 )HLSL" // ... and on in a third one
-                      R"HLSL(
+    R"HLSL(
 // A 3x3 median of each component, which removes the odd wrong block, scaled to full-resolution pixels.
 void Sort(inout float a, inout float b)
 {

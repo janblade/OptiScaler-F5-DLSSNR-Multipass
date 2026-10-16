@@ -511,9 +511,18 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     auto result = _fgSwapChain->Present(SyncInterval, Flags);
 
     if (SUCCEEDED(result))
+    {
         _AdvanceFakeBackBufferIndex();
+    }
     else
+    {
         LOG_ERROR("fg Present failed: {:X}", (UINT) result);
+
+        // The reason (and the D3D12 DRED report, when on) is the bridge's D3D12 device's; the outer present only asks
+        // the game's D3D11 one
+        if ((result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET) && _dx12Device != nullptr)
+            Util::GetDeviceRemovedReason(_dx12Device);
+    }
 
     return result;
 }
@@ -525,7 +534,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetBuffer(UINT Buffer, REFIID riid, void*
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(BOOL Fullscreen, IDXGIOutput* pTarget)
 {
-    LOG_DEBUG("Dx11wDx12SC SetFullscreenState: {}, target: {:X}, caller: {}", Fullscreen, (size_t) pTarget,
+    DXGI_OUTPUT_DESC targetDesc {};
+    const bool targetDescribed = pTarget != nullptr && SUCCEEDED(pTarget->GetDesc(&targetDesc));
+
+    LOG_DEBUG("Dx11wDx12SC SetFullscreenState: {}, target: {:X} ({}), caller: {}", Fullscreen, (size_t) pTarget,
+              targetDescribed ? wstring_to_string(targetDesc.DeviceName) : std::string("-"),
               Util::WhoIsTheCaller(_ReturnAddress()));
 
     State::Instance().realExclusiveFullscreen = Fullscreen;
@@ -698,9 +711,25 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeTarget(const DXGI_MODE_DESC* pNewTa
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetContainingOutput(IDXGIOutput** ppOutput)
 {
-    return _fgSwapChain != nullptr
-               ? _fgSwapChain->GetContainingOutput(ppOutput)
-               : (_real != nullptr ? _real->GetContainingOutput(ppOutput) : DXGI_ERROR_DEVICE_REMOVED);
+    const HRESULT result =
+        _fgSwapChain != nullptr
+            ? _fgSwapChain->GetContainingOutput(ppOutput)
+            : (_real != nullptr ? _real->GetContainingOutput(ppOutput) : DXGI_ERROR_DEVICE_REMOVED);
+
+    // Which display the game is told it is on (its resolution list follows it): the output, and where the window is.
+    DXGI_OUTPUT_DESC desc {};
+    RECT window {};
+    const bool described = SUCCEEDED(result) && ppOutput != nullptr && *ppOutput != nullptr &&
+                           SUCCEEDED((*ppOutput)->GetDesc(&desc));
+    GetWindowRect(_handle, &window);
+
+    LOG_DEBUG("GetContainingOutput {:X}: {} ({},{} {}x{}), window ({},{} {}x{})", (UINT) result,
+              described ? wstring_to_string(desc.DeviceName) : std::string("-"), desc.DesktopCoordinates.left,
+              desc.DesktopCoordinates.top, desc.DesktopCoordinates.right - desc.DesktopCoordinates.left,
+              desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top, window.left, window.top,
+              window.right - window.left, window.bottom - window.top);
+
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetFrameStatistics(DXGI_FRAME_STATISTICS* pStats)
@@ -1026,6 +1055,7 @@ bool Dx11wDx12SC::_InitInteropObjects()
             return false;
         }
 
+        _copyCommandLists[i]->SetName(L"D3D11 bridge copy");
         _copyCommandLists[i]->Close();
     }
 
@@ -1152,6 +1182,7 @@ bool Dx11wDx12SC::_EnsureNativeInputCopyRing()
             return false;
         }
 
+        _nrCopyCommandLists[i]->SetName(L"D3D11 bridge native input copy");
         _nrCopyCommandLists[i]->Close();
     }
 

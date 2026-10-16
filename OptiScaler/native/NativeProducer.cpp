@@ -69,6 +69,7 @@ bool NativeProducer::Init(ID3D12Device* device)
         return false;
     }
 
+    _list->SetName(L"Optical F5Low producer");
     _list->Close();
 
     if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_fence))))

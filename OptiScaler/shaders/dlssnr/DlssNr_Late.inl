@@ -179,6 +179,7 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
             Say("Could not prepare the finished-picture option.");
             return nullptr;
         }
+        slot.commands->SetName(L"DLSS-NR finished picture"); // named for the D3D12 device-removed report
     }
     return next;
 }

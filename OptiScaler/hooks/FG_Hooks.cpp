@@ -555,6 +555,23 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
 void FGHooks::ApplyRestyle(const WindowRestyle& restyle)
 {
+    // Already so: every successful ResizeBuffers asks again while exclusive fullscreen is refused, and restyling a window
+    // that already matches still sends it a frame change, which a game can answer with yet another resize.
+    const LONG_PTR style = restyle.popup ? (WS_POPUP | WS_VISIBLE) : (WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+    const int x = restyle.popup ? restyle.x : 0;
+    const int y = restyle.popup ? restyle.y : 0;
+    const LONG_PTR currentStyle =
+        GetWindowLongPtr(restyle.hwnd, GWL_STYLE) & ~static_cast<LONG_PTR>(WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
+    RECT rect {};
+
+    if (currentStyle == style && GetWindowRect(restyle.hwnd, &rect) && rect.left == x && rect.top == y &&
+        rect.right - rect.left == restyle.width && rect.bottom - rect.top == restyle.height)
+    {
+        LOG_DEBUG("Window already {} {}x{} at {}x{}", restyle.popup ? "popup" : "windowed", restyle.width,
+                  restyle.height, x, y);
+        return;
+    }
+
     if (restyle.popup)
     {
         SetWindowLongPtr(restyle.hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
@@ -620,6 +637,19 @@ void FGHooks::RestyleWindowLater(const WindowRestyle& restyle)
 
     LOG_WARN("Could not defer the window restyle, applying it now");
     ApplyRestyle(restyle);
+}
+
+void FGHooks::ReleaseRestyleHook()
+{
+    std::scoped_lock lock(_restyleMutex);
+
+    // hMod is null for a thread hook in this process, so the hook does not keep this DLL loaded
+    if (_restyleHook != nullptr)
+        UnhookWindowsHookEx(_restyleHook);
+
+    _restyleHook = nullptr;
+    _restyleHookThread = 0;
+    _restylePending = false;
 }
 
 LRESULT CALLBACK FGHooks::RestyleMessageHook(int code, WPARAM wParam, LPARAM lParam)
@@ -945,14 +975,12 @@ HRESULT FGHooks::hkResizeTarget(IDXGISwapChain* This, const DXGI_MODE_DESC* pNew
                      pNewTargetParameters->Width, pNewTargetParameters->Height, client.right - client.left,
                      client.bottom - client.top, width, height, info.width, info.height);
 
+            // Synchronous: games read the window size right after ResizeTarget. Centred on the monitor; a size equal
+            // to the monitor covers it.
             if (client.right - client.left != width || client.bottom - client.top != height)
             {
-                SetWindowLongPtr(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-                SetWindowLongPtr(hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW);
-
-                // Centred on the monitor; a size equal to the monitor covers it
-                SetWindowPos(hwnd, HWND_TOP, info.x + (info.width - width) / 2, info.y + (info.height - height) / 2,
-                             width, height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                ApplyRestyle({ hwnd, true, info.x + (info.width - width) / 2, info.y + (info.height - height) / 2,
+                               width, height });
             }
         }
         else

@@ -22,6 +22,9 @@ class FGHooks
     // This must not mark State::currentFGSwapchain and must not install FG present hooks.
     static void SetDx12InteropPresentSC(IDXGISwapChain* pSwapChain, HWND hWnd);
     static void ClearDx12InteropPresentSC(IUnknown* pSwapChain);
+
+    // Removes the window-thread hook the borderless restyle is applied through (when OptiScaler is unloaded).
+    static void ReleaseRestyleHook();
     static bool IsDx12InteropPresentSC(IUnknown* pSwapChain);
 
   private:

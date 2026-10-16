@@ -31,6 +31,7 @@
 #include <hooks/Dxgi_Hooks.h>
 #include <hooks/D3D11_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
+#include <hooks/FG_Hooks.h>
 #include <hooks/Vulkan_Hooks.h>
 #include <hooks/Ntdll_Hooks.h>
 #include <hooks/Kernel_Hooks.h>
@@ -2258,6 +2259,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // unhookCrypt32();
         // unhookAdvapi32();
         // DetachHooks();
+
+        FGHooks::ReleaseRestyleHook();
 
         if (skModule != nullptr)
             NtdllProxy::FreeLibrary_Ldr(skModule);

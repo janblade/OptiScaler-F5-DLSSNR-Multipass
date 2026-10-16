@@ -406,6 +406,8 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             return;
         }
 
+        g_pd3dCommandList->SetName(L"Menu overlay");
+
         result = g_pd3dCommandList->Close();
         if (result != S_OK)
         {

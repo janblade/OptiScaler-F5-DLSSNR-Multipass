@@ -1026,6 +1026,7 @@ bool Dx11wDx12SC::_InitInteropObjects()
             return false;
         }
 
+        _copyCommandLists[i]->SetName(L"D3D11 bridge copy");
         _copyCommandLists[i]->Close();
     }
 
@@ -1152,6 +1153,7 @@ bool Dx11wDx12SC::_EnsureNativeInputCopyRing()
             return false;
         }
 
+        _nrCopyCommandLists[i]->SetName(L"D3D11 bridge native input copy");
         _nrCopyCommandLists[i]->Close();
     }
 

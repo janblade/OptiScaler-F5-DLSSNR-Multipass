@@ -730,6 +730,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             LogToConsole.set_from_config(readBool("Log", "LogToConsole"));
             LogToDebug.set_from_config(readBool("Log", "LogToDebug"));
             LogToNGX.set_from_config(readBool("Log", "LogToNGX"));
+            D3D12Dred.set_from_config(readBool("Log", "D3D12Dred"));
             OpenConsole.set_from_config(readBool("Log", "OpenConsole"));
             DebugWait.set_from_config(readBool("Log", "DebugWait"));
             LogSingleFile.set_from_config(readBool("Log", "SingleFile"));
@@ -2015,6 +2016,7 @@ bool Config::SaveIni()
         ini.SetValue("Log", "LogToConsole", GetBoolValue(Instance()->LogToConsole.value_for_config()).c_str());
         ini.SetValue("Log", "LogToDebug", GetBoolValue(Instance()->LogToDebug.value_for_config()).c_str());
         ini.SetValue("Log", "LogToNGX", GetBoolValue(Instance()->LogToNGX.value_for_config()).c_str());
+        ini.SetValue("Log", "D3D12Dred", GetBoolValue(Instance()->D3D12Dred.value_for_config()).c_str());
         ini.SetValue("Log", "OpenConsole", GetBoolValue(Instance()->OpenConsole.value_for_config()).c_str());
         ini.SetValue("Log", "SingleFile", GetBoolValue(Instance()->LogSingleFile.value_for_config()).c_str());
         ini.SetValue("Log", "LogFileName",

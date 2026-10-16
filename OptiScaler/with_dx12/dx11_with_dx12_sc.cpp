@@ -144,12 +144,13 @@ struct FgResizeArgs
     UINT flags;
 };
 
-// What the game's resize becomes for the FG swapchain: the same changes as when the bridge created it
-// (DxgiFactory_Hooks' PrepareDx12InteropDesc), an SRGB format as its UNORM one and fewer than 2 buffers as the count it
-// has. The FG swapchain is a flip one, which rejects both (E_INVALIDARG); it then kept its old size while the bridge
-// copied the new-size picture into it, and the GPU hung (MGS V and Mad Max resize with an SRGB format, MGS V with 1
-// buffer). Under XeFG the flags are the swapchain's own, since FGHooks::hkResizeBuffers keeps them anyway, so a resize
-// that only differs there is skipped too.
+// What the game's resize becomes for the FG swapchain, which the bridge created as a flip one (DxgiFactory_Hooks'
+// PrepareDx12InteropDesc): an SRGB format as its UNORM one, fewer than 2 buffers as the count it has, and the flags it
+// was created with (creation drops some, such as GDI_COMPATIBLE, and a flip swapchain's tearing and waitable-object
+// flags can't change in a resize). A flip swapchain rejects an SRGB format or 1 buffer (E_INVALIDARG); it then kept
+// its old size while the bridge copied the new-size picture into it, and the GPU hung (MGS V and Mad Max resize with an
+// SRGB format, MGS V with 1 buffer). A resize that only differs in flags is skipped. Formats the creation path refuses
+// outright are not changed here.
 FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI_FORMAT format, UINT flags)
 {
     FgResizeArgs args { bufferCount, format, flags };
@@ -163,11 +164,8 @@ FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI
         args.bufferCount = 0;
 
     DXGI_SWAP_CHAIN_DESC desc {};
-    if (State::Instance().activeFgOutput == FGOutput::XeFG && fgSwapChain != nullptr &&
-        SUCCEEDED(fgSwapChain->GetDesc(&desc)))
-    {
+    if (fgSwapChain != nullptr && SUCCEEDED(fgSwapChain->GetDesc(&desc)))
         args.flags = desc.Flags;
-    }
 
     if (args.bufferCount != bufferCount || args.format != format || args.flags != flags)
     {
@@ -176,6 +174,30 @@ FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI
     }
 
     return args;
+}
+
+// The menu overlay's teardown in a bridge resize. A real size change can't hold the present barrier for the whole call:
+// frame generation's own resize waits for its present thread, which takes the shared side (XeFG's presents only,
+// wrapped_swapchain's LocalPresent). That thread draws the overlay, and tearing the overlay down under it freed
+// ImGui's viewport data while it was in use (Mad Max, XeFG); so the barrier is held for the teardown only. Frame
+// generation is switched off before, outside the barrier: the teardown would otherwise do it while holding it, and
+// switching XeFG off can wait for that same present thread. The caller keeps a ScopedResize for the whole resize, so
+// the present leaves the overlay alone until it is done.
+void TearDownOverlayForResize(HWND handle, bool barrierHeld)
+{
+    auto fg = State::Instance().currentFG;
+    if (fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
+    {
+        State::Instance().fgChanged = true;
+        fg->UpdateTarget();
+        fg->Deactivate();
+    }
+
+    std::unique_lock<std::shared_mutex> overlayLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
+    if (!barrierHeld && State::Instance().activeFgOutput == FGOutput::XeFG)
+        overlayLock.lock();
+
+    MenuOverlayDx::CleanupRenderTarget(true, handle);
 }
 } // namespace
 
@@ -609,18 +631,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         LOG_WARN("continuing ResizeBuffers after FG/present queue wait failure");
     }
 
-    // A real size change can't hold the present barrier for the whole call: frame generation's own resize waits for its
-    // present thread, which takes the shared side. That thread draws the menu overlay, and tearing the overlay down
-    // under it freed ImGui's viewport data while it was in use (Mad Max, XeFG). Hold the barrier for the teardown
-    // only, and keep the overlay off until the resize is done.
     Dx11wDx12Sync::ScopedResize resizing {};
-    {
-        std::unique_lock<std::shared_mutex> overlayLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
-        if (!presentResizeLock.owns_lock() && State::Instance().activeFgOutput == FGOutput::XeFG)
-            overlayLock.lock();
-
-        MenuOverlayDx::CleanupRenderTarget(true, _handle);
-    }
+    TearDownOverlayForResize(_handle, presentResizeLock.owns_lock());
 
     _ReleaseInteropBackBuffers();
 
@@ -879,18 +891,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         LOG_WARN("continuing ResizeBuffers1 after FG/present queue wait failure");
     }
 
-    // A real size change can't hold the present barrier for the whole call: frame generation's own resize waits for its
-    // present thread, which takes the shared side. That thread draws the menu overlay, and tearing the overlay down
-    // under it freed ImGui's viewport data while it was in use (Mad Max, XeFG). Hold the barrier for the teardown
-    // only, and keep the overlay off until the resize is done.
     Dx11wDx12Sync::ScopedResize resizing {};
-    {
-        std::unique_lock<std::shared_mutex> overlayLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
-        if (!presentResizeLock.owns_lock() && State::Instance().activeFgOutput == FGOutput::XeFG)
-            overlayLock.lock();
-
-        MenuOverlayDx::CleanupRenderTarget(true, _handle);
-    }
+    TearDownOverlayForResize(_handle, presentResizeLock.owns_lock());
 
     _ReleaseInteropBackBuffers();
 

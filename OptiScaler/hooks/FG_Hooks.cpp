@@ -531,9 +531,6 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
         if (State::Instance().SCExclusiveFullscreen)
         {
-            SetWindowLongPtr(_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-            SetWindowLongPtr(_hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW);
-
             Util::MonitorInfo info;
 
             if (pTarget != nullptr)
@@ -544,18 +541,117 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
             LOG_DEBUG("Overriding window size: {}x{}, and pos: {}x{} at monitor: {}", info.width, info.height, info.x,
                       info.y, wstring_to_string(info.name));
 
-            SetWindowPos(_hwnd, HWND_TOP, info.x, info.y, info.width, info.height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            RestyleWindowLater({ _hwnd, true, info.x, info.y, info.width, info.height });
         }
         else
         {
-            SetWindowLongPtr(_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-            SetWindowLongPtr(_hwnd, GWL_EXSTYLE, WS_EX_OVERLAPPEDWINDOW);
-            SetWindowPos(_hwnd, nullptr, 0, 0, scDesc.BufferDesc.Width, scDesc.BufferDesc.Height,
-                         SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+            RestyleWindowLater(
+                { _hwnd, false, 0, 0, (int) scDesc.BufferDesc.Width, (int) scDesc.BufferDesc.Height });
         }
     }
 
     return result;
+}
+
+void FGHooks::ApplyRestyle(const WindowRestyle& restyle)
+{
+    if (restyle.popup)
+    {
+        SetWindowLongPtr(restyle.hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowLongPtr(restyle.hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW);
+        SetWindowPos(restyle.hwnd, HWND_TOP, restyle.x, restyle.y, restyle.width, restyle.height,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    }
+    else
+    {
+        SetWindowLongPtr(restyle.hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        SetWindowLongPtr(restyle.hwnd, GWL_EXSTYLE, WS_EX_OVERLAPPEDWINDOW);
+        SetWindowPos(restyle.hwnd, nullptr, 0, 0, restyle.width, restyle.height,
+                     SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+// Posts the restyle to the window and applies it when the window thread takes that message from its queue, through a
+// WH_GETMESSAGE hook on that thread (no dependency on the menu's input hooks, which may not be set up yet at the game's
+// first fullscreen switch). Only the latest request is kept; the message carries no data, so a foreign post of the same
+// message can only apply the pending one early. Falls back to applying it now when it cannot be posted.
+void FGHooks::RestyleWindowLater(const WindowRestyle& restyle)
+{
+    if (restyle.hwnd == nullptr || !IsWindow(restyle.hwnd))
+        return;
+
+    bool posted = false;
+    DWORD pid = 0;
+    const DWORD tid = GetWindowThreadProcessId(restyle.hwnd, &pid);
+
+    if (tid != 0 && pid == GetCurrentProcessId())
+    {
+        std::scoped_lock lock(_restyleMutex);
+
+        if (_restyleMessage.load() == 0)
+            _restyleMessage.store(RegisterWindowMessageW(L"OptiScaler.FGHooks.Restyle"));
+
+        if (_restyleHook == nullptr || _restyleHookThread != tid)
+        {
+            if (_restyleHook != nullptr)
+                UnhookWindowsHookEx(_restyleHook);
+
+            _restyleHook = SetWindowsHookExW(WH_GETMESSAGE, RestyleMessageHook, nullptr, tid);
+            _restyleHookThread = _restyleHook != nullptr ? tid : 0;
+
+            if (_restyleHook == nullptr)
+                LOG_WARN("SetWindowsHookEx(WH_GETMESSAGE) failed: {}", GetLastError());
+        }
+
+        if (_restyleMessage.load() != 0 && _restyleHook != nullptr)
+        {
+            _pendingRestyle = restyle;
+            _restylePending = PostMessageW(restyle.hwnd, _restyleMessage.load(), 0, 0) != FALSE;
+            posted = _restylePending;
+        }
+    }
+
+    if (posted)
+    {
+        LOG_DEBUG("Window restyle deferred to the message loop: {} {}x{} at {}x{}", restyle.popup ? "popup" : "windowed",
+                  restyle.width, restyle.height, restyle.x, restyle.y);
+        return;
+    }
+
+    LOG_WARN("Could not defer the window restyle, applying it now");
+    ApplyRestyle(restyle);
+}
+
+LRESULT CALLBACK FGHooks::RestyleMessageHook(int code, WPARAM wParam, LPARAM lParam)
+{
+    auto msg = reinterpret_cast<MSG*>(lParam);
+    const UINT restyleMessage = _restyleMessage.load();
+
+    if (code == HC_ACTION && wParam == PM_REMOVE && msg != nullptr && restyleMessage != 0 &&
+        msg->message == restyleMessage)
+    {
+        msg->message = WM_NULL;
+
+        WindowRestyle restyle {};
+        bool apply = false;
+
+        {
+            std::scoped_lock lock(_restyleMutex);
+            apply = _restylePending;
+            restyle = _pendingRestyle;
+            _restylePending = false;
+        }
+
+        // Outside the lock: the messages this sends can bring the game back into SetFullscreenState.
+        if (apply && IsWindow(restyle.hwnd))
+        {
+            LOG_DEBUG("Applying deferred window restyle: {} {}x{} at {}x{}", restyle.popup ? "popup" : "windowed",
+                      restyle.width, restyle.height, restyle.x, restyle.y);
+            ApplyRestyle(restyle);
+        }
+    }
+
+    return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
 HANDLE FGHooks::hkGetFrameLatencyWaitableObject(IDXGISwapChain2* This)
@@ -811,16 +907,13 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
     if (result == S_OK && Config::Instance()->FGXeFGForceBorderless.value_or_default() &&
         State::Instance().SCExclusiveFullscreen)
     {
-        SetWindowLongPtr(_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-        SetWindowLongPtr(_hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW);
-
         Util::MonitorInfo info;
         info = Util::GetMonitorInfoForWindow(_hwnd);
 
         LOG_DEBUG("Overriding window size: {}x{}, and pos: {}x{} at monitor: {}", info.width, info.height, info.x,
                   info.y, wstring_to_string(info.name));
 
-        SetWindowPos(_hwnd, HWND_TOP, info.x, info.y, info.width, info.height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        RestyleWindowLater({ _hwnd, true, info.x, info.y, info.width, info.height });
     }
 
     return result;
@@ -1090,16 +1183,13 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
     if (result == S_OK && Config::Instance()->FGXeFGForceBorderless.value_or_default() &&
         State::Instance().SCExclusiveFullscreen)
     {
-        SetWindowLongPtr(_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-        SetWindowLongPtr(_hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW);
-
         Util::MonitorInfo info;
         info = Util::GetMonitorInfoForWindow(_hwnd);
 
         LOG_DEBUG("Overriding window size: {}x{}, and pos: {}x{} at monitor: {}", info.width, info.height, info.x,
                   info.y, wstring_to_string(info.name));
 
-        SetWindowPos(_hwnd, HWND_TOP, info.x, info.y, info.width, info.height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        RestyleWindowLater({ _hwnd, true, info.x, info.y, info.width, info.height });
     }
 
     return result;

@@ -317,6 +317,10 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("ffxiv_dx11.exe", GameQuirk::DisableVsyncOverride),
     QUIRK_ENTRY("graphadapterdesc.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
+    // Mad Max
+    // Runs on its own D3D11 feature level; tested with the elevation off
+    QUIRK_ENTRY("madmax.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+
     // Prey 2017
     // Requires Prey Luma Remastered mod for upscalers
     QUIRK_ENTRY("prey.exe", GameQuirk::DontUseNTShared, GameQuirk::DisableOptiXessPipelineCreation,

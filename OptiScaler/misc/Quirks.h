@@ -318,8 +318,9 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("graphadapterdesc.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
     // Mad Max
-    // Runs on its own D3D11 feature level; tested with the elevation off
-    QUIRK_ENTRY("madmax.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
+    // Runs on its own D3D11 feature level; tested with the elevation off. Resizes with an SRGB format, which XeFG's
+    // flip swapchain rejects through the D3D11 bridge (it then stays at the old size and the GPU hangs on the copy).
+    QUIRK_ENTRY("madmax.exe", GameQuirk::SkipD3D11FeatureLevelElevation, GameQuirk::XeFGBridgeResizeAsCreated),
 
     // Prey 2017
     // Requires Prey Luma Remastered mod for upscalers

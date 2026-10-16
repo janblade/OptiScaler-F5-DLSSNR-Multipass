@@ -511,9 +511,18 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     auto result = _fgSwapChain->Present(SyncInterval, Flags);
 
     if (SUCCEEDED(result))
+    {
         _AdvanceFakeBackBufferIndex();
+    }
     else
+    {
         LOG_ERROR("fg Present failed: {:X}", (UINT) result);
+
+        // The reason (and the D3D12 DRED report, when on) is the bridge's D3D12 device's; the outer present only asks
+        // the game's D3D11 one
+        if ((result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET) && _dx12Device != nullptr)
+            Util::GetDeviceRemovedReason(_dx12Device);
+    }
 
     return result;
 }

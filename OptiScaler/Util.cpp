@@ -833,23 +833,31 @@ static std::string DredName(const char* a, const wchar_t* w)
 // the operations around the last one it completed, and the allocations near a page fault. Once per process.
 static void LogDredReport(ID3D12Device* device)
 {
+    // Spent only by a report that has breadcrumbs, so a device without them (another component's, lost first) does
+    // not use up the one for the bridge's
     static std::atomic<bool> reported { false };
 
-    if (!Config::Instance()->D3D12Dred.value_or_default() || reported.exchange(true))
+    if (!Config::Instance()->D3D12Dred.value_or_default() || reported.load())
         return;
 
     ID3D12DeviceRemovedExtendedData1* dred = nullptr;
 
     if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred))) || dred == nullptr)
     {
-        LOG_ERROR("DRED: no report on this device (DRED was not on when it was created)");
+        LOG_ERROR("DRED: this device has no DRED interface");
         return;
     }
 
     D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs {};
 
-    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs)))
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs)) && crumbs.pHeadAutoBreadcrumbNode != nullptr)
     {
+        if (reported.exchange(true))
+        {
+            dred->Release();
+            return;
+        }
+
         UINT finished = 0;
         UINT unfinished = 0;
 
@@ -887,7 +895,9 @@ static void LogDredReport(ID3D12Device* device)
     }
     else
     {
-        LOG_ERROR("DRED: no breadcrumbs");
+        LOG_ERROR("DRED: no breadcrumbs (DRED was not on when this device was created)");
+        dred->Release();
+        return;
     }
 
     D3D12_DRED_PAGE_FAULT_OUTPUT1 fault {};
@@ -919,9 +929,6 @@ void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
 {
     auto reason = pDevice->GetDeviceRemovedReason();
 
-    if (reason != S_OK)
-        LogDredReport(pDevice);
-
     switch (reason)
     {
     case DXGI_ERROR_DEVICE_HUNG:
@@ -951,6 +958,9 @@ void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
     default:
         LOG_ERROR("Device removed reason: Unknown ({:X})", (UINT) reason);
     }
+
+    if (reason != S_OK)
+        LogDredReport(pDevice);
 }
 
 void Util::LoadProxyLibrary(const std::wstring& name, const std::wstring& optiPath, const std::wstring& overridePath,

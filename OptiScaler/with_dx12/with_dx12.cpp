@@ -7,16 +7,15 @@
 
 #include <Config.h>
 
-// D3D12 DRED (device-removed extended data): auto-breadcrumbs and page-fault tracking for devices created after this,
-// read back by Util::GetDeviceRemovedReason when the device is lost. Diagnostics only, [Log] D3D12Dred.
+// D3D12 DRED (device-removed extended data): auto-breadcrumbs and page-fault tracking, read back by
+// Util::GetDeviceRemovedReason when a device is lost. Turned on before the bridge's D3D12 device is created; the
+// setting is process-wide, so every D3D12 device created after it has it too. Diagnostics only, [Log] D3D12Dred.
 static void EnableDredOnce()
 {
-    static bool done = false;
+    static std::atomic<bool> done { false };
 
-    if (done || !Config::Instance()->D3D12Dred.value_or_default())
+    if (!Config::Instance()->D3D12Dred.value_or_default() || done.exchange(true))
         return;
-
-    done = true;
 
     auto getDebugInterface = D3d12Proxy::Module() != nullptr ? D3d12Proxy::D3D12GetDebugInterface_() : nullptr;
     ID3D12DeviceRemovedExtendedDataSettings* settings = nullptr;
@@ -33,7 +32,7 @@ static void EnableDredOnce()
     settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
     settings->Release();
 
-    LOG_INFO("D3D12 DRED on (breadcrumbs and page faults) for the bridge's D3D12 device");
+    LOG_INFO("D3D12 DRED on (breadcrumbs and page faults) for D3D12 devices created from now on");
 }
 
 HRESULT CreateD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL featureLevel, ID3D12Device** device)

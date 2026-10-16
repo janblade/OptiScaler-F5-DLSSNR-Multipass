@@ -688,19 +688,19 @@ class Config
     // NativeUpscaler: experimental. With NativeMotion on and the game making no upscaler call, presents the picture,
     // the finder's depth (all far when it has none) and the optical flow to OptiScaler's upscaler (Dx12Upscaler, FFX
     // when unset) as a synthetic upscaler call (render size == output size, no jitter: no reconstruction; the backend's
-    // pass runs only with NativeUpscalerPass true and NR on), so frame generation with the Upscaler input works in a
+    // pass runs only with NativeUpscalerPass true), so frame generation with the Upscaler input works in a
     // game that never calls an upscaler. Takes
     // priority over NativeInput. Changes apply at once. In a D3D11 game, FGInput=Upscaler replaces the game's swap chain
     // with with_dx12::Dx11wDx12SC; this and NativeInput then run from its present (native/NativeDriverDx11.cpp's
     // OnFGPresent, with_dx12/dx11_with_dx12_sc.cpp's _ApplyNativeInputToFGBackBuffer), while Finished Picture NR (the
-    // D3D12 swap chain path) does nothing there. The menu's "NR + upscaler & frame generation" mode (Optical F5Low page): it
+    // D3D12 swap chain path) does nothing there. The menu's "NR + frame generation" mode (Optical F5Low page): it
     // sets NativeDepthFinder, NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished
     // Picture if it was on (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
-    // NativeUpscalerPass: with NativeUpscaler on and Neural Rendering on, whether the upscaler backend still evaluates
-    // the picture. Auto (unset) and false: it does not. The backend only keeps frame generation's Upscaler input alive,
-    // and NR runs on the game's picture in place, as in NativeInput (native/VirtualUpscalerMode.h). true: the old pass,
-    // NR on the backend's output (to compare, or as a fallback).
+    // NativeUpscalerPass: with NativeUpscaler on, whether the upscaler backend evaluates the picture (Neural Rendering on
+    // or off). Auto (unset) and false: it does not. The backend only keeps frame generation's Upscaler input alive, and
+    // with NR on, NR runs on the game's picture in place, as in NativeInput (native/VirtualUpscalerMode.h). true: the
+    // backend's pass, NR (when on) on its output. The menu's "Run the upscaler on the picture".
     CustomOptional<bool> DlssNrNativeUpscalerPass { false };
     // NativeFrameGenerationOnly: a Vulkan game that calls DLSS, FSR or XeSS of its own gets OptiScaler's frame generation
     // from that call. The Vulkan present bridge (native/VkPresentBridge.h) puts frame generation's D3D12 swapchain on the

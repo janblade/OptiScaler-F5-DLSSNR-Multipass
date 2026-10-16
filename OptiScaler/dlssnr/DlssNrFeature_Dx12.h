@@ -103,7 +103,7 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
                       DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState, unsigned long long epoch);
 // The same for Optical F5Low's virtual upscaler (native/VirtualUpscalerDriver.h), which keeps its upscaler backend only for
 // frame generation and runs NR on the game's picture here. It skips the check that is about NR Only mode: Finished Picture
-// does not have to be on (the "NR + upscaler & frame generation" mode keeps it off). Needs Enable Neural Rendering.
+// does not have to be on (the "NR + frame generation" mode keeps it off). Needs Enable Neural Rendering.
 bool ApplyVirtualUpscalerInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
                                ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
                                bool depthReversed, bool reset, DXGI_COLOR_SPACE_TYPE colorSpace,

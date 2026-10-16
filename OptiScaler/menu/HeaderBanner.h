@@ -15,7 +15,7 @@ enum class Feature
     None,   // no feature, or one that is not initialised
     Game,   // a game's feature, running
     Frozen, // a game's feature, not currently used by the game
-    F5Low   // Optical F5Low's own virtual upscaler (NR + upscaler & frame generation)
+    F5Low   // Optical F5Low's own virtual upscaler (NR + frame generation)
 };
 
 struct Inputs

@@ -1021,7 +1021,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     static constexpr ModeChoice kModes[] = {
         { Mode::Off, Shown::Off, "Off##nativemode" },
         { Mode::NrOnly, Shown::NrOnly, "NR only##nativemode" },
-        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + upscaler & frame generation##nativemode" },
+        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + frame generation##nativemode" },
         { Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, "FG only (game's upscaler)##nativemode" },
     };
 
@@ -1079,9 +1079,8 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
 
     HelpMarker("For games that don't call an upscaler: Optical F5Low works out the motion itself so NR can run.\n"
                "NR only: NR on the finished picture. Cheapest; no frame generation.\n"
-               "NR + upscaler & frame generation: adds OptiScaler's upscaler, which gives frame generation its input; "
-               "needed for frame generation. With NR on, NR works on the game's picture and the upscaler does not "
-               "process it.\n"
+               "NR + frame generation: adds OptiScaler's upscaler, which gives frame generation its input; needed for "
+               "frame generation. It does not process the picture unless you tick Run the upscaler on the picture.\n"
                "FG only (Vulkan): frame generation for Vulkan games that call DLSS, FSR or XeSS themselves.\n"
                "Needs Enable Neural Rendering. On Vulkan, set up frame generation before the game starts.");
 
@@ -1094,6 +1093,21 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                                         "is not needed.");
 
         return;
+    }
+
+    // The backend's own pass over the picture (NativeUpscalerPass), with NR on or off. Off (the default) it only gives frame
+    // generation its input.
+    if (shown == Shown::NrAndFrameGeneration)
+    {
+        bool pass = config->DlssNrNativeUpscalerPass.value_or_default();
+
+        if (ImGui::Checkbox("Run the upscaler on the picture##nativeupscalerpass", &pass))
+            config->DlssNrNativeUpscalerPass = pass;
+
+        HelpMarker("Runs the chosen upscaler (DLSS, FSR or XeSS) over the game's picture at the same size. It adds no "
+                   "detail, but can steady shimmer in games with weak anti-aliasing; it can also soften the picture "
+                   "or leave trails where the estimated motion is wrong. Costs about 1.5-3 ms. Off: the upscaler only "
+                   "gives frame generation its input. Works with NR on or off.");
     }
 
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
@@ -1331,7 +1345,7 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
     case DlssNrNativeMode::Shown::NrOnly:
         return "NR only";
     case DlssNrNativeMode::Shown::NrAndFrameGeneration:
-        return "NR + upscaler & frame generation";
+        return "NR + frame generation";
     case DlssNrNativeMode::Shown::MotionOnly:
         return "motion only";
     case DlssNrNativeMode::Shown::FrameGenerationOnly:
@@ -3822,7 +3836,7 @@ void RenderF5LowUpscalerNote()
 {
     ImGui::TextWrapped(
         "Driven by Optical F5Low (the game makes no upscaler call): this upscaler runs at the same size as the game's "
-        "picture. With NR on, NR works on the game's picture and this upscaler only gives frame generation its input.");
+        "picture and only gives frame generation its input, unless Run the upscaler on the picture is ticked there.");
 
     if (ImGui::SmallButton("Optical F5Low settings##upscalernote"))
         MenuPages::RequestPage(MenuPages::Page::NrF5Low);
@@ -3838,7 +3852,7 @@ void RenderF5LowFrameGenHint(Config* config, bool noUpscalerFeature)
     if (!noUpscalerFeature || Decide(HeaderInputs(config, Feature::None, false)).action != Action::UseF5Low)
         return;
 
-    ImGui::TextWrapped("No upscaler call from the game? Optical F5Low's NR + upscaler & frame generation gives frame "
+    ImGui::TextWrapped("No upscaler call from the game? Optical F5Low's NR + frame generation gives frame "
                        "generation its input.");
 
     if (ImGui::SmallButton("Use Optical F5Low##framegenhint"))

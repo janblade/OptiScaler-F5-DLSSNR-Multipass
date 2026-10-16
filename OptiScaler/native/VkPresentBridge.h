@@ -1,7 +1,7 @@
 #pragma once
 
 // The Vulkan present bridge, OptiScaler's side: a Vulkan game that gets frame generation from Optical F5Low's "NR +
-// upscaler & frame generation" mode presents through a D3D12 swapchain, the way a D3D11 game does (with_dx12/
+// frame generation" mode presents through a D3D12 swapchain, the way a D3D11 game does (with_dx12/
 // dx11_with_dx12_sc.h). When the game makes its swapchain with the mode and a frame generation output chosen at start
 // (OptiFG Upscaler input), the VkSwapchain is made on a hidden window's surface, and the real window gets a D3D12 swapchain
 // from frame generation, on the private D3D12 device that native/VkFrameSource.h already shares the picture with. Per

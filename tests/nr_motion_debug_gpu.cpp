@@ -112,7 +112,7 @@ int main(int argc, char** argv)
     const bool isolatedModel = modelBlack > model.size()/8 && modelCyan > 10;
     ok &= isolatedModel;
     printf("isolated projective grid: %zu cyan / %zu black pixels: %s\n", modelCyan, modelBlack, isolatedModel ? "PASS" : "FAIL");
-    for (int view = 0; view < 10; ++view)
+    for (int view = 0; view < 11; ++view)
     {
         ok &= flow.Visualise(gpu.list.Get(), 24, view);
         gpu.Submit();
@@ -142,6 +142,13 @@ int main(int argc, char** argv)
         noModelBlack &= noModel[i] == 0 && noModel[i+1] == 0 && noModel[i+2] == 0 && noModel[i+3] == 255;
     ok &= noModelBlack;
     printf("invalid model-only view stays black: %s\n", noModelBlack ? "PASS" : "FAIL");
+    ok &= flow.Visualise(gpu.list.Get(), 24, 10);
+    const auto reason = ReadPreview(gpu, flow.Preview());
+    bool invalidMagenta = true;
+    for (size_t i = 0; i < reason.size(); i += 4)
+        invalidMagenta &= reason[i] == 255 && reason[i+1] == 0 && reason[i+2] == 255 && reason[i+3] == 255;
+    ok &= invalidMagenta;
+    printf("rejection reason distinguishes invalid global model as magenta: %s\n", invalidMagenta ? "PASS" : "FAIL");
     ok &= SUCCEEDED(gpu.device->GetDeviceRemovedReason());
     printf("motion debug GPU: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

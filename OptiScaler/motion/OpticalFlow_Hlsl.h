@@ -796,8 +796,12 @@ float2 GeoPredict(float h[8], float2 current, out float denominator)
 
 int GeoHypothesisPoint(int hypothesis, int quadrant)
 {
-    uint seed = (uint)hypothesis * 747796405u + (uint)quadrant * 2891336453u + 277803737u;
-    int local = (int)((seed >> 16) & 3u);
+    // The old linear hash repeated 17 of its 32 four-point combinations.
+    // Keep all 15 distinct old combinations in original first-occurrence order;
+    // spend the other 17 solves on distinct combinations with broader support coverage.
+    // Each byte stores one two-bit local site per quadrant. No extra solve or sample.
+    static const uint patterns[32] = { 118u, 45u, 139u, 98u, 220u, 183u, 33u, 200u, 114u, 29u, 135u, 34u, 216u, 119u, 136u, 193u, 89u, 239u, 158u, 176u, 6u, 100u, 59u, 245u, 83u, 76u, 170u, 20u, 254u, 189u, 214u, 3u };
+    int local = (int)((patterns[hypothesis] >> (2 * quadrant)) & 3u);
     int x = (quadrant & 1) * 2 + (local & 1);
     int y = (quadrant >> 1) * 2 + ((local >> 1) & 1);
     return y * 4 + x;
@@ -942,11 +946,52 @@ void FitGeometry(uint3 id : SV_DispatchThreadID)
             }
         }
     }
+    // A least-squares refit may lose a boundary inlier or fail numerically. It must
+    // not erase the supported minimal model solely because refinement failed.
+    // Apply the SAME support-ratio, spatial, residual and projective-domain gates.
+    // This runs only on failed refits, not as another normal-frame iteration.
+    if (!(diagnostics[2] > 0.5) && totalWeight > 0.0 && bestScore / totalWeight >= 0.30)
+    {
+        bool validMinimal = true;
+        [unroll] for (int q = 0; q < 5; ++q)
+        {
+            float2 probe = q == 0 ? float2(0, 0) : q == 1 ? float2(-0.9, -0.9) :
+                           q == 2 ? float2(0.9, -0.9) : q == 3 ? float2(-0.9, 0.9) : float2(0.9, 0.9);
+            float denominator = bestH[6] * probe.x + bestH[7] * probe.y + 1.0;
+            validMinimal = validMinimal && denominator > 0.1 && denominator < 10.0;
+        }
+        float score = 0.0, meanError = 0.0;
+        int count = 0;
+        uint quadrants = 0u;
+        [loop] for (int i = 0; i < 16; ++i)
+            if (gGeoWeight[i] > 0.0)
+            {
+                float denominator;
+                float2 predicted = GeoPredict(bestH, gGeoCurrent[i], denominator);
+                float errorPx = length((predicted - gGeoPrevious[i]) * float2(aux) * 0.5);
+                if (denominator > 0.1 && denominator < 10.0 && errorPx <= inlierPx)
+                {
+                    score += gGeoWeight[i];
+                    meanError += errorPx * gGeoWeight[i];
+                    ++count;
+                    quadrants |= 1u << ((i % 4 >= 2 ? 1 : 0) + (i / 4 >= 2 ? 2 : 0));
+                }
+            }
+        if (validMinimal && count >= 6 && quadrants == 15u && score / totalWeight >= 0.30)
+        {
+            diagnostics[0] = score / totalWeight;
+            diagnostics[1] = meanError / max(score, 1e-6);
+            diagnostics[2] = 1.0;
+            diagnostics[3] = (float)count;
+        }
+    }
     OutModel[uint2(0, 0)] = float4(bestH[0], bestH[1], bestH[2], bestH[3]);
     OutModel[uint2(1, 0)] = float4(bestH[4], bestH[5], bestH[6], bestH[7]);
     OutModel[uint2(2, 0)] = float4(diagnostics[0], diagnostics[1], diagnostics[2], diagnostics[3]);
 }
 
+)HLSL"
+R"HLSL(
 [numthreads(8, 8, 1)]
 void FuseGeometry(uint3 id : SV_DispatchThreadID)
 {
@@ -1034,7 +1079,7 @@ R"HLSL(
 // The F5Low tab can select one of these views without changing the vectors consumed downstream:
 // 0 final fused flow, 1 local structure confidence, 2 fitted camera vectors, 3 fusion source,
 // 4 photometric support, 5 frame fit quality, 6 raw flow, 7 visible-motion arrows,
-// 8 geometry rejection only, 9 geometric model grid only.
+// 8 geometry rejection only, 9 geometric model grid only, 10 rejection reason.
 float3 GeoVectorColour(float2 f)
 {
     float hue = atan2(f.y, f.x) / 6.2831853 + 0.5;
@@ -1052,6 +1097,11 @@ void Visualise(uint3 id : SV_DispatchThreadID)
     if (radius == 8)
     {
         OutFlow[id.xy] = float4(GeometryRejectionMask(info.x).xxx, 1.0);
+        return;
+    }
+    if (radius == 10)
+    {
+        OutFlow[id.xy] = GeometryRejectionReason(info, fit);
         return;
     }
     if (radius == 9)

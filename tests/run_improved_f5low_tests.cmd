@@ -4,6 +4,12 @@ setlocal
 pushd "%~dp0.."
 if not exist build\improved-f5low mkdir build\improved-f5low
 set "OUT=build\improved-f5low"
+python tests\nr_geometry_sampling.py
+if errorlevel 1 goto failed
+cl /nologo /std:c++20 /EHsc /O2 /Fe:%OUT%\nr-geometry-fit.exe tests\nr_geometry_fit_gpu.cpp OptiScaler\motion\OpticalFlow_Dx12.cpp OptiScaler\motion\SceneCut_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
+if errorlevel 1 goto failed
+%OUT%\nr-geometry-fit.exe
+if errorlevel 1 goto failed
 cl /nologo /std:c++20 /EHsc /O2 /Fe:%OUT%\nr-submission.exe tests\nr_external_submission.cpp
 if errorlevel 1 goto failed
 %OUT%\nr-submission.exe

@@ -668,7 +668,7 @@ bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, float maxSpeed,
     constants.sizeX = _preview.width;
     constants.sizeY = _preview.height;
     constants.scale = maxSpeed;
-    constants.radius = std::clamp(view, 0, 9);
+    constants.radius = std::clamp(view, 0, 10);
     constants.auxX = _width;
     constants.auxY = _height;
     constants.knee = std::clamp(_debugSettings.spacing, 16.0f, 128.0f);

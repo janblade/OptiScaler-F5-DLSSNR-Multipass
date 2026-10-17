@@ -82,7 +82,8 @@ class OpticalFlowDx12
     // A picture of the flow for a menu: hue is the direction, brightness the speed up to maxSpeed pixels, black is still.
     // R8G8B8A8_UNORM at the flow's size, left in the PIXEL_SHADER_RESOURCE state. Call after Dispatch() when FlowValid().
     // view: 0 final fused flow, 1 local confidence, 2 camera-model flow, 3 fusion source,
-    // 4 photometric support, 5 homography fit quality, 6 flow before fusion, 7 colored motion arrows on a dotted grid.
+    // 4 photometric support, 5 homography fit quality, 6 flow before fusion, 7 colored motion arrows on a dotted grid,
+    // 8 geometry rejection, 9 geometric model grid, 10 geometry rejection reason.
     bool Visualise(ID3D12GraphicsCommandList* list, float maxSpeed, int view = 0,
                    ID3D12Resource* color = nullptr, DXGI_FORMAT colorFormat = DXGI_FORMAT_UNKNOWN);
     ID3D12Resource* Preview() const { return _preview.resource; }

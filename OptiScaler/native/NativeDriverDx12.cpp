@@ -44,7 +44,7 @@ int g_flowPreviewDisplay = 0; // 0 inline only, 1 enlarged window, 2 fullscreen 
 constexpr const char* kFlowDebugViews[] = {
     "Final optical flow (fused direction and speed)", "Local texture confidence", "Camera homography motion",
     "Selective geometric fusion source", "Photometric support", "Homography fit quality", "Raw flow before fusion",
-    "Motion arrows (colored grid)", "Selective geometric fusion rejection only", "Geometric model only (warped grid)" };
+    "Motion arrows (colored grid)", "Selective geometric fusion rejection only", "Geometric model only (warped grid)", "SGF rejection reason" };
 
 std::unique_lock<std::mutex> g_debugFrameLock;
 bool g_debugFrameSampled = false;
@@ -109,7 +109,7 @@ void DrawExpandedFlowPreview()
             if (ImGui::Begin("F5Low preview controls##f5flowfullscreen", nullptr,
                 flags | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize))
             {
-                ImGui::TextUnformatted(kFlowDebugViews[std::clamp(g_flowDebugView, 0, 9)]);
+                ImGui::TextUnformatted(kFlowDebugViews[std::clamp(g_flowDebugView, 0, 10)]);
                 if (ImGui::Button("Exit fullscreen preview")) g_flowPreviewDisplay = 0;
             }
             ImGui::End();
@@ -125,7 +125,7 @@ void DrawExpandedFlowPreview()
     ImGui::SetNextWindowBgAlpha(0.92f);
     if (ImGui::Begin("F5Low enlarged diagnostic##f5flowexpanded", &open, flags))
     {
-        ImGui::TextUnformatted(kFlowDebugViews[std::clamp(g_flowDebugView, 0, 9)]);
+        ImGui::TextUnformatted(kFlowDebugViews[std::clamp(g_flowDebugView, 0, 10)]);
         if (texture)
         {
             const D3D12_RESOURCE_DESC desc = texture->GetDesc();
@@ -314,6 +314,7 @@ void DrawAdvancedUi()
 
     if (g_flowDebugView == 3)
         ImGui::TextDisabled("Source colors: black = invalid, blue = local flow, orange = homography, green = blended.");
+    if (g_flowDebugView == 10) ImGui::TextWrapped("Black: geometry used. Magenta: global model invalid. Orange: projection invalid/outside image. Yellow: photometric mismatch. Cyan: local flow retained. Red: no selected hypothesis.");
     if (g_flowDebugView == 8)
         ImGui::TextWrapped("White: geometry not used (local-only or invalid). Black: geometry accepted, including blends. No model means all white. This is not an occlusion mask.");
     if (g_flowDebugView == 9)

@@ -83,6 +83,30 @@ int main()
         CHECK(s.Update({ Make(1, 2560, 1440, 90000), Make(2, 2560, 1440, 100000, 8) }, W, H).id == 1); // two buffers: a frame
     }
 
+    // Quiet frames in a row count as misses: a 2D menu or map that draws one fullscreen pass into the scene's buffer
+    // every frame (Mad Max: 3 vertices, 1 draw) must not keep the last scene pick for good, or its stale content goes on
+    // as depth. Real frames in between (an emulator's extra presents) clear the count.
+    {
+        Selector s;
+        s.Settings().holdFrames = 3;
+        const auto scene = Make(1, 2560, 1440, 90000);
+        const auto menu = Make(1, 2560, 1440, 3, 1);
+        CHECK(Settle(s, { scene }, W, H).id == 1);
+        CHECK(s.Update({ menu }, W, H).valid);
+        CHECK(s.Update({ menu }, W, H).valid);
+        CHECK(s.Update({ menu }, W, H).valid);
+        CHECK(!s.Update({ menu }, W, H).valid); // the fourth in a row: dropped
+        CHECK(!s.Update({ menu }, W, H).valid);
+        // Back to the scene: it qualifies again (it was the last real frame's buffer, so no new warm-up).
+        CHECK(s.Update({ scene }, W, H).id == 1);
+        // Quiet presents between real frames never reach the limit.
+        for (int i = 0; i < 20; ++i)
+        {
+            CHECK(s.Update({ menu }, W, H).id == 1);
+            CHECK(s.Update({ scene }, W, H).id == 1);
+        }
+    }
+
     // Ranked by vertices; by draw calls when over a third of them are indirect.
     {
         Selector s;

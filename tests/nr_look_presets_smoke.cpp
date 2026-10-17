@@ -66,9 +66,17 @@ int main()
         CHECK(changed([](Settings& s) { s.skinColour = 0.5f; }));
         CHECK(changed([](Settings& s) { s.envDetail = 0.5f; }));
         CHECK(changed([](Settings& s) { s.envColour = 0.5f; }));
-        CHECK(changed([](Settings& s) { s.inputStyle = 3; }));
-        CHECK(changed([](Settings& s) { s.inputStrength = 0.5f; }));
-        CHECK(changed([](Settings& s) { s.facesOnly = true; }));
+        CHECK(changed([](Settings& s) { s.inputs.flatten = DlssNrInput::kFlattenSmoothCanvas; }));
+        CHECK(changed([](Settings& s) { s.inputs.structure = true; }));
+        CHECK(changed([](Settings& s) { s.inputs = DlssNrInput::FromSingle(kInputStructureHint, 1.0f, true); }));
+        CHECK(changed([](Settings& s) { s.inputs = DlssNrInput::FromSingle(kInputStructureHint, 0.5f, false); }));
+        // A strength or Faces only with no style on changes nothing
+        {
+            Settings off = base;
+            off.inputs.structureStrength = 0.5f;
+            off.inputs.facesOnly = true;
+            CHECK(Matches(off, base));
+        }
 
         // Within the sliders' rounding it still matches
         Settings s = base;
@@ -89,10 +97,10 @@ int main()
         CHECK(!native.pass2.has_value() && !native.pass3.has_value());
 
         const Settings& soft = Get(Look::SoftCanvas).settings;
-        CHECK(soft.inputStyle == kInputSmoothCanvas && soft.curve == kCurveHlg && soft.detail == 2.0f);
+        CHECK(soft.inputs.flatten == DlssNrInput::kFlattenSmoothCanvas && soft.curve == kCurveHlg && soft.detail == 2.0f);
 
         CHECK(Get(Look::DetailOnly).settings.colour == 0.0f);
-        CHECK(Get(Look::Painterly).settings.inputStyle == kInputWatercolour &&
+        CHECK(Get(Look::Painterly).settings.inputs.flatten == DlssNrInput::kFlattenWatercolour &&
               Get(Look::Painterly).settings.detail == 1.5f);
         CHECK(Get(Look::Faces).settings.skinSplit && Get(Look::Faces).settings.envDetail < 1.0f);
         CHECK(Get(Look::Cinematic).settings.pass1.style == 2);
@@ -100,10 +108,10 @@ int main()
         // Structure: the structure hint input at 1.25 (2 was too strong in NBA), the model's own structure and Detail strength
         // left at 1 so the boost is not stacked, skin structure 0.75, HLG for the darks
         const Settings& structure = Get(Look::Structure).settings;
-        CHECK(structure.inputStyle == kInputStructureHint && structure.inputStrength == 1.25f);
+        CHECK(structure.inputs.structure && structure.inputs.structureStrength == 1.25f && structure.inputs.flatten == 0u);
         CHECK(structure.curve == kCurveHlg && structure.detail == 1.0f && structure.colour == 1.0f);
         CHECK(structure.pass1.style == 0 && structure.pass1.structure == 1.0f && structure.pass1.skin == 0.75f);
-        CHECK(!structure.facesOnly && !structure.skinSplit);
+        CHECK(!structure.inputs.facesOnly && !structure.skinSplit);
 
         CHECK(Get(Look::Painterly).experimental && Get(Look::SoftCanvas).experimental &&
               Get(Look::Structure).experimental);
@@ -129,8 +137,8 @@ int main()
                    a.laterOverrides == b.laterOverrides && a.curve == b.curve && a.detail == b.detail &&
                    a.colour == b.colour && a.skinSplit == b.skinSplit && a.skinTone == b.skinTone &&
                    a.skinDetail == b.skinDetail && a.skinColour == b.skinColour && a.envDetail == b.envDetail &&
-                   a.envColour == b.envColour && a.inputStyle == b.inputStyle &&
-                   a.inputStrength == b.inputStrength && a.facesOnly == b.facesOnly;
+                   a.envColour == b.envColour && DlssNrInput::Same(a.inputs, b.inputs) &&
+                   a.inputs.facesOnly == b.inputs.facesOnly;
         };
 
         Settings faces = lit({ 0, 1.0f, 1.0f, 1.0f, 1.0f, true }, kCurveSoftKnee);
@@ -138,16 +146,15 @@ int main()
         faces.envDetail = 0.6f;
 
         Settings painterly = lit({ 0, 1.0f, 1.0f, 1.0f, -1.0f, true }, kCurveSoftKnee);
-        painterly.inputStyle = kInputWatercolour;
+        painterly.inputs = DlssNrInput::FromSingle(kInputWatercolour, 1.0f, false);
         painterly.detail = 1.5f;
 
         Settings soft = lit({ 0, 1.0f, 1.0f, 1.0f, -1.0f, true }, kCurveHlg);
-        soft.inputStyle = kInputSmoothCanvas;
+        soft.inputs = DlssNrInput::FromSingle(kInputSmoothCanvas, 1.0f, false);
         soft.detail = 2.0f;
 
         Settings structure = lit({ 0, 1.0f, 1.0f, 1.0f, 0.75f, true }, kCurveHlg);
-        structure.inputStyle = kInputStructureHint;
-        structure.inputStrength = 1.25f;
+        structure.inputs = DlssNrInput::FromSingle(kInputStructureHint, 1.25f, false);
 
         CHECK(exact(Compose(Base::Standard, Get(Look::Faces).modifier), faces));
         CHECK(exact(Compose(Base::Standard, Get(Look::Painterly).modifier), painterly));
@@ -172,15 +179,14 @@ int main()
         const Settings structNat = ComposeLook(Look::Structure, Base::Natural);
         CHECK(structNat.pass1.structure <= 1.0f && structNat.pass2->structure <= 1.0f &&
               structNat.pass3->structure <= 1.0f);
-        CHECK(structNat.curve == kCurveHlg && structNat.inputStyle == kInputStructureHint &&
-              structNat.inputStrength == 1.25f);
+        CHECK(structNat.curve == kCurveHlg && structNat.inputs.structure && structNat.inputs.structureStrength == 1.25f);
         CHECK(structNat.pass1.skin == 0.75f && structNat.pass3->skin == 0.75f);
         // The cap only lowers: Natural's intensity and tone stay
         CHECK(structNat.pass1.intensity == 1.4f && structNat.pass1.tone == 1.4f && structNat.pass3->tone == 0.46f);
 
         const Settings paintCin = ComposeLook(Look::Painterly, Base::Cinematic);
         CHECK(paintCin.pass1.style == 2 && paintCin.pass1.intensity == 1.2f && paintCin.curve == kCurveSoftKnee &&
-              paintCin.detail == 1.5f && paintCin.inputStyle == kInputWatercolour);
+              paintCin.detail == 1.5f && paintCin.inputs.flatten == DlssNrInput::kFlattenWatercolour);
 
         CHECK(ComposeLook(Look::SoftCanvas, Base::Cinematic).curve == kCurveHlg);
         CHECK(ComposeLook(Look::SoftCanvas, Base::Natural).curve == kCurveHlg);

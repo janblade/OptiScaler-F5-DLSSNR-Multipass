@@ -8,6 +8,7 @@
 
 #include <dlssnr/DlssNr.h>
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/DlssNrVitReuse.h>
 #include <dlssnr/ResidualFg.h>
 #include <dlssnr/DlssNrDetailReuse.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
@@ -332,11 +333,14 @@ struct NrState
     SGSR1_Dx12* sgsr1UpAnswer = nullptr;
     Scaler nrScaler = Scaler::Count;
 
-    // Experimental input style (DlssNrInputStyle): the model's picture restyled (DlssNrMode_Watercolor,
+    // Experimental input styles (DlssNr_InputStyles.h): the model's picture restyled (DlssNrMode_Watercolor,
     // DlssNrMode_StructureHint or DlssNrMode_SmoothCanvas), which then stands in for the model input and the resolve's proxy. Created when first
     // used, parked with the scratch set; its state is tracked because the resolve reads it.
     ID3D12Resource* styled = nullptr;
     D3D12_RESOURCE_STATES styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // The second texture the styles alternate with when more than one is on
+    ID3D12Resource* styledB = nullptr;
+    D3D12_RESOURCE_STATES styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     // Frame hold (design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
     // over the live output before the encode reads it while held, so a setting change re-renders the
@@ -3177,6 +3181,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.lutScratch);
             ParkNrResource(g_nr.styled);
             g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            ParkNrResource(g_nr.styledB);
+            g_nr.styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             g_nr.passScratchFailed = false;
             g_nr.passClampScratchFailed = false;
             g_nr.passClampScratch2Failed = false;
@@ -4377,43 +4383,71 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         modelMotion = EdgeCompression::motion;
     }
 
-    // Experimental input style (DlssNrInputStyle): restyle the model's picture once it is final (after the shrink and
-    // the edge packing). The restyled picture is both the model input and the resolve's proxy (ordinaryProxy below,
-    // and through the edge unpacking), so Composed hands back only what the model painted on top of it. Skipped above
-    // 100% model resolution (the resolve compares against colorCopy there) and on the deferred path.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the model's picture once
+    // it is final (after the shrink and the edge packing), each style that is on in turn (flatten, then structure hint),
+    // each on the one before's result, alternating between two textures. The last result is both the
+    // model input and the resolve's proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back
+    // only what the model painted on top of it. Skipped above 100% model resolution (the resolve compares against
+    // colorCopy there) and on the deferred path.
     bool inputRestyled = false;
     {
-        const uint32_t style = cfg.DlssNrInputStyle.value_or_default();
-        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), style == 2u ? 3.0f : 1.0f);
-        const bool facesOnly = cfg.DlssNrInputStyleFacesOnly.value_or_default();
-        const bool wanted = style >= 1u && style <= 3u && strength > 0.0f;
-        const char* skip = !wanted                                     ? nullptr
+        const DlssNrInput::Styles styles = cfg.DlssNrInputStyles();
+        DlssNrInput::Pass passes[2];
+        const int passCount = DlssNrInput::Passes(styles, passes);
+
+        const char* skip = passCount == 0                              ? nullptr
                            : cfg.DlssNrDeferredDlss.value_or_default() ? "the deferred Super Resolution path"
                            : workScale > 1.0f                          ? "model resolution above 100%"
                                                                        : nullptr;
-        bool restyled = false;
+        int ran = 0;
 
-        if (wanted && skip == nullptr)
+        if (passCount > 0 && skip == nullptr)
         {
             const D3D12_RESOURCE_DESC in = modelInput->GetDesc();
 
-            if (g_nr.styled != nullptr && (g_nr.styled->GetDesc().Width != in.Width ||
-                                           g_nr.styled->GetDesc().Height != in.Height ||
-                                           g_nr.styled->GetDesc().Format != in.Format))
+            // One texture for one style, two to alternate between for more (the second is let go while one is enough)
+            ID3D12Resource** targets[2] = { &g_nr.styled, &g_nr.styledB };
+            D3D12_RESOURCE_STATES* targetStates[2] = { &g_nr.styledState, &g_nr.styledBState };
+
+            if (passCount < 2 && g_nr.styledB != nullptr)
             {
-                ParkNrResource(g_nr.styled);
-                g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                ParkNrResource(g_nr.styledB);
+                g_nr.styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             }
 
-            if (g_nr.styled == nullptr)
+            for (int t = 0; t < (passCount > 1 ? 2 : 1); ++t)
             {
-                g_nr.styled = CreateScratch(device, in.Format, (unsigned int) in.Width, in.Height);
-                g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                ID3D12Resource*& target = *targets[t];
+
+                if (target != nullptr && (target->GetDesc().Width != in.Width || target->GetDesc().Height != in.Height ||
+                                          target->GetDesc().Format != in.Format))
+                {
+                    ParkNrResource(target);
+                    *targetStates[t] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                }
+
+                if (target == nullptr)
+                {
+                    target = CreateScratch(device, in.Format, (unsigned int) in.Width, in.Height);
+                    *targetStates[t] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                }
             }
 
-            if (g_nr.styled != nullptr)
+            ID3D12Resource* source = modelInput;
+
+            for (int k = 0; k < passCount; ++k)
             {
-                Barrier(cmdList, g_nr.styled, g_nr.styledState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                const uint32_t style = passes[k].style;
+                ID3D12Resource* target = *targets[k % 2];
+                D3D12_RESOURCE_STATES& targetState = *targetStates[k % 2];
+
+                if (target == nullptr)
+                {
+                    skip = "its texture could not be created";
+                    break;
+                }
+
+                Barrier(cmdList, target, targetState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
                 DlssNrConstants paint {};
                 paint.Mode = StyleMode(style);
@@ -4421,48 +4455,53 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 paint.Height = in.Height;
                 paint.Passthrough = isHdrBuffer ? 0u : 1u;
                 paint.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-                paint.TransferStrength = strength;
-                paint.SkinProtection = facesOnly ? 1u : 0u; // the style passes read it as "faces only"
-                const bool painted =
-                    DispatchPass(cmdList, paint, modelInput, nullptr, nullptr, nullptr, nullptr, g_nr.styled, nullptr);
+                paint.TransferStrength = passes[k].strength;
+                paint.SkinProtection = styles.facesOnly ? 1u : 0u; // the style passes read it as "faces only"
 
-                Barrier(cmdList, g_nr.styled, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                const bool painted = DispatchPass(cmdList, paint, source, nullptr, nullptr, nullptr, nullptr, target, nullptr);
+
+                Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                g_nr.styledState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                targetState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
-                // A failed dispatch left the texture as it was (never written, or last frame's): the model keeps the
-                // picture as it is, as on Vulkan
-                if (painted)
-                {
-                    modelInput = g_nr.styled;
-                    restyled = true;
-                    inputRestyled = true;
-                }
-                else
+                // A failed dispatch left its texture as it was: the model gets the picture up to the last style that ran
+                if (!painted)
                 {
                     skip = "its dispatch failed";
+                    break;
                 }
+
+                source = target;
+                ++ran;
             }
-            else
+
+            if (ran > 0)
             {
-                skip = "its texture could not be created";
+                modelInput = source;
+                inputRestyled = true;
             }
         }
 
         // Said when it changes, so a log shows each A/B toggle.
-        static int said = -1;
-        const int state = restyled ? (int) style + 10 + (facesOnly ? 10 : 0) : (skip != nullptr ? 2 : 0);
+        static std::string said = "-";
+        std::string state;
+
+        for (int k = 0; k < ran; ++k)
+            state += std::format("{}{} {:.2f}", k == 0 ? "" : ", ", StyleName(passes[k].style), passes[k].strength);
+
+        if (skip != nullptr)
+            state += std::format("{}skipped ({})", ran > 0 ? "; then " : "", skip);
 
         if (state != said)
         {
             said = state;
 
-            if (restyled)
-                LOG_INFO("DLSS-NR input style: {} on (strength {:.2f}, {}x{}{}{})", StyleName(style), strength,
-                         modelInput->GetDesc().Width, modelInput->GetDesc().Height, facesOnly ? ", faces only" : "",
+            if (ran > 0)
+                LOG_INFO("DLSS-NR input style: {} ({}x{}{}{})", state, modelInput->GetDesc().Width,
+                         modelInput->GetDesc().Height, styles.facesOnly ? ", faces only" : "",
                          spatial ? ", edge-compressed picture" : "");
             else if (skip != nullptr)
-                LOG_INFO("DLSS-NR input style: skipped ({})", skip);
+                LOG_INFO("DLSS-NR input style: {}", state);
             else
                 LOG_INFO("DLSS-NR input style: off");
         }
@@ -4763,16 +4802,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // and the frame slot (successfulDispatches counts NR frames and is constant across one frame's passes, so all passes compute on the
         // same frame and all reuse on the next; see DlssNrVitReuse.h for why the passes must not be offset)
         // While detail reuse runs, full frames are every other frame: a ViT slot keyed to them would compute only
-        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time. Also in a
-        // Vulkan game reaching this through the D3D12 bridge (IFeature_VkwDx12): Reuse bottleneck is off for Vulkan
-        // games, as on the native Vulkan path (the reused result flashed in dark scenes there).
+        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time.
         // The edit cache likewise: the model runs one frame in N.
-        const bool vitEveryFrame = reusePlan.active || cachePlan.runs || State::Instance().api == Vulkan;
+        // Copy mode (DlssNrVitReuse.h): the plain set always reuses through our own copy of the ViT output. A Vulkan game
+        // reaching this through the D3D12 bridge (IFeature_VkwDx12) uses it for the fp8 set too: on the native Vulkan path
+        // the kept result was overwritten between frames (dark scenes flashed), and the copy does not depend on it staying.
+        const bool vitEveryFrame = reusePlan.active || cachePlan.runs;
+        const unsigned copySets =
+            DlssNrVitReuse::kCopyPlain | (State::Instance().api == Vulkan ? DlssNrVitReuse::kCopyFp8 : 0u);
         DlssNrNative::BeginEvaluate(passFeature, passReset,
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
-                                    cfg.DlssNrKernelProfile.value_or_default());
+                                    cfg.DlssNrKernelProfile.value_or_default(), copySets);
         result = g_nr.evaluate(
             cmdList, passFeature, g_nr.capabilityParams, passInput, modelDepth, spatial ? modelMotion : evalMotion,
             passOutput, modelWidth, modelHeight, evalGuideW, evalGuideH, evalMotionW, evalMotionH,
@@ -4784,8 +4826,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             tuning.autoMask ? 1 : 0, evalMvScaleX,
             evalMvScaleY);
         if (DlssNrNative::EndEvaluate(cmdList))
-            LOG_WARN("DLSS-NR: the model's kernel launches were not in the expected order; Reuse bottleneck is off for "
-                     "this session");
+            LOG_WARN("DLSS-NR: Reuse bottleneck is {}", DlssNrNative::VitStatus());
 
         for (const std::string& report : DlssNrNative::TakeProfileReports())
             LOG_INFO("{}", report);
@@ -6237,6 +6278,13 @@ void Shutdown()
         g_nr.styled = nullptr;
     }
     g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    if (g_nr.styledB != nullptr)
+    {
+        g_nr.styledB->Release();
+        g_nr.styledB = nullptr;
+    }
+    g_nr.styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     if (g_nr.sgsr1UpAnswer != nullptr)
     {

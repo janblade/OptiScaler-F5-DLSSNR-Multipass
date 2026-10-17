@@ -134,10 +134,65 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
     LOG_INFO("done!");
 }
 
+// The overlay's own fence, signalled right after each overlay submit, and the value of the last one. A full teardown
+// waits for that value: everything it releases can still be in use by overlay work the GPU hasn't run yet. With long
+// frames (DLSS-NR on) the last overlay draw was still queued when a D3D11 bridge resize freed its buffers, the GPU
+// faulted on the freed memory and hung (Mad Max, D3D12 DRED: the "Menu overlay" list stopped at its first draw, page
+// fault on a recently freed resource). Waiting for this value, not for the whole queue, ignores work queued after the
+// overlay (XeFG presents on the same queue and can queue waits for frames a resize holds back), and needs no queue
+// pointer at teardown.
+static ID3D12Fence* g_overlayFence = nullptr;
+static UINT64 g_overlayFenceValue = 0;
+
+static void SignalOverlayFence(ID3D12Device* device, ID3D12CommandQueue* queue)
+{
+    if (g_overlayFence == nullptr &&
+        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_overlayFence))))
+    {
+        g_overlayFence = nullptr;
+        return;
+    }
+
+    if (SUCCEEDED(queue->Signal(g_overlayFence, g_overlayFenceValue + 1)))
+        ++g_overlayFenceValue;
+}
+
+// Bounded, so a lost device or a stuck queue can't hold the caller for good. The event lives for the process: one that
+// timed out stays registered with the fence, so it is never closed, and every wake is checked against the fence value.
+static void WaitForOverlayWork()
+{
+    if (g_overlayFence == nullptr || g_overlayFence->GetCompletedValue() >= g_overlayFenceValue)
+        return;
+
+    static HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+    if (event == nullptr || FAILED(g_overlayFence->SetEventOnCompletion(g_overlayFenceValue, event)))
+    {
+        LOG_WARN("Could not wait for the overlay's GPU work before releasing it");
+        return;
+    }
+
+    const auto deadline = GetTickCount64() + 2000;
+
+    while (g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
+    {
+        const auto now = GetTickCount64();
+
+        if (now >= deadline || WaitForSingleObject(event, (DWORD) (deadline - now)) == WAIT_TIMEOUT)
+        {
+            LOG_WARN("The overlay's GPU work did not finish within 2 s; releasing its resources anyway");
+            return;
+        }
+    }
+}
+
 static void CleanupRenderTargetDx12(bool clearQueue)
 {
     if (!_isInited || !_dx12Device || State::Instance().isShuttingDown)
         return;
+
+    if (clearQueue)
+        WaitForOverlayWork();
 
     for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
     {
@@ -169,6 +224,10 @@ static void CleanupRenderTargetDx12(bool clearQueue)
             g_pd3dCommandQueue = nullptr;
 
         g_pd3dSrvDescHeapAlloc.Destroy();
+
+        // Made again on the device the overlay is set up on next
+        SAFE_RELEASE(g_overlayFence);
+        g_overlayFenceValue = 0;
 
         // SAFE_RELEASE(g_pd3dDeviceParam);
 
@@ -406,6 +465,8 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             return;
         }
 
+        g_pd3dCommandList->SetName(L"Menu overlay");
+
         result = g_pd3dCommandList->Close();
         if (result != S_OK)
         {
@@ -512,6 +573,7 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
 
                 ID3D12CommandList* ppCommandLists[] = { g_pd3dCommandList };
                 ((ID3D12CommandQueue*) currentSCCommandQueue)->ExecuteCommandLists(1, ppCommandLists);
+                SignalOverlayFence(device, (ID3D12CommandQueue*) currentSCCommandQueue);
             }
         }
         else

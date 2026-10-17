@@ -1,0 +1,42 @@
+// nr_vit_copy16(dst, src, n): copies n 16-byte elements from src to dst, grid-stride. Used by OptiScaler's Reuse bottleneck to keep
+// its own copy of the DLSS-NR ViT output (see DlssNrVitReuse.h, copy mode).
+.version 7.0
+.target sm_75
+.address_size 64
+
+.visible .entry nr_vit_copy16(
+	.param .u64 p_dst,
+	.param .u64 p_src,
+	.param .u64 p_n
+)
+{
+	.reg .pred %p;
+	.reg .b32 %r<9>;
+	.reg .b64 %rd<12>;
+
+	ld.param.u64 %rd1, [p_dst];
+	ld.param.u64 %rd2, [p_src];
+	ld.param.u64 %rd3, [p_n];
+	cvta.to.global.u64 %rd1, %rd1;
+	cvta.to.global.u64 %rd2, %rd2;
+	mov.u32 %r1, %ctaid.x;
+	mov.u32 %r2, %ntid.x;
+	mov.u32 %r3, %tid.x;
+	mov.u32 %r4, %nctaid.x;
+	mul.wide.u32 %rd4, %r1, %r2;
+	cvt.u64.u32 %rd5, %r3;
+	add.u64 %rd4, %rd4, %rd5;
+	mul.wide.u32 %rd6, %r4, %r2;
+LOOP:
+	setp.ge.u64 %p, %rd4, %rd3;
+	@%p bra DONE;
+	shl.b64 %rd7, %rd4, 4;
+	add.u64 %rd8, %rd2, %rd7;
+	ld.global.v4.u32 {%r5, %r6, %r7, %r8}, [%rd8];
+	add.u64 %rd9, %rd1, %rd7;
+	st.global.v4.u32 [%rd9], {%r5, %r6, %r7, %r8};
+	add.u64 %rd4, %rd4, %rd6;
+	bra LOOP;
+DONE:
+	ret;
+}

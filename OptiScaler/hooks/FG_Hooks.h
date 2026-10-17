@@ -22,6 +22,9 @@ class FGHooks
     // This must not mark State::currentFGSwapchain and must not install FG present hooks.
     static void SetDx12InteropPresentSC(IDXGISwapChain* pSwapChain, HWND hWnd);
     static void ClearDx12InteropPresentSC(IUnknown* pSwapChain);
+
+    // Removes the window-thread hook the borderless restyle is applied through (when OptiScaler is unloaded).
+    static void ReleaseRestyleHook();
     static bool IsDx12InteropPresentSC(IUnknown* pSwapChain);
 
   private:
@@ -57,6 +60,31 @@ class FGHooks
     inline static UINT _lastPresentFlags = 0;
     inline static double _lastFGFrameTime = -1.0;
     inline static std::shared_mutex _resizeMutex;
+
+    // The window style and size that stand in for exclusive fullscreen when FGXeFGForceBorderless is on. Applied from
+    // the window thread's message loop instead of inside the game's SetFullscreenState / ResizeBuffers call: the window
+    // messages it sends reach the game's window procedure at once, and Mad Max answers them by starting its fullscreen
+    // switch again inside the one still running, which then reads memory it has already freed.
+    struct WindowRestyle
+    {
+        HWND hwnd = nullptr;
+        bool popup = true; // borderless popup covering (x, y, width, height); false: overlapped window at width x height
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+    };
+
+    inline static std::mutex _restyleMutex;
+    inline static WindowRestyle _pendingRestyle;
+    inline static bool _restylePending = false;
+    inline static HHOOK _restyleHook = nullptr;
+    inline static DWORD _restyleHookThread = 0;
+    inline static std::atomic<UINT> _restyleMessage = 0;
+
+    static void RestyleWindowLater(const WindowRestyle& restyle);
+    static void ApplyRestyle(const WindowRestyle& restyle);
+    static LRESULT CALLBACK RestyleMessageHook(int code, WPARAM wParam, LPARAM lParam);
 
     static void HookFGSwapchain(IDXGISwapChain* pSwapChain);
 

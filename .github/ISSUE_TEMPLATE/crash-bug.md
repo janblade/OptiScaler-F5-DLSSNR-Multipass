@@ -40,5 +40,6 @@ Also please mention in description which upscaler inputs are used (which upscale
 
 #### I have attached
  - [ ] OptiScaler.log _(set `LogLevel=0` and `LogToFile=true` in OptiScaler.ini, zip it if too big)_
+ - [ ] OptiScaler_crash.dmp, for a crash _(set `CrashDump=true` in OptiScaler.ini, zip it)_
  - [ ] Screenshot of game folder _(where you placed Opti)_
  - [ ] Screenshot of Opti overlay in-game _(opens with shortcut, default Insert)_

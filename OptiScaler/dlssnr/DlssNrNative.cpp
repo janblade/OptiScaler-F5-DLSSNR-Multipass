@@ -27,6 +27,7 @@
 #include "DlssNrHybridBuilder.h"
 #include "DlssNrHybridAssets.h"
 #include "DlssNrVitReuse.h"
+#include "DlssNrVitCopyKernel.h"
 #include "DlssNrKernelProfile.h"
 #pragma comment(lib,"bcrypt.lib")
 namespace DlssNrNative {namespace {
@@ -66,6 +67,10 @@ struct State{std::recursive_mutex mutex;bool enabled=false,candidate=false,resta
  std::vector<Session>graveyard;
  DlssNrKernelProfile::Profiler prof;std::map<NVDX_ObjectHandle,DlssNrKernelProfile::Info>fnInfo; // kernel census and per-group GPU timing (ini KernelProfile)
  DlssNrVitReuse::Filter vit;std::map<NVDX_ObjectHandle,std::pair<DlssNrVitReuse::Role,DlssNrVitReuse::KernelSet>>vitRole; // ViT reuse: launches of the ViT run are dropped on reused frames; each kernel set has its own rate
+ // ViT reuse copy mode (plain set): our copy of the run's 2-D output per device and feature, and the copy kernel per device (the device is held,
+ // so its address is not reused; failed = its load failed, not retried). Replaced buffers are retired, never freed.
+ struct VitCopy{Buffer buf;uint64_t dst=0,bytes=0;};std::map<std::pair<ID3D12Device*,const void*>,VitCopy>vitCopies;
+ struct VitCopyKernel{ComPtr<ID3D12Device>device;NVDX_ObjectHandle fn=nullptr;bool failed=false;};std::map<ID3D12Device*,VitCopyKernel>vitCopyFn;std::vector<Buffer>vitRetired;
  decltype(&NvAPI_D3D12_CreateCuModule) createModule=nullptr;decltype(&NvAPI_D3D12_CreateCuFunction)createFunction=nullptr;decltype(&NvAPI_D3D12_LaunchCuKernelChain)launch=nullptr;
  decltype(&NvAPI_D3D12_DestroyCuModule)destroyModule=nullptr;decltype(&NvAPI_D3D12_DestroyCuFunction)destroyFunction=nullptr;};
 // Deliberately retain resources until process exit, never free under recorded GPU work.
@@ -139,15 +144,38 @@ void Vendor(ID3D12GraphicsCommandList*c,Device&d,Session&s){auto&t=d.contracts.a
 bool Supported(const void*data,unsigned bytes){if(bytes!=3202680||!data)return false;const unsigned char expected[32]={0x3f,0xa6,0xf0,0x76,0xee,0xcf,0xbb,0x6e,0x19,0xc3,0x78,0xf8,0x4b,0xbb,0x70,0x25,0xcd,0x80,0x5e,0xd4,0xde,0x9a,0x2f,0x9c,0x9b,0x99,0x5e,0xb3,0x4a,0x7f,0x3d,0x76};unsigned char hash[32];return BCryptHash(BCRYPT_SHA256_ALG_HANDLE,nullptr,0,(PUCHAR)data,bytes,hash,32)==0&&!memcmp(hash,expected,32);}
 NvAPI_Status __cdecl CreateModule(ID3D12Device*d,const void*b,NvU32 n,NVDX_ObjectHandle*out){auto&s=S();std::lock_guard<std::recursive_mutex>apiGuard(s.mutex);auto rc=s.createModule(d,b,n,out);if(rc==0){std::lock_guard<std::recursive_mutex>g(s.mutex);s.modules[*out]=Supported(b,n);s.active=false;}return rc;}
 NvAPI_Status __cdecl CreateFunction(ID3D12Device*d,NVDX_ObjectHandle m,const char*n,NVDX_ObjectHandle*out){auto&s=S();std::lock_guard<std::recursive_mutex>apiGuard(s.mutex);auto rc=s.createFunction(d,m,n,out);if(rc==0&&n){{std::lock_guard<std::recursive_mutex>g(s.mutex);s.fnInfo[*out]=DlssNrKernelProfile::Classify(n);}{auto role=DlssNrVitReuse::RoleOf(n);if(role!=DlssNrVitReuse::Role::None){std::lock_guard<std::recursive_mutex>g(s.mutex);s.vitRole[*out]={role,DlssNrVitReuse::SetOf(n)};}}unsigned kind=99;if(!strcmp(n,"cc_vit_1d_ffn_expand_publish_fp8"))kind=0;else if(!strcmp(n,"cc_vit_1d_ffn_expand_chained_fp8"))kind=1;else if(!strcmp(n,"cc_vit_1d_ffn_contract_chained_fp8"))kind=2;if(kind!=99){std::lock_guard<std::recursive_mutex>g(s.mutex);s.targets[*out]={d,m,kind,s.modules[m]};}}return rc;}
-// ViT reuse: true when at least one launch of this call was dropped; `kept` then holds the others. Only launches recorded inside an NR evaluation are looked at.
-// `gap`: where in `kept` the barrier goes (see Filter::Split), or -1.
-bool VitDrop(State&s,const NVAPI_CU_KERNEL_LAUNCH_PARAMS*k,NvU32 count,std::vector<NVAPI_CU_KERNEL_LAUNCH_PARAMS>&kept,ptrdiff_t&gap){
+// ViT reuse: true when this call needs more than a plain launch (a launch dropped, a barrier or a copy to record); `kept` then holds the launches that go out.
+// Only launches recorded inside an NR evaluation are looked at. `gap`, `copy`, `copyAt`, `copyFrom`: see Filter::Split. A run's first launch is identified by
+// its parameters and geometry (FNV-1a), so a moved or resized network is computed again in copy mode.
+bool VitDrop(State&s,const NVAPI_CU_KERNEL_LAUNCH_PARAMS*k,NvU32 count,std::vector<NVAPI_CU_KERNEL_LAUNCH_PARAMS>&kept,ptrdiff_t&gap,DlssNrVitReuse::Copy&copy,ptrdiff_t&copyAt,ptrdiff_t&copyFrom){
  if(!k||!count||!s.vit.Evaluating())return false;
- return s.vit.Split(k,count,[&](const NVAPI_CU_KERNEL_LAUNCH_PARAMS&l){auto it=s.vitRole.find(l.hFunction);return it==s.vitRole.end()?std::pair{DlssNrVitReuse::Role::None,DlssNrVitReuse::KernelSet::Unknown}:it->second;},kept,gap);}
+ const auto sigOf=[](const NVAPI_CU_KERNEL_LAUNCH_PARAMS&l){uint64_t h=1469598103934665603ull;const auto mix=[&](const void*p,size_t n){for(size_t i=0;i<n;++i){h^=((const unsigned char*)p)[i];h*=1099511628211ull;}};if(l.pParams)mix(l.pParams,l.paramSize);mix(&l.gridDim,sizeof l.gridDim);mix(&l.blockDim,sizeof l.blockDim);return h;};
+ return s.vit.Split(k,count,[&](const NVAPI_CU_KERNEL_LAUNCH_PARAMS&l){auto it=s.vitRole.find(l.hFunction);return it==s.vitRole.end()?std::pair{DlssNrVitReuse::Role::None,DlssNrVitReuse::KernelSet::Unknown}:it->second;},sigOf,kept,gap,copy,copyAt,copyFrom);}
+// ViT reuse copy mode: record the save (the run's 2-D output into our buffer) or the restore (back into it). `end` is the run's last launch;
+// DlssNrVitReuse::CheckOutput says where its 2-D output is and how big. Returns why it could not, or nullptr.
+const char* VitCopyRecord(State&s,ID3D12GraphicsCommandList*c,DlssNrVitReuse::Copy kind,const NVAPI_CU_KERNEL_LAUNCH_PARAMS&end){
+ struct{uint64_t dst;}e{};uint64_t bytes=0;const uint64_t threads=(uint64_t)end.gridDim.x*end.gridDim.y*end.gridDim.z*end.blockDim.x*end.blockDim.y*end.blockDim.z;
+ if(const char*why=DlssNrVitReuse::CheckOutput(end.pParams,end.paramSize,threads,s.vit.LastSet(),e.dst,bytes))return why;
+ try{ComPtr<ID3D12Device>dev;Check(c->GetDevice(IID_PPV_ARGS(&dev)));auto&k=s.vitCopyFn[dev.Get()];if(k.failed)return "the copy kernel could not be loaded";
+  if(!k.fn){k.device=dev;NVDX_ObjectHandle m=nullptr;if(!s.createModule||!s.createFunction||s.createModule(dev.Get(),DlssNrVitCopyKernel::fatbin,(NvU32)sizeof DlssNrVitCopyKernel::fatbin,&m)!=NVAPI_OK||s.createFunction(dev.Get(),m,"nr_vit_copy16",&k.fn)!=NVAPI_OK){if(m&&s.destroyModule)s.destroyModule(dev.Get(),m);k.fn=nullptr;k.failed=true;return "the copy kernel could not be loaded";}s.fnInfo[k.fn]=DlssNrKernelProfile::Classify("nr_vit_copy16");}
+  const NVDX_ObjectHandle fn=k.fn;auto&v=s.vitCopies[{dev.Get(),s.vit.Feature()}];
+  if(kind==DlssNrVitReuse::Copy::Save){if(v.buf.bytes<bytes){if(v.buf.gpu)s.vitRetired.push_back(v.buf);v.buf=Allocate(dev.Get(),bytes);}v.dst=e.dst;v.bytes=bytes;}
+  else if(!v.buf.gpu||v.dst!=e.dst||v.bytes!=bytes)return "the saved ViT output does not match the network";
+  const uint64_t n=bytes/16;struct Params{uint64_t dst,src,n;}p{kind==DlssNrVitReuse::Copy::Save?v.buf.address():e.dst,kind==DlssNrVitReuse::Copy::Save?e.dst:v.buf.address(),n};
+  LaunchBlob(c,fn,&p,sizeof p,{(unsigned)std::min<uint64_t>((n+255)/256,1024),1,1},{256,1,1});}
+ catch(const std::exception&){return "the copy could not be recorded";}
+ return nullptr;}
 NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList*c,const NVAPI_CU_KERNEL_LAUNCH_PARAMS*k,NvU32 count){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
  // A UAV barrier where the skipped run would have been: without it the kernel before the gap and the one after it can overlap on the
  // GPU. The run's own kernels kept them apart. On the plain set the kernel after it is the run's kept last kernel (see DlssNrVitReuse.h).
- {std::vector<NVAPI_CU_KERNEL_LAUNCH_PARAMS>kept;ptrdiff_t gap=-1;if(VitDrop(s,k,count,kept,gap)){if(gap<0)return kept.empty()?NVAPI_OK:RealLaunch(s,c,kept.data(),(NvU32)kept.size());
+ {std::vector<NVAPI_CU_KERNEL_LAUNCH_PARAMS>kept;ptrdiff_t gap=-1,copyAt=-1,copyFrom=-1;DlssNrVitReuse::Copy copy=DlssNrVitReuse::Copy::None;if(VitDrop(s,k,count,kept,gap,copy,copyAt,copyFrom)){
+  // Copy mode: the copy goes at copyAt with a UAV barrier on each side, so it sees the 2-D output complete (save) or is complete before the
+  // decoder reads it (restore, which also stands where the skipped run was). If it cannot be recorded, Reuse goes off; a restore that failed
+  // falls back to the run's last kernel, as without copy mode: right where the DLL keeps the 1-D result, one stale frame where it does not.
+  if(copy!=DlssNrVitReuse::Copy::None){if(copyAt>0){auto r=RealLaunch(s,c,kept.data(),(NvU32)copyAt);if(r!=NVAPI_OK)return r;}Barrier(c);
+   if(const char*why=VitCopyRecord(s,c,copy,k[copyFrom])){s.vit.Disable(why);if(copy==DlssNrVitReuse::Copy::Restore){auto r=RealLaunch(s,c,&k[copyFrom],1);if(r!=NVAPI_OK)return r;}}
+   Barrier(c);return (size_t)copyAt<kept.size()?RealLaunch(s,c,kept.data()+copyAt,(NvU32)(kept.size()-copyAt)):NVAPI_OK;}
+  if(gap<0)return kept.empty()?NVAPI_OK:RealLaunch(s,c,kept.data(),(NvU32)kept.size());
   // the kept launches of this call on either side of the gap go out as two chains with the barrier between them
   if(gap>0){auto r=RealLaunch(s,c,kept.data(),(NvU32)gap);if(r!=NVAPI_OK)return r;}Barrier(c);return (size_t)gap<kept.size()?RealLaunch(s,c,kept.data()+gap,(NvU32)(kept.size()-gap)):NVAPI_OK;}}
  // FP8 passthrough must stay available even after a latched hybrid failure: check `enabled`
@@ -215,8 +243,8 @@ void SetPrecision(unsigned precision){auto&s=S();std::lock_guard<std::recursive_
 }
 void SetEnabled(bool on){SetPrecision(on?4u:0u);}
 bool IsActive(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.enabled&&s.active&&!s.restartRequired;}
-void BeginEvaluate(const void*feature,bool reset,unsigned every,unsigned everyPlain,long long slot,ID3D12GraphicsCommandList*cmd,bool profile){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.vit.Begin(feature,reset,every,slot,everyPlain);s.prof.Begin(cmd,profile);}
-bool EndEvaluate(ID3D12GraphicsCommandList*cmd){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.prof.End(cmd);const bool wasOff=s.vit.Disabled();return !s.vit.End()&&!wasOff;}
+void BeginEvaluate(const void*feature,bool reset,unsigned every,unsigned everyPlain,long long slot,ID3D12GraphicsCommandList*cmd,bool profile,unsigned copySets){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.vit.Begin(feature,reset,every,slot,everyPlain,copySets);s.prof.Begin(cmd,profile);}
+bool EndEvaluate(ID3D12GraphicsCommandList*cmd){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.prof.End(cmd);const bool wasOff=s.vit.Disabled();const bool wellFormed=s.vit.End();return (!wellFormed||s.vit.Disabled())&&!wasOff;}
 std::vector<std::string> TakeProfileReports(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.prof.TakeReports();}
 std::string VitStatus(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.vit.Status();}
 bool VitPlainKernels(){return S().vit.LastSet()==DlssNrVitReuse::KernelSet::Plain;}

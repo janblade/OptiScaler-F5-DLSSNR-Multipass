@@ -3,6 +3,8 @@
 #include "SysUtils.h"
 #include "State.h"
 #include "native/NativeLowLatencyRule.h"
+#include "motion/MotionProfiles.h"
+#include "shaders/dlssnr/DlssNr_InputStyles.h"
 
 #include <optional>
 #include <filesystem>
@@ -244,6 +246,8 @@ class Config
     CustomOptional<bool> LogToConsole { false };
     CustomOptional<bool> LogToDebug { false };
     CustomOptional<bool> LogToNGX { false };
+    CustomOptional<bool> D3D12Dred { false }; // [Log] D3D12 device-removed breadcrumbs on the D3D11 bridge's device
+    CustomOptional<bool> CrashDump { false }; // [Log] write OptiScaler_crash.dmp when the game crashes (read once at start)
     CustomOptional<bool> OpenConsole { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
     CustomOptional<int> LogLevel { 0 };
@@ -330,6 +334,8 @@ class Config
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
+    // The model's render preset hint: 1 Preset A (the main model), 2 Preset B (the small model, 310.9 DLLs only); 0 and
+    // any other value: the DLL's choice, the small model on 310.9 DLLs. 310.8 DLLs have only the main model.
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
@@ -507,18 +513,42 @@ class Config
     // rather than kept as an unclear trade-off; see plans/2026-09-18-dlssnr-enlarge-filter-simplify.md.
     CustomOptional<uint32_t> DlssNrReducedUpscaleMethod { 1 };
 
-    // Experimental input style: how the picture the model is shown is restyled before the model runs.
-    // 0 = off (default), 1 = watercolour (a Kuwahara filter: texture flattened into washes, edges kept),
-    // 2 = structure hint (local contrast raised on luminance, CAS-like, overshoot bounded),
-    // 3 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept).
-    // DlssNrInputStyleStrength: watercolour and smooth canvas blend with the picture as it was (0..1); the structure
-    // hint scales its boost (0..3). DlssNrInputStyleFacesOnly: the style only where the colour looks like skin (the
-    // same colour test as SkinProtection). The resolve compares the answer against the same restyled picture, so
-    // Composed hands back only what the model painted; Replace shows the model's painting as it is. Skipped at model
-    // resolution above 100% and on the deferred path.
-    CustomOptional<uint32_t> DlssNrInputStyle { 0 };
-    CustomOptional<float> DlssNrInputStyleStrength { 1.0f };
+    // Experimental input styles: how the picture the model is shown is restyled before the model runs, as one card in
+    // the menu (shaders/dlssnr/DlssNr_InputStyles.h). They run in this order, each on the one before's result:
+    // DlssNrInputFlatten: 0 = off (default), 1 = watercolour (a Kuwahara filter: texture flattened into washes, edges
+    // kept), 2 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept);
+    // its strength blends with the picture as it was (0..1).
+    // DlssNrInputStructureHint: local contrast raised on luminance, CAS-like, overshoot bounded; strength 0..3.
+    // DlssNrInputStyleFacesOnly: both only where the colour looks like skin (the same colour test as
+    // SkinProtection). The resolve compares the answer against the same restyled picture, so Composed hands back only
+    // what the model painted; Replace shows the model's painting as it is. Skipped at model resolution above 100% and on
+    // the deferred path. The ini also keeps the old single InputStyle / InputStyleStrength (read when none of the new
+    // keys is set, and written as the first style that runs, for a build from before).
+    CustomOptional<uint32_t> DlssNrInputFlatten { DlssNrInput::kFlattenOff };
+    CustomOptional<float> DlssNrInputFlattenStrength { 1.0f };
+    CustomOptional<bool> DlssNrInputStructureHint { false };
+    CustomOptional<float> DlssNrInputStructureStrength { 1.0f };
     CustomOptional<bool> DlssNrInputStyleFacesOnly { false };
+
+    DlssNrInput::Styles DlssNrInputStyles() const
+    {
+        DlssNrInput::Styles s;
+        s.flatten = DlssNrInputFlatten.value_or_default();
+        s.flattenStrength = DlssNrInputFlattenStrength.value_or_default();
+        s.structure = DlssNrInputStructureHint.value_or_default();
+        s.structureStrength = DlssNrInputStructureStrength.value_or_default();
+        s.facesOnly = DlssNrInputStyleFacesOnly.value_or_default();
+        return s;
+    }
+
+    void SetDlssNrInputStyles(const DlssNrInput::Styles& s)
+    {
+        DlssNrInputFlatten = s.flatten;
+        DlssNrInputFlattenStrength = s.flattenStrength;
+        DlssNrInputStructureHint = s.structure;
+        DlssNrInputStructureStrength = s.structureStrength;
+        DlssNrInputStyleFacesOnly = s.facesOnly;
+    }
 
     // Post-SR placement only: derive the working scale from the render:output ratio the upscaler
     // itself already reconstructed detail at, instead of the manual slider above. That output already
@@ -650,6 +680,11 @@ class Config
     // asks for that itself. Can cost a little depth compression on some GPUs. Off: Vulkan depth reads as not readable,
     // and Optical F5Low runs on motion only. Startup only (images are made once). See resource_tracking/GenericDepth_Vk.h.
     CustomOptional<bool> DlssNrNativeDepthVkCopyUsage { true };
+    // NativeDepthResolveInList: D3D12 only. With NativeDepthFinder on, a multisampled depth buffer is resolved inside
+    // the game's own command list (ResolveSubresourceRegion MIN/MAX) where the device and format allow it, instead of
+    // a full multisampled copy and a compute resolve afterwards. Off: always the copy and compute resolve, for a driver
+    // that resolves depth wrongly (flat depth in the finder's preview). See native/DepthSnapshotDx12.h.
+    CustomOptional<bool> DlssNrNativeDepthResolveInList { true };
     // NativeDxvkVulkan: experimental. A D3D11 game running on dxvk (doitsujin/dxvk: its D3D11 calls become Vulkan ones)
     // normally gets Optical F5Low's D3D11 driver (native/NativeDriverDx11.h), the same shared-texture bridge to a private
     // D3D12 device a real D3D11 game gets. On: that D3D11 driver stands aside, and the Vulkan driver (native/NativeDriverVk.h,
@@ -669,6 +704,12 @@ class Config
     // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
     // overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
+    // NativeMotionProfile: the Optical F5Low page's "Motion profile", a named set of the motion estimate's knobs for a
+    // kind of game (motion/MotionProfiles.h): default, anime, realistic, sportswide, sportspan or custom. Custom is
+    // NativeMotionProfileCustom, the Flow tuning menu's values as a key=value list (written when a Flow tuning control
+    // moves). Applied when the motion estimate starts and when the menu changes it.
+    CustomOptional<native::motion::Profile> DlssNrNativeMotionProfile { native::motion::Profile::Default };
+    CustomOptional<std::string> DlssNrNativeMotionProfileCustom { std::string() };
     // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at
     // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See native/NativeDriverDx12.h and
@@ -683,19 +724,19 @@ class Config
     // NativeUpscaler: experimental. With NativeMotion on and the game making no upscaler call, presents the picture,
     // the finder's depth (all far when it has none) and the optical flow to OptiScaler's upscaler (Dx12Upscaler, FFX
     // when unset) as a synthetic upscaler call (render size == output size, no jitter: no reconstruction; the backend's
-    // pass runs only with NativeUpscalerPass true and NR on), so frame generation with the Upscaler input works in a
+    // pass runs only with NativeUpscalerPass true), so frame generation with the Upscaler input works in a
     // game that never calls an upscaler. Takes
     // priority over NativeInput. Changes apply at once. In a D3D11 game, FGInput=Upscaler replaces the game's swap chain
     // with with_dx12::Dx11wDx12SC; this and NativeInput then run from its present (native/NativeDriverDx11.cpp's
     // OnFGPresent, with_dx12/dx11_with_dx12_sc.cpp's _ApplyNativeInputToFGBackBuffer), while Finished Picture NR (the
-    // D3D12 swap chain path) does nothing there. The menu's "NR + upscaler & frame generation" mode (Optical F5Low page): it
+    // D3D12 swap chain path) does nothing there. The menu's "NR + frame generation" mode (Optical F5Low page): it
     // sets NativeDepthFinder, NativeMotion and this together, clears NativeInput, and switches NR Pass at: off Finished
     // Picture if it was on (see dlssnr/DlssNr_NativeMode.h). See native/VirtualUpscalerDriver.h.
     CustomOptional<bool> DlssNrNativeUpscaler { false };
-    // NativeUpscalerPass: with NativeUpscaler on and Neural Rendering on, whether the upscaler backend still evaluates
-    // the picture. Auto (unset) and false: it does not. The backend only keeps frame generation's Upscaler input alive,
-    // and NR runs on the game's picture in place, as in NativeInput (native/VirtualUpscalerMode.h). true: the old pass,
-    // NR on the backend's output (to compare, or as a fallback).
+    // NativeUpscalerPass: with NativeUpscaler on, whether the upscaler backend evaluates the picture (Neural Rendering on
+    // or off). Auto (unset) and false: it does not. The backend only keeps frame generation's Upscaler input alive, and
+    // with NR on, NR runs on the game's picture in place, as in NativeInput (native/VirtualUpscalerMode.h). true: the
+    // backend's pass, NR (when on) on its output. The menu's "Run the upscaler on the picture".
     CustomOptional<bool> DlssNrNativeUpscalerPass { false };
     // NativeFrameGenerationOnly: a Vulkan game that calls DLSS, FSR or XeSS of its own gets OptiScaler's frame generation
     // from that call. The Vulkan present bridge (native/VkPresentBridge.h) puts frame generation's D3D12 swapchain on the

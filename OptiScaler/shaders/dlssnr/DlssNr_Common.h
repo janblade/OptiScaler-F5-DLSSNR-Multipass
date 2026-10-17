@@ -35,7 +35,7 @@ enum DlssNrMode : uint32_t
     DlssNrMode_SmoothCanvas = 16   // experimental input style: the model's picture through a cross bilateral filter
 };
 
-// [DlssNr] InputStyle (1..3) -> its pass and its name for the log. The pass reads its constants' SkinProtection as
+// An input style's number (DlssNr_InputStyles.h: 1..3) -> its pass and its name for the log. The pass reads its constants' SkinProtection as
 // "faces only".
 inline DlssNrMode StyleMode(uint32_t style)
 {

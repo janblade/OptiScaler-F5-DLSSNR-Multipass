@@ -3901,10 +3901,11 @@ void UpdateF5LowHint(Config* config)
 {
     // Once per session, and never again after it has been shown or once a game upscaler is in play.
     static bool shown = false;
+    static bool gameUpscalerSeen = false;
     static double quietMs = 0.0;
     static double lastCallMs = 0.0;
 
-    if (shown || !config->F5LowHint.value_or_default())
+    if (shown || gameUpscalerSeen || !config->F5LowHint.value_or_default())
         return;
 
     // Real time between presents (ImGui's DeltaTime stands still while no menu frame is drawn)
@@ -3914,6 +3915,13 @@ void UpdateF5LowHint(Config* config)
 
     const auto feature = State::Instance().currentFeature;
     const bool noFeature = feature == nullptr || !feature->IsInited();
+
+    // The game called an upscaler, or one ran: it has its own, also when it turns it off in a menu later
+    gameUpscalerSeen = HeaderBanner::GameUpscalerSeen(gameUpscalerSeen, NativeGameCallsUpscaler(CurrentNativeApi()),
+                                                      !noFeature);
+
+    if (gameUpscalerSeen)
+        return;
 
     // The header's offer: Optical F5Low off, NR available, no upscaler call from the game, and no upscaler running.
     const bool offerStands =

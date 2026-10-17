@@ -118,7 +118,7 @@ int main(int argc,char** argv) {
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=model->GetDesc().Format;ud.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
         gpu.device->CreateUnorderedAccessView(model.Get(),nullptr,&ud,cpu(8));gpu.device->CreateUnorderedAccessView(model.Get(),nullptr,&ud,cpu(9));
-        unsigned constants[28]{};constants[0]=3;constants[1]=1;constants[2]=640;constants[3]=360;
+        unsigned constants[28]{};constants[0]=3;constants[1]=1;constants[2]=640;constants[3]=360;constants[5]=1;
         ID3D12DescriptorHeap* heaps[]={heap.Get()};gpu.list->SetDescriptorHeaps(1,heaps);gpu.list->SetComputeRootSignature(root.Get());
         gpu.list->SetComputeRoot32BitConstants(0,28,constants,0);gpu.list->SetComputeRootDescriptorTable(1,gpuHandle(0));
         gpu.list->SetComputeRootDescriptorTable(2,gpuHandle(8));gpu.list->SetPipelineState(pso.Get());gpu.list->Dispatch(1,1,1);

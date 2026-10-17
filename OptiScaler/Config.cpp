@@ -549,6 +549,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
             DlssNrNativeDebugView.set_from_config(readBool("DlssNr", "NativeDebugView"));
             DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
+            DlssNrNativeGeometricFusion.set_from_config(readBool("DlssNr", "NativeGeometricFusion"));
             DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
             DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
             DlssNrNativeUpscalerPass.set_from_config(readBool("DlssNr", "NativeUpscalerPass"));
@@ -1630,6 +1631,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "NativeDebugView",
                  GetBoolValue(Instance()->DlssNrNativeDebugView.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeMotion", GetBoolValue(Instance()->DlssNrNativeMotion.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeGeometricFusion", GetBoolValue(Instance()->DlssNrNativeGeometricFusion.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeUpscaler",
                  GetBoolValue(Instance()->DlssNrNativeUpscaler.value_for_config()).c_str());

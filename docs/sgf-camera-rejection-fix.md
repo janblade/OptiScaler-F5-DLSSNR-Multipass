@@ -75,6 +75,7 @@ shader distinguishes the decisions hidden by an all-white mask:
 | Colour | Meaning |
 |---|---|
 | Black | Geometry contributes, directly or blended |
+| Gray | Camera geometry intentionally disabled |
 | Magenta | Global camera model invalid |
 | Orange | Model projection invalid or outside the previous image |
 | Yellow | Geometric photometric residual rejected |
@@ -84,6 +85,23 @@ shader distinguishes the decisions hidden by an all-white mask:
 The view uses existing GPU diagnostics, adds no normal-frame pass or CPU readback,
 and never writes motion/confidence/history. Native view index: 10; ReShade index: 8.
 Existing indices are preserved. DX11/Vulkan preview transport and DX12 all expose it.
+
+## Camera-model switch
+
+Both implementations offer **Use camera model (selective geometric fusion)**,
+enabled by default. OptiScaler persists `[DlssNr] NativeGeometricFusion`; the ReShade
+preset persists `MV_UseGeometry`. Disabling it bypasses the fitting and geometric
+photometric/fusion work, copies the complete pre-fusion local field, and clears the
+model with a distinct disabled state. Lightweight dispatches still copy the field
+and update diagnostics. No stale model remains visible. Re-enabling fits a fresh
+model without restarting the game. The original F5Low global motion candidate is
+controlled separately; provider 5 remains selected when geometry is off.
+
+Native GPU tests at both resolutions verify the off-mode motion field exactly equals
+the local field, the model view is black, the reason view is gray, and on-mode recovers
+a fresh valid model. A real x86 ReShade/Feeder/host64 fixture additionally verifies
+the complete RGBA16F fused texture is byte-identical to the local texture in off mode,
+with NR composition still active. This does not change game-provided engine vectors.
 
 ## Quality and performance
 
@@ -98,10 +116,10 @@ frames per run, three counterbalanced before/after runs per resolution; games cl
 
 | Resolution | Previous total ms | Corrected total ms | Previous fit ms | Corrected fit ms |
 |---|---:|---:|---:|---:|
-| 1920×1080 | 1.118037 | 1.120068 | 0.049246 | 0.052732 |
-| 3413×1920 | 3.089792 | 3.072375 | 0.050048 | 0.052911 |
+| 1920×1080 | 1.141282 | 1.117060 | 0.049289 | 0.052676 |
+| 3413×1920 | 3.149103 | 3.190703 | 0.049664 | 0.056171 |
 
-The fit adds approximately 0.003 ms. Total timing differences are small relative to
+The fit adds only a few microseconds. Total timing differences are small relative to
 run variation; no meaningful overall speedup or slowdown, or whole-game FPS change,
 is established. The previous parallel-fitting optimization remains in place.
 

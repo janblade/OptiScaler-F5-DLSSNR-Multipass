@@ -818,6 +818,17 @@ groupshared uint gGeoMask[32];
 void FitGeometry(uint3 id : SV_DispatchThreadID)
 {
     uint lane = id.y * 8u + id.x;
+    // Uniform branch: no thread enters a group barrier when geometry is disabled.
+    if (hasPrediction == 0)
+    {
+        if (lane == 0u)
+        {
+            OutModel[uint2(0, 0)] = 0.0;
+            OutModel[uint2(1, 0)] = 0.0;
+            OutModel[uint2(2, 0)] = float4(0, 0, -1, 0); // disabled, distinct from failed fit
+        }
+        return;
+    }
     const float inlierPx = 0.75;
     if (lane < 16u)
     {
@@ -996,6 +1007,12 @@ R"HLSL(
 void FuseGeometry(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= size.x || id.y >= size.y) return;
+    if (hasPrediction == 0)
+    {
+        OutFlow[id.xy] = FlowIn.Load(int3(id.xy, 0));
+        OutInfo[id.xy] = float4(1, 0, 1e6, 0);
+        return;
+    }
     float2 uv = (float2(id.xy) + 0.5) / float2(size);
     float4 flow = FlowIn.Load(int3(id.xy, 0));
     float4 h0 = GeoModel.Load(int3(0, 0, 0));

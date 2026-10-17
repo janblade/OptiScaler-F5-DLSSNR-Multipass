@@ -129,6 +129,8 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     else if (!useVirtualUpscaler)
         ReleaseVirtualUpscaler();
 
+    _producer->Flow()->Tuning().geometricFusion = Config::Instance()->DlssNrNativeGeometricFusion.value_or_default();
+
     NativeProducer::Options options;
     options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
     options.flowPreview = flowPreview;
@@ -293,6 +295,11 @@ void NativeDriver::DrawFlowTuning()
     }
 
     auto& tune = _producer->Flow()->Tuning();
+    bool useGeometry = Config::Instance()->DlssNrNativeGeometricFusion.value_or_default();
+    if (ImGui::Checkbox("Use camera model (selective geometric fusion)##flowgeometry", &useGeometry))
+        Config::Instance()->DlssNrNativeGeometricFusion = useGeometry;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Off: keep the complete local F5Low field, without homography fitting or geometric fusion. The original global motion candidate has its own control below.");
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
     ImGui::SetNextItemWidth(160.0f);

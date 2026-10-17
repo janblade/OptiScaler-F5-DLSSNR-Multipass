@@ -121,6 +121,38 @@ int main(int argc, char** argv)
     const bool unchanged = before == after;
     ok &= unchanged;
     printf("all debug views preserve vectors: %s\n", unchanged ? "PASS" : "FAIL");
+    flow.Tuning().geometricFusion = false;
+    auto c = gpu.Picture(10, -6);
+    flow.Dispatch(gpu.list.Get(), c.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    const auto geometryOff = ReadFlow(gpu, flow.Flow());
+    const auto localOnly = ReadFlow(gpu, flow.RawFlow(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    const bool localExact = geometryOff == localOnly;
+    ok &= localExact;
+    printf("camera geometry off: final field exactly equals full local F5Low field: %s\n", localExact ? "PASS" : "FAIL");
+    ok &= flow.Visualise(gpu.list.Get(), 24, 10);
+    const auto disabledReason = ReadPreview(gpu, flow.Preview());
+    bool disabledGray = true;
+    for (size_t i = 0; i < disabledReason.size(); i += 4)
+        disabledGray &= disabledReason[i] == 51 && disabledReason[i+1] == 51 && disabledReason[i+2] == 51 && disabledReason[i+3] == 255;
+    ok &= disabledGray;
+    printf("camera disabled reason is gray, distinct from failed fit: %s\n", disabledGray ? "PASS" : "FAIL");
+    ok &= flow.Visualise(gpu.list.Get(), 24, 9);
+    const auto disabledModel = ReadPreview(gpu, flow.Preview());
+    bool disabledBlack = true;
+    for (size_t i = 0; i < disabledModel.size(); i += 4)
+        disabledBlack &= disabledModel[i] == 0 && disabledModel[i+1] == 0 && disabledModel[i+2] == 0 && disabledModel[i+3] == 255;
+    ok &= disabledBlack;
+    printf("camera disabled model is black, without stale grid: %s\n", disabledBlack ? "PASS" : "FAIL");
+    flow.Tuning().geometricFusion = true;
+    auto d = gpu.Picture(15, -9);
+    flow.Dispatch(gpu.list.Get(), d.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    ok &= flow.Visualise(gpu.list.Get(), 24, 9);
+    const auto enabledModel = ReadPreview(gpu, flow.Preview());
+    size_t restoredCyan = 0;
+    for (size_t i = 0; i < enabledModel.size(); i += 4)
+        restoredCyan += enabledModel[i+2] > 80 && enabledModel[i+1] > 60 && enabledModel[i] < 30;
+    ok &= restoredCyan > 10;
+    printf("camera geometry re-enabled: fresh valid model: %s\n", restoredCyan > 10 ? "PASS" : "FAIL");
     flow.Reset();
     const bool reset = !flow.FlowValid() && !flow.Visualise(gpu.list.Get(), 24, 7);
     ok &= reset;

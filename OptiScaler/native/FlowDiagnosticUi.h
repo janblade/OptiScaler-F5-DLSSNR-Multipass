@@ -40,7 +40,7 @@ class FlowDiagnosticUi
         ImGui::Combo("F5Low diagnostic view##f5flowdebug",&_view,views,(int)std::size(views));
         _requested.store(_view,std::memory_order_release);
         if (_view==3) ImGui::TextDisabled("Black: invalid. Blue: local flow. Orange: homography. Green: blend.");
-        if (_view==10) ImGui::TextWrapped("Black: geometry used. Magenta: global model invalid. Orange: projection invalid/outside image. Yellow: photometric mismatch. Cyan: local flow retained. Red: no selected hypothesis.");
+        if (_view==10) ImGui::TextWrapped("Gray: camera geometry disabled. Black: geometry used. Magenta: global model invalid. Orange: projection invalid/outside image. Yellow: photometric mismatch. Cyan: local flow retained. Red: no selected hypothesis.");
         if (_view==8) ImGui::TextWrapped("White: geometry not used (local-only or invalid). Black: geometry accepted, including blends. No model means all white. This is not an occlusion mask.");
         if (_view==9) ImGui::TextWrapped("Cyan: fitted projective grid. Dark gray: fixed reference grid. Black if no valid model. No optical-flow or game-picture background.");
         if (ImGui::Button("Enlarge preview")) _display=1;

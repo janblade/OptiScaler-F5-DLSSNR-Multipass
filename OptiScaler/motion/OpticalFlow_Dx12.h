@@ -128,6 +128,7 @@ class OpticalFlowDx12
     // Penalty added per pixel of distance from that answer, which keeps flat areas from picking noise.
     struct Settings
     {
+        bool geometricFusion = true;  // added camera homography/SGF; false outputs the complete pre-fusion F5Low field
         int radius = 1;
         int coarseRadius = 4;
         float lambda = 0.03f;

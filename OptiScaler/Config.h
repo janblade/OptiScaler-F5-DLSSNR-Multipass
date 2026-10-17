@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "SysUtils.h"
 #include "State.h"
@@ -674,6 +674,8 @@ class Config
     // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See native/NativeDriverDx12.h and
     // NativeDriverDx11.h.
     CustomOptional<bool> DlssNrNativeMotion { false };
+    // Added camera homography/SGF branch; false preserves the full original local estimator.
+    CustomOptional<bool> DlssNrNativeGeometricFusion { true };
     // NativeInput: with NativeMotion on and the game making no upscaler call, runs DLSS-NR on the finished picture with
     // the optical flow as its motion and the depth finder's depth when it has one (Story 4 of the native input
     // producer). Needs FinishedPicture and Enabled on as well. Lower GPU cost than NativeUpscaler below, with no frame

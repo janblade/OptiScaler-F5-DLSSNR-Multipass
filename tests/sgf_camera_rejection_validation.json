@@ -257,27 +257,27 @@
       "width": 1920,
       "height": 1080,
       "gpu_ms": {
-        "before": 1.118037,
-        "fixed": 1.120068
+        "before": 1.141282,
+        "fixed": 1.11706
       },
       "fit_ms": {
-        "before": 0.049246,
-        "fixed": 0.052732
+        "before": 0.049289,
+        "fixed": 0.052676
       },
-      "delta_ms": 0.002031000000000116
+      "delta_ms": -0.024221999999999966
     },
     {
       "width": 3413,
       "height": 1920,
       "gpu_ms": {
-        "before": 3.089792,
-        "fixed": 3.072375
+        "before": 3.149103,
+        "fixed": 3.190703
       },
       "fit_ms": {
-        "before": 0.050048,
-        "fixed": 0.052911
+        "before": 0.049664,
+        "fixed": 0.056171
       },
-      "delta_ms": -0.017417000000000016
+      "delta_ms": 0.04159999999999986
     }
   ],
   "runtime": [
@@ -298,6 +298,16 @@
     "gameExit": 0,
     "actual_nr_composition": true,
     "provider5Mentioned": true,
+    "cameraOff": false,
+    "fullFieldBypassExact": null,
+    "result": "PASS"
+  },
+  "cameraOffRuntime": {
+    "gameExit": 0,
+    "actual_nr_composition": true,
+    "provider5Mentioned": true,
+    "cameraOff": true,
+    "fullFieldBypassExact": true,
     "result": "PASS"
   },
   "regressions": [
@@ -323,12 +333,7 @@
     },
     {
       "step": "embedded-bytecode",
-      "exit": 1
-    },
-    {
-      "step": "embedded-bytecode",
-      "exit": 0,
-      "note": "Rebuilt the validator after generating the replacement embedded shaders; previous check executable contained the old arrays."
+      "exit": 0
     }
   ],
   "quality": {

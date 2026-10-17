@@ -10,6 +10,7 @@ float GeometryRejectionMask(float source)
 // Display only; derive reasons from existing fusion/model diagnostics. No readback.
 float4 GeometryRejectionReason(float4 info, float4 fit)
 {
+    if (fit.z < 0.0) return float4(0.2, 0.2, 0.2, 1); // camera geometry disabled
     if (info.x >= 1.5) return float4(0, 0, 0, 1); // geometry accepted
     if (!(fit.z > 0.5)) return float4(1, 0, 1, 1); // global model invalid
     if (!(info.z < 1e5)) return float4(1, 0.35, 0, 1); // invalid projection/outside image

@@ -579,6 +579,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         // Fit the normalized eight-parameter current-to-previous homography from robustly
         // supported flow samples, then choose or blend the local hypotheses per pixel.
         constants = Constants {};
+        constants.hasPrediction = _settings.geometricFusion ? 1 : 0;
         constants.sizeX = _geometryModel.width;
         constants.sizeY = _geometryModel.height;
         constants.auxX = (uint32_t) colorDesc.Width;
@@ -588,6 +589,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
              nullptr, DXGI_FORMAT_UNKNOWN, previous[0].resource, kLumaFormat);
 
         constants = Constants {};
+        constants.hasPrediction = _settings.geometricFusion ? 1 : 0;
         constants.sizeX = _flowFused.width;
         constants.sizeY = _flowFused.height;
         constants.auxX = (uint32_t) colorDesc.Width;

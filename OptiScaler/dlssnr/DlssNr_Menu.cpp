@@ -3266,12 +3266,15 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
     // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the picture the model is
     // shown, as one card. One way to flatten first (watercolour and smooth canvas do the same job, so a choice of one),
-    // then the two hints as checkboxes; each style's strength shows only while it is on.
+    // then the two hints as checkboxes; each style's strength shows only while it is on. Its own section, open at start:
+    // with the modern style a top-level section is a card.
+    if (auto card = ScopedCollapsingHeader("Input style (experimental)", ImGuiTreeNodeFlags_DefaultOpen);
+        card.IsHeaderOpen())
     {
         DlssNrInput::Styles styles = config->DlssNrInputStyles();
         bool changed = false;
 
-        ImGui::TextUnformatted("Input style (experimental)");
+        ImGui::TextDisabled("Restyles the picture NR is shown; the styles combine.");
         HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed. "
                    "The styles combine and run in this order: flatten, structure hint, texture hint.\nWith a composed "
                    "curve only what NR paints differently shows; with a replace curve you see NR's painting as it is "

@@ -2173,10 +2173,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     bool inputRestyled = false;
     {
         const uint32_t style = cfg.DlssNrInputStyle.value_or_default();
-        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), style == 2u ? 3.0f : 1.0f);
+        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), StyleMostStrength(style));
         const bool facesOnly = cfg.DlssNrInputStyleFacesOnly.value_or_default();
-        const bool wanted = style >= 1u && style <= 3u && strength > 0.0f;
-        const char* skip = wanted && workScale > 1.0f ? "model resolution above 100%" : nullptr;
+        const bool wanted = style >= 1u && style <= 4u && strength > 0.0f;
+        // The texture hint keeps its pattern's coordinates from frame to frame, which only the D3D12 path holds so far
+        const char* skip = !wanted               ? nullptr
+                           : style == 4u         ? "the texture hint is D3D12 only for now"
+                           : workScale > 1.0f    ? "model resolution above 100%"
+                                                 : nullptr;
         bool restyled = false;
 
         if (wanted && skip == nullptr)

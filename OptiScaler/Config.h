@@ -513,9 +513,11 @@ class Config
     // Experimental input style: how the picture the model is shown is restyled before the model runs.
     // 0 = off (default), 1 = watercolour (a Kuwahara filter: texture flattened into washes, edges kept),
     // 2 = structure hint (local contrast raised on luminance, CAS-like, overshoot bounded),
-    // 3 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept).
+    // 3 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept),
+    // 4 = texture hint (a faint fibre pattern on flat areas only, carried along the motion vectors so it stays on the
+    // surfaces; NR turns it into a visible material texture. D3D12 only).
     // DlssNrInputStyleStrength: watercolour and smooth canvas blend with the picture as it was (0..1); the structure
-    // hint scales its boost (0..3). DlssNrInputStyleFacesOnly: the style only where the colour looks like skin (the
+    // hint scales its boost (0..3); the texture hint scales its pattern (0..2). DlssNrInputStyleFacesOnly: the style only where the colour looks like skin (the
     // same colour test as SkinProtection). The resolve compares the answer against the same restyled picture, so
     // Composed hands back only what the model painted; Replace shows the model's painting as it is. Skipped at model
     // resolution above 100% and on the deferred path.

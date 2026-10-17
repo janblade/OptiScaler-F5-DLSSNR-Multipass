@@ -79,6 +79,11 @@ cbuffer Params : register(b0)
     uint  gInputEncoding;
     // Resolve only: gOriginal is the game's own texture (still in gInputEncoding), not the encode's kept copy.
     uint  gOriginalIsGameColour;
+    // Texture hint (mode 17) only: where the motion texture's valid region starts, and 1 to start the pattern's surface
+    // coordinates over (first frame, a new size, a reset). See DlssNrConstants::HintMotionBaseX.
+    uint  gHintMotionBaseX;
+    uint  gHintMotionBaseY;
+    uint  gHintReset;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -815,6 +820,74 @@ float StyleSkinWeight(float3 stored)
     return SkinColourWeight(gPassthrough != 0 ? stored : LinearToSrgb(saturate(DecodeProxyToLinear(stored))));
 }
 
+// The texture hint's pattern (mode 17). kHintWrap: the coordinates wrap here; both of the pattern's cell sizes divide it.
+static const float kHintWrap = 4096.0;
+static const float2 kHintSeed = float2(1013.5, 2711.25);
+// The pattern's strength at InputStyleStrength 1, as a ratio of the stored value (about 15% of linear light)
+static const float kHintAmplitude = 0.07;
+
+// Value noise with a smoothstep blend on an integer lattice that repeats every `period` cells: each cell corner a hashed
+// value in [-1, 1]
+float HintLatticeValue(int2 cell, int2 period, uint salt)
+{
+    // Cells are never negative: the coordinates are wrapped to [0, kHintWrap) before they get here
+    const uint2 c = (uint2) cell % (uint2) period;
+    uint v = (c.x * 73856093u) ^ (c.y * 19349663u) ^ (salt * 83492791u);
+    v = v * 747796405u + 2891336453u;
+    v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    v = (v >> 22u) ^ v;
+    return (float) (v & 0xFFFFu) / 32767.5 - 1.0;
+}
+
+float HintValueNoise(float2 at, int2 period, uint salt)
+{
+    const float2 cell = floor(at);
+    float2 f = at - cell;
+    f = f * f * (3.0 - 2.0 * f);
+    const int2 i = (int2) cell;
+    const float a = HintLatticeValue(i, period, salt);
+    const float b = HintLatticeValue(i + int2(1, 0), period, salt);
+    const float cc = HintLatticeValue(i + int2(0, 1), period, salt);
+    const float d = HintLatticeValue(i + int2(1, 1), period, salt);
+    return lerp(lerp(a, b, f.x), lerp(cc, d, f.x), f.y);
+}
+
+// Fibre: noise stretched 4:1 along x (cells 6.4 x 1.6 px), with a weaker layer stretched along y; unit spread (0.3265 is
+// the spread of this mix, measured)
+float FibrePattern(float2 coord)
+{
+    const float along = HintValueNoise(coord / float2(6.4, 1.6), int2(640, 2560), 1u);
+    const float across = HintValueNoise(coord / float2(1.6, 6.4), int2(2560, 640), 2u);
+    return (0.7 * along + 0.3 * across) / 0.3265;
+}
+
+// The pattern coordinate a pixel had one frame ago, carried by its motion vector (current to previous, in pixels of
+// this picture once scaled by gMvScale); x below -1 where there is none (a reset, or the vector leaves the picture).
+// The motion texture is read in its valid region (gGuideWidth x gGuideHeight from gHintMotionBase), by where the pixel
+// falls in the picture.
+float2 TextureHintCoord(int2 p, int2 last)
+{
+    if (gHintReset != 0)
+        return float2(-2.0, 0.0);
+
+    const float2 size = float2(last + 1);
+    const int2 motionAt = int2(gHintMotionBaseX, gHintMotionBaseY) +
+                          min(int2((float2(p) + 0.5) * float2(gGuideWidth, gGuideHeight) / size),
+                              int2((int) gGuideWidth - 1, (int) gGuideHeight - 1));
+    const float2 motion = gMotion.Load(int3(motionAt, 0)).xy * float2(gMvScaleX, gMvScaleY);
+    const float2 before = float2(p) + motion;
+
+    if (!all(isfinite(motion)))
+        return float2(-2.0, 0.0);
+
+    const int2 near = (int2) round(before);
+
+    if (any(near < int2(0, 0)) || any(near > last))
+        return float2(-2.0, 0.0);
+
+    return gModel.Load(int3(near, 0)).xy + (before - float2(near));
+}
+
 // Automatic exposure uses the same 8x8 group as every other mode, but spreads the expensive work
 // across all 64 lanes. Only 1 KiB of groupshared memory is reserved, so the ordinary encode/resolve
 // passes keep effectively the same occupancy.
@@ -1277,6 +1350,85 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
             hinted = lerp(c, hinted, StyleSkinWeight(c));
 
         gTarget[id.xy] = float4(saturate(hinted), centre.a);
+        return;
+    }
+    if (gMode == 17)
+    {
+        // Experimental input style ([DlssNr] InputStyle = 4), the texture hint: a faint fibre pattern (linen, canvas)
+        // on flat fills only, so the model has a surface to build on. Checked offline (plan
+        // 2026-10-16-f5low-motion-profiles, S7): the model removes random grain as noise but keeps and strengthens a
+        // structured pattern, which Composed then hands back as a visible material texture.
+        //
+        // The pattern sticks to the surface: each pixel keeps a pattern coordinate (gKeep, read back next frame as
+        // gModel), carried along the motion vectors -- the coordinate one frame ago at the pixel the vector points
+        // to, plus the part of a pixel the vector has beyond it (a nearest read: no blur builds up over frames). It
+        // starts over at the pixel itself where there is no last frame, the vector leaves the picture, or the
+        // coordinates around it no longer step one pixel per pixel (a stretch or a tear, a zoom that went on).
+        // Coordinates wrap at kHintWrap, a whole number of the pattern's cells, so the wrap leaves no seam.
+        uint w, h;
+        gSource.GetDimensions(w, h);
+        const int2 p = (int2) id.xy;
+
+        if (p.x >= (int) w || p.y >= (int) h)
+            return;
+
+        const int2 last = int2((int) w - 1, (int) h - 1);
+        const float4 centre = gSource.Load(int3(p, 0));
+        const float3 c = saturate(centre.rgb);
+
+        float2 coord = TextureHintCoord(p, last);
+        uint broken = coord.x < -1.0 ? 4u : 0u;
+
+        if (broken == 0u)
+        {
+            // Count the neighbours whose coordinate does not sit one pixel away: a seam has neighbours on one side
+            // only, so it keeps its coordinate; a pixel off from three or four starts over.
+            const int2 steps[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+
+            [unroll] for (int k = 0; k < 4; ++k)
+            {
+                const int2 q = clamp(p + steps[k], int2(0, 0), last);
+                const float2 other = TextureHintCoord(q, last);
+                const float2 apart = other - coord;
+                const float2 wrapped = apart - kHintWrap * round(apart / kHintWrap);
+                broken += other.x < -1.0 || any(abs(wrapped - float2(q - p)) > 0.5) ? 1u : 0u;
+            }
+        }
+
+        if (broken >= 3u)
+            coord = float2(p) + kHintSeed;
+
+        coord -= kHintWrap * floor(coord / kHintWrap);
+        gKeep[id.xy] = float4(coord, 0.0, 1.0);
+
+        // Flat: the 5x5 window's luma spread is small (a fill, sky, a plain wall), so outlines and anything with a
+        // texture of its own, and two pixels around them, are left as they are.
+        float sum = 0.0, sumSq = 0.0;
+
+        [unroll] for (int dy = -2; dy <= 2; ++dy)
+        {
+            [unroll] for (int dx = -2; dx <= 2; ++dx)
+            {
+                const float ln =
+                    dot(saturate(gSource.Load(int3(clamp(p + int2(dx, dy), int2(0, 0), last), 0)).rgb), kLuma);
+                sum += ln;
+                sumSq += ln * ln;
+            }
+        }
+
+        const float mean = sum / 25.0;
+        const float spread = sqrt(max(sumSq / 25.0 - mean * mean, 0.0));
+        float amount = (1.0 - smoothstep(0.006, 0.02, spread)) * kHintAmplitude * clamp(gTransferStrength, 0.0, 2.0);
+
+        // Faces only (the style pass's SkinProtection): as much of the style as the pixel looks like skin
+        if (gSkinProtection != 0)
+            amount *= StyleSkinWeight(c);
+
+        // On the stored values, as a ratio, so a dark fill shows as much of it as a light one; capped so no channel
+        // passes 1 (a clipped channel would shift the hue)
+        const float peak = max(max(c.r, c.g), c.b);
+        const float scale = min(1.0 + amount * FibrePattern(coord), 1.0 / max(peak, 1e-6));
+        gTarget[id.xy] = float4(saturate(c * max(scale, 0.0)), centre.a);
         return;
     }
     if (gMode == 16)

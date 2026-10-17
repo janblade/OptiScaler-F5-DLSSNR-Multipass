@@ -510,7 +510,7 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DlssNrReducedUpscaleMethod = 0u;
             DlssNrModelResolutionAuto.set_from_config(readBool("DlssNr", "ModelResolutionAuto"));
             DlssNrInputStyle.set_from_config(readUInt("DlssNr", "InputStyle"));
-            if (DlssNrInputStyle.has_value() && DlssNrInputStyle.value() > 3u)
+            if (DlssNrInputStyle.has_value() && DlssNrInputStyle.value() > 4u)
                 DlssNrInputStyle.reset();
             DlssNrInputStyleStrength.set_from_config(readFloat("DlssNr", "InputStyleStrength"));
             if (DlssNrInputStyleStrength.has_value())

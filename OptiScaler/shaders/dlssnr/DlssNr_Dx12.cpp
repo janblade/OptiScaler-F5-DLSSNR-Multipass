@@ -338,6 +338,14 @@ struct NrState
     // used, parked with the scratch set; its state is tracked because the resolve reads it.
     ID3D12Resource* styled = nullptr;
     D3D12_RESOURCE_STATES styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // The texture hint's (InputStyle 4) pattern coordinates on the surfaces, R32G32_FLOAT at the model's picture size:
+    // this frame's is written while last frame's (hintCoord[hintLast]) is read, then they swap. hintValid: the last one
+    // holds a frame of them (false starts them over: first use, a new size, the style off for a frame).
+    ID3D12Resource* hintCoord[2] = {};
+    D3D12_RESOURCE_STATES hintCoordState[2] = { D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
+    int hintLast = 0;
+    bool hintValid = false;
 
     // Frame hold (design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
     // over the live output before the encode reads it while held, so a setting change re-renders the
@@ -3178,6 +3186,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.lutScratch);
             ParkNrResource(g_nr.styled);
             g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+            for (int i = 0; i < 2; ++i)
+            {
+                ParkNrResource(g_nr.hintCoord[i]);
+                g_nr.hintCoordState[i] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+
+            g_nr.hintValid = false;
             g_nr.passScratchFailed = false;
             g_nr.passClampScratchFailed = false;
             g_nr.passClampScratch2Failed = false;
@@ -4381,13 +4397,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Experimental input style (DlssNrInputStyle): restyle the model's picture once it is final (after the shrink and
     // the edge packing). The restyled picture is both the model input and the resolve's proxy (ordinaryProxy below,
     // and through the edge unpacking), so Composed hands back only what the model painted on top of it. Skipped above
-    // 100% model resolution (the resolve compares against colorCopy there) and on the deferred path.
+    // 100% model resolution (the resolve compares against colorCopy there) and on the deferred path. The texture hint
+    // (style 4) also carries its pattern's surface coordinates from frame to frame along the motion the model is given.
     bool inputRestyled = false;
     {
         const uint32_t style = cfg.DlssNrInputStyle.value_or_default();
-        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), style == 2u ? 3.0f : 1.0f);
+        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), StyleMostStrength(style));
         const bool facesOnly = cfg.DlssNrInputStyleFacesOnly.value_or_default();
-        const bool wanted = style >= 1u && style <= 3u && strength > 0.0f;
+        const bool wanted = style >= 1u && style <= 4u && strength > 0.0f;
+        const bool textureHint = style == 4u;
         const char* skip = !wanted                                     ? nullptr
                            : cfg.DlssNrDeferredDlss.value_or_default() ? "the deferred Super Resolution path"
                            : workScale > 1.0f                          ? "model resolution above 100%"
@@ -4412,7 +4430,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             }
 
-            if (g_nr.styled != nullptr)
+            // The texture hint's coordinates, at the picture's size (a new size starts them over)
+            if (textureHint)
+            {
+                for (int i = 0; i < 2; ++i)
+                {
+                    if (g_nr.hintCoord[i] != nullptr && (g_nr.hintCoord[i]->GetDesc().Width != in.Width ||
+                                                         g_nr.hintCoord[i]->GetDesc().Height != in.Height))
+                    {
+                        ParkNrResource(g_nr.hintCoord[i]);
+                        g_nr.hintValid = false;
+                    }
+
+                    if (g_nr.hintCoord[i] == nullptr)
+                    {
+                        g_nr.hintCoord[i] =
+                            CreateScratch(device, DXGI_FORMAT_R32G32_FLOAT, (unsigned int) in.Width, in.Height);
+                        g_nr.hintCoordState[i] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                        g_nr.hintValid = false;
+                    }
+                }
+            }
+
+            const bool hintReady = !textureHint || (g_nr.hintCoord[0] != nullptr && g_nr.hintCoord[1] != nullptr);
+
+            if (g_nr.styled != nullptr && hintReady)
             {
                 Barrier(cmdList, g_nr.styled, g_nr.styledState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -4424,12 +4466,47 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 paint.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
                 paint.TransferStrength = strength;
                 paint.SkinProtection = facesOnly ? 1u : 0u; // the style passes read it as "faces only"
-                const bool painted =
-                    DispatchPass(cmdList, paint, modelInput, nullptr, nullptr, nullptr, nullptr, g_nr.styled, nullptr);
+
+                ID3D12Resource* hintBefore = nullptr;
+                ID3D12Resource* hintNow = nullptr;
+                ID3D12Resource* hintMotion = nullptr;
+
+                if (textureHint)
+                {
+                    const int before = g_nr.hintLast;
+                    const int now = 1 - before;
+                    hintBefore = g_nr.hintCoord[before];
+                    hintNow = g_nr.hintCoord[now];
+                    Barrier(cmdList, hintBefore, g_nr.hintCoordState[before],
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    g_nr.hintCoordState[before] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    Barrier(cmdList, hintNow, g_nr.hintCoordState[now], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    g_nr.hintCoordState[now] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+                    // The motion the model is given: packed and exact in packed pixels with edge compression, else
+                    // the game's (its scale takes it to full-frame pixels, the ratio on to the picture's)
+                    hintMotion = modelMotion;
+                    paint.MvScaleX = spatial ? 1.0f : g_nr.guideMvScaleX * (float) in.Width / (float) width;
+                    paint.MvScaleY = spatial ? 1.0f : g_nr.guideMvScaleY * (float) in.Height / (float) height;
+                    paint.GuideWidth = spatial ? (unsigned int) in.Width : motionWidth;
+                    paint.GuideHeight = spatial ? in.Height : motionHeight;
+                    paint.HintMotionBaseX = spatial ? 0u : motionBaseX;
+                    paint.HintMotionBaseY = spatial ? 0u : motionBaseY;
+                    paint.HintReset = !g_nr.hintValid || g_nr.reset ? 1u : 0u;
+                }
+
+                const bool painted = DispatchPass(cmdList, paint, modelInput, hintBefore, nullptr, hintMotion, nullptr,
+                                                  g_nr.styled, hintNow);
 
                 Barrier(cmdList, g_nr.styled, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 g_nr.styledState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+                if (textureHint)
+                {
+                    g_nr.hintLast = 1 - g_nr.hintLast;
+                    g_nr.hintValid = painted;
+                }
 
                 // A failed dispatch left the texture as it was (never written, or last frame's): the model keeps the
                 // picture as it is, as on Vulkan
@@ -4449,6 +4526,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 skip = "its texture could not be created";
             }
         }
+
+        if (!restyled || !textureHint)
+            g_nr.hintValid = false;
 
         // Said when it changes, so a log shows each A/B toggle.
         static int said = -1;
@@ -6240,6 +6320,18 @@ void Shutdown()
         g_nr.styled = nullptr;
     }
     g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    for (int i = 0; i < 2; ++i)
+    {
+        if (g_nr.hintCoord[i] != nullptr)
+        {
+            g_nr.hintCoord[i]->Release();
+            g_nr.hintCoord[i] = nullptr;
+        }
+
+        g_nr.hintCoordState[i] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    g_nr.hintValid = false;
 
     if (g_nr.sgsr1UpAnswer != nullptr)
     {

@@ -3270,8 +3270,8 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
     // Experimental input style (Config.h DlssNrInputStyle): restyle the picture the model is shown.
     {
-        static const char* styleNames[] = { "Off", "Watercolour", "Structure hint", "Smooth canvas" };
-        int style = (int) std::min(config->DlssNrInputStyle.value_or_default(), 3u);
+        static const char* styleNames[] = { "Off", "Watercolour", "Structure hint", "Smooth canvas", "Texture hint" };
+        int style = (int) std::min(config->DlssNrInputStyle.value_or_default(), 4u);
 
         if (ImGui::Combo("Input style (experimental)", &style, styleNames, IM_ARRAYSIZE(styleNames)))
             config->DlssNrInputStyle = (uint32_t) style;
@@ -3280,15 +3280,18 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
                    "Watercolour flattens texture into washes and keeps edges (can look blocky).\nStructure hint raises "
                    "local contrast (brightness only) so NR has more structure to follow; high strength blurs with a "
                    "composed curve.\nSmooth canvas shows NR skin like an untextured old-game surface: pores and fine "
-                   "shading flattened, contours kept, so NR paints its own skin detail.\nWith a composed curve only "
+                   "shading flattened, contours kept, so NR paints its own skin detail.\nTexture hint lays a faint "
+                   "fibre pattern (linen, canvas) on flat areas only, stuck to the surfaces, which NR turns into a "
+                   "visible material texture: for cartoon and cel-shaded pictures (D3D12 only).\nWith a composed curve only "
                    "what NR paints differently shows; with a replace curve you see NR's painting as it is (Restore "
                    "Sharpness is off while a style is on, or it would put the game's texture back).\nNo effect above "
                    "100% Model resolution.");
 
         if (style != 0)
         {
-            // Watercolour and smooth canvas are a blend (0..1); the structure hint's boost goes to 3x.
-            const float most = style == 2 ? 3.0f : 1.0f;
+            // Watercolour and smooth canvas are a blend (0..1); the structure hint's boost goes to 3x, the texture hint
+            // to twice its pattern.
+            const float most = StyleMostStrength((uint32_t) style);
             float strength = std::min(config->DlssNrInputStyleStrength.value_or_default(), most);
 
             if (ImGui::SliderFloat("Input style strength", &strength, 0.0f, most, "%.2f"))

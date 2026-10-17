@@ -22,6 +22,14 @@
 // capture): it waits on no sync counter, so it can run without the rest of the run. The fp8 set drops it: there the 2-D output keeps its
 // own memory, and nothing says the 1-D result does.
 //
+// Whether that 1-D result keeps its memory depends on the DLL: some plain builds keep it, and in others a decoder buffer starts inside it
+// (checked on captures), so keeping the last kernel rebuilds from foreign data. Hence copy mode (Begin's `copyPlain`, the D3D12 path): on
+// the plain set the caller keeps its own copy of the 2-D output, so the DLL's memory layout no longer matters. A computed run asks for a
+// save right after its last kernel; a skipped run drops its last kernel too and asks for a restore where it was. Only the decoder's first
+// kernel reads the 2-D output (checked on 310.8 and 310.9 captures, both sets), so that copy is the whole state the decoder needs. A skipped
+// run also needs the run's first launch to match the computed one (`sig`, from its parameters), so a moved or resized network is computed
+// again instead of restored into the wrong place. One ViT run per evaluation: a second one in copy mode turns the feature off.
+//
 // This header is only the decision: which launch of an evaluation is dropped. It knows nothing about NvAPI, so tests/nr_vit_reuse_smoke.cpp
 // exercises it on the host.
 
@@ -127,6 +135,14 @@ template <class Handle> class Kernels
     std::unordered_map<Handle, std::pair<Role, KernelSet>> roles_;
 };
 
+// Copy work the caller records for a plain-set run in copy mode, at the position Split reports (see the top).
+enum class Copy : uint8_t
+{
+    None = 0,
+    Save,    // right after the run's last kernel: copy its 2-D output into the caller's buffer
+    Restore, // where the skipped last kernel was: copy the caller's buffer back into the 2-D output
+};
+
 // Feed it the launches of one model evaluation, in order, between Begin and End. One Filter serves every feature (every
 // pass); the evaluation in progress belongs to the calling thread, so launches from any other thread pass untouched.
 class Filter
@@ -140,7 +156,9 @@ class Filter
     // on a pass that was reusing, so the picture used data two frames old, like every = 3.
     // The cycle is anchored to the frame, so a pass that had to start over (reset, lost cache) falls back into its own
     // phase on the next due frame. A pass never goes longer than every - 1 reused evaluations, anchored or not.
-    void Begin(const void* feature, bool reset, unsigned every, long long slot = -1, unsigned everyPlain = 0)
+    // `copyPlain`: the caller can record the plain set's save and restore copies (copy mode, see the top); without it the plain set keeps
+    // the run's last kernel.
+    void Begin(const void* feature, bool reset, unsigned every, long long slot = -1, unsigned everyPlain = 0, bool copyPlain = false)
     {
         Ctx& c = ctx();
         c = Ctx {};
@@ -150,13 +168,15 @@ class Filter
         c.every = every < 1 ? 1 : every;
         c.everyPlain = everyPlain < 1 ? c.every : everyPlain;
         c.slot = slot;
+        c.copyPlain = copyPlain;
     }
 
     bool Evaluating() const { return ctx().active; }
+    const void* Feature() const { return ctx().key; } // of the evaluation in progress (the caller's copy is kept per feature)
 
     // True when this launch is to be dropped. Must be called for every launch of the evaluation, in order. `set` is the launch's
-    // kernel set; only the run's first launch uses it.
-    bool Drop(Role role, KernelSet set = KernelSet::Fp8)
+    // kernel set and `sig` a digest of its parameters; only the run's first launch uses them.
+    bool Drop(Role role, KernelSet set = KernelSet::Fp8, uint64_t sig = 0)
     {
         Ctx& c = ctx();
 
@@ -178,10 +198,19 @@ class Filter
             lastSet_ = set;
 
             const unsigned every = set == KernelSet::Plain ? c.everyPlain : c.every;
+
+            // copy mode keeps one copy per feature: a second run in the same evaluation would overwrite it
+            if (set == KernelSet::Plain && c.copyPlain && c.runs > 0)
+                c.anomaly = true;
+
+            ++c.runs;
+            c.copy = set == KernelSet::Plain && c.copyPlain && every > 1 && !disabled_ && !c.anomaly;
+            c.sig = sig;
             std::lock_guard<std::mutex> lock(mutex_);
             Entry& e = entries_[c.key];
             const bool due = c.slot >= 0 && c.slot % every == 0;
-            const bool skip = !disabled_ && every > 1 && e.valid && !c.reset && !due && e.skips + 1 < every;
+            const bool sameRun = !c.copy || (e.copied && e.sig == sig);
+            const bool skip = !disabled_ && every > 1 && e.valid && sameRun && !c.reset && !due && e.skips + 1 < every;
 
             if (skip)
             {
@@ -193,6 +222,7 @@ class Filter
             // computed in full: the cache is valid again only once the run has been seen to the end
             e.skips = 0;
             e.valid = false;
+            e.copied = false;
             return false;
         }
         case Role::Inner:
@@ -213,12 +243,29 @@ class Filter
                 c.skipping = false;
                 c.gap = true;
                 ++reused_;
+
+                if (c.copy)
+                {
+                    c.pending = Copy::Restore; // in its place: the caller's copy of the 2-D output
+                    ++restored_;
+                    return true;
+                }
+
                 return c.set != KernelSet::Plain; // the plain set keeps it: it rebuilds the 2-D output (see the top)
             }
 
             std::lock_guard<std::mutex> lock(mutex_);
-            entries_[c.key].valid = true;
+            Entry& e = entries_[c.key];
+            e.valid = true;
             ++computed_;
+
+            if (c.copy)
+            {
+                e.copied = true;
+                e.sig = c.sig;
+                c.pending = Copy::Save;
+            }
+
             return false;
         }
         default:
@@ -241,19 +288,32 @@ class Filter
         return gap;
     }
 
+    // True once, right after the Drop call that asked for it: the copy to record (see Copy). A restore goes where the barrier goes, a
+    // save right after the run's last kernel.
+    Copy TakeCopy()
+    {
+        Ctx& c = ctx();
+        const Copy copy = c.pending;
+        c.pending = Copy::None;
+        return copy;
+    }
+
     // One launch call of the evaluation: `kept` gets the launches that go out, in order. `gap` is where in `kept` the barrier goes
     // (the last launch of a skipped run was there, or is there when it is kept), or -1 when that launch was not in this call.
-    // True when the call needs that treatment (something dropped, or a barrier to record); false = launch the call unchanged.
-    // `roleOf(launch)` gives a launch's std::pair<Role, KernelSet>.
-    template <class T, class RoleOfLaunch>
-    bool Split(const T* launches, size_t count, RoleOfLaunch roleOf, std::vector<T>& kept, std::ptrdiff_t& gap)
+    // True when the call needs that treatment (something dropped, or a barrier or copy to record); false = launch the call unchanged.
+    // `roleOf(launch)` gives a launch's std::pair<Role, KernelSet>, `sigOf(launch)` the digest Drop takes. In copy mode `copy` says which
+    // copy goes at `copyAt` in `kept` (a restore: at `gap`; a save: right after the run's last kernel), and `copyFrom` is the index in
+    // `launches` of that last kernel, whose parameters name the 2-D output.
+    template <class T, class RoleOfLaunch, class SigOfLaunch>
+    bool Split(const T* launches, size_t count, RoleOfLaunch roleOf, SigOfLaunch sigOf, std::vector<T>& kept, std::ptrdiff_t& gap,
+               Copy& copy, std::ptrdiff_t& copyAt, std::ptrdiff_t& copyFrom)
     {
         bool any = false;
 
         for (size_t i = 0; i < count; ++i)
         {
             const std::pair<Role, KernelSet> rs = roleOf(launches[i]);
-            const bool drop = Drop(rs.first, rs.second);
+            const bool drop = Drop(rs.first, rs.second, rs.first == Role::Start ? sigOf(launches[i]) : 0);
 
             if (TakeGap())
             {
@@ -265,9 +325,26 @@ class Filter
                 any = true;
             else
                 kept.push_back(launches[i]);
+
+            if (const Copy pending = TakeCopy(); pending != Copy::None)
+            {
+                any = true;
+                copy = pending;
+                copyAt = (std::ptrdiff_t) kept.size(); // a restore: the dropped kernel's place; a save: after the kept one
+                copyFrom = (std::ptrdiff_t) i;
+            }
         }
 
         return any;
+    }
+
+    // Without copy mode (Begin's copyPlain false) no copy is ever asked for.
+    template <class T, class RoleOfLaunch>
+    bool Split(const T* launches, size_t count, RoleOfLaunch roleOf, std::vector<T>& kept, std::ptrdiff_t& gap)
+    {
+        Copy copy = Copy::None;
+        std::ptrdiff_t copyAt = -1, copyFrom = -1;
+        return Split(launches, count, roleOf, [](const T&) { return uint64_t(0); }, kept, gap, copy, copyAt, copyFrom);
     }
 
     // One launch per call, as Vulkan's vkCmdCuLaunchKernelNVX does: whether to record the barrier before it (or, when
@@ -279,11 +356,16 @@ class Filter
         bool launch = true;
     };
 
+    // No copy mode here (Vulkan does not record the copies): a copy asked for anyway turns the feature off.
     Single One(Role role, KernelSet set)
     {
         Single s;
         s.launch = !Drop(role, set);
         s.barrier = TakeGap();
+
+        if (TakeCopy() != Copy::None)
+            ctx().anomaly = true;
+
         return s;
     }
 
@@ -311,6 +393,15 @@ class Filter
         return wellFormed;
     }
 
+    // The caller could not record a copy that was asked for: no kept result can be trusted, and the feature goes off for the session.
+    void Disable(const char* reason)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_.clear();
+        reason_ = reason ? reason : "";
+        disabled_ = true;
+    }
+
     // The modules were destroyed: no cached result can be trusted any more.
     void Clear()
     {
@@ -322,16 +413,20 @@ class Filter
     KernelSet LastSet() const { return lastSet_; } // the kernel set of the last ViT run seen
     unsigned long long Computed() const { return computed_; }
     unsigned long long Reused() const { return reused_; }
+    unsigned long long Restored() const { return restored_; } // reused evaluations served from the caller's copy (copy mode)
 
     std::string Status() const
     {
-        char buf[128];
+        char buf[160];
 
         if (disabled_)
-            return "off for this session (unexpected NR launch order)";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return "off for this session (" + (reason_.empty() ? std::string("unexpected NR launch order") : reason_) + ")";
+        }
 
-        snprintf(buf, sizeof buf, "computed %llu, reused %llu", (unsigned long long) computed_,
-                 (unsigned long long) reused_);
+        snprintf(buf, sizeof buf, "computed %llu, reused %llu (%llu from a copy)", (unsigned long long) computed_,
+                 (unsigned long long) reused_, (unsigned long long) restored_);
         return buf;
     }
 
@@ -340,6 +435,8 @@ class Filter
     {
         bool valid = false;  // the output buffer holds a complete result
         unsigned skips = 0;  // consecutive evaluations that reused it
+        bool copied = false; // copy mode: the caller saved that result
+        uint64_t sig = 0;    // copy mode: the digest of the run's first launch when it was saved
     };
 
     struct Ctx
@@ -355,6 +452,11 @@ class Filter
         bool anomaly = false;
         bool gap = false;                   // see TakeGap
         KernelSet set = KernelSet::Unknown; // of the run in progress
+        bool copyPlain = false;             // see Begin
+        bool copy = false;                  // the run in progress is in copy mode
+        unsigned runs = 0;                  // ViT runs started in this evaluation
+        uint64_t sig = 0;                   // of the run in progress
+        Copy pending = Copy::None;          // see TakeCopy
     };
 
     static Ctx& ctx()
@@ -363,11 +465,13 @@ class Filter
         return c;
     }
 
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::unordered_map<const void*, Entry> entries_;
+    std::string reason_; // why Disable turned it off
     std::atomic<bool> disabled_ { false };
     std::atomic<KernelSet> lastSet_ { KernelSet::Unknown };
     std::atomic<unsigned long long> computed_ { 0 };
     std::atomic<unsigned long long> reused_ { 0 };
+    std::atomic<unsigned long long> restored_ { 0 };
 };
 } // namespace DlssNrVitReuse

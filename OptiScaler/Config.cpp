@@ -509,13 +509,39 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (DlssNrReducedUpscaleMethod.has_value() && DlssNrReducedUpscaleMethod.value() > 1u)
                 DlssNrReducedUpscaleMethod = 0u;
             DlssNrModelResolutionAuto.set_from_config(readBool("DlssNr", "ModelResolutionAuto"));
-            DlssNrInputStyle.set_from_config(readUInt("DlssNr", "InputStyle"));
-            if (DlssNrInputStyle.has_value() && DlssNrInputStyle.value() > 3u)
-                DlssNrInputStyle.reset();
-            DlssNrInputStyleStrength.set_from_config(readFloat("DlssNr", "InputStyleStrength"));
-            if (DlssNrInputStyleStrength.has_value())
-                DlssNrInputStyleStrength = std::clamp(DlssNrInputStyleStrength.value(), 0.0f, 3.0f);
-            DlssNrInputStyleFacesOnly.set_from_config(readBool("DlssNr", "InputStyleFacesOnly"));
+            {
+                const auto flatten = readUInt("DlssNr", "InputFlatten");
+                const auto flattenStrength = readFloat("DlssNr", "InputFlattenStrength");
+                const auto structure = readBool("DlssNr", "InputStructureHint");
+                const auto structureStrength = readFloat("DlssNr", "InputStructureStrength");
+                DlssNrInputStyleFacesOnly.set_from_config(readBool("DlssNr", "InputStyleFacesOnly"));
+
+                const bool newKeys = flatten.has_value() || flattenStrength.has_value() || structure.has_value() ||
+                                     structureStrength.has_value();
+                const auto single = readUInt("DlssNr", "InputStyle");
+
+                if (!newKeys && single.has_value() && single.value() >= 1u && single.value() <= 3u)
+                {
+                    // An ini from before the card: its one style, at its strength
+                    const float strength = readFloat("DlssNr", "InputStyleStrength").value_or(1.0f);
+                    SetDlssNrInputStyles(DlssNrInput::FromSingle(single.value(), strength,
+                                                                 DlssNrInputStyleFacesOnly.value_or_default()));
+                }
+                else
+                {
+                    DlssNrInputFlatten.set_from_config(flatten);
+                    if (DlssNrInputFlatten.has_value() && DlssNrInputFlatten.value() > DlssNrInput::kFlattenSmoothCanvas)
+                        DlssNrInputFlatten.reset();
+                    DlssNrInputFlattenStrength.set_from_config(flattenStrength);
+                    DlssNrInputStructureHint.set_from_config(structure);
+                    DlssNrInputStructureStrength.set_from_config(structureStrength);
+                }
+
+                if (DlssNrInputFlattenStrength.has_value())
+                    DlssNrInputFlattenStrength = std::clamp(DlssNrInputFlattenStrength.value(), 0.0f, 1.0f);
+                if (DlssNrInputStructureStrength.has_value())
+                    DlssNrInputStructureStrength = std::clamp(DlssNrInputStructureStrength.value(), 0.0f, 3.0f);
+            }
             DlssNrSpatialCompression.set_from_config(readBool("DlssNr", "SpatialCompression"));
             DlssNrSpatialCenterX.set_from_config(readFloat("DlssNr", "SpatialCenterX"));
             DlssNrSpatialCenterY.set_from_config(readFloat("DlssNr", "SpatialCenterY"));
@@ -549,6 +575,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrNativeDepthWarmupFrames.set_from_config(readUInt("DlssNr", "NativeDepthWarmupFrames"));
             DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
             DlssNrNativeDebugView.set_from_config(readBool("DlssNr", "NativeDebugView"));
+            DlssNrNativeMotionProfile.set_from_config(
+                readString("DlssNr", "NativeMotionProfile", true).transform(native::motion::ProfileFromIniText));
+            DlssNrNativeMotionProfileCustom.set_from_config(readString("DlssNr", "NativeMotionProfileCustom"));
             DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
             DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
             DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
@@ -1585,11 +1614,23 @@ bool Config::SaveIni()
                  GetIntValue(Instance()->DlssNrReducedUpscaleMethod.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ModelResolutionAuto",
                  GetBoolValue(Instance()->DlssNrModelResolutionAuto.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "InputStyle", GetIntValue(Instance()->DlssNrInputStyle.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "InputStyleStrength",
-                 GetFloatValue(Instance()->DlssNrInputStyleStrength.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "InputFlatten", GetIntValue(Instance()->DlssNrInputFlatten.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "InputFlattenStrength",
+                 GetFloatValue(Instance()->DlssNrInputFlattenStrength.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "InputStructureHint",
+                 GetBoolValue(Instance()->DlssNrInputStructureHint.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "InputStructureStrength",
+                 GetFloatValue(Instance()->DlssNrInputStructureStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "InputStyleFacesOnly",
                  GetBoolValue(Instance()->DlssNrInputStyleFacesOnly.value_for_config()).c_str());
+
+    // The old single key for a build from before the card: the first style that runs (auto when none does)
+    {
+        const auto first = DlssNrInput::ToSingle(Instance()->DlssNrInputStyles());
+        ini.SetValue("DlssNr", "InputStyle", first.style == 0u ? "auto" : std::to_string(first.style).c_str());
+        ini.SetValue("DlssNr", "InputStyleStrength",
+                     first.style == 0u ? "auto" : GetFloatValue(std::optional<float>(first.strength)).c_str());
+    }
     ini.SetValue("DlssNr", "SpatialCompression",
                  GetBoolValue(Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
     ini.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());
@@ -1634,6 +1675,10 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrNativeDepthOverlay.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDebugView",
                  GetBoolValue(Instance()->DlssNrNativeDebugView.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeMotionProfile",
+                 native::motion::ProfileIniText(Instance()->DlssNrNativeMotionProfile.value_or_default()));
+    ini.SetValue("DlssNr", "NativeMotionProfileCustom",
+                 Instance()->DlssNrNativeMotionProfileCustom.value_for_config_or("").c_str());
     ini.SetValue("DlssNr", "NativeMotion", GetBoolValue(Instance()->DlssNrNativeMotion.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeUpscaler",

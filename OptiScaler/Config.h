@@ -3,6 +3,8 @@
 #include "SysUtils.h"
 #include "State.h"
 #include "native/NativeLowLatencyRule.h"
+#include "motion/MotionProfiles.h"
+#include "shaders/dlssnr/DlssNr_InputStyles.h"
 
 #include <optional>
 #include <filesystem>
@@ -332,6 +334,8 @@ class Config
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
+    // The model's render preset hint: 1 Preset A (the main model), 2 Preset B (the small model, 310.9 DLLs only); 0 and
+    // any other value: the DLL's choice, the small model on 310.9 DLLs. 310.8 DLLs have only the main model.
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
@@ -509,18 +513,42 @@ class Config
     // rather than kept as an unclear trade-off; see plans/2026-09-18-dlssnr-enlarge-filter-simplify.md.
     CustomOptional<uint32_t> DlssNrReducedUpscaleMethod { 1 };
 
-    // Experimental input style: how the picture the model is shown is restyled before the model runs.
-    // 0 = off (default), 1 = watercolour (a Kuwahara filter: texture flattened into washes, edges kept),
-    // 2 = structure hint (local contrast raised on luminance, CAS-like, overshoot bounded),
-    // 3 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept).
-    // DlssNrInputStyleStrength: watercolour and smooth canvas blend with the picture as it was (0..1); the structure
-    // hint scales its boost (0..3). DlssNrInputStyleFacesOnly: the style only where the colour looks like skin (the
-    // same colour test as SkinProtection). The resolve compares the answer against the same restyled picture, so
-    // Composed hands back only what the model painted; Replace shows the model's painting as it is. Skipped at model
-    // resolution above 100% and on the deferred path.
-    CustomOptional<uint32_t> DlssNrInputStyle { 0 };
-    CustomOptional<float> DlssNrInputStyleStrength { 1.0f };
+    // Experimental input styles: how the picture the model is shown is restyled before the model runs, as one card in
+    // the menu (shaders/dlssnr/DlssNr_InputStyles.h). They run in this order, each on the one before's result:
+    // DlssNrInputFlatten: 0 = off (default), 1 = watercolour (a Kuwahara filter: texture flattened into washes, edges
+    // kept), 2 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept);
+    // its strength blends with the picture as it was (0..1).
+    // DlssNrInputStructureHint: local contrast raised on luminance, CAS-like, overshoot bounded; strength 0..3.
+    // DlssNrInputStyleFacesOnly: both only where the colour looks like skin (the same colour test as
+    // SkinProtection). The resolve compares the answer against the same restyled picture, so Composed hands back only
+    // what the model painted; Replace shows the model's painting as it is. Skipped at model resolution above 100% and on
+    // the deferred path. The ini also keeps the old single InputStyle / InputStyleStrength (read when none of the new
+    // keys is set, and written as the first style that runs, for a build from before).
+    CustomOptional<uint32_t> DlssNrInputFlatten { DlssNrInput::kFlattenOff };
+    CustomOptional<float> DlssNrInputFlattenStrength { 1.0f };
+    CustomOptional<bool> DlssNrInputStructureHint { false };
+    CustomOptional<float> DlssNrInputStructureStrength { 1.0f };
     CustomOptional<bool> DlssNrInputStyleFacesOnly { false };
+
+    DlssNrInput::Styles DlssNrInputStyles() const
+    {
+        DlssNrInput::Styles s;
+        s.flatten = DlssNrInputFlatten.value_or_default();
+        s.flattenStrength = DlssNrInputFlattenStrength.value_or_default();
+        s.structure = DlssNrInputStructureHint.value_or_default();
+        s.structureStrength = DlssNrInputStructureStrength.value_or_default();
+        s.facesOnly = DlssNrInputStyleFacesOnly.value_or_default();
+        return s;
+    }
+
+    void SetDlssNrInputStyles(const DlssNrInput::Styles& s)
+    {
+        DlssNrInputFlatten = s.flatten;
+        DlssNrInputFlattenStrength = s.flattenStrength;
+        DlssNrInputStructureHint = s.structure;
+        DlssNrInputStructureStrength = s.structureStrength;
+        DlssNrInputStyleFacesOnly = s.facesOnly;
+    }
 
     // Post-SR placement only: derive the working scale from the render:output ratio the upscaler
     // itself already reconstructed detail at, instead of the manual slider above. That output already
@@ -676,6 +704,12 @@ class Config
     // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
     // overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
+    // NativeMotionProfile: the Optical F5Low page's "Motion profile", a named set of the motion estimate's knobs for a
+    // kind of game (motion/MotionProfiles.h): default, anime, realistic, sportswide, sportspan or custom. Custom is
+    // NativeMotionProfileCustom, the Flow tuning menu's values as a key=value list (written when a Flow tuning control
+    // moves). Applied when the motion estimate starts and when the menu changes it.
+    CustomOptional<native::motion::Profile> DlssNrNativeMotionProfile { native::motion::Profile::Default };
+    CustomOptional<std::string> DlssNrNativeMotionProfileCustom { std::string() };
     // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at
     // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See native/NativeDriverDx12.h and

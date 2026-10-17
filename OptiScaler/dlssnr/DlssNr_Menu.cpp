@@ -695,9 +695,7 @@ static DlssNrLook::Settings ReadLook(Config* config)
     s.skinColour = config->DlssNrSkinColour.value_or_default();
     s.envDetail = config->DlssNrEnvironmentDetail.value_or_default();
     s.envColour = config->DlssNrEnvironmentColour.value_or_default();
-    s.inputStyle = config->DlssNrInputStyle.value_or_default();
-    s.inputStrength = config->DlssNrInputStyleStrength.value_or_default();
-    s.facesOnly = config->DlssNrInputStyleFacesOnly.value_or_default();
+    s.inputs = config->DlssNrInputStyles();
     return s;
 }
 
@@ -728,9 +726,7 @@ static void WriteLook(Config* config, const DlssNrLook::Settings& s)
     config->DlssNrSkinColour = s.skinColour;
     config->DlssNrEnvironmentDetail = s.envDetail;
     config->DlssNrEnvironmentColour = s.envColour;
-    config->DlssNrInputStyle = s.inputStyle;
-    config->DlssNrInputStyleStrength = s.inputStrength;
-    config->DlssNrInputStyleFacesOnly = s.facesOnly;
+    config->SetDlssNrInputStyles(s.inputs);
 }
 
 // "##lookbase": Natural and Cinematic are also look buttons on the same page, and ImGui takes the label as the ID
@@ -1677,7 +1673,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     ImGui::SeparatorText("Look Presets");
     {
         const auto now = ReadLook(config);
-        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h DlssNrInputStyle)
+        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h DlssNrInputFlatten ...)
         const bool inputStyleOff = config->DlssNrWorkingScale.value_or_default() > 1.0f + 0.005f ||
                                    config->DlssNrDeferredDlss.value_or_default();
 
@@ -3268,40 +3264,81 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         HelpMarker("Filter used to reduce NR output when Model resolution exceeds 100%.\nSharper filters may introduce ringing around edges.");
     }
 
-    // Experimental input style (Config.h DlssNrInputStyle): restyle the picture the model is shown.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the picture the model is
+    // shown, as one card. One way to flatten first (watercolour and smooth canvas do the same job, so a choice of one),
+    // then the structure hint as a checkbox; each style's strength shows only while it is on. Its own section, open at start:
+    // with the modern style a top-level section is a card.
+    if (auto card = ScopedCollapsingHeader("Input style (experimental)", ImGuiTreeNodeFlags_DefaultOpen);
+        card.IsHeaderOpen())
     {
-        static const char* styleNames[] = { "Off", "Watercolour", "Structure hint", "Smooth canvas" };
-        int style = (int) std::min(config->DlssNrInputStyle.value_or_default(), 3u);
+        DlssNrInput::Styles styles = config->DlssNrInputStyles();
+        bool changed = false;
 
-        if (ImGui::Combo("Input style (experimental)", &style, styleNames, IM_ARRAYSIZE(styleNames)))
-            config->DlssNrInputStyle = (uint32_t) style;
+        ImGui::TextDisabled("Restyles the picture NR is shown; the styles combine.");
+        HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed. "
+                   "The styles combine and run in this order: flatten, then structure hint.\nWith a composed "
+                   "curve only what NR paints differently shows; with a replace curve you see NR's painting as it is "
+                   "(Restore Sharpness is off while a style is on, or it would put the game's texture back).\nEach "
+                   "style is one more pass before the model runs. No effect above 100% Model resolution.");
 
-        HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed.\n"
-                   "Watercolour flattens texture into washes and keeps edges (can look blocky).\nStructure hint raises "
-                   "local contrast (brightness only) so NR has more structure to follow; high strength blurs with a "
-                   "composed curve.\nSmooth canvas shows NR skin like an untextured old-game surface: pores and fine "
-                   "shading flattened, contours kept, so NR paints its own skin detail.\nWith a composed curve only "
-                   "what NR paints differently shows; with a replace curve you see NR's painting as it is (Restore "
-                   "Sharpness is off while a style is on, or it would put the game's texture back).\nNo effect above "
-                   "100% Model resolution.");
-
-        if (style != 0)
+        // A strength slider for a style that is on, with its Reset (1.0) beside it
+        const auto strength = [&](const char* label, const char* resetId, float& value, uint32_t style)
         {
-            // Watercolour and smooth canvas are a blend (0..1); the structure hint's boost goes to 3x.
-            const float most = style == 2 ? 3.0f : 1.0f;
-            float strength = std::min(config->DlssNrInputStyleStrength.value_or_default(), most);
+            const float most = DlssNrInput::MostStrength(style);
+            ImGui::Indent();
+            float shown = std::min(value, most);
 
-            if (ImGui::SliderFloat("Input style strength", &strength, 0.0f, most, "%.2f"))
-                config->DlssNrInputStyleStrength = strength;
+            if (ImGui::SliderFloat(label, &shown, 0.0f, most, "%.2f"))
+            {
+                value = shown;
+                changed = true;
+            }
 
-            bool facesOnly = config->DlssNrInputStyleFacesOnly.value_or_default();
+            ImGui::SameLine();
 
-            if (ImGui::Checkbox("Faces only (skin colours)##inputstyle", &facesOnly))
-                config->DlssNrInputStyleFacesOnly = facesOnly;
+            if (ImGui::SmallButton(resetId))
+            {
+                value = 1.0f;
+                changed = true;
+            }
 
-            HelpMarker("Apply the input style only where the colour looks like skin (the same colour test as Skin "
+            ImGui::Unindent();
+        };
+
+        ImGui::TextUnformatted("Flatten first:");
+        ImGui::SameLine();
+        int flatten = (int) std::min(styles.flatten, DlssNrInput::kFlattenSmoothCanvas);
+        changed |= ImGui::RadioButton("Off##inputflatten", &flatten, (int) DlssNrInput::kFlattenOff);
+        ImGui::SameLine();
+        changed |= ImGui::RadioButton("Watercolour##inputflatten", &flatten, (int) DlssNrInput::kFlattenWatercolour);
+        ImGui::SameLine();
+        changed |= ImGui::RadioButton("Smooth canvas##inputflatten", &flatten, (int) DlssNrInput::kFlattenSmoothCanvas);
+        styles.flatten = (uint32_t) flatten;
+        HelpMarker("Watercolour flattens texture into washes and keeps edges (can look blocky).\nSmooth canvas shows NR "
+                   "skin like an untextured old-game surface: pores and fine shading flattened, contours kept, so NR "
+                   "paints its own skin detail.\nStrength blends with the picture as it was (0 to 1).");
+
+        if (styles.flatten != DlssNrInput::kFlattenOff)
+            strength("Strength##inputflattenstrength", "Reset##inputflattenstrength", styles.flattenStrength,
+                     DlssNrInput::FlattenStyle(styles.flatten));
+
+        changed |= ImGui::Checkbox("Structure hint##inputstructure", &styles.structure);
+        HelpMarker("Raises local contrast (brightness only) so NR has more structure to follow; high strength blurs "
+                   "with a composed curve. Strength 0 to 3.");
+
+        if (styles.structure)
+            strength("Strength##inputstructurestrength", "Reset##inputstructurestrength", styles.structureStrength,
+                     DlssNrInput::kStyleStructureHint);
+
+        if (DlssNrInput::Any(styles))
+        {
+            changed |= ImGui::Checkbox("Faces only (skin colours)##inputstyle", &styles.facesOnly);
+            HelpMarker("Apply the input styles only where the colour looks like skin (the same colour test as Skin "
                        "protection; warm materials can match too, coloured light can hide skin).");
         }
+
+        if (changed)
+            config->SetDlssNrInputStyles(styles);
     }
 
     RenderEdgeCompression(config, menuResScale, nr);
@@ -3497,6 +3534,16 @@ static void RenderPassesPage(Config* config, float menuResScale)
     ImGui::TextWrapped("Settings apply when you release a slider.");
     static const char* styles[] = { "Standard", "Natural", "Cinematic" };
     static const char* inheritedStyles[] = { "Auto (inherit pass 1)", "Standard", "Natural", "Cinematic" };
+    // [DlssNr] Preset / Pass2Preset / Pass3Preset, the model's DLSSNR.Hint.Render.Preset: 1 and 2 named as NVIDIA names
+    // its presets (A = 1, B = 2). On 310.9 DLLs 1 selects the main model and 2 the small one, and any other value (0,
+    // Default, included) falls back to 2; 310.8 DLLs have only the main model. A saved 3 behaves as 2 and shows as B.
+    static const char* presets[] = { "Default", "Preset A (main model)", "Preset B (small model)" };
+    static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset A (main model)",
+                                              "Preset B (small model)" };
+    static const char* presetHelp =
+        "Which model NR runs on this pass. Preset A: the main model (more detail). Preset B: the small model (about half "
+        "the cost, softer; only in 310.9 DLLs). Default: the DLL decides, which is the small model on 310.9 DLLs. 310.8 "
+        "DLLs have only the main model, so the preset changes nothing there. Passes 4 and up use Pass 1's preset.";
 
     if (ImGui::TreeNodeEx("Pass 1", ImGuiTreeNodeFlags_DefaultOpen))
     {
@@ -3504,6 +3551,10 @@ static void RenderPassesPage(Config* config, float menuResScale)
         if (ImGui::Combo("Style", &style, styles, IM_ARRAYSIZE(styles)))
             config->DlssNrStyle = (uint32_t) style;
         HelpMarker("Look profile: Standard, Natural or Cinematic. Intensity sets its strength.");
+        int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 2u);
+        if (ImGui::Combo("Preset", &preset, presets, IM_ARRAYSIZE(presets)))
+            config->DlssNrPreset = (uint32_t) preset;
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);
@@ -3520,6 +3571,8 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass2Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
+        InheritedProfileCombo("Preset", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrPass2Intensity, 0.0f, 2.0f, config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass2LocalStructure, 0.0f, 2.0f, config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
         DeferredSlider("Local tone", &config->DlssNrPass2LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
@@ -3537,6 +3590,8 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass3Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
+        InheritedProfileCombo("Preset", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrPass3Intensity, 0.0f, 2.0f, config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass3LocalStructure, 0.0f, 2.0f, config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
         DeferredSlider("Local tone", &config->DlssNrPass3LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
@@ -3571,18 +3626,6 @@ static void RenderPassesPage(Config* config, float menuResScale)
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Advanced preset hints (effect unverified)"))
-    {
-        ImGui::TextWrapped("Experimental model hints; visual effect unverified. Use Style to select a profile.");
-        static const char* presets[] = { "Default", "Preset 1", "Preset 2", "Preset 3" };
-        static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset 1", "Preset 2", "Preset 3" };
-        int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 3u);
-        if (ImGui::Combo("Pass 1 preset hint", &preset, presets, IM_ARRAYSIZE(presets)))
-            config->DlssNrPreset = (uint32_t) preset;
-        InheritedProfileCombo("Pass 2 preset hint", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        InheritedProfileCombo("Pass 3 preset hint", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        ImGui::TreePop();
-    }
     ImGui::TextWrapped("Pass settings apply to SR and RR on DX12 and native Vulkan. The driver-proxy backend supports one pass.");
 
     ImGui::SeparatorText("Colour");

@@ -114,6 +114,18 @@ int main()
         CHECK(HintDue(q30) && HintDue(q144));
     }
 
+    // Once the game has used an upscaler, it stays seen: a menu where the game turns it off does not bring the notice back
+    {
+        bool seen = false;
+        seen = GameUpscalerSeen(seen, false, false);
+        CHECK(!seen);
+        seen = GameUpscalerSeen(seen, true, false); // gameplay: the game calls its upscaler
+        CHECK(seen);
+        seen = GameUpscalerSeen(seen, false, false); // inventory: no call, no upscaler running
+        CHECK(seen);
+        CHECK(GameUpscalerSeen(false, false, true)); // an upscaler running counts too
+    }
+
     // NR only running, and waiting.
     {
         const Banner b = Decide(Make(Feature::None, true, false, Shown::NrOnly, true, true));

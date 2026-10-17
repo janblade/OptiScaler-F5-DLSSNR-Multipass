@@ -193,15 +193,18 @@ Inputs GatherInputs()
     auto& state = State::Instance();
 
     Inputs in;
-    const auto rule = RuleForInput(config->FramerateLowLatencyInput.value_or_default());
-    in.setting = rule.setting;
-    in.blockGameLowLatency = rule.blockGameLowLatency && !FrameGenerationNeedsReflex();
-
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
           config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
           config->DlssNrNativeFrameGenerationOnly.value_or_default() });
-    in.f5lowRunning = shown != DlssNrNativeMode::Shown::Off && !GameUpscalerCalledRecently();
+    const bool gameUpscaler = GameUpscalerCalledRecently();
+    const bool virtualUpscaler = shown == DlssNrNativeMode::Shown::NrAndFrameGeneration && !gameUpscaler;
+    const auto input = EffectiveInput(config->FramerateLowLatencyInput.value_or_default(), virtualUpscaler);
+    const auto rule = RuleForInput(input);
+    in.setting = rule.setting;
+    in.blockGameLowLatency = rule.blockGameLowLatency && !FrameGenerationNeedsReflex();
+
+    in.f5lowRunning = shown != DlssNrNativeMode::Shown::Off && !gameUpscaler;
     in.xefgRunning = state.activeFgOutput == FGOutput::XeFG && state.currentFG != nullptr &&
                      state.currentFG->SwapchainContext() != nullptr;
     // While it is on. Its short pauses (toggles, a changed interpolation count, swap chain remakes, about ten frames) do

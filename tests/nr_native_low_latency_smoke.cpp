@@ -787,6 +787,12 @@ int main()
         CHECK(!BlocksGameLowLatency(Input::Auto, false));
         CHECK(!BlocksGameLowLatency(Input::OptiScaler, false));
 
+        // Auto is Game with the virtual upscaler; a hand-picked Input stays what it is
+        CHECK(EffectiveInput(Input::Auto, true) == Input::Game);
+        CHECK(EffectiveInput(Input::Auto, false) == Input::Auto);
+        for (auto input : { Input::Game, Input::OptiScaler, Input::Off })
+            CHECK(EffectiveInput(input, true) == input && EffectiveInput(input, false) == input);
+
         // Ini words: the new key, and the old [DlssNr] NativeLowLatency one
         for (auto input : { Input::Auto, Input::Game, Input::OptiScaler, Input::Off })
         {

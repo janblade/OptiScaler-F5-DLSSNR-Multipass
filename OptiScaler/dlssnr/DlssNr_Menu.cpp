@@ -3281,9 +3281,10 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
                    "(Restore Sharpness is off while a style is on, or it would put the game's texture back).\nEach "
                    "style is one more pass before the model runs. No effect above 100% Model resolution.");
 
-        // A strength slider for a style that is on, with its Reset (1.0) beside it
-        const auto strength = [&](const char* label, const char* resetId, float& value, float most)
+        // A strength slider for a style that is on, with its Reset (the style's default) beside it
+        const auto strength = [&](const char* label, const char* resetId, float& value, uint32_t style)
         {
+            const float most = DlssNrInput::MostStrength(style);
             ImGui::Indent();
             float shown = std::min(value, most);
 
@@ -3297,7 +3298,7 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
             if (ImGui::SmallButton(resetId))
             {
-                value = 1.0f;
+                value = DlssNrInput::DefaultStrength(style);
                 changed = true;
             }
 
@@ -3319,7 +3320,7 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
         if (styles.flatten != DlssNrInput::kFlattenOff)
             strength("Strength##inputflattenstrength", "Reset##inputflattenstrength", styles.flattenStrength,
-                     DlssNrInput::MostStrength(DlssNrInput::FlattenStyle(styles.flatten)));
+                     DlssNrInput::FlattenStyle(styles.flatten));
 
         changed |= ImGui::Checkbox("Structure hint##inputstructure", &styles.structure);
         HelpMarker("Raises local contrast (brightness only) so NR has more structure to follow; high strength blurs "
@@ -3327,16 +3328,17 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
         if (styles.structure)
             strength("Strength##inputstructurestrength", "Reset##inputstructurestrength", styles.structureStrength,
-                     DlssNrInput::MostStrength(DlssNrInput::kStyleStructureHint));
+                     DlssNrInput::kStyleStructureHint);
 
         changed |= ImGui::Checkbox("Texture hint##inputtexture", &styles.texture);
-        HelpMarker("Lays a faint fibre pattern (linen, canvas) on flat areas only, stuck to the surfaces, which NR turns "
-                   "into a visible material texture: for cartoon and cel-shaded pictures. Strength 0 to 2.\nD3D12 only "
+        HelpMarker("Lays a faint fibre pattern (linen, canvas) on flat fills of one colour only, stuck to the surfaces, "
+                   "which NR turns into a visible material texture: for cartoon and cel-shaded pictures; a realistic "
+                   "picture is left nearly alone. Strength 0 to 2 (0.5 default).\nD3D12 only "
                    "for now: NR on native Vulkan leaves it out (the Vulkan-to-D3D12 bridge has it).");
 
         if (styles.texture)
             strength("Strength##inputtexturestrength", "Reset##inputtexturestrength", styles.textureStrength,
-                     DlssNrInput::MostStrength(DlssNrInput::kStyleTextureHint));
+                     DlssNrInput::kStyleTextureHint);
 
         if (DlssNrInput::Any(styles))
         {

@@ -31,6 +31,9 @@ inline float MostStrength(uint32_t style)
     return style == kStyleStructureHint ? 3.0f : style == kStyleTextureHint ? 2.0f : 1.0f;
 }
 
+// A style's default strength (its Reset): 1, the texture hint 0.5
+inline float DefaultStrength(uint32_t style) { return style == kStyleTextureHint ? 0.5f : 1.0f; }
+
 struct Styles
 {
     uint32_t flatten = kFlattenOff;
@@ -38,7 +41,7 @@ struct Styles
     bool structure = false;
     float structureStrength = 1.0f;
     bool texture = false;
-    float textureStrength = 1.0f;
+    float textureStrength = 0.5f;
     bool facesOnly = false;
 };
 

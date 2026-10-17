@@ -1401,24 +1401,36 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         coord -= kHintWrap * floor(coord / kHintWrap);
         gKeep[id.xy] = float4(coord, 0.0, 1.0);
 
-        // Flat: the 5x5 window's luma spread is small (a fill, sky, a plain wall), so outlines and anything with a
-        // texture of its own, and two pixels around them, are left as they are.
-        float sum = 0.0, sumSq = 0.0;
+        // Flat means a fill of one colour (a cel-shaded or flat-shaded surface, a plain panel): the luma spread is near
+        // zero both over the 5x5 window (every pixel: a one-pixel outline two pixels away counts) and over a 9x9 one read
+        // every other pixel (a smooth gradient, skin, a blurred background spread out over that width and do not count).
+        // A realistic picture has almost none of that, so it is left alone (a first, looser test at 0.6..2% over 5x5
+        // covered most of NBA 2K27 and read as a paper filter).
+        // At the picture's edges the windows move inward rather than repeat the edge pixel, which would make a gradient
+        // there look flatter than it is.
+        const int2 denseCentre = clamp(p, min(int2(2, 2), last), max(last - 2, int2(0, 0)));
+        const int2 wideCentre = clamp(p, min(int2(4, 4), last), max(last - 4, int2(0, 0)));
+        float sum = 0.0, sumSq = 0.0, wideSum = 0.0, wideSumSq = 0.0;
 
         [unroll] for (int dy = -2; dy <= 2; ++dy)
         {
             [unroll] for (int dx = -2; dx <= 2; ++dx)
             {
-                const float ln =
-                    dot(saturate(gSource.Load(int3(clamp(p + int2(dx, dy), int2(0, 0), last), 0)).rgb), kLuma);
+                const float ln = dot(
+                    saturate(gSource.Load(int3(clamp(denseCentre + int2(dx, dy), int2(0, 0), last), 0)).rgb), kLuma);
                 sum += ln;
                 sumSq += ln * ln;
+                const float lw = dot(
+                    saturate(gSource.Load(int3(clamp(wideCentre + 2 * int2(dx, dy), int2(0, 0), last), 0)).rgb), kLuma);
+                wideSum += lw;
+                wideSumSq += lw * lw;
             }
         }
 
-        const float mean = sum / 25.0;
-        const float spread = sqrt(max(sumSq / 25.0 - mean * mean, 0.0));
-        float amount = (1.0 - smoothstep(0.006, 0.02, spread)) * kHintAmplitude * clamp(gTransferStrength, 0.0, 2.0);
+        const float mean = sum / 25.0, wideMean = wideSum / 25.0;
+        const float spread = max(sqrt(max(sumSq / 25.0 - mean * mean, 0.0)),
+                                 sqrt(max(wideSumSq / 25.0 - wideMean * wideMean, 0.0)));
+        float amount = (1.0 - smoothstep(0.003, 0.008, spread)) * kHintAmplitude * clamp(gTransferStrength, 0.0, 2.0);
 
         // Faces only (the style pass's SkinProtection): as much of the style as the pixel looks like skin
         if (gSkinProtection != 0)

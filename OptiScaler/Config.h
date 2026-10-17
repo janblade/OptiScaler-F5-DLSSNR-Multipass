@@ -518,7 +518,8 @@ class Config
     // its strength blends with the picture as it was (0..1).
     // DlssNrInputStructureHint: local contrast raised on luminance, CAS-like, overshoot bounded; strength 0..3.
     // DlssNrInputTextureHint: a faint fibre pattern on flat areas only, carried along the motion vectors so it stays on
-    // the surfaces; NR turns it into a visible material texture (D3D12 only); strength 0..2.
+    // the surfaces; NR turns it into a visible material texture (D3D12 only); strength 0..2, default 0.5. Flat means a
+    // fill of one colour (cel-shaded surfaces, plain panels): a realistic picture is left nearly alone.
     // DlssNrInputStyleFacesOnly: all of them only where the colour looks like skin (the same colour test as
     // SkinProtection). The resolve compares the answer against the same restyled picture, so Composed hands back only
     // what the model painted; Replace shows the model's painting as it is. Skipped at model resolution above 100% and on
@@ -529,7 +530,7 @@ class Config
     CustomOptional<bool> DlssNrInputStructureHint { false };
     CustomOptional<float> DlssNrInputStructureStrength { 1.0f };
     CustomOptional<bool> DlssNrInputTextureHint { false };
-    CustomOptional<float> DlssNrInputTextureStrength { 1.0f };
+    CustomOptional<float> DlssNrInputTextureStrength { 0.5f };
     CustomOptional<bool> DlssNrInputStyleFacesOnly { false };
 
     DlssNrInput::Styles DlssNrInputStyles() const

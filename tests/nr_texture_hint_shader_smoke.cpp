@@ -1,8 +1,8 @@
 // Headless shader test: Windows D3D11 WARP runs dlssnr.hlsl's texture hint ([DlssNr] InputStyle = 4,
 // DlssNrMode_TextureHint) on a small synthetic picture: a flat fill with a dark outline and a textured strip.
 //
-//   1. The pattern lands on the flat fill, within its amplitude; the textured strip and the outline with two pixels
-//      around it are left exactly as they were.
+//   1. The pattern lands on the flat fill, within its amplitude; the textured strip, the outline with two pixels
+//      around it and a smooth gradient are left exactly as they were.
 //   2. With the picture moved 3 px to the right and motion vectors saying so, every coordinate is last frame's one
 //      3 px to the left, and the hinted flat fill is last frame's moved by 3 px (the pattern sticks to the surface).
 //      A pixel whose vector leaves the picture starts over at its own place.
@@ -40,7 +40,7 @@ static int fails = 0;
 static void expect(bool ok, const std::string& label) { if (!ok) { std::printf("FAIL: %s\n", label.c_str()); ++fails; } }
 
 // The picture with its content moved `shift` px to the right: a fill, a dark outline at x = 20 + shift, a textured strip
-// from x = 44 + shift
+// from x = 44 + shift, and below y = 30 a smooth gradient (0.4% a pixel: skin, a blurred background) instead of the fill
 static Image Picture(int shift)
 {
     Image img((size_t) W * H);
@@ -49,6 +49,11 @@ static Image Picture(int shift)
         {
             const int u = x - shift;
             Px p { 0.40f, 0.30f, 0.50f, 1.0f };
+            if (y >= 30 && u < 44)
+            {
+                const float g = 0.004f * (float) u;
+                p = { 0.30f + g, 0.20f + g, 0.40f + g, 1.0f };
+            }
             if (u == 20)
                 p = { 0.05f, 0.04f, 0.06f, 1.0f };
             else if (u >= 44)
@@ -210,13 +215,14 @@ int main(int argc, char** argv)
     const auto coords0 = gpu.Read<Coord>(coordA.Get());
 
     bool resetPlaces = true, flatChanged = false, flatBounded = true, textureKept = true, outlineKept = true;
+    bool gradientKept = true;
     for (int y = 0; y < H; ++y)
         for (int x = 0; x < W; ++x)
         {
             const size_t i = (size_t) y * W + x;
             resetPlaces &= coords0[i].x == x + kSeedX && coords0[i].y == y + kSeedY;
             const float ratio = hinted0[i].g / frame0[i].g;
-            const bool flat = std::abs(x - 20) > 2 && x < 42;
+            const bool flat = std::abs(x - 20) > 2 && x < 42 && y < 26;
             if (flat)
             {
                 flatChanged |= std::abs(ratio - 1.0f) > 0.01f;
@@ -228,12 +234,19 @@ int main(int argc, char** argv)
                 textureKept &= hinted0[i].r == frame0[i].r && hinted0[i].g == frame0[i].g && hinted0[i].b == frame0[i].b;
             if (std::abs(x - 20) <= 2)
                 outlineKept &= hinted0[i].g == frame0[i].g;
+            if (y >= 34 && x < 40 && hinted0[i].g != frame0[i].g)
+            {
+                if (gradientKept)
+                    std::printf("gradient changed at x=%d y=%d: %.6f -> %.6f\n", x, y, frame0[i].g, hinted0[i].g);
+                gradientKept = false;
+            }
         }
     expect(resetPlaces, "reset: every coordinate is the pixel's own place");
     expect(flatChanged, "the flat fill gets the pattern");
     expect(flatBounded, "the pattern stays within its amplitude and keeps the hue");
     expect(textureKept, "the textured strip is left as it was");
     expect(outlineKept, "the outline and two pixels around it are left as they were");
+    expect(gradientKept, "a smooth gradient is left as it was");
 
     // 2. The picture moves 3 px right: coordinates and the hinted fill move with it
     gpu.Run(Settings(1.0f, false), pic1.Get(), coordA.Get(), motionMoved.Get(), out1.Get(), coordB.Get());

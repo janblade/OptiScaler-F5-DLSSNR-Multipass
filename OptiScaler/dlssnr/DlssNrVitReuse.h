@@ -23,8 +23,10 @@
 // own memory, and nothing says the 1-D result does.
 //
 // Whether that 1-D result keeps its memory depends on the DLL: some plain builds keep it, and in others a decoder buffer starts inside it
-// (checked on captures), so keeping the last kernel rebuilds from foreign data. Hence copy mode (Begin's `copyPlain`, the D3D12 path): on
-// the plain set the caller keeps its own copy of the 2-D output, so the DLL's memory layout no longer matters. A computed run asks for a
+// (checked on captures), so keeping the last kernel rebuilds from foreign data. Hence copy mode (Begin's `copySets`): for the kernel sets
+// named there the caller keeps its own copy of the 2-D output, so the DLL's memory layout no longer matters. D3D12 uses it for the plain
+// set; Vulkan games (natively, and through the D3D12 bridge) for both sets, since on Vulkan the kept result was overwritten between frames
+// on the fp8 set too (see DlssNrNative_Vk.cpp). A computed run asks for a
 // save right after its last kernel; a skipped run drops its last kernel too and asks for a restore where it was. Only the decoder's first
 // kernel reads the 2-D output (checked on 310.8 and 310.9 captures, both sets), so that copy is the whole state the decoder needs. A skipped
 // run also needs the run's first launch to match the computed one (`sig`, from its parameters), so a moved or resized network is computed
@@ -83,6 +85,12 @@ enum class KernelSet : uint8_t
     Plain,
 };
 
+// Begin's `copySets`: which kernel sets reuse through the caller's copy (copy mode, see the top).
+constexpr unsigned kCopyPlain = 1;
+constexpr unsigned kCopyFp8 = 2;
+
+inline unsigned CopyBit(KernelSet set) { return set == KernelSet::Plain ? kCopyPlain : set == KernelSet::Fp8 ? kCopyFp8 : 0; }
+
 inline KernelSet SetOf(const char* name)
 {
     if (name == nullptr)
@@ -92,6 +100,68 @@ inline KernelSet SetOf(const char* name)
     constexpr size_t suffixLen = sizeof(suffix) - 1;
     const size_t len = strlen(name);
     return len >= suffixLen && strcmp(name + len - suffixLen, suffix) == 0 ? KernelSet::Fp8 : KernelSet::Plain;
+}
+
+// Copy mode: the 2-D output named by the run's last launch (cc_vit_1d_repack_1d_to_2d[_fp8]), whose parameters are {u64 src, u64 dst,
+// u32 rows, u32 cols}: rows x cols tokens x 1024 channels, fp16 on the plain set and fp8 on the fp8 set, one 32-bit word per thread
+// (checked on 310.8 and 310.9 captures of both sets, both networks). That layout is checked against the launch's own thread count, the token
+// count is capped and the place must be 16-byte aligned (the copy moves 16 bytes at a time), before anything is written into the DLL's
+// memory. Returns why not, or nullptr with `dst` and `bytes` set.
+inline const char* CheckOutput(const void* params, size_t size, uint64_t threads, KernelSet set, uint64_t& dst, uint64_t& bytes)
+{
+    struct Params
+    {
+        uint64_t src, dst;
+        uint32_t rows, cols;
+    } p {};
+
+    if (params == nullptr || size != sizeof p)
+        return "unexpected parameters of the ViT run's last kernel";
+
+    memcpy(&p, params, sizeof p);
+    const uint64_t tokens = (uint64_t) p.rows * p.cols;
+    const uint64_t element = set == KernelSet::Plain ? 2 : 1;
+
+    if (p.dst == 0 || (p.dst & 15) != 0 || tokens == 0 || tokens > 16384 || threads * 4 != tokens * 1024 * element)
+        return "unexpected size or place of the ViT output";
+
+    dst = p.dst;
+    bytes = tokens * 1024 * element;
+    return nullptr;
+}
+
+// Vulkan: a launch's parameters come as a CUDA "extra" list {1 (buffer pointer), buffer, 2 (&buffer size), &size, 0 (end)}. Scans at most
+// `count` entries when the caller gives more than one (the model passes 1 and ends the list with 0). Returns false for anything else.
+inline bool ExtraParams(const void* const* extras, uint32_t count, const void*& params, size_t& size)
+{
+    params = nullptr;
+    size = 0;
+
+    if (extras == nullptr)
+        return false;
+
+    const unsigned limit = count > 1 && count < 16 ? count : 16;
+    unsigned i = 0;
+
+    for (; i < limit; i += 2)
+    {
+        const uintptr_t key = (uintptr_t) extras[i];
+
+        if (key == 0)
+            break;
+
+        if (i + 1 >= limit)
+            return false;
+
+        if (key == 1)
+            params = extras[i + 1];
+        else if (key == 2 && extras[i + 1] != nullptr)
+            size = *static_cast<const size_t*>(extras[i + 1]);
+        else
+            return false;
+    }
+
+    return params != nullptr && size != 0;
 }
 
 // The ViT run's kernels by handle, from their names at creation (Vulkan: vkCreateCuFunctionNVX). A handle can come back
@@ -135,7 +205,7 @@ template <class Handle> class Kernels
     std::unordered_map<Handle, std::pair<Role, KernelSet>> roles_;
 };
 
-// Copy work the caller records for a plain-set run in copy mode, at the position Split reports (see the top).
+// Copy work the caller records for a run in copy mode, at the position Split / One reports (see the top).
 enum class Copy : uint8_t
 {
     None = 0,
@@ -156,9 +226,9 @@ class Filter
     // on a pass that was reusing, so the picture used data two frames old, like every = 3.
     // The cycle is anchored to the frame, so a pass that had to start over (reset, lost cache) falls back into its own
     // phase on the next due frame. A pass never goes longer than every - 1 reused evaluations, anchored or not.
-    // `copyPlain`: the caller can record the plain set's save and restore copies (copy mode, see the top); without it the plain set keeps
-    // the run's last kernel.
-    void Begin(const void* feature, bool reset, unsigned every, long long slot = -1, unsigned everyPlain = 0, bool copyPlain = false)
+    // `copySets` (kCopyPlain, kCopyFp8): the kernel sets whose save and restore copies the caller records (copy mode, see the top); the
+    // others keep their own rule (the plain set keeps the run's last kernel, the fp8 set drops it).
+    void Begin(const void* feature, bool reset, unsigned every, long long slot = -1, unsigned everyPlain = 0, unsigned copySets = 0)
     {
         Ctx& c = ctx();
         c = Ctx {};
@@ -168,7 +238,7 @@ class Filter
         c.every = every < 1 ? 1 : every;
         c.everyPlain = everyPlain < 1 ? c.every : everyPlain;
         c.slot = slot;
-        c.copyPlain = copyPlain;
+        c.copySets = copySets;
     }
 
     bool Evaluating() const { return ctx().active; }
@@ -200,11 +270,13 @@ class Filter
             const unsigned every = set == KernelSet::Plain ? c.everyPlain : c.every;
 
             // copy mode keeps one copy per feature: a second run in the same evaluation would overwrite it
-            if (set == KernelSet::Plain && c.copyPlain && c.runs > 0)
+            const bool copySet = (c.copySets & CopyBit(set)) != 0;
+
+            if (copySet && c.runs > 0)
                 c.anomaly = true;
 
             ++c.runs;
-            c.copy = set == KernelSet::Plain && c.copyPlain && every > 1 && !disabled_ && !c.anomaly;
+            c.copy = copySet && every > 1 && !disabled_ && !c.anomaly;
             c.sig = sig;
             std::lock_guard<std::mutex> lock(mutex_);
             Entry& e = entries_[c.key];
@@ -338,7 +410,7 @@ class Filter
         return any;
     }
 
-    // Without copy mode (Begin's copyPlain false) no copy is ever asked for.
+    // Without copy mode (Begin's copySets 0) no copy is ever asked for.
     template <class T, class RoleOfLaunch>
     bool Split(const T* launches, size_t count, RoleOfLaunch roleOf, std::vector<T>& kept, std::ptrdiff_t& gap)
     {
@@ -350,22 +422,20 @@ class Filter
     // One launch per call, as Vulkan's vkCmdCuLaunchKernelNVX does: whether to record the barrier before it (or, when
     // it is dropped, where it would have been) and whether it goes out. The same decisions as Split over the same
     // launches.
+    // In copy mode `copy` is the copy to record with this launch: a save right after it, a restore in its place (with the barrier).
     struct Single
     {
         bool barrier = false;
         bool launch = true;
+        Copy copy = Copy::None;
     };
 
-    // No copy mode here (Vulkan does not record the copies): a copy asked for anyway turns the feature off.
-    Single One(Role role, KernelSet set)
+    Single One(Role role, KernelSet set, uint64_t sig = 0)
     {
         Single s;
-        s.launch = !Drop(role, set);
+        s.launch = !Drop(role, set, sig);
         s.barrier = TakeGap();
-
-        if (TakeCopy() != Copy::None)
-            ctx().anomaly = true;
-
+        s.copy = TakeCopy();
         return s;
     }
 
@@ -410,7 +480,7 @@ class Filter
     }
 
     bool Disabled() const { return disabled_; }
-    KernelSet LastSet() const { return lastSet_; } // the kernel set of the last ViT run seen
+    KernelSet LastSet() const { return lastSet_; } // the kernel set of the last ViT run seen (the copy's, during a copy)
     unsigned long long Computed() const { return computed_; }
     unsigned long long Reused() const { return reused_; }
     unsigned long long Restored() const { return restored_; } // reused evaluations served from the caller's copy (copy mode)
@@ -452,7 +522,7 @@ class Filter
         bool anomaly = false;
         bool gap = false;                   // see TakeGap
         KernelSet set = KernelSet::Unknown; // of the run in progress
-        bool copyPlain = false;             // see Begin
+        unsigned copySets = 0;              // see Begin
         bool copy = false;                  // the run in progress is in copy mode
         unsigned runs = 0;                  // ViT runs started in this evaluation
         uint64_t sig = 0;                   // of the run in progress

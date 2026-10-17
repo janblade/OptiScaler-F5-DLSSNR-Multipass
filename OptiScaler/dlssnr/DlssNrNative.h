@@ -10,8 +10,8 @@ void SetPrecision(unsigned precision);
 bool IsActive();
 std::string Status();
 // ViT reuse (see DlssNrVitReuse.h): bracket one model evaluation of `feature`. `every` = how often the ViT bottleneck is computed (1 = always) with the fp8 kernel set, `everyPlain` with the plain fp16 one; `slot` = frame number, the same for every pass of a frame, so the passes compute on the same frame.
-// `copyPlain`: the plain set reuses through our own copy of the ViT output (copy mode; the D3D12 launch path records it, Vulkan does not).
-void BeginEvaluate(const void* feature, bool reset, unsigned every, unsigned everyPlain, long long slot, ID3D12GraphicsCommandList* cmd, bool profile, bool copyPlain);
+// `copySets` (DlssNrVitReuse::kCopyPlain, kCopyFp8): the kernel sets that reuse through our own copy of the ViT output (copy mode; recorded by the D3D12 launch path here and by DlssNrNative_Vk.cpp on Vulkan).
+void BeginEvaluate(const void* feature, bool reset, unsigned every, unsigned everyPlain, long long slot, ID3D12GraphicsCommandList* cmd, bool profile, unsigned copySets);
 // True when this evaluation turned Reuse off for the session (unexpected launch order, or a copy that could not be recorded); VitStatus says why. Log it once.
 bool EndEvaluate(ID3D12GraphicsCommandList* cmd);
 // Kernel census / per-group GPU timing lines finished since the last call (ini [DlssNr] KernelProfile), for the log.
@@ -32,7 +32,13 @@ void VkModuleDestroyed();
 // The device was lost and its kernels abandoned without their destroy calls: forget the kept results and the handles too
 // (a new device can hand them out again).
 void VkDeviceLost();
-// One launch: records the barrier where a skipped ViT run was, and says whether the launch goes out. Inside our own
-// evaluate bracket only; any other launch (the game's own DLSS SR) goes out untouched.
-bool VkLaunch(void* commandBuffer, uint64_t function);
+// The Vulkan device of the next evaluations (DlssNrFeature_Vk.cpp, before BeginEvaluate): Reuse bottleneck's copies go there.
+void VkEvaluateDevice(void* device, void* physicalDevice);
+// The device is about to be destroyed and is idle: destroy Reuse bottleneck's own objects on it (VkDeviceLost then forgets the rest).
+void VkDeviceDestroying(void* device);
+// One launch (`launchInfo` = its VkCuLaunchInfoNVX): records the barrier where a skipped ViT run was, and a restore copy in place of its
+// last kernel, and says whether the launch goes out. Inside our own evaluate bracket only; any other launch (the game's own DLSS SR) goes
+// out untouched. VkLaunched follows the launch when it went out (a save copy goes right after the run's last kernel).
+bool VkLaunch(void* commandBuffer, const void* launchInfo);
+void VkLaunched(void* commandBuffer);
 }

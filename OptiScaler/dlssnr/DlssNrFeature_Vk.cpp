@@ -162,9 +162,11 @@ struct VkState
     OwnedImage lutScratch;
     bool lutScratchFailed = false;
 
-    // Experimental input style (DlssNrInputStyle): the model's picture restyled, standing in for the model input and the
-    // resolve's proxy. Made on first use at the model picture's size; freed with the other sized images.
+    // Experimental input styles (DlssNr_InputStyles.h): the model's picture restyled, standing in for the model input and
+    // the resolve's proxy; styledB is the second image they alternate with when more than one is on. Made on first use at
+    // the model picture's size; freed with the other sized images.
     OwnedImage styled;
+    OwnedImage styledB;
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -1271,6 +1273,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         DestroyImage(g_vk.lutScratch); // recreated at the new size when a LutFile still wants it
         g_vk.lutScratchFailed = false;
         DestroyImage(g_vk.styled); // recreated at the model picture's size when an input style still wants it
+        DestroyImage(g_vk.styledB);
 
         const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
 
@@ -2166,82 +2169,116 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         mvY *= (float) workHeight / height;
     }
 
-    // Experimental input style (DlssNrInputStyle), as on D3D12: restyle the model's picture once it is final (after the
-    // shrink and the edge packing). It then stands in for the model input and the resolve's proxy (ordinaryProxy below,
-    // and through the edge unpacking), so Composed hands back only what the model painted on top of it. Skipped above
-    // 100% model resolution, where the resolve compares against the full proxy instead.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h), as on D3D12: restyle the model's
+    // picture once it is final (after the shrink and the edge packing), each style that is on in turn, each on the one
+    // before's result, alternating between two images. The last result stands in for the model input and the resolve's
+    // proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back only what the model painted on
+    // top of it. Skipped above 100% model resolution, where the resolve compares against the full proxy instead. The
+    // texture hint is left out here: it keeps its pattern's coordinates from frame to frame, which only D3D12 holds so far.
     bool inputRestyled = false;
     {
-        const uint32_t style = cfg.DlssNrInputStyle.value_or_default();
-        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), StyleMostStrength(style));
-        const bool facesOnly = cfg.DlssNrInputStyleFacesOnly.value_or_default();
-        const bool wanted = style >= 1u && style <= 4u && strength > 0.0f;
-        // The texture hint keeps its pattern's coordinates from frame to frame, which only the D3D12 path holds so far
-        const char* skip = !wanted               ? nullptr
-                           : style == 4u         ? "the texture hint is D3D12 only for now"
-                           : workScale > 1.0f    ? "model resolution above 100%"
-                                                 : nullptr;
-        bool restyled = false;
+        const DlssNrInput::Styles styles = cfg.DlssNrInputStyles();
+        DlssNrInput::Pass all[3], passes[3];
+        const int allCount = DlssNrInput::Passes(styles, all);
+        int passCount = 0;
+        bool hintLeftOut = false;
 
-        if (wanted && skip == nullptr)
+        for (int k = 0; k < allCount; ++k)
         {
-            if (g_vk.styled.Valid() && (g_vk.styled.width != modelInput->width ||
-                                        g_vk.styled.height != modelInput->height ||
-                                        g_vk.styled.format != modelInput->format))
+            if (all[k].style == DlssNrInput::kStyleTextureHint)
+                hintLeftOut = true;
+            else
+                passes[passCount++] = all[k];
+        }
+
+        const char* skip = passCount == 0 ? nullptr : workScale > 1.0f ? "model resolution above 100%" : nullptr;
+        int ran = 0;
+
+        if (passCount > 0 && skip == nullptr)
+        {
+            OwnedImage* targets[2] = { &g_vk.styled, &g_vk.styledB };
+
+            for (int t = 0; t < (passCount > 1 ? 2 : 1); ++t)
             {
-                // Earlier frames may still read it (a switch of Compress screen edges changes the model picture's size)
-                vkDeviceWaitIdle(device);
-                DestroyImage(g_vk.styled);
+                OwnedImage& target = *targets[t];
+
+                if (target.Valid() && (target.width != modelInput->width || target.height != modelInput->height ||
+                                       target.format != modelInput->format))
+                {
+                    // Earlier frames may still read it (a switch of Compress screen edges changes the model picture's
+                    // size)
+                    vkDeviceWaitIdle(device);
+                    DestroyImage(target);
+                }
+
+                if (!target.Valid())
+                    CreateImage(target, modelInput->width, modelInput->height, modelInput->format, true);
             }
 
-            if (!g_vk.styled.Valid())
-                CreateImage(g_vk.styled, modelInput->width, modelInput->height, modelInput->format, true);
+            OwnedImage* source = modelInput;
 
-            if (g_vk.styled.Valid())
+            for (int k = 0; k < passCount; ++k)
             {
-                DlssNrConstants paint = encode;
-                paint.Mode = StyleMode(style);
-                paint.Width = modelInput->width;
-                paint.Height = modelInput->height;
-                paint.TransferStrength = strength;
-                paint.SkinProtection = facesOnly ? 1u : 0u; // the style passes read it as "faces only"
+                OwnedImage& target = *targets[k % 2];
 
-                Transition(cmdBuffer, *modelInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                Transition(cmdBuffer, g_vk.styled, VK_IMAGE_LAYOUT_GENERAL);
-
-                if (g_vk.pass->Dispatch(cmdBuffer, paint, modelInput->width, modelInput->height, modelInput->view,
-                                        VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, g_vk.styled.view, VK_NULL_HANDLE,
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+                if (!target.Valid())
                 {
-                    modelInput = &g_vk.styled;
-                    restyled = true;
-                    inputRestyled = true;
+                    skip = "its image could not be created";
+                    break;
                 }
-                else
+
+                DlssNrConstants paint = encode;
+                paint.Mode = StyleMode(passes[k].style);
+                paint.Width = source->width;
+                paint.Height = source->height;
+                paint.TransferStrength = passes[k].strength;
+                paint.SkinProtection = styles.facesOnly ? 1u : 0u; // the style passes read it as "faces only"
+
+                Transition(cmdBuffer, *source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                Transition(cmdBuffer, target, VK_IMAGE_LAYOUT_GENERAL);
+
+                // A failed dispatch: the model gets the picture up to the last style that ran
+                if (!g_vk.pass->Dispatch(cmdBuffer, paint, source->width, source->height, source->view, VK_NULL_HANDLE,
+                                         VK_NULL_HANDLE, VK_NULL_HANDLE, target.view, VK_NULL_HANDLE,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
                 {
                     skip = "its dispatch failed";
+                    break;
                 }
+
+                source = &target;
+                ++ran;
             }
-            else
+
+            if (ran > 0)
             {
-                skip = "its image could not be created";
+                modelInput = source;
+                inputRestyled = true;
             }
         }
 
         // Said when it changes, so a log shows each A/B toggle.
-        static int said = -1;
-        const int state = restyled ? (int) style + 10 + (facesOnly ? 10 : 0) : (skip != nullptr ? 2 : 0);
+        static std::string said = "-";
+        std::string state;
+
+        for (int k = 0; k < ran; ++k)
+            state += std::format("{}{} {:.2f}", k == 0 ? "" : ", ", StyleName(passes[k].style), passes[k].strength);
+
+        if (skip != nullptr)
+            state += std::format("{}skipped ({})", ran > 0 ? "; then " : "", skip);
+
+        if (hintLeftOut)
+            state += std::format("{}texture hint left out (D3D12 only for now)", state.empty() ? "" : "; ");
 
         if (state != said)
         {
             said = state;
 
-            if (restyled)
-                LOG_INFO("DLSS-NR Vulkan input style: {} on (strength {:.2f}, {}x{}{}{})", StyleName(style), strength,
-                         modelInput->width, modelInput->height, facesOnly ? ", faces only" : "",
-                         spatial ? ", edge-compressed picture" : "");
-            else if (skip != nullptr)
-                LOG_INFO("DLSS-NR Vulkan input style: skipped ({})", skip);
+            if (ran > 0)
+                LOG_INFO("DLSS-NR Vulkan input style: {} ({}x{}{}{})", state, modelInput->width, modelInput->height,
+                         styles.facesOnly ? ", faces only" : "", spatial ? ", edge-compressed picture" : "");
+            else if (!state.empty())
+                LOG_INFO("DLSS-NR Vulkan input style: {}", state);
             else
                 LOG_INFO("DLSS-NR Vulkan input style: off");
         }
@@ -2727,6 +2764,7 @@ void ReleaseNrObjects()
     DestroyImage(g_vk.lutScratch);
     g_vk.lutScratchFailed = false;
     DestroyImage(g_vk.styled);
+    DestroyImage(g_vk.styledB);
     g_vk.autoExposureAdapter.Invalidate();
     DestroyMeterReadback();
 
@@ -2782,6 +2820,7 @@ void ShutdownVk(bool deviceAlive)
         g_vk.lutScratch = OwnedImage {};
         g_vk.lutScratchFailed = false;
         g_vk.styled = OwnedImage {};
+        g_vk.styledB = OwnedImage {};
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
         DetailReuseVk::Release(false);

@@ -4,6 +4,7 @@
 #include "State.h"
 #include "native/NativeLowLatencyRule.h"
 #include "motion/MotionProfiles.h"
+#include "shaders/dlssnr/DlssNr_InputStyles.h"
 
 #include <optional>
 #include <filesystem>
@@ -510,20 +511,50 @@ class Config
     // rather than kept as an unclear trade-off; see plans/2026-09-18-dlssnr-enlarge-filter-simplify.md.
     CustomOptional<uint32_t> DlssNrReducedUpscaleMethod { 1 };
 
-    // Experimental input style: how the picture the model is shown is restyled before the model runs.
-    // 0 = off (default), 1 = watercolour (a Kuwahara filter: texture flattened into washes, edges kept),
-    // 2 = structure hint (local contrast raised on luminance, CAS-like, overshoot bounded),
-    // 3 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept),
-    // 4 = texture hint (a faint fibre pattern on flat areas only, carried along the motion vectors so it stays on the
-    // surfaces; NR turns it into a visible material texture. D3D12 only).
-    // DlssNrInputStyleStrength: watercolour and smooth canvas blend with the picture as it was (0..1); the structure
-    // hint scales its boost (0..3); the texture hint scales its pattern (0..2). DlssNrInputStyleFacesOnly: the style only where the colour looks like skin (the
-    // same colour test as SkinProtection). The resolve compares the answer against the same restyled picture, so
-    // Composed hands back only what the model painted; Replace shows the model's painting as it is. Skipped at model
-    // resolution above 100% and on the deferred path.
-    CustomOptional<uint32_t> DlssNrInputStyle { 0 };
-    CustomOptional<float> DlssNrInputStyleStrength { 1.0f };
+    // Experimental input styles: how the picture the model is shown is restyled before the model runs, as one card in
+    // the menu (shaders/dlssnr/DlssNr_InputStyles.h). They run in this order, each on the one before's result:
+    // DlssNrInputFlatten: 0 = off (default), 1 = watercolour (a Kuwahara filter: texture flattened into washes, edges
+    // kept), 2 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept);
+    // its strength blends with the picture as it was (0..1).
+    // DlssNrInputStructureHint: local contrast raised on luminance, CAS-like, overshoot bounded; strength 0..3.
+    // DlssNrInputTextureHint: a faint fibre pattern on flat areas only, carried along the motion vectors so it stays on
+    // the surfaces; NR turns it into a visible material texture (D3D12 only); strength 0..2.
+    // DlssNrInputStyleFacesOnly: all of them only where the colour looks like skin (the same colour test as
+    // SkinProtection). The resolve compares the answer against the same restyled picture, so Composed hands back only
+    // what the model painted; Replace shows the model's painting as it is. Skipped at model resolution above 100% and on
+    // the deferred path. The ini also keeps the old single InputStyle / InputStyleStrength (read when none of the new
+    // keys is set, and written as the first style that runs, for a build from before).
+    CustomOptional<uint32_t> DlssNrInputFlatten { DlssNrInput::kFlattenOff };
+    CustomOptional<float> DlssNrInputFlattenStrength { 1.0f };
+    CustomOptional<bool> DlssNrInputStructureHint { false };
+    CustomOptional<float> DlssNrInputStructureStrength { 1.0f };
+    CustomOptional<bool> DlssNrInputTextureHint { false };
+    CustomOptional<float> DlssNrInputTextureStrength { 1.0f };
     CustomOptional<bool> DlssNrInputStyleFacesOnly { false };
+
+    DlssNrInput::Styles DlssNrInputStyles() const
+    {
+        DlssNrInput::Styles s;
+        s.flatten = DlssNrInputFlatten.value_or_default();
+        s.flattenStrength = DlssNrInputFlattenStrength.value_or_default();
+        s.structure = DlssNrInputStructureHint.value_or_default();
+        s.structureStrength = DlssNrInputStructureStrength.value_or_default();
+        s.texture = DlssNrInputTextureHint.value_or_default();
+        s.textureStrength = DlssNrInputTextureStrength.value_or_default();
+        s.facesOnly = DlssNrInputStyleFacesOnly.value_or_default();
+        return s;
+    }
+
+    void SetDlssNrInputStyles(const DlssNrInput::Styles& s)
+    {
+        DlssNrInputFlatten = s.flatten;
+        DlssNrInputFlattenStrength = s.flattenStrength;
+        DlssNrInputStructureHint = s.structure;
+        DlssNrInputStructureStrength = s.structureStrength;
+        DlssNrInputTextureHint = s.texture;
+        DlssNrInputTextureStrength = s.textureStrength;
+        DlssNrInputStyleFacesOnly = s.facesOnly;
+    }
 
     // Post-SR placement only: derive the working scale from the render:output ratio the upscaler
     // itself already reconstructed detail at, instead of the manual slider above. That output already

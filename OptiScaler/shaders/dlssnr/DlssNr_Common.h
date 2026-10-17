@@ -36,7 +36,7 @@ enum DlssNrMode : uint32_t
     DlssNrMode_TextureHint = 17    // experimental input style: a faint fibre pattern on flat fills, carried by motion
 };
 
-// [DlssNr] InputStyle (1..4) -> its pass and its name for the log. The pass reads its constants' SkinProtection as
+// An input style's number (DlssNr_InputStyles.h: 1..4) -> its pass and its name for the log. The pass reads its constants' SkinProtection as
 // "faces only".
 inline DlssNrMode StyleMode(uint32_t style)
 {
@@ -53,10 +53,6 @@ inline const char* StyleName(uint32_t style)
            : style == 4u ? "texture hint"
                          : "watercolour";
 }
-
-// The most InputStyleStrength does for a style: watercolour and smooth canvas are a blend (1), the structure hint's boost
-// goes to 3x, the texture hint to twice its pattern
-inline float StyleMostStrength(uint32_t style) { return style == 2u ? 3.0f : style == 4u ? 2.0f : 1.0f; }
 
 // A successful sample may be reused only on the immediately following frame.
 // Failed composition, cuts and gaps must not turn a two-frame hold into a freeze.

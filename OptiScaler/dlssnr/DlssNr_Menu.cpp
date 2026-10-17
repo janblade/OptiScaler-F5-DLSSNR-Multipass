@@ -695,9 +695,7 @@ static DlssNrLook::Settings ReadLook(Config* config)
     s.skinColour = config->DlssNrSkinColour.value_or_default();
     s.envDetail = config->DlssNrEnvironmentDetail.value_or_default();
     s.envColour = config->DlssNrEnvironmentColour.value_or_default();
-    s.inputStyle = config->DlssNrInputStyle.value_or_default();
-    s.inputStrength = config->DlssNrInputStyleStrength.value_or_default();
-    s.facesOnly = config->DlssNrInputStyleFacesOnly.value_or_default();
+    s.inputs = config->DlssNrInputStyles();
     return s;
 }
 
@@ -728,9 +726,7 @@ static void WriteLook(Config* config, const DlssNrLook::Settings& s)
     config->DlssNrSkinColour = s.skinColour;
     config->DlssNrEnvironmentDetail = s.envDetail;
     config->DlssNrEnvironmentColour = s.envColour;
-    config->DlssNrInputStyle = s.inputStyle;
-    config->DlssNrInputStyleStrength = s.inputStrength;
-    config->DlssNrInputStyleFacesOnly = s.facesOnly;
+    config->SetDlssNrInputStyles(s.inputs);
 }
 
 // "##lookbase": Natural and Cinematic are also look buttons on the same page, and ImGui takes the label as the ID
@@ -1677,7 +1673,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     ImGui::SeparatorText("Look Presets");
     {
         const auto now = ReadLook(config);
-        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h DlssNrInputStyle)
+        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h DlssNrInputFlatten ...)
         const bool inputStyleOff = config->DlssNrWorkingScale.value_or_default() > 1.0f + 0.005f ||
                                    config->DlssNrDeferredDlss.value_or_default();
 
@@ -3268,43 +3264,86 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         HelpMarker("Filter used to reduce NR output when Model resolution exceeds 100%.\nSharper filters may introduce ringing around edges.");
     }
 
-    // Experimental input style (Config.h DlssNrInputStyle): restyle the picture the model is shown.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the picture the model is
+    // shown, as one card. One way to flatten first (watercolour and smooth canvas do the same job, so a choice of one),
+    // then the two hints as checkboxes; each style's strength shows only while it is on.
     {
-        static const char* styleNames[] = { "Off", "Watercolour", "Structure hint", "Smooth canvas", "Texture hint" };
-        int style = (int) std::min(config->DlssNrInputStyle.value_or_default(), 4u);
+        DlssNrInput::Styles styles = config->DlssNrInputStyles();
+        bool changed = false;
 
-        if (ImGui::Combo("Input style (experimental)", &style, styleNames, IM_ARRAYSIZE(styleNames)))
-            config->DlssNrInputStyle = (uint32_t) style;
+        ImGui::TextUnformatted("Input style (experimental)");
+        HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed. "
+                   "The styles combine and run in this order: flatten, structure hint, texture hint.\nWith a composed "
+                   "curve only what NR paints differently shows; with a replace curve you see NR's painting as it is "
+                   "(Restore Sharpness is off while a style is on, or it would put the game's texture back).\nEach "
+                   "style is one more pass before the model runs. No effect above 100% Model resolution.");
 
-        HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed.\n"
-                   "Watercolour flattens texture into washes and keeps edges (can look blocky).\nStructure hint raises "
-                   "local contrast (brightness only) so NR has more structure to follow; high strength blurs with a "
-                   "composed curve.\nSmooth canvas shows NR skin like an untextured old-game surface: pores and fine "
-                   "shading flattened, contours kept, so NR paints its own skin detail.\nTexture hint lays a faint "
-                   "fibre pattern (linen, canvas) on flat areas only, stuck to the surfaces, which NR turns into a "
-                   "visible material texture: for cartoon and cel-shaded pictures (D3D12 only).\nWith a composed curve only "
-                   "what NR paints differently shows; with a replace curve you see NR's painting as it is (Restore "
-                   "Sharpness is off while a style is on, or it would put the game's texture back).\nNo effect above "
-                   "100% Model resolution.");
-
-        if (style != 0)
+        // A strength slider for a style that is on, with its Reset (1.0) beside it
+        const auto strength = [&](const char* label, const char* resetId, float& value, float most)
         {
-            // Watercolour and smooth canvas are a blend (0..1); the structure hint's boost goes to 3x, the texture hint
-            // to twice its pattern.
-            const float most = StyleMostStrength((uint32_t) style);
-            float strength = std::min(config->DlssNrInputStyleStrength.value_or_default(), most);
+            ImGui::Indent();
+            float shown = std::min(value, most);
 
-            if (ImGui::SliderFloat("Input style strength", &strength, 0.0f, most, "%.2f"))
-                config->DlssNrInputStyleStrength = strength;
+            if (ImGui::SliderFloat(label, &shown, 0.0f, most, "%.2f"))
+            {
+                value = shown;
+                changed = true;
+            }
 
-            bool facesOnly = config->DlssNrInputStyleFacesOnly.value_or_default();
+            ImGui::SameLine();
 
-            if (ImGui::Checkbox("Faces only (skin colours)##inputstyle", &facesOnly))
-                config->DlssNrInputStyleFacesOnly = facesOnly;
+            if (ImGui::SmallButton(resetId))
+            {
+                value = 1.0f;
+                changed = true;
+            }
 
-            HelpMarker("Apply the input style only where the colour looks like skin (the same colour test as Skin "
+            ImGui::Unindent();
+        };
+
+        ImGui::TextUnformatted("Flatten first:");
+        ImGui::SameLine();
+        int flatten = (int) std::min(styles.flatten, DlssNrInput::kFlattenSmoothCanvas);
+        changed |= ImGui::RadioButton("Off##inputflatten", &flatten, (int) DlssNrInput::kFlattenOff);
+        ImGui::SameLine();
+        changed |= ImGui::RadioButton("Watercolour##inputflatten", &flatten, (int) DlssNrInput::kFlattenWatercolour);
+        ImGui::SameLine();
+        changed |= ImGui::RadioButton("Smooth canvas##inputflatten", &flatten, (int) DlssNrInput::kFlattenSmoothCanvas);
+        styles.flatten = (uint32_t) flatten;
+        HelpMarker("Watercolour flattens texture into washes and keeps edges (can look blocky).\nSmooth canvas shows NR "
+                   "skin like an untextured old-game surface: pores and fine shading flattened, contours kept, so NR "
+                   "paints its own skin detail.\nStrength blends with the picture as it was (0 to 1).");
+
+        if (styles.flatten != DlssNrInput::kFlattenOff)
+            strength("Strength##inputflattenstrength", "Reset##inputflattenstrength", styles.flattenStrength,
+                     DlssNrInput::MostStrength(DlssNrInput::FlattenStyle(styles.flatten)));
+
+        changed |= ImGui::Checkbox("Structure hint##inputstructure", &styles.structure);
+        HelpMarker("Raises local contrast (brightness only) so NR has more structure to follow; high strength blurs "
+                   "with a composed curve. Strength 0 to 3.");
+
+        if (styles.structure)
+            strength("Strength##inputstructurestrength", "Reset##inputstructurestrength", styles.structureStrength,
+                     DlssNrInput::MostStrength(DlssNrInput::kStyleStructureHint));
+
+        changed |= ImGui::Checkbox("Texture hint##inputtexture", &styles.texture);
+        HelpMarker("Lays a faint fibre pattern (linen, canvas) on flat areas only, stuck to the surfaces, which NR turns "
+                   "into a visible material texture: for cartoon and cel-shaded pictures. Strength 0 to 2.\nD3D12 only "
+                   "for now: NR on native Vulkan leaves it out (the Vulkan-to-D3D12 bridge has it).");
+
+        if (styles.texture)
+            strength("Strength##inputtexturestrength", "Reset##inputtexturestrength", styles.textureStrength,
+                     DlssNrInput::MostStrength(DlssNrInput::kStyleTextureHint));
+
+        if (DlssNrInput::Any(styles))
+        {
+            changed |= ImGui::Checkbox("Faces only (skin colours)##inputstyle", &styles.facesOnly);
+            HelpMarker("Apply the input styles only where the colour looks like skin (the same colour test as Skin "
                        "protection; warm materials can match too, coloured light can hide skin).");
         }
+
+        if (changed)
+            config->SetDlssNrInputStyles(styles);
     }
 
     RenderEdgeCompression(config, menuResScale, nr);

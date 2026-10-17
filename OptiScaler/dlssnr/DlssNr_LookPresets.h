@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <optional>
 
+#include "../shaders/dlssnr/DlssNr_InputStyles.h"
+
 namespace DlssNrLook
 {
 // [DlssNr] ReversibleMode, the curve and how the answer is put back (Config.h)
@@ -27,7 +29,7 @@ inline constexpr uint32_t kCurveReplaceBalanced = 4; // balanced curve, replace
 inline constexpr uint32_t kCurveHlg = 5;             // HLG + composed
 inline constexpr uint32_t kCurveLinear = 7;          // linear + composed: what game integrations hand the model
 
-// [DlssNr] InputStyle
+// The old single [DlssNr] InputStyle numbers: a look still sets one style (DlssNrInput::FromSingle)
 inline constexpr uint32_t kInputOff = 0;
 inline constexpr uint32_t kInputWatercolour = 1;
 inline constexpr uint32_t kInputStructureHint = 2;
@@ -67,9 +69,7 @@ struct Settings
     float skinColour = 1.0f;
     float envDetail = 1.0f;
     float envColour = 1.0f;
-    uint32_t inputStyle = kInputOff;
-    float inputStrength = 1.0f;
-    bool facesOnly = false;
+    DlssNrInput::Styles inputs; // the input styles card, Faces only included
 };
 
 // What the second-row looks (Faces, Painterly, Soft canvas, Structure) start from: the base's pass profiles and curve.
@@ -239,9 +239,7 @@ inline Settings Compose(Base base, const Modifier& m)
     if (m.envDetail)
         s.envDetail = *m.envDetail;
     if (m.inputStyle)
-        s.inputStyle = *m.inputStyle;
-    if (m.inputStrength)
-        s.inputStrength = *m.inputStrength;
+        s.inputs = DlssNrInput::FromSingle(*m.inputStyle, m.inputStrength.value_or(1.0f), false);
 
     return s;
 }
@@ -292,8 +290,7 @@ inline bool Matches(const Settings& now, const Settings& look)
            Near(now.colour, look.colour) && now.skinSplit == look.skinSplit && now.skinTone == look.skinTone &&
            Near(now.skinDetail, look.skinDetail) && Near(now.skinColour, look.skinColour) &&
            Near(now.envDetail, look.envDetail) && Near(now.envColour, look.envColour) &&
-           now.inputStyle == look.inputStyle && Near(now.inputStrength, look.inputStrength) &&
-           now.facesOnly == look.facesOnly;
+           DlssNrInput::Same(now.inputs, look.inputs);
 }
 
 // A second-row look on a base

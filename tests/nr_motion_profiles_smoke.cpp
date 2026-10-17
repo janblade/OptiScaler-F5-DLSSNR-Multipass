@@ -12,6 +12,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
 
 using namespace native::motion;
 
@@ -120,16 +122,26 @@ int main()
         CHECK(!SetKnob("debugView", 1.0f, f, t));
     }
 
-    // Every knob is written once, and the list names no knob twice
+    // No key twice (a second member would never be set), every range the right way round, every default inside its
+    // range (a Custom list of the defaults reads back as the defaults)
     {
+        std::set<std::string> names;
         int count = 0;
+        bool ordered = true, defaultsInside = true;
         Flow f;
         Trust t;
-        VisitKnobs(f, t, [&](const char*, auto&, float lo, float hi) { count += lo <= hi ? 1 : 100; });
-        size_t commas = 0;
-        for (char c : defaults)
-            commas += c == ',' ? 1 : 0;
-        CHECK(count == (int) commas + 1);
+        VisitKnobs(f, t,
+                   [&](const char* name, auto& member, float lo, float hi)
+                   {
+                       names.insert(name);
+                       ++count;
+                       ordered &= lo <= hi;
+                       const float v = (float) member;
+                       defaultsInside &= v >= lo && v <= hi;
+                   });
+        CHECK((int) names.size() == count);
+        CHECK(ordered);
+        CHECK(defaultsInside);
     }
 
     printf(g_failed == 0 ? "nr_motion_profiles_smoke: PASS\n" : "nr_motion_profiles_smoke: %d FAILED\n", g_failed);

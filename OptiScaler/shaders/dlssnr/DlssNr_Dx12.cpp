@@ -4405,9 +4405,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             const D3D12_RESOURCE_DESC in = modelInput->GetDesc();
 
-            // One texture for one style, two to alternate between for more
+            // One texture for one style, two to alternate between for more (the second is let go while one is enough)
             ID3D12Resource** targets[2] = { &g_nr.styled, &g_nr.styledB };
             D3D12_RESOURCE_STATES* targetStates[2] = { &g_nr.styledState, &g_nr.styledBState };
+
+            if (passCount < 2 && g_nr.styledB != nullptr)
+            {
+                ParkNrResource(g_nr.styledB);
+                g_nr.styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
 
             for (int t = 0; t < (passCount > 1 ? 2 : 1); ++t)
             {

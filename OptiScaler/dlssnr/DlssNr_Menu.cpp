@@ -3541,9 +3541,9 @@ static void RenderPassesPage(Config* config, float menuResScale)
     static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset A (main model)",
                                               "Preset B (small model)" };
     static const char* presetHelp =
-        "Which model NR runs on this pass. Preset A: the main model (most detail). Preset B: the small model (about half "
+        "Which model NR runs on this pass. Preset A: the main model (more detail). Preset B: the small model (about half "
         "the cost, softer; only in 310.9 DLLs). Default: the DLL decides, which is the small model on 310.9 DLLs. 310.8 "
-        "DLLs have only the main model, so the preset changes nothing there.";
+        "DLLs have only the main model, so the preset changes nothing there. Passes 4 and up use Pass 1's preset.";
 
     if (ImGui::TreeNodeEx("Pass 1", ImGuiTreeNodeFlags_DefaultOpen))
     {

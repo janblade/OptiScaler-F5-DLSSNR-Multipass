@@ -2186,8 +2186,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (passCount > 0 && skip == nullptr)
         {
             OwnedImage* targets[2] = { &g_vk.styled, &g_vk.styledB };
+            const int targetCount = passCount > 1 ? 2 : 1;
+            bool waited = false;
 
-            for (int t = 0; t < (passCount > 1 ? 2 : 1); ++t)
+            for (int t = 0; t < targetCount; ++t)
             {
                 OwnedImage& target = *targets[t];
 
@@ -2195,8 +2197,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                        target.format != modelInput->format))
                 {
                     // Earlier frames may still read it (a switch of Compress screen edges changes the model picture's
-                    // size)
-                    vkDeviceWaitIdle(device);
+                    // size); one wait covers both images
+                    if (!waited)
+                        vkDeviceWaitIdle(device);
+
+                    waited = true;
                     DestroyImage(target);
                 }
 

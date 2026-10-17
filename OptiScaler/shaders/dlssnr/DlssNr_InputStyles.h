@@ -52,10 +52,11 @@ inline int Passes(const Styles& s, Pass out[2])
     int n = 0;
     const auto add = [&](uint32_t style, float strength)
     {
-        strength = std::fmin(strength, MostStrength(style));
+        // Not above 0 (NaN included, from a hand-edited ini): the style does not run
+        if (style == 0u || !(strength > 0.0f))
+            return;
 
-        if (style != 0u && strength > 0.0f)
-            out[n++] = { style, strength };
+        out[n++] = { style, std::fmin(strength, MostStrength(style)) };
     };
 
     add(FlattenStyle(s.flatten), s.flattenStrength);

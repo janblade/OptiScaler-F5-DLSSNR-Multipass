@@ -245,7 +245,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     // best is where the search starts, so a steady pan carries over from frame to frame and an edge is not stuck with the
     // answer of a cell that lies across it.
     int2 centre = 0;
-    float2 centreExact = 0.0; // the candidate before rounding: its part of a pixel is where the sub-pixel steps start
+    float2 centreExact = 0.0; // the candidate before rounding: its part of a pixel is kept where no sub-pixel step is solved
     float start = Cost(p, centre, w, cur);
 
     // How long the picture has been unchanged here (finest level only): the age last frame, and from this frame's
@@ -471,11 +471,12 @@ void Match(uint3 id : SV_DispatchThreadID)
         confidence = weak / (weak + knee);
     }
 
-    // A flat window gives the steps nothing to go on, so they leave the whole-pixel offset; there the part of a pixel the
-    // winning candidate had (when the search kept it) is kept, which carries a camera's or a neighbour's fraction across a
-    // flat fill. Where a step was solved it stands as before.
+    // A window with no structure across it (a flat one, or one straight edge) gives the steps nothing to go on, so they
+    // leave the whole-pixel offset; there the part of a pixel the winning candidate had (when the search kept it) is kept,
+    // which carries a camera's or a neighbour's fraction across a flat fill. Where a step was solved it stands as before.
+    // The clamp is the rounding's own range, and keeps a non-finite candidate (history, the camera) out of the output.
     if (!stepped && all(bestD == centre))
-        sub = centreExact - float2(centre);
+        sub = clamp(centreExact - float2(centre), -0.5, 0.5);
 
     OutFlow[id.xy] = float4(float2(bestD) + sub, confidence, 1.0);
 

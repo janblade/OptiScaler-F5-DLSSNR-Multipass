@@ -295,18 +295,20 @@ void NativeDriver::DrawFlowTuning()
     using native::motion::Profile;
     auto config = Config::Instance();
 
-    // The profile can be picked before a mode runs: it is applied when the motion estimate starts
+    // The profile can be picked before a mode runs: it is applied when the motion estimate starts. One not offered yet
+    // (an ini naming it) runs as Default, and the combo says so.
     const Profile current = config->DlssNrNativeMotionProfile.value_or_default();
+    const Profile shown = native::motion::ProfileOffered(current) ? current : Profile::Default;
     ImGui::SetNextItemWidth(220.0f);
 
-    if (ImGui::BeginCombo("Motion profile##motionprofile", native::motion::ProfileMenuName(current)))
+    if (ImGui::BeginCombo("Motion profile##motionprofile", native::motion::ProfileMenuName(shown)))
     {
         for (const Profile profile : native::motion::kAllProfiles)
         {
             if (!native::motion::ProfileOffered(profile))
                 continue;
 
-            if (ImGui::Selectable(native::motion::ProfileMenuName(profile), profile == current) && profile != current)
+            if (ImGui::Selectable(native::motion::ProfileMenuName(profile), profile == shown) && profile != current)
             {
                 config->DlssNrNativeMotionProfile = profile;
                 ApplyMotionProfile();
@@ -338,11 +340,13 @@ void NativeDriver::DrawFlowTuning()
     const std::string before = native::motion::WriteKnobs(tune, guides);
 
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
+    // AlwaysClamp: a typed value stays in the knob's range, so Custom reads back what ran
+    constexpr ImGuiSliderFlags clampTyped = ImGuiSliderFlags_AlwaysClamp;
+    ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4, "%d", clampTyped);
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3);
+    ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3, "%d", clampTyped);
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
+    ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9, "%d", clampTyped);
     ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
     ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
 
@@ -367,16 +371,18 @@ void NativeDriver::DrawFlowTuning()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "Gives flat areas (walls, sky) the whole picture's motion. Off: they get none.");
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Frames unchanged before it counts as still (0 = off)##flowstill", &tune.stillFrames, 0, 60);
+    ImGui::SliderInt("Frames unchanged before it counts as still (0 = off)##flowstill", &tune.stillFrames, 0, 60, "%d",
+                     clampTyped);
 
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "After this many unchanged frames, an area (a HUD panel) stays still while the "
                                 "picture pans. Higher: waits longer. 0: off.");
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderFloat("Still: largest change allowed##flowstilleps", &tune.stillEpsilon, 0.0005f, 0.05f, "%.4f",
-                       ImGuiSliderFlags_Logarithmic);
+                       ImGuiSliderFlags_Logarithmic | clampTyped);
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderFloat("Still: what the camera must win by##flowstillmargin", &tune.stillMargin, 0.0f, 0.2f, "%.3f");
+    ImGui::SliderFloat("Still: what the camera must win by##flowstillmargin", &tune.stillMargin, 0.0f, 0.2f, "%.3f",
+                       clampTyped);
     ImGui::Checkbox("Cheaper sub-pixel refinement##flowinverse", &tune.inverseRefinement);
 
     if (ImGui::IsItemHovered())

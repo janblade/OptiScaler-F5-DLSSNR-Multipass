@@ -5777,7 +5777,8 @@ void MenuCommon::RenderFramerateLowLatency(RenderMenuContext& ctx)
         std::vector<MenuOption<Input>> inputOptions = {
             { Input::Auto, "Auto",
                 "The game's own Reflex when it makes the calls.\n"
-                "Otherwise OptiScaler's, while an Optical F5Low mode, XeFG or FSR FG runs." },
+                "Otherwise OptiScaler's, while an Optical F5Low mode, XeFG or FSR FG runs.\n"
+                "With Optical F5Low's NR + frame generation (the virtual upscaler) it is Game." },
             { Input::Game, "Game",
                 "Only the game's own Reflex. OptiScaler makes no latency calls." },
             { Input::OptiScaler, "OptiScaler",

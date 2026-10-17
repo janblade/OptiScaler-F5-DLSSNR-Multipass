@@ -193,14 +193,15 @@ Inputs GatherInputs()
     auto& state = State::Instance();
 
     Inputs in;
-    const auto rule = RuleForInput(config->FramerateLowLatencyInput.value_or_default());
-    in.setting = rule.setting;
-    in.blockGameLowLatency = rule.blockGameLowLatency && !FrameGenerationNeedsReflex();
-
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
           config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
           config->DlssNrNativeFrameGenerationOnly.value_or_default() });
+    const auto rule = RuleForInput(EffectiveInput(config->FramerateLowLatencyInput.value_or_default(),
+                                                  shown == DlssNrNativeMode::Shown::NrAndFrameGeneration));
+    in.setting = rule.setting;
+    in.blockGameLowLatency = rule.blockGameLowLatency && !FrameGenerationNeedsReflex();
+
     in.f5lowRunning = shown != DlssNrNativeMode::Shown::Off && !GameUpscalerCalledRecently();
     in.xefgRunning = state.activeFgOutput == FGOutput::XeFG && state.currentFG != nullptr &&
                      state.currentFG->SwapchainContext() != nullptr;

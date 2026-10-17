@@ -5778,7 +5778,8 @@ void MenuCommon::RenderFramerateLowLatency(RenderMenuContext& ctx)
             { Input::Auto, "Auto",
                 "The game's own Reflex when it makes the calls.\n"
                 "Otherwise OptiScaler's, while an Optical F5Low mode, XeFG or FSR FG runs.\n"
-                "With Optical F5Low's NR + frame generation (the virtual upscaler) it is Game." },
+                "With Optical F5Low's NR + frame generation it is Game: only the game's own Reflex, "
+                "even with XeFG or FSR FG." },
             { Input::Game, "Game",
                 "Only the game's own Reflex. OptiScaler makes no latency calls." },
             { Input::OptiScaler, "OptiScaler",

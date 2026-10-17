@@ -50,8 +50,9 @@ inline InputRule RuleForInput(Input input)
     }
 }
 
-// Auto is Game while Optical F5Low's virtual upscaler (the NR + frame generation mode) is selected: only the game's own
-// Reflex, OptiScaler makes no latency calls next to it. OptiScaler, picked by hand, still starts ours.
+// Auto is Game while Optical F5Low's virtual upscaler (the NR + frame generation mode) runs: only the game's own Reflex,
+// OptiScaler makes no latency calls next to it, even for XeFG or FSR FG (which then lower nothing in a game without
+// Reflex). OptiScaler, picked by hand, still starts ours. Standing aside for a game upscaler, Auto is Auto again.
 inline Input EffectiveInput(Input input, bool virtualUpscaler)
 {
     return input == Input::Auto && virtualUpscaler ? Input::Game : input;
@@ -715,7 +716,8 @@ inline const char* DecisionText(Decision decision, bool gameReflexFeedsXell = fa
     switch (decision)
     {
     case Decision::SettingOff:
-        return "OptiScaler makes no latency calls: the Input is Game (Auto with the virtual upscaler) or Off";
+        return "OptiScaler makes no latency calls: the Input is Game (Auto acts as Game with NR + frame generation) "
+               "or Off";
     case Decision::LowLatencyOff:
         return "Input is Off: no low latency, the game's Reflex is sent with it off";
     case Decision::NoF5Low:

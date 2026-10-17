@@ -2318,7 +2318,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         // was kept), by something outside the model's own launches. D3D12 keeps it. No command list: the kernel
         // profiler is D3D12's.
         DlssNrNative::BeginEvaluate(passFeature, passReset, 1u, 1u, (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull),
-                                    nullptr, false);
+                                    nullptr, false, false);
         evaluated = g_vk.evaluate(
             (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
             &input->ngx, modelDepth, spatial ? modelMotion : reusePlan.motion, &answer->ngx, modelWidth, modelHeight,

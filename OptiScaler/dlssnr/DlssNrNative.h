@@ -10,8 +10,9 @@ void SetPrecision(unsigned precision);
 bool IsActive();
 std::string Status();
 // ViT reuse (see DlssNrVitReuse.h): bracket one model evaluation of `feature`. `every` = how often the ViT bottleneck is computed (1 = always) with the fp8 kernel set, `everyPlain` with the plain fp16 one; `slot` = frame number, the same for every pass of a frame, so the passes compute on the same frame.
-void BeginEvaluate(const void* feature, bool reset, unsigned every, unsigned everyPlain, long long slot, ID3D12GraphicsCommandList* cmd, bool profile);
-// True when this evaluation's launch order was not the expected one and turned Reuse off for the session (log it once).
+// `copyPlain`: the plain set reuses through our own copy of the ViT output (copy mode; the D3D12 launch path records it, Vulkan does not).
+void BeginEvaluate(const void* feature, bool reset, unsigned every, unsigned everyPlain, long long slot, ID3D12GraphicsCommandList* cmd, bool profile, bool copyPlain);
+// True when this evaluation turned Reuse off for the session (unexpected launch order, or a copy that could not be recorded); VitStatus says why. Log it once.
 bool EndEvaluate(ID3D12GraphicsCommandList* cmd);
 // Kernel census / per-group GPU timing lines finished since the last call (ini [DlssNr] KernelProfile), for the log.
 std::vector<std::string> TakeProfileReports();

@@ -4772,7 +4772,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
-                                    cfg.DlssNrKernelProfile.value_or_default());
+                                    cfg.DlssNrKernelProfile.value_or_default(), true);
         result = g_nr.evaluate(
             cmdList, passFeature, g_nr.capabilityParams, passInput, modelDepth, spatial ? modelMotion : evalMotion,
             passOutput, modelWidth, modelHeight, evalGuideW, evalGuideH, evalMotionW, evalMotionH,
@@ -4784,8 +4784,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             tuning.autoMask ? 1 : 0, evalMvScaleX,
             evalMvScaleY);
         if (DlssNrNative::EndEvaluate(cmdList))
-            LOG_WARN("DLSS-NR: the model's kernel launches were not in the expected order; Reuse bottleneck is off for "
-                     "this session");
+            LOG_WARN("DLSS-NR: Reuse bottleneck is {}", DlssNrNative::VitStatus());
 
         for (const std::string& report : DlssNrNative::TakeProfileReports())
             LOG_INFO("{}", report);

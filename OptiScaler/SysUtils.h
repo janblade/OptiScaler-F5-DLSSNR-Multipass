@@ -14,6 +14,8 @@
 #include <winternl.h>
 #include <d3dkmthk.h>
 
+#include "misc/ThreadTls.h"
+
 #define NV_WINDOWS
 #define NVSDK_NGX
 #define NGX_ENABLE_DEPRECATED_GET_PARAMETERS

@@ -3534,6 +3534,16 @@ static void RenderPassesPage(Config* config, float menuResScale)
     ImGui::TextWrapped("Settings apply when you release a slider.");
     static const char* styles[] = { "Standard", "Natural", "Cinematic" };
     static const char* inheritedStyles[] = { "Auto (inherit pass 1)", "Standard", "Natural", "Cinematic" };
+    // [DlssNr] Preset / Pass2Preset / Pass3Preset, the model's DLSSNR.Hint.Render.Preset: 1 and 2 named as NVIDIA names
+    // its presets (A = 1, B = 2). On 310.9 DLLs 1 selects the main model and 2 the small one, and any other value (0,
+    // Default, included) falls back to 2; 310.8 DLLs have only the main model. A saved 3 behaves as 2 and shows as B.
+    static const char* presets[] = { "Default", "Preset A (main model)", "Preset B (small model)" };
+    static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset A (main model)",
+                                              "Preset B (small model)" };
+    static const char* presetHelp =
+        "Which model NR runs on this pass. Preset A: the main model (most detail). Preset B: the small model (about half "
+        "the cost, softer; only in 310.9 DLLs). Default: the DLL decides, which is the small model on 310.9 DLLs. 310.8 "
+        "DLLs have only the main model, so the preset changes nothing there.";
 
     if (ImGui::TreeNodeEx("Pass 1", ImGuiTreeNodeFlags_DefaultOpen))
     {
@@ -3541,6 +3551,10 @@ static void RenderPassesPage(Config* config, float menuResScale)
         if (ImGui::Combo("Style", &style, styles, IM_ARRAYSIZE(styles)))
             config->DlssNrStyle = (uint32_t) style;
         HelpMarker("Look profile: Standard, Natural or Cinematic. Intensity sets its strength.");
+        int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 2u);
+        if (ImGui::Combo("Preset", &preset, presets, IM_ARRAYSIZE(presets)))
+            config->DlssNrPreset = (uint32_t) preset;
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);
@@ -3557,6 +3571,8 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass2Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
+        InheritedProfileCombo("Preset", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrPass2Intensity, 0.0f, 2.0f, config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass2LocalStructure, 0.0f, 2.0f, config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
         DeferredSlider("Local tone", &config->DlssNrPass2LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
@@ -3574,6 +3590,8 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass3Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
+        InheritedProfileCombo("Preset", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrPass3Intensity, 0.0f, 2.0f, config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass3LocalStructure, 0.0f, 2.0f, config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
         DeferredSlider("Local tone", &config->DlssNrPass3LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
@@ -3608,18 +3626,6 @@ static void RenderPassesPage(Config* config, float menuResScale)
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Advanced preset hints (effect unverified)"))
-    {
-        ImGui::TextWrapped("Experimental model hints; visual effect unverified. Use Style to select a profile.");
-        static const char* presets[] = { "Default", "Preset 1", "Preset 2", "Preset 3" };
-        static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset 1", "Preset 2", "Preset 3" };
-        int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 3u);
-        if (ImGui::Combo("Pass 1 preset hint", &preset, presets, IM_ARRAYSIZE(presets)))
-            config->DlssNrPreset = (uint32_t) preset;
-        InheritedProfileCombo("Pass 2 preset hint", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        InheritedProfileCombo("Pass 3 preset hint", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        ImGui::TreePop();
-    }
     ImGui::TextWrapped("Pass settings apply to SR and RR on DX12 and native Vulkan. The driver-proxy backend supports one pass.");
 
     ImGui::SeparatorText("Colour");

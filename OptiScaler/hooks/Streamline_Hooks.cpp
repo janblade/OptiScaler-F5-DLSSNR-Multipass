@@ -22,6 +22,8 @@
 #include <magic_enum.hpp>
 #include "detours/detours.h"
 
+#include <atomic>
+#include <cstring>
 #include <mutex>
 
 namespace
@@ -37,6 +39,15 @@ thread_local const sl::Preferences* gamePluginPreferences = nullptr;
 // ERROR_INVALID_OPERATION (0x10DD), which Streamline's own exception handler then treats as fatal.
 // This mutex serializes every Begin...Commit sequence in this file against every other one.
 std::mutex g_detoursTransactionMutex;
+
+// The original a hook calls is read on game threads while a plugin may be hooked on another
+template <typename T> static T LoadOriginal(T& original) { return std::atomic_ref<T>(original).load(std::memory_order_acquire); }
+
+template <typename T> static void StoreOriginal(T& original, T value)
+{
+    std::atomic_ref<T>(original).store(value, std::memory_order_release);
+}
+
 struct GamePluginLoadScope
 {
     const sl::Preferences* previous;
@@ -1624,18 +1635,18 @@ void* StreamlineHooks::hkdlss_slGetPluginFunction(const char* functionName)
 
     if (strcmp(functionName, "slOnPluginLoad") == 0)
     {
-        o_dlss_slOnPluginLoad = (PFN_slOnPluginLoad) o_dlss_slGetPluginFunction(functionName);
+        o_dlss_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_dlss_slGetPluginFunction)(functionName);
         return &hkdlss_slOnPluginLoad;
     }
 
     if (strcmp(functionName, "slDLSSGetOptimalSettings") == 0 &&
         State::Instance().gameQuirks & GameQuirk::PregmataFixDLSSModes)
     {
-        o_slDLSSGetOptimalSettings = (decltype(&slDLSSGetOptimalSettings)) o_dlss_slGetPluginFunction(functionName);
+        o_slDLSSGetOptimalSettings = (decltype(&slDLSSGetOptimalSettings)) LoadOriginal(o_dlss_slGetPluginFunction)(functionName);
         return &hkslDLSSGetOptimalSettings;
     }
 
-    return o_dlss_slGetPluginFunction(functionName);
+    return LoadOriginal(o_dlss_slGetPluginFunction)(functionName);
 }
 
 void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
@@ -1644,13 +1655,13 @@ void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
 
     if (strcmp(functionName, "slOnPluginLoad") == 0)
     {
-        o_dlssg_slOnPluginLoad = (PFN_slOnPluginLoad) o_dlssg_slGetPluginFunction(functionName);
+        o_dlssg_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_dlssg_slGetPluginFunction)(functionName);
         return &hkdlssg_slOnPluginLoad;
     }
 
     if (strcmp(functionName, "slDLSSGSetOptions") == 0)
     {
-        o_slDLSSGSetOptions = (decltype(&slDLSSGSetOptions)) o_dlssg_slGetPluginFunction(functionName);
+        o_slDLSSGSetOptions = (decltype(&slDLSSGSetOptions)) LoadOriginal(o_dlssg_slGetPluginFunction)(functionName);
 
         // Give steam overlay the original as it seems to be hooking it
         auto steamOverlay = KernelBaseProxy::GetModuleHandleA_()("gameoverlayrenderer64.dll");
@@ -1665,7 +1676,7 @@ void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
 
     if (strcmp(functionName, "slDLSSGGetState") == 0)
     {
-        o_slDLSSGGetState = (decltype(&slDLSSGGetState)) o_dlssg_slGetPluginFunction(functionName);
+        o_slDLSSGGetState = (decltype(&slDLSSGGetState)) LoadOriginal(o_dlssg_slGetPluginFunction)(functionName);
 
         // Give steam overlay the original as it seems to be hooking it
         auto steamOverlay = KernelBaseProxy::GetModuleHandleA_()("gameoverlayrenderer64.dll");
@@ -1681,7 +1692,7 @@ void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
     if (strcmp(functionName, "slGetPluginJSONConfig") == 0 && IsSL1AndDLSSGManaged())
     {
         o_dlssg_slGetPluginJSONConfig_sl1 =
-            reinterpret_cast<PFN_slGetPluginJSONConfig_sl1>(o_dlssg_slGetPluginFunction(functionName));
+            reinterpret_cast<PFN_slGetPluginJSONConfig_sl1>(LoadOriginal(o_dlssg_slGetPluginFunction)(functionName));
 
         if (o_dlssg_slGetPluginJSONConfig_sl1 != nullptr)
         {
@@ -1692,12 +1703,12 @@ void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
 
     // Ensure that we have those DLSSG calls
     if (!o_slDLSSGSetOptions)
-        o_slDLSSGSetOptions = (decltype(&slDLSSGSetOptions)) o_dlssg_slGetPluginFunction("slDLSSGSetOptions");
+        o_slDLSSGSetOptions = (decltype(&slDLSSGSetOptions)) LoadOriginal(o_dlssg_slGetPluginFunction)("slDLSSGSetOptions");
 
     if (!o_slDLSSGGetState)
-        o_slDLSSGGetState = (decltype(&slDLSSGGetState)) o_dlssg_slGetPluginFunction("slDLSSGGetState");
+        o_slDLSSGGetState = (decltype(&slDLSSGGetState)) LoadOriginal(o_dlssg_slGetPluginFunction)("slDLSSGGetState");
 
-    return o_dlssg_slGetPluginFunction(functionName);
+    return LoadOriginal(o_dlssg_slGetPluginFunction)(functionName);
 }
 
 void* StreamlineHooks::hklocal_dlssg_slGetPluginFunction(const char* functionName)
@@ -1706,11 +1717,11 @@ void* StreamlineHooks::hklocal_dlssg_slGetPluginFunction(const char* functionNam
 
     if (strcmp(functionName, "slOnPluginLoad") == 0 && State::Instance().activeFgNvngx != FGNvngxReplacement::None)
     {
-        o_local_dlssg_slOnPluginLoad = (PFN_slOnPluginLoad) o_local_dlssg_slGetPluginFunction(functionName);
+        o_local_dlssg_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_local_dlssg_slGetPluginFunction)(functionName);
         return &hklocal_dlssg_slOnPluginLoad;
     }
 
-    return o_local_dlssg_slGetPluginFunction(functionName);
+    return LoadOriginal(o_local_dlssg_slGetPluginFunction)(functionName);
 }
 
 bool StreamlineHooks::hkreflex_slSetConstants_sl1(const void* data, uint32_t frameIndex, uint32_t id)
@@ -1739,25 +1750,25 @@ void* StreamlineHooks::hkreflex_slGetPluginFunction(const char* functionName)
 
     if (strcmp(functionName, "slSetConstants") == 0 && State::Instance().streamlineVersion.major == 1)
     {
-        o_reflex_slSetConstants_sl1 = (PFN_slSetConstants_sl1) o_reflex_slGetPluginFunction(functionName);
+        o_reflex_slSetConstants_sl1 = (PFN_slSetConstants_sl1) LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
         return &hkreflex_slSetConstants_sl1;
     }
 
     if (strcmp(functionName, "slOnPluginLoad") == 0)
     {
-        o_reflex_slOnPluginLoad = (PFN_slOnPluginLoad) o_reflex_slGetPluginFunction(functionName);
+        o_reflex_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
         return &hkreflex_slOnPluginLoad;
     }
 
     if (strcmp(functionName, "slReflexSetOptions") == 0)
     {
-        o_slReflexSetOptions = (decltype(&slReflexSetOptions)) o_reflex_slGetPluginFunction(functionName);
+        o_slReflexSetOptions = (decltype(&slReflexSetOptions)) LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
         return &hkslReflexSetOptions;
     }
 
     if (strcmp(functionName, "slReflexSleep") == 0)
     {
-        o_slReflexSleep = (decltype(&slReflexSleep)) o_reflex_slGetPluginFunction(functionName);
+        o_slReflexSleep = (decltype(&slReflexSleep)) LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
         return &hkslReflexSleep;
     }
 
@@ -1766,11 +1777,11 @@ void* StreamlineHooks::hkreflex_slGetPluginFunction(const char* functionName)
         (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
          State::Instance().activeFgInput == FGInput::DLSSG))
     {
-        o_slPCLSetMarker = (decltype(&slPCLSetMarker)) o_reflex_slGetPluginFunction(functionName);
+        o_slPCLSetMarker = (decltype(&slPCLSetMarker)) LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
         return &hkslPCLSetMarker;
     }
 
-    return o_reflex_slGetPluginFunction(functionName);
+    return LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
 }
 
 sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::FrameToken& frame)
@@ -1863,17 +1874,17 @@ void* StreamlineHooks::hkpcl_slGetPluginFunction(const char* functionName)
         (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
          State::Instance().activeFgInput == FGInput::DLSSG))
     {
-        o_slPCLSetMarker = (decltype(&slPCLSetMarker)) o_pcl_slGetPluginFunction(functionName);
+        o_slPCLSetMarker = (decltype(&slPCLSetMarker)) LoadOriginal(o_pcl_slGetPluginFunction)(functionName);
         return &hkslPCLSetMarker;
     }
 
     if (strcmp(functionName, "slOnPluginLoad") == 0)
     {
-        o_pcl_slOnPluginLoad = (PFN_slOnPluginLoad) o_pcl_slGetPluginFunction(functionName);
+        o_pcl_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_pcl_slGetPluginFunction)(functionName);
         return &hkpcl_slOnPluginLoad;
     }
 
-    return o_pcl_slGetPluginFunction(functionName);
+    return LoadOriginal(o_pcl_slGetPluginFunction)(functionName);
 }
 
 bool StreamlineHooks::hk_setVoid(void* self, const char* key, void** value)
@@ -1937,18 +1948,18 @@ void* StreamlineHooks::hkcommon_slGetPluginFunction(const char* functionName)
 
     if (strcmp(functionName, "slOnPluginLoad") == 0)
     {
-        o_common_slOnPluginLoad = (PFN_slOnPluginLoad) o_common_slGetPluginFunction(functionName);
+        o_common_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_common_slGetPluginFunction)(functionName);
         return &hkcommon_slOnPluginLoad;
     }
 
     // Used around Streamline v1.3, as 1.5 doesn't seem to have it anymore
     if (strcmp(functionName, "slSetParameters") == 0)
     {
-        o_common_slSetParameters_sl1 = (PFN_slSetParameters_sl1) o_common_slGetPluginFunction(functionName);
+        o_common_slSetParameters_sl1 = (PFN_slSetParameters_sl1) LoadOriginal(o_common_slGetPluginFunction)(functionName);
         return &hkcommon_slSetParameters_sl1;
     }
 
-    return o_common_slGetPluginFunction(functionName);
+    return LoadOriginal(o_common_slGetPluginFunction)(functionName);
 }
 
 void StreamlineHooks::updateForceReflex()
@@ -2266,28 +2277,154 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
     State::EnableChecks(owner);
 }
 
+// Streamline plugins (sl.dlss, sl.dlss_g, sl.reflex, sl.pcl, sl.common): one detour on each plugin's
+// slGetPluginFunction. Every load of a plugin comes through here, also a load of one already in memory (Streamline and
+// games load them more than once). Taking the detour off and putting it back each time removed it while game threads
+// called through it, or stacked two detours on one function that then called each other: the intermittent crash or
+// freeze at startup. So the detour stays while it is in place, and only a fresh copy of a plugin (loaded again after an
+// unload, at the same or another address) is hooked again.
+struct PluginHook
+{
+    const char* logName;   // "Hooking slGetPluginFunction in <logName>"
+    const char* errorName; // "Failed to hook <errorName>"
+    HMODULE module = nullptr;
+    void* target = nullptr;          // the plugin's slGetPluginFunction carrying our detour
+    uint8_t patch[8] {};             // its first bytes as Detours left them: our jump
+};
+
+static PluginHook g_dlssPlugin { "sl.dlss", "DLSS" };
+static PluginHook g_dlssgPlugin { "sl.dlssg", "DLSSG" };
+static PluginHook g_localDlssgPlugin { "local sl.dlssg", "local DLSSG" };
+static PluginHook g_reflexPlugin { "sl.reflex", "Reflex" };
+static PluginHook g_pclPlugin { "sl.pcl", "PCL" };
+static PluginHook g_commonPlugin { "sl.common", "Common" };
+
+// Held around each plugin's record and its Detours transaction (taken before g_detoursTransactionMutex, never after).
+// Nothing under it loads a library or waits for the loader.
+static std::mutex g_pluginHookMutex;
+
+// Our detour is still in place: its module is loaded and the function still starts with the jump we put there. A copy
+// loaded again after an unload starts with its own code, and a module that is gone is not read.
+static bool PluginDetourLive(const PluginHook& plugin)
+{
+    if (plugin.target == nullptr)
+        return false;
+
+    HMODULE owner = nullptr;
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(plugin.target), &owner) ||
+        owner != plugin.module)
+    {
+        return false;
+    }
+
+    return std::memcmp(plugin.target, plugin.patch, sizeof(plugin.patch)) == 0;
+}
+
+// Takes our detour off (caller holds g_pluginHookMutex). False when it could not, and then the detour and the original
+// it calls stay as they are.
+template <typename T> static bool DetachPlugin(PluginHook& plugin, T& original, void* hook)
+{
+    PVOID trampoline = reinterpret_cast<PVOID>(LoadOriginal(original));
+
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourDetach(&trampoline, hook);
+
+    if (const auto detourResult = DetourTransactionCommit(); detourResult != NO_ERROR)
+    {
+        LOG_ERROR("Failed to unhook {}: {:X}", plugin.errorName, detourResult);
+        return false;
+    }
+
+    return true;
+}
+
+// Hooks `module`'s slGetPluginFunction unless our detour is already in place on it. `onNewCopy` runs when the record of
+// an earlier copy is let go (sl.common: its system caps pointer belonged to that copy).
+template <typename T>
+static void HookPlugin(PluginHook& plugin, HMODULE module, T& original, void* hook, void (*onNewCopy)() = nullptr)
+{
+    // Outside our lock: it may wait for the loader
+    auto target = reinterpret_cast<void*>(KernelBaseProxy::GetProcAddress_()(module, "slGetPluginFunction"));
+
+    if (target == nullptr)
+    {
+        LOG_WARN("No slGetPluginFunction in {}", plugin.logName);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pluginHookMutex);
+
+    if (plugin.module == module && plugin.target == target && PluginDetourLive(plugin))
+    {
+        LOG_TRACE("slGetPluginFunction in {} is already hooked", plugin.logName);
+        return;
+    }
+
+    // An earlier copy: take our detour off it while it is still in place there (as before), else only forget it (its
+    // code is gone or was loaded again). A detach that fails leaves that copy's detour as it was; the new copy is
+    // other code, so hooking it stacks nothing.
+    bool earlierStillHooked = false;
+
+    if (plugin.target != nullptr)
+    {
+        if (PluginDetourLive(plugin))
+            earlierStillHooked = !DetachPlugin(plugin, original, hook);
+
+        if (!earlierStillHooked && onNewCopy != nullptr)
+            onNewCopy();
+
+        plugin.module = nullptr;
+        plugin.target = nullptr;
+    }
+
+    LOG_TRACE("Hooking slGetPluginFunction in {}", plugin.logName);
+
+    PVOID trampoline = target;
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&trampoline, hook);
+
+    if (const auto detourResult = DetourTransactionCommit(); detourResult != NO_ERROR)
+    {
+        LOG_ERROR("Failed to hook {}: {:X}", plugin.errorName, detourResult);
+
+        // A detour still in place on the earlier copy keeps calling through the original it has
+        if (!earlierStillHooked)
+            StoreOriginal(original, static_cast<T>(nullptr));
+
+        return;
+    }
+
+    plugin.module = module;
+    plugin.target = target;
+    std::memcpy(plugin.patch, target, sizeof(plugin.patch));
+    StoreOriginal(original, reinterpret_cast<T>(trampoline));
+}
+
+// Takes the detour off a plugin if it is still in place; the original is cleared only once nothing can call it
+template <typename T> static void UnhookPlugin(PluginHook& plugin, T& original, void* hook)
+{
+    std::lock_guard<std::mutex> lock(g_pluginHookMutex);
+
+    if (PluginDetourLive(plugin) && !DetachPlugin(plugin, original, hook))
+        return;
+
+    plugin.module = nullptr;
+    plugin.target = nullptr;
+    StoreOriginal(original, static_cast<T>(nullptr));
+}
+
 // SL DLSS
 
 void StreamlineHooks::unhookDlss()
 {
     LOG_FUNC();
-
-    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-
-    if (o_dlss_slGetPluginFunction)
-        DetourDetach(&(PVOID&) o_dlss_slGetPluginFunction, hkdlss_slGetPluginFunction);
-
-    auto detourResult = DetourTransactionCommit();
-    if (detourResult != NO_ERROR)
-    {
-        LOG_ERROR("Failed to unhook DLSS: {:X}", detourResult);
-    }
-    else
-    {
-        o_dlss_slGetPluginFunction = nullptr;
-    }
+    UnhookPlugin(g_dlssPlugin, o_dlss_slGetPluginFunction, reinterpret_cast<void*>(hkdlss_slGetPluginFunction));
 }
 
 void StreamlineHooks::hookDlss(HMODULE slDlss)
@@ -2302,28 +2439,7 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
         return;
     }
 
-    if (o_dlss_slGetPluginFunction)
-        unhookDlss();
-
-    o_dlss_slGetPluginFunction =
-        reinterpret_cast<PFN_slGetPluginFunction>(KernelBaseProxy::GetProcAddress_()(slDlss, "slGetPluginFunction"));
-
-    if (o_dlss_slGetPluginFunction != nullptr)
-    {
-        LOG_TRACE("Hooking slGetPluginFunction in sl.dlss");
-        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-
-        DetourAttach(&(PVOID&) o_dlss_slGetPluginFunction, hkdlss_slGetPluginFunction);
-
-        auto detourResult = DetourTransactionCommit();
-        if (detourResult != NO_ERROR)
-        {
-            LOG_ERROR("Failed to hook DLSS: {:X}", detourResult);
-            o_dlss_slGetPluginFunction = nullptr;
-        }
-    }
+    HookPlugin(g_dlssPlugin, slDlss, o_dlss_slGetPluginFunction, reinterpret_cast<void*>(hkdlss_slGetPluginFunction));
 }
 
 // SL DLSSG
@@ -2331,20 +2447,7 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
 void StreamlineHooks::unhookDlssg()
 {
     LOG_FUNC();
-
-    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-
-    if (o_dlssg_slGetPluginFunction)
-        DetourDetach(&(PVOID&) o_dlssg_slGetPluginFunction, hkdlssg_slGetPluginFunction);
-
-    auto detourResult = DetourTransactionCommit();
-    if (detourResult != NO_ERROR)
-    {
-        LOG_ERROR("Failed to unhook DLSSG: {:X}", detourResult);
-        o_dlssg_slGetPluginFunction = nullptr;
-    }
+    UnhookPlugin(g_dlssgPlugin, o_dlssg_slGetPluginFunction, reinterpret_cast<void*>(hkdlssg_slGetPluginFunction));
 }
 
 void StreamlineHooks::hookDlssg(HMODULE slDlssg)
@@ -2362,28 +2465,8 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
     // The game's copy or the driver's OTA one; both come through here.
     MfgUnlock::OnStreamlinePluginLoaded(slDlssg);
 
-    if (o_dlssg_slGetPluginFunction)
-        unhookDlssg();
-
-    o_dlssg_slGetPluginFunction =
-        reinterpret_cast<PFN_slGetPluginFunction>(KernelBaseProxy::GetProcAddress_()(slDlssg, "slGetPluginFunction"));
-
-    if (o_dlssg_slGetPluginFunction != nullptr)
-    {
-        LOG_TRACE("Hooking slGetPluginFunction in sl.dlssg");
-        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-
-        DetourAttach(&(PVOID&) o_dlssg_slGetPluginFunction, hkdlssg_slGetPluginFunction);
-
-        auto detourResult = DetourTransactionCommit();
-        if (detourResult != NO_ERROR)
-        {
-            LOG_ERROR("Failed to hook DLSSG: {:X}", detourResult);
-            o_dlssg_slGetPluginFunction = nullptr;
-        }
-    }
+    HookPlugin(g_dlssgPlugin, slDlssg, o_dlssg_slGetPluginFunction,
+               reinterpret_cast<void*>(hkdlssg_slGetPluginFunction));
 }
 
 // Local SL DLSSG
@@ -2391,18 +2474,8 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
 void StreamlineHooks::unhookLocalDlssg()
 {
     LOG_FUNC();
-
-    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-
-    if (o_local_dlssg_slGetPluginFunction)
-    {
-        DetourDetach(&(PVOID&) o_local_dlssg_slGetPluginFunction, hklocal_dlssg_slGetPluginFunction);
-        o_local_dlssg_slGetPluginFunction = nullptr;
-    }
-
-    DetourTransactionCommit();
+    UnhookPlugin(g_localDlssgPlugin, o_local_dlssg_slGetPluginFunction,
+                 reinterpret_cast<void*>(hklocal_dlssg_slGetPluginFunction));
 }
 
 void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
@@ -2417,23 +2490,8 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
         return;
     }
 
-    if (o_local_dlssg_slGetPluginFunction)
-        unhookLocalDlssg();
-
-    o_local_dlssg_slGetPluginFunction =
-        reinterpret_cast<PFN_slGetPluginFunction>(KernelBaseProxy::GetProcAddress_()(slDlssg, "slGetPluginFunction"));
-
-    if (o_local_dlssg_slGetPluginFunction != nullptr)
-    {
-        LOG_TRACE("Hooking slGetPluginFunction in local sl.dlssg");
-        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-
-        DetourAttach(&(PVOID&) o_local_dlssg_slGetPluginFunction, hklocal_dlssg_slGetPluginFunction);
-
-        DetourTransactionCommit();
-    }
+    HookPlugin(g_localDlssgPlugin, slDlssg, o_local_dlssg_slGetPluginFunction,
+               reinterpret_cast<void*>(hklocal_dlssg_slGetPluginFunction));
 }
 
 // SL REFLEX
@@ -2441,23 +2499,7 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
 void StreamlineHooks::unhookReflex()
 {
     LOG_FUNC();
-
-    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-
-    if (o_reflex_slGetPluginFunction)
-        DetourDetach(&(PVOID&) o_reflex_slGetPluginFunction, hkreflex_slGetPluginFunction);
-
-    auto detourResult = DetourTransactionCommit();
-    if (detourResult != NO_ERROR)
-    {
-        LOG_ERROR("Failed to unhook Reflex: {:X}", detourResult);
-    }
-    else
-    {
-        o_reflex_slGetPluginFunction = nullptr;
-    }
+    UnhookPlugin(g_reflexPlugin, o_reflex_slGetPluginFunction, reinterpret_cast<void*>(hkreflex_slGetPluginFunction));
 }
 
 void StreamlineHooks::hookReflex(HMODULE slReflex)
@@ -2472,28 +2514,8 @@ void StreamlineHooks::hookReflex(HMODULE slReflex)
         return;
     }
 
-    if (o_reflex_slGetPluginFunction)
-        unhookReflex();
-
-    o_reflex_slGetPluginFunction =
-        reinterpret_cast<PFN_slGetPluginFunction>(KernelBaseProxy::GetProcAddress_()(slReflex, "slGetPluginFunction"));
-
-    if (o_reflex_slGetPluginFunction != nullptr)
-    {
-        LOG_TRACE("Hooking slGetPluginFunction in sl.reflex");
-        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-
-        DetourAttach(&(PVOID&) o_reflex_slGetPluginFunction, hkreflex_slGetPluginFunction);
-
-        auto detourResult = DetourTransactionCommit();
-        if (detourResult != NO_ERROR)
-        {
-            LOG_ERROR("Failed to hook Reflex: {:X}", detourResult);
-            o_reflex_slGetPluginFunction = nullptr;
-        }
-    }
+    HookPlugin(g_reflexPlugin, slReflex, o_reflex_slGetPluginFunction,
+               reinterpret_cast<void*>(hkreflex_slGetPluginFunction));
 }
 
 // SL PCL
@@ -2501,23 +2523,7 @@ void StreamlineHooks::hookReflex(HMODULE slReflex)
 void StreamlineHooks::unhookPcl()
 {
     LOG_FUNC();
-
-    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-
-    if (o_pcl_slGetPluginFunction)
-        DetourDetach(&(PVOID&) o_pcl_slGetPluginFunction, hkpcl_slGetPluginFunction);
-
-    auto detourResult = DetourTransactionCommit();
-    if (detourResult != NO_ERROR)
-    {
-        LOG_ERROR("Failed to unhook PCL: {:X}", detourResult);
-    }
-    else
-    {
-        o_pcl_slGetPluginFunction = nullptr;
-    }
+    UnhookPlugin(g_pclPlugin, o_pcl_slGetPluginFunction, reinterpret_cast<void*>(hkpcl_slGetPluginFunction));
 }
 
 void StreamlineHooks::hookPcl(HMODULE slPcl)
@@ -2532,28 +2538,7 @@ void StreamlineHooks::hookPcl(HMODULE slPcl)
         return;
     }
 
-    if (o_pcl_slGetPluginFunction)
-        unhookPcl();
-
-    o_pcl_slGetPluginFunction =
-        reinterpret_cast<PFN_slGetPluginFunction>(KernelBaseProxy::GetProcAddress_()(slPcl, "slGetPluginFunction"));
-
-    if (o_pcl_slGetPluginFunction != nullptr)
-    {
-        LOG_TRACE("Hooking slGetPluginFunction in sl.pcl");
-        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-
-        DetourAttach(&(PVOID&) o_pcl_slGetPluginFunction, hkpcl_slGetPluginFunction);
-
-        auto detourResult = DetourTransactionCommit();
-        if (detourResult != NO_ERROR)
-        {
-            LOG_ERROR("Failed to hook PCL: {:X}", detourResult);
-            o_pcl_slGetPluginFunction = nullptr;
-        }
-    }
+    HookPlugin(g_pclPlugin, slPcl, o_pcl_slGetPluginFunction, reinterpret_cast<void*>(hkpcl_slGetPluginFunction));
 }
 
 // SL COMMON
@@ -2562,23 +2547,14 @@ void StreamlineHooks::unhookCommon()
 {
     LOG_FUNC();
 
-    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
+    const bool hooked = o_common_slGetPluginFunction != nullptr;
+    UnhookPlugin(g_commonPlugin, o_common_slGetPluginFunction, reinterpret_cast<void*>(hkcommon_slGetPluginFunction));
 
-    if (o_common_slGetPluginFunction)
-        DetourDetach(&(PVOID&) o_common_slGetPluginFunction, hkcommon_slGetPluginFunction);
-
-    auto detourResult = DetourTransactionCommit();
-    if (detourResult != NO_ERROR)
-    {
-        LOG_ERROR("Failed to unhook Common: {:X}", detourResult);
-    }
-    else
+    // The system caps pointers belong to that copy of sl.common
+    if (hooked && o_common_slGetPluginFunction == nullptr)
     {
         systemCaps = nullptr;
         systemCapsSl15 = nullptr;
-        o_common_slGetPluginFunction = nullptr;
     }
 }
 
@@ -2594,28 +2570,14 @@ void StreamlineHooks::hookCommon(HMODULE slCommon)
         return;
     }
 
-    if (o_common_slGetPluginFunction)
-        unhookCommon();
-
-    o_common_slGetPluginFunction =
-        reinterpret_cast<PFN_slGetPluginFunction>(KernelBaseProxy::GetProcAddress_()(slCommon, "slGetPluginFunction"));
-
-    if (o_common_slGetPluginFunction != nullptr)
-    {
-        LOG_TRACE("Hooking slGetPluginFunction in sl.common");
-        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-
-        DetourAttach(&(PVOID&) o_common_slGetPluginFunction, hkcommon_slGetPluginFunction);
-
-        auto detourResult = DetourTransactionCommit();
-        if (detourResult != NO_ERROR)
-        {
-            LOG_ERROR("Failed to hook Common: {:X}", detourResult);
-            o_common_slGetPluginFunction = nullptr;
-        }
-    }
+    // The system caps pointers belong to one copy of sl.common
+    HookPlugin(g_commonPlugin, slCommon, o_common_slGetPluginFunction,
+               reinterpret_cast<void*>(hkcommon_slGetPluginFunction),
+               []
+               {
+                   systemCaps = nullptr;
+                   systemCapsSl15 = nullptr;
+               });
 }
 
 bool StreamlineHooks::isInterposerHooked() { return o_slInit != nullptr || o_slInit_sl1 != nullptr; }

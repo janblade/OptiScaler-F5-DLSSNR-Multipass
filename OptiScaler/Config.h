@@ -245,6 +245,7 @@ class Config
     CustomOptional<bool> LogToDebug { false };
     CustomOptional<bool> LogToNGX { false };
     CustomOptional<bool> D3D12Dred { false }; // [Log] D3D12 device-removed breadcrumbs on the D3D11 bridge's device
+    CustomOptional<bool> CrashDump { false }; // [Log] write OptiScaler_crash.dmp when the game crashes (read once at start)
     CustomOptional<bool> OpenConsole { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
     CustomOptional<int> LogLevel { 0 };

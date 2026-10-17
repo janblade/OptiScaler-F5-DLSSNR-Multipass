@@ -104,7 +104,7 @@ void OnDeviceReleasedVulkan(VkDevice device);
 
 struct Status
 {
-    Decision decision = Decision::NoF5Low;
+    Decision decision = Decision::NoF5Low; // as the menu shows it (ShownDecision), not always the one the code runs on
     const char* path = ""; // plain words for the method in use, empty unless decision is Run
     bool hasLatency = false;
     float latencyMs = 0.0f; // the game's simulation start to the end of the GPU work, from GetLatency

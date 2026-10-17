@@ -115,6 +115,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
         }
 
         _producer = std::move(fresh);
+        ApplyMotionProfile();
         LOG_INFO("{}: optical flow and trust mask ready{} (in {:.1f} ms, on the present thread)", _tag, _readyNote,
                  Util::MillisecondsNow() - initStart);
     }
@@ -277,8 +278,48 @@ void NativeDriver::DrawStatus()
     }
 }
 
+void NativeDriver::ApplyMotionProfile()
+{
+    if (!_producer)
+        return;
+
+    auto config = Config::Instance();
+    const auto profile = config->DlssNrNativeMotionProfile.value_or_default();
+    const std::string custom = config->DlssNrNativeMotionProfileCustom.value_or_default();
+    native::motion::ApplyProfile(profile, custom, _producer->Flow()->Tuning(), _producer->Trust()->Tuning());
+    LOG_INFO("{}: motion profile {}", _tag, native::motion::ProfileIniText(profile));
+}
+
 void NativeDriver::DrawFlowTuning()
 {
+    using native::motion::Profile;
+    auto config = Config::Instance();
+
+    // The profile can be picked before a mode runs: it is applied when the motion estimate starts
+    const Profile current = config->DlssNrNativeMotionProfile.value_or_default();
+    ImGui::SetNextItemWidth(220.0f);
+
+    if (ImGui::BeginCombo("Motion profile##motionprofile", native::motion::ProfileMenuName(current)))
+    {
+        for (const Profile profile : native::motion::kAllProfiles)
+        {
+            if (!native::motion::ProfileOffered(profile))
+                continue;
+
+            if (ImGui::Selectable(native::motion::ProfileMenuName(profile), profile == current) && profile != current)
+            {
+                config->DlssNrNativeMotionProfile = profile;
+                ApplyMotionProfile();
+            }
+        }
+
+        ImGui::EndCombo();
+    }
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Settings of the motion estimate for a kind of game. Default suits most games. "
+                                "Moving a control under Flow tuning saves your values as Custom, kept for this game.");
+
     // Always shown and open on Optical F5Low's page; the settings live in the running motion estimate, so there is
     // nothing to tune until a mode runs.
     if (!ImGui::TreeNodeEx("Flow tuning (to compare, applies at once)##flowtuning", ImGuiTreeNodeFlags_DefaultOpen))
@@ -292,6 +333,10 @@ void NativeDriver::DrawFlowTuning()
     }
 
     auto& tune = _producer->Flow()->Tuning();
+    auto& guides = _producer->Trust()->Tuning();
+    // What the controls below start from, to tell when one of them moved
+    const std::string before = native::motion::WriteKnobs(tune, guides);
+
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
     ImGui::SetNextItemWidth(160.0f);
@@ -301,7 +346,6 @@ void NativeDriver::DrawFlowTuning()
     ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
     ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
 
-    auto& guides = _producer->Trust()->Tuning();
     ImGui::Checkbox("Sharp motion at outlines (uses depth)##flowguidesurface", &guides.guideSurface);
 
     if (ImGui::IsItemHovered())
@@ -370,7 +414,20 @@ void NativeDriver::DrawFlowTuning()
     ImGui::SameLine();
 
     if (ImGui::Button("Defaults##flowdefaults"))
-        tune = OpticalFlowDx12::Settings {};
+        native::motion::ApplyProfile(Profile::Default, {}, tune, guides);
+
+    // A control moved: the values are the Custom profile now (saved with the ini), or Default again when they are its
+    // values
+    if (const std::string after = native::motion::WriteKnobs(tune, guides); after != before)
+    {
+        OpticalFlowDx12::Settings flowDefaults;
+        TrustMaskDx12::Settings trustDefaults;
+        const bool isDefault = after == native::motion::WriteKnobs(flowDefaults, trustDefaults);
+        config->DlssNrNativeMotionProfile = isDefault ? Profile::Default : Profile::Custom;
+
+        if (!isDefault)
+            config->DlssNrNativeMotionProfileCustom = after;
+    }
 
     ImGui::TreePop();
 }

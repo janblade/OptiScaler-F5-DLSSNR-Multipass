@@ -22,8 +22,9 @@
 //   OptiScaler\motion\SceneCut_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
 //
 // Arguments: key=value settings of the flow and the trust mask (see main), scene=<name> to run one scene, depth=0/1 to
-// run only without / with depth, dump=<dir> to write each run's last frame there (picture, guide, truth, layer, mask). No
-// arguments: every scene with and without depth under the default settings.
+// run only without / with depth, profile=<name> to start from a motion profile (before any key=value), dump=<dir> to
+// write each run's last frame there (picture, guide, truth, layer, mask). No arguments: every scene with and without
+// depth under the default settings.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -43,6 +44,7 @@
 
 #include "../OptiScaler/motion/OpticalFlow_Dx12.h"
 #include "../OptiScaler/motion/TrustMask_Dx12.h"
+#include "../OptiScaler/motion/MotionProfiles.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -597,38 +599,11 @@ struct Result
     double False() const { return others ? (double) othersHit / others : 0.0; }
 };
 
-// key=value settings for the flow (OpticalFlowDx12::Settings) and the trust mask (TrustMaskDx12::Settings); false for
-// an unknown key.
+// key=value settings for the flow (OpticalFlowDx12::Settings) and the trust mask (TrustMaskDx12::Settings), the same
+// keys and bounds as a motion profile (motion/MotionProfiles.h); false for an unknown key.
 bool SetKnob(const std::string& key, float v, OpticalFlowDx12::Settings& f, TrustMaskDx12::Settings& t)
 {
-    if (key == "radius") f.radius = (int) v;
-    else if (key == "coarse") f.coarseRadius = (int) v;
-    else if (key == "lambda") f.lambda = v;
-    else if (key == "history") f.useHistory = v != 0;
-    else if (key == "cells") f.coarseCells = (int) v;
-    else if (key == "smooth") f.smoothRadius = (int) v;
-    else if (key == "knee") f.confidenceKnee = v;
-    else if (key == "dmatch") f.depthMatching = v != 0;
-    else if (key == "global") f.globalCandidate = v != 0;
-    else if (key == "inverse") f.inverseRefinement = v != 0;
-    else if (key == "zero") f.zeroMargin = v;
-    else if (key == "zeroreach") f.zeroReach = (int) v;
-    else if (key == "still") f.stillFrames = (int) v;
-    else if (key == "stilleps") f.stillEpsilon = v;
-    else if (key == "stillmargin") f.stillMargin = v;
-    else if (key == "look") f.lookWeights = v != 0;
-    else if (key == "lookrange") f.lookRange = v;
-    else if (key == "lookdist") f.lookDistance = v;
-    else if (key == "depthtol") t.depthTolerance = v;
-    else if (key == "flowtol") t.flowTolerance = v;
-    else if (key == "lumatol") t.lumaTolerance = v;
-    else if (key == "revealtol") t.revealTolerance = v;
-    else if (key == "decay") t.decay = v;
-    else if (key == "surface") t.guideSurface = v != 0;
-    else if (key == "uncover") t.uncoverBackground = v != 0;
-    else if (key == "reach") t.uncoverReach = v;
-    else return false;
-    return true;
+    return native::motion::SetKnob(key, v, f, t);
 }
 
 Result Run(Gpu& gpu, const Scene& s, bool depthOn, const OpticalFlowDx12::Settings& fs, const TrustMaskDx12::Settings& ts)
@@ -830,6 +805,12 @@ int main(int argc, char** argv)
             (value != 0 ? onlyDepth : onlyNoDepth) = true;
         else if (key == "dump")
             dumpDir = text;
+        else if (key == "profile")
+        {
+            // A profile's settings (motion/MotionProfiles.h); key=value arguments after it change them further
+            native::motion::ApplyProfile(native::motion::ProfileFromIniText(text), {}, fs, ts);
+            knobs += " " + arg;
+        }
         else if (key == "scene")
         {
             for (int g = 0; g < kGenres; ++g)

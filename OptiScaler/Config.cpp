@@ -549,6 +549,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrNativeDepthWarmupFrames.set_from_config(readUInt("DlssNr", "NativeDepthWarmupFrames"));
             DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
             DlssNrNativeDebugView.set_from_config(readBool("DlssNr", "NativeDebugView"));
+            DlssNrNativeMotionProfile.set_from_config(
+                readString("DlssNr", "NativeMotionProfile", true).transform(native::motion::ProfileFromIniText));
+            DlssNrNativeMotionProfileCustom.set_from_config(readString("DlssNr", "NativeMotionProfileCustom"));
             DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
             DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
             DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
@@ -1634,6 +1637,10 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrNativeDepthOverlay.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDebugView",
                  GetBoolValue(Instance()->DlssNrNativeDebugView.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeMotionProfile",
+                 native::motion::ProfileIniText(Instance()->DlssNrNativeMotionProfile.value_or_default()));
+    ini.SetValue("DlssNr", "NativeMotionProfileCustom",
+                 Instance()->DlssNrNativeMotionProfileCustom.value_for_config_or("").c_str());
     ini.SetValue("DlssNr", "NativeMotion", GetBoolValue(Instance()->DlssNrNativeMotion.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeUpscaler",

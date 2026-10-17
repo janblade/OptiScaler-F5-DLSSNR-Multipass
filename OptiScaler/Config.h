@@ -3,6 +3,7 @@
 #include "SysUtils.h"
 #include "State.h"
 #include "native/NativeLowLatencyRule.h"
+#include "motion/MotionProfiles.h"
 
 #include <optional>
 #include <filesystem>
@@ -676,6 +677,12 @@ class Config
     // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
     // overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
+    // NativeMotionProfile: the Optical F5Low page's "Motion profile", a named set of the motion estimate's knobs for a
+    // kind of game (motion/MotionProfiles.h): default, anime, realistic, sportswide, sportspan or custom. Custom is
+    // NativeMotionProfileCustom, the Flow tuning menu's values as a key=value list (written when a Flow tuning control
+    // moves). Applied when the motion estimate starts and when the menu changes it.
+    CustomOptional<native::motion::Profile> DlssNrNativeMotionProfile { native::motion::Profile::Default };
+    CustomOptional<std::string> DlssNrNativeMotionProfileCustom { std::string() };
     // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at
     // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See native/NativeDriverDx12.h and

@@ -514,16 +514,13 @@ bool Config::Reload(std::filesystem::path iniPath)
                 const auto flattenStrength = readFloat("DlssNr", "InputFlattenStrength");
                 const auto structure = readBool("DlssNr", "InputStructureHint");
                 const auto structureStrength = readFloat("DlssNr", "InputStructureStrength");
-                const auto texture = readBool("DlssNr", "InputTextureHint");
-                const auto textureStrength = readFloat("DlssNr", "InputTextureStrength");
                 DlssNrInputStyleFacesOnly.set_from_config(readBool("DlssNr", "InputStyleFacesOnly"));
 
                 const bool newKeys = flatten.has_value() || flattenStrength.has_value() || structure.has_value() ||
-                                     structureStrength.has_value() || texture.has_value() ||
-                                     textureStrength.has_value();
+                                     structureStrength.has_value();
                 const auto single = readUInt("DlssNr", "InputStyle");
 
-                if (!newKeys && single.has_value() && single.value() >= 1u && single.value() <= 4u)
+                if (!newKeys && single.has_value() && single.value() >= 1u && single.value() <= 3u)
                 {
                     // An ini from before the card: its one style, at its strength
                     const float strength = readFloat("DlssNr", "InputStyleStrength").value_or(1.0f);
@@ -538,16 +535,12 @@ bool Config::Reload(std::filesystem::path iniPath)
                     DlssNrInputFlattenStrength.set_from_config(flattenStrength);
                     DlssNrInputStructureHint.set_from_config(structure);
                     DlssNrInputStructureStrength.set_from_config(structureStrength);
-                    DlssNrInputTextureHint.set_from_config(texture);
-                    DlssNrInputTextureStrength.set_from_config(textureStrength);
                 }
 
                 if (DlssNrInputFlattenStrength.has_value())
                     DlssNrInputFlattenStrength = std::clamp(DlssNrInputFlattenStrength.value(), 0.0f, 1.0f);
                 if (DlssNrInputStructureStrength.has_value())
                     DlssNrInputStructureStrength = std::clamp(DlssNrInputStructureStrength.value(), 0.0f, 3.0f);
-                if (DlssNrInputTextureStrength.has_value())
-                    DlssNrInputTextureStrength = std::clamp(DlssNrInputTextureStrength.value(), 0.0f, 2.0f);
             }
             DlssNrSpatialCompression.set_from_config(readBool("DlssNr", "SpatialCompression"));
             DlssNrSpatialCenterX.set_from_config(readFloat("DlssNr", "SpatialCenterX"));
@@ -1628,10 +1621,6 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrInputStructureHint.value_for_config()).c_str());
     ini.SetValue("DlssNr", "InputStructureStrength",
                  GetFloatValue(Instance()->DlssNrInputStructureStrength.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "InputTextureHint",
-                 GetBoolValue(Instance()->DlssNrInputTextureHint.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "InputTextureStrength",
-                 GetFloatValue(Instance()->DlssNrInputTextureStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "InputStyleFacesOnly",
                  GetBoolValue(Instance()->DlssNrInputStyleFacesOnly.value_for_config()).c_str());
 

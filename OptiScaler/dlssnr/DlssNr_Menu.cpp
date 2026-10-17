@@ -3266,7 +3266,7 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
     // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the picture the model is
     // shown, as one card. One way to flatten first (watercolour and smooth canvas do the same job, so a choice of one),
-    // then the two hints as checkboxes; each style's strength shows only while it is on. Its own section, open at start:
+    // then the structure hint as a checkbox; each style's strength shows only while it is on. Its own section, open at start:
     // with the modern style a top-level section is a card.
     if (auto card = ScopedCollapsingHeader("Input style (experimental)", ImGuiTreeNodeFlags_DefaultOpen);
         card.IsHeaderOpen())
@@ -3276,12 +3276,12 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
         ImGui::TextDisabled("Restyles the picture NR is shown; the styles combine.");
         HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed. "
-                   "The styles combine and run in this order: flatten, structure hint, texture hint.\nWith a composed "
+                   "The styles combine and run in this order: flatten, then structure hint.\nWith a composed "
                    "curve only what NR paints differently shows; with a replace curve you see NR's painting as it is "
                    "(Restore Sharpness is off while a style is on, or it would put the game's texture back).\nEach "
                    "style is one more pass before the model runs. No effect above 100% Model resolution.");
 
-        // A strength slider for a style that is on, with its Reset (the style's default) beside it
+        // A strength slider for a style that is on, with its Reset (1.0) beside it
         const auto strength = [&](const char* label, const char* resetId, float& value, uint32_t style)
         {
             const float most = DlssNrInput::MostStrength(style);
@@ -3298,7 +3298,7 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
 
             if (ImGui::SmallButton(resetId))
             {
-                value = DlssNrInput::DefaultStrength(style);
+                value = 1.0f;
                 changed = true;
             }
 
@@ -3329,16 +3329,6 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         if (styles.structure)
             strength("Strength##inputstructurestrength", "Reset##inputstructurestrength", styles.structureStrength,
                      DlssNrInput::kStyleStructureHint);
-
-        changed |= ImGui::Checkbox("Texture hint##inputtexture", &styles.texture);
-        HelpMarker("Lays a faint fibre pattern (linen, canvas) on flat fills of one colour only, stuck to the surfaces, "
-                   "which NR turns into a visible material texture: for cartoon and cel-shaded pictures; a realistic "
-                   "picture is left nearly alone. Strength 0 to 2 (0.5 default).\nD3D12 only "
-                   "for now: NR on native Vulkan leaves it out (the Vulkan-to-D3D12 bridge has it).");
-
-        if (styles.texture)
-            strength("Strength##inputtexturestrength", "Reset##inputtexturestrength", styles.textureStrength,
-                     DlssNrInput::kStyleTextureHint);
 
         if (DlssNrInput::Any(styles))
         {

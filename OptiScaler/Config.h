@@ -517,10 +517,7 @@ class Config
     // kept), 2 = smooth canvas (a cross bilateral filter: skin like an untextured old-game surface, contours kept);
     // its strength blends with the picture as it was (0..1).
     // DlssNrInputStructureHint: local contrast raised on luminance, CAS-like, overshoot bounded; strength 0..3.
-    // DlssNrInputTextureHint: a faint fibre pattern on flat areas only, carried along the motion vectors so it stays on
-    // the surfaces; NR turns it into a visible material texture (D3D12 only); strength 0..2, default 0.5. Flat means a
-    // fill of one colour (cel-shaded surfaces, plain panels): a realistic picture is left nearly alone.
-    // DlssNrInputStyleFacesOnly: all of them only where the colour looks like skin (the same colour test as
+    // DlssNrInputStyleFacesOnly: both only where the colour looks like skin (the same colour test as
     // SkinProtection). The resolve compares the answer against the same restyled picture, so Composed hands back only
     // what the model painted; Replace shows the model's painting as it is. Skipped at model resolution above 100% and on
     // the deferred path. The ini also keeps the old single InputStyle / InputStyleStrength (read when none of the new
@@ -529,8 +526,6 @@ class Config
     CustomOptional<float> DlssNrInputFlattenStrength { 1.0f };
     CustomOptional<bool> DlssNrInputStructureHint { false };
     CustomOptional<float> DlssNrInputStructureStrength { 1.0f };
-    CustomOptional<bool> DlssNrInputTextureHint { false };
-    CustomOptional<float> DlssNrInputTextureStrength { 0.5f };
     CustomOptional<bool> DlssNrInputStyleFacesOnly { false };
 
     DlssNrInput::Styles DlssNrInputStyles() const
@@ -540,8 +535,6 @@ class Config
         s.flattenStrength = DlssNrInputFlattenStrength.value_or_default();
         s.structure = DlssNrInputStructureHint.value_or_default();
         s.structureStrength = DlssNrInputStructureStrength.value_or_default();
-        s.texture = DlssNrInputTextureHint.value_or_default();
-        s.textureStrength = DlssNrInputTextureStrength.value_or_default();
         s.facesOnly = DlssNrInputStyleFacesOnly.value_or_default();
         return s;
     }
@@ -552,8 +545,6 @@ class Config
         DlssNrInputFlattenStrength = s.flattenStrength;
         DlssNrInputStructureHint = s.structure;
         DlssNrInputStructureStrength = s.structureStrength;
-        DlssNrInputTextureHint = s.texture;
-        DlssNrInputTextureStrength = s.textureStrength;
         DlssNrInputStyleFacesOnly = s.facesOnly;
     }
 

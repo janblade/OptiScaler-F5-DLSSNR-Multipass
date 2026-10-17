@@ -2173,23 +2173,12 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // picture once it is final (after the shrink and the edge packing), each style that is on in turn, each on the one
     // before's result, alternating between two images. The last result stands in for the model input and the resolve's
     // proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back only what the model painted on
-    // top of it. Skipped above 100% model resolution, where the resolve compares against the full proxy instead. The
-    // texture hint is left out here: it keeps its pattern's coordinates from frame to frame, which only D3D12 holds so far.
+    // top of it. Skipped above 100% model resolution, where the resolve compares against the full proxy instead.
     bool inputRestyled = false;
     {
         const DlssNrInput::Styles styles = cfg.DlssNrInputStyles();
-        DlssNrInput::Pass all[3], passes[3];
-        const int allCount = DlssNrInput::Passes(styles, all);
-        int passCount = 0;
-        bool hintLeftOut = false;
-
-        for (int k = 0; k < allCount; ++k)
-        {
-            if (all[k].style == DlssNrInput::kStyleTextureHint)
-                hintLeftOut = true;
-            else
-                passes[passCount++] = all[k];
-        }
+        DlssNrInput::Pass passes[2];
+        const int passCount = DlssNrInput::Passes(styles, passes);
 
         const char* skip = passCount == 0 ? nullptr : workScale > 1.0f ? "model resolution above 100%" : nullptr;
         int ran = 0;
@@ -2267,9 +2256,6 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (skip != nullptr)
             state += std::format("{}skipped ({})", ran > 0 ? "; then " : "", skip);
 
-        if (hintLeftOut)
-            state += std::format("{}texture hint left out (D3D12 only for now)", state.empty() ? "" : "; ");
-
         if (state != said)
         {
             said = state;
@@ -2277,7 +2263,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             if (ran > 0)
                 LOG_INFO("DLSS-NR Vulkan input style: {} ({}x{}{}{})", state, modelInput->width, modelInput->height,
                          styles.facesOnly ? ", faces only" : "", spatial ? ", edge-compressed picture" : "");
-            else if (!state.empty())
+            else if (skip != nullptr)
                 LOG_INFO("DLSS-NR Vulkan input style: {}", state);
             else
                 LOG_INFO("DLSS-NR Vulkan input style: off");

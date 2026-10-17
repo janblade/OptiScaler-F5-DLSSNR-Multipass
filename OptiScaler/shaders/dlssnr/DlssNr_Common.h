@@ -32,26 +32,19 @@ enum DlssNrMode : uint32_t
     DlssNrMode_AutoExposure = 13, // the 64x64 meter's tile means -> one exposure value, 1x1
     DlssNrMode_Watercolor = 14,   // experimental input style: the model's picture -> a Kuwahara "watercolour" of it
     DlssNrMode_StructureHint = 15, // experimental input style: the model's picture with its local contrast raised
-    DlssNrMode_SmoothCanvas = 16,  // experimental input style: the model's picture through a cross bilateral filter
-    DlssNrMode_TextureHint = 17    // experimental input style: a faint fibre pattern on flat fills, carried by motion
+    DlssNrMode_SmoothCanvas = 16   // experimental input style: the model's picture through a cross bilateral filter
 };
 
-// An input style's number (DlssNr_InputStyles.h: 1..4) -> its pass and its name for the log. The pass reads its constants' SkinProtection as
+// An input style's number (DlssNr_InputStyles.h: 1..3) -> its pass and its name for the log. The pass reads its constants' SkinProtection as
 // "faces only".
 inline DlssNrMode StyleMode(uint32_t style)
 {
-    return style == 2u   ? DlssNrMode_StructureHint
-           : style == 3u ? DlssNrMode_SmoothCanvas
-           : style == 4u ? DlssNrMode_TextureHint
-                         : DlssNrMode_Watercolor;
+    return style == 2u ? DlssNrMode_StructureHint : style == 3u ? DlssNrMode_SmoothCanvas : DlssNrMode_Watercolor;
 }
 
 inline const char* StyleName(uint32_t style)
 {
-    return style == 2u   ? "structure hint"
-           : style == 3u ? "smooth canvas"
-           : style == 4u ? "texture hint"
-                         : "watercolour";
+    return style == 2u ? "structure hint" : style == 3u ? "smooth canvas" : "watercolour";
 }
 
 // A successful sample may be reused only on the immediately following frame.
@@ -356,13 +349,6 @@ struct alignas(256) DlssNrConstants
     // Resolve only: 1 when gOriginal is the game's own texture rather than the encode's kept copy (the colour cannot
     // take a UAV, so the resolve writes into the copy instead), and so still carries InputEncoding's encoding.
     uint32_t OriginalIsGameColour;
-    // Texture hint (DlssNrMode_TextureHint) only. HintMotionBaseX/Y: where the motion texture's valid region starts
-    // (GuideWidth x GuideHeight from there; MvScaleX/Y take its vectors to pixels of the picture). HintReset: 1 starts
-    // the pattern's surface coordinates over at every pixel (no last frame of them: the first frame, a new size, a
-    // reset of the model's history).
-    uint32_t HintMotionBaseX;
-    uint32_t HintMotionBaseY;
-    uint32_t HintReset;
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 

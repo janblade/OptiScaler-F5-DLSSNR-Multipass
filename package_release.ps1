@@ -177,24 +177,15 @@ if ($IncludeDlssFrameGeneration) {
         -ArchivePath $StreamlineArchive -AcceptNvidiaLicenses
 }
 
-# Logging on, in the release only.
-#
-# Upstream ships LogToFile=auto, which resolves to false, and the source ini is theirs -- changing it
-# in the repo would put a log-behaviour change into a PR that is about neural rendering. But this is
-# an experimental build whose notes ask people to attach OptiScaler.log, and the first release shipped
-# asking for a file that was never written.
-#
-# Info rather than Trace: every line explaining why the pass did not start is Info or worse, so it
-# answers the common report at almost no cost. Crash reports need Trace and synchronous writes, and
-# the notes say so rather than everyone paying for it.
+# No logging and no crash dumps by default: the ini ships LogToFile=auto, LogLevel=auto and CrashDump=auto (all off). A
+# report needs LogToFile=true (and CrashDump=true for a crash); the install notes and the issue template say how.
 $iniPath = "$stage\OptiScaler.ini"
 $ini = Get-Content $iniPath -Raw
-$ini = $ini -replace '(?m)^LogToFile=auto', 'LogToFile=true'
-$ini = $ini -replace '(?m)^LogLevel=auto', 'LogLevel=2'
-Set-Content $iniPath $ini -Encoding utf8 -NoNewline
-
-$check = Select-String -Path $iniPath -Pattern '^LogToFile=|^LogLevel=' | ForEach-Object { $_.Line }
+$check = Select-String -Path $iniPath -Pattern '^LogToFile=|^LogLevel=|^CrashDump=' | ForEach-Object { $_.Line }
 Write-Host "log settings: $($check -join ', ')"
+foreach ($line in $check) {
+    if ($line -notmatch '=auto$') { throw "REFUSING: the release ini must ship logging and crash dumps off: $line" }
+}
 
 $targetProcess = Select-String -Path $iniPath -Pattern '^TargetProcessName=' | Select-Object -First 1
 if ($targetProcess.Line -ne 'TargetProcessName=auto') {

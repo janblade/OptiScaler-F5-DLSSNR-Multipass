@@ -1868,7 +1868,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
         PrepareLogger();
-        InstallCrashHandler();
+
+        // Off by default: a crash then leaves no file behind, and the game's own crash handling is untouched
+        if (Config::Instance()->CrashDump.value_or_default())
+            InstallCrashHandler();
 
         spdlog::warn("{0} loaded", VER_PRODUCT_NAME);
         spdlog::warn("---------------------------------");

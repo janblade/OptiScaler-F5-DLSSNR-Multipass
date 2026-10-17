@@ -8,6 +8,7 @@
 
 #include <dlssnr/DlssNr.h>
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/DlssNrVitReuse.h>
 #include <dlssnr/ResidualFg.h>
 #include <dlssnr/DlssNrDetailReuse.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
@@ -4763,16 +4764,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // and the frame slot (successfulDispatches counts NR frames and is constant across one frame's passes, so all passes compute on the
         // same frame and all reuse on the next; see DlssNrVitReuse.h for why the passes must not be offset)
         // While detail reuse runs, full frames are every other frame: a ViT slot keyed to them would compute only
-        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time. Also in a
-        // Vulkan game reaching this through the D3D12 bridge (IFeature_VkwDx12): Reuse bottleneck is off for Vulkan
-        // games, as on the native Vulkan path (the reused result flashed in dark scenes there).
+        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time.
         // The edit cache likewise: the model runs one frame in N.
-        const bool vitEveryFrame = reusePlan.active || cachePlan.runs || State::Instance().api == Vulkan;
+        // Copy mode (DlssNrVitReuse.h): the plain set always reuses through our own copy of the ViT output. A Vulkan game
+        // reaching this through the D3D12 bridge (IFeature_VkwDx12) uses it for the fp8 set too: on the native Vulkan path
+        // the kept result was overwritten between frames (dark scenes flashed), and the copy does not depend on it staying.
+        const bool vitEveryFrame = reusePlan.active || cachePlan.runs;
+        const unsigned copySets =
+            DlssNrVitReuse::kCopyPlain | (State::Instance().api == Vulkan ? DlssNrVitReuse::kCopyFp8 : 0u);
         DlssNrNative::BeginEvaluate(passFeature, passReset,
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
-                                    cfg.DlssNrKernelProfile.value_or_default(), true);
+                                    cfg.DlssNrKernelProfile.value_or_default(), copySets);
         result = g_nr.evaluate(
             cmdList, passFeature, g_nr.capabilityParams, passInput, modelDepth, spatial ? modelMotion : evalMotion,
             passOutput, modelWidth, modelHeight, evalGuideW, evalGuideH, evalMotionW, evalMotionH,

@@ -22,6 +22,7 @@
 #include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/DlssNrVitReuse.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 #include <dlssnr/DlssNr_VkExtensions.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
@@ -2312,13 +2313,18 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
         const auto tuning = Profiles::PassTuning(cfg, pass);
         void* const passFeature = pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass];
-        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp), so the kernel set shows. Reuse
-        // bottleneck is forced off on Vulkan (every = 1 on both kernel sets, whatever the ini says): with the ViT run skipped, its kept result was
-        // overwritten between frames there (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel
-        // was kept), by something outside the model's own launches. D3D12 keeps it. No command list: the kernel
-        // profiler is D3D12's.
-        DlssNrNative::BeginEvaluate(passFeature, passReset, 1u, 1u, (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull),
-                                    nullptr, false, false);
+        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp). Reuse bottleneck runs in copy mode
+        // on both kernel sets here: with the ViT run skipped, its kept result was overwritten between frames on Vulkan
+        // (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel was kept) by something outside the
+        // model's own launches, so the decoder gets our own copy, restored right before it reads it. While detail reuse
+        // runs the bottleneck is computed every time (as on D3D12). No command list: the kernel profiler is D3D12's.
+        const bool vitEveryFrame = reusePlan.active;
+        DlssNrNative::VkEvaluateDevice(g_vk.device, g_vk.physicalDevice);
+        DlssNrNative::BeginEvaluate(passFeature, passReset,
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
+                                    (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull), nullptr, false,
+                                    DlssNrVitReuse::kCopyPlain | DlssNrVitReuse::kCopyFp8);
         evaluated = g_vk.evaluate(
             (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
             &input->ngx, modelDepth, spatial ? modelMotion : reusePlan.motion, &answer->ngx, modelWidth, modelHeight,
@@ -2330,8 +2336,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
         if (DlssNrNative::EndEvaluate(nullptr))
-            LOG_WARN("DLSS-NR Vulkan: the model's kernel launches were not in the expected order; Reuse bottleneck "
-                     "is off for this session");
+            LOG_WARN("DLSS-NR Vulkan: Reuse bottleneck is {}", DlssNrNative::VitStatus());
         if (evaluated != 1)
             break;
         if (pass + 1 < runPasses)
@@ -2878,8 +2883,10 @@ void ShutdownVkForDevice(VkDevice device, const char* why)
         return;
 
     LOG_INFO("DLSS-NR Vulkan: {}; releasing the model and NGX first", why);
+    const VkDevice destroyed = g_vk.device;
     ShutdownVk(true);
-    // The model's kernels go with the device.
+    // Reuse bottleneck's own copy buffers and kernel are ours to destroy while the device is idle; the model's kernels go with the device.
+    DlssNrNative::VkDeviceDestroying(destroyed);
     DlssNrNative::VkDeviceLost();
 }
 

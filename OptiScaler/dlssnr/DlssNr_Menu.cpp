@@ -2715,29 +2715,22 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
     // One setting per kernel set: the fp8 kernels (NVIDIA's DLL and fp8-based builds) and the plain FP16 kernels (used by some modified DLSS-NR DLLs).
     // Only the one for the kernels actually running is used.
     const char* kernelSet = DlssNrNative::VitKernelSet();
-    // Forced off for Vulkan games, natively and through the D3D12 bridge (DlssNrFeature_Vk.cpp, DlssNr_Dx12.cpp): shown
-    // off and greyed out; the settings stay as they are for D3D12 games.
-    const bool vitReuseVk = DlssNr::IsRunningVk() || State::Instance().api == Vulkan;
-    ImGui::BeginDisabled(vitReuseVk);
-    bool vitReuse = !vitReuseVk && config->DlssNrVitEvery.value_or_default() > 1;
+    bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
     if (ImGui::Checkbox("Reuse bottleneck: FP8 kernels", &vitReuse))
         config->DlssNrVitEvery = vitReuse ? 2u : 1u;
     HelpMarker("Reuses the model's slowest-changing stage every other frame. Saves about a tenth of NR's GPU time; "
                "fast motion can look slightly softer. On by default.");
-    bool vitReusePlain = !vitReuseVk && config->DlssNrVitEveryPlain.value_or_default() > 1;
+    bool vitReusePlain = config->DlssNrVitEveryPlain.value_or_default() > 1;
     if (ImGui::Checkbox("Reuse bottleneck: plain FP16 kernels", &vitReusePlain))
         config->DlssNrVitEveryPlain = vitReusePlain ? 2u : 1u;
     HelpMarker("The same as above, used when the model runs the plain FP16 kernels (used by some modified DLSS-NR DLLs).\nOn by default.");
-    ImGui::EndDisabled();
     ImGui::Text("Kernel set in use: %s", kernelSet);
     bool detailReuse = config->DlssNrDetailReuse.value_or_default();
     const auto detailReuseStatus = !detailReuse            ? DlssNr::DetailReuseInfo {}
                                    : DlssNr::IsRunningVk() ? DlssNr::DetailReuseStatusVk()
                                                            : DlssNr::DetailReuseStatus();
     const bool detailReuseRunning = detailReuse && detailReuseStatus.active;
-    if (vitReuseVk)
-        ImGui::TextWrapped("Reuse bottleneck: off in Vulkan games (the reused result can flash in dark scenes)");
-    else if (detailReuseRunning)
+    if (detailReuseRunning)
         ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
     else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
         ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());

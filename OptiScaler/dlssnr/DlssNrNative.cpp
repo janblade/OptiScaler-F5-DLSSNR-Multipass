@@ -151,14 +151,11 @@ bool VitDrop(State&s,const NVAPI_CU_KERNEL_LAUNCH_PARAMS*k,NvU32 count,std::vect
  if(!k||!count||!s.vit.Evaluating())return false;
  const auto sigOf=[](const NVAPI_CU_KERNEL_LAUNCH_PARAMS&l){uint64_t h=1469598103934665603ull;const auto mix=[&](const void*p,size_t n){for(size_t i=0;i<n;++i){h^=((const unsigned char*)p)[i];h*=1099511628211ull;}};if(l.pParams)mix(l.pParams,l.paramSize);mix(&l.gridDim,sizeof l.gridDim);mix(&l.blockDim,sizeof l.blockDim);return h;};
  return s.vit.Split(k,count,[&](const NVAPI_CU_KERNEL_LAUNCH_PARAMS&l){auto it=s.vitRole.find(l.hFunction);return it==s.vitRole.end()?std::pair{DlssNrVitReuse::Role::None,DlssNrVitReuse::KernelSet::Unknown}:it->second;},sigOf,kept,gap,copy,copyAt,copyFrom);}
-// ViT reuse copy mode: record the save (the run's 2-D output into our buffer) or the restore (back into it). `end` is the run's last launch,
-// cc_vit_1d_repack_1d_to_2d: {u64 src, u64 dst, u32 rows, u32 cols}, the 2-D output = rows x cols tokens x 1024 channels x fp16, one fp16 pair
-// per thread (checked on 310.8 and 310.9 plain captures, both networks). That layout is checked against the launch's own geometry, and the
-// token count is capped, before anything is written into the DLL's memory. Returns why it could not, or nullptr.
+// ViT reuse copy mode: record the save (the run's 2-D output into our buffer) or the restore (back into it). `end` is the run's last launch;
+// DlssNrVitReuse::CheckOutput says where its 2-D output is and how big. Returns why it could not, or nullptr.
 const char* VitCopyRecord(State&s,ID3D12GraphicsCommandList*c,DlssNrVitReuse::Copy kind,const NVAPI_CU_KERNEL_LAUNCH_PARAMS&end){
- struct EndParams{uint64_t src,dst;uint32_t rows,cols;}e{};if(end.paramSize!=sizeof e||!end.pParams)return "unexpected parameters of the ViT run's last kernel";memcpy(&e,end.pParams,sizeof e);
- const uint64_t tokens=(uint64_t)e.rows*e.cols,threads=(uint64_t)end.gridDim.x*end.gridDim.y*end.gridDim.z*end.blockDim.x*end.blockDim.y*end.blockDim.z;
- if(!e.dst||(e.dst&15)||!tokens||tokens>16384||threads*2!=tokens*1024)return "unexpected size or place of the ViT output";const uint64_t bytes=tokens*1024*2;
+ struct{uint64_t dst;}e{};uint64_t bytes=0;const uint64_t threads=(uint64_t)end.gridDim.x*end.gridDim.y*end.gridDim.z*end.blockDim.x*end.blockDim.y*end.blockDim.z;
+ if(const char*why=DlssNrVitReuse::CheckOutput(end.pParams,end.paramSize,threads,s.vit.LastSet(),e.dst,bytes))return why;
  try{ComPtr<ID3D12Device>dev;Check(c->GetDevice(IID_PPV_ARGS(&dev)));auto&k=s.vitCopyFn[dev.Get()];if(k.failed)return "the copy kernel could not be loaded";
   if(!k.fn){k.device=dev;NVDX_ObjectHandle m=nullptr;if(!s.createModule||!s.createFunction||s.createModule(dev.Get(),DlssNrVitCopyKernel::fatbin,(NvU32)sizeof DlssNrVitCopyKernel::fatbin,&m)!=NVAPI_OK||s.createFunction(dev.Get(),m,"nr_vit_copy16",&k.fn)!=NVAPI_OK){if(m&&s.destroyModule)s.destroyModule(dev.Get(),m);k.fn=nullptr;k.failed=true;return "the copy kernel could not be loaded";}s.fnInfo[k.fn]=DlssNrKernelProfile::Classify("nr_vit_copy16");}
   const NVDX_ObjectHandle fn=k.fn;auto&v=s.vitCopies[{dev.Get(),s.vit.Feature()}];
@@ -246,7 +243,7 @@ void SetPrecision(unsigned precision){auto&s=S();std::lock_guard<std::recursive_
 }
 void SetEnabled(bool on){SetPrecision(on?4u:0u);}
 bool IsActive(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.enabled&&s.active&&!s.restartRequired;}
-void BeginEvaluate(const void*feature,bool reset,unsigned every,unsigned everyPlain,long long slot,ID3D12GraphicsCommandList*cmd,bool profile,bool copyPlain){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.vit.Begin(feature,reset,every,slot,everyPlain,copyPlain);s.prof.Begin(cmd,profile);}
+void BeginEvaluate(const void*feature,bool reset,unsigned every,unsigned everyPlain,long long slot,ID3D12GraphicsCommandList*cmd,bool profile,unsigned copySets){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.vit.Begin(feature,reset,every,slot,everyPlain,copySets);s.prof.Begin(cmd,profile);}
 bool EndEvaluate(ID3D12GraphicsCommandList*cmd){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.prof.End(cmd);const bool wasOff=s.vit.Disabled();const bool wellFormed=s.vit.End();return (!wellFormed||s.vit.Disabled())&&!wasOff;}
 std::vector<std::string> TakeProfileReports(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.prof.TakeReports();}
 std::string VitStatus(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.vit.Status();}

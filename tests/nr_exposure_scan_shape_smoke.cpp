@@ -29,6 +29,7 @@ int main()
 {
     // Buffers: Cyberpunk's exposure is in a 16-byte one; 128 is the bound (Nioh 3's junk was 256+)
     CHECK(!SmallBuffer(0));
+    CHECK(!SmallBuffer(2)); // cannot hold the float read
     CHECK(SmallBuffer(4));
     CHECK(SmallBuffer(16));
     CHECK(SmallBuffer(128));
@@ -41,6 +42,16 @@ int main()
     CHECK(!SmallTexture(17, 16));
     CHECK(!SmallTexture(0, 1));
     CHECK(!SmallTexture(1u << 31, 1u << 31)); // no overflow into a small product
+
+    // DXGI formats: one or two float or typeless channels (NBA's handed exposure is R32_TYPELESS)
+    CHECK(DxgiFloatFormat(kDxgiR32Typeless).bytes == 4);
+    CHECK(DxgiFloatFormat(kDxgiR16Float).bytes == 2);
+    CHECK(DxgiFloatFormat(kDxgiR16G16Typeless).bytes == 2);
+    CHECK(DxgiFloatFormat(kDxgiR32G32Float).bytes == 4);
+    CHECK(std::strcmp(DxgiFloatFormat(kDxgiR32Typeless).name, "R32_TYPELESS") == 0);
+    CHECK(DxgiFloatFormat(10).bytes == 0); // R16G16B16A16_FLOAT: a picture
+    CHECK(DxgiFloatFormat(42).bytes == 0); // R32_UINT: not a scale
+    CHECK(DxgiFloatFormat(28).bytes == 0); // R8G8B8A8_UNORM
 
     // Vulkan formats: one or two float channels, the first channel's size
     CHECK(VkFloatFormat(kVkR16Sfloat).bytes == 2);

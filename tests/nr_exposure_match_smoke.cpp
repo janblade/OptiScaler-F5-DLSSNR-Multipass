@@ -104,6 +104,16 @@ static void Synthetic()
         CHECK(std::fabs(f.scale - 1.0f) < 1e-6f); // snapped to log2
     }
     {
+        // EV100 style: a stop value with a large offset never crosses zero, and fits log-log almost as tightly at a
+        // slope no exposure has; it is still a stop value
+        for (float offset : { 6.0f, 10.0f, 15.0f })
+        {
+            const Fit f = Classify(meter, Map(e, [offset](float x, size_t) { return std::log2(x) + offset; }));
+            CHECK(f.kind == Kind::Stops);
+            CHECK(std::fabs(f.scale - 1.0f) < 1e-6f);
+        }
+    }
+    {
         // natural log of a luminance: stops the other way, ln scale
         const Fit f = Classify(meter, Map(e, [](float x, size_t) { return -std::log(x); }));
         CHECK(f.kind == Kind::Stops);
@@ -192,6 +202,24 @@ static void Synthetic()
     {
         std::vector<std::vector<float>> c { Map(e, [](float x, size_t i) { return i < 600 ? x : 1.0f / x; }) };
         CHECK(Match(meter, c).what != What::Found);
+    }
+
+    // One cut between two brightness levels (a load from a dark area to a bright one): travel enough, but anything that
+    // steps at the same cut (an area id) fits it -- not a verdict
+    {
+        std::vector<float> twoLevels(rows);
+        for (size_t i = 0; i < rows; ++i)
+            twoLevels[i] = i < rows / 2 ? 0.25f : 4.0f;
+        std::vector<std::vector<float>> c { Map(twoLevels,
+                                                [](float, size_t i) { return i < rows / 2 ? 3.0f : 7.0f; }) };
+        CHECK(Match(Metered(twoLevels, 0.05f), c).what == What::NotSure);
+    }
+
+    // Baked needs the candidate's swing over as many levels: a two-level value beside a flat meter is not the exposure
+    {
+        const auto flat = Metered(std::vector<float>(rows, 0.5f), 0.1f);
+        std::vector<std::vector<float>> c { Map(e, [](float, size_t i) { return i < rows / 2 ? 0.25f : 4.0f; }) };
+        CHECK(Match(flat, c).what == What::NotSure);
     }
 
     // Rows without a meter reading (0: Automatic not running, a black frame) are left out, not read as dark
@@ -286,12 +314,18 @@ static Recording Load(const std::string& path)
     return r;
 }
 
-static int Column(const Recording& r, const char* name)
+// The candidate column called `name`; a missing one fails the test and reads as an empty column
+static const std::vector<float>& Column(const Recording& r, const char* name)
 {
+    static const std::vector<float> none;
+
     for (size_t i = 0; i < r.columns.size(); ++i)
         if (r.columns[i] == name)
-            return (int) i;
-    return -1;
+            return r.candidates[i];
+
+    printf("FAIL: no column %s\n", name);
+    ++fails;
+    return none;
 }
 
 static void Recordings(const std::string& folder)
@@ -304,10 +338,10 @@ static void Recordings(const std::string& folder)
         CHECK(r.ok);
         if (r.ok)
         {
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c14")]).kind == Kind::Steady);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c15")]).kind == Kind::Steady);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c2")]).kind == Kind::NotFloat);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c4")]).kind == Kind::NotFloat);
+            CHECK(Classify(r.meter, Column(r, "c14")).kind == Kind::Steady);
+            CHECK(Classify(r.meter, Column(r, "c15")).kind == Kind::Steady);
+            CHECK(Classify(r.meter, Column(r, "c2")).kind == Kind::NotFloat);
+            CHECK(Classify(r.meter, Column(r, "c4")).kind == Kind::NotFloat);
             CHECK(Match(r.meter, r.candidates).what != What::Found);
         }
     }
@@ -329,17 +363,17 @@ static void Recordings(const std::string& folder)
             CHECK(v.meterTravelEv > 6.0f);
 
             for (const char* exposure : { "c61", "c62", "c63" })
-                CHECK(Classify(r.meter, r.candidates[Column(r, exposure)]).kind == Kind::Multiplier);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c4")]).kind == Kind::Steady);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c9")]).kind == Kind::Unrelated);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c11")]).kind == Kind::Unrelated);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c13")]).kind == Kind::Steady);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c24")]).kind == Kind::NotFloat);
-            CHECK(Classify(r.meter, r.candidates[Column(r, "c30")]).kind == Kind::Steady);
+                CHECK(Classify(r.meter, Column(r, exposure)).kind == Kind::Multiplier);
+            CHECK(Classify(r.meter, Column(r, "c4")).kind == Kind::Steady);
+            CHECK(Classify(r.meter, Column(r, "c9")).kind == Kind::Unrelated);
+            CHECK(Classify(r.meter, Column(r, "c11")).kind == Kind::Unrelated);
+            CHECK(Classify(r.meter, Column(r, "c13")).kind == Kind::Steady);
+            CHECK(Classify(r.meter, Column(r, "c24")).kind == Kind::NotFloat);
+            CHECK(Classify(r.meter, Column(r, "c30")).kind == Kind::Steady);
 
             // Automatic gives the level: k near 1, the game's exposure is about our meter's size
-            const int best = Column(r, "c61");
-            const float k = AnchorScale(Fit { Kind::Multiplier }, r.meter, r.candidates[best]);
+            const std::vector<float>& best = Column(r, "c61");
+            const float k = AnchorScale(Fit { Kind::Multiplier }, r.meter, best);
             CHECK(k > 0.5f && k < 2.0f);
             printf("  cyberpunk: %s, slope %.3f, corr %.3f, lag %d, %.1f EV, k %.3f\n", r.columns[v.index].c_str(),
                    v.fit.slope, v.fit.corr, v.fit.lag, v.meterTravelEv, k);

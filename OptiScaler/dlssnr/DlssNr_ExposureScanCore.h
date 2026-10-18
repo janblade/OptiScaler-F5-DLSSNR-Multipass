@@ -60,9 +60,9 @@ struct Tracked
 
 std::mutex& Mutex();
 
-// Set while this thread holds Mutex() and calls into its API (a staging resource made, a copy recorded): a creation
-// hook reached from inside -- the scan's own resources, or a D3D11On12 device's D3D12 ones -- passes by instead of
-// taking the lock again, which would deadlock (it is not recursive).
+// Set while this thread holds Mutex() and calls into its API (nests: a depth count) (a staging resource made, a copy
+// recorded): a creation hook reached from inside -- the scan's own resources, or a D3D11On12 device's D3D12 ones --
+// passes by instead of taking the lock again, which would deadlock (it is not recursive).
 class HeldScope
 {
   public:
@@ -99,6 +99,10 @@ void ConsumeLocked(size_t slot, uint32_t generation, const void* bytes);
 
 // Once per NR frame, by the pass that runs NR: marks the handed candidate, writes the recording's row, logs the movers.
 void EndFrameLocked(const FrameExposure& frame);
+
+// The game's own handed exposure for this NR frame when the pass only sees OptiScaler's copy of it (the D3D11 bridge
+// hands NR a D3D12 copy of the game's D3D11 texture): EndFrameLocked marks this one instead, then forgets it.
+void NoteHandedLocked(Api api, const void* handle);
 
 bool AnyAliveLocked(Api api);
 

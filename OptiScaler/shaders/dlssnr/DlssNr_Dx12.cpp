@@ -4307,7 +4307,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         scanFrame.game = whitePointSource == 1   ? g_nr.gameExposure
                          : whitePointSource == 3 ? g_nr.autoPairGameExposure
                                                  : 0.0f;
-        scanFrame.pre = frame.PreExposure;
+        // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
+        scanFrame.pre = whitePointSource == 3 ? g_nr.autoExposurePreExposure : frame.PreExposure;
         DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
     }
 

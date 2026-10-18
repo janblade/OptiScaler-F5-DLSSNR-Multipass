@@ -5,6 +5,7 @@
 #include "DlssNr_ExposureScanShape.h"
 
 #include <Config.h>
+#include <hooks/Vulkan_Hooks.h>
 
 #include <detours/detours.h>
 
@@ -83,6 +84,78 @@ std::mutex g_ringMutex;
 
 uint64_t Key(const void* handle) { return (uint64_t) (uintptr_t) handle; }
 
+// The scan's lock, unless this thread already holds it (Core::Held): a destroy or free reached from inside the scan's
+// own API calls -- dxvk or vkd3d-proton making Vulkan calls for a D3D11 or D3D12 call the scan made under the lock --
+// must still drop what it destroys, and this thread owns the state already.
+std::unique_lock<std::mutex> LockUnlessHeld()
+{
+    return Core::Held() ? std::unique_lock<std::mutex>() : std::unique_lock<std::mutex>(Core::Mutex());
+}
+
+// The native frame source submits its copy in (with the scan's copies, Record) itself, after the game's own frame: a
+// game that frees a candidate once its own frame fence passed can still have that copy queued. Each round's submit is
+// noted (Submitted) and a dropped candidate's last such copy is waited for before the game's destroy or free goes on.
+// The NR pass (Tick) and VkwDx12 record into the game's own command buffer, which the game's own fences cover. Under
+// Core::Mutex().
+struct Round
+{
+    unsigned long long frame = ~0ull;
+    VkDevice device = VK_NULL_HANDLE;
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    uint64_t value = 0;
+};
+
+Round g_rounds[Core::kSlots];
+unsigned long long g_recordedRound = ~0ull;               // the last round Record copied in, until Submitted
+unsigned long long g_lastCopy[Core::kMaxCandidates] = {}; // the ring round of each slot's last copy
+bool g_lastCopyOwnSubmit[Core::kMaxCandidates] = {};      // ... and whether the frame source submitted it
+
+void WaitForLastCopyLocked(size_t slot, VkDevice device)
+{
+    if (slot >= Core::kMaxCandidates || !g_lastCopyOwnSubmit[slot])
+        return;
+
+    g_lastCopyOwnSubmit[slot] = false;
+    const unsigned long long frame = g_lastCopy[slot];
+    const Round& round = g_rounds[frame % Core::kSlots];
+
+    if (round.frame != frame || round.semaphore == VK_NULL_HANDLE || round.device != device)
+        return;
+
+    static PFN_vkWaitSemaphores wait = nullptr;
+    static VkDevice waitDevice = VK_NULL_HANDLE;
+
+    if (waitDevice != device)
+    {
+        waitDevice = device;
+        wait = (PFN_vkWaitSemaphores) VulkanHooks::GetDeviceProcAddr(device, "vkWaitSemaphores");
+
+        if (wait == nullptr)
+            wait = (PFN_vkWaitSemaphores) VulkanHooks::GetDeviceProcAddr(device, "vkWaitSemaphoresKHR");
+    }
+
+    if (wait == nullptr)
+        return;
+
+    VkSemaphoreWaitInfo info {};
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    info.semaphoreCount = 1;
+    info.pSemaphores = &round.semaphore;
+    info.pValues = &round.value;
+
+    if (wait(device, &info, 100'000'000ull) != VK_SUCCESS)
+    {
+        static bool said = false;
+
+        if (!said)
+        {
+            said = true;
+            LOG_WARN(
+                "DLSS-NR exposure scan (Vulkan): a copy of a resource the game is freeing did not finish in 100 ms");
+        }
+    }
+}
+
 void CountWatchedLocked()
 {
     int alive = 0;
@@ -103,6 +176,7 @@ void DropVkLocked(size_t slot)
     if (!list[slot].isBuffer && slot < Core::kMaxCandidates && g_imageHandle[slot].exchange(0) != 0)
         g_images--;
 
+    WaitForLastCopyLocked(slot, (VkDevice) list[slot].device);
     Core::DropLocked(slot);
 }
 
@@ -155,7 +229,7 @@ VkResult VKAPI_CALL hkCreateBuffer(VkDevice device, const VkBufferCreateInfo* in
     const bool candidate =
         info != nullptr &&
         (info->usage & (VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)) != 0 &&
-        DlssNrExposureScanShape::SmallBuffer(info->size) && Core::Active();
+        DlssNrExposureScanShape::SmallBuffer(info->size) && !Core::Held() && Core::Active();
     VkBufferCreateInfo local {};
 
     if (candidate && (info->usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT) == 0)
@@ -187,7 +261,7 @@ void VKAPI_CALL hkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAlloca
 {
     if (buffer != VK_NULL_HANDLE && g_watched.load(std::memory_order_relaxed) > 0)
     {
-        std::lock_guard<std::mutex> lock(Core::Mutex());
+        const auto lock = LockUnlessHeld();
         DropHandleLocked(buffer);
     }
 
@@ -199,7 +273,8 @@ VkResult VKAPI_CALL hkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDevic
 {
     const VkResult result = o_vkBindBufferMemory(device, buffer, memory, memoryOffset);
 
-    if (result == VK_SUCCESS && g_watched.load(std::memory_order_relaxed) > 0)
+    // A binding made from inside the scan's own calls is never the game's candidate
+    if (result == VK_SUCCESS && g_watched.load(std::memory_order_relaxed) > 0 && !Core::Held())
     {
         std::lock_guard<std::mutex> lock(Core::Mutex());
         AdoptBoundLocked(buffer, memory);
@@ -213,7 +288,7 @@ VkResult BindBuffers2(PFN_vkBindBufferMemory2 original, VkDevice device, uint32_
 {
     const VkResult result = original(device, count, infos);
 
-    if (result == VK_SUCCESS && infos != nullptr && g_watched.load(std::memory_order_relaxed) > 0)
+    if (result == VK_SUCCESS && infos != nullptr && g_watched.load(std::memory_order_relaxed) > 0 && !Core::Held())
     {
         std::lock_guard<std::mutex> lock(Core::Mutex());
 
@@ -238,7 +313,7 @@ VkResult VKAPI_CALL hkBindImageMemory(VkDevice device, VkImage image, VkDeviceMe
 {
     const VkResult result = o_vkBindImageMemory(device, image, memory, memoryOffset);
 
-    if (result == VK_SUCCESS && g_watched.load(std::memory_order_relaxed) > 0)
+    if (result == VK_SUCCESS && g_watched.load(std::memory_order_relaxed) > 0 && !Core::Held())
     {
         std::lock_guard<std::mutex> lock(Core::Mutex());
         AdoptBoundLocked(image, memory);
@@ -252,7 +327,7 @@ VkResult BindImages2(PFN_vkBindImageMemory2 original, VkDevice device, uint32_t 
 {
     const VkResult result = original(device, count, infos);
 
-    if (result == VK_SUCCESS && infos != nullptr && g_watched.load(std::memory_order_relaxed) > 0)
+    if (result == VK_SUCCESS && infos != nullptr && g_watched.load(std::memory_order_relaxed) > 0 && !Core::Held())
     {
         std::lock_guard<std::mutex> lock(Core::Mutex());
 
@@ -278,7 +353,7 @@ void VKAPI_CALL hkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAll
     // A candidate whose memory goes cannot be copied any more, even if the game keeps the handle
     if (memory != VK_NULL_HANDLE && g_watched.load(std::memory_order_relaxed) > 0)
     {
-        std::lock_guard<std::mutex> lock(Core::Mutex());
+        const auto lock = LockUnlessHeld();
         std::vector<Tracked>& list = Core::ListLocked();
 
         for (size_t i = 0; i < list.size(); ++i)
@@ -405,43 +480,29 @@ void GlobalBarrier(VkCommandBuffer cmd, VkPipelineStageFlags from, VkAccessFlags
     vkCmdPipelineBarrier(cmd, from, to, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
-void ImageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags fromAccess,
-                  VkAccessFlags toAccess)
-{
-    VkImageMemoryBarrier barrier {};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcAccessMask = fromAccess;
-    barrier.dstAccessMask = toAccess;
-    barrier.oldLayout = from;
-    barrier.newLayout = to;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                         nullptr, 1, &barrier);
-}
-
-// A layout an image can be copied from, after a transition when it is not GENERAL. Not one never seen (0), and not
-// UNDEFINED or PREINITIALIZED: there is no picture in those to keep.
-bool CopyableLayout(uint32_t layout)
-{
-    return layout != 0 && layout != VK_IMAGE_LAYOUT_UNDEFINED && layout != VK_IMAGE_LAYOUT_PREINITIALIZED;
-}
-
-void NoteLayout(VkImage image, VkImageLayout layout)
+// The layout a candidate image is left in by a barrier the game records. One handing the image to another queue family
+// makes it unknown: a copy on this queue would read it without the ownership transfer. A slot dropped and taken again
+// while this ran must not keep the old image's layout: the handle is checked again after the store.
+void NoteLayout(VkImage image, VkImageLayout layout, uint32_t srcFamily, uint32_t dstFamily)
 {
     const uint64_t key = Key(image);
+    const bool otherQueue =
+        srcFamily != dstFamily && srcFamily != VK_QUEUE_FAMILY_IGNORED && dstFamily != VK_QUEUE_FAMILY_IGNORED;
 
     for (size_t i = 0; i < Core::kMaxCandidates; ++i)
     {
-        if (g_imageHandle[i].load(std::memory_order_relaxed) == key)
-            g_imageLayout[i].store((uint32_t) layout, std::memory_order_relaxed);
+        if (g_imageHandle[i].load(std::memory_order_relaxed) != key)
+            continue;
+
+        g_imageLayout[i].store(otherQueue ? 0u : (uint32_t) layout, std::memory_order_relaxed);
+
+        if (g_imageHandle[i].load(std::memory_order_relaxed) != key)
+            g_imageLayout[i].store(0u, std::memory_order_relaxed);
     }
 }
 
 // Read back the values copied kSlots rounds ago, then copy this round's: the shared part of Tick and Record
-void ReadAndCopy(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical)
+void ReadAndCopy(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, bool ownSubmit)
 {
     if (cmd == VK_NULL_HANDLE || device == VK_NULL_HANDLE || g_watched.load(std::memory_order_relaxed) == 0)
         return;
@@ -476,9 +537,8 @@ void ReadAndCopy(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical
             continue;
 
         const VkDeviceSize offset = (slot * Core::kMaxCandidates + i) * kStride;
-        const uint32_t layout = t.isBuffer ? 0 : g_imageLayout[i].load(std::memory_order_relaxed);
 
-        if (!t.isBuffer && !CopyableLayout(layout))
+        if (!t.isBuffer && g_imageLayout[i].load(std::memory_order_relaxed) != (uint32_t) VK_IMAGE_LAYOUT_GENERAL)
             continue;
 
         // The game's writes before this point, whatever wrote them, are visible to the copies
@@ -496,30 +556,24 @@ void ReadAndCopy(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical
         }
         else
         {
-            const VkImage image = (VkImage) t.handle;
-            const VkImageLayout from = (VkImageLayout) layout;
-            const bool general = from == VK_IMAGE_LAYOUT_GENERAL;
-
-            if (!general)
-                ImageBarrier(cmd, image, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT,
-                             VK_ACCESS_TRANSFER_READ_BIT);
-
+            // Only in GENERAL, where a copy needs no transition: a layout noted from recorded barriers is the last one
+            // RECORDED, which another thread's or a later frame's recording can make wrong, and a transition from a
+            // wrong layout can corrupt a compressed image. Exposure images written by compute sit in GENERAL.
             VkBufferImageCopy region {};
             region.bufferOffset = offset;
             region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             region.imageExtent = { 1, 1, 1 };
-            vkCmdCopyImageToBuffer(cmd, image, general ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                   g_ring.buffer, 1, &region);
-
-            // Back to where the game left it, for whatever it records next
-            if (!general)
-                ImageBarrier(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, from, VK_ACCESS_TRANSFER_READ_BIT,
-                             VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+            vkCmdCopyImageToBuffer(cmd, (VkImage) t.handle, VK_IMAGE_LAYOUT_GENERAL, g_ring.buffer, 1, &region);
         }
 
         g_ring.generation[slot][i] = t.generation;
         g_ring.copied[slot][i] = true;
+        g_lastCopy[i] = g_ring.frames;
+        g_lastCopyOwnSubmit[i] = ownSubmit;
     }
+
+    if (ownSubmit && any)
+        g_recordedRound = g_ring.frames;
 
     if (any)
         GlobalBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT,
@@ -586,14 +640,14 @@ void Hook(HMODULE vulkanModule)
 bool WantsImage(const VkImageCreateInfo& info)
 {
     return info.imageType == VK_IMAGE_TYPE_2D && info.samples == VK_SAMPLE_COUNT_1_BIT && info.extent.depth == 1 &&
-           (info.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 &&
+           info.mipLevels == 1 && info.arrayLayers == 1 && (info.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 &&
            DlssNrExposureScanShape::VkFloatFormat((uint32_t) info.format).bytes != 0 &&
            DlssNrExposureScanShape::SmallTexture(info.extent.width, info.extent.height) && Core::Active();
 }
 
 void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage image, void* caller)
 {
-    if (image == VK_NULL_HANDLE)
+    if (image == VK_NULL_HANDLE || Core::Held())
         return;
 
     std::lock_guard<std::mutex> lock(Core::Mutex());
@@ -615,7 +669,7 @@ void OnImageDestroyed(VkImage image)
     if (image == VK_NULL_HANDLE || g_watched.load(std::memory_order_relaxed) == 0)
         return;
 
-    std::lock_guard<std::mutex> lock(Core::Mutex());
+    const auto lock = LockUnlessHeld();
     DropHandleLocked(image);
 }
 
@@ -625,7 +679,8 @@ void NoteBarriers(uint32_t count, const VkImageMemoryBarrier* barriers)
         return;
 
     for (uint32_t i = 0; i < count; ++i)
-        NoteLayout(barriers[i].image, barriers[i].newLayout);
+        NoteLayout(barriers[i].image, barriers[i].newLayout, barriers[i].srcQueueFamilyIndex,
+                   barriers[i].dstQueueFamilyIndex);
 }
 
 void NoteBarriers2(const VkDependencyInfo* info)
@@ -634,7 +689,10 @@ void NoteBarriers2(const VkDependencyInfo* info)
         return;
 
     for (uint32_t i = 0; i < info->imageMemoryBarrierCount; ++i)
-        NoteLayout(info->pImageMemoryBarriers[i].image, info->pImageMemoryBarriers[i].newLayout);
+    {
+        const VkImageMemoryBarrier2& b = info->pImageMemoryBarriers[i];
+        NoteLayout(b.image, b.newLayout, b.srcQueueFamilyIndex, b.dstQueueFamilyIndex);
+    }
 }
 
 void Tick(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, const ExposureScan::FrameExposure& frame)
@@ -642,16 +700,39 @@ void Tick(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, const
     if (!Core::Active())
         return;
 
-    ReadAndCopy(cmd, device, physical);
+    ReadAndCopy(cmd, device, physical, false);
 
     std::lock_guard<std::mutex> lock(Core::Mutex());
     Core::EndFrameLocked(frame);
 }
 
-void Record(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical)
+void Record(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, bool ownSubmit)
 {
     if (Core::Active())
-        ReadAndCopy(cmd, device, physical);
+        ReadAndCopy(cmd, device, physical, ownSubmit);
+}
+
+void Submitted(VkDevice device, VkSemaphore timeline, uint64_t value)
+{
+    if (timeline == VK_NULL_HANDLE || g_watched.load(std::memory_order_relaxed) == 0)
+        return;
+
+    std::lock_guard<std::mutex> lock(Core::Mutex());
+
+    if (g_recordedRound == ~0ull)
+        return;
+
+    g_rounds[g_recordedRound % Core::kSlots] = { g_recordedRound, device, timeline, value };
+    g_recordedRound = ~0ull;
+}
+
+void NoteHanded(VkImage exposure)
+{
+    if (exposure == VK_NULL_HANDLE || !Core::Active() || Core::Held())
+        return;
+
+    std::lock_guard<std::mutex> lock(Core::Mutex());
+    Core::NoteHandedLocked(Api::Vulkan, exposure);
 }
 
 void OnDeviceDestroyed(VkDevice device)
@@ -660,7 +741,7 @@ void OnDeviceDestroyed(VkDevice device)
         return;
 
     {
-        std::lock_guard<std::mutex> lock(Core::Mutex());
+        const auto lock = LockUnlessHeld();
         std::vector<Tracked>& list = Core::ListLocked();
 
         for (size_t i = 0; i < list.size(); ++i)

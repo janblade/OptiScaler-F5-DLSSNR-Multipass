@@ -7,8 +7,9 @@
 //
 // Vulkan has no reference counts, so nothing is held: a candidate exists from its memory binding until the game
 // destroys it or frees its memory (those calls drop it first). Copying needs TRANSFER_SRC, which the scan adds to a
-// candidate-shaped buffer or image at creation (as the depth finder does for depth images). An image is copied only in
-// the layout the game's last recorded barrier left it in; one never seen in a barrier is skipped.
+// candidate-shaped buffer or image at creation (as the depth finder does for depth images). An image is copied only
+// while the game's last recorded barrier left it in GENERAL (no transition is ever made on it), and not once a barrier
+// hands it to another queue family.
 
 #include <windows.h>
 #include <vulkan/vulkan.h>
@@ -40,9 +41,16 @@ void NoteBarriers2(const VkDependencyInfo* info);
 // kSlots frames ago, writes the frame's bookkeeping (the recording's row, the movers) and copies this frame's.
 void Tick(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, const ExposureScan::FrameExposure& frame);
 
-// NR on D3D12 for a Vulkan game (native/VkFrameSource.cpp, at the copy in): reads and copies only; the D3D12 pass
-// writes the frame's bookkeeping.
-void Record(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical);
+// NR on D3D12 for a Vulkan game: reads and copies only; the D3D12 pass writes the frame's bookkeeping. `ownSubmit`: the
+// caller submits `cmd` itself after the game's frame (native/VkFrameSource.cpp) and then calls Submitted with the
+// timeline value that submit signals, so a candidate the game frees waits for that copy. False when `cmd` is the game's
+// own command buffer (VkwDx12, upscalers/IFeature_VkwDx12.cpp), which the game's fences cover.
+void Record(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, bool ownSubmit);
+void Submitted(VkDevice device, VkSemaphore timeline, uint64_t value);
+
+// VkwDx12 (upscalers/IFeature_VkwDx12.cpp), before NR: the game's own exposure image, which NR then only sees as a
+// D3D12 copy; the scan marks this one as the handed exposure.
+void NoteHanded(VkImage exposure);
 
 // The game destroys a device: its candidates and the ring made on it go.
 void OnDeviceDestroyed(VkDevice device);

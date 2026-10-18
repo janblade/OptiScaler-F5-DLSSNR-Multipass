@@ -22,6 +22,15 @@
 #include <thread>
 #include <string>
 
+static_assert(DXGI_FORMAT_R32G32_TYPELESS == DlssNrExposureScanShape::kDxgiR32G32Typeless);
+static_assert(DXGI_FORMAT_R32G32_FLOAT == DlssNrExposureScanShape::kDxgiR32G32Float);
+static_assert(DXGI_FORMAT_R16G16_TYPELESS == DlssNrExposureScanShape::kDxgiR16G16Typeless);
+static_assert(DXGI_FORMAT_R16G16_FLOAT == DlssNrExposureScanShape::kDxgiR16G16Float);
+static_assert(DXGI_FORMAT_R32_TYPELESS == DlssNrExposureScanShape::kDxgiR32Typeless);
+static_assert(DXGI_FORMAT_R32_FLOAT == DlssNrExposureScanShape::kDxgiR32Float);
+static_assert(DXGI_FORMAT_R16_TYPELESS == DlssNrExposureScanShape::kDxgiR16Typeless);
+static_assert(DXGI_FORMAT_R16_FLOAT == DlssNrExposureScanShape::kDxgiR16Float);
+
 namespace DlssNr
 {
 namespace ExposureScan
@@ -69,6 +78,10 @@ struct ScanState
     uint32_t readbackGeneration[kSlots][kMaxCandidates] = {};
     unsigned long long frames12 = 0;
 
+    // Core::NoteHandedLocked: the game's own handed exposure for the coming EndFrameLocked, when the pass sees a copy
+    const void* handedNote = nullptr;
+    Api handedNoteApi = Api::D3D12;
+
     // The recording (DlssNr_ExposureScanRecord.h). `listVersion` changes with every adopt and drop; `namedVersion` /
     // `namedHanded` are what the last names line said, so a new line is written only when the list changes.
     bool recording = false;
@@ -81,58 +94,16 @@ struct ScanState
 ScanState g_scan;
 std::mutex g_scanMutex;
 
-// Formats an exposure could plausibly be in: floating point, one or two channels.
-//
-// Two channels because eye adaptation commonly carries the value and something alongside it -- the
-// previous frame's value, or a target it is easing toward. Anything wider is a picture rather than a
-// number. Integer formats are excluded because an exposure is a scale and a normalised integer
-// cannot hold one.
-// outBytes is the size of the FIRST channel only -- that is the one texel this reads back, and a
-// two-channel format that stored 4 or 8 there would be decoded as the wrong type. The copy uses the
-// real format (outFormat) so it matches the source texture; the read uses outBytes.
+// Formats an exposure could plausibly be in, the same table on every API (DlssNr_ExposureScanShape.h, where the reasons
+// are). outBytes is the size of the FIRST channel only -- that is the one texel this reads back. The copy uses the real
+// format (outFormat) so it matches the source texture; the read uses outBytes.
 bool PlausibleFormat(DXGI_FORMAT f, unsigned int* outBytes, const char** outName, DXGI_FORMAT* outFormat)
 {
+    const DlssNrExposureScanShape::Format format = DlssNrExposureScanShape::DxgiFloatFormat((uint32_t) f);
     *outFormat = f;
-    switch (f)
-    {
-    case DXGI_FORMAT_R32_FLOAT:
-        *outBytes = 4;
-        *outName = "R32_FLOAT";
-        return true;
-    case DXGI_FORMAT_R16_FLOAT:
-        *outBytes = 2;
-        *outName = "R16_FLOAT";
-        return true;
-    case DXGI_FORMAT_R32G32_FLOAT:
-        *outBytes = 4;
-        *outName = "R32G32_FLOAT";
-        return true;
-    case DXGI_FORMAT_R16G16_FLOAT:
-        *outBytes = 2;
-        *outName = "R16G16_FLOAT";
-        return true;
-    // Typeless: the view decides the type, so the texture says nothing more than its channel sizes. NBA 2K27 hands DLSS
-    // a 1x1 R32_TYPELESS exposure (2026-10-14), which the float-only list missed. Read as float; an integer in there
-    // reads as a tiny or huge float and stays outside the plausible range.
-    case DXGI_FORMAT_R32_TYPELESS:
-        *outBytes = 4;
-        *outName = "R32_TYPELESS";
-        return true;
-    case DXGI_FORMAT_R16_TYPELESS:
-        *outBytes = 2;
-        *outName = "R16_TYPELESS";
-        return true;
-    case DXGI_FORMAT_R32G32_TYPELESS:
-        *outBytes = 4;
-        *outName = "R32G32_TYPELESS";
-        return true;
-    case DXGI_FORMAT_R16G16_TYPELESS:
-        *outBytes = 2;
-        *outName = "R16G16_TYPELESS";
-        return true;
-    default:
-        return false;
-    }
+    *outBytes = format.bytes;
+    *outName = format.name;
+    return format.bytes != 0;
 }
 
 float HalfToFloatImpl(uint16_t h)
@@ -238,30 +209,78 @@ bool Wanted()
            Config::Instance()->DlssNrRecordExposureScan.value_or_default();
 }
 
+// What a module is to the scan: the game's, someone else's (OptiScaler, middleware), or one that only forwards the
+// game's call (Streamline's proxy device, DlssNrExposureScanSource::PassesThrough). Cached per module; a skipped module
+// is logged once. Under g_scanMutex.
+enum class Maker
+{
+    Game,
+    Other,
+    Forwarder
+};
+
+Maker MakerOfLocked(HMODULE module)
+{
+    static std::unordered_map<HMODULE, Maker> known;
+
+    if (const auto it = known.find(module); it != known.end())
+        return it->second;
+
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(module, path, MAX_PATH);
+    const std::string name = wstring_to_string(std::filesystem::path(path).filename().wstring());
+
+    Maker maker = Maker::Game;
+
+    if (module != dllModule && DlssNrExposureScanSource::PassesThrough(name))
+        maker = Maker::Forwarder;
+    else if (!DlssNrExposureScanSource::FromGame(name, module == dllModule))
+        maker = Maker::Other;
+
+    known.emplace(module, maker);
+
+    if (maker == Maker::Other)
+        LOG_INFO("DLSS-NR exposure scan: skipping small resources made by {} (not the game's)",
+                 module == dllModule ? std::string("OptiScaler") : name);
+    else if (maker == Maker::Forwarder)
+        LOG_INFO("DLSS-NR exposure scan: {} forwards the game's calls; the module that called it decides", name);
+
+    return maker;
+}
+
 // Whether the resource came from the game (DlssNr_ExposureScanSource.h). Asked only for resources that already look
-// like an exposure, so the module lookup is rare; cached per module and logged once per skipped module. Under
-// g_scanMutex.
+// like an exposure, so the lookup is rare. `caller` is the creation call's return address; when that is a forwarder
+// (the game calls Streamline's proxy device, whose call reaches the detoured device function), the stack is walked to
+// the first module that is neither OptiScaler nor a forwarder, and that one decides. Under g_scanMutex.
 bool FromGameLocked(void* caller)
 {
-    static std::unordered_map<HMODULE, bool> known;
-
     const HMODULE module = caller != nullptr ? Util::GetCallerModule(caller) : nullptr;
 
     if (module == nullptr)
         return true;
 
-    if (const auto it = known.find(module); it != known.end())
-        return it->second;
+    const Maker maker = MakerOfLocked(module);
 
-    const std::string name = Util::WhoIsTheCaller(caller);
-    const bool fromGame = DlssNrExposureScanSource::FromGame(name, module == dllModule);
-    known.emplace(module, fromGame);
+    if (maker != Maker::Forwarder)
+        return maker == Maker::Game;
 
-    if (!fromGame)
-        LOG_INFO("DLSS-NR exposure scan: skipping small resources made by {} (not the game's)",
-                 module == dllModule ? std::string("OptiScaler") : name);
+    void* frames[32] = {};
+    const USHORT count = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
 
-    return fromGame;
+    for (USHORT i = 0; i < count; ++i)
+    {
+        const HMODULE frameModule = Util::GetCallerModule(frames[i]);
+
+        if (frameModule == nullptr || frameModule == dllModule)
+            continue;
+
+        const Maker frameMaker = MakerOfLocked(frameModule);
+
+        if (frameMaker != Maker::Forwarder)
+            return frameMaker == Maker::Game;
+    }
+
+    return true; // nothing above the forwarder: not known to be someone else's
 }
 
 // The recording's file writer. The render thread only appends text; a thread of its own opens the file (the log's name
@@ -302,14 +321,14 @@ class RecordWriter
 
         if (_wfopen_s(&file, path.c_str(), L"w") != 0 || file == nullptr)
         {
-            LOG_WARN("DLSS-NR exposure scan: could not open the recording {}", path.string());
+            LOG_WARN("DLSS-NR exposure scan: could not open the recording {}", wstring_to_string(path.wstring()));
             std::lock_guard<std::mutex> lock(_mutex);
             _failed = true;
             _pending.clear();
             return;
         }
 
-        LOG_INFO("DLSS-NR exposure scan: recording every candidate to {}", path.string());
+        LOG_INFO("DLSS-NR exposure scan: recording every candidate to {}", wstring_to_string(path.wstring()));
 
         for (;;)
         {
@@ -410,8 +429,8 @@ bool LooksLikeANumber(const D3D12_RESOURCE_DESC& rd, std::string* outShape, unsi
     if (rd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
     {
         // 256 texels rather than 16. A 16x16 texture is still a number by any reasonable measure and
-        // a 256-bin histogram is exactly how a lot of engines compute one.
-        if (rd.Width * rd.Height > 256 || rd.Width == 0 || rd.Height == 0)
+        // a 256-bin histogram is exactly how a lot of engines compute one (DlssNrExposureScanShape::SmallTexture).
+        if (!DlssNrExposureScanShape::SmallTexture(rd.Width, rd.Height))
             return false;
 
         const char* name = nullptr;
@@ -434,8 +453,8 @@ bool LooksLikeANumber(const D3D12_RESOURCE_DESC& rd, std::string* outShape, unsi
         // 128 bytes, down from 4kB. The wider bound filled all twelve slots in Nioh 3 with 256, 512
         // and 768 byte buffers that never held anything but zero, and the real answer -- eight bytes
         // -- only made the list because it happened to be created early. A cap that can be filled by
-        // junk is a cap that can hide the answer.
-        if (rd.Width == 0 || rd.Width > 128)
+        // junk is a cap that can hide the answer. At least the 4 bytes read (DlssNrExposureScanShape::SmallBuffer).
+        if (!DlssNrExposureScanShape::SmallBuffer(rd.Width))
             return false;
 
         *outIsBuffer = true;
@@ -457,12 +476,18 @@ std::mutex& Mutex() { return g_scanMutex; }
 
 namespace
 {
-thread_local bool t_held = false;
+thread_local int t_held = 0;
 }
 
-HeldScope::HeldScope() { t_held = true; }
-HeldScope::~HeldScope() { t_held = false; }
-bool Held() { return t_held; }
+HeldScope::HeldScope() { ++t_held; }
+HeldScope::~HeldScope() { --t_held; }
+bool Held() { return t_held > 0; }
+
+void NoteHandedLocked(Api api, const void* handle)
+{
+    g_scan.handedNote = handle;
+    g_scan.handedNoteApi = api;
+}
 
 bool Wanted() { return ExposureScan::Wanted(); }
 
@@ -636,8 +661,18 @@ bool AnyAliveLocked(Api api)
     return false;
 }
 
-void EndFrameLocked(const FrameExposure& frame)
+void EndFrameLocked(const FrameExposure& passFrame)
 {
+    // The game's own resource when the pass was handed OptiScaler's copy of it (NoteHandedLocked)
+    FrameExposure frame = passFrame;
+
+    if (g_scan.handedNote != nullptr)
+    {
+        frame.handed = g_scan.handedNote;
+        frame.handedApi = g_scan.handedNoteApi;
+        g_scan.handedNote = nullptr;
+    }
+
     bool anyAlive = false;
 
     for (const Tracked& t : g_scan.tracked)

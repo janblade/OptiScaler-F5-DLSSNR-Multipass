@@ -62,6 +62,13 @@ int main()
     CHECK(!FromGame("amd_fidelityfx_upscaler_dx12.dll", false));
     CHECK(!FromGame("ffx_fsr3upscaler_x64.dll", false));
 
+    // Streamline's proxy device forwards the game's own call: the module above it decides
+    using DlssNrExposureScanSource::PassesThrough;
+    CHECK(PassesThrough("sl.interposer.dll"));
+    CHECK(PassesThrough("SL.INTERPOSER.DLL"));
+    CHECK(!PassesThrough("sl.dlss_g.dll")); // a plugin makes its own resources
+    CHECK(!PassesThrough("Cyberpunk2077.exe"));
+
     printf(fails == 0 ? "nr_exposure_scan_record_smoke: PASS\n" : "nr_exposure_scan_record_smoke: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

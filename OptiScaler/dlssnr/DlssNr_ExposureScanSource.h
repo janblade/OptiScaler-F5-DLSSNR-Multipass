@@ -27,6 +27,18 @@ inline constexpr std::array<std::string_view, 9> kMiddleware = {
     "nvlowlatency",   // Reflex
 };
 
+// Modules that forward the game's own call rather than making a resource of their own: Streamline's proxy device. A
+// creation detoured behind it returns into it, so the module that called IT decides (the scan walks up the stack).
+inline bool PassesThrough(std::string_view moduleName)
+{
+    std::string lower(moduleName);
+
+    for (char& c : lower)
+        c = (char) std::tolower((unsigned char) c);
+
+    return lower.starts_with("sl.interposer");
+}
+
 // `moduleName`: the calling module's file name (any case). `ours`: it is OptiScaler's own module.
 inline bool FromGame(std::string_view moduleName, bool ours)
 {

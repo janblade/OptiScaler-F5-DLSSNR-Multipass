@@ -1476,7 +1476,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         scanFrame.game = requestedWhitePointSource == 1   ? g_vk.gameExposure
                          : requestedWhitePointSource == 3 ? g_vk.pairGameExposure
                                                           : 0.0f;
-        scanFrame.pre = g_vk.gamePreExposure;
+        // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
+        scanFrame.pre = requestedWhitePointSource == 3 ? g_vk.autoExposurePreExposure : g_vk.gamePreExposure;
         DlssNr::ExposureScanVk::Tick(cmdBuffer, device, physicalDevice, scanFrame);
     }
 

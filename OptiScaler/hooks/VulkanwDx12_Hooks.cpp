@@ -1039,6 +1039,8 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents(VkCommandBuffer commandBuffer, uint32_t ev
                                       uint32_t imageMemoryBarrierCount,
                                       const VkImageMemoryBarrier* pImageMemoryBarriers)
 {
+    DlssNr::ExposureScanVk::NoteBarriers(imageMemoryBarrierCount, pImageMemoryBarriers);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -1561,6 +1563,9 @@ void Vulkan_wDx12::hk_vkCmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent ev
 void Vulkan_wDx12::hk_vkCmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents,
                                        const VkDependencyInfo* pDependencyInfos)
 {
+    for (uint32_t i = 0; pDependencyInfos != nullptr && i < eventCount; ++i)
+        DlssNr::ExposureScanVk::NoteBarriers2(&pDependencyInfos[i]);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -2791,6 +2796,9 @@ void Vulkan_wDx12::hk_vkCmdResetEvent2KHR(VkCommandBuffer commandBuffer, VkEvent
 void Vulkan_wDx12::hk_vkCmdWaitEvents2KHR(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents,
                                           const VkDependencyInfo* pDependencyInfos)
 {
+    for (uint32_t i = 0; pDependencyInfos != nullptr && i < eventCount; ++i)
+        DlssNr::ExposureScanVk::NoteBarriers2(&pDependencyInfos[i]);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);

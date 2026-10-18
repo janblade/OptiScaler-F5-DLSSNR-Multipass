@@ -44,6 +44,7 @@ PFN_CreateBuffer o_CreateBuffer = nullptr;
 PFN_CreateTexture2D o_CreateTexture2D = nullptr;
 std::atomic<bool> g_installed = false;
 bool g_installFailed = false;
+std::mutex g_installMutex; // device creation and the present can both install
 
 // One ring slot's staging resource for one candidate slot, and what it was made for.
 struct Staging
@@ -56,41 +57,8 @@ struct Staging
 };
 
 Staging g_staging[Core::kSlots][Core::kMaxCandidates];
+ID3D11Device* g_stagingDevice = nullptr; // not held: the presenting device the staging resources were made on
 unsigned long long g_frames = 0;
-
-// Same formats as the D3D12 filter (PlausibleFormat): float or typeless, one or two channels; the first channel's size.
-unsigned int FirstChannelBytes(DXGI_FORMAT f, const char** name)
-{
-    switch (f)
-    {
-    case DXGI_FORMAT_R32_FLOAT:
-        *name = "R32_FLOAT";
-        return 4;
-    case DXGI_FORMAT_R16_FLOAT:
-        *name = "R16_FLOAT";
-        return 2;
-    case DXGI_FORMAT_R32G32_FLOAT:
-        *name = "R32G32_FLOAT";
-        return 4;
-    case DXGI_FORMAT_R16G16_FLOAT:
-        *name = "R16G16_FLOAT";
-        return 2;
-    case DXGI_FORMAT_R32_TYPELESS:
-        *name = "R32_TYPELESS";
-        return 4;
-    case DXGI_FORMAT_R16_TYPELESS:
-        *name = "R16_TYPELESS";
-        return 2;
-    case DXGI_FORMAT_R32G32_TYPELESS:
-        *name = "R32G32_TYPELESS";
-        return 4;
-    case DXGI_FORMAT_R16G16_TYPELESS:
-        *name = "R16G16_TYPELESS";
-        return 2;
-    default:
-        return 0;
-    }
-}
 
 HRESULT STDMETHODCALLTYPE hkCreateBuffer(ID3D11Device* This, const D3D11_BUFFER_DESC* pDesc,
                                          const D3D11_SUBRESOURCE_DATA* pInitialData, ID3D11Buffer** ppBuffer)
@@ -128,10 +96,9 @@ HRESULT STDMETHODCALLTYPE hkCreateTexture2D(ID3D11Device* This, const D3D11_TEXT
     std::lock_guard<std::mutex> lock(Core::Mutex());
     Core::ExaminedLocked();
 
-    const char* name = nullptr;
-    const unsigned int bytes = FirstChannelBytes(pDesc->Format, &name);
+    const DlssNrExposureScanShape::Format format = DlssNrExposureScanShape::DxgiFloatFormat((uint32_t) pDesc->Format);
 
-    if (bytes == 0 || pDesc->SampleDesc.Count != 1 ||
+    if (format.bytes == 0 || pDesc->SampleDesc.Count != 1 ||
         !DlssNrExposureScanShape::SmallTexture(pDesc->Width, pDesc->Height))
         return hr;
 
@@ -139,27 +106,33 @@ HRESULT STDMETHODCALLTYPE hkCreateTexture2D(ID3D11Device* This, const D3D11_TEXT
         return hr;
 
     Core::AdoptLocked(Api::D3D11, (ID3D11Resource*) *ppTexture2D, This,
-                      std::to_string(pDesc->Width) + "x" + std::to_string(pDesc->Height) + " " + name, bytes, false,
-                      (uint32_t) pDesc->Format);
+                      std::to_string(pDesc->Width) + "x" + std::to_string(pDesc->Height) + " " + format.name,
+                      format.bytes, false, (uint32_t) pDesc->Format);
     return hr;
 }
 
 void InstallOn(ID3D11Device* device)
 {
-    if (device == nullptr || g_installed || g_installFailed)
+    if (device == nullptr || g_installed)
         return;
 
-    // A D3D11 game on dxvk with its Vulkan presents read (VkPresentBridge): the Vulkan scan sees the same resources as
-    // dxvk's Vulkan buffers and images, where NR then runs; scanning both would count everything twice.
-    if (VkPresentBridge::DxvkThroughVulkan())
+    std::lock_guard<std::mutex> lock(g_installMutex);
+
+    if (g_installed || g_installFailed)
+        return;
+
+    // A D3D11 game on dxvk: its resources are dxvk's Vulkan buffers and images, which the Vulkan scan sees. Scanning
+    // both would count everything twice, and the staging resources made here under the scan's lock would reach the
+    // Vulkan hooks from inside it.
+    if (VkPresentBridge::DxvkGame())
     {
         g_installFailed = true;
-        LOG_INFO("DLSS-NR exposure scan (D3D11): dxvk through Vulkan, the Vulkan scan covers this game");
+        LOG_INFO("DLSS-NR exposure scan (D3D11): a dxvk game, the Vulkan scan covers it");
         return;
     }
 
-    // The device the game holds and calls (a Streamline proxy when there is one): hooking the device behind a proxy
-    // would make every creation look like Streamline's, which the source check skips
+    // Whichever device this is -- the game's, or the one behind Streamline's proxy -- the detours sit in the device's
+    // functions; a creation forwarded by the proxy is traced back to the game by the source check (FromGameLocked)
     PVOID* table = *(PVOID**) device;
     o_CreateBuffer = (PFN_CreateBuffer) table[kCreateBuffer];
     o_CreateTexture2D = (PFN_CreateTexture2D) table[kCreateTexture2D];
@@ -188,6 +161,15 @@ void ReleaseStaging(Staging& s)
         s.resource->Release();
 
     s = Staging {};
+}
+
+void ReleaseAllStaging()
+{
+    for (auto& ring : g_staging)
+    {
+        for (Staging& s : ring)
+            ReleaseStaging(s);
+    }
 }
 
 // The staging resource for a candidate in one ring slot, made on first use and remade when the slot has a new owner or
@@ -254,11 +236,22 @@ void OnPresent(IDXGISwapChain* swapChain)
         return;
 
     // The device's own calls, not a proxy's (Streamline): the context the copies go on, and the device the candidates'
-    // GetDevice gives back
-    ID3D11Device* real = nullptr;
+    // GetDevice gives back. Looked up once per device: the lookup logs each time it finds a proxy.
+    static ID3D11Device* lastDevice = nullptr;
+    static ID3D11Device* lastReal = nullptr;
 
-    if (!Util::CheckForRealObject(__FUNCTION__, device, (IUnknown**) &real) || real == nullptr)
-        real = device;
+    if (device != lastDevice)
+    {
+        ID3D11Device* found = nullptr;
+
+        if (!Util::CheckForRealObject(__FUNCTION__, device, (IUnknown**) &found) || found == nullptr)
+            found = device;
+
+        lastDevice = device;
+        lastReal = found;
+    }
+
+    ID3D11Device* real = lastReal;
 
     InstallOn(device);
 
@@ -279,6 +272,14 @@ void OnPresent(IDXGISwapChain* swapChain)
     std::vector<Tracked>& list = Core::ListLocked();
     const unsigned int slot = (unsigned int) (g_frames % Core::kSlots);
 
+    // Another device presents now: staging made on the old one cannot be mapped on this one's context, and holding it
+    // would keep the old device alive
+    if (real != g_stagingDevice)
+    {
+        ReleaseAllStaging();
+        g_stagingDevice = real;
+    }
+
     // Read what was copied kSlots presents ago; a copy not done yet is read next round
     for (size_t i = 0; i < list.size() && i < Core::kMaxCandidates; ++i)
     {
@@ -286,6 +287,12 @@ void OnPresent(IDXGISwapChain* swapChain)
 
         if (!s.copied || s.resource == nullptr)
             continue;
+
+        if (s.device != real)
+        {
+            ReleaseStaging(s);
+            continue;
+        }
 
         D3D11_MAPPED_SUBRESOURCE mapped {};
         const HRESULT hr = context->Map(s.resource, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
@@ -309,8 +316,17 @@ void OnPresent(IDXGISwapChain* swapChain)
     {
         Tracked& t = list[i];
 
+        // A freed slot's staging goes with the lifetime pass
         if (!t.alive || t.api != Api::D3D11)
+        {
+            if (checkLifetimes)
+            {
+                for (auto& ring : g_staging)
+                    ReleaseStaging(ring[i]);
+            }
+
             continue;
+        }
 
         ID3D11Resource* resource = (ID3D11Resource*) t.handle;
 
@@ -347,6 +363,7 @@ void OnPresent(IDXGISwapChain* swapChain)
 
         if (t.isBuffer)
         {
+            // t.bytes (4) is within the buffer: candidates are at least 4 bytes (DlssNrExposureScanShape::SmallBuffer)
             const D3D11_BOX box { 0, 0, 0, t.bytes, 1, 1 };
             context->CopySubresourceRegion(staging, 0, 0, 0, 0, resource, 0, &box);
         }
@@ -363,6 +380,15 @@ void OnPresent(IDXGISwapChain* swapChain)
     g_frames++;
     context->Release();
     device->Release();
+}
+
+void NoteHanded(ID3D11Resource* exposure)
+{
+    if (exposure == nullptr || !Core::Active() || Core::Held())
+        return;
+
+    std::lock_guard<std::mutex> lock(Core::Mutex());
+    Core::NoteHandedLocked(Api::D3D11, exposure);
 }
 } // namespace ExposureScanDx11
 } // namespace DlssNr

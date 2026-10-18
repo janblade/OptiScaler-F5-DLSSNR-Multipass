@@ -8,6 +8,7 @@
 // Dx11FrameSource), so that pass writes the frame's bookkeeping; this file only finds and reads.
 
 struct ID3D11Device;
+struct ID3D11Resource;
 struct IDXGISwapChain;
 
 namespace DlssNr
@@ -22,5 +23,9 @@ void Install(ID3D11Device* device);
 // Once a frame at the present (the same two places the D3D11 depth finder closes its frame): reads back the values
 // copied kSlots presents ago without waiting, and copies this frame's, on the presenting device's immediate context.
 void OnPresent(IDXGISwapChain* swapChain);
+
+// From the upscaler bridge (upscalers/IFeature_Dx11wDx12.cpp), before NR: the game's own D3D11 exposure texture, which
+// NR then only sees as a D3D12 copy; the scan marks this one as the handed exposure.
+void NoteHanded(ID3D11Resource* exposure);
 } // namespace ExposureScanDx11
 } // namespace DlssNr

@@ -22,9 +22,14 @@
 // - Timer: rises (or falls) on almost every changing row;
 // - Noisy: jumps across most of its range from row to row (a random seed, a dither index).
 //
-// Confidence: no verdict before minRows rows with a reading and minTravelEv of meter travel (a scene that never changes
-// its light says nothing about units), and the best fit must hold in each half of the recording that has light to show.
-// A meter that barely moves while a candidate swings is the other answer: the game exposed the colour itself (Baked).
+// Confidence: no verdict before minRows rows with a reading and minTravelEv of meter travel over at least minLevels
+// brightness levels (a scene that never changes its light, or one cut between two levels, says nothing about units),
+// and the best fit must hold in each half of the recording that has light to show. A meter that barely moves while a
+// candidate swings (over as many levels) is the other answer: the game exposed the colour itself (Baked).
+//
+// The game's pre-exposure needs no handling here: the meter divides it out before it reads the scene (dlssnr.hlsl,
+// meteredSceneLuma = averageBufferLuma / preExposure), so a game that pre-exposes its colour does not flatten the
+// meter.
 //
 // Header-only, no D3D types: tests/nr_exposure_match_smoke.cpp, on synthetic cases and on the recordings in
 // tests/data/exposure_scan.
@@ -80,6 +85,7 @@ struct Settings
     size_t minRows = 200;          // ~20 s at the recording's ~10 rows a second
     float minTravelEv = 2.0f;      // meter travel before units can be told
     float halfTravelEv = 1.0f;     // a half with less than this is not asked to agree
+    int minLevels = 4;             // brightness levels visited (detail::Levels), for the meter and a baked candidate
     float minCorr = 0.9f;          // whole recording
     float halfCorr = 0.8f;         // each half
     float bakedMeterEv = 0.5f;     // meter at most this flat ...
@@ -251,15 +257,30 @@ inline Fit ClassifyRows(const std::vector<float>& logMeter, const std::vector<fl
     int linLag = 0;
     BestLag(logMeter, v, s, linSlope, linCorr, linLag);
 
-    const bool stops = !canLog || std::fabs(linCorr) > std::fabs(logCorr) + 0.01f;
-    if (stops)
+    // Each fit's own verdict: log-log as a multiplier or divisor (a slope of 0.5..1.5), linear as a stop value (a slope
+    // that snaps to a log base). Both hold: the tighter fit wins. One holds: that is the answer -- a stop value with a
+    // large offset (EV100 style, never crossing zero) fits log-log almost as tightly, but at a slope (~0.1) no
+    // exposure has. Neither: Unrelated, reported with the tighter fit.
+    const bool logHolds =
+        canLog && std::fabs(logCorr) >= s.minCorr && std::fabs(logSlope) >= 0.5f && std::fabs(logSlope) <= 1.5f;
+    const float scale = SnapScale(linSlope);
+    const bool linHolds = std::fabs(linCorr) >= s.minCorr && scale != 0.0f;
+
+    bool useLin;
+    if (logHolds && linHolds)
+        useLin = std::fabs(linCorr) > std::fabs(logCorr) + 0.01f;
+    else if (logHolds || linHolds)
+        useLin = linHolds;
+    else
+        useLin = !canLog || std::fabs(linCorr) > std::fabs(logCorr);
+
+    if (useLin)
     {
         f.slope = linSlope;
         f.corr = linCorr;
         f.lag = linLag;
-        const float scale = SnapScale(linSlope);
-        f.kind = std::fabs(linCorr) >= s.minCorr && scale != 0.0f ? Kind::Stops : Kind::Unrelated;
-        if (f.kind == Kind::Stops)
+        f.kind = linHolds ? Kind::Stops : Kind::Unrelated;
+        if (linHolds)
             f.scale = scale;
         return f;
     }
@@ -267,11 +288,34 @@ inline Fit ClassifyRows(const std::vector<float>& logMeter, const std::vector<fl
     f.slope = logSlope;
     f.corr = logCorr;
     f.lag = logLag;
-    if (std::fabs(logCorr) >= s.minCorr && std::fabs(logSlope) >= 0.5f && std::fabs(logSlope) <= 1.5f)
-        f.kind = logSlope > 0.0f ? Kind::Multiplier : Kind::Divisor;
-    else
-        f.kind = Kind::Unrelated;
+    f.kind = logHolds ? (logSlope > 0.0f ? Kind::Multiplier : Kind::Divisor) : Kind::Unrelated;
     return f;
+}
+
+// How many brightness levels a log2 series visits: 0.5 EV bins holding at least 2% of its rows. One cut between two
+// levels moves the travel but proves nothing about units -- anything that steps at the same cut fits it.
+inline int Levels(const std::vector<float>& logs)
+{
+    if (logs.empty())
+        return 0;
+
+    const float low = *std::min_element(logs.begin(), logs.end());
+    std::vector<size_t> bins;
+
+    for (float l : logs)
+    {
+        const size_t bin = (size_t) ((l - low) * 2.0f);
+        if (bin >= bins.size())
+            bins.resize(bin + 1, 0);
+        ++bins[bin];
+    }
+
+    int levels = 0;
+
+    for (size_t count : bins)
+        levels += count * 50 >= logs.size() ? 1 : 0;
+
+    return levels;
 }
 
 inline bool IsMatch(Kind k) { return k == Kind::Multiplier || k == Kind::Divisor || k == Kind::Stops; }
@@ -335,7 +379,7 @@ inline Verdict Match(const std::vector<float>& meter, const std::vector<std::vec
             if (logs.size() * 20 < v.size() * 19)
                 continue;
             const float swing = SpreadEv(logs);
-            if (swing >= s.bakedCandidateEv && swing > widest)
+            if (swing >= s.bakedCandidateEv && Levels(logs) >= s.minLevels && swing > widest)
             {
                 widest = swing;
                 out.what = What::Baked;
@@ -344,7 +388,7 @@ inline Verdict Match(const std::vector<float>& meter, const std::vector<std::vec
         }
         return out;
     }
-    if (out.meterTravelEv < s.minTravelEv)
+    if (out.meterTravelEv < s.minTravelEv || Levels(lm) < s.minLevels)
         return out;
 
     const size_t half = rows.size() / 2;

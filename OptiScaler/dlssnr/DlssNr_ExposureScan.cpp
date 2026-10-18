@@ -236,14 +236,15 @@ bool EnsureReadback(ID3D12Device* device)
 // Whether the scan should be running at all.
 //
 // Choosing it as the white point's source is the whole of the answer for anybody using this.
-// The separate setting survives as a developer override, for the one case a user has no reason
+// The separate settings survive as developer overrides, for the one case a user has no reason
 // to want: watching the scan in a game that supplies a REAL exposure, so the two can be
-// compared in the log. That is validation work, not a control, and it does not belong in a
-// panel.
+// compared in the log (ScanExposure), or recording it to a file (RecordExposureScan). That is
+// validation work, not a control, and it does not belong in a panel.
 bool Wanted()
 {
     return Config::Instance()->DlssNrWhitePointSource.value_or_default() == 2 ||
-           Config::Instance()->DlssNrScanExposure.value_or_default();
+           Config::Instance()->DlssNrScanExposure.value_or_default() ||
+           Config::Instance()->DlssNrRecordExposureScan.value_or_default();
 }
 
 // Whether the resource came from the game (DlssNr_ExposureScanSource.h). Asked only for resources that already look
@@ -343,12 +344,13 @@ class RecordWriter
     bool _failed = false;
 };
 
-// One row of the recording, every kEveryFrames frames. Under g_scanMutex.
+// One row of the recording, every kEveryFrames frames, only when asked for (RecordExposureScan): a scan that runs for
+// the picture writes no file. Under g_scanMutex.
 void RecordLocked(const FrameExposure& frame)
 {
     using namespace DlssNrExposureScanRecord;
 
-    if (!Due(g_scan.frames))
+    if (!Config::Instance()->DlssNrRecordExposureScan.value_or_default() || !Due(g_scan.frames))
         return;
 
     if (!g_scan.recording)
@@ -538,7 +540,7 @@ unsigned int Examined()
 
 void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc, void* caller)
 {
-    // Gated on the scan being wanted (WhitePointSource 2 or ScanExposure), not just on NR being on.
+    // Gated on the scan being wanted (WhitePointSource 2, ScanExposure or RecordExposureScan), not just on NR being on.
     //
     // This was once deliberately ungated, so a scan switched on mid-game would still have the eye
     // adaptation view the engine created at load. That reasoning assumed recording was only a

@@ -1,9 +1,9 @@
 #pragma once
 
 // The exposure scan's recording: every candidate's value next to what is known about the frame's brightness, written
-// as CSV beside the log while the scan runs ([DlssNr] ScanExposure). It is the data the matcher is built and tested
-// on (plan 2026-10-14-exposure-scan-all-apis, story 2): which candidate follows the scene's light, in what units, and
-// whether the game's exposure is already in the picture.
+// as CSV beside the log when asked for ([DlssNr] RecordExposureScan, which also turns the scan on). It is the data the
+// matcher is built and tested on (plan 2026-10-14-exposure-scan-all-apis, story 2, DlssNr_ExposureMatch.h): which
+// candidate follows the scene's light, in what units, and whether the game's exposure is already in the picture.
 //
 // One row per kEveryFrames NR frames:
 //   seconds,frame,meter,game,pre,c1,c2,...

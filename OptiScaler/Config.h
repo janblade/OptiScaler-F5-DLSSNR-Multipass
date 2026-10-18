@@ -610,6 +610,10 @@ class Config
     // was inferred here it went straight into the interface and was wrong.
     CustomOptional<bool> DlssNrScanExposure { false };
 
+    // Write the exposure scan's recording (<log>.exposurescan.csv: every candidate beside NR's brightness reading) for
+    // diagnosis. Turns the scan on. Separate from ScanExposure so a scan that runs for the picture never writes a file.
+    CustomOptional<bool> DlssNrRecordExposureScan { false };
+
     // Anchoring the scan: the white point that looked right, and the scan's value at that moment.
     //
     // The absolute white point cannot be derived from a buffer whose units are unknown. What CAN be

@@ -6,6 +6,7 @@
 #include <Logger.h>
 #include <Config.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
@@ -633,7 +634,10 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     // Dx11wDx12SC the D3D11 finder's frame is closed by NativeMotionDx11::OnFGPresent instead: frame generation's present
     // still reaches here, and a second close in the same frame sees no draws and resets every candidate's warm-up.
     if (State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
+    {
         GenericDepthDx11::OnPresent(pSwapChain);
+        DlssNr::ExposureScanDx11::OnPresent(pSwapChain);
+    }
 
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {

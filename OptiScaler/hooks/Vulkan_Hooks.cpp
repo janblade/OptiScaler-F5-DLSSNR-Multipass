@@ -26,6 +26,7 @@
 #include <native/PresentStageTiming.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <detours/detours.h>
@@ -1381,6 +1382,7 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         VkPresentBridge::OnDeviceDestroying(device);
         NativeMotionVk::OnDeviceDestroyed(device);
         GenericDepthVk::OnDeviceDestroyed(device);
+        DlssNr::ExposureScanVk::OnDeviceDestroyed(device);
         native::lowlatency::OnDeviceReleasedVulkan(device);
 
         // InputCommon's output on it stops while the device still lives (its semaphores are the device's), then the

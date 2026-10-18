@@ -1,6 +1,7 @@
 #include <pch.h>
 
 #include "VulkanwDx12_Hooks.h"
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <State.h>
@@ -1065,6 +1066,9 @@ void Vulkan_wDx12::hk_vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, VkPipe
                                            uint32_t imageMemoryBarrierCount,
                                            const VkImageMemoryBarrier* pImageMemoryBarriers)
 {
+    // The layout each exposure scan image candidate is left in (dlssnr/DlssNr_ExposureScan_Vk.h); a no-op without any
+    DlssNr::ExposureScanVk::NoteBarriers(imageMemoryBarrierCount, pImageMemoryBarriers);
+
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
     if (State::Instance().gameQuirks & GameQuirk::VulkanDLSSBarrierFixup &&
         (primaryGpu.vendorId != VendorId::Nvidia || !primaryGpu.dlssCapable))
@@ -1577,6 +1581,8 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t e
 
 void Vulkan_wDx12::hk_vkCmdPipelineBarrier2(VkCommandBuffer commandBuffer, const VkDependencyInfo* pDependencyInfo)
 {
+    DlssNr::ExposureScanVk::NoteBarriers2(pDependencyInfo);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -2805,6 +2811,8 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents2KHR(VkCommandBuffer commandBuffer, uint32_
 
 void Vulkan_wDx12::hk_vkCmdPipelineBarrier2KHR(VkCommandBuffer commandBuffer, const VkDependencyInfo* pDependencyInfo)
 {
+    DlssNr::ExposureScanVk::NoteBarriers2(pDependencyInfo);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);

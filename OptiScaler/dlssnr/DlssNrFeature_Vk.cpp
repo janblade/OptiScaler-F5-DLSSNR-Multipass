@@ -23,6 +23,7 @@
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/DlssNrVitReuse.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 #include <dlssnr/DlssNr_VkExtensions.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
@@ -1461,6 +1462,22 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         g_vk.pairValidAt = 0;
         g_vk.gameLiveGate.Reset();
         g_vk.gameLiveSaid = false;
+    }
+
+    // The exposure scan (DlssNr_ExposureScan_Vk.h): its values copied on NR's command buffer, and the frame's bookkeeping
+    // with what is known about the frame's brightness, as the D3D12 pass gives it (DlssNr_Dx12.cpp)
+    {
+        DlssNr::ExposureScan::FrameExposure scanFrame;
+        scanFrame.handed = exposure != nullptr && exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW
+                               ? (const void*) exposure->Resource.ImageViewInfo.Image
+                               : nullptr;
+        scanFrame.handedApi = DlssNr::ExposureScan::Api::Vulkan;
+        scanFrame.meter = requestedWhitePointSource == 3 ? g_vk.autoExposureRawValue : 0.0f;
+        scanFrame.game = requestedWhitePointSource == 1   ? g_vk.gameExposure
+                         : requestedWhitePointSource == 3 ? g_vk.pairGameExposure
+                                                          : 0.0f;
+        scanFrame.pre = g_vk.gamePreExposure;
+        DlssNr::ExposureScanVk::Tick(cmdBuffer, device, physicalDevice, scanFrame);
     }
 
     // Following the game's exposure (DlssNr_FollowGame.h): on (DlssNr_GameDefaults.h), the calibration locked, and a

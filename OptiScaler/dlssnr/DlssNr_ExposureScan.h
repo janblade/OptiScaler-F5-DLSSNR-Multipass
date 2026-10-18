@@ -83,6 +83,15 @@ unsigned int Examined();
 // right buffer or merely a moving one.
 float BestValue(int* outIndex = nullptr, float* outLowest = nullptr, float* outHighest = nullptr);
 
+// Which API a candidate was found on. D3D12 here; D3D11 in DlssNr_ExposureScan_Dx11.h, Vulkan in
+// DlssNr_ExposureScan_Vk.h. All share one list, readout and recording (DlssNr_ExposureScanCore.h).
+enum class Api
+{
+    D3D12,
+    D3D11,
+    Vulkan
+};
+
 // Called once per frame from the Neural Rendering pass, on its command list. Copies one value out of
 // each candidate and reads back the copies taken a few frames ago.
 //
@@ -90,10 +99,11 @@ float BestValue(int* outIndex = nullptr, float* outLowest = nullptr, float* outH
 // the candidate that is the game's own exposure texture.
 struct FrameExposure
 {
-    ID3D12Resource* handed = nullptr; // the ExposureTexture on the upscaler call, if any
-    float meter = 0.0f;               // Automatic's raw reading, 0 when Automatic is not running
-    float game = 0.0f;                // the game's exposure as last read, 0 when none
-    float pre = 1.0f;                 // DLSS.Pre.Exposure
+    const void* handed = nullptr; // the ExposureTexture on the upscaler call, if any: an ID3D12Resource*, or a VkImage
+    Api handedApi = Api::D3D12;
+    float meter = 0.0f;           // Automatic's raw reading, 0 when Automatic is not running
+    float game = 0.0f;            // the game's exposure as last read, 0 when none
+    float pre = 1.0f;             // DLSS.Pre.Exposure
 };
 
 void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame);
@@ -156,7 +166,9 @@ float AnchoredWhitePoint(float scanNow, bool inverted, float trim);
 void LoadAnchors(const std::string& serialized);
 std::string SerializeAnchors();
 
-// Release the scan's references to captured resources (call at feature teardown -- see the .cpp).
+// Release the scan's references to captured D3D12 resources (call at feature teardown -- see the .cpp). D3D11 and Vulkan
+// candidates stay: D3D11 has no placed heaps to pull from under a held reference, and Vulkan's are dropped when the
+// game destroys them.
 void ReleaseTrackedResources();
 
 void Shutdown();

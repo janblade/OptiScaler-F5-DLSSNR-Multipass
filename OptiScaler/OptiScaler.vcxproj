@@ -469,6 +469,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScanRecord.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScanSource.h" />
+    <ClInclude Include="dlssnr\DlssNr_ExposureScanCore.h" />
+    <ClInclude Include="dlssnr\DlssNr_ExposureScanShape.h" />
+    <ClInclude Include="dlssnr\DlssNr_ExposureMatch.h" />
+    <ClInclude Include="dlssnr\DlssNr_ExposureScan_Dx11.h" />
+    <ClInclude Include="dlssnr\DlssNr_ExposureScan_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ColourEncodingStatus.h" />
     <ClInclude Include="dlssnr\DlssNr_NativeMode.h" />
     <ClInclude Include="dlssnr\DlssNr_LutStatus.h" />
@@ -1023,6 +1028,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNrSpatial_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_ExposureScan_Dx11.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_ExposureScan_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_LutStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />

@@ -6,6 +6,7 @@
 
 #include <proxies/KernelBase_Proxy.h>
 
+#include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeLowLatency.h>
 
@@ -104,6 +105,8 @@ static void HookToDeviceLocal(ID3D11Device* InDevice)
     // The depth finder hooks the immediate context the first time any D3D11 device is captured, whether or not this device's
     // own sampler hooks are already in (a second call with the same device is a no-op inside Install()).
     GenericDepthDx11::Install(InDevice);
+    // The exposure scan's creation hooks, while the scan is wanted (dlssnr/DlssNr_ExposureScan_Dx11.h)
+    DlssNr::ExposureScanDx11::Install(InDevice);
 
     if (o_CreateSamplerState != nullptr || InDevice == nullptr)
         return;

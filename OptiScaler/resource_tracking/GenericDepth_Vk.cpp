@@ -277,6 +277,10 @@ VkResult VKAPI_CALL hkCreateImage(VkDevice device, const VkImageCreateInfo* info
 
     const VkResult result = o_vkCreateImage(device, info, allocator, image);
 
+    // Remembered first: OnImageCreated notes on the remembered entry when the image is not the game's
+    if (info != nullptr && result == VK_SUCCESS && image != nullptr)
+        DlssNr::ExposureScanVk::RememberImage(*info, *image, scanImage);
+
     if (scanImage && result == VK_SUCCESS && image != nullptr)
         DlssNr::ExposureScanVk::OnImageCreated(device, *info, *image, _ReturnAddress());
 

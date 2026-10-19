@@ -33,6 +33,10 @@ bool WantsImage(const VkImageCreateInfo& info);
 void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage image, void* caller);
 void OnImageDestroyed(VkImage image);
 
+// After every image creation: a candidate-shaped (`wanted`: WantsImage said yes) or 1x1 one is remembered with its
+// creation info, so a handed exposure image that is not a candidate can be told why (NoteHanded).
+void RememberImage(const VkImageCreateInfo& info, VkImage image, bool wanted);
+
 // From the game's pipeline barriers (hooks/VulkanwDx12_Hooks.cpp): the layout each candidate image is left in.
 void NoteBarriers(uint32_t count, const VkImageMemoryBarrier* barriers);
 void NoteBarriers2(const VkDependencyInfo* info);
@@ -49,8 +53,9 @@ void Record(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, boo
 void Submitted(VkDevice device, VkSemaphore timeline, uint64_t value);
 
 // VkwDx12 (upscalers/IFeature_VkwDx12.cpp), before NR: the game's own exposure image, which NR then only sees as a
-// D3D12 copy; the scan marks this one as the handed exposure.
-void NoteHanded(VkImage exposure);
+// D3D12 copy; the scan marks this one as the handed exposure. The view's size, format, mip and layer are only for the
+// log line that says why the image is not a candidate, when it is not.
+void NoteHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat format, uint32_t mip, uint32_t layer);
 
 // The game destroys a device: its candidates and the ring made on it go.
 void OnDeviceDestroyed(VkDevice device);

@@ -53,6 +53,21 @@ struct Pending
 
 std::unordered_map<uint64_t, Pending> g_pending;
 
+// Every candidate-shaped image and every 1x1 image the game makes (an exposure image is 1x1; RDR2 makes thousands of
+// other small textures, so not every small one), so a handed exposure image that is not a candidate can be told why:
+// the filter, a full list, or a binding the scan does not see. Under Core::Mutex().
+struct Seen
+{
+    VkImageCreateInfo info {};
+    bool wanted = false;  // candidate-shaped (WantsImage)
+    bool notGame = false; // ... but made by a module that is not the game's (Core::FromGameLocked)
+    bool capped = false;  // ... and bound while the list was full
+};
+
+constexpr size_t kMaxSeen = 4096;
+std::unordered_map<uint64_t, Seen> g_seen;
+std::atomic<int> g_seenCount = 0;
+
 // Pending plus adopted Vulkan candidates: the destroy, free and bind hooks take the lock only when there is any.
 std::atomic<int> g_watched = 0;
 
@@ -206,6 +221,12 @@ void AdoptBoundLocked(const void* handle, VkDeviceMemory memory)
     g_pending.erase(it);
 
     const int slot = Core::AdoptLocked(Api::Vulkan, (void*) handle, p.device, p.shape, p.bytes, p.isBuffer, p.format);
+
+    if (slot < 0 && !p.isBuffer)
+    {
+        if (const auto seen = g_seen.find(Key(handle)); seen != g_seen.end())
+            seen->second.capped = true;
+    }
 
     if (slot >= 0)
     {
@@ -654,7 +675,12 @@ void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage imag
     Core::ExaminedLocked();
 
     if (!Core::FromGameLocked(caller))
+    {
+        if (const auto seen = g_seen.find(Key(image)); seen != g_seen.end())
+            seen->second.notGame = true;
+
         return;
+    }
 
     const DlssNrExposureScanShape::Format format = DlssNrExposureScanShape::VkFloatFormat((uint32_t) info.format);
     g_pending[Key(image)] = { device,
@@ -664,12 +690,51 @@ void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage imag
     CountWatchedLocked();
 }
 
+void RememberImage(const VkImageCreateInfo& info, VkImage image, bool wanted)
+{
+    if (image == VK_NULL_HANDLE || Core::Held() || !Core::Active())
+        return;
+
+    if (!wanted && (info.extent.width != 1 || info.extent.height != 1))
+        return;
+
+    std::lock_guard<std::mutex> lock(Core::Mutex());
+
+    if (g_seen.size() >= kMaxSeen)
+    {
+        static bool said = false;
+
+        if (!said)
+        {
+            said = true;
+            LOG_INFO("DLSS-NR exposure scan (Vulkan): {} candidate-shaped or 1x1 images remembered, no more for the "
+                     "handed exposure check",
+                     kMaxSeen);
+        }
+
+        return;
+    }
+
+    Seen seen;
+    seen.info = info;
+    seen.info.pNext = nullptr;
+    seen.info.pQueueFamilyIndices = nullptr;
+    seen.wanted = wanted;
+    g_seen[Key(image)] = seen;
+    g_seenCount = (int) g_seen.size();
+}
+
 void OnImageDestroyed(VkImage image)
 {
-    if (image == VK_NULL_HANDLE || g_watched.load(std::memory_order_relaxed) == 0)
+    if (image == VK_NULL_HANDLE ||
+        (g_watched.load(std::memory_order_relaxed) == 0 && g_seenCount.load(std::memory_order_relaxed) == 0))
         return;
 
     const auto lock = LockUnlessHeld();
+
+    if (g_seen.erase(Key(image)) != 0)
+        g_seenCount = (int) g_seen.size();
+
     DropHandleLocked(image);
 }
 
@@ -726,13 +791,52 @@ void Submitted(VkDevice device, VkSemaphore timeline, uint64_t value)
     g_recordedRound = ~0ull;
 }
 
-void NoteHanded(VkImage exposure)
+void NoteHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat format, uint32_t mip, uint32_t layer)
 {
     if (exposure == VK_NULL_HANDLE || !Core::Active() || Core::Held())
         return;
 
     std::lock_guard<std::mutex> lock(Core::Mutex());
     Core::NoteHandedLocked(Api::Vulkan, exposure);
+
+    // Once, a while after NR started: why the handed image is not a candidate, when it is not
+    static unsigned int calls = 0;
+    static bool said = false;
+
+    if (said || ++calls < 600)
+        return;
+
+    said = true;
+
+    for (const Tracked& t : Core::ListLocked())
+    {
+        if (t.alive && t.api == Api::Vulkan && t.handle == (const void*) exposure)
+            return;
+    }
+
+    const auto seen = g_seen.find(Key(exposure));
+
+    if (seen == g_seen.end())
+    {
+        LOG_WARN("DLSS-NR exposure scan (Vulkan): the handed exposure image (view {}x{}, format {}, mip {}, layer {}) "
+                 "was not seen made while the scan watched ({} remembered): made before the scan started, by a path "
+                 "it does not hook, or neither candidate-shaped nor 1x1",
+                 width, height, (int) format, mip, layer, g_seen.size());
+        return;
+    }
+
+    const VkImageCreateInfo& i = seen->second.info;
+    const char* why = !seen->second.wanted ? "the filter rejects it"
+                      : seen->second.notGame
+                          ? "it is candidate-shaped, but made by a module that is not the game's"
+                      : seen->second.capped
+                          ? "it is candidate-shaped, but the candidate list was already full when it was bound"
+                          : "it is candidate-shaped, but its memory binding was never seen";
+
+    LOG_WARN("DLSS-NR exposure scan (Vulkan): the handed exposure image is not a candidate: {} (type {}, {}x{}x{}, "
+             "format {}, mips {}, layers {}, samples {}, usage {:#x}, flags {:#x}; the view: mip {}, layer {})",
+             why, (int) i.imageType, i.extent.width, i.extent.height, i.extent.depth, (int) i.format, i.mipLevels,
+             i.arrayLayers, (int) i.samples, (unsigned int) i.usage, (unsigned int) i.flags, mip, layer);
 }
 
 void OnDeviceDestroyed(VkDevice device)

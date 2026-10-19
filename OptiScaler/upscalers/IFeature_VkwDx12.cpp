@@ -2217,7 +2217,11 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
             InParameters->Get(NVSDK_NGX_Parameter_ExposureTexture, (void**) &exposure);
 
             if (exposure != nullptr && exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW)
-                DlssNr::ExposureScanVk::NoteHanded(exposure->Resource.ImageViewInfo.Image);
+                DlssNr::ExposureScanVk::NoteHanded(
+                    exposure->Resource.ImageViewInfo.Image, exposure->Resource.ImageViewInfo.Width,
+                    exposure->Resource.ImageViewInfo.Height, exposure->Resource.ImageViewInfo.Format,
+                    exposure->Resource.ImageViewInfo.SubresourceRange.baseMipLevel,
+                    exposure->Resource.ImageViewInfo.SubresourceRange.baseArrayLayer);
         }
 
         if (State::Instance().changeBackend[Handle()->Id])

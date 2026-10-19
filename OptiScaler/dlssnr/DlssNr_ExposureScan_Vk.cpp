@@ -796,8 +796,20 @@ void NoteHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat form
     if (exposure == VK_NULL_HANDLE || !Core::Active() || Core::Held())
         return;
 
+    {
+        std::lock_guard<std::mutex> lock(Core::Mutex());
+        Core::NoteHandedLocked(Api::Vulkan, exposure);
+    }
+
+    ExplainHanded(exposure, width, height, format, mip, layer);
+}
+
+void ExplainHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat format, uint32_t mip, uint32_t layer)
+{
+    if (exposure == VK_NULL_HANDLE || !Core::Active() || Core::Held())
+        return;
+
     std::lock_guard<std::mutex> lock(Core::Mutex());
-    Core::NoteHandedLocked(Api::Vulkan, exposure);
 
     // Once, a while after NR started: why the handed image is not a candidate, when it is not
     static unsigned int calls = 0;

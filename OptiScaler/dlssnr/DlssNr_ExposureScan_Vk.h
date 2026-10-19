@@ -57,6 +57,10 @@ void Submitted(VkDevice device, VkSemaphore timeline, uint64_t value);
 // log line that says why the image is not a candidate, when it is not.
 void NoteHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat format, uint32_t mip, uint32_t layer);
 
+// Native Vulkan NR (dlssnr/DlssNrFeature_Vk.cpp), which hands its exposure image to Tick itself: only the log line that
+// says, once, why the handed image is not a candidate. NoteHanded calls it too.
+void ExplainHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat format, uint32_t mip, uint32_t layer);
+
 // The game destroys a device: its candidates and the ring made on it go.
 void OnDeviceDestroyed(VkDevice device);
 } // namespace ExposureScanVk

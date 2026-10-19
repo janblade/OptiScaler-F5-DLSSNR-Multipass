@@ -1479,6 +1479,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
         scanFrame.pre = requestedWhitePointSource == 3 ? g_vk.autoExposurePreExposure : g_vk.gamePreExposure;
         DlssNr::ExposureScanVk::Tick(cmdBuffer, device, physicalDevice, scanFrame);
+
+        if (scanFrame.handed != nullptr)
+        {
+            const auto& view = exposure->Resource.ImageViewInfo;
+            DlssNr::ExposureScanVk::ExplainHanded(view.Image, view.Width, view.Height, view.Format,
+                                                  view.SubresourceRange.baseMipLevel,
+                                                  view.SubresourceRange.baseArrayLayer);
+        }
     }
 
     // Following the game's exposure (DlssNr_FollowGame.h): on (DlssNr_GameDefaults.h), the calibration locked, and a
@@ -1757,14 +1765,15 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                              0, nullptr, 1, &rawToHost, 0, nullptr);
                     }
 
-                    // The game's exposure beside Automatic's, for following it (DlssNr_FollowGame.h). The game's image
-                    // is read through the same layout guess Game exposure's courier uses, so it is only touched where
-                    // it can matter: while following is on. The meter's tiles are reduced already.
+                    // The game's exposure beside Automatic's, for following it (DlssNr_FollowGame.h) and as the exposure
+                    // scan's known answer (as on D3D12, DlssNr_Dx12.cpp). The game's image is read through the same
+                    // layout guess Game exposure's courier uses, so it is only touched where it can matter: while
+                    // following is on or the scan runs. The meter's tiles are reduced already.
                     g_vk.meterPairHasGame[slot] = false;
 
                     if (exposure != nullptr && exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW &&
                         exposure->Resource.ImageViewInfo.ImageView != VK_NULL_HANDLE &&
-                        DlssNr::FollowGameOn(cfg))
+                        (DlssNr::FollowGameOn(cfg) || DlssNr::ExposureScan::Scanning()))
                     {
                         DlssNrConstants courier {};
                         courier.Mode = DlssNrMode_Meter;

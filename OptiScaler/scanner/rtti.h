@@ -10,4 +10,7 @@ namespace rtti
 // `className` is the name used in the type descriptor, e.g. "ffxProvider_FSR4" or "UpscalerModel@fsr4_common"
 void** FindVtable(HMODULE module, std::string_view className);
 
+// Number of leading vtable entries that point into the module's code
+size_t CountVirtualFunctions(HMODULE module, void** vtable);
+
 } // namespace rtti

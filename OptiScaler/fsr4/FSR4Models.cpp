@@ -52,9 +52,6 @@ struct HookedModule
 std::deque<HookedModule> hookedModules;
 std::mutex hookMutex;
 
-// Module whose support check FFX asked last, the one the game runs
-HMODULE lastQueriedModule = nullptr;
-
 const ModelProvider& Provider(FSR4Model model)
 {
     return *std::ranges::find(modelProviders, model, &ModelProvider::model);
@@ -108,7 +105,6 @@ bool hkIsSupported(void* provider, void* device)
             continue;
 
         auto patched = &*found;
-        lastQueriedModule = hooked.module;
 
         auto model = patched->provider->model;
         auto o_IsSupported = patched->o_IsSupported;
@@ -198,20 +194,16 @@ void FSR4Models::Hook(HMODULE module)
     hookedModules.push_back(std::move(hooked));
 }
 
-bool FSR4Models::SelectsModels(HMODULE module)
+bool FSR4Models::ModuleHasModel(HMODULE module, FSR4Model model)
 {
-    std::scoped_lock lock(hookMutex);
+    {
+        std::scoped_lock lock(hookMutex);
 
-    auto hooked = FindHookedModule(module);
-    return hooked != nullptr && !hooked->patchedProviders.empty();
-}
+        if (auto hooked = FindHookedModule(module))
+            return hooked->HasModel(model);
+    }
 
-bool FSR4Models::AnyModuleSelectsModels()
-{
-    std::scoped_lock lock(hookMutex);
-
-    return std::ranges::any_of(hookedModules,
-                               [](const HookedModule& hooked) { return !hooked.patchedProviders.empty(); });
+    return rtti::FindVtable(module, Provider(model).className) != nullptr;
 }
 
 bool FSR4Models::CanGpuRun(FSR4Model model)
@@ -221,7 +213,7 @@ bool FSR4Models::CanGpuRun(FSR4Model model)
     switch (model)
     {
     case FSR4Model::FP8:
-        // FP8 forced through Fsr4ForceModel, RDNA 4, or emulated on Linux (e.g. RDNA 3 with the WMMA workaround)
+        // FP8 forced through Fsr4GpuSupport, RDNA 4, or emulated on Linux (e.g. RDNA 3 with the WMMA workaround)
         return gpu.fsr4Support == FSR4Support::FP8 || gpu.realFsr4Support == FSR4Support::FP8;
 
     case FSR4Model::INT8:
@@ -285,21 +277,3 @@ std::optional<FSR4Model> FSR4Models::ActiveModel(HMODULE module)
 }
 
 const char* FSR4Models::Name(FSR4Model model) { return Provider(model).name; }
-
-HMODULE FSR4Models::SelectingModule()
-{
-    std::scoped_lock lock(hookMutex);
-
-    // The module FFX asked last is the one the game runs
-    if (auto lastQueried = FindHookedModule(lastQueriedModule); lastQueried && !lastQueried->patchedProviders.empty())
-        return lastQueried->module;
-
-    // Nothing asked yet, the newest module is the most likely one
-    for (auto hooked = hookedModules.rbegin(); hooked != hookedModules.rend(); ++hooked)
-    {
-        if (!hooked->patchedProviders.empty())
-            return hooked->module;
-    }
-
-    return nullptr;
-}

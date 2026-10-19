@@ -13,14 +13,7 @@ class FSR4Models
     // Safe to call more than once for the same module
     static void Hook(HMODULE module);
 
-    // True when the module has several model providers and their support checks are patched, the byte pattern model
-    // selection of FSR4ModelSelection isn't needed (and can't work, it misses new builds) for these
-    static bool SelectsModels(HMODULE module);
-    static bool AnyModuleSelectsModels();
-
-    // Newest module whose models can be selected, nullptr when there is none
-    static HMODULE SelectingModule();
-
+    static bool ModuleHasModel(HMODULE module, FSR4Model model);
     static bool CanGpuRun(FSR4Model model);
 
     // Models of the module that can be switched between, empty when there is nothing to switch

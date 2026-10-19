@@ -21,6 +21,9 @@
 #include <proxies/XeSS_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/FfxApi_Proxy.h>
+#include <upscalers/ffx/FFXFeature.h>
+#include <fsr4/FSR4Models.h>
+#include <fsr4/FSR4Presets.h>
 #include <proxies/Streamline_Proxy.h>
 
 #include <framegen/nvngx/Nvngx_FG.h>
@@ -3146,13 +3149,18 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     ImGui::SameLine();
                     if (state.currentFsr4Preset.has_value())
                         ImGui::TextDisabled("(Active: %d)", state.currentFsr4Preset.value());
-                    else if (FSR4ModelSelection::IsInt8FsrHooked())
+                    else if (FSR4Presets::IsAnyModuleHooked())
                         ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "(Potential FSR3 fallback)");
                     else
                         ImGui::TextDisabled("(Failed to hook)");
 
-                    // FSR 4 models, only listed when the GPU can run more than one of the module's
-                    HMODULE modelModule = FSR4Models::SelectingModule();
+                    // FSR 4 models of the module running the selected upscaler, only listed when the GPU can run more
+                    // than one of them
+                    HMODULE modelModule = nullptr;
+                    const auto ffxIndex = config->FfxUpscalerIndex.value_or_default();
+                    if (ffxIndex >= 0 && ffxIndex < state.ffxUpscalerVersionIds.size())
+                        modelModule = FfxApiProxy::UpscalerModule(state.ffxUpscalerVersionIds[ffxIndex]);
+
                     if (auto models = FSR4Models::SelectableModels(modelModule); !models.empty())
                     {
                         auto& selectedModel = config->Fsr4Model;
@@ -3241,10 +3249,12 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                         {
                             LOG_DEBUG("FSR4 Watermark set to {}", fsr4wm);
                             config->Fsr4EnableWatermark = fsr4wm;
-                        }
+                            Util::SetFlagEnvVar(L"MLSR-WATERMARK", fsr4wm);
 
-                        ShowHelpMarker("After changing this option, please Save Settings.\n"
-                                       "It will be applied on next launch.");
+                            // The driver reads the variable on context creation
+                            state.newBackend = currentBackend;
+                            MARK_ALL_BACKENDS_CHANGED();
+                        }
                     }
                 }
 
@@ -4427,10 +4437,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 {
                     LOG_DEBUG("FSRFGEnableWatermark set FGWatermark: {}", fgwm);
                     config->FSRFGEnableWatermark = fgwm;
-                }
+                    Util::SetFlagEnvVar(L"MLFI-WATERMARK", fgwm);
 
-                ShowHelpMarker("After changing this option, please Save Settings\n"
-                               "It will be applied on next launch.");
+                    // The driver reads the variable on context creation
+                    if (config->IsFGEnabled())
+                        state.fgChanged = true;
+                }
             }
 
             ImGui::Spacing();
@@ -5521,10 +5533,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     {
                         LOG_DEBUG("FSRFGEnableWatermark set FGWatermark: {}", fgwm);
                         config->FSRFGEnableWatermark = fgwm;
-                    }
+                        Util::SetFlagEnvVar(L"MLFI-WATERMARK", fgwm);
 
-                    ShowHelpMarker("After changing this option, please Save Settings\n"
-                                   "It will be applied on next launch.");
+                        // The driver reads the variable on context creation
+                        if (config->IsFGEnabled())
+                            state.fgChanged = true;
+                    }
                 }
             }
 

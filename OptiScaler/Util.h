@@ -63,6 +63,8 @@ std::map<Luid, std::filesystem::path> GetDriverStore();
 // Wall clock in ns (100 ns resolution), for the low latency layer's timing
 uint64_t GetTimestamp();
 
+void SetFlagEnvVar(const wchar_t* name, bool enabled);
+
 template <typename T> void DelayedDestroy(std::unique_ptr<T> ptr)
 {
     std::thread([p = std::move(ptr)]() mutable { std::this_thread::sleep_for(std::chrono::seconds(2)); }).detach();

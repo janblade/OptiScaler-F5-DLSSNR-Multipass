@@ -129,3 +129,23 @@ void** rtti::FindVtable(HMODULE module, std::string_view className)
 
     return nullptr;
 }
+
+size_t rtti::CountVirtualFunctions(HMODULE module, void** vtable)
+{
+    if (module == nullptr || vtable == nullptr)
+        return 0;
+
+    auto codeSections = GetSections(module, SectionKind::Code);
+    auto isCode = [&codeSections](const void* address)
+    {
+        auto byte = static_cast<const uint8_t*>(address);
+        return std::ranges::any_of(codeSections, [byte](auto section)
+                                   { return byte >= section.data() && byte < section.data() + section.size(); });
+    };
+
+    size_t count = 0;
+    while (isCode(vtable[count]))
+        count++;
+
+    return count;
+}

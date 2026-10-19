@@ -412,7 +412,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
     for (auto& gpuInfo : cache)
     {
         if (gpuInfo.vendorId != VendorId::AMD && !gpuInfo.usesDxvk &&
-            Config::Instance()->Fsr4ForceModel.value_or_default() == FSR4Support::None)
+            Config::Instance()->Fsr4GpuSupport.value_or_default() == FSR4Support::None)
         {
             continue;
         }
@@ -454,9 +454,9 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
                     res.usesVkd3dProton = true;
 
                 // Kinda questionable, may need to reconsider
-                if (Config::Instance()->Fsr4ForceModel.value_or_default() != FSR4Support::None)
+                if (Config::Instance()->Fsr4GpuSupport.value_or_default() != FSR4Support::None)
                 {
-                    res.fsr4Support = Config::Instance()->Fsr4ForceModel.value_or_default();
+                    res.fsr4Support = Config::Instance()->Fsr4GpuSupport.value_or_default();
                     res.fsr4ForcedSupport = true;
                 }
 
@@ -555,23 +555,19 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
 
                     // Check for native INT8 support, the same way the driver picks the model
                     // Don't treat this as real because RDNA3 on Linux may be able to support FP8, useful for FG
-                    // The RDNA2 and APU models are in the Vulkan driver FSR only, DX12 keeps treating those GPUs as
-                    // without FSR 4 unless one is forced
-                    // Asic family reported on Linux is unreliable, device_info takes precedence there when it knows the
-                    // card
+                    // Asic family reported on Linux is unreliable, device_info takes precedence there when it
+                    // knows the card
                     bool preferDeviceInfo = State::Instance().isRunningOnLinux &&
                                             gpuInfo.amdHwGeneration != device_info::HwGeneration::kUndefinedGeneration;
 
                     if (res.fsr4Support == FSR4Support::None && !preferDeviceInfo &&
-                        gpuInfo.fsr4DriverModel == FSR4Support::INT8)
+                        IsFsr4Int8(gpuInfo.fsr4DriverModel))
                     {
-                        res.fsr4Support = FSR4Support::INT8;
+                        res.fsr4Support = gpuInfo.fsr4DriverModel;
                     }
 
-                    // Asic info not available or not trusted, or the GPU is one of the INT8 Lite / RDNA2 ones that DX12
-                    // didn't treat as FSR 4 capable before (Phoenix and Hawk Point were INT8 through device_info)
-                    if (res.fsr4Support == FSR4Support::None &&
-                        (preferDeviceInfo || gpuInfo.fsr4DriverModel != FSR4Support::INT8))
+                    // Asic info not available or not trusted, fall back to device_info
+                    if (res.fsr4Support == FSR4Support::None && (preferDeviceInfo || gpuInfo.amdAsicFamily == 0))
                     {
                         device_info::AdapterId adapterId(gpuInfo.vendorId, gpuInfo.deviceId, gpuInfo.revisionId);
                         auto cardInfo = device_info::GetCardInfo(adapterId);
@@ -583,9 +579,36 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
 
                             auto& card = cardInfo.value();
 
-                            // Navi 3x (RDNA3), Phoenix / Hawk Point and Strix Halo
-                            if (card.generation == HwGeneration::kGfx11 || card.asic_type == AsicType::kGfx11_5_1)
+                            // Mirrors getFsr4ModelForAsic
+                            // RDNA4
+                            if (card.generation == HwGeneration::kGfx12)
+                            {
+                                res.fsr4Support = FSR4Support::FP8;
+                            }
+                            // Navi 3x (RDNA3) and Strix Halo
+                            else if ((card.generation == HwGeneration::kGfx11 && !card.is_apu) ||
+                                     card.asic_type == AsicType::kGfx11_5_1)
+                            {
                                 res.fsr4Support = FSR4Support::INT8;
+                            }
+                            // Navi 2x (RDNA2)
+                            else if (card.generation == HwGeneration::kGfx10_3 && !card.is_apu)
+                            {
+                                res.fsr4Support = FSR4Support::INT8_2;
+                            }
+                            // Van Gogh and Strix Point
+                            else if (card.asic_type == AsicType::kGfx10_3_3 || card.asic_type == AsicType::kGfx11_5_0)
+                            {
+                                res.fsr4Support = FSR4Support::INT8Lite;
+                            }
+                            // Phoenix, Hawk Point, Krackan, Navi 10 and Navi 12, not officially supported, we are
+                            // adding support for them. Navi 14 lacks hardware INT8
+                            else if ((card.generation == HwGeneration::kGfx11 && card.is_apu) ||
+                                     card.asic_type == AsicType::kGfx11_5_2 || card.asic_type == AsicType::kGfx10_1_0 ||
+                                     card.asic_type == AsicType::kGfx10_1_0Xl || card.asic_type == AsicType::kGfx10_1_1)
+                            {
+                                res.fsr4Support = FSR4Support::INT8Lite;
+                            }
                         }
                     }
 
@@ -630,7 +653,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
                 primaryGpu.fsr4Support = FSR4Support::INT8;
                 primaryGpu.fsr4ForcedSupport = true;
 
-                Config::Instance()->Fsr4ForceModel = FSR4Support::INT8;
+                Config::Instance()->Fsr4GpuSupport = FSR4Support::INT8;
             }
         }
     }
@@ -688,7 +711,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
     // This means that the user didn't want to force support but we decided that we want to force it
     // We need spoofing on but if it's off then this will be too late for most cases to enable it
     // But if we only force it for AMD GPUs then that's fine
-    if (Config::Instance()->Fsr4ForceModel.value_or_default() == FSR4Support::None && primaryGpu.fsr4ForcedSupport)
+    if (Config::Instance()->Fsr4GpuSupport.value_or_default() == FSR4Support::None && primaryGpu.fsr4ForcedSupport)
     {
         //// We need spoofing hooks for FFX but want to avoid spoofing for the rest of the game
         // if (!Config::Instance()->DxgiSpoofing.value_or_default())
@@ -701,18 +724,20 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
     }
 }
 
-void IdentifyGpu::updateInt8Support(std::optional<bool>& sdkSupportsInt8, std::optional<bool>& amdxcffx64SupportsInt8)
+void IdentifyGpu::updateInt8Support(bool sdkSupportsInt8, bool driverSupportsInt8)
 {
-    if (amdxcffx64SupportsInt8 && !amdxcffx64SupportsInt8.value() && sdkSupportsInt8 && !sdkSupportsInt8.value())
-    {
-        LOG_DEBUG("Neither driver nor the sdk supports FSR 4 Int 8, disabling");
+    if (sdkSupportsInt8 || driverSupportsInt8)
+        return;
 
-        std::scoped_lock lock(mutex);
-        for (auto& gpuInfo : cache)
-        {
-            gpuInfo.fsr4Support = FSR4Support::None;
-            gpuInfo.fsr4ForcedSupport = false;
-        }
+    std::scoped_lock lock(mutex);
+    for (auto& gpuInfo : cache)
+    {
+        if (gpuInfo.fsr4Support != FSR4Support::INT8)
+            continue;
+
+        LOG_DEBUG("Neither driver nor the sdk supports FSR 4 Int 8, disabling FSR 4 for {}", gpuInfo.name);
+        gpuInfo.fsr4Support = FSR4Support::None;
+        gpuInfo.fsr4ForcedSupport = false;
     }
 }
 

@@ -416,6 +416,19 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         }
     }
 
+    // HDR output: Direct3D 11 swap chains are not supported yet (no device exists here, so it is read as D3D11); logged
+    // when HDR output is on, the chain is not touched
+    if (pSwapChainDesc != nullptr)
+    {
+        SdrToHdr::CreateRequest hdrRequest;
+        hdrRequest.format = localDesc.BufferDesc.Format;
+        hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+                               localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        hdrRequest.hwnd = localDesc.OutputWindow;
+        DXGI_FORMAT hdrFormat = localDesc.BufferDesc.Format;
+        SdrToHdr::PrepareCreate(hdrRequest, hdrFormat);
+    }
+
     _skipDx11Create = true;
 
     auto result = o_D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,

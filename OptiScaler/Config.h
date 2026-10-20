@@ -1309,11 +1309,6 @@ class Config
     CustomOptional<float> HdrOutputGameNits { 203.0f }; // [HDR] GameNits: SDR white, 80..1000
     CustomOptional<int> HdrOutputDecode { 0 };        // [HDR] Decode: 0 = gamma 2.2, 1 = sRGB
 
-    // Legacy: ForceHDR / SkipColorSpace are no longer read from the ini (ForceHDR=true sets HdrOutputEnabled). The old
-    // swap chain code still names them until it is removed, so they stay false.
-    CustomOptional<bool> ForceHDR { false };
-    CustomOptional<bool> SkipColorSpace { false };
-
     // V-Sync
     CustomOptional<bool> OverrideVsync { false };
     CustomOptional<bool, NoDefault> ForceVsync;

@@ -278,8 +278,10 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
 #endif
 #endif
 
+// `proxy` and `display` are HDR output's (output/SdrToHdr_*): null for a chain it is not on
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
-                            const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
+                            const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP,
+                            SdrToHdr::ProxyChain* proxy = nullptr, const SdrToHdr::DisplayInfo* display = nullptr)
 {
     if (State::Instance().isShuttingDown)
     {
@@ -327,6 +329,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         // Update swapchain info evey frame
         if (pSwapChain->GetDesc(&State::Instance().currentSwapchainDesc) != S_OK)
             LOG_WARN("Can't get swapchain desc!");
+        else if (proxy != nullptr && proxy->Active())
+            State::Instance().currentSwapchainDesc.BufferDesc.Format = proxy->GameFormat(); // the game's, not the HDR one
     }
 
     ID3D11Device* device = nullptr;
@@ -565,6 +569,33 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         if (cq && (fg == nullptr || !fg->IsActive() || fg->IsPaused()))
             DlssNr::ApplyToFinishedPicture(pSwapChain, cq);
 
+        // HDR output: the game drew into its proxy back buffer. Turn it into the real HDR one, after the finished picture
+        // (which reads the proxy) and before the menu (which draws on the real buffer).
+        if (proxy != nullptr && cq != nullptr && proxy->Active())
+        {
+            Microsoft::WRL::ComPtr<IDXGISwapChain3> chain3;
+
+            if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&chain3))))
+            {
+                SdrToHdr::PassConstants k;
+                k.convert = Config::Instance()->HdrOutputConvert.value_or_default() ? 1u : 0u;
+                k.decode = (uint32_t) Config::Instance()->HdrOutputDecode.value_or_default();
+                k.gameNits = SdrToHdr::ClampGameNits(Config::Instance()->HdrOutputGameNits.value_or_default());
+                k.peakNits = SdrToHdr::ResolvePeakNits(Config::Instance()->HdrOutputPeakNits.value_or_default(),
+                                                       display != nullptr ? display->maxLuminance : 0.0f);
+                k.sdrWhiteNits = display != nullptr ? display->sdrWhiteNits : 80.0f;
+
+                static bool failureLogged = false;
+                const char* why = proxy->Present(cq, chain3.Get(), k);
+
+                if (why != nullptr && !failureLogged)
+                {
+                    failureLogged = true;
+                    LOG_ERROR("HDR output: {}; the real back buffer keeps the last picture", why);
+                }
+            }
+        }
+
         // Draw overlay, not while the D3D11 bridge resizes (it tears the overlay down on the game's thread)
         if (Dx11wDx12Sync::ResizeInProgress().load() == 0)
             MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
@@ -653,7 +684,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 }
 
 WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags,
-                                               bool isUWP, bool isComposition)
+                                               bool isUWP, bool isComposition, const SdrToHdr::Plan* plan)
     : _real(real), _device(pDevice), _handle(hWnd), _refcount(1), _uwp(isUWP), _composition(isComposition)
 {
     _id = ++scCount;
@@ -680,7 +711,59 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
 
     CheckForHdrOutput();
 
+    // HDR output decided to make this chain HDR (the real chain already is): the game gets proxies in its own format
+    if (plan != nullptr && plan->proxied)
+    {
+        _display = plan->display;
+        _displayKnown = plan->displayKnown;
+        _proxy = std::make_unique<SdrToHdr::ProxyChain>();
+
+        const char* why = "the swap chain has no IDXGISwapChain3 or no D3D12 device";
+        auto* device = QueueDevice();
+
+        if (_real3 != nullptr && device != nullptr)
+        {
+            ScopedSkipHeapCapture skipHeapCapture {};
+            why = _proxy->Start(device, _real3, plan->gameFormat, plan->hdr10);
+        }
+
+        if (why != nullptr)
+        {
+            // Never leave the game with an HDR chain and no pass
+            LOG_WARN("HDR output: {}; putting the swap chain back to the game's format", why);
+
+            if (_real3 != nullptr)
+                _proxy->Revert(_real3, plan->gameFormat, flags, _gameColourSpace);
+
+            _proxy.reset();
+        }
+        else
+        {
+            UpdateOutputColorSpace(plan->hdr10 ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                               : DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+            DlssNr::FinishedPictureColorSpace(_real3, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709); // the finished picture is SDR
+            MenuOverlayDx::ApplyThemeStyle();
+        }
+    }
+
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
+}
+
+ID3D12Device* WrappedIDXGISwapChain4::QueueDevice() const
+{
+    ID3D12CommandQueue* queue = nullptr;
+
+    if (_device == nullptr || FAILED(_device->QueryInterface(IID_PPV_ARGS(&queue))) || queue == nullptr)
+        return nullptr;
+
+    ID3D12Device* device = nullptr;
+    queue->GetDevice(IID_PPV_ARGS(&device));
+    queue->Release();
+
+    if (device != nullptr)
+        device->Release(); // the queue keeps it alive
+
+    return device;
 }
 
 WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() {}
@@ -830,6 +913,10 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
                 State::Instance().currentFGSwapchain = nullptr;
         }
 
+        // HDR output: the proxies and the pass go before the chain they convert into
+        if (_proxy != nullptr)
+            _proxy->Release();
+
         auto refCount = _real->Release();
 
         // Disabled for now, cause issues with some games
@@ -906,7 +993,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp);
+        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp, _proxy.get(), &_display);
 
         // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
         if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
@@ -924,6 +1011,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
 {
+    // HDR output: the game gets its proxy back buffer, in its own format (any thread)
+    if (_proxy != nullptr && _proxy->Active())
+        return _proxy->GetBuffer(Buffer, riid, ppSurface);
+
     auto result = _real->GetBuffer(Buffer, riid, ppSurface);
     return result;
 }
@@ -987,7 +1078,16 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetFullscreenState(BOOL* pFull
     return _real->GetFullscreenState(pFullscreen, ppTarget);
 }
 
-HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc) { return _real->GetDesc(pDesc); }
+HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc)
+{
+    const HRESULT result = _real->GetDesc(pDesc);
+
+    // HDR output: the game made, and is told about, its own format
+    if (SUCCEEDED(result) && pDesc != nullptr && Proxied())
+        pDesc->BufferDesc.Format = _proxy->GameFormat();
+
+    return result;
+}
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height,
                                                                 DXGI_FORMAT NewFormat, UINT SwapChainFlags)
@@ -1108,7 +1208,21 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
 #endif
 #endif
 
-    if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
+    // HDR output (on, or still on this chain): decides again for the new state and does the resize itself when the chain is
+    // or becomes proxied. Off, and never proxied: skipped, the resize below is what it always was.
+    bool hdrHandled = false;
+
+    if (Config::Instance()->HdrOutputEnabled.value_or_default() || _proxy != nullptr)
+    {
+        _lastFlags = SwapChainFlags;
+        result = ResizeHdr(false, BufferCount, Width, Height, NewFormat, SwapChainFlags, nullptr, nullptr, hdrHandled);
+    }
+
+    if (hdrHandled)
+    {
+        // done by HDR output
+    }
+    else if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
     {
         ScopedSkipHeapCapture skipHeapCapture {};
 
@@ -1135,77 +1249,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         State::Instance().screenHeight = static_cast<float>(Height);
         State::Instance().lastMipBias = 100.0f;
         State::Instance().lastMipBiasMax = -100.0f;
-    }
-
-    // Crude implementation of EndlesslyFlowering's AutoHDR-ReShade
-    // https://github.com/EndlesslyFlowering/AutoHDR-ReShade
-    if (Config::Instance()->ForceHDR.value_or_default())
-    {
-        LOG_INFO("Force HDR on");
-
-        do
-        {
-            if (_real3 == nullptr)
-                break;
-
-            NewFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            DXGI_COLOR_SPACE_TYPE hdrCS = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
-
-            if (Config::Instance()->UseHDR10.value_or_default())
-            {
-                NewFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
-                hdrCS = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-            }
-
-            if (!Config::Instance()->SkipColorSpace.value_or_default())
-            {
-                UINT css = 0;
-
-                result = _real3->CheckColorSpaceSupport(hdrCS, &css);
-
-                if (result != S_OK)
-                {
-                    LOG_ERROR("CheckColorSpaceSupport error: {:X}", (UINT) result);
-                    break;
-                }
-
-                if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
-                {
-                    result = _real3->SetColorSpace1(hdrCS);
-                    if (SUCCEEDED(result)) DlssNr::FinishedPictureColorSpace(_real3, hdrCS);
-
-                    if (result != S_OK)
-                    {
-                        LOG_ERROR("SetColorSpace1 error: {:X}", (UINT) result);
-                        break;
-                    }
-                }
-
-                LOG_INFO("HDR format and color space are set");
-            }
-
-        } while (false);
-    }
-
-    State::Instance().scBuffers.clear();
-    UINT bc = BufferCount;
-    if (bc == 0 && _real1 != nullptr)
-    {
-        DXGI_SWAP_CHAIN_DESC1 desc {};
-
-        if (_real1->GetDesc1(&desc) == S_OK)
-            bc = desc.BufferCount;
-    }
-
-    for (UINT i = 0; i < bc; i++)
-    {
-        IUnknown* buffer;
-
-        if (_real->GetBuffer(i, IID_PPV_ARGS(&buffer)) == S_OK)
-        {
-            State::Instance().scBuffers.push_back(buffer);
-            buffer->Release();
-        }
     }
 
     LOG_DEBUG("result: {0:X}", (UINT) result);
@@ -1244,7 +1287,12 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetLastPresentCount(UINT* pLas
 //
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc1(DXGI_SWAP_CHAIN_DESC1* pDesc)
 {
-    return _real1->GetDesc1(pDesc);
+    const HRESULT result = _real1->GetDesc1(pDesc);
+
+    if (SUCCEEDED(result) && pDesc != nullptr && Proxied())
+        pDesc->Format = _proxy->GameFormat();
+
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc)
@@ -1278,7 +1326,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp);
+        result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp, _proxy.get(),
+                              &_display);
 
         // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
         if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
@@ -1375,10 +1424,28 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::CheckColorSpaceSupport(DXGI_CO
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
+    // HDR output is converting this chain: the real chain's colour space is ours. Record the game's, do not forward it.
+    if (Proxied())
+    {
+        _gameColourSpace = ColorSpace;
+
+        if (ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 && ColorSpace != DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709 &&
+            !_hdrColourSpaceLogged)
+        {
+            _hdrColourSpaceLogged = true;
+            LOG_INFO("HDR output: the game asked for colour space {} while its picture is being converted; recorded, "
+                     "not forwarded",
+                     (int) ColorSpace);
+        }
+
+        return S_OK;
+    }
+
     auto result = _real3->SetColorSpace1(ColorSpace);
 
     if (SUCCEEDED(result))
     {
+        _gameColourSpace = ColorSpace;
         UpdateOutputColorSpace(ColorSpace);
 
         CheckForHdrOutput();
@@ -1581,7 +1648,21 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
 #endif
 #endif
 
-    if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
+    // HDR output, as in ResizeBuffers
+    bool hdrHandled = false;
+
+    if (Config::Instance()->HdrOutputEnabled.value_or_default() || _proxy != nullptr)
+    {
+        _lastFlags = SwapChainFlags;
+        result = ResizeHdr(true, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue,
+                           hdrHandled);
+    }
+
+    if (hdrHandled)
+    {
+        // done by HDR output
+    }
+    else if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
     {
         ScopedSkipHeapCapture skipHeapCapture {};
 
@@ -1612,74 +1693,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         State::Instance().lastMipBiasMax = -100.0f;
     }
 
-    // Crude implementation of EndlesslyFlowering's AutoHDR-ReShade
-    // https://github.com/EndlesslyFlowering/AutoHDR-ReShade
-    if (Config::Instance()->ForceHDR.value_or_default())
-    {
-        LOG_INFO("Force HDR on");
-
-        do
-        {
-            Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            DXGI_COLOR_SPACE_TYPE hdrCS = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
-
-            if (Config::Instance()->UseHDR10.value_or_default())
-            {
-                Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-                hdrCS = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-            }
-
-            if (!Config::Instance()->SkipColorSpace.value_or_default())
-            {
-                UINT css = 0;
-
-                auto result = _real3->CheckColorSpaceSupport(hdrCS, &css);
-
-                if (result != S_OK)
-                {
-                    LOG_ERROR("CheckColorSpaceSupport error: {:X}", (UINT) result);
-                    break;
-                }
-
-                if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
-                {
-                    result = _real3->SetColorSpace1(hdrCS);
-                    if (SUCCEEDED(result)) DlssNr::FinishedPictureColorSpace(_real3, hdrCS);
-
-                    if (result != S_OK)
-                    {
-                        LOG_ERROR("SetColorSpace1 error: {:X}", (UINT) result);
-                        break;
-                    }
-                }
-
-                LOG_INFO("HDR format and color space are set");
-            }
-
-        } while (false);
-    }
-
-    State::Instance().scBuffers.clear();
-    UINT bc = BufferCount;
-    if (bc == 0 && _real1 != nullptr)
-    {
-        DXGI_SWAP_CHAIN_DESC1 desc {};
-
-        if (_real1->GetDesc1(&desc) == S_OK)
-            bc = desc.BufferCount;
-    }
-
-    for (UINT i = 0; i < bc; i++)
-    {
-        IUnknown* buffer;
-
-        if (_real->GetBuffer(i, IID_PPV_ARGS(&buffer)) == S_OK)
-        {
-            State::Instance().scBuffers.push_back(buffer);
-            buffer->Release();
-        }
-    }
-
     LOG_DEBUG("result: {0:X}", (UINT) result);
 
     if (lockedFg != nullptr)
@@ -1691,6 +1704,112 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     CheckForHdrOutput();
 
     return result;
+}
+
+// HDR output's part of a resize (see SdrToHdr::ProxyChain::Resize). `handled` is false when it left the resize to the caller:
+// the chain is not, and does not become, proxied.
+HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format,
+                                          UINT SwapChainFlags, const UINT* pCreationNodeMask,
+                                          IUnknown* const* ppPresentQueue, bool& handled)
+{
+    handled = false;
+    CheckForHdrOutput(); // the display the window is on now, with its SDR white level and peak
+
+    DXGI_SWAP_CHAIN_DESC current {};
+    _real->GetDesc(&current);
+
+    const bool wasProxied = Proxied();
+    DXGI_FORMAT gameFormat = wasProxied ? _proxy->GameFormat() : current.BufferDesc.Format;
+
+    if (Format != DXGI_FORMAT_UNKNOWN)
+        gameFormat = Format;
+
+    auto* device = QueueDevice();
+
+    SdrToHdr::Inputs in;
+    in.enabled = Config::Instance()->HdrOutputEnabled.value_or_default();
+    in.gameFormat = gameFormat;
+    in.flipModel = _real3 != nullptr && (current.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+                                         current.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
+    in.displayKnown = _displayKnown;
+    in.displayHdr = _display.hdrOn;
+    in.d3d11 = device == nullptr;
+    in.composition = _composition;
+
+    if (pCreationNodeMask != nullptr)
+    {
+        const UINT count = BufferCount != 0 ? BufferCount : current.BufferCount;
+
+        for (UINT i = 1; i < count; ++i)
+            in.multiNode = in.multiNode || pCreationNodeMask[i] != pCreationNodeMask[0];
+    }
+
+    SdrToHdr::FillEnvironment(in);
+    const SdrToHdr::Decision decision = SdrToHdr::Decide(in);
+
+    if (in.enabled || wasProxied)
+        LOG_INFO("{}", SdrToHdr::ReasonText(decision.reason));
+
+    if (!decision.use && !wasProxied)
+        return S_OK;
+
+    handled = true;
+
+    if (_proxy == nullptr)
+        _proxy = std::make_unique<SdrToHdr::ProxyChain>();
+
+    const bool hdr10 = Config::Instance()->UseHDR10.value_or_default();
+
+    SdrToHdr::ResizeRequest request;
+    request.useV1 = v1;
+    request.count = BufferCount;
+    request.width = Width;
+    request.height = Height;
+    request.rawFormat = Format;
+    request.resolvedFormat = gameFormat;
+    request.flags = SwapChainFlags;
+    request.nodeMask = pCreationNodeMask;
+    request.queues = ppPresentQueue;
+    request.wantProxy = decision.use;
+    request.hdr10 = hdr10;
+    request.gameColourSpace = _gameColourSpace;
+
+    SdrToHdr::ResizeResult result;
+
+    {
+        ScopedSkipHeapCapture skipHeapCapture {}; // the proxies are ours: not a game's resources to capture
+        result = _proxy->Resize(device, _real3, request);
+    }
+
+    if (result.note != nullptr)
+        LOG_WARN("HDR output: {}", result.note);
+
+    if (result.reverted)
+        LOG_WARN("HDR output: the swap chain was put back to the game's format");
+
+    if (!result.refused)
+    {
+        // The menu and the finished picture follow the colour space the real chain ended up with
+        if (result.proxied)
+        {
+            UpdateOutputColorSpace(hdr10 ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                         : DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+            DlssNr::FinishedPictureColorSpace(_real3, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        }
+        else if (wasProxied)
+        {
+            UpdateOutputColorSpace(_gameColourSpace);
+            DlssNr::FinishedPictureColorSpace(_real3, _gameColourSpace);
+        }
+
+        if (result.proxied || wasProxied)
+            MenuOverlayDx::ApplyThemeStyle();
+
+        if (!result.proxied)
+            _proxy.reset();
+    }
+
+    return result.hr;
 }
 
 //

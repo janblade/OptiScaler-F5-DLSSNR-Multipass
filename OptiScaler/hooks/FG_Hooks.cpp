@@ -1475,6 +1475,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
+        // (HDR output stands down under frame generation, so `This` has no proxy back buffers here)
         DlssNr::ApplyToFinishedPicture(This, gameQueue);
         fg->Present();
     }

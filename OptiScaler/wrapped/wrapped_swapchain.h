@@ -7,7 +7,11 @@
 #include "dxgi1_6.h"
 #include "d3d12.h"
 
+#include <output/SdrToHdr_Create.h>
+#include <output/SdrToHdr_ProxyDx12.h>
+
 #include <atomic>
+#include <memory>
 
 using Microsoft::WRL::ComPtr;
 
@@ -16,8 +20,9 @@ using Microsoft::WRL::ComPtr;
 class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChain4 final : public IDXGISwapChain4
 {
   public:
+    // `plan` is HDR output's decision for this chain (output/SdrToHdr_Create.h); null: the chain is not touched by it.
     WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP,
-                          bool isComposition = false);
+                          bool isComposition = false, const SdrToHdr::Plan* plan = nullptr);
     virtual ~WrappedIDXGISwapChain4();
 
     // implement IUnknown
@@ -101,6 +106,20 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
 
     HWND _handle = nullptr;
 
+    // HDR output (output/SdrToHdr_*): null until the chain is, or was, proxied. While it is active the game's GetBuffer
+    // returns the proxies and the real chain is HDR.
+    std::unique_ptr<SdrToHdr::ProxyChain> _proxy;
+    DXGI_COLOR_SPACE_TYPE _gameColourSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; // what the game last asked for
+    SdrToHdr::DisplayInfo _display;
+    bool _displayKnown = false;
+    bool _hdrColourSpaceLogged = false;
+    bool _passFailureLogged = false;
+
+    bool Proxied() const { return _proxy != nullptr && _proxy->Active(); }
+    ID3D12Device* QueueDevice() const;
+    HRESULT ResizeHdr(bool v1, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags,
+                      const UINT* pCreationNodeMask, IUnknown* const* ppPresentQueue, bool& handled);
+
 #ifdef USE_LOCAL_MUTEX
     OwnedMutex _localMutex;
 #endif
@@ -120,6 +139,13 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
                 if (SUCCEEDED(output6->GetDesc1(&desc)))
                 {
                     State::Instance().hdrOutputActive = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+
+                    // HDR output also wants the SDR white level and the peak: only read while it is on
+                    if (Config::Instance()->HdrOutputEnabled.value_or_default() || _proxy != nullptr)
+                    {
+                        _display = SdrToHdr::QueryDisplay(output.Get());
+                        _displayKnown = true;
+                    }
                 }
             }
         }

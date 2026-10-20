@@ -1915,8 +1915,15 @@ static void RenderExposureSection(Config* config, float menuResScale)
 
         // Auto first, naming what it is now; the other entries are the values 0-3
         const uint32_t configuredSource = config->DlssNrWhitePointSource.value_or_default();
-        const std::string autoSource =
-            std::string("Auto (") + sourceNames[DlssNr::WhitePointSourceEffective(*config)] + ")";
+        // While the exposure scan's match drives Auto (story 5), Auto names that one
+        float foundExposure = 0.0f;
+        const bool autoFound = configuredSource == DlssNrExposureDefault::kSourceAuto &&
+                               DlssNr::WhitePointSourceEffective(*config) == DlssNrExposureDefault::kSourceAutomatic &&
+                               DlssNr::ExposureScan::FoundExposure(&foundExposure);
+        const std::string autoSource = std::string("Auto (") +
+                                       (autoFound ? "Game's exposure, found by OptiScaler"
+                                                  : sourceNames[DlssNr::WhitePointSourceEffective(*config)]) +
+                                       ")";
         const char* sourceItems[] = { autoSource.c_str(), sourceNames[0], sourceNames[1], sourceNames[2],
                                       sourceNames[3] };
         int sourceItem = configuredSource == DlssNrExposureDefault::kSourceAuto
@@ -1936,11 +1943,22 @@ static void RenderExposureSection(Config* config, float menuResScale)
         const int source = (int) DlssNr::WhitePointSourceEffective(*config);
 
         HelpMarker("Where NR's brightness reference comes from.\n"
-                   "Auto: the game's exposure when the game gives one, else Automatic exposure.\n"
+                   "Auto: the game's exposure when the game gives one. Else OptiScaler looks for the game's own\n"
+                   "exposure in its memory while you play; once found, the game's value moves the brightness at\n"
+                   "Automatic exposure's level. Until then, or if none is found, Automatic exposure.\n"
                    "Manual: Paper white.\n"
                    "Game exposure: the game's own value.\n"
                    "Scanned exposure: read from game buffers; needs calibration.\n"
                    "Automatic exposure: OptiScaler measures the frame itself.");
+
+        // Auto's exposure search, while Auto is chosen: searching, found, not needed, ...
+        if (configuredSource == DlssNrExposureDefault::kSourceAuto)
+        {
+            const std::string search = DlssNr::ExposureScan::AutoStatus();
+
+            if (!search.empty())
+                ImGui::TextDisabled("Exposure search: %s", search.c_str());
+        }
 
         // Availability, in colour, for the option currently chosen. Two lines at most, whichever source.
         if (ImGui::TreeNode("Exposure readout##autoexposure"))

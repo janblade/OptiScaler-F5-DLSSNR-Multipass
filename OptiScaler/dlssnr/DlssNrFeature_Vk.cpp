@@ -255,6 +255,8 @@ struct VkState
     // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
     // the scan has found none. Read back a few frames behind, so while it holds the host's white point is in force.
     float foundBaseWhitePoint = 0.0f;
+    float foundBlendFrom = 0.0f;  // Automatic's base white point when the found one took over, while easing
+    double foundBlendStart = 0.0; // when it took over (seconds, steady clock)
 };
 
 // The grid the meter writes, and the size of one readback. 64 * 64 * sizeof(float). The game's
@@ -1506,25 +1508,41 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
         g_vk.followingGame = follow;
 
-        // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs
+        // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs.
+        // Taking over from Automatic's own is eased over a second, in stops, as on D3D12.
         float found = 0.0f;
         const bool was = g_vk.foundBaseWhitePoint > 0.0f;
-        g_vk.foundBaseWhitePoint = requestedWhitePointSource == 3 && linearHdr && !displayWhite && !follow &&
-                                           DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
-                                       ? g_vk.gamePreExposure / found
-                                       : 0.0f;
+        const float target = requestedWhitePointSource == 3 && linearHdr && !displayWhite && !follow &&
+                                     DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
+                                 ? g_vk.gamePreExposure / found
+                                 : 0.0f;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 
-        if ((g_vk.foundBaseWhitePoint > 0.0f) != was)
+        if (target > 0.0f && !was)
         {
-            const float own =
+            g_vk.foundBlendFrom =
                 g_vk.autoExposureValue > 1e-8f ? g_vk.autoExposurePreExposure / g_vk.autoExposureValue : 0.0f;
-            LOG_INFO("DLSS-NR automatic exposure (Vulkan): {}",
-                     g_vk.foundBaseWhitePoint > 0.0f
-                         ? std::format("the game's own exposure (found by the scan) moves the white point from here: "
-                                       "{:.4g}, Automatic's own {:.4g} ({:+.2f} EV)",
-                                       g_vk.foundBaseWhitePoint, own,
-                                       own > 0.0f ? std::log2(own / g_vk.foundBaseWhitePoint) : 0.0f)
-                         : std::string("Automatic's own meter again"));
+            g_vk.foundBlendStart = now;
+
+            const float own = g_vk.foundBlendFrom;
+            LOG_INFO("DLSS-NR automatic exposure (Vulkan): the game's own exposure (found by the scan) moves the white "
+                     "point from here: {:.4g}, Automatic's own {:.4g} ({:+.2f} EV), eased over a second",
+                     target, own, own > 0.0f ? std::log2(own / target) : 0.0f);
+        }
+        else if (target <= 0.0f && was)
+        {
+            LOG_INFO("DLSS-NR automatic exposure (Vulkan): Automatic's own meter again");
+        }
+
+        g_vk.foundBaseWhitePoint = target;
+
+        if (target > 0.0f && g_vk.foundBlendFrom > 0.0f)
+        {
+            const double t = std::clamp(now - g_vk.foundBlendStart, 0.0, 1.0);
+            g_vk.foundBaseWhitePoint = std::exp2(std::lerp(std::log2(g_vk.foundBlendFrom), std::log2(target), (float) t));
+
+            if (t >= 1.0)
+                g_vk.foundBlendFrom = 0.0f;
         }
     }
 

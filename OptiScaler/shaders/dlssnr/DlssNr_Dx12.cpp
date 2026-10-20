@@ -389,6 +389,8 @@ struct NrState
     // the scan has found none. Read back a few frames behind like the meter's value, so while it holds the white point
     // is the host's (the shader is not asked to recompute it from the meter's live texture).
     float foundBaseWhitePoint = 0.0f;
+    float foundBlendFrom = 0.0f;   // Automatic's base white point when the found one took over, while easing
+    double foundBlendStart = 0.0;  // when it took over (seconds, steady clock)
 
     // Eye adaptation (DlssNr_ExposureAdapt.h): the meter's own reading lands in autoExposureRaw (kept in the UAV state
     // between evaluations) and a one-texel pass eases autoExposure toward it, so autoExposure above is the eased value
@@ -3913,24 +3915,42 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     g_nr.gamePreExposure = frame.PreExposure;
 
     // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs, and
-    // never while following the game (that one is handed over, so Auto has no scan match then)
+    // never while following the game (that one is handed over, so Auto has no scan match then). Taking over from
+    // Automatic's own is eased over a second, in stops, from where Automatic stood: Cyberpunk 2077 took over 0.84 EV
+    // apart, in a scene it keeps darker than the meter would.
     {
         float found = 0.0f;
         const bool was = g_nr.foundBaseWhitePoint > 0.0f;
-        g_nr.foundBaseWhitePoint = usingAutoExposure && !g_nr.followingGame &&
-                                           DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
-                                       ? frame.PreExposure / found
-                                       : 0.0f;
+        const float target = usingAutoExposure && !g_nr.followingGame &&
+                                     DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
+                                 ? frame.PreExposure / found
+                                 : 0.0f;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 
-        if ((g_nr.foundBaseWhitePoint > 0.0f) != was)
+        if (target > 0.0f && !was)
         {
-            const float own = AutoOwnBaseWhitePoint();
-            LOG_INFO("DLSS-NR automatic exposure: {}", g_nr.foundBaseWhitePoint > 0.0f
-                         ? std::format("the game's own exposure (found by the scan) moves the white point from here: "
-                                       "{:.4g}, Automatic's own {:.4g} ({:+.2f} EV)",
-                                       g_nr.foundBaseWhitePoint, own,
-                                       own > 0.0f ? std::log2(own / g_nr.foundBaseWhitePoint) : 0.0f)
-                         : std::string("Automatic's own meter again"));
+            g_nr.foundBlendFrom = AutoOwnBaseWhitePoint();
+            g_nr.foundBlendStart = now;
+
+            const float own = g_nr.foundBlendFrom;
+            LOG_INFO("DLSS-NR automatic exposure: the game's own exposure (found by the scan) moves the white point from "
+                     "here: {:.4g}, Automatic's own {:.4g} ({:+.2f} EV), eased over a second",
+                     target, own, own > 0.0f ? std::log2(own / target) : 0.0f);
+        }
+        else if (target <= 0.0f && was)
+        {
+            LOG_INFO("DLSS-NR automatic exposure: Automatic's own meter again");
+        }
+
+        g_nr.foundBaseWhitePoint = target;
+
+        if (target > 0.0f && g_nr.foundBlendFrom > 0.0f)
+        {
+            const double t = std::clamp(now - g_nr.foundBlendStart, 0.0, 1.0);
+            g_nr.foundBaseWhitePoint = std::exp2(std::lerp(std::log2(g_nr.foundBlendFrom), std::log2(target), (float) t));
+
+            if (t >= 1.0)
+                g_nr.foundBlendFrom = 0.0f;
         }
     }
 

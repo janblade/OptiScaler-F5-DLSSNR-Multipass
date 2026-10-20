@@ -48,6 +48,7 @@ struct Tracked
     bool isBuffer = false;
     unsigned int bytes = 4; // size of the value's first channel: 2 (half) or 4 (float)
     uint32_t format = 0;    // D3D: the DXGI_FORMAT, Vulkan: the VkFormat (textures/images only)
+    int rank = 0;           // how likely its shape is to hold the exposure (DlssNrExposureScanShape::Rank)
 
     float latest = 0.0f;
     float lowest = 0.0f;
@@ -85,10 +86,12 @@ void ExaminedLocked();
 
 std::vector<Tracked>& ListLocked();
 
-// Takes a free slot for a new candidate; D3D12/D3D11 handles get a reference. Returns the slot, or -1 when already
-// tracked or full (said once).
+// Takes a free slot for a new candidate; D3D12/D3D11 handles get a reference. `size`: bytes for a buffer, texels for a
+// texture. A full list gives up a candidate of the same API whose shape is less likely to be the exposure
+// (DlssNrExposureScanShape::EvictFor), let go of by `drop` (the backend's own; null: DropLocked). Returns the slot, or
+// -1 when already tracked or full with nothing to give up (said once).
 int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, unsigned int bytes, bool isBuffer,
-                uint32_t format);
+                uint32_t format, uint64_t size, void (*drop)(size_t slot) = nullptr);
 
 // Lets go of a candidate: its reference (D3D) is released and its slot freed.
 void DropLocked(size_t slot);

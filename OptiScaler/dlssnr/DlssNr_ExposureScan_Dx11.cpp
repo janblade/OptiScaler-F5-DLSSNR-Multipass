@@ -80,7 +80,8 @@ HRESULT STDMETHODCALLTYPE hkCreateBuffer(ID3D11Device* This, const D3D11_BUFFER_
         return hr;
 
     Core::AdoptLocked(Api::D3D11, (ID3D11Resource*) *ppBuffer, This,
-                      "buffer, " + std::to_string((unsigned int) pDesc->ByteWidth) + " bytes", 4, true, 0);
+                      "buffer, " + std::to_string((unsigned int) pDesc->ByteWidth) + " bytes", 4, true, 0,
+                      pDesc->ByteWidth);
     return hr;
 }
 
@@ -107,7 +108,7 @@ HRESULT STDMETHODCALLTYPE hkCreateTexture2D(ID3D11Device* This, const D3D11_TEXT
 
     Core::AdoptLocked(Api::D3D11, (ID3D11Resource*) *ppTexture2D, This,
                       std::to_string(pDesc->Width) + "x" + std::to_string(pDesc->Height) + " " + format.name,
-                      format.bytes, false, (uint32_t) pDesc->Format);
+                      format.bytes, false, (uint32_t) pDesc->Format, (uint64_t) pDesc->Width * pDesc->Height);
     return hr;
 }
 

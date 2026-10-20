@@ -10,7 +10,8 @@
 //
 // The slots: a candidate that goes away (the game destroyed it, or the scan let go of it) frees its slot rather than
 // shifting the list, because each API's readback ring holds values by slot index for a few frames. A slot's generation
-// counts its owners, so a value copied for the old owner is never credited to the new one.
+// counts its owners, so a value copied for the old owner is never credited to the new one. A full list makes room for a
+// newcomer whose shape is likelier to be the exposure (Rank, EvictFor).
 //
 // Header-only, no D3D or Vulkan types: tests/nr_exposure_scan_shape_smoke.cpp.
 
@@ -112,6 +113,42 @@ template <class Slot> int FreeSlot(const std::vector<Slot>& slots, size_t cap)
     }
 
     return slots.size() < cap ? (int) slots.size() : -1;
+}
+
+// How likely a candidate's shape is to hold the exposure, for a full list (EvictFor). `size`: bytes for a buffer, texels
+// for a texture. A texture of up to 4 texels ranks 3 (the exposures found so far: Cyberpunk 2077's and Arkham Knight's
+// 1x1, RDR2's 1x1, Doom Eternal's 2x2); another small texture, or a buffer of up to 16 bytes (Cyberpunk's copy of its
+// exposure), ranks 2; a bigger buffer ranks 1.
+inline int Rank(bool isBuffer, uint64_t size)
+{
+    if (isBuffer)
+        return size <= 16 ? 2 : 1;
+
+    return size <= 4 ? 3 : 2;
+}
+
+// The slot a newcomer of `rank` takes when the list is full, or -1. Games make most candidates at load, before NR has
+// read any of them, so the full list is mostly judged by shape: the exposures of RDR2 and Doom Eternal came after 64
+// buffers and bigger textures. The candidate given up is one of a lower rank that has not been seen moving and is not
+// the handed exposure, that `mayGo` allows (its backend's own): the lowest rank, then the most reads without moving,
+// then the lowest slot (the earlier made, while slots are not yet reused: an exposure tends to come late, with the
+// post-processing). Once NR runs, a candidate that moves is kept whatever comes after it.
+template <class Slot, class MayGo> int EvictFor(const std::vector<Slot>& slots, int rank, MayGo mayGo)
+{
+    int best = -1;
+
+    for (size_t i = 0; i < slots.size(); ++i)
+    {
+        const Slot& s = slots[i];
+
+        if (!s.alive || s.moves || s.handed || s.rank >= rank || !mayGo(s))
+            continue;
+
+        if (best < 0 || s.rank < slots[best].rank || (s.rank == slots[best].rank && s.reads > slots[best].reads))
+            best = (int) i;
+    }
+
+    return best;
 }
 
 // Whether a value copied from slot `index` when its generation was `copied` still belongs to who holds it now.

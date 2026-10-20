@@ -5,6 +5,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 using namespace DlssNrExposureScanShape;
 
@@ -23,7 +25,78 @@ struct Slot
 {
     bool alive = false;
     uint32_t generation = 0;
+    bool moves = false;
+    bool handed = false;
+    int rank = 0;
+    unsigned int reads = 0;
+    int id = -1; // which resource of the replayed order holds the slot
 };
+
+// Replays the order a game made its candidates in, as the scan's adopt does (Core::AdoptLocked): a free slot, or one
+// given up by a less likely shape. "b16": a buffer of 16 bytes, "t4": a texture of 4 texels.
+static std::vector<std::string> Words(const std::string& order)
+{
+    std::vector<std::string> out;
+    std::string word;
+    for (char c : order + " ")
+    {
+        if (c != ' ')
+            word += c;
+        else if (!word.empty())
+        {
+            out.push_back(word);
+            word.clear();
+        }
+    }
+    return out;
+}
+
+static bool Adopt(std::vector<Slot>& slots, const std::string& word, int id)
+{
+    const bool isBuffer = word[0] == 'b';
+    const int rank = Rank(isBuffer, (uint64_t) std::stoull(word.substr(1)));
+    int slot = FreeSlot(slots, 64);
+
+    if (slot < 0)
+    {
+        const int victim = EvictFor(slots, rank, [](const Slot&) { return true; });
+        if (victim >= 0)
+        {
+            slots[victim].alive = false;
+            slot = FreeSlot(slots, 64);
+        }
+    }
+
+    if (slot < 0)
+        return false;
+    if ((size_t) slot == slots.size())
+        slots.emplace_back();
+    slots[slot] = { true, slots[slot].generation + 1, false, false, rank, 0, id };
+    return true;
+}
+
+// The slot the resource made after `before` ends up in, or -1: `atLoad` is made next, before NR reads anything; then
+// NR runs and sees the exposure move (moves = true), and `later` is made.
+static int Replay(const std::string& before, const std::string& exposure, const std::string& atLoad,
+                  const std::string& later)
+{
+    std::vector<Slot> slots;
+    int id = 0;
+    for (const std::string& w : Words(before))
+        Adopt(slots, w, id++);
+    const int exposureId = id;
+    Adopt(slots, exposure, id++);
+    for (const std::string& w : Words(atLoad))
+        Adopt(slots, w, id++);
+    for (Slot& s : slots)
+        s.moves = s.moves || (s.alive && s.id == exposureId);
+    for (const std::string& w : Words(later))
+        Adopt(slots, w, id++);
+    for (size_t i = 0; i < slots.size(); ++i)
+        if (slots[i].alive && slots[i].id == exposureId)
+            return (int) i;
+    return -1;
+}
 
 int main()
 {
@@ -82,6 +155,66 @@ int main()
     CHECK(!SameOwner(slots, 1, 1));
     CHECK(SameOwner(slots, 1, 2));
     CHECK(!SameOwner(slots, 7, 1)); // out of range
+
+    // A full list makes room for a likelier shape (Rank, EvictFor), on the order three games made their candidates in
+    // (the first 64 from each run's log). Each exposure came late: Cyberpunk 2077's copy (a 16-byte buffer) as
+    // candidate 63, RDR2's 1x1 and Doom Eternal's 2x2 after the list was full -- they were shut out before.
+    CHECK(Rank(false, 1) == 3 && Rank(false, 4) == 3 && Rank(false, 16) == 2 && Rank(false, 256) == 2);
+    CHECK(Rank(true, 4) == 2 && Rank(true, 16) == 2 && Rank(true, 20) == 1 && Rank(true, 128) == 1);
+    {
+        const std::string cyberpunk =
+            "b20 b20 b28 b4 b24 b96 b24 b24 b128 b4 b28 b28 b4 b96 b12 b96 b36 b36 b12 b4 b4 b4 b4 b4 b4 b24 b4 b96 b36 "
+            "b36 b4 b4 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 b128 "
+            "b128 b128 b128 b128 b128 b128 b128 b128 b128 t1 t1 b16 b96";
+        const std::string rdr2 =
+            "b16 b4 b56 b16 b16 b16 b16 b16 b16 b16 b16 b16 b16 b16 b48 b96 b60 b80 b12 b20 t1 b32 b32 b24 b68 b128 b128 "
+            "b128 b12 b12 b32 b64 b4 b64 b96 b108 b48 b12 t256 t256 t256 t256 t256 t256 t256 t256 t1 t1 b4 b4 b4 b4 b4 "
+            "b40 b32 b32 b16 b32 b64 b128 b64 b16 b64 b12";
+        const std::string doom = "b112 b112 b128 b128 b112 b128 b128 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 "
+                                 "t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t4 t16 t16 t16 t16 t16 t16 t16 t16 t16 "
+                                 "t16 t16 t16 t16 t16 t16 t16 t16 t16 t16 t16 t16 t16 t16 t16 t16";
+        // what keeps coming after the list is full: at load, the same shapes as before; once NR runs, also tiny
+        // textures that are not the exposure
+        std::string load, flood;
+        for (int i = 0; i < 100; ++i)
+        {
+            load += i % 3 == 0 ? "b128 " : i % 3 == 1 ? "b16 " : "t16 ";
+            flood += i % 4 == 0 ? "t4 " : i % 4 == 1 ? "b128 " : i % 4 == 2 ? "b16 " : "t1 ";
+        }
+
+        CHECK(Replay(cyberpunk, "b16", load, flood) >= 0);
+        CHECK(Replay(rdr2 + " " + load, "t1", load + flood, flood) >= 0);
+        CHECK(Replay(doom + " " + load, "t4", load + flood, flood) >= 0);
+
+        // The limit: at load nothing has been read, so tiny textures made after a 16-byte exposure buffer push it out
+        // when nothing smaller is left (Cyberpunk's own order did not do this; its 1x1 textures came first)
+        CHECK(Replay(cyberpunk, "b16", flood, "") == -1);
+
+        // a bigger buffer never pushes anything out, and a shape never pushes out its own rank
+        std::string full;
+        for (int i = 0; i < 64; ++i)
+            full += "b128 ";
+        CHECK(Replay(full, "b128", "", "") == -1);
+        CHECK(Replay(full, "t1", "t1 t1", "") >= 0);
+    }
+    {
+        // a candidate seen moving, or the handed exposure, is never given up; of the rest, the one read longest
+        std::vector<Slot> list;
+        for (int i = 0; i < 64; ++i)
+            Adopt(list, "b128", i);
+        for (Slot& s : list)
+            s.moves = true;
+        list[5].moves = false;
+        list[5].handed = true;
+        CHECK(!Adopt(list, "t1", 100));
+        list[9].moves = false;
+        list[9].reads = 50;
+        list[3].moves = false;
+        list[3].reads = 10;
+        CHECK(Adopt(list, "t1", 101));
+        CHECK(list[9].id == 101);
+        CHECK(list[5].id == 5);
+    }
 
     printf(fails == 0 ? "nr_exposure_scan_shape_smoke: PASS\n" : "nr_exposure_scan_shape_smoke: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;

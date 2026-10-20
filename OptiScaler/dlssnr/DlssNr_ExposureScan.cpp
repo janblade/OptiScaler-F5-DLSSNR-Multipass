@@ -515,7 +515,7 @@ const char* ApiSuffix(Api api)
 float HalfToFloat(uint16_t h) { return HalfToFloatImpl(h); }
 
 int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, unsigned int bytes, bool isBuffer,
-                uint32_t format)
+                uint32_t format, uint64_t size, void (*drop)(size_t slot))
 {
     if (handle == nullptr)
         return -1;
@@ -526,7 +526,23 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
             return -1;
     }
 
-    const int slot = DlssNrExposureScanShape::FreeSlot(g_scan.tracked, kMaxCandidates);
+    const int rank = DlssNrExposureScanShape::Rank(isBuffer, size);
+    int slot = DlssNrExposureScanShape::FreeSlot(g_scan.tracked, kMaxCandidates);
+
+    // Full: a candidate less likely to be the exposure makes room
+    if (slot < 0)
+    {
+        const int victim =
+            DlssNrExposureScanShape::EvictFor(g_scan.tracked, rank, [api](const Tracked& t) { return t.api == api; });
+
+        if (victim >= 0)
+        {
+            LOG_INFO("DLSS-NR exposure scan: the list is full; candidate {} ({}{}) makes room for a likelier one ({}{})",
+                     victim + 1, g_scan.tracked[victim].shape, ApiSuffix(api), shape, ApiSuffix(api));
+            (drop != nullptr ? drop : DropLocked)((size_t) victim);
+            slot = DlssNrExposureScanShape::FreeSlot(g_scan.tracked, kMaxCandidates);
+        }
+    }
 
     if (slot < 0)
     {
@@ -556,6 +572,7 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
     t.isBuffer = isBuffer;
     t.bytes = bytes;
     t.format = format;
+    t.rank = rank;
 
     if (api != Api::Vulkan)
         ((IUnknown*) handle)->AddRef();
@@ -806,7 +823,8 @@ void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource, voi
     if (!FromGameLocked(caller))
         return;
 
-    Core::AdoptLocked(Api::D3D12, resource, nullptr, shape, bytes, isBuffer, (uint32_t) fmt);
+    Core::AdoptLocked(Api::D3D12, resource, nullptr, shape, bytes, isBuffer, (uint32_t) fmt,
+                      isBuffer ? desc->Width : desc->Width * desc->Height);
 }
 
 unsigned int Examined()
@@ -856,7 +874,8 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
     if (!FromGameLocked(caller))
         return;
 
-    Core::AdoptLocked(Api::D3D12, resource, nullptr, shape, bytes, isBuffer, (uint32_t) fmt);
+    Core::AdoptLocked(Api::D3D12, resource, nullptr, shape, bytes, isBuffer, (uint32_t) fmt,
+                      isBuffer ? rd.Width : rd.Width * rd.Height);
 }
 
 void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame)

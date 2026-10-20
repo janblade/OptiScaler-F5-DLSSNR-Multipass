@@ -49,6 +49,7 @@ struct Pending
     unsigned int bytes = 4;
     bool isBuffer = true;
     uint32_t format = 0;
+    uint64_t size = 0; // bytes for a buffer, texels for an image
 };
 
 std::unordered_map<uint64_t, Pending> g_pending;
@@ -221,7 +222,8 @@ void AdoptBoundLocked(const void* handle, VkDeviceMemory memory)
     const Pending p = it->second;
     g_pending.erase(it);
 
-    const int slot = Core::AdoptLocked(Api::Vulkan, (void*) handle, p.device, p.shape, p.bytes, p.isBuffer, p.format);
+    const int slot = Core::AdoptLocked(Api::Vulkan, (void*) handle, p.device, p.shape, p.bytes, p.isBuffer, p.format,
+                                       p.size, DropVkLocked);
 
     if (slot < 0 && !p.isBuffer)
     {
@@ -271,7 +273,7 @@ VkResult VKAPI_CALL hkCreateBuffer(VkDevice device, const VkBufferCreateInfo* in
         if (Core::FromGameLocked(_ReturnAddress()))
         {
             g_pending[Key(*buffer)] = { device, "buffer, " + std::to_string((unsigned long long) info->size) + " bytes",
-                                        4, true, 0 };
+                                        4, true, 0, (uint64_t) info->size };
             CountWatchedLocked();
         }
     }
@@ -687,7 +689,8 @@ void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage imag
     g_pending[Key(image)] = { device,
                               std::to_string(info.extent.width) + "x" + std::to_string(info.extent.height) + " " +
                                   format.name,
-                              format.bytes, false, (uint32_t) info.format };
+                              format.bytes, false, (uint32_t) info.format,
+                              (uint64_t) info.extent.width * info.extent.height };
     CountWatchedLocked();
 }
 

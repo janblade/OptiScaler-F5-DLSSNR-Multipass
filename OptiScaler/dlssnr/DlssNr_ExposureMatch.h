@@ -14,6 +14,8 @@
 // - slope ~ -1: a divisor, or a scene luminance (white point style);
 // - a candidate that follows log2 of the meter linearly instead: a stop value (log2, ln or log10, either sign).
 // The fit is tried at a range of row lags, because a game's eye adaptation trails the meter's raw (unadapted) reading.
+// A game may adapt only part of the way (a log-log slope down to Settings::minExposureSlope) and clamp at a floor or a
+// ceiling; the rows a candidate spends on such a plateau are left out of its fit (detail::Plateaus).
 //
 // What is not an exposure, rejected before any fit:
 // - Steady: changes in under 2% of rows. NBA 2K27's own handed exposure is this (one value per scene, 1.3195 for the
@@ -92,6 +94,11 @@ struct Settings
     float bakedCandidateEv = 2.0f; // ... while a candidate swings at least this much
     int minLag = -5;               // rows; a little lead is allowed, the copy may be read a frame late
     int maxLag = 30;               // ~3 s of eye adaptation
+    // A multiplier's or divisor's log-log slope against the meter. Under 1: the game adapts only part of the way
+    // (Doom Eternal ~0.5-0.6, RDR2 ~0.8); that range is the game's own look, and the value still says which way and
+    // when the light changed. Under ~0.3 is a stop value with a large offset, fitted as one.
+    float minExposureSlope = 0.3f;
+    float maxExposureSlope = 1.5f;
 };
 
 namespace detail
@@ -107,8 +114,10 @@ inline float Percentile(std::vector<float> v, float p)
 
 inline float SpreadEv(const std::vector<float>& logs) { return Percentile(logs, 0.95f) - Percentile(logs, 0.05f); }
 
-// Least squares of y on x with y shifted `lag` rows later; slope and correlation, 0 when either side is flat.
-inline void Regress(const std::vector<float>& x, const std::vector<float>& y, int lag, float& slope, float& corr)
+// Least squares of y on x with y shifted `lag` rows later; slope and correlation, 0 when either side is flat. Rows of y
+// marked in `skip` (a clamped value, Plateaus) are left out.
+inline void Regress(const std::vector<float>& x, const std::vector<float>& y, int lag, float& slope, float& corr,
+                    const std::vector<char>* skip = nullptr)
 {
     slope = 0.0f;
     corr = 0.0f;
@@ -118,16 +127,22 @@ inline void Regress(const std::vector<float>& x, const std::vector<float>& y, in
         return;
 
     double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+    int used = 0;
     for (int i = from; i < to; ++i)
     {
+        if (skip != nullptr && (*skip)[i])
+            continue;
         const double a = x[i - lag], b = y[i];
         sx += a;
         sy += b;
         sxx += a * a;
         syy += b * b;
         sxy += a * b;
+        ++used;
     }
-    const double m = to - from;
+    if (used < 3)
+        return;
+    const double m = used;
     const double vx = sxx - sx * sx / m, vy = syy - sy * sy / m, cxy = sxy - sx * sy / m;
     if (vx <= 1e-12 || vy <= 1e-12)
         return;
@@ -136,14 +151,14 @@ inline void Regress(const std::vector<float>& x, const std::vector<float>& y, in
 }
 
 inline void BestLag(const std::vector<float>& x, const std::vector<float>& y, const Settings& s, float& slope,
-                    float& corr, int& lag)
+                    float& corr, int& lag, const std::vector<char>* skip = nullptr)
 {
     slope = corr = 0.0f;
     lag = 0;
     for (int l = s.minLag; l <= s.maxLag; ++l)
     {
         float sl, r;
-        Regress(x, y, l, sl, r);
+        Regress(x, y, l, sl, r, skip);
         if (std::fabs(r) > std::fabs(corr) + 1e-6f ||
             (std::fabs(r) > std::fabs(corr) - 1e-6f && std::abs(l) < std::abs(lag)))
         {
@@ -152,6 +167,35 @@ inline void BestLag(const std::vector<float>& x, const std::vector<float>& y, co
             lag = l;
         }
     }
+}
+
+// The rows where a series sits at its own lowest or highest value, when that value holds at least 5% of the rows: a
+// clamped exposure (Doom Eternal's floor of 2.0 in bright scenes) does not follow the light there, and fitting those
+// rows hides how well it follows it everywhere else. Nothing is marked when the plateaus would leave under 40% of the
+// rows -- a value that is mostly clamped is a stepped one, and its fit should say so.
+inline std::vector<char> Plateaus(const std::vector<float>& y)
+{
+    std::vector<char> skip(y.size(), 0);
+    if (y.empty())
+        return skip;
+
+    const auto [lo, hi] = std::minmax_element(y.begin(), y.end());
+    const float low = *lo, high = *hi;
+    if (!(high > low))
+        return skip;
+
+    const size_t atLow = (size_t) std::count(y.begin(), y.end(), low);
+    const size_t atHigh = (size_t) std::count(y.begin(), y.end(), high);
+    const bool skipLow = atLow * 20 >= y.size(), skipHigh = atHigh * 20 >= y.size();
+    const size_t left = y.size() - (skipLow ? atLow : 0) - (skipHigh ? atHigh : 0);
+
+    if ((!skipLow && !skipHigh) || left * 5 < y.size() * 2)
+        return skip;
+
+    for (size_t i = 0; i < y.size(); ++i)
+        skip[i] = (skipLow && y[i] == low) || (skipHigh && y[i] == high) ? 1 : 0;
+
+    return skip;
 }
 
 // The stop value's scale: its slope against log2 of the meter, snapped to log2 / ln / log10 when within 25%
@@ -249,20 +293,22 @@ inline Fit ClassifyRows(const std::vector<float>& logMeter, const std::vector<fl
             x.push_back(logMeter[i]);
             y.push_back(v[i] > 0.0f ? std::log2(v[i]) : y.back());
         }
-        BestLag(x, y, s, logSlope, logCorr, logLag);
+        const std::vector<char> skip = Plateaus(y);
+        BestLag(x, y, s, logSlope, logCorr, logLag, &skip);
     }
 
     // Linear in log2 of the meter: a stop value
     float linSlope = 0, linCorr = 0;
     int linLag = 0;
-    BestLag(logMeter, v, s, linSlope, linCorr, linLag);
+    const std::vector<char> linSkip = Plateaus(v);
+    BestLag(logMeter, v, s, linSlope, linCorr, linLag, &linSkip);
 
-    // Each fit's own verdict: log-log as a multiplier or divisor (a slope of 0.5..1.5), linear as a stop value (a slope
-    // that snaps to a log base). Both hold: the tighter fit wins. One holds: that is the answer -- a stop value with a
-    // large offset (EV100 style, never crossing zero) fits log-log almost as tightly, but at a slope (~0.1) no
+    // Each fit's own verdict: log-log as a multiplier or divisor (a slope in the exposure band), linear as a stop value
+    // (a slope that snaps to a log base). Both hold: the tighter fit wins. One holds: that is the answer -- a stop value
+    // with a large offset (EV100 style, never crossing zero) fits log-log almost as tightly, but at a slope (~0.1) no
     // exposure has. Neither: Unrelated, reported with the tighter fit.
-    const bool logHolds =
-        canLog && std::fabs(logCorr) >= s.minCorr && std::fabs(logSlope) >= 0.5f && std::fabs(logSlope) <= 1.5f;
+    const bool logHolds = canLog && std::fabs(logCorr) >= s.minCorr && std::fabs(logSlope) >= s.minExposureSlope &&
+                          std::fabs(logSlope) <= s.maxExposureSlope;
     const float scale = SnapScale(linSlope);
     const bool linHolds = std::fabs(linCorr) >= s.minCorr && scale != 0.0f;
 

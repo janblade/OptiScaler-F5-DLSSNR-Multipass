@@ -127,6 +127,20 @@ static void Synthetic()
         CHECK(f.lag >= 6 && f.lag <= 24);
     }
 
+    // A game that adapts only part of the way and clamps (Doom Eternal: a floor in bright scenes, ~0.5-0.6 stop per
+    // meter stop above it): still a multiplier, fitted on the rows off its floor
+    {
+        const auto partial = Map(e, [](float x, size_t) { return std::max(6.0f, 8.0f * std::pow(x, 0.4f)); });
+        size_t clamped = 0;
+        for (float a : partial)
+            clamped += a == 6.0f ? 1 : 0;
+        CHECK(clamped * 5 >= rows && clamped * 2 <= rows); // the floor holds 20-50% of the rows
+        const Fit f = Classify(meter, partial);
+        CHECK(f.kind == Kind::Multiplier);
+        CHECK(f.slope > 0.3f && f.slope < 0.5f);
+        CHECK(f.corr > 0.95f);
+    }
+
     // What is not an exposure
     CHECK(Classify(meter, Map(e, [](float, size_t i) { return 0.1f * (float) i; })).kind == Kind::Timer);
     CHECK(Classify(meter, Map(e, [](float, size_t) { return Rand01(); })).kind == Kind::Noisy);

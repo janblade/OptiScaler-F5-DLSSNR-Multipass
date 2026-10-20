@@ -78,6 +78,14 @@ struct AutoState
     DlssNrExposureMatch::Fit fit;
     float level = 0.0f;
 
+    // The level from the best-measured find this session (the most rows), and its kind. A re-find of the same kind --
+    // the game remade its exposure on a quality change -- is judged on a short history: Cyberpunk 2077 measured 1.5 on
+    // 250 rows where its first find had 1.06 on 850, half a stop darker for having changed DLSS quality. Kept, the
+    // brightness does not depend on when the exposure was found.
+    float bestLevel = 0.0f;
+    size_t bestLevelRows = 0;
+    DlssNrExposureMatch::Kind bestLevelKind = DlssNrExposureMatch::Kind::Unsure;
+
     // The found exposure as the picture uses it, worked out once per NR frame (FoundExposure reads it), with the
     // pre-exposure of the frame it goes with. A match that moves with our meter's unadapted reading (lag 1 row or less,
     // or leading it) is the game's per-frame target, before its own eye adaptation: Cyberpunk 2077's jumps up to ~1 EV between frames when
@@ -205,6 +213,22 @@ DlssNrExposureAuto::Verdict CollectMatchLocked()
         g_auto.foundOwner = tracked[slot].generation;
         g_auto.fit = v.fit;
         g_auto.level = level;
+
+        const bool sameKind = g_auto.bestLevel > 0.0f && g_auto.bestLevelKind == v.fit.kind;
+
+        if (!sameKind || v.rows >= g_auto.bestLevelRows)
+        {
+            g_auto.bestLevel = level;
+            g_auto.bestLevelRows = v.rows;
+            g_auto.bestLevelKind = v.fit.kind;
+        }
+        else
+        {
+            LOG_INFO("DLSS-NR exposure scan (Auto): found again on {} rows (level {:.4g}); keeping the level measured on "
+                     "{} rows: {:.4g}",
+                     v.rows, level, g_auto.bestLevelRows, g_auto.bestLevel);
+            g_auto.level = g_auto.bestLevel;
+        }
 
         static const char* kKinds[] = { "unsure",    "steady",     "not a float", "a timer",    "noisy",
                                         "unrelated", "multiplier", "divisor",     "stop value", "scene luminance" };

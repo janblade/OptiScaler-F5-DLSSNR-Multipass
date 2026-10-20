@@ -108,6 +108,9 @@ struct Settings
     float minExposureSlope = 0.3f;
     float maxExposureSlope = 1.5f;
     size_t frozenRows = 20; // ~2 s holding one exact value: paused, not following (detail::Plateaus)
+    // A best lag at either end of [minLag, maxLag] is no fit (ClassifyRows). Off for the halves Match asks to agree: they
+    // confirm the kind on fewer rows, where a noisy half's best lag can land anywhere; the lag used is the whole one's.
+    bool edgeLagRejects = true;
 };
 
 namespace detail
@@ -329,10 +332,15 @@ inline Fit ClassifyRows(const std::vector<float>& logMeter, const std::vector<fl
     // (a slope that snaps to a log base). Both hold: the tighter fit wins. One holds: that is the answer -- a stop value
     // with a large offset (EV100 style, never crossing zero) fits log-log almost as tightly, but at a slope (~0.1) no
     // exposure has. Neither: Unrelated, reported with the tighter fit.
+    //
+    // A best lag at either end of the searched range is not a fit: the best may lie beyond it, and the rows it pairs are
+    // the wrong ones (Cyberpunk 2077 after a quality change, 200 rows: lag -5, slope 1.30, and a level three times the
+    // real one; a value cannot lead the light by half a second).
+    const auto inside = [&s](int lag) { return !s.edgeLagRejects || (lag > s.minLag && lag < s.maxLag); };
     const bool logHolds = canLog && std::fabs(logCorr) >= s.minCorr && std::fabs(logSlope) >= s.minExposureSlope &&
-                          std::fabs(logSlope) <= s.maxExposureSlope;
+                          std::fabs(logSlope) <= s.maxExposureSlope && inside(logLag);
     const float scale = SnapScale(linSlope);
-    const bool linHolds = std::fabs(linCorr) >= s.minCorr && scale != 0.0f;
+    const bool linHolds = std::fabs(linCorr) >= s.minCorr && scale != 0.0f && inside(linLag);
 
     bool useLin;
     if (logHolds && linHolds)
@@ -467,6 +475,7 @@ inline Verdict Match(const std::vector<float>& meter, const std::vector<std::vec
     const bool ask1 = SpreadEv(lm1) >= s.halfTravelEv, ask2 = SpreadEv(lm2) >= s.halfTravelEv;
     Settings halfSettings = s;
     halfSettings.minCorr = s.halfCorr;
+    halfSettings.edgeLagRejects = false;
 
     out.what = What::None;
     for (size_t c = 0; c < candidates.size(); ++c)

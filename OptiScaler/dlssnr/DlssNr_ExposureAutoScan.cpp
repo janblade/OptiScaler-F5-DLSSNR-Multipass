@@ -79,8 +79,8 @@ struct AutoState
     float level = 0.0f;
 
     // The found exposure as the picture uses it, worked out once per NR frame (FoundExposure reads it), with the
-    // pre-exposure of the frame it goes with. A match that moves with our meter's unadapted reading (lag 0-1 rows) is
-    // the game's per-frame target, before its own eye adaptation: Cyberpunk 2077's jumps up to ~1 EV between frames when
+    // pre-exposure of the frame it goes with. A match that moves with our meter's unadapted reading (lag 1 row or less,
+    // or leading it) is the game's per-frame target, before its own eye adaptation: Cyberpunk 2077's jumps up to ~1 EV between frames when
     // the camera pans and stops, a flash if used as it is. That one is eased as Automatic's own reading is
     // (DlssNr_ExposureAdapt.h, the same seconds); a match that trails the meter is the game's eased value already and is
     // used as it is.
@@ -323,7 +323,7 @@ void FoundNowLocked(const FrameExposure& frame, std::chrono::steady_clock::time_
         if (!hold)
             g_auto.now = 0.0f;
     }
-    else if (std::abs(g_auto.fit.lag) > 1)
+    else if (g_auto.fit.lag > 1)
     {
         g_auto.now = target;
         g_auto.validAt = now;

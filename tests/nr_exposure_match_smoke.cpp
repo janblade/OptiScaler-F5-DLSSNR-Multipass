@@ -132,6 +132,16 @@ static void Synthetic()
         CHECK(f.kind == Kind::Luminance);
     }
 
+    // A best lag at the end of the searched range is no fit (Cyberpunk 2077 after a quality change: a value "leading"
+    // the meter by the full 5 rows, on 200 rows, with a level three times the real one). Inside the range it is.
+    {
+        auto leading = [&](size_t rowsAhead)
+        { return Map(e, [&](float, size_t i) { return e[std::min(i + rowsAhead, e.size() - 1)]; }); };
+        CHECK(Classify(meter, leading(8)).kind == Kind::Unrelated);
+        const Fit inside = Classify(meter, leading(3));
+        CHECK(inside.kind == Kind::Multiplier && inside.lag == -3);
+    }
+
     // Eye adaptation: the game's value trails the meter's raw reading; the lag search finds it
     {
         const Fit f = Classify(meter, Eased(e, 12.0f));

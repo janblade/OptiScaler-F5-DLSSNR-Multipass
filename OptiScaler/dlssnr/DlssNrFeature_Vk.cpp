@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "DlssNr_SuperiorScaling.h"
 
 #include "DlssNrFeature_Vk.h"
 #include "DlssNrFeature_Dx12.h"
@@ -762,6 +763,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 {
     applied = false;
     auto& cfg = *Config::Instance();
+    if (DlssNr::SuperiorScaling::Enabled(cfg))
+    {
+        static bool warned = false;
+        if (!warned) LOG_WARN("Superior Scaling requires D3D12 or a D3D12 bridge; native Vulkan keeps the clean frame.");
+        warned = true;
+        return;
+    }
+
 
     if (cfg.DlssNrDeferredDlss.value_or_default() && !rayReconstruction)
     {

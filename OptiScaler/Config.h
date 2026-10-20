@@ -432,7 +432,15 @@ class Config
     // residual. Only has an effect when Model resolution is under 100%.
     CustomOptional<uint32_t> DlssNrTransfer { 1 }; // 11: Superior Scaling (v59)
     CustomOptional<int> DlssNrSuperiorScalingPreset { 1 }; // private DLSS A=1 / K=11, independent of NR A/B
-    CustomOptional<float> DlssNrSuperiorHighlightProtection { 100.0f };
+    CustomOptional<float> DlssNrAutoExposureHighlightProtection { 0.0f };
+    CustomOptional<float> DlssNrMaxDarkening { 100.0f };
+    CustomOptional<float> DlssNrFinalChromaticityRecovery { 0.0f };
+    CustomOptional<bool> DlssNrFinalChromaticityPreserveSaturation { false };
+    CustomOptional<float> DlssNrFinalSaturationRecovery { 0.0f };
+    CustomOptional<uint32_t> DlssNrFinalSaturationMode { 0 };
+    CustomOptional<float> DlssNrFinalHighSaturationProtection { 0.0f };
+    CustomOptional<float> DlssNrFinalColourSmoothingMs { 250.0f };
+
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the
     // game already tone mapped there is nothing to measure and this has no effect.

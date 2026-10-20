@@ -41,9 +41,11 @@ struct Generation
     ID3D12GraphicsCommandList* creation = nullptr; // normalized identity only
     NVSDK_NGX_Parameter* parameters = nullptr;
     NVSDK_NGX_Handle* feature = nullptr;
-    Texture proxy, original, small, depth, motion, interLow, interWorking, finalLow;
+    Texture proxy, original, workProxy, depth, motion, interLow, interWorking, finalLow;
     Texture carrier, temporalOutput, temporalMotion, unit, meter, exposure, active, held;
-    Texture nativeAnswer;
+    Texture nativeAnswer, finalColour, colourStats[2], colourHistory[2];
+    bool colourHistoryValid = false;
+    unsigned colourCursor = 0;
     std::unique_ptr<OS_Dx12> superUp, superDown;
     Scaler scaler = Scaler::Count;
     bool holding = false;
@@ -136,7 +138,7 @@ bool Ensure(Texture& t, ID3D12Device* device, DXGI_FORMAT format, unsigned w, un
     return t.resource != nullptr;
 }
 
-bool Dispatch(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, Constants c,
+bool Dispatch(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, const Constants& c,
               ID3D12Resource* source, ID3D12Resource* model, ID3D12Resource* original,
               ID3D12Resource* motion, ID3D12Resource* previous, ID3D12Resource* low,
               Texture& output, Texture* keep = nullptr, uint32_t* immutableSlot = nullptr)
@@ -179,15 +181,24 @@ void ExposureConstants(Constants& c, const Config& cfg, unsigned source, float p
     const float trim = source == 3 ? cfg.DlssNrAutoExposureTrim.value_or_default()
                                  : cfg.DlssNrWhitePointTrim.value_or_default();
     c.ExposureTrim = std::isfinite(trim) ? std::clamp(trim, .001f, 1000.0f) : 1.0f;
-    const float protection = cfg.DlssNrSuperiorHighlightProtection.value_or_default();
+    const float protection = cfg.DlssNrAutoExposureHighlightProtection.value_or_default();
     c.ExposureProtection = std::isfinite(protection) ? std::clamp(protection, 0.0f, 100.0f) : 0.0f;
-    const auto anchors = DlssNrTrim::Parse(source == 3 ? cfg.DlssNrAutoExposureTrimAnchors.value_or_default()
-                                                    : cfg.DlssNrExposureTrimAnchors.value_or_default());
-    for (const auto& anchor : anchors)
+    auto text = source == 3 ? cfg.DlssNrAutoExposureTrimAnchors.value_or_default()
+                            : cfg.DlssNrGameExposureTrimAnchors.value_or_default();
+    std::replace(text.begin(), text.end(), ';', ' ');
+    std::istringstream input(text);
+    std::array<std::pair<float, float>, 8> anchors {};
+    unsigned count = 0;
+    float point, value; char colon;
+    while (count < anchors.size() && input >> point >> colon >> value)
+        if (colon == ':' && std::isfinite(point) && point > 0 && std::isfinite(value) && value > 0)
+            anchors[count++] = { point, std::clamp(value, .001f, 1000.0f) };
+    std::stable_sort(anchors.begin(), anchors.begin() + count);
+    for (unsigned i = 0; i < count; ++i)
     {
-        if (c.ExposureAnchorCount == 8u) break;
-        c.ExposureAnchors[c.ExposureAnchorCount * 2u] = anchor.key;
-        c.ExposureAnchors[c.ExposureAnchorCount++ * 2u + 1u] = anchor.trim;
+        if (i + 1 < count && anchors[i].first == anchors[i + 1].first) continue;
+        c.ExposureAnchors[2 * c.ExposureAnchorCount] = anchors[i].first;
+        c.ExposureAnchors[2 * c.ExposureAnchorCount++ + 1] = anchors[i].second;
     }
 }
 
@@ -340,7 +351,7 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
     auto& g = *state.current;
     if (g.failed) { Say("Private DLSS initialization failed; switch Superior Scaling off and on to retry."); return false; }
     if (!Ensure(g.proxy, device, format, width, height) || !Ensure(g.original, device, format, width, height) ||
-        ((workWidth != width || workHeight != height) && !Ensure(g.small, device, format, workWidth, workHeight)))
+        ((workWidth != width || workHeight != height) && !Ensure(g.workProxy, device, format, workWidth, workHeight)))
     { Say("Input resource allocation failed."); return false; }
     if (temporal && !g.feature)
     {
@@ -393,6 +404,7 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
         g_gpuTime->End(cmd);
         if (auto ms = g_gpuTime->ReadGpuTime(queue)) g_lastGpuTime = ms;
         if (auto ms = g_ngxTime->ReadGpuTime(queue)) g_lastNgxTime = ms;
+        g_gpuTime->DiscardFresh(); g_ngxTime->DiscardFresh();
     } };
 
     float white = frame.WhitePointOverride > 0 ? frame.WhitePointOverride : cfg.DlssNrWhitePointScale.value_or_default();
@@ -480,14 +492,14 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
             }
             if (!g.superUp) g.superUp = std::make_unique<OS_Dx12>("Superior supersample up", device, true, scaler);
             if (!g.superDown) g.superDown = std::make_unique<OS_Dx12>("Superior supersample down", device, false, scaler);
-            g.small.To(cmd, Uav);
-            built = g.superUp->Dispatch(cmd, modelInput, g.small.Get());
-            if (built) g.small.To(cmd, Srv);
+            g.workProxy.To(cmd, Uav);
+            built = g.superUp->Dispatch(cmd, modelInput, g.workProxy.Get());
+            if (built) g.workProxy.To(cmd, Srv);
         }
         Constants down {}; down.Mode = 2u; down.Width = workWidth; down.Height = workHeight;
         down.DirectResolveFlags = 65536u; // custom Area, independent of the legacy down/upscaler settings
-        if (!built && !Dispatch(shader, cmd, down, modelInput, nullptr, nullptr, nullptr, nullptr, nullptr, g.small)) return false;
-        modelInput = g.small.Get();
+        if (!built && !Dispatch(shader, cmd, down, modelInput, nullptr, nullptr, nullptr, nullptr, nullptr, g.workProxy)) return false;
+        modelInput = g.workProxy.Get();
     }
     depthIn = ReadableGuide(device, cmd, depth, &g_nr.depthClone);
     motionIn = ReadableGuide(device, cmd, motion, &g_nr.motionClone);
@@ -598,7 +610,7 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
     resolve.Passthrough = encode.Passthrough; resolve.ReversibleMode = encode.ReversibleMode;
     resolve.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
     resolve.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
-    resolve.MaxRatio = cfg.DlssNrMaxRatio.value_or_default(); resolve.MaxDarkening = 100.0f;
+    resolve.MaxRatio = cfg.DlssNrMaxRatio.value_or_default(); resolve.MaxDarkening = std::clamp(cfg.DlssNrMaxDarkening.value_or_default(), 0.0f, 100.0f);
     resolve.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
     resolve.DebugView = cfg.DlssNrDebugView.value_or_default();
     if (resolve.DebugView == 5u) resolve.DebugView = 0u;
@@ -633,13 +645,66 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
             if (!low) resolve.GuideWidth = 0u; // same guided-only fallback as v59
         }
     }
+    if (resolve.DebugView == 4u) { resolveProxy = modelInput; resolve.DebugView = 1u; }
+    // v59's optional final colour recovery; no dispatch/allocation when disabled.
+    const float chroma = std::clamp(cfg.DlssNrFinalChromaticityRecovery.value_or_default(), 0.0f, 100.0f);
+    const float saturation = std::clamp(cfg.DlssNrFinalSaturationRecovery.value_or_default(), 0.0f, 100.0f);
+    const bool colourEnabled = (chroma > 0 || saturation > 0) && resolve.CompareMode == 0 &&
+                              resolve.DebugView == 0 && resolve.ShowSkinMask == 0 && resolve.ApplyModel;
+    if (!colourEnabled || reset) g.colourHistoryValid = false;
+    constexpr unsigned statsW = 32;
+    const unsigned statsH = std::max(1u, unsigned((uint64_t(statsW) * height + width / 2u) / width));
+    const bool colourReady = colourEnabled && Ensure(g.finalColour, device, format, width, height) &&
+        Ensure(g.colourStats[0], device, DXGI_FORMAT_R32G32B32A32_FLOAT, statsW, statsH) &&
+        Ensure(g.colourStats[1], device, DXGI_FORMAT_R32G32B32A32_FLOAT, statsW, statsH) &&
+        Ensure(g.colourHistory[0], device, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 1) &&
+        Ensure(g.colourHistory[1], device, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 1);
     const bool targetUav = (target->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
     ID3D12Resource* original = targetUav ? g.original.Get() : target;
     ID3D12Resource* destination = targetUav ? target : g.original.Get();
-    if (targetUav) transitionTarget(Uav); else g.original.To(cmd, Uav);
+    if (colourReady) g.finalColour.To(cmd, Uav);
+    else if (targetUav) transitionTarget(Uav); else g.original.To(cmd, Uav);
     if (!shader.DispatchSuperiorPass(cmd, resolve, resolveProxy, resolveAnswer, original, exposureTexture, nullptr, low,
-                                    destination, nullptr)) return false;
-    if (!targetUav)
+                                    colourReady ? g.finalColour.Get() : destination, nullptr)) return false;
+    bool colourApplied = false;
+    if (colourReady)
+    {
+        g.finalColour.To(cmd, Srv);
+        Constants stats {}; stats.Mode = 29u; stats.Width = statsW; stats.Height = statsH;
+        stats.Passthrough = resolve.Passthrough;
+        if (Dispatch(shader, cmd, stats, original, g.finalColour.Get(), nullptr, nullptr, nullptr, nullptr,
+                     g.colourStats[0], &g.colourStats[1]))
+        {
+            const auto write = g.colourCursor & 1u, read = write ^ 1u;
+            Constants reduce {}; reduce.Mode = 30u; reduce.Width = reduce.Height = 1;
+            reduce.GuideWidth = statsW; reduce.GuideHeight = statsH;
+            reduce.MaxRatio = std::clamp(cfg.DlssNrFinalColourSmoothingMs.value_or_default(), 0.0f, 5000.0f);
+            reduce.DebugScale = std::clamp(frame.FrameTimeMs, .01f, 1000.0f);
+            reduce.ApplyModel = g.colourHistoryValid;
+            auto* previousHistory = g.colourHistoryValid ? g.colourHistory[read].Get() : g.colourStats[0].Get();
+            if (Dispatch(shader, cmd, reduce, g.colourStats[0].Get(), g.colourStats[1].Get(), previousHistory,
+                         nullptr, nullptr, nullptr, g.colourHistory[write]))
+            {
+                g.colourHistoryValid = true; g.colourCursor = read;
+                Constants apply {}; apply.Mode = 31u; apply.Width = width; apply.Height = height;
+                apply.Passthrough = resolve.Passthrough; apply.TransferStrength = chroma * .01f;
+                apply.ColourStrength = saturation * .01f;
+                apply.ApplyModel = cfg.DlssNrFinalChromaticityPreserveSaturation.value_or_default();
+                apply.Transfer = std::min(cfg.DlssNrFinalSaturationMode.value_or_default(), 1u);
+                apply.MaxDarkening = std::clamp(cfg.DlssNrFinalHighSaturationProtection.value_or_default() * .01f, 0.0f, 1.0f);
+                if (targetUav) transitionTarget(Uav); else g.original.To(cmd, Uav);
+                colourApplied = shader.DispatchSuperiorPass(cmd, apply, g.finalColour.Get(), g.colourHistory[write].Get(),
+                                                           nullptr, nullptr, nullptr, nullptr, destination, nullptr);
+            }
+        }
+        if (!colourApplied)
+        {
+            g.finalColour.To(cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
+            cmd->CopyResource(target, g.finalColour.Get());
+        }
+    }
+    if (!targetUav && (!colourReady || colourApplied))
     {
         g.original.To(cmd, D3D12_RESOURCE_STATE_COPY_SOURCE); transitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
         cmd->CopyResource(target, g.original.Get());

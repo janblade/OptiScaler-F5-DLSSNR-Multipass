@@ -1141,7 +1141,7 @@ void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devic
 void CopyAutoExposureToReadback(ID3D12GraphicsCommandList* cmdList, float preExposure, bool withGameExposure,
                                 ID3D12Resource* raw)
 {
-    if (g_nr.autoExposure == nullptr)
+    if (!superior && g_nr.autoExposure == nullptr)
         return;
 
     const unsigned int slot = (unsigned int) (g_nr.meterFrames % 4);
@@ -3247,12 +3247,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_nr.output == nullptr)
     {
         g_nr.output = CreateScratch(device, modelFormat, modelWidth, modelHeight);
-        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
+
         g_nr.workWidth = modelWidth;
         g_nr.workHeight = modelHeight;
     }
 
-    if (g_nr.hdrCopy == nullptr)
+    if (!superior && g_nr.colorCopy == nullptr)
+        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
+    if (!superior && g_nr.hdrCopy == nullptr)
         g_nr.hdrCopy = CreateScratch(device, keepFormat, width, height);
 
     if (cropColor && g_nr.activeColor == nullptr)
@@ -3302,7 +3304,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // passClampScratch, so a Passes=2 configuration doesn't permanently carry a full working-resolution
     // texture it structurally can never use. A failure here doesn't disable multipass outright, only
     // caps the chain one pass short at that second boundary (the pass loop's own null-target check).
-    if (requestedPasses > 2 && g_nr.passClampScratch2 == nullptr && !g_nr.passClampScratch2Failed)
+    if (!superior && requestedPasses > 2 && g_nr.passClampScratch2 == nullptr && !g_nr.passClampScratch2Failed)
     {
         g_nr.passClampScratch2 = CreateScratch(device, modelFormat, modelWidth, modelHeight);
         g_nr.passClampScratch2Failed = g_nr.passClampScratch2 == nullptr;
@@ -3333,17 +3335,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (spatial && !replaceCorrection)
         ParkNrResource(g_nr.colorSmall);
-    else if (reduced && g_nr.colorSmall == nullptr)
+    else if (!superior && reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
 
     // The up/down-leg target is native (the answer is brought back to frame size before the
     // resolve) -- shared by both the supersampling down-leg (> 1) and the reduced up-leg (< 1),
     // mutually exclusive per frame.
     // Packed and supersampling, the pair is averaged into Compress screen edges' own native pair instead.
-    if (workScale != 1.0f && !(spatial && workScale > 1.0f) && g_nr.outputNative == nullptr)
+    if (!superior && workScale != 1.0f && !(spatial && workScale > 1.0f) && g_nr.outputNative == nullptr)
         g_nr.outputNative = CreateScratch(device, desc.Format, width, height);
 
-    if (g_nr.meter == nullptr)
+    if (!superior && g_nr.meter == nullptr)
     {
         g_nr.meter = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, kDlssNrMeterGrid, kDlssNrMeterGrid);
 
@@ -3400,7 +3402,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // Tried once per device: a failure is not retried (and logged) every frame.
-    if (g_nr.autoExposureRaw == nullptr && !g_nr.autoExposureRawFailed)
+    if (!superior && g_nr.autoExposureRaw == nullptr && !g_nr.autoExposureRawFailed)
     {
         g_nr.autoExposureRaw = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, 1, 1);
         g_nr.autoExposureRawFailed = g_nr.autoExposureRaw == nullptr;
@@ -3409,8 +3411,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_WARN("DLSS-NR: could not allocate the eye adaptation texture; Automatic follows every frame at once");
     }
 
-    if (g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr &&
-        g_nr.hdrCopy != nullptr)
+    if (g_nr.feature == nullptr && g_nr.output != nullptr &&
+        (superior || (g_nr.colorCopy != nullptr && g_nr.hdrCopy != nullptr)))
     {
         auto snippet = FindSelectedModel();
 
@@ -3608,7 +3610,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         ResTrack_Dx12::HookLateNrQueue(device);
         SuperiorRun::Run(*this, cmdList, device, target, depth, motion, frame, guides,
-                         width, height, workWidth, workHeight, workScale, requestedPasses, timingQueue, outputArrival);
+                         width, height, workWidth, workHeight, workScale, requestedPasses,
+                         timingQueue ? timingQueue : (ID3D12CommandQueue*) State::Instance().currentCommandQueue,
+                         outputArrival);
         device->Release();
         return;
     }

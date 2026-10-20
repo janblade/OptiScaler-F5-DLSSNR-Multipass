@@ -102,7 +102,7 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList, con
             pipeline = get(14u, dlssnr_interpass_low36_cached_cso, sizeof(dlssnr_interpass_low36_cached_cso));
         if (!pipeline) pipeline = get(15u, dlssnr_interpass_low36_cso, sizeof(dlssnr_interpass_low36_cso));
     }
-    if (!pipeline) pipeline = get(13u, DlssNr_cso, sizeof(DlssNr_cso));
+    if (!pipeline) pipeline = get(13u, DlssNr::Superior::Bytecode::DlssNr_cso, sizeof(DlssNr::Superior::Bytecode::DlssNr_cso));
     if (!_init || !pipeline || !InCmdList || !_device || !InSource || !OutTarget)
         return false;
 

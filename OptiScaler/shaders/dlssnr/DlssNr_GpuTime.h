@@ -156,6 +156,8 @@ class DlssNrGpuTime
     }
 
     // The samples completed since the last call, oldest first. Call after ReadGpuTime.
+    void DiscardFresh() { fresh.clear(); }
+
     std::vector<double> TakeFresh()
     {
         std::sort(fresh.begin(), fresh.end());

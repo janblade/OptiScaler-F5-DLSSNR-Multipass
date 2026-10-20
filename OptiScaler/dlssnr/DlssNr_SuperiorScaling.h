@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include "DlssNr_GuidedShaping.h"
 
 namespace DlssNr::SuperiorScaling
 {
@@ -15,13 +16,24 @@ template<class C> inline bool Enabled(const C& cfg) { return Enabled(cfg.DlssNrT
 inline int Preset(int preset) { return preset == 11 ? 11 : 1; } // K or A; no default/latest ambiguity.
 inline float High(unsigned style, unsigned nrPreset = 1u)
 {
-    constexpr float main[] { .8f, .75f, .95f }, small[] { .950f, .925f, .955f };
-    return (nrPreset == 2u ? small : main)[std::min(style, 2u)];
+    constexpr float main[] { .8f, .75f, .95f }, smallModel[] { .950f, .925f, .955f };
+    return (nrPreset == 2u ? smallModel : main)[std::min(style, 2u)];
 }
 inline float Low(unsigned style, unsigned nrPreset = 1u)
 {
-    constexpr float main[] { .661f, .787f, .784f }, small[] { .861f, .838f, .861f };
-    return (nrPreset == 2u ? small : main)[std::min(style, 2u)];
+    constexpr float main[] { .661f, .787f, .784f }, smallModel[] { .861f, .838f, .861f };
+    return (nrPreset == 2u ? smallModel : main)[std::min(style, 2u)];
+}
+
+inline float EffectiveBand(float p50, float scale, float structure, float intensity)
+{
+    const float exponent = std::log2(1.0f / std::clamp(scale, .25f, 1.0f));
+    const float value = std::pow(std::max(0.0f, p50), exponent);
+    return Profiles::ModelAdjustedGain(std::isfinite(value) ? value : 1.0f, structure, intensity);
+}
+inline float MotionScale(float gameScale, unsigned motionExtent, unsigned referenceExtent)
+{
+    return referenceExtent ? gameScale * (float(motionExtent) / float(referenceExtent)) : gameScale;
 }
 
 template<class C> inline bool InputEncode(const C& c, uint64_t sourceWidth, uint32_t sourceHeight)

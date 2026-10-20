@@ -45,7 +45,8 @@
 // detail's, which does not run beside it. The edit cache (DlssNr_EditCache.inl) adds seven on a cached frame (ring,
 // context, carry, three cell levels, apply) and up to five on a refresh (ring, compose, context, capture, a crossfade).
 // Ninety-six slots leave four or more such frames before descriptor/constant reuse; many more passes leave fewer.
-#define DLSSNR_NUM_OF_HEAPS 96
+// Superior adds up to two dispatches per boundary; allow six in-flight 30-pass frames.
+#define DLSSNR_NUM_OF_HEAPS 512
 
 // Goes through the same constant-buffer ring as DlssNrConstants.
 static_assert(sizeof(DlssNrDetailReuseConstants) == sizeof(DlssNrConstants));

@@ -41,7 +41,10 @@ thread_local const sl::Preferences* gamePluginPreferences = nullptr;
 std::mutex g_detoursTransactionMutex;
 
 // The original a hook calls is read on game threads while a plugin may be hooked on another
-template <typename T> static T LoadOriginal(T& original) { return std::atomic_ref<T>(original).load(std::memory_order_acquire); }
+template <typename T> static T LoadOriginal(T& original)
+{
+    return std::atomic_ref<T>(original).load(std::memory_order_acquire);
+}
 
 template <typename T> static void StoreOriginal(T& original, T value)
 {
@@ -2283,13 +2286,33 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 // called through it, or stacked two detours on one function that then called each other: the intermittent crash or
 // freeze at startup. So the detour stays while it is in place, and only a fresh copy of a plugin (loaded again after an
 // unload, at the same or another address) is hooked again.
+//
+// What the function starts with tells the cases apart, so both the bytes Detours wrote (our jump) and the bytes it
+// replaced (the plugin's own) are kept:
+// - our jump: hooked, nothing to do;
+// - the plugin's own bytes: a fresh copy (or our detour taken off): hook it;
+// - anything else: another tool hooked it on top of ours (an overlay, a mod). Hooking again would stack a second detour
+//   behind theirs, which calls back into ours forever; taking ours off is not possible either. Left alone, and said
+//   once.
+//
+// Each hook calls one original, so only one copy of a plugin can carry our detour. When another copy is loaded (the
+// game's and the driver's OTA sl.dlss_g, from two folders), the earlier copy's detour is taken off by writing its own
+// bytes back in one aligned 8-byte store, and its trampoline is kept: a game thread already inside the hook still runs
+// the earlier copy's prologue and returns into its code, where a Detours detach would have freed the trampoline under
+// it. (A few dozen bytes per copy change, a handful of times per session.) If the earlier copy cannot be taken off, the
+// new copy is not hooked: the earlier one keeps working, rather than both calling one copy's code.
 struct PluginHook
 {
     const char* logName;   // "Hooking slGetPluginFunction in <logName>"
     const char* errorName; // "Failed to hook <errorName>"
     HMODULE module = nullptr;
-    void* target = nullptr;          // the plugin's slGetPluginFunction carrying our detour
-    uint8_t patch[8] {};             // its first bytes as Detours left them: our jump
+    void* target =
+        nullptr; // where Detours wrote our jump (the plugin's slGetPluginFunction, after any jump it follows)
+    // Its first bytes as Detours left them (our jump, then int3 to the end of the last instruction it moved) and as
+    // they were before. The first 8 tell the cases apart; all of them are put back when our detour is taken off.
+    uint8_t patch[32] {};
+    uint8_t pristine[32] {};
+    bool saidForeign = false;
 };
 
 static PluginHook g_dlssPlugin { "sl.dlss", "DLSS" };
@@ -2300,30 +2323,96 @@ static PluginHook g_pclPlugin { "sl.pcl", "PCL" };
 static PluginHook g_commonPlugin { "sl.common", "Common" };
 
 // Held around each plugin's record and its Detours transaction (taken before g_detoursTransactionMutex, never after).
-// Nothing under it loads a library or waits for the loader.
+// Nothing under it loads a library, waits for the loader or frees a module: a module pinned for a check (PluginPin) is
+// released after it.
 static std::mutex g_pluginHookMutex;
 
-// Our detour is still in place: its module is loaded and the function still starts with the jump we put there. A copy
-// loaded again after an unload starts with its own code, and a module that is gone is not read.
-static bool PluginDetourLive(const PluginHook& plugin)
+enum class PluginState
+{
+    Gone,     // no record, or its module is not loaded any more
+    Ours,     // our jump is in place
+    Pristine, // the plugin's own bytes: a fresh copy at the same address, or our detour taken off
+    Foreign   // something else is written there
+};
+
+// A module held loaded while its bytes are read or written, released once g_pluginHookMutex is let go (FreeLibrary may
+// unload it, and unloading takes the loader lock)
+struct PluginPin
+{
+    HMODULE module = nullptr;
+    ~PluginPin()
+    {
+        if (module != nullptr)
+            FreeLibrary(module);
+    }
+};
+
+// The record's function as it stands now (caller holds g_pluginHookMutex). `pin` keeps its module loaded until the
+// caller has released the lock.
+static PluginState StateOf(const PluginHook& plugin, PluginPin& pin)
 {
     if (plugin.target == nullptr)
-        return false;
+        return PluginState::Gone;
 
     HMODULE owner = nullptr;
 
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            static_cast<LPCWSTR>(plugin.target), &owner) ||
-        owner != plugin.module)
-    {
-        return false;
-    }
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, static_cast<LPCWSTR>(plugin.target), &owner))
+        return PluginState::Gone;
 
-    return std::memcmp(plugin.target, plugin.patch, sizeof(plugin.patch)) == 0;
+    pin.module = owner;
+
+    if (owner != plugin.module)
+        return PluginState::Gone;
+
+    if (std::memcmp(plugin.target, plugin.patch, 8) == 0)
+        return PluginState::Ours;
+
+    if (std::memcmp(plugin.target, plugin.pristine, 8) == 0)
+        return PluginState::Pristine;
+
+    return PluginState::Foreign;
 }
 
-// Takes our detour off (caller holds g_pluginHookMutex). False when it could not, and then the detour and the original
-// it calls stay as they are.
+// Takes our detour off a copy still carrying it (caller holds g_pluginHookMutex and a pin on its module), keeping its
+// trampoline for any thread already inside the hook. The bytes past the first 8 go back first (behind our jump, nothing
+// runs them), then the first 8 in one aligned 8-byte store, so a thread entering the function sees either our jump or
+// its own code, never half of each. False when the first bytes are not ours any more or the function is not 8-byte
+// aligned; nothing is changed then.
+static bool TakeOffPlugin(PluginHook& plugin)
+{
+    if ((reinterpret_cast<uintptr_t>(plugin.target) & 7) != 0)
+        return false;
+
+    auto* code = static_cast<uint8_t*>(plugin.target);
+    LONG64 ours = 0, own = 0;
+    std::memcpy(&ours, plugin.patch, sizeof(ours));
+    std::memcpy(&own, plugin.pristine, sizeof(own));
+
+    DWORD protection = 0;
+
+    if (!VirtualProtect(code, sizeof(plugin.patch), PAGE_EXECUTE_READWRITE, &protection))
+        return false;
+
+    bool done = false;
+
+    if (std::memcmp(code, &ours, sizeof(ours)) == 0)
+    {
+        for (size_t i = sizeof(ours); i < sizeof(plugin.patch); ++i)
+        {
+            if (code[i] == plugin.patch[i])
+                code[i] = plugin.pristine[i];
+        }
+
+        done = InterlockedCompareExchange64(reinterpret_cast<LONG64*>(code), own, ours) == ours;
+    }
+
+    VirtualProtect(code, sizeof(plugin.patch), protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), code, sizeof(plugin.patch));
+    return done;
+}
+
+// The fallback for a function TakeOffPlugin cannot handle (not 8-byte aligned): a Detours detach, as before this record
+// existed. It frees the trampoline, which a thread already inside the hook may still be about to call.
 template <typename T> static bool DetachPlugin(PluginHook& plugin, T& original, void* hook)
 {
     PVOID trampoline = reinterpret_cast<PVOID>(LoadOriginal(original));
@@ -2342,90 +2431,119 @@ template <typename T> static bool DetachPlugin(PluginHook& plugin, T& original, 
     return true;
 }
 
-// Hooks `module`'s slGetPluginFunction unless our detour is already in place on it. `onNewCopy` runs when the record of
-// an earlier copy is let go (sl.common: its system caps pointer belonged to that copy).
+// Hooks `module`'s slGetPluginFunction unless our detour is already in place on it (see PluginHook). `onNewCopy` runs
+// when the record of an earlier copy is let go.
 template <typename T>
 static void HookPlugin(PluginHook& plugin, HMODULE module, T& original, void* hook, void (*onNewCopy)() = nullptr)
 {
     // Outside our lock: it may wait for the loader
-    auto target = reinterpret_cast<void*>(KernelBaseProxy::GetProcAddress_()(module, "slGetPluginFunction"));
+    auto function = reinterpret_cast<void*>(KernelBaseProxy::GetProcAddress_()(module, "slGetPluginFunction"));
 
-    if (target == nullptr)
+    if (function == nullptr)
     {
         LOG_WARN("No slGetPluginFunction in {}", plugin.logName);
         return;
     }
 
+    PluginPin pin; // released after the lock below
     std::lock_guard<std::mutex> lock(g_pluginHookMutex);
+    const PluginState state = StateOf(plugin, pin);
 
-    if (plugin.module == module && plugin.target == target && PluginDetourLive(plugin))
+    if (plugin.module == module)
     {
-        LOG_TRACE("slGetPluginFunction in {} is already hooked", plugin.logName);
+        if (state == PluginState::Ours)
+        {
+            LOG_TRACE("slGetPluginFunction in {} is already hooked", plugin.logName);
+            return;
+        }
+
+        if (state == PluginState::Foreign)
+        {
+            if (!plugin.saidForeign)
+            {
+                plugin.saidForeign = true;
+                LOG_WARN("slGetPluginFunction in {} was hooked by something else on top of ours; leaving it as it is",
+                         plugin.logName);
+            }
+
+            return;
+        }
+    }
+    else if (state == PluginState::Ours && !TakeOffPlugin(plugin) && !DetachPlugin(plugin, original, hook))
+    {
+        LOG_ERROR("Failed to hook {}: the earlier copy's hook could not be taken off, so it stays in use",
+                  plugin.errorName);
+        return;
+    }
+    else if (state == PluginState::Foreign)
+    {
+        LOG_ERROR("Failed to hook {}: the earlier copy is hooked by something else on top of ours, so it stays in use",
+                  plugin.errorName);
         return;
     }
 
-    // An earlier copy: take our detour off it while it is still in place there (as before), else only forget it (its
-    // code is gone or was loaded again). A detach that fails leaves that copy's detour as it was; the new copy is
-    // other code, so hooking it stacks nothing.
-    bool earlierStillHooked = false;
+    // The earlier record (if any) is let go: its copy is gone, was loaded again, or no longer carries our detour
+    if (plugin.target != nullptr && onNewCopy != nullptr)
+        onNewCopy();
 
-    if (plugin.target != nullptr)
-    {
-        if (PluginDetourLive(plugin))
-            earlierStillHooked = !DetachPlugin(plugin, original, hook);
-
-        if (!earlierStillHooked && onNewCopy != nullptr)
-            onNewCopy();
-
-        plugin.module = nullptr;
-        plugin.target = nullptr;
-    }
+    plugin.module = nullptr;
+    plugin.target = nullptr;
+    plugin.saidForeign = false;
 
     LOG_TRACE("Hooking slGetPluginFunction in {}", plugin.logName);
 
-    PVOID trampoline = target;
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
-    DetourAttach(&trampoline, hook);
+
+    // The trampoline is built here, before the jump is written at the commit: published first, so no thread ever finds
+    // the hook live with no original (or the earlier copy's) to call
+    PVOID pointer = function;
+    PDETOUR_TRAMPOLINE trampoline = nullptr;
+    PVOID target = nullptr;
+
+    if (const auto attachResult = DetourAttachEx(&pointer, hook, &trampoline, &target, nullptr);
+        attachResult != NO_ERROR || target == nullptr)
+    {
+        DetourTransactionAbort();
+        LOG_ERROR("Failed to hook {}: {:X}", plugin.errorName, attachResult);
+        return;
+    }
+
+    // Read before the commit writes the jump: the plugin's own bytes
+    uint8_t pristine[sizeof(plugin.pristine)] {};
+    std::memcpy(pristine, target, sizeof(pristine));
+
+    const T previous = LoadOriginal(original);
+    StoreOriginal(original, reinterpret_cast<T>(trampoline));
 
     if (const auto detourResult = DetourTransactionCommit(); detourResult != NO_ERROR)
     {
+        StoreOriginal(original, previous);
         LOG_ERROR("Failed to hook {}: {:X}", plugin.errorName, detourResult);
-
-        // A detour still in place on the earlier copy keeps calling through the original it has
-        if (!earlierStillHooked)
-            StoreOriginal(original, static_cast<T>(nullptr));
-
         return;
     }
 
     plugin.module = module;
     plugin.target = target;
+    std::memcpy(plugin.pristine, pristine, sizeof(pristine));
     std::memcpy(plugin.patch, target, sizeof(plugin.patch));
-    StoreOriginal(original, reinterpret_cast<T>(trampoline));
+
+    // Detours writes a 5-byte jump; anything else here means it patched somewhere this record cannot follow
+    if (static_cast<const uint8_t*>(target)[0] != 0xE9)
+        LOG_WARN("slGetPluginFunction in {}: unexpected hook bytes; reloads of it may not be told apart",
+                 plugin.logName);
 }
 
-// Takes the detour off a plugin if it is still in place; the original is cleared only once nothing can call it
-template <typename T> static void UnhookPlugin(PluginHook& plugin, T& original, void* hook)
+// Our detour is in place on the plugin's current copy
+static bool PluginHooked(PluginHook& plugin)
 {
+    PluginPin pin;
     std::lock_guard<std::mutex> lock(g_pluginHookMutex);
-
-    if (PluginDetourLive(plugin) && !DetachPlugin(plugin, original, hook))
-        return;
-
-    plugin.module = nullptr;
-    plugin.target = nullptr;
-    StoreOriginal(original, static_cast<T>(nullptr));
+    return StateOf(plugin, pin) == PluginState::Ours;
 }
 
 // SL DLSS
-
-void StreamlineHooks::unhookDlss()
-{
-    LOG_FUNC();
-    UnhookPlugin(g_dlssPlugin, o_dlss_slGetPluginFunction, reinterpret_cast<void*>(hkdlss_slGetPluginFunction));
-}
 
 void StreamlineHooks::hookDlss(HMODULE slDlss)
 {
@@ -2443,12 +2561,6 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
 }
 
 // SL DLSSG
-
-void StreamlineHooks::unhookDlssg()
-{
-    LOG_FUNC();
-    UnhookPlugin(g_dlssgPlugin, o_dlssg_slGetPluginFunction, reinterpret_cast<void*>(hkdlssg_slGetPluginFunction));
-}
 
 void StreamlineHooks::hookDlssg(HMODULE slDlssg)
 {
@@ -2471,13 +2583,6 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
 
 // Local SL DLSSG
 
-void StreamlineHooks::unhookLocalDlssg()
-{
-    LOG_FUNC();
-    UnhookPlugin(g_localDlssgPlugin, o_local_dlssg_slGetPluginFunction,
-                 reinterpret_cast<void*>(hklocal_dlssg_slGetPluginFunction));
-}
-
 void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
 {
     if (State::Instance().externalFrameGeneration)
@@ -2495,12 +2600,6 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
 }
 
 // SL REFLEX
-
-void StreamlineHooks::unhookReflex()
-{
-    LOG_FUNC();
-    UnhookPlugin(g_reflexPlugin, o_reflex_slGetPluginFunction, reinterpret_cast<void*>(hkreflex_slGetPluginFunction));
-}
 
 void StreamlineHooks::hookReflex(HMODULE slReflex)
 {
@@ -2520,12 +2619,6 @@ void StreamlineHooks::hookReflex(HMODULE slReflex)
 
 // SL PCL
 
-void StreamlineHooks::unhookPcl()
-{
-    LOG_FUNC();
-    UnhookPlugin(g_pclPlugin, o_pcl_slGetPluginFunction, reinterpret_cast<void*>(hkpcl_slGetPluginFunction));
-}
-
 void StreamlineHooks::hookPcl(HMODULE slPcl)
 {
     if (State::Instance().externalFrameGeneration)
@@ -2543,21 +2636,6 @@ void StreamlineHooks::hookPcl(HMODULE slPcl)
 
 // SL COMMON
 
-void StreamlineHooks::unhookCommon()
-{
-    LOG_FUNC();
-
-    const bool hooked = o_common_slGetPluginFunction != nullptr;
-    UnhookPlugin(g_commonPlugin, o_common_slGetPluginFunction, reinterpret_cast<void*>(hkcommon_slGetPluginFunction));
-
-    // The system caps pointers belong to that copy of sl.common
-    if (hooked && o_common_slGetPluginFunction == nullptr)
-    {
-        systemCaps = nullptr;
-        systemCapsSl15 = nullptr;
-    }
-}
-
 void StreamlineHooks::hookCommon(HMODULE slCommon)
 {
     if (State::Instance().externalFrameGeneration)
@@ -2570,26 +2648,27 @@ void StreamlineHooks::hookCommon(HMODULE slCommon)
         return;
     }
 
-    // The system caps pointers belong to one copy of sl.common
+    // Read again on the next plugin load (hookSystemCaps), as on every load of sl.common before: a game that starts
+    // Streamline again while sl.common stays loaded may hand out new caps
+    systemCaps = nullptr;
+    systemCapsSl15 = nullptr;
+
     HookPlugin(g_commonPlugin, slCommon, o_common_slGetPluginFunction,
-               reinterpret_cast<void*>(hkcommon_slGetPluginFunction),
-               []
-               {
-                   systemCaps = nullptr;
-                   systemCapsSl15 = nullptr;
-               });
+               reinterpret_cast<void*>(hkcommon_slGetPluginFunction));
 }
 
 bool StreamlineHooks::isInterposerHooked() { return o_slInit != nullptr || o_slInit_sl1 != nullptr; }
 
-bool StreamlineHooks::isDlssHooked() { return o_dlss_slGetPluginFunction != nullptr; }
+// Hooked: our detour is in place on the plugin's current copy (a copy unloaded since is not; CheckModulesInMemory then
+// hooks the one loaded now)
+bool StreamlineHooks::isDlssHooked() { return PluginHooked(g_dlssPlugin); }
 
-bool StreamlineHooks::isDlssgHooked() { return o_dlssg_slGetPluginFunction != nullptr; }
+bool StreamlineHooks::isDlssgHooked() { return PluginHooked(g_dlssgPlugin); }
 
-bool StreamlineHooks::isLocalDlssgHooked() { return o_local_dlssg_slGetPluginFunction != nullptr; }
+bool StreamlineHooks::isLocalDlssgHooked() { return PluginHooked(g_localDlssgPlugin); }
 
-bool StreamlineHooks::isCommonHooked() { return o_common_slGetPluginFunction != nullptr; }
+bool StreamlineHooks::isCommonHooked() { return PluginHooked(g_commonPlugin); }
 
-bool StreamlineHooks::isPclHooked() { return o_pcl_slGetPluginFunction != nullptr; }
+bool StreamlineHooks::isPclHooked() { return PluginHooked(g_pclPlugin); }
 
-bool StreamlineHooks::isReflexHooked() { return o_reflex_slGetPluginFunction != nullptr; }
+bool StreamlineHooks::isReflexHooked() { return PluginHooked(g_reflexPlugin); }

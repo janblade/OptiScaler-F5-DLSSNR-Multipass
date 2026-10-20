@@ -32,11 +32,24 @@
 // slGetPluginFunction in <plugin>" per plugin for the whole run, however often it is loaded again.
 // Then sl.dlss.dll is freed until it unloads and loaded once more: the fresh copy must be hooked
 // again (a second "Hooking" line, and a probe call reaching hkdlss_slGetPluginFunction).
+// Two more cases from the Review Pass (PR #210):
+// - Two copies side by side: a second sl.dlss.dll from another folder is loaded in turn with the first, many times.
+//   Only one copy can carry the hook (each hook calls one original); the other's is taken off. No crash, the probe
+//   through the copy loaded last reaches the hook and the one through the other copy does not. Not while called:
+//   hooking a copy writes over its first instructions and Detours moves only the thread doing it, so a thread running
+//   those very instructions at that moment would fault -- on every hook, before this change too (it hooked on every
+//   load then). Streamline calls a plugin's slGetPluginFunction while loading it, not in a loop.
+// - A hook on top of ours: the test writes a jump over our jump, as an overlay would, then loads the plugin again.
+//   Hooking again would stack a second detour behind that one, and a call would loop forever; it must be left alone
+//   (a "hooked by something else" line) and a call must return.
 // Needs [Log] LogLevel=0 (trace) for the "Hooking" lines.
 #include <windows.h>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <memory>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -73,10 +86,96 @@ static void CallThroughHook(const std::filesystem::path& path)
         getPluginFunction("probe_hammer");
 }
 
+using GetPluginFunction = void* (*) (const char*);
+
+static GetPluginFunction FunctionOf(HMODULE module)
+{
+    return module ? reinterpret_cast<GetPluginFunction>(GetProcAddress(module, "slGetPluginFunction")) : nullptr;
+}
+
+// A call that must return within a few seconds (a loop between stacked detours never does)
+static bool ReturnsInTime(GetPluginFunction function, const char* name)
+{
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread call(
+        [function, name, done]
+        {
+            function(name);
+            *done = true;
+        });
+
+    for (int i = 0; i < 50 && !*done; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    if (!*done)
+    {
+        call.detach(); // left looping; the run exits right after
+        return false;
+    }
+
+    call.join();
+    return true;
+}
+
+// Writes a jump at `function` to a stub that jumps on to where `function` jumped before: another tool hooking the
+// function on top of ours. The stub has to be within 2 GB of the function for a 5-byte jump.
+static bool HookOnTop(void* function)
+{
+    auto* code = static_cast<uint8_t*>(function);
+
+    if (code[0] != 0xE9 || (reinterpret_cast<uintptr_t>(code) & 7) != 0)
+        return false;
+
+    int32_t relative = 0;
+    std::memcpy(&relative, code + 1, sizeof(relative));
+    const uint64_t onward = reinterpret_cast<uint64_t>(code) + 5 + relative;
+
+    uint8_t* stub = nullptr;
+    for (uint64_t offset = 0x10000; stub == nullptr && offset < 0x70000000; offset += 0x10000)
+    {
+        const uint64_t at = (reinterpret_cast<uint64_t>(code) - offset) & ~0xFFFFull;
+        stub = static_cast<uint8_t*>(
+            VirtualAlloc(reinterpret_cast<void*>(at), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    }
+
+    if (stub == nullptr)
+        return false;
+
+    stub[0] = 0x48; // mov rax, onward
+    stub[1] = 0xB8;
+    std::memcpy(stub + 2, &onward, sizeof(onward));
+    stub[10] = 0xFF; // jmp rax
+    stub[11] = 0xE0;
+
+    LONG64 head = 0;
+    std::memcpy(&head, code, sizeof(head));
+    auto* bytes = reinterpret_cast<uint8_t*>(&head);
+    const int32_t toStub = static_cast<int32_t>(reinterpret_cast<int64_t>(stub) - reinterpret_cast<int64_t>(code) - 5);
+    std::memcpy(bytes + 1, &toStub, sizeof(toStub));
+
+    DWORD protection = 0;
+    if (!VirtualProtect(code, 8, PAGE_EXECUTE_READWRITE, &protection))
+        return false;
+
+    InterlockedExchange64(reinterpret_cast<LONG64*>(code), head);
+    VirtualProtect(code, 8, protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), code, 8);
+    return true;
+}
+
 static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info)
 {
-    std::printf("FAIL: exception 0x%08lX at %p during the stress run (a call through a removed hook?)\n",
-                info->ExceptionRecord->ExceptionCode, info->ExceptionRecord->ExceptionAddress);
+    const auto* at = static_cast<const char*>(info->ExceptionRecord->ExceptionAddress);
+    HMODULE module = nullptr;
+    wchar_t name[MAX_PATH] = L"no module: a trampoline or freed memory";
+
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(at), &module))
+        GetModuleFileNameW(module, name, MAX_PATH);
+
+    std::printf("FAIL: exception 0x%08lX at %p (%ls +0x%llX) during the stress run (a call through a removed hook?)\n",
+                info->ExceptionRecord->ExceptionCode, at, name,
+                module ? static_cast<unsigned long long>(at - reinterpret_cast<const char*>(module)) : 0ull);
     std::fflush(stdout);
     ExitProcess(3);
 }
@@ -330,13 +429,73 @@ int wmain(int argc, wchar_t** argv)
             }
         }
 
+        // Two copies side by side, loaded in turn while both are called
+        if (std::filesystem::exists(dlssPath))
+        {
+            const auto copyDir = dllPath.parent_path() / L"second_copy";
+            std::filesystem::create_directories(copyDir);
+            const auto copyPath = copyDir / L"sl.dlss.dll";
+            std::filesystem::copy_file(dlssPath, copyPath, std::filesystem::copy_options::overwrite_existing);
+
+            const HMODULE first = LoadLibraryW(dlssPath.c_str());
+            const HMODULE second = LoadLibraryW(copyPath.c_str());
+            Require(first != nullptr && second != nullptr && first != second, "Two copies of sl.dlss.dll side by side");
+
+            for (int i = 0; i < 200; ++i)
+            {
+                LoadLibraryW(dlssPath.c_str());
+                FunctionOf(first)("probe_first_between");
+                LoadLibraryW(copyPath.c_str());
+                FunctionOf(second)("probe_second_between");
+            }
+
+            FunctionOf(second)("probe_second_copy");
+            FunctionOf(first)("probe_first_copy");
+            WaitForLogToSettle(logPath);
+            lines = ReadLog(logPath);
+            const bool reached = AnyContains(lines, "probe_second_copy");
+            const bool other = AnyContains(lines, "probe_first_copy");
+            std::printf("two copies loaded in turn 200 times: no crash, probe through the last %s the hook, through "
+                        "the other %s\n",
+                        reached ? "reached" : "did not reach", other ? "reached it too" : "did not");
+
+            if (!reached || other)
+            {
+                std::puts("FAIL: only the copy loaded last should carry the hook");
+                failed = true;
+            }
+
+            // A hook on top of ours, then the plugin loaded again: left alone, and a call returns
+            if (HookOnTop(reinterpret_cast<void*>(FunctionOf(second))))
+            {
+                LoadLibraryW(copyPath.c_str());
+                const bool returned = ReturnsInTime(FunctionOf(second), "probe_on_top");
+                WaitForLogToSettle(logPath);
+                lines = ReadLog(logPath);
+                const bool said = AnyContains(lines, "hooked by something else on top of ours");
+                std::printf("hook on top of ours, loaded again: call %s, %s\n",
+                            returned ? "returned" : "did NOT return", said ? "left alone" : "not told apart");
+
+                if (!returned || !said)
+                {
+                    std::puts("FAIL: a hook on top of ours must be left alone");
+                    failed = true;
+                }
+            }
+            else
+            {
+                std::puts("WARN: could not place a hook on top of ours; that case was not run");
+            }
+        }
+
         if (failed)
         {
             std::fflush(stdout);
             ExitProcess(1);
         }
 
-        std::puts("PASS: no transaction race, each plugin hooked once while loaded again and called, reload hooked again");
+        std::puts("PASS: no transaction race, each plugin hooked once while loaded again and called, reload hooked "
+                  "again, two copies in turn, a hook on top left alone");
         std::fflush(stdout);
         ExitProcess(0);
     }

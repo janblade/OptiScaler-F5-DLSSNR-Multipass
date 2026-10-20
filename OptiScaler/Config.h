@@ -1300,9 +1300,18 @@ class Config
     // Reflex (low_latency/input/OutputRule.h PlanOutput).
     CustomOptional<bool> FramerateFrameCapOnly { false };
 
-    // HDR
+    // HDR output for SDR games (output/SdrToHdr_*): the real swap chain becomes scRGB / HDR10 and one pass converts the
+    // game's picture. Enabled applies at the next swap chain create / resize; the rest is read every frame.
+    CustomOptional<bool> HdrOutputEnabled { false };  // [HDR] Enabled (the old ForceHDR=true is read into it)
+    CustomOptional<bool> HdrOutputConvert { true };   // [HDR] Convert: the A/B toggle, never saved
+    CustomOptional<bool> UseHDR10 { false };          // [HDR] UseHDR10: PQ instead of scRGB
+    CustomOptional<float> HdrOutputPeakNits { 0.0f }; // [HDR] PeakNits: clamp, 0 = the display's MaxLuminance
+    CustomOptional<float> HdrOutputGameNits { 203.0f }; // [HDR] GameNits: SDR white, 80..1000
+    CustomOptional<int> HdrOutputDecode { 0 };        // [HDR] Decode: 0 = gamma 2.2, 1 = sRGB
+
+    // Legacy: ForceHDR / SkipColorSpace are no longer read from the ini (ForceHDR=true sets HdrOutputEnabled). The old
+    // swap chain code still names them until it is removed, so they stay false.
     CustomOptional<bool> ForceHDR { false };
-    CustomOptional<bool> UseHDR10 { false };
     CustomOptional<bool> SkipColorSpace { false };
 
     // V-Sync

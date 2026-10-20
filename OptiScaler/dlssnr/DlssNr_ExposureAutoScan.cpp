@@ -465,6 +465,8 @@ bool CopiesLocked(size_t slot)
 
     return g_auto.life.CopiesMatchOnly() && (int) slot == g_auto.found;
 }
+
+bool SearchingLocked() { return !On() || g_auto.life.CopiesAll(); }
 } // namespace AutoScan
 
 std::string AutoStatus()
@@ -490,6 +492,8 @@ std::string AutoStatus()
     if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Searching &&
         std::none_of(tracked.begin(), tracked.end(), [](const Tracked& t) { return t.alive; }))
         line += ": nothing to search yet, the game makes its buffers at a loading screen";
+    else if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Searching && Core::WaitingLocked() > 0)
+        line += " (" + std::to_string(Core::WaitingLocked()) + " more waiting their turn)";
 
     return line;
 }

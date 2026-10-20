@@ -60,13 +60,32 @@ constexpr unsigned int kSlots = Core::kSlots;
 // so the stride is that alignment; buffer copies have no such rule and are unaffected by the waste.
 constexpr unsigned int kStride = 512;
 
-// What an exposure could plausibly be. Outside these it is a flag, a counter, a sentinel or a
-// zeroed buffer nobody has written yet -- Nioh 3 offers all four, including one holding 1000000.
-constexpr float kFloor = 1e-6f;
-constexpr float kCeiling = 1e4f;
+// What an exposure could plausibly be (DlssNr_ExposureScanShape.h)
+constexpr float kFloor = DlssNrExposureScanShape::kPlausibleFloor;
+constexpr float kCeiling = DlssNrExposureScanShape::kPlausibleCeiling;
+
+// D3D12 candidates turned away by a full list, waiting for a slot (Core::AdoptLocked). Bounded: a game that remakes its
+// buffers again and again (Starfield, with every DLSS-G recreation) must not pile references up.
+constexpr size_t kMaxWaiting = 1024;
 
 struct ScanState
 {
+    // A candidate waiting for a slot, with a reference held
+    struct Waiting
+    {
+        ID3D12Resource* resource = nullptr;
+        std::string shape;
+        unsigned int bytes = 4;
+        bool isBuffer = false;
+        uint32_t format = 0;
+        uint64_t size = 0;
+        int rank = 0;
+        std::chrono::steady_clock::time_point at;
+    };
+    std::vector<Waiting> waiting;
+    unsigned int notDecimalLetGo = 0; // candidates let go of for holding no decimal number, this session (the log)
+    bool saidWaitingFull = false;
+
     unsigned int examined = 0;
     // By slot: a freed slot stays until a new candidate takes it (DlssNr_ExposureScanShape.h)
     std::vector<Tracked> tracked;
@@ -226,6 +245,67 @@ void ReleaseRetiredLocked(bool all)
         return true;
     };
     r.erase(std::remove_if(r.begin(), r.end(), done), r.end());
+}
+
+// Lets go of the candidates waiting for a slot: those that arrived `freshSeconds` or more ago (all: 0). Never copied
+// from, so released at once.
+void ReleaseWaitingLocked(float freshSeconds = 0.0f)
+{
+    const auto now = std::chrono::steady_clock::now();
+    auto& w = g_scan.waiting;
+    const auto old = [&](const ScanState::Waiting& x)
+    {
+        if (std::chrono::duration<float>(now - x.at).count() < freshSeconds)
+            return false;
+        x.resource->Release();
+        return true;
+    };
+    const size_t before = w.size();
+    w.erase(std::remove_if(w.begin(), w.end(), old), w.end());
+
+    if (w.size() != before)
+        LOG_INFO("DLSS-NR exposure scan: {} waiting candidates let go; {} still wait", before - w.size(), w.size());
+}
+
+// Frees the slots of D3D12 candidates that hold no decimal number (DlssNrExposureScanShape::HoldsNoDecimal) for those
+// waiting, the likeliest shape first (DlssNrExposureScanShape::Rotate). Once per NR frame, while the scan copies every
+// candidate: whoever waits gets kNotADecimalReads NR frames of reads, so a game that made hundreds at once is gone
+// through in seconds (Witcher 3: ~309 in ~15 s). Found or given up (Auto), they wait without being copied, and being
+// taken in then would not start a new search: only what the game makes does. Auto finished with candidates, or the scan
+// no longer wanted (a D3D11 or Vulkan game's EndFrame; D3D12's Tick releases them itself), they are let go of.
+void RotateLocked()
+{
+    if (g_scan.waiting.empty())
+        return;
+
+    if (!Wanted() || AutoScan::ClosedLocked(4))
+    {
+        ReleaseWaitingLocked();
+        return;
+    }
+
+    if (!AutoScan::SearchingLocked())
+        return;
+
+    const DlssNrExposureScanShape::Rotation r = DlssNrExposureScanShape::Rotate(
+        g_scan.tracked, g_scan.waiting, kMaxCandidates, [](const Tracked& t) { return t.api == Api::D3D12; },
+        [](size_t slot) { Core::LetGoLocked(slot); },
+        [](ScanState::Waiting& w)
+        {
+            // The slot takes its own reference; the waiting one goes either way
+            const bool taken = Core::AdoptLocked(Api::D3D12, w.resource, nullptr, w.shape, w.bytes, w.isBuffer,
+                                                 w.format, w.size, nullptr, true) >= 0;
+            w.resource->Release();
+            return taken;
+        });
+
+    g_scan.notDecimalLetGo += r.letGo;
+
+    if (r.letGo > 0 || r.taken > 0)
+        LOG_INFO(
+            "DLSS-NR exposure scan: let go of {} candidates holding no decimal number ({} so far); {} waiting took "
+            "their slots, {} still wait",
+            r.letGo, g_scan.notDecimalLetGo, r.taken, g_scan.waiting.size());
 }
 
 // What a module is to the scan: the game's, someone else's (OptiScaler, middleware), or one that only forwards the
@@ -534,7 +614,7 @@ const char* ApiSuffix(Api api)
 float HalfToFloat(uint16_t h) { return HalfToFloatImpl(h); }
 
 int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, unsigned int bytes, bool isBuffer,
-                uint32_t format, uint64_t size, void (*drop)(size_t slot))
+                uint32_t format, uint64_t size, void (*drop)(size_t slot), bool quiet)
 {
     const int rank = DlssNrExposureScanShape::Rank(isBuffer, size);
 
@@ -569,12 +649,39 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
 
     if (slot < 0)
     {
+        // D3D12: waits for a slot (RotateLocked)
+        const bool waits = api == Api::D3D12 && g_scan.waiting.size() < kMaxWaiting &&
+                           std::none_of(
+                               g_scan.waiting.begin(), g_scan.waiting.end(), [handle](const ScanState::Waiting& w)
+                               { return w.resource == (ID3D12Resource*) handle; });
+
+        if (waits)
+        {
+            ScanState::Waiting w;
+            w.resource = (ID3D12Resource*) handle;
+            w.shape = shape;
+            w.bytes = bytes;
+            w.isBuffer = isBuffer;
+            w.format = format;
+            w.size = size;
+            w.rank = rank;
+            w.at = std::chrono::steady_clock::now();
+            w.resource->AddRef();
+            g_scan.waiting.push_back(std::move(w));
+        }
+        else if (api == Api::D3D12 && g_scan.waiting.size() >= kMaxWaiting && !g_scan.saidWaitingFull)
+        {
+            g_scan.saidWaitingFull = true;
+            LOG_WARN("DLSS-NR exposure scan: {} candidates already wait for a slot; more are not taken", kMaxWaiting);
+        }
+
         if (!g_scan.complained)
         {
             g_scan.complained = true;
-            LOG_WARN("DLSS-NR exposure scan: more than {} candidates, so the filter is too loose here "
-                     "rather than the game having {} exposures",
-                     kMaxCandidates, kMaxCandidates);
+            LOG_WARN("DLSS-NR exposure scan: more than {} candidates{}", kMaxCandidates,
+                     api == Api::D3D12 ? "; up to 1024 more wait for the slots of those that hold no decimal number"
+                                       : ", so the filter is too loose here rather than the game having that many "
+                                         "exposures");
         }
 
         return -1;
@@ -601,12 +708,31 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
     if (api != Api::Vulkan)
         ((IUnknown*) handle)->AddRef();
 
+    // Taken directly while it also waits (the game made another view of it once a slot was free): one reference too
+    // many would keep the per-frame "the game has released it" check from ever firing for it
+    if (api == Api::D3D12)
+    {
+        std::erase_if(g_scan.waiting,
+                      [handle](const ScanState::Waiting& w)
+                      {
+                          if (w.resource != (ID3D12Resource*) handle)
+                              return false;
+
+                          w.resource->Release();
+                          return true;
+                      });
+    }
+
     g_scan.listVersion++;
     AutoScan::AdoptedLocked(rank);
 
-    LOG_INFO("DLSS-NR exposure scan: candidate {} -- {}{}", slot + 1, shape, ApiSuffix(api));
+    if (!quiet)
+        LOG_INFO("DLSS-NR exposure scan: candidate {} -- {}{}", slot + 1, shape, ApiSuffix(api));
+
     return slot;
 }
+
+size_t WaitingLocked() { return g_scan.waiting.size(); }
 
 void DropLocked(size_t slot)
 {
@@ -662,6 +788,9 @@ void ConsumeLocked(size_t slot, uint32_t generation, const void* bytes)
     // sample happened to be first.
     if (value <= kFloor || value >= kCeiling)
     {
+        if (DlssNrExposureScanShape::NotADecimal(value))
+            t.notDecimal++;
+
         t.latest = value;
         t.reads++;
         return;
@@ -731,6 +860,7 @@ void EndFrameLocked(const FrameExposure& passFrame)
     // Auto's lifecycle runs every NR frame, candidates or not: a handed texture, or new candidates after giving up,
     // change its course
     AutoScan::FrameLocked(frame);
+    RotateLocked();
 
     bool anyAlive = false;
 
@@ -817,7 +947,8 @@ void EndFrameLocked(const FrameExposure& passFrame)
         }
 
         if (movers == 0)
-            LOG_INFO("DLSS-NR scan: {} candidates tracked, none moving yet -- go between bright and dark", alive);
+            LOG_INFO("DLSS-NR scan: {} candidates tracked ({} waiting), none moving yet -- go between bright and dark",
+                     alive, g_scan.waiting.size());
     }
 
     g_scan.frames++;
@@ -930,7 +1061,7 @@ bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
     {
         std::lock_guard<std::mutex> lock(g_scanMutex);
 
-        if (g_scan.retiring.empty() && !Core::AnyAliveLocked(Api::D3D12))
+        if (g_scan.retiring.empty() && g_scan.waiting.empty() && !Core::AnyAliveLocked(Api::D3D12))
             return false;
 
         for (size_t i = 0; i < g_scan.tracked.size(); ++i)
@@ -938,6 +1069,8 @@ bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
             if (g_scan.tracked[i].alive && g_scan.tracked[i].api == Api::D3D12)
                 Core::DropLocked(i);
         }
+
+        ReleaseWaitingLocked();
 
         g_scan.frames12++;
         ReleaseRetiredLocked(false);
@@ -1011,6 +1144,27 @@ bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
             LOG_INFO("DLSS-NR exposure scan: candidate {} ({}) let go: the game has released it", i + 1, t.shape);
             Core::LetGoLocked(i);
         }
+    }
+
+    // ... and the same for those waiting for a slot, now and then: they are never copied from, so holding one a moment
+    // past the game only keeps its memory a moment longer (up to 1024 of them would be ~2k interlocked calls a frame)
+    if (g_scan.frames12 % 60 == 0 && !g_scan.waiting.empty())
+    {
+        const size_t released = std::erase_if(g_scan.waiting,
+                                              [](const ScanState::Waiting& w)
+                                              {
+                                                  w.resource->AddRef();
+
+                                                  if (w.resource->Release() != 1)
+                                                      return false;
+
+                                                  w.resource->Release();
+                                                  return true;
+                                              });
+
+        if (released > 0)
+            LOG_INFO("DLSS-NR exposure scan: {} waiting candidates let go: the game has released them; {} still wait",
+                     released, g_scan.waiting.size());
     }
 
     // The state a candidate is in is the game's business and nothing here has a contract about it.
@@ -1130,7 +1284,8 @@ Verdict Where()
         mostReads = std::max(mostReads, t.reads);
     }
 
-    return mostReads >= kPatience ? Verdict::Barren : Verdict::Watching;
+    // Not barren while candidates still wait for a slot: they have not been looked at yet
+    return mostReads >= kPatience && g_scan.waiting.empty() ? Verdict::Barren : Verdict::Watching;
 }
 
 const char* Headline()
@@ -1172,8 +1327,9 @@ const char* Headline()
         }
 
         line = "DLSS-NR exposure scan: watching " + std::to_string(alive) +
+               (g_scan.waiting.empty() ? "" : " (" + std::to_string(g_scan.waiting.size()) + " more waiting)") +
                ", none moving yet -- walk between light and shade  (" +
-               std::to_string(mostReads * 100 / kPatience) + "%)";
+               std::to_string(std::min(mostReads * 100 / kPatience, 100u)) + "%)";
         break;
     }
 
@@ -1541,6 +1697,7 @@ void ReleaseTrackedResources()
     }
 
     ReleaseRetiredLocked(true);
+    ReleaseWaitingLocked(kFreshSeconds);
     g_scan.complained = false;
 }
 
@@ -1552,6 +1709,7 @@ void Shutdown()
         Core::DropLocked(i);
 
     ReleaseRetiredLocked(true);
+    ReleaseWaitingLocked();
     g_scan.tracked.clear();
 
     for (unsigned int i = 0; i < kSlots; ++i)

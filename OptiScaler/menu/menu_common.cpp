@@ -44,6 +44,7 @@
 #include <memory>
 #include <type_traits>
 #include <misc/IdentifyGpu.h>
+#include <misc/XeModuleInfo.h>
 #include <hooks/Xell_Hooks.h>
 #include <low_latency/input/input_common.h>
 
@@ -4405,6 +4406,17 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         fgOutput)
     {
         ImGui::SeparatorText("Frame Generation (XeFG)");
+
+        // Which files are in use (worked out in the background at start, see XeModuleInfo)
+        ImGui::PushTextWrapPos(0.0f);
+
+        for (const auto& line : { XeModuleInfo::XeFGLine(), XeModuleInfo::XeLLLine() })
+        {
+            if (!line.empty())
+                ImGui::TextDisabled("%s", line.c_str());
+        }
+
+        ImGui::PopTextWrapPos();
 
         bool ignoreChecks = config->FGXeFGIgnoreInitChecks.value_or_default();
 

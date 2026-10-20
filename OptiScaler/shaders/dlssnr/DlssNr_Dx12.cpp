@@ -582,6 +582,12 @@ std::unique_ptr<DlssNrGpuTime> g_gpuTime;
 // we can actually do something about.
 std::unique_ptr<DlssNrGpuTime> g_ngxTime;
 std::optional<double> g_lastNgxTime;
+
+// A third, around the exposure scan's copies (DlssNr::ExposureScan::Tick), for what searching costs -- it runs by
+// itself on Auto, so its price is paid by everyone on Auto until it finds or gives up. Averaged over the log interval.
+std::unique_ptr<DlssNrGpuTime> g_scanTime;
+double g_scanTimeSum = 0.0, g_scanTimeMax = 0.0;
+unsigned g_scanTimeSamples = 0;
 std::optional<double> g_lastGpuTime;
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
@@ -3668,6 +3674,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_ngxTime == nullptr)
         g_ngxTime = std::make_unique<DlssNrGpuTime>(device, "model");
 
+    if (g_scanTime == nullptr)
+        g_scanTime = std::make_unique<DlssNrGpuTime>(device, "exposure scan");
+
     if (g_gpuTime != nullptr)
         g_gpuTime->Start(cmdList);
 
@@ -4361,7 +4370,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                  : 0.0f;
         // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
         scanFrame.pre = whitePointSource == 3 ? g_nr.autoExposurePreExposure : frame.PreExposure;
+        const bool timeScan = g_scanTime != nullptr && DlssNr::ExposureScan::Holding();
+
+        if (timeScan)
+            g_scanTime->Start(cmdList);
+
         DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
+
+        if (timeScan)
+            g_scanTime->End(cmdList);
     }
 
     // No depth gives depthIn == nullptr; only a depth that could not be cloned is a failure.
@@ -5508,6 +5525,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     g_lastNgxTime = ngx;
             }
 
+            if (g_scanTime != nullptr)
+            {
+                g_scanTime->ReadGpuTime(queue);
+
+                for (const double sample : g_scanTime->TakeFresh())
+                {
+                    g_scanTimeSum += sample;
+                    g_scanTimeMax = std::max(g_scanTimeMax, sample);
+                    ++g_scanTimeSamples;
+                }
+
+                static unsigned long long lastScanLog = 0;
+
+                if (g_scanTimeSamples > 0 && g_frames - lastScanLog > 600)
+                {
+                    lastScanLog = g_frames;
+                    LOG_INFO("DLSS-NR exposure scan GPU cost: {:.4f} ms per frame on average, {:.4f} ms at most, over {} "
+                             "frames; {} candidates held ({})",
+                             g_scanTimeSum / g_scanTimeSamples, g_scanTimeMax, g_scanTimeSamples,
+                             DlssNr::ExposureScan::Report().size(), DlssNr::ExposureScan::AutoStatus());
+                    g_scanTimeSum = g_scanTimeMax = 0.0;
+                    g_scanTimeSamples = 0;
+                }
+            }
+
             // The split, once every few hundred frames. What is worth reading is not the total but the
             // remainder: the model's cost is NVIDIA's to set, and everything else is ours.
             static unsigned long long lastSplitLog = 0;
@@ -6480,6 +6522,7 @@ void Shutdown()
     g_capture.release();
     g_gpuTime.reset();
     g_ngxTime.reset();
+    g_scanTime.reset();
     g_lastNgxTime.reset();
     g_lastGpuTime.reset();
 

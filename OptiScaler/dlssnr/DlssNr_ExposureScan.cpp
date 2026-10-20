@@ -1493,6 +1493,15 @@ const char* Status()
 // beside the meter for the recording. Auto scans too (AutoStatus), but shows only its own line.
 bool Scanning() { return AskedFor(); }
 
+bool Holding()
+{
+    if (!Wanted())
+        return false;
+
+    std::lock_guard<std::mutex> lock(g_scanMutex);
+    return Core::AnyAliveLocked(Api::D3D12);
+}
+
 std::string AutoStatus()
 {
     if (!AutoOn())

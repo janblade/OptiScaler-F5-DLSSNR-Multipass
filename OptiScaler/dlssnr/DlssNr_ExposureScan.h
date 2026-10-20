@@ -128,6 +128,9 @@ std::vector<Candidate> Report();
 const char* Status();
 bool Scanning();
 
+// Whether the scan holds a D3D12 candidate, i.e. whether Tick records copies this frame (to time them).
+bool Holding();
+
 // Auto (WhitePointSource auto, plan 2026-10-14-exposure-scan-all-apis story 5): the scan runs by itself, judges its
 // candidates with the matcher and lets go of what it does not need (DlssNr_ExposureAuto.h). Where it stands, in one
 // line for the menu and the log ("searching", "found ...", "the game hands its exposure over", ...); empty when the

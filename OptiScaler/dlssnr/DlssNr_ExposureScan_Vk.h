@@ -33,9 +33,9 @@ bool WantsImage(const VkImageCreateInfo& info);
 void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage image, void* caller);
 void OnImageDestroyed(VkImage image);
 
-// After every image creation: a candidate-shaped (`wanted`: WantsImage said yes) or 1x1 one is remembered with its
-// creation info, so a handed exposure image that is not a candidate can be told why (NoteHanded).
-void RememberImage(const VkImageCreateInfo& info, VkImage image, bool wanted);
+// After every image creation: a candidate-shaped (`wanted`: WantsImage said yes) or 1x1 one is remembered with the
+// creation info the game asked for, so a handed exposure image that is not a candidate can be told why (NoteHanded).
+void RememberImage(VkDevice device, const VkImageCreateInfo& info, VkImage image, bool wanted);
 
 // From the game's pipeline barriers (hooks/VulkanwDx12_Hooks.cpp): the layout each candidate image is left in.
 void NoteBarriers(uint32_t count, const VkImageMemoryBarrier* barriers);

@@ -58,6 +58,7 @@ std::unordered_map<uint64_t, Pending> g_pending;
 // the filter, a full list, or a binding the scan does not see. Under Core::Mutex().
 struct Seen
 {
+    VkDevice device = VK_NULL_HANDLE; // its entries go with the device (OnDeviceDestroyed)
     VkImageCreateInfo info {};
     bool wanted = false;  // candidate-shaped (WantsImage)
     bool notGame = false; // ... but made by a module that is not the game's (Core::FromGameLocked)
@@ -690,7 +691,7 @@ void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage imag
     CountWatchedLocked();
 }
 
-void RememberImage(const VkImageCreateInfo& info, VkImage image, bool wanted)
+void RememberImage(VkDevice device, const VkImageCreateInfo& info, VkImage image, bool wanted)
 {
     if (image == VK_NULL_HANDLE || Core::Held() || !Core::Active())
         return;
@@ -716,6 +717,7 @@ void RememberImage(const VkImageCreateInfo& info, VkImage image, bool wanted)
     }
 
     Seen seen;
+    seen.device = device;
     seen.info = info;
     seen.info.pNext = nullptr;
     seen.info.pQueueFamilyIndices = nullptr;
@@ -831,9 +833,10 @@ void ExplainHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat f
     if (seen == g_seen.end())
     {
         LOG_WARN("DLSS-NR exposure scan (Vulkan): the handed exposure image (view {}x{}, format {}, mip {}, layer {}) "
-                 "was not seen made while the scan watched ({} remembered): made before the scan started, by a path "
+                 "was not seen made while the scan watched ({} remembered{}): made before the scan started, by a path "
                  "it does not hook, or neither candidate-shaped nor 1x1",
-                 width, height, (int) format, mip, layer, g_seen.size());
+                 width, height, (int) format, mip, layer, g_seen.size(),
+                 g_seen.size() >= kMaxSeen ? ", the list is full, so it may have been made after that" : "");
         return;
     }
 
@@ -869,6 +872,11 @@ void OnDeviceDestroyed(VkDevice device)
         for (auto it = g_pending.begin(); it != g_pending.end();)
             it = it->second.device == device ? g_pending.erase(it) : std::next(it);
 
+        // A device can go without its images being destroyed one by one: theirs must not fill the remembered list
+        for (auto it = g_seen.begin(); it != g_seen.end();)
+            it = it->second.device == device ? g_seen.erase(it) : std::next(it);
+
+        g_seenCount = (int) g_seen.size();
         CountWatchedLocked();
     }
 

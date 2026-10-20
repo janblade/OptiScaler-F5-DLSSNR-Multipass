@@ -981,7 +981,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                      : std::string(),
                                  paired ? g_vk.pairGameExposure : 0.0f, gameBase,
                                  paired && gameBase > 0.0f ? autoBase / gameBase : 0.0f,
-                                 paired ? "" : "; read only while following", DlssNr::KnownUnexposedGame() ? "yes" : "no",
+                                 paired ? "" : "; read only while following or scanning",
+                                 DlssNr::KnownUnexposedGame() ? "yes" : "no",
                                  DlssNr::FollowGameOn(cfg) ? "on" : "off");
                     }
                 }

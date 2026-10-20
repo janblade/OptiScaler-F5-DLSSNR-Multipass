@@ -503,6 +503,9 @@
     <ClInclude Include="output\SdrToHdr_Display.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Hlsl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\MsaaPictureDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>

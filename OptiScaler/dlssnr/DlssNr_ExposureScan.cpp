@@ -596,7 +596,7 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
     t.bytes = bytes;
     t.format = format;
     t.rank = rank;
-    t.adoptedAt = g_scan.frames12;
+    t.adoptedAt = std::chrono::steady_clock::now();
 
     if (api != Api::Vulkan)
         ((IUnknown*) handle)->AddRef();
@@ -1523,16 +1523,20 @@ void ReleaseTrackedResources()
     // D3D12's only: D3D11 has no placed heaps that a held reference could outlive, and Vulkan's candidates are dropped
     // as the game destroys them (DlssNr_ExposureScan_Vk.cpp).
     //
-    // Except what the game made since NR's last frame: a quality or resolution change makes the game remake its own
+    // Except what the game made in the last kFreshSeconds: a quality or resolution change makes the game remake its own
     // buffers first and release the upscaler's feature after (Cyberpunk 2077 made its exposure again 0.25 s before the
-    // release), so those are what comes next, not what is being torn down. Dropping them left Auto searching with
-    // nothing to search until the next loading screen. They are the game's own (DlssNr_ExposureScanSource.h), and the
-    // per-frame check in Tick lets go of any the game releases.
+    // release, with an NR frame in between), so those are what comes next, not what is being torn down. Dropping them
+    // left Auto searching with nothing to search until the next loading screen. They are the game's own
+    // (DlssNr_ExposureScanSource.h), and the per-frame check in Tick lets go of any the game releases.
+    constexpr float kFreshSeconds = 2.0f;
+    const auto now = std::chrono::steady_clock::now();
+
     for (size_t i = 0; i < g_scan.tracked.size(); ++i)
     {
         const Tracked& t = g_scan.tracked[i];
 
-        if (t.alive && t.api == Api::D3D12 && t.adoptedAt < g_scan.frames12)
+        if (t.alive && t.api == Api::D3D12 &&
+            std::chrono::duration<float>(now - t.adoptedAt).count() >= kFreshSeconds)
             Core::DropLocked(i);
     }
 

@@ -60,13 +60,31 @@ constexpr unsigned int kSlots = Core::kSlots;
 // so the stride is that alignment; buffer copies have no such rule and are unaffected by the waste.
 constexpr unsigned int kStride = 512;
 
-// What an exposure could plausibly be. Outside these it is a flag, a counter, a sentinel or a
-// zeroed buffer nobody has written yet -- Nioh 3 offers all four, including one holding 1000000.
-constexpr float kFloor = 1e-6f;
-constexpr float kCeiling = 1e4f;
+// What an exposure could plausibly be (DlssNr_ExposureScanShape.h)
+constexpr float kFloor = DlssNrExposureScanShape::kPlausibleFloor;
+constexpr float kCeiling = DlssNrExposureScanShape::kPlausibleCeiling;
+
+// D3D12 candidates turned away by a full list, waiting for a slot (Core::AdoptLocked). Bounded: a game that remakes its
+// buffers again and again (Starfield, with every DLSS-G recreation) must not pile references up.
+constexpr size_t kMaxWaiting = 1024;
 
 struct ScanState
 {
+    // A candidate waiting for a slot, with a reference held
+    struct Waiting
+    {
+        ID3D12Resource* resource = nullptr;
+        std::string shape;
+        unsigned int bytes = 4;
+        bool isBuffer = false;
+        uint32_t format = 0;
+        uint64_t size = 0;
+        int rank = 0;
+        std::chrono::steady_clock::time_point at;
+    };
+    std::vector<Waiting> waiting;
+    unsigned int notDecimalLetGo = 0; // candidates let go of for holding no decimal number, this session (the log)
+
     unsigned int examined = 0;
     // By slot: a freed slot stays until a new candidate takes it (DlssNr_ExposureScanShape.h)
     std::vector<Tracked> tracked;
@@ -226,6 +244,77 @@ void ReleaseRetiredLocked(bool all)
         return true;
     };
     r.erase(std::remove_if(r.begin(), r.end(), done), r.end());
+}
+
+// Lets go of the candidates waiting for a slot: those that arrived `freshSeconds` or more ago (all: 0). Never copied
+// from, so released at once.
+void ReleaseWaitingLocked(float freshSeconds = 0.0f)
+{
+    const auto now = std::chrono::steady_clock::now();
+    auto& w = g_scan.waiting;
+    const auto old = [&](const ScanState::Waiting& x)
+    {
+        if (std::chrono::duration<float>(now - x.at).count() < freshSeconds)
+            return false;
+        x.resource->Release();
+        return true;
+    };
+    w.erase(std::remove_if(w.begin(), w.end(), old), w.end());
+}
+
+// Frees the slots of D3D12 candidates that hold no decimal number (DlssNrExposureScanShape::HoldsNoDecimal) for those
+// waiting, the likeliest shape first. Once per NR frame, while the scan copies every candidate: whoever waits gets a
+// second of reads, so a game that made hundreds at once is gone through in seconds. Found or given up (Auto), they wait
+// without being copied; Auto finished with candidates, or the scan no longer wanted, they are let go of.
+void RotateLocked()
+{
+    if (g_scan.waiting.empty())
+        return;
+
+    if (!Wanted() || AutoScan::ClosedLocked(4))
+    {
+        ReleaseWaitingLocked();
+        return;
+    }
+
+    if (!AutoScan::SearchingLocked())
+        return;
+
+    unsigned int letGo = 0;
+
+    for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+    {
+        const Tracked& t = g_scan.tracked[i];
+
+        if (t.alive && t.api == Api::D3D12 && !t.handed && DlssNrExposureScanShape::HoldsNoDecimal(t))
+        {
+            Core::LetGoLocked(i);
+            letGo++;
+        }
+    }
+
+    unsigned int taken = 0;
+
+    while (!g_scan.waiting.empty() && DlssNrExposureScanShape::FreeSlot(g_scan.tracked, kMaxCandidates) >= 0)
+    {
+        const int next = DlssNrExposureScanShape::NextWaiting(g_scan.waiting);
+        ScanState::Waiting w = std::move(g_scan.waiting[(size_t) next]);
+        g_scan.waiting.erase(g_scan.waiting.begin() + next);
+
+        // The slot takes its own reference; the waiting one goes either way
+        if (Core::AdoptLocked(Api::D3D12, w.resource, nullptr, w.shape, w.bytes, w.isBuffer, w.format, w.size) >= 0)
+            taken++;
+
+        w.resource->Release();
+    }
+
+    g_scan.notDecimalLetGo += letGo;
+
+    if (letGo > 0 || taken > 0)
+        LOG_INFO(
+            "DLSS-NR exposure scan: let go of {} candidates holding no decimal number ({} so far); {} waiting took "
+            "their slots, {} still wait",
+            letGo, g_scan.notDecimalLetGo, taken, g_scan.waiting.size());
 }
 
 // What a module is to the scan: the game's, someone else's (OptiScaler, middleware), or one that only forwards the
@@ -569,12 +658,34 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
 
     if (slot < 0)
     {
+        // D3D12: waits for a slot (RotateLocked)
+        const bool waits = api == Api::D3D12 && g_scan.waiting.size() < kMaxWaiting &&
+                           std::none_of(
+                               g_scan.waiting.begin(), g_scan.waiting.end(), [handle](const ScanState::Waiting& w)
+                               { return w.resource == (ID3D12Resource*) handle; });
+
+        if (waits)
+        {
+            ScanState::Waiting w;
+            w.resource = (ID3D12Resource*) handle;
+            w.shape = shape;
+            w.bytes = bytes;
+            w.isBuffer = isBuffer;
+            w.format = format;
+            w.size = size;
+            w.rank = rank;
+            w.at = std::chrono::steady_clock::now();
+            w.resource->AddRef();
+            g_scan.waiting.push_back(std::move(w));
+        }
+
         if (!g_scan.complained)
         {
             g_scan.complained = true;
-            LOG_WARN("DLSS-NR exposure scan: more than {} candidates, so the filter is too loose here "
-                     "rather than the game having {} exposures",
-                     kMaxCandidates, kMaxCandidates);
+            LOG_WARN("DLSS-NR exposure scan: more than {} candidates{}", kMaxCandidates,
+                     api == Api::D3D12 ? "; the rest wait for the slots of those that hold no decimal number"
+                                       : ", so the filter is too loose here rather than the game having that many "
+                                         "exposures");
         }
 
         return -1;
@@ -662,6 +773,9 @@ void ConsumeLocked(size_t slot, uint32_t generation, const void* bytes)
     // sample happened to be first.
     if (value <= kFloor || value >= kCeiling)
     {
+        if (DlssNrExposureScanShape::NotADecimal(value))
+            t.notDecimal++;
+
         t.latest = value;
         t.reads++;
         return;
@@ -731,6 +845,7 @@ void EndFrameLocked(const FrameExposure& passFrame)
     // Auto's lifecycle runs every NR frame, candidates or not: a handed texture, or new candidates after giving up,
     // change its course
     AutoScan::FrameLocked(frame);
+    RotateLocked();
 
     bool anyAlive = false;
 
@@ -930,7 +1045,7 @@ bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
     {
         std::lock_guard<std::mutex> lock(g_scanMutex);
 
-        if (g_scan.retiring.empty() && !Core::AnyAliveLocked(Api::D3D12))
+        if (g_scan.retiring.empty() && g_scan.waiting.empty() && !Core::AnyAliveLocked(Api::D3D12))
             return false;
 
         for (size_t i = 0; i < g_scan.tracked.size(); ++i)
@@ -938,6 +1053,8 @@ bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
             if (g_scan.tracked[i].alive && g_scan.tracked[i].api == Api::D3D12)
                 Core::DropLocked(i);
         }
+
+        ReleaseWaitingLocked();
 
         g_scan.frames12++;
         ReleaseRetiredLocked(false);
@@ -1012,6 +1129,19 @@ bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
             Core::LetGoLocked(i);
         }
     }
+
+    // ... and the same for those waiting for a slot
+    std::erase_if(g_scan.waiting,
+                  [](const ScanState::Waiting& w)
+                  {
+                      w.resource->AddRef();
+
+                      if (w.resource->Release() != 1)
+                          return false;
+
+                      w.resource->Release();
+                      return true;
+                  });
 
     // The state a candidate is in is the game's business and nothing here has a contract about it.
     //
@@ -1541,6 +1671,7 @@ void ReleaseTrackedResources()
     }
 
     ReleaseRetiredLocked(true);
+    ReleaseWaitingLocked(kFreshSeconds);
     g_scan.complained = false;
 }
 
@@ -1552,6 +1683,7 @@ void Shutdown()
         Core::DropLocked(i);
 
     ReleaseRetiredLocked(true);
+    ReleaseWaitingLocked();
     g_scan.tracked.clear();
 
     for (unsigned int i = 0; i < kSlots; ++i)

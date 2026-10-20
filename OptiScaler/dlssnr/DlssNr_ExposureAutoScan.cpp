@@ -465,6 +465,8 @@ bool CopiesLocked(size_t slot)
 
     return g_auto.life.CopiesMatchOnly() && (int) slot == g_auto.found;
 }
+
+bool SearchingLocked() { return !On() || g_auto.life.CopiesAll(); }
 } // namespace AutoScan
 
 std::string AutoStatus()

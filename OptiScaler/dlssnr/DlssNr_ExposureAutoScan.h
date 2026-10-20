@@ -35,6 +35,10 @@ void AdoptedLocked(int rank);
 // Whether the backend copies this slot's value this frame: every candidate while watching and searching, only the match
 // once found, none after giving up (those are held for the next search). Always true when Auto is not on.
 bool CopiesLocked(size_t slot);
+
+// Whether every candidate is copied (watching or searching, or Auto not on): candidates waiting for a slot are only
+// rotated in then (Core::AdoptLocked)
+bool SearchingLocked();
 } // namespace AutoScan
 } // namespace ExposureScan
 } // namespace DlssNr

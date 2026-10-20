@@ -11,7 +11,8 @@
 // The slots: a candidate that goes away (the game destroyed it, or the scan let go of it) frees its slot rather than
 // shifting the list, because each API's readback ring holds values by slot index for a few frames. A slot's generation
 // counts its owners, so a value copied for the old owner is never credited to the new one. A full list makes room for a
-// newcomer whose shape is likelier to be the exposure (Rank, EvictFor).
+// newcomer whose shape is likelier to be the exposure, or for any newcomer once a candidate has shown it holds no
+// decimal number (Rank, EvictFor, HoldsNoDecimal); on D3D12 one turned away waits for a slot (NextWaiting).
 //
 // Header-only, no D3D or Vulkan types: tests/nr_exposure_scan_shape_smoke.cpp.
 
@@ -115,6 +116,29 @@ template <class Slot> int FreeSlot(const std::vector<Slot>& slots, size_t cap)
     return slots.size() < cap ? (int) slots.size() : -1;
 }
 
+// What an exposure could plausibly be. Outside these it is a flag, a counter, a sentinel or a zeroed buffer nobody has
+// written yet -- Nioh 3 offers all four, including one holding 1000000.
+inline constexpr float kPlausibleFloor = 1e-6f;
+inline constexpr float kPlausibleCeiling = 1e4f;
+
+// A value read as a float that is not a decimal number: not zero (a buffer not yet written) and outside the plausible
+// range. An integer read as a float lands far below it -- Witcher 3's 244 UAV buffers held only values like 65536,
+// 9.18e-41 as a float (2026-10-20) -- and a sentinel far above it. A NaN or an infinity is not counted (the reader
+// skips those).
+inline bool NotADecimal(float v)
+{
+    const float a = v < 0.0f ? -v : v;
+    return v != 0.0f && a == a && (a <= kPlausibleFloor || a >= kPlausibleCeiling);
+}
+
+// Reads of a candidate that never held a plausible value, all saying it holds something else, before a full list gives
+// it up for anything (EvictFor) and the scan lets it go for one that waits (Core: the waiting list). About a second of
+// NR frames: such a buffer says so from its first read.
+inline constexpr unsigned int kNotADecimalReads = 60;
+
+// `Slot` has `unsigned int inRange` (plausible reads) and `notDecimal` (NotADecimal reads)
+template <class Slot> bool HoldsNoDecimal(const Slot& s) { return s.inRange == 0 && s.notDecimal >= kNotADecimalReads; }
+
 // How likely a candidate's shape is to hold the exposure, for a full list (EvictFor). `size`: bytes for a buffer, texels
 // for a texture (every layer and slice counted). A texture of up to 4 texels ranks 4 (the exposures found so far:
 // Cyberpunk 2077's and Arkham Knight's 1x1, RDR2's 1x1, Doom Eternal's 2x2); another small texture, or a buffer of up to
@@ -133,7 +157,8 @@ inline int Rank(bool isBuffer, uint64_t size)
 // buffers and bigger textures. The candidate given up is one of a lower rank that has not been seen moving and is not
 // the handed exposure, that `mayGo` allows (its backend's own): the lowest rank, then the most reads without moving,
 // then the lowest slot (the earlier made, while slots are not yet reused: an exposure tends to come late, with the
-// post-processing). Once NR runs, a candidate that moves is kept whatever comes after it.
+// post-processing). Once NR runs, a candidate that moves is kept whatever comes after it, and one that holds no decimal
+// (HoldsNoDecimal) gives way first, to a newcomer of any rank.
 template <class Slot, class MayGo> int EvictFor(const std::vector<Slot>& slots, int rank, MayGo mayGo)
 {
     int best = -1;
@@ -141,11 +166,36 @@ template <class Slot, class MayGo> int EvictFor(const std::vector<Slot>& slots, 
     for (size_t i = 0; i < slots.size(); ++i)
     {
         const Slot& s = slots[i];
+        const bool noDecimal = HoldsNoDecimal(s);
 
-        if (!s.alive || s.moves || s.handed || s.rank >= rank || !mayGo(s))
+        if (!s.alive || s.moves || s.handed || (s.rank >= rank && !noDecimal) || !mayGo(s))
             continue;
 
-        if (best < 0 || s.rank < slots[best].rank || (s.rank == slots[best].rank && s.reads > slots[best].reads))
+        if (best < 0)
+        {
+            best = (int) i;
+            continue;
+        }
+
+        const Slot& b = slots[best];
+        const bool bNoDecimal = HoldsNoDecimal(b);
+
+        if (noDecimal != bNoDecimal ? noDecimal : s.rank < b.rank || (s.rank == b.rank && s.reads > b.reads))
+            best = (int) i;
+    }
+
+    return best;
+}
+
+// The waiting list's next one to take a free slot (Core): the likeliest shape, then the first to arrive. `Waiting` has
+// `int rank`. -1 when empty.
+template <class Waiting> int NextWaiting(const std::vector<Waiting>& waiting)
+{
+    int best = -1;
+
+    for (size_t i = 0; i < waiting.size(); ++i)
+    {
+        if (best < 0 || waiting[i].rank > waiting[best].rank)
             best = (int) i;
     }
 

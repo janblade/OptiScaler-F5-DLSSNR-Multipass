@@ -559,6 +559,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrProxyProbe.set_from_config(readBool("DlssNr", "ProxyProbe"));
             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
+            DlssNrRecordExposureScan.set_from_config(readBool("DlssNr", "RecordExposureScan"));
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
             DlssNrGameExposureScale.set_from_config(readUInt("DlssNr", "GameExposureScale"));
             if (DlssNrGameExposureScale.has_value() && DlssNrGameExposureScale.value() > 2)
@@ -1711,8 +1712,11 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "PassFeedback", GetFloatValue(Instance()->DlssNrPassFeedback.value_for_config()).c_str());
     ini.SetValue("DlssNr", "UseProxy", GetBoolValue(Instance()->DlssNrUseProxy.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ProxyProbe", GetBoolValue(Instance()->DlssNrProxyProbe.value_for_config()).c_str());
-    // ScanExposure is a developer override with no menu control; persist it so a set ini keeps it.
+    // ScanExposure and RecordExposureScan are developer overrides with no menu control; persist them so a set ini keeps
+    // them.
     ini.SetValue("DlssNr", "ScanExposure", GetBoolValue(Instance()->DlssNrScanExposure.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RecordExposureScan",
+                 GetBoolValue(Instance()->DlssNrRecordExposureScan.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointScale",
                  GetFloatValue(Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Preset", GetIntValue(Instance()->DlssNrPreset.value_for_config()).c_str());

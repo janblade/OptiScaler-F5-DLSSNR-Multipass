@@ -39,6 +39,7 @@
 #include "DlssNr_ExposureCalibrate_Run.h"
 #include "DlssNr_ProxyCurve.h"
 #include "DlssNr_ExposureAdapt.h"
+#include "DlssNr_ExposureFoundBlend.h"
 #include "DlssNr_ExposureMeter.h"
 #include "DlssNr_FinishedReady.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
@@ -385,6 +386,13 @@ struct NrState
     bool autoExposureReadable = false;
     float autoExposureValue = 0.0f;
 
+    // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
+    // none is in force. Read back a few frames behind like the meter's value, so while it holds the white point is the
+    // host's (the shader is not asked to recompute it from the meter's live texture). Eased in and out
+    // (DlssNr_ExposureFoundBlend.h).
+    float foundBaseWhitePoint = 0.0f;
+    DlssNrExposureFoundBlend::Blend foundBlend;
+
     // Eye adaptation (DlssNr_ExposureAdapt.h): the meter's own reading lands in autoExposureRaw (kept in the UAV state
     // between evaluations) and a one-texel pass eases autoExposure toward it, so autoExposure above is the eased value
     // and everything downstream reads that. autoExposureRawValue is the reading's readback, for the log.
@@ -538,11 +546,15 @@ float AutoOwnBaseWhitePoint()
 }
 
 // Automatic exposure's base white point, the value its Trim multiplies: the game's base white point times the
-// learned calibration while following the game (DlssNr_FollowGame.h), else Automatic's own.
+// learned calibration while following the game (DlssNr_FollowGame.h), Auto's found exposure while the scan has one,
+// else Automatic's own.
 float AutoBaseWhitePoint()
 {
     if (g_nr.followingGame && g_nr.autoPairGameExposure > 1e-8f)
         return g_nr.autoPairPreExposure / g_nr.autoPairGameExposure * DlssNrFollowGame::Instance().Scale();
+
+    if (g_nr.foundBaseWhitePoint > 0.0f)
+        return g_nr.foundBaseWhitePoint;
 
     return AutoOwnBaseWhitePoint();
 }
@@ -571,6 +583,12 @@ std::unique_ptr<DlssNrGpuTime> g_gpuTime;
 // we can actually do something about.
 std::unique_ptr<DlssNrGpuTime> g_ngxTime;
 std::optional<double> g_lastNgxTime;
+
+// A third, around the exposure scan's copies (DlssNr::ExposureScan::Tick), for what searching costs -- it runs by
+// itself on Auto, so its price is paid by everyone on Auto until it finds or gives up. Averaged over the log interval.
+std::unique_ptr<DlssNrGpuTime> g_scanTime;
+double g_scanTimeSum = 0.0, g_scanTimeMax = 0.0;
+unsigned g_scanTimeSamples = 0;
 std::optional<double> g_lastGpuTime;
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
@@ -1712,7 +1730,9 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
     // Measured off the frame the encode is about to read -- the upscaler's fresh output -- and never
     // off anything this pass has written. That is the difference from the statistical meter removed
     // below, which read its own output and chased it.
-    if (DlssNr::WhitePointSourceEffective(cfg) == 3 && g_nr.autoExposureValue > 1e-8f)
+    // A found exposure in force counts on its own: Automatic's reading starts over on a change of source, and the
+    // white point must not fall to the slider for the frames that takes (DlssNr_ExposureFoundBlend.h).
+    if (DlssNr::WhitePointSourceEffective(cfg) == 3 && (g_nr.autoExposureValue > 1e-8f || g_nr.foundBaseWhitePoint > 0.0f))
     {
         // Following the game (DlssNr_FollowGame.h): the game's base white point times the learned calibration, which
         // is where Automatic's own would sit. The shader does the same from the game's live texture.
@@ -3657,6 +3677,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_ngxTime == nullptr)
         g_ngxTime = std::make_unique<DlssNrGpuTime>(device, "model");
 
+    if (g_scanTime == nullptr)
+        g_scanTime = std::make_unique<DlssNrGpuTime>(device, "exposure scan");
+
     if (g_gpuTime != nullptr)
         g_gpuTime->Start(cmdList);
 
@@ -3849,7 +3872,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // needs the two from the same frame. The meter's tiles have been reduced already; nothing else reads them now.
         // Same rule as Vulkan: only while following the game's exposure (DlssNr_GameDefaults.h), so nothing is learned
         // while it is off (switching it on later starts learning at that moment).
-        const bool pairGameExposure = frame.ExposureTexture != nullptr && DlssNr::FollowGameOn(cfg);
+        // Also while the exposure scan runs: its recording needs the game's exposure beside Automatic's reading.
+        const bool pairGameExposure =
+            frame.ExposureTexture != nullptr && (DlssNr::FollowGameOn(cfg) || DlssNr::ExposureScan::Scanning());
 
         if (pairGameExposure)
         {
@@ -3901,6 +3926,39 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.gamePreExposure = frame.PreExposure;
 
+    // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs, and
+    // never while following the game (that one is handed over, so Auto has no scan match then). Moving to and from it
+    // is eased over a second, in stops (DlssNr_ExposureFoundBlend.h): Cyberpunk 2077 took over 0.84 EV apart, in a
+    // scene it keeps darker than the meter would.
+    {
+        float found = 0.0f;
+        float foundPre = 1.0f;
+        const float target = usingAutoExposure && !g_nr.followingGame &&
+                                     DlssNr::ExposureScan::FoundExposure(&found, &foundPre) && found > 1e-8f
+                                 ? foundPre / found
+                                 : 0.0f;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float own = AutoOwnBaseWhitePoint();
+        g_nr.foundBaseWhitePoint = g_nr.foundBlend.Step(target, own, now, usingAutoExposure);
+
+        switch (g_nr.foundBlend.LastEvent())
+        {
+        case DlssNrExposureFoundBlend::Event::TookOver:
+            LOG_INFO("DLSS-NR automatic exposure: the game's own exposure (found by the scan) moves the white point from "
+                     "here: {:.4g}, from {:.4g} ({:+.2f} EV), eased over a second",
+                     target, g_nr.foundBaseWhitePoint, std::log2(g_nr.foundBaseWhitePoint / target));
+            break;
+        case DlssNrExposureFoundBlend::Event::Leaving:
+            LOG_INFO("DLSS-NR automatic exposure: the game's exposure is gone; back to Automatic's own meter, eased");
+            break;
+        case DlssNrExposureFoundBlend::Event::Left:
+            LOG_INFO("DLSS-NR automatic exposure: Automatic's own meter again");
+            break;
+        default:
+            break;
+        }
+    }
+
     float whitePoint = frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride : ResolveWhitePoint(cfg, isHdrBuffer);
 
     // While Tune for this scene runs, the white point is pinned on the CPU (the base frozen at its start times the
@@ -3951,7 +4009,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         params.WhitePoint = whitePoint;
         params.UseGameExposure = useGameExposure;
         params.ExposurePreMul = exposurePreMul;
-        params.UseExposureWhitePoint = usingAutoExposure && !calibrationPinned ? 1u : 0u;
+        params.UseExposureWhitePoint =
+            usingAutoExposure && !calibrationPinned && !(g_nr.foundBaseWhitePoint > 0.0f) ? 1u : 0u;
         params.ExposureBaseScale = exposureBaseScale;
         FillExposureConstants(params, cfg, usingAutoExposure ? 3u : 1u, frame.PreExposure);
     };
@@ -4295,8 +4354,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         modelInput = g_nr.colorSmall;
     }
 
-    // Read the exposure scan's candidates on the pass's own command list, once a frame.
-    DlssNr::ExposureScan::Tick(device, cmdList);
+    // Read the exposure scan's candidates on the pass's own command list, once a frame, with what is known about the
+    // frame's brightness for its recording: Automatic's raw reading (Automatic only) and the game's exposure (read on
+    // Game exposure, paired on Automatic while scanning).
+    {
+        DlssNr::ExposureScan::FrameExposure scanFrame;
+        scanFrame.handed = (ID3D12Resource*) frame.ExposureTexture;
+        scanFrame.meter = whitePointSource == 3 ? g_nr.autoExposureRawValue : 0.0f;
+        scanFrame.game = whitePointSource == 1   ? g_nr.gameExposure
+                         : whitePointSource == 3 ? g_nr.autoPairGameExposure
+                                                 : 0.0f;
+        // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
+        scanFrame.pre = whitePointSource == 3 ? g_nr.autoExposurePreExposure : frame.PreExposure;
+        // Timed only on frames that record copies: an empty pair would pull the average toward 0
+        const bool timeScan = g_scanTime != nullptr && DlssNr::ExposureScan::Holding();
+
+        if (timeScan)
+            g_scanTime->Start(cmdList);
+
+        const bool copied = DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
+
+        if (timeScan && copied)
+            g_scanTime->End(cmdList);
+        else if (timeScan)
+            g_scanTime->Abandon();
+    }
 
     // No depth gives depthIn == nullptr; only a depth that could not be cloned is a failure.
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
@@ -5442,6 +5524,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     g_lastNgxTime = ngx;
             }
 
+            if (g_scanTime != nullptr)
+            {
+                g_scanTime->ReadGpuTime(queue);
+
+                for (const double sample : g_scanTime->TakeFresh())
+                {
+                    g_scanTimeSum += sample;
+                    g_scanTimeMax = std::max(g_scanTimeMax, sample);
+                    ++g_scanTimeSamples;
+                }
+
+                static unsigned long long lastScanLog = 0;
+
+                if (g_scanTimeSamples > 0 && g_frames - lastScanLog > 600)
+                {
+                    lastScanLog = g_frames;
+                    LOG_INFO("DLSS-NR exposure scan GPU cost: {:.4f} ms per frame on average, {:.4f} ms at most, over {} "
+                             "frames; {} candidates held ({})",
+                             g_scanTimeSum / g_scanTimeSamples, g_scanTimeMax, g_scanTimeSamples,
+                             DlssNr::ExposureScan::Report().size(), DlssNr::ExposureScan::AutoStatus());
+                    g_scanTimeSum = g_scanTimeMax = 0.0;
+                    g_scanTimeSamples = 0;
+                }
+            }
+
             // The split, once every few hundred frames. What is worth reading is not the total but the
             // remainder: the model's cost is NVIDIA's to set, and everything else is ours.
             static unsigned long long lastSplitLog = 0;
@@ -5537,6 +5644,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         g_nr.reset = true;
         if (g_gpuTime) g_gpuTime->ClearLast();
         if (g_ngxTime) g_ngxTime->ClearLast();
+        if (g_scanTime) g_scanTime->ClearLast();
         g_lastGpuTime.reset();
         g_lastNgxTime.reset();
         Late::Cancel();
@@ -5888,10 +5996,13 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             {
                 loggedScan = scanned;
 
-                if (g_nr.gameExposure > 1e-6f)
+                // Read on Game exposure, paired on Automatic while scanning
+                const float gameNow = g_nr.gameExposure > 1e-6f ? g_nr.gameExposure : g_nr.autoPairGameExposure;
+
+                if (gameNow > 1e-6f)
                     LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  the "
                              "game's own exposure is {:.5f}  |  ratio {:.4f}",
-                             which, scanned, low, high, g_nr.gameExposure, scanned / g_nr.gameExposure);
+                             which, scanned, low, high, gameNow, scanned / gameNow);
                 else
                     LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  this "
                              "game supplies no exposure to compare against",
@@ -6114,6 +6225,7 @@ FollowGameStatus FollowGameExposureStatus()
     s.gameExposureSeen = g_nr.autoPairGameExposure > 0.0f;
     s.following = g_nr.followingGame;
     s.disagreementEv = FollowDisagreementEv();
+    s.foundInForce = g_nr.foundBaseWhitePoint > 0.0f;
     return s;
 }
 
@@ -6411,6 +6523,7 @@ void Shutdown()
     g_capture.release();
     g_gpuTime.reset();
     g_ngxTime.reset();
+    g_scanTime.reset();
     g_lastNgxTime.reset();
     g_lastGpuTime.reset();
 

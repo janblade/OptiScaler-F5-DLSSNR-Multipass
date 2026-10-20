@@ -4,6 +4,7 @@
 #include "DepthFinderCore.h"
 #include "VkDeviceRules.h"
 
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <Config.h>
@@ -611,6 +612,8 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     RecordCopyToShared(slot.copyIn, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, _picture, family);
     FrameInput depth;
     const bool haveDepth = !waiting && RecordDepth(slot.copyIn, family, depth);
+    // The exposure scan's values, on the game's queue (NR runs on D3D12 here, whose pass writes the frame's bookkeeping)
+    DlssNr::ExposureScanVk::Record(slot.copyIn, _device, _physical, true);
     vkEndCommandBuffer(slot.copyIn);
 
     // The present's semaphores are binary: their values are ignored, but the arrays must match the counts. Bridged, the
@@ -654,6 +657,7 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     }
 
     SubmitDepthCopy(copied);
+    DlssNr::ExposureScanVk::Submitted(_device, _fence.Semaphore(), copied);
     _acquired = true;
     _tookPresentWaits = true;
     _error.clear();

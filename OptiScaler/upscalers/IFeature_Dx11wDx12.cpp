@@ -3,6 +3,7 @@
 #include "NgxOptionalDx12Inputs.h"
 
 #include <dlssnr/DlssNr.h>
+#include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -471,6 +472,11 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         InParameters->Set(NVSDK_NGX_Parameter_MotionVectors, (void*) dx11Mv.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Output, (void*) dx11Out.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Depth, (void*) dx11Depth.Dx12Resource);
+
+        // The exposure scan's known answer is the game's own texture, not the D3D12 copy NR is handed below
+        ID3D11Resource* gameExposure = nullptr;
+        getOriginalNgxResource(InParameters, NVSDK_NGX_Parameter_ExposureTexture, &gameExposure);
+        DlssNr::ExposureScanDx11::NoteHanded(gameExposure);
 
         SetOptionalDx12Inputs(InParameters, dx11Exp.Dx12Resource, dx11Reactive.Dx12Resource, AutoExposure(),
                               Config::Instance()->DisableReactiveMask.value_or(false));

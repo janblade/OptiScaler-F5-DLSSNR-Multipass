@@ -284,6 +284,7 @@ void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
     DlssNrWatchedLists::Remove(1, &list);
     if (g_gpuTime) g_gpuTime->ResetRecording(cmd);
     if (g_ngxTime) g_ngxTime->ResetRecording(cmd);
+    if (g_scanTime) g_scanTime->ResetRecording(cmd);
     // Reuse's coverage readbacks: a recording thrown away frees its slot, since no fence will ever be signalled for it.
     DetailReuse::ResetRecording(cmd);
     SceneCut::ResetRecording(cmd); // the scene-cut flag's readbacks, the same way
@@ -333,6 +334,7 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     DlssNrWatchedLists::Remove(count, watched);
     if (g_gpuTime) g_gpuTime->Submitted(queue, count, lists);
     if (g_ngxTime) g_ngxTime->Submitted(queue, count, lists);
+    if (g_scanTime) g_scanTime->Submitted(queue, count, lists);
     // Reuse's coverage readbacks: a copy is safe to read once the list it was recorded on has been executed.
     DetailReuse::Submitted(queue, count, lists);
     SceneCut::Submitted(queue, count, lists); // the scene-cut flag's readbacks, the same way

@@ -5,6 +5,7 @@
 
 #include <Config.h>
 #include <dlssnr/DlssNr.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 #include <inputs/FG/Upscaler_Inputs_Dx12.h>
 #include <native/NativeDriverVk.h>
@@ -2207,6 +2208,21 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
             break;
         }
         interopPrepared = true;
+
+        // The exposure scan: the game's candidates copied on its own command buffer (NR runs on D3D12 here, whose pass
+        // writes the frame's bookkeeping), and the game's own exposure image as the known answer, not NR's D3D12 copy
+        DlssNr::ExposureScanVk::Record(InCmdBuffer, VulkanDevice, VulkanPhysicalDevice, false);
+        {
+            NVSDK_NGX_Resource_VK* exposure = nullptr;
+            InParameters->Get(NVSDK_NGX_Parameter_ExposureTexture, (void**) &exposure);
+
+            if (exposure != nullptr && exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW)
+                DlssNr::ExposureScanVk::NoteHanded(
+                    exposure->Resource.ImageViewInfo.Image, exposure->Resource.ImageViewInfo.Width,
+                    exposure->Resource.ImageViewInfo.Height, exposure->Resource.ImageViewInfo.Format,
+                    exposure->Resource.ImageViewInfo.SubresourceRange.baseMipLevel,
+                    exposure->Resource.ImageViewInfo.SubresourceRange.baseArrayLayer);
+        }
 
         if (State::Instance().changeBackend[Handle()->Id])
             break;

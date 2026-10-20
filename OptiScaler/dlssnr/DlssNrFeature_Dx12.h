@@ -189,6 +189,9 @@ struct FollowGameStatus
     // While following: how far the followed base sits from Automatic's own, in EV (D3D12; 0 on Vulkan). Beyond
     // DlssNrExposureCalibrate::kFollowDisagreementLimitEv the learned calibration is stale and wants a Re-learn.
     float disagreementEv = 0.0f;
+    // Auto's found exposure (story 5) moves the white point this frame (DlssNr_ExposureScan.h FoundExposure): what the
+    // menu names Auto by, since the scan can hold a match the picture is not using (SDR, a finished picture, ...)
+    bool foundInForce = false;
 };
 
 FollowGameStatus FollowGameExposureStatus();

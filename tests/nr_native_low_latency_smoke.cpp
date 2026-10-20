@@ -549,6 +549,30 @@ int main()
             CHECK(SettleCap(byMethod, xellNow, Method::XellWithXefg) == xellNow);
             // ... the same method still settles
             CHECK(SettleCap(byMethod, reflex, Method::XellWithXefg) == xellNow);
+
+            // XeFG's count stepping while it generates (Dynamic MFG) is taken at once on the split; a pause still
+            // settles
+            {
+                const auto split = Method::RealReflexWithXefg;
+                const CapPlan at4x { CapOwner::LowLatency, IntervalUs(CapPerRenderedFrame(120.0f, 4)) };
+                const CapPlan at3x { CapOwner::LowLatency, IntervalUs(CapPerRenderedFrame(120.0f, 3)) };
+                const CapPlan paused { CapOwner::LowLatency, IntervalUs(120.0f) };
+                CapSettle counted;
+
+                CHECK(SettleCapForCount(counted, at4x, split, 4) == at4x);
+                // 4X -> 3X: at once
+                CHECK(SettleCapForCount(counted, at3x, split, 3) == at3x);
+                // A pause (one shown per rendered) keeps 3X's interval through it
+                for (int i = 0; i < kCapSettlePresents - 1; ++i)
+                    CHECK(SettleCapForCount(counted, paused, split, 1) == at3x);
+                CHECK(SettleCapForCount(counted, at3x, split, 3) == at3x);
+                // A count step that moves the cap to another owner still settles
+                const CapPlan limiterNow { CapOwner::Limiter, 0 };
+                CHECK(SettleCapForCount(counted, limiterNow, split, 4) == at3x);
+                // (last call: 4 shown) a step to 3 on the same method is one, on another method not
+                CHECK(CountStep(counted, at3x, split, 3));
+                CHECK(!CountStep(counted, at3x, Method::XellWithXefg, 3));
+            }
             CHECK(SettleCap(settle, limiter) == limiter);
 
             // A plan that keeps changing never settles on any of its passing values

@@ -276,6 +276,9 @@ class State
 
     bool WAR_xefgRequestFGToggle = false;
 
+    // XeFG's Dynamic MFG with "Use target as cap": its target while it runs, 0: none (FrameLimit::CapFps)
+    std::atomic<float> xefgDynamicCapFps = 0.0f;
+
     bool dlssgGameDMFGSupported = false;
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
@@ -343,6 +346,9 @@ class State
     std::deque<double> frameTimes;
     std::vector<DetailedGpuTime> detailedGpuTimes;
     double lastFGFrameTime = 0.0;
+    // How long the last present to the FG swapchain waited: the present itself (V-Sync, a full queue) and OptiScaler's
+    // limiter, not the low latency sleep after it (InputCommon::take_sleep_ms). For XeFG's Dynamic MFG.
+    std::atomic<double> lastFGPresentMs = 0.0;
     double presentFrameTime = 0.0;
     std::mutex frameTimeMutex;
 

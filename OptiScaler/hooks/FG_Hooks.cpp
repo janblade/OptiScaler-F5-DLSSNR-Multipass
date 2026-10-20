@@ -1653,6 +1653,11 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         fg->Mutex.unlockThis(2);
     }
 
+    // What this present waited (the present and OptiScaler's limiter), for XeFG's Dynamic MFG; the low latency sleep
+    // below counts apart (InputCommon::take_sleep_ms)
+    if (willPresent)
+        state.lastFGPresentMs = Util::MillisecondsNow() - presentStartMs;
+
     // After frame generation's lock is released: Sleep holds this thread until the next frame should start
     if (lowLatencyDevice != nullptr)
         native::lowlatency::OnPresentEnd(lowLatencyDevice, native::lowlatency::PresentSource::FrameGeneration);

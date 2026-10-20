@@ -7,6 +7,8 @@
 #include <proxies/XeFG_Proxy.h>
 
 #include "shaders/depth_invert/DI_Dx12.h"
+#include "XeFG_DynamicCount.h"
+#include "XeFG_DynamicCap.h"
 
 #include <xell.h>
 #include <xell_d3d12.h>
@@ -27,6 +29,23 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     bool _uiComposition = false;
 
     std::unique_ptr<DI_Dx12> _depthInvert;
+
+    // Dynamic MFG: the count follows a target frame rate, up to the Frame Gen setting
+    XeFG_DynamicCount _dynamicCount;
+    XeFG_DynamicCap _dynamicCap; // "Use target as cap": holds the target, no rounding band, no 1X
+    bool _dynamicActive = false;
+    bool _dynamicCapActive = false;
+    bool _dynamicDrain = true; // the next frame's sleep times reach back before Dynamic ran: dropped
+    double _dynamicLogMs = 0.0;
+    int _refreshRate = 0;
+    double _refreshCheckedMs = 0.0;
+
+    // The count for this frame, the Frame Gen setting `maxCount` the most; switches frame generation off at 1X
+    int DynamicCount(int maxCount);
+    void StopDynamic();
+    void SetGenerationOff(bool off);
+    float DisplayRefreshFps(double nowMs);
+    float DynamicTargetFps(double nowMs);
 
     // XeFG's frame ID of each slot's frame (FrameIdFor): XeLL's ID for that frame where one is known
     std::mutex _frameIdMutex;

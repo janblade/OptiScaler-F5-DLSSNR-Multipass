@@ -9,6 +9,7 @@
 #include "shaders/depth_invert/DI_Dx12.h"
 #include "XeFG_DynamicCount.h"
 #include "XeFG_DynamicCap.h"
+#include "XeFG_DynamicTarget.h"
 
 #include <xell.h>
 #include <xell_d3d12.h>

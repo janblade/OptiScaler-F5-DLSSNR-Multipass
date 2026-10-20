@@ -4189,7 +4189,8 @@ void MenuCommon::RenderXeFGDynamicMFG(RenderMenuContext& ctx, int maxInterpolati
                 config->FGXeFGFramerateTargetDMFG = target;
         }
 
-        ShowHelpMarker("Presented FPS to aim for, never above the FPS limit.\n"
+        ShowHelpMarker("Presented FPS to aim for, never above the FPS limit\n"
+                       "(or the refresh rate with V-Sync).\n"
                        "Auto: the FPS limit, or just under the refresh rate.");
 
         // The cap picks from 2X up: it needs a higher MFG setting

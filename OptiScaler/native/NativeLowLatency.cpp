@@ -1032,7 +1032,9 @@ uint32_t XefgShownPerRendered()
 Status GetStatus()
 {
     Status status;
-    status.decision = g_decision.load();
+    // As the menu shows it: standing aside for the game's own Reflex rather than off (ShownDecision)
+    status.decision = ShownDecision(g_decision.load(), Config::Instance()->FramerateLowLatencyInput.value_or_default(),
+                                    ReflexHooks::gameCalledReflex());
     status.xefgSide = XefgSide();
     // In the split XeLL only keeps XeFG running: the game's Reflex lowers latency on the other side
     status.gameReflexFeedsXell = ReflexHooks::gameReflexFeedsXell() && status.xefgSide == XefgLatency::XeLL;

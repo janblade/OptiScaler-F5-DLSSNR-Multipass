@@ -678,6 +678,16 @@ inline const char* StatusLabel(Decision decision)
     }
 }
 
+// The decision both pages show. With the Input on Game (or Auto acting as Game with NR + frame generation) Decide stops
+// at SettingOff before it looks at the game, so a game making its own Reflex calls read as "[Off]" next to "Active: Game
+// -> XeLL". For the menu that is the game's Reflex at work, and we stand aside for it. Off keeps its own wording (the
+// game's Reflex may be kept on for DLSS FG, which has its own line). The code runs on Decide's answer, not this one.
+inline Decision ShownDecision(Decision decision, Input input, bool gameCallsReflex)
+{
+    return decision == Decision::SettingOff && input != Input::Off && gameCallsReflex ? Decision::GameRunsReflex
+                                                                                      : decision;
+}
+
 // The Framerate page's "Active: <input> -> <output>": who makes the latency calls right now. The game's Reflex counts
 // whenever the game makes calls, whatever we decided about ours. Frame generation that runs Reflex itself (DLSS FG) makes
 // calls whatever the Input says, and so does a game's own XeLL; both are facts, not read off the order Decide checks in.

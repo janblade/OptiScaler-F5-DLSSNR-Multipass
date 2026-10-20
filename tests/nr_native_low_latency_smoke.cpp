@@ -887,6 +887,23 @@ int main()
         // The game's own Reflex calls still count first
         CHECK(std::strcmp(ActiveInputText(Decision::SettingOff, true, false, true), "Game") == 0);
 
+        // Input Game (or Auto acting as Game with NR + frame generation) and the game making its own Reflex calls: the
+        // menu stands aside for it ("Active: Game -> XeLL" next to "[Off]" was read as two notices that disagree)
+        CHECK(ShownDecision(Decision::SettingOff, Input::Game, true) == Decision::GameRunsReflex);
+        CHECK(ShownDecision(Decision::SettingOff, Input::Auto, true) == Decision::GameRunsReflex);
+        CHECK(std::strcmp(StatusLabel(ShownDecision(Decision::SettingOff, Input::Auto, true)), "Standing aside") == 0);
+        CHECK(std::strcmp(DecisionText(ShownDecision(Decision::SettingOff, Input::Auto, true), true),
+                          "The game's Reflex feeds XeFG's XeLL") == 0);
+        // No game Reflex: still off, with the reason that says why
+        CHECK(ShownDecision(Decision::SettingOff, Input::Game, false) == Decision::SettingOff);
+        // Input Off keeps its own wording, also when DLSS FG keeps the game's Reflex on (SettingOff then)
+        CHECK(ShownDecision(Decision::SettingOff, Input::Off, true) == Decision::SettingOff);
+        CHECK(ShownDecision(Decision::LowLatencyOff, Input::Off, true) == Decision::LowLatencyOff);
+        // Every other decision is shown as it is
+        CHECK(ShownDecision(Decision::Run, Input::OptiScaler, true) == Decision::Run);
+        CHECK(ShownDecision(Decision::NoF5Low, Input::Auto, true) == Decision::NoF5Low);
+        CHECK(std::strcmp(ActiveInputText(ShownDecision(Decision::SettingOff, Input::Auto, true), true), "Game") == 0);
+
         // The reason for Input Game, or Off kept by DLSS FG, does not claim the Input is Game
         CHECK(std::strstr(DecisionText(Decision::SettingOff), "Input is Game:") == nullptr);
         CHECK(DecisionText(Decision::SettingOff)[0] != '\0');

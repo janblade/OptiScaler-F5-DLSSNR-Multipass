@@ -112,26 +112,43 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
 
     VkResult result;
 
-    // Get swapchain image count.
+    // Get swapchain image count. The driver may make more images than the game asked for (minImageCount is a floor),
+    // so everything per image below is sized from this count.
+    _scImageCount = 0;
     result = vkGetSwapchainImagesKHR(device, *pSwapchain, &_scImageCount, NULL);
     if (result != VK_SUCCESS)
     {
         LOG_ERROR("vkGetSwapchainImagesKHR error: {0:X}", (UINT) result);
+        _scImageCount = 0;
         return;
     }
 
-    VkImage images[8];
-    result = vkGetSwapchainImagesKHR(device, *pSwapchain, &_scImageCount, images);
-    if (result != VK_SUCCESS)
+    LOG_DEBUG("Swapchain image count: {}, game's minImageCount: {}", _scImageCount, pCreateInfo->minImageCount);
+
+    // ImGui's Vulkan backend needs at least two images; with fewer the menu stays off on this swapchain
+    if (_scImageCount < 2)
+    {
+        LOG_ERROR("Swapchain has only {} image(s), no menu on this swapchain", _scImageCount);
+        _scImageCount = 0;
+        return;
+    }
+
+    std::vector<VkImage> images(_scImageCount);
+    result = vkGetSwapchainImagesKHR(device, *pSwapchain, &_scImageCount, images.data());
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE)
     {
         LOG_ERROR("vkGetSwapchainImagesKHR error: {0:X}", (UINT) result);
+        _scImageCount = 0;
         return;
     }
 
     // Alloc ImGui frame structure/semaphores for every image.
     // For convenience, I am using ImGui_ImplVulkanH_Frame in imgui_impl_vulkan.h
+    // A swapchain made again lands here with the previous arrays still allocated, sized for its image count
     if (!_vulkanObjectsCreated)
     {
+        IM_FREE(_ImVulkan_Frames);
+        IM_FREE(_ImVulkan_Semaphores);
         _ImVulkan_Frames = (ImGui_ImplVulkanH_Frame*) IM_ALLOC(sizeof(ImGui_ImplVulkanH_Frame) * _scImageCount);
         _ImVulkan_Semaphores = (VkSemaphore*) IM_ALLOC(sizeof(VkSemaphore) * _scImageCount);
     }
@@ -389,7 +406,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         _ImVulkan_Info.Queue = queue;
         _ImVulkan_Info.DescriptorPool = pool;
         _ImVulkan_Info.Subpass = 0;
-        _ImVulkan_Info.MinImageCount = pCreateInfo->minImageCount;
+        _ImVulkan_Info.MinImageCount = std::clamp(pCreateInfo->minImageCount, 2u, _scImageCount);
         _ImVulkan_Info.ImageCount = _scImageCount;
         _ImVulkan_Info.Allocator = NULL;
         _ImVulkan_Info.RenderPass = _vkRenderPass;

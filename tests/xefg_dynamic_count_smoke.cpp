@@ -2,6 +2,7 @@
 // Build: cl /std:c++20 /EHsc /W4 tests\xefg_dynamic_count_smoke.cpp
 #include "../OptiScaler/framegen/xefg/XeFG_DynamicCount.h"
 #include "../OptiScaler/framegen/xefg/XeFG_DynamicCap.h"
+#include "../OptiScaler/framegen/xefg/XeFG_DynamicTarget.h"
 
 #include <cstdio>
 
@@ -22,6 +23,7 @@ struct Game
     double genMs = 0.5;
     double onMs = 1.0;
     double limitFps = 0.0;
+    double dropsOverFps = 0.0; // V-Sync that drops generated frames over this rate instead of holding the game
 };
 
 struct Frame
@@ -73,7 +75,7 @@ static Result SimCount(const Game& g, double targetFps, int maxCount, int startC
         const auto f = Run(frameGame, count);
         now += f.frameMs;
 
-        const int next = dc.Update({ now, f.frameMs, f.waitMs, targetFps, vsync ? g.limitFps : 0.0,
+        const int next = dc.Update({ now, f.frameMs, f.waitMs, targetFps, vsync ? g.limitFps : g.dropsOverFps,
                                      vsync ? 0.0 : g.limitFps, maxCount, count, rounding, minCount });
 
         if (now >= seconds * 500.0)
@@ -201,6 +203,33 @@ int main()
         Check(from6.count == 2 && from2.count == 2, "the lowest count that holds the cap");
         Check(from6.changesLate == 0 && from2.changesLate == 0, "holds still at the cap");
         Check(from6.presented >= 120.0 * 0.97, "presented at the cap");
+    }
+
+    std::printf("Target under V-Sync:\n");
+    {
+        Check(xefg::DynamicTargetFps(180.0f, 0.0f, 120.0f, true) == 120.0f,
+              "a target above the refresh rate: the refresh");
+        Check(xefg::DynamicTargetFps(180.0f, 0.0f, 120.0f, false) == 180.0f, "without V-Sync: as set");
+        Check(xefg::DynamicTargetFps(90.0f, 0.0f, 120.0f, true) == 90.0f, "under the refresh rate: as set");
+        Check(xefg::DynamicTargetFps(0.0f, 180.0f, 120.0f, true) == 120.0f, "the FPS limit above it: the refresh");
+        Check(xefg::DynamicTargetFps(180.0f, 60.0f, 120.0f, true) == 60.0f, "the FPS limit below it: the limit");
+        Check(xefg::DynamicTargetFps(0.0f, 0.0f, 120.0f, true) == 116.0f, "auto: just under the refresh");
+        Check(xefg::DynamicTargetFps(180.0f, 0.0f, 0.0f, true) == 180.0f, "refresh unknown: as set");
+
+        // Witcher 3's case (6X run, ForceVsync, 120 Hz, "at least", target 180): XeFG drops the generated frames that
+        // don't fit the refresh rather than holding the game, so (count + 1) x the real rate reads above 120 and the
+        // controller never sees the cap; with the target as set it climbs to the most for frames that are dropped
+        Game g { 30.0, 0.5, 1.0, 0.0, 120.0 };
+        const auto unclamped = SimCount(g, 180.0, 5, 3, 2, 0, false, 0.10, 600.0);
+        const auto clamped =
+            SimCount(g, xefg::DynamicTargetFps(180.0f, 0.0f, 120.0f, true), 5, 3, 2, 0, false, 0.10, 600.0);
+        std::printf("    180 as set: %dX; clamped to 120: %dX at %.1f fps estimated, %d late changes\n",
+                    unclamped.count + 1, clamped.count + 1, clamped.presented, clamped.changesLate);
+        Check(unclamped.count == 5, "(as set it climbs to 6X, for frames V-Sync drops)");
+        // 3X: 3 x 31.7 = 95, 4X: 4 x 31.3 = 125
+        Check(clamped.count == 3 && clamped.presented >= 120.0 * 0.97,
+              "clamped: 4X, the lowest that reaches the refresh rate");
+        Check(clamped.changesLate <= 2, "clamped: settles");
     }
 
     std::printf(failures == 0 ? "xefg_dynamic_count_smoke: PASS\n" : "xefg_dynamic_count_smoke: FAIL (%d)\n", failures);

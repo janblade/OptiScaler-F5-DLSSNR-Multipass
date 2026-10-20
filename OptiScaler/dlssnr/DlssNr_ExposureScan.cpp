@@ -720,7 +720,9 @@ void EndFrameLocked(const FrameExposure& passFrame)
                 LOG_INFO("DLSS-NR exposure scan: candidate {} ({}{}) is the exposure the game hands to the upscaler",
                          (unsigned int) (i + 1), t.shape, ApiSuffix(t.api));
 
-            t.handed = handed;
+            // Kept while the candidate lives: a game can hand over two images by turns (Doom Eternal: this frame's and
+            // the last), and both are its exposure
+            t.handed = t.handed || handed;
             found = found || handed;
         }
 

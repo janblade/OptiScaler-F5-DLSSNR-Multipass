@@ -18,6 +18,7 @@
 //   Resolve  proxy + model answer + untouched copy -> the frame, edited
 
 #include "DlssNr_Common.h"
+#include "superior/Constants.h"
 #include "DlssNr_DetailReuseConstants.h"
 #include "DlssNr_EditCacheConstants.h"
 #include "DlssNr_LutConstants.h"
@@ -65,6 +66,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12Resource* _constantBuffers[DLSSNR_NUM_OF_HEAPS] = {};
 
     uint32_t _heapIndex = 0;
+
+    ID3D12PipelineState* _superiorPipeline[16] {};
+    bool _superiorAttempted[16] {};
+    ID3D12PipelineState* SuperiorPipeline(const DlssNr::Superior::DlssNrConstants&, ID3D12Resource*);
 
     // The shader reads five inputs and writes two, and not every mode uses all of them. Unused slots
     // still need a view bound -- an unbound descriptor is not an empty read, it is a read from
@@ -170,6 +175,12 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                   // table keeps its shape -- not evidence that temporal accumulation exists.
                   ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
                   ID3D12Resource* OutKeep);
+
+    // v59 shaders keep their ABI and share the existing descriptor/constant ring.
+    bool DispatchSuperiorPass(ID3D12GraphicsCommandList* cmd, const DlssNr::Superior::DlssNrConstants& constants,
+                              ID3D12Resource* source, ID3D12Resource* model, ID3D12Resource* original,
+                              ID3D12Resource* motion, ID3D12Resource* previous, ID3D12Resource* low,
+                              ID3D12Resource* target, ID3D12Resource* keep, uint32_t* immutableSlot = nullptr);
 
     // One compute pass of Finished Picture's shader (dlssnr_finished_color.hlsl). Same descriptor
     // table shape as DispatchPass; binds _finishedColorPipelineState instead of _pipelineState.

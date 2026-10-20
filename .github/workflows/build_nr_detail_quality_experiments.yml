@@ -1,0 +1,39 @@
+name: Build Superior Scaling port
+on:
+  push:
+    branches: [codex/superior-scaling-port]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: superior-port-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Fetch dependencies
+        shell: powershell
+        run: |
+          git config --global core.longpaths true
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build Release DLL
+        shell: powershell
+        run: |
+          msbuild OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal /fl /flp:logfile=superior-build.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: Superior-Scaling-port-${{ github.sha }}
+          path: |
+            x64/Release/OptiScaler.dll
+            x64/Release/a/**
+            superior-build.log
+          if-no-files-found: error

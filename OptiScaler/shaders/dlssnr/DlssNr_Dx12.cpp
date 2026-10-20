@@ -1,5 +1,8 @@
 #include "pch.h"
 #include <dlssnr/PassProfiles.h>
+#include <dlssnr/DlssNr_SuperiorScaling.h>
+#include <dlssnr/DlssNr_SuperiorGains.h>
+#include <dlssnr/DlssNr_GpuLifetime.h>
 #include <native/DriverInitGate.h>
 
 #include <set>
@@ -2125,6 +2128,8 @@ void ReportSkipOnce(const char* reason)
 // of OptiScaler sees.
 // ---------------------------------------------------------------------------------------------
 
+#include "superior/Pipeline.inl"
+
 DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice)
     : Shader_Dx12(InName, InDevice)
 {
@@ -2246,8 +2251,12 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     return true;
 }
 
+#include "superior/Shader.inl"
+
 DlssNr_Dx12::~DlssNr_Dx12()
 {
+    for (auto* pipeline : _superiorPipeline)
+        if (pipeline) pipeline->Release();
     if (_finishedColorPipelineState)
         _finishedColorPipelineState->Release();
     if (_detailStatsPipelineState)
@@ -2899,6 +2908,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
+    const bool superior = DlssNr::SuperiorScaling::Enabled(cfg);
+    auto& superiorState = SuperiorRun::GetState();
+    if (superiorState.wasEnabled != superior)
+    {
+        superiorState.wasEnabled = superior;
+        g_nr.reset = true;
+        if (superiorState.current)
+        {
+            auto old = std::move(superiorState.current);
+            superiorState.lifetime.Retire([old] {});
+            superiorState.lifetime.BeginGeneration();
+        }
+    }
 
     // Depth is the one input the model can run without: NVIDIA's own retail DLL treats it as an optional
     // refinement of motion-vector dilation at object edges (it is null in every known capture, including
@@ -3128,7 +3150,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
 
     bool spatialReset = false;
-    bool spatial = EdgeCompression::Begin(cfg, width, height, workScale, proxyBackend, spatialSignature, spatialReset);
+    bool spatial = !superior && EdgeCompression::Begin(cfg, width, height, workScale, proxyBackend, spatialSignature, spatialReset);
 
     if (spatialReset)
         g_nr.reset = true;
@@ -3580,6 +3602,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             device->Release();
             return;
         }
+    }
+
+    if (superior)
+    {
+        ResTrack_Dx12::HookLateNrQueue(device);
+        SuperiorRun::Run(*this, cmdList, device, target, depth, motion, frame, guides,
+                         width, height, workWidth, workHeight, workScale, requestedPasses, timingQueue, outputArrival);
+        device->Release();
+        return;
     }
 
     // The upscaler has just written this, so it is a UAV. The model needs it readable.
@@ -5901,6 +5932,9 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &frame.MotionSubrectBaseX);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &frame.MotionSubrectBaseY);
 
+    params->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, &frame.FrameTimeMs);
+    frame.ExposureState = Config::Instance()->ExposureResourceBarrier.has_value()
+        ? Config::Instance()->ExposureResourceBarrier.value() : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
         frame.MvScaleX = 1.0f;
 
@@ -6531,3 +6565,9 @@ void Shutdown()
     g_compose.reset();
 }
 } // namespace DlssNr
+
+std::string DlssNr::SuperiorScaling::Status()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    return SuperiorRun::GetState().status;
+}

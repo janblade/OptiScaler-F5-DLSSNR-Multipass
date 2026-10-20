@@ -1033,6 +1033,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_LutStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_GpuLifetime.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Menu.cpp" />
     <ClCompile Include="dlssnr\DlssNrNative.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

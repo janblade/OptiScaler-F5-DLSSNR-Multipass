@@ -4,6 +4,7 @@
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_LookPresets.h"
+#include "DlssNr_SuperiorScaling.h"
 #include "DlssNrNative.h"
 
 
@@ -3390,44 +3391,42 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
 
     ImGui::SeparatorText("NR Output Options");
 
-    // Meaningful only when the model runs BELOW the frame's size. At 100% -- and above, where
-    // supersampling composites its down-legged answer at native -- the residual collapses to the
-    // model's own picture and the two modes are identical, so the control says so by going grey.
     {
-        // The applied scale, not the slider: with Auto after SR the slider can say 100% while NR runs smaller.
         const bool reduced = AppliedModelScale(config, nr) < 0.999f;
-
-        if (!reduced)
-            ImGui::BeginDisabled();
-
-        static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual" };
-        int enlarge = (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
-
-        if (ImGui::Combo("Upscale Mode", &enlarge, enlargeNames, IM_ARRAYSIZE(enlargeNames)))
-            config->DlssNrTransfer = (uint32_t) enlarge;
-
-        if (!reduced)
+        static const char* names[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
+        const auto transfer = config->DlssNrTransfer.value_or_default();
+        int selected = DlssNr::SuperiorScaling::Enabled(transfer) ? 3 : (int) std::min(transfer, 2u);
+        if (ImGui::Combo("Enlargement", &selected, names, IM_ARRAYSIZE(names)))
+            config->DlssNrTransfer = selected == 3 ? DlssNr::SuperiorScaling::Transfer : (uint32_t) selected;
+        HelpMarker("How NR is reconstructed below 100% model resolution. Superior Scaling uses its own Area "
+                   "downsample, frequency shaping and temporal DLSS stabilization. Model resolution and each "
+                   "NR pass remain configurable. At 100% it runs ordinary NR without enlargement or private DLSS.");
+        if (DlssNr::SuperiorScaling::Enabled(*config))
+        {
+            ImGui::TextDisabled("Downsample: Area (Superior Scaling)");
+            static const char* presets[] = { "A - higher performance", "K - slower, more stable NR in motion" };
+            int preset = DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
+            if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
+                config->DlssNrSuperiorScalingPreset = preset == 1 ? 11 : 1;
+            HelpMarker("Private DLSS SR in DLAA mode, applied to NR's residual at its working resolution. "
+                       "This A/K choice is independent of the NR main/small model and the game's DLSS preset.");
+            if (nr.vulkan)
+                ImGui::TextWrapped("Superior Scaling requires DirectX 12 or a supported DirectX 12 bridge.");
+            else if (!reduced)
+                ImGui::TextDisabled("Temporal stabilization is inactive at 100% or above.");
+            const auto status = DlssNr::SuperiorScaling::Status();
+            if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
+        }
+        else
+        {
+            ImGui::BeginDisabled(!reduced);
+            static const char* methods[] = { "Bilinear (fast)", "SGSR1" };
+            int method = (int) std::min(config->DlssNrReducedUpscaleMethod.value_or_default(), 1u);
+            if (ImGui::Combo("Upscale Method", &method, methods, IM_ARRAYSIZE(methods)))
+                config->DlssNrReducedUpscaleMethod = (uint32_t) method;
             ImGui::EndDisabled();
-
-        HelpMarker("Below 100% Model resolution, how NR's result is enlarged.\n"
-                   "Classic: the whole output.\n"
-                   "Matched residual: only NR's changes; less blur and colour shift.\n"
-                   "NVIDIA residual: only the changes, NVIDIA's way.");
-
-        if (!reduced)
-            ImGui::BeginDisabled();
-
-        static const char* upscaleMethodNames[] = { "Bilinear (fast)", "SGSR1" };
-        int upscaleMethod = (int) std::min(config->DlssNrReducedUpscaleMethod.value_or_default(), 1u);
-
-        if (ImGui::Combo("Upscale Method", &upscaleMethod, upscaleMethodNames, IM_ARRAYSIZE(upscaleMethodNames)))
-            config->DlssNrReducedUpscaleMethod = (uint32_t) upscaleMethod;
-
-        if (!reduced)
-            ImGui::EndDisabled();
-
-        HelpMarker("Below 100% Model resolution, the filter that enlarges NR's result. Bilinear: cheapest, softest. "
-                   "SGSR1: edge-aware, sharper.");
+            HelpMarker("Below 100% model resolution: Bilinear is cheaper and softer; SGSR1 is edge-aware and sharper.");
+        }
     }
 
     // How the game's colour is decoded (DlssNr_ColourEncoding.h). Auto trusts the game; a forced choice is applied

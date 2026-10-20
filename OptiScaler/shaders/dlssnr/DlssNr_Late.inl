@@ -282,6 +282,7 @@ void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
 
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     DlssNrWatchedLists::Remove(1, &list);
+    SuperiorRun::ResetRecording(cmd);
     if (g_gpuTime) g_gpuTime->ResetRecording(cmd);
     if (g_ngxTime) g_ngxTime->ResetRecording(cmd);
     if (g_scanTime) g_scanTime->ResetRecording(cmd);
@@ -332,6 +333,7 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
 
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     DlssNrWatchedLists::Remove(count, watched);
+    SuperiorRun::Submitted(queue, count, lists);
     if (g_gpuTime) g_gpuTime->Submitted(queue, count, lists);
     if (g_ngxTime) g_ngxTime->Submitted(queue, count, lists);
     if (g_scanTime) g_scanTime->Submitted(queue, count, lists);

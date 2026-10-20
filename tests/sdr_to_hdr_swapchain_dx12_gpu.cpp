@@ -257,6 +257,47 @@ float ReadFirstPixel(Gpu& g, ID3D12Resource* texture)
     return HalfToFloat(half);
 }
 
+// The red code (10 bits) of the first pixel of a real R10G10B10A2 back buffer (resting in PRESENT)
+uint32_t ReadFirstPixel10(Gpu& g, ID3D12Resource* texture)
+{
+    D3D12_RESOURCE_DESC desc = texture->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    UINT64 total = 0;
+    g.device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &total);
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC bufferDesc {};
+    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDesc.Width = total;
+    bufferDesc.Height = 1;
+    bufferDesc.DepthOrArraySize = 1;
+    bufferDesc.MipLevels = 1;
+    bufferDesc.SampleDesc.Count = 1;
+    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                      IID_PPV_ARGS(&readback));
+    const auto in = Transition(texture, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    g.list->ResourceBarrier(1, &in);
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = footprint;
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = texture;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    g.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const auto out = Transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+    g.list->ResourceBarrier(1, &out);
+    g.Submit();
+    uint8_t* mapped = nullptr;
+    readback->Map(0, nullptr, (void**) &mapped);
+    uint32_t texel = 0;
+    std::memcpy(&texel, mapped + footprint.Offset, 4);
+    readback->Unmap(0, nullptr);
+    return texel & 1023u;
+}
+
 ULONG RefCount(IUnknown* object)
 {
     object->AddRef();
@@ -486,6 +527,43 @@ int main(int argc, char** argv)
 
         chain.Release();
         Check(!chain.Active() && !SdrToHdr::AnyProxied(), "Release: inactive, nothing registered");
+
+        real.Reset(); // one swap chain per window
+
+        // HDR10: the pass writes PQ because the real chain is 10 bit, whatever the caller's constants say
+        {
+            auto pq = MakeChain(g, window, DXGI_FORMAT_R10G10B10A2_UNORM, 2, 64, 32);
+            SdrToHdr::ProxyChain pqChain;
+            const char* why10 = pq == nullptr ? "the 10 bit chain could not be made" : pqChain.Start(g.device.Get(), pq.Get(), kGame, true);
+            const bool started10 = why10 == nullptr;
+            Check(started10, "HDR10: Start on a 10 bit chain");
+
+            if (!started10)
+                std::printf("      %s (WARP may not take the PQ colour space)\n", why10);
+
+            if (started10)
+            {
+                const UINT index = pq->GetCurrentBackBufferIndex();
+                ComPtr<ID3D12Resource> proxy, realBuffer;
+                pqChain.GetBuffer(index, IID_PPV_ARGS(&proxy));
+                pq->GetBuffer(index, IID_PPV_ARGS(&realBuffer));
+                Paint(g, proxy.Get(), 128.0f / 255.0f);
+                const char* why = pqChain.Present(g.queue.Get(), pq.Get(), Constants()); // Constants() says scRGB
+                g.Wait();
+                const uint32_t code = ReadFirstPixel10(g, realBuffer.Get());
+                const double nits = std::pow(128.0 / 255.0, 2.2) * 203.0;
+                const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0, c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0,
+                             c3 = 2392.0 / 128.0;
+                const double p = std::pow(nits / 10000.0, m1);
+                const double expected = std::pow((c1 + c2 * p) / (1.0 + c3 * p), m2) * 1023.0;
+                char what[128];
+                std::snprintf(what, sizeof(what), "HDR10: the red code is %u, PQ of the grey is %.1f", code, expected);
+                Check(why == nullptr && std::fabs((double) code - expected) <= 1.0, what);
+                proxy.Reset();
+                realBuffer.Reset();
+                pqChain.Release();
+            }
+        }
         g.Wait();
     }
 

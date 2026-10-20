@@ -293,6 +293,7 @@ const char* ProxyChain::BuildLocked(ID3D12Device* device, IDXGISwapChain3* real,
     }
 
     _relaxed = relaxed;
+    _realFormat = desc.BufferDesc.Format;
     _typedSrgb = !relaxed && IsSrgb(gameFormat);
 
     if (const char* why = _pass.Init(device, desc.BufferDesc.Format, desc.BufferCount))
@@ -482,6 +483,7 @@ const char* ProxyChain::Present(ID3D12CommandQueue* queue, IDXGISwapChain3* real
         return "the HDR pass could not get the real back buffer";
 
     constants.srcLinear = _typedSrgb ? 1u : 0u;
+    constants.mode = _realFormat == DXGI_FORMAT_R10G10B10A2_UNORM ? 1u : 0u; // follows the chain, not the live setting
     const char* why = _pass.Run(queue, index, _proxies[index], realBuffer, constants);
     realBuffer->Release(); // the pass holds no reference between frames: a resize must find none
     return why;

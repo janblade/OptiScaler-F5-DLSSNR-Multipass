@@ -90,6 +90,7 @@ class ProxyChain
     std::vector<ID3D12Resource*> _proxies;
     Dx12Pass _pass;
     DXGI_FORMAT _gameFormat = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT _realFormat = DXGI_FORMAT_UNKNOWN; // the real chain's: scRGB (FP16) or PQ (10 bit) follows from it
     bool _relaxed = false;     // made with castable formats: GetDesc shows the game's format and the pass reads it raw
     bool _typedSrgb = false;   // a typed _SRGB proxy: read through an _SRGB view, the shader encodes it again
     IUnknown* _identity = nullptr; // the real chain's IUnknown, the registry key (not owned)

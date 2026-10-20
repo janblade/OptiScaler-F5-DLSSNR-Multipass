@@ -64,12 +64,17 @@ DXGI_FORMAT SrgbViewFormat(DXGI_FORMAT format)
 }
 } // namespace
 
-void Dx12Pass::Release()
+void Dx12Pass::WaitForIdle()
 {
-    // Nothing of ours may still be running on the GPU when it goes.
     if (_fence != nullptr && _fenceValue != 0 && _fence->GetCompletedValue() < _fenceValue && _event != nullptr &&
         SUCCEEDED(_fence->SetEventOnCompletion(_fenceValue, _event)))
         WaitForSingleObject(_event, 2000);
+}
+
+void Dx12Pass::Release()
+{
+    // Nothing of ours may still be running on the GPU when it goes.
+    WaitForIdle();
 
     ReleaseOf(_list);
 

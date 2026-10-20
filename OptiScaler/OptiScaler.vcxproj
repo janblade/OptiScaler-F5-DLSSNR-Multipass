@@ -556,6 +556,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\SharedFrame.h" />
     <ClInclude Include="native\DepthCopyDx11.h" />
     <ClInclude Include="native\DepthResolveDx12.h" />
+    <ClInclude Include="output\SdrToHdr_ProxyDx12.h" />
     <ClInclude Include="output\SdrToHdr_Dx12.h" />
     <ClInclude Include="output\SdrToHdr_Hlsl.h" />
     <ClInclude Include="output\SdrToHdr_Display.h" />
@@ -915,6 +916,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </ClCompile>
     <ClCompile Include="output\SdrToHdr_Display.cpp" />
     <ClCompile Include="output\SdrToHdr_Dx12.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyDx12.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>

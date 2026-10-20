@@ -46,6 +46,9 @@ class Dx12Pass
     const char* Run(ID3D12CommandQueue* queue, UINT index, ID3D12Resource* proxy, ID3D12Resource* real,
                     const PassConstants& constants);
 
+    // Waits (up to 2 s) until everything submitted so far has finished on the GPU.
+    void WaitForIdle();
+
     // Waits for what was submitted, then lets go of everything.
     void Release();
 

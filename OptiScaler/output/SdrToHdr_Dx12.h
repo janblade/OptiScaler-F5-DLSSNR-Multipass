@@ -18,7 +18,8 @@ struct PassConstants
     float gameNits = 203.0f;
     float peakNits = 1000.0f; // a clamp; the caller resolves 0 (SdrToHdr::ResolvePeakNits)
     float sdrWhiteNits = 80.0f;
-    float pad[2] = {};
+    uint32_t srcLinear = 0; // 1: the proxy is a typed _SRGB resource, read through an _SRGB view (see SdrToHdr_Hlsl.h)
+    float pad = 0.0f;
 };
 static_assert(sizeof(PassConstants) == 32, "b0 is 8 dwords");
 

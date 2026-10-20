@@ -44,6 +44,24 @@ DXGI_FORMAT RawViewFormat(DXGI_FORMAT format)
         return DXGI_FORMAT_UNKNOWN;
     }
 }
+
+// The _SRGB view of a proxy: the hardware decodes it, and the shader encodes it again (gSrcLinear).
+DXGI_FORMAT SrgbViewFormat(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    default:
+        return DXGI_FORMAT_UNKNOWN;
+    }
+}
 } // namespace
 
 void Dx12Pass::Release()
@@ -224,7 +242,8 @@ const char* Dx12Pass::Run(ID3D12CommandQueue* queue, UINT index, ID3D12Resource*
 
     const D3D12_RESOURCE_DESC proxyDesc = proxy->GetDesc();
     const D3D12_RESOURCE_DESC realDesc = real->GetDesc();
-    const DXGI_FORMAT view = RawViewFormat(proxyDesc.Format);
+    const DXGI_FORMAT view =
+        constants.srcLinear != 0 ? SrgbViewFormat(proxyDesc.Format) : RawViewFormat(proxyDesc.Format);
 
     if (view == DXGI_FORMAT_UNKNOWN)
         return "the HDR pass cannot read this back buffer format";

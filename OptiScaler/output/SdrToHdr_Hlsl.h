@@ -16,6 +16,9 @@ namespace SdrToHdrHlsl
 //
 //   t0  the proxy through a non-sRGB view (R8G8B8A8_UNORM or B8G8R8A8_UNORM): the encoded values the game wrote, whether
 //       it drew through an _SRGB view or not (the hardware encodes on write, so memory holds encoded values either way)
+//   (gSrcLinear 1: the proxy is a typed _SRGB resource read through an _SRGB view, so t0 holds linear values and the
+//   pass encodes them back with the piecewise sRGB curve first; without relaxed format casting that is how an _SRGB
+//   game format is read)
 //   b0  gMode 0 = scRGB (1.0 = 80 nits), 1 = PQ; gConvert 1 = this conversion, 0 = how Windows maps an SDR app on an
 //       HDR desktop (the piecewise sRGB curve at the Windows SDR white level); gDecode 0 = gamma 2.2, 1 = sRGB curve
 inline constexpr const char* kSource = R"HLSL(
@@ -29,7 +32,8 @@ cbuffer Constants : register(b0)
     float gGameNits;
     float gPeakNits;
     float gSdrWhiteNits;
-    float2 gPad;
+    uint gSrcLinear;
+    float gPad;
 };
 
 float4 FullScreenVS(uint id : SV_VertexID) : SV_Position
@@ -51,6 +55,19 @@ float3 SrgbDecode(float3 v)
     return float3(SrgbDecode1(v.r), SrgbDecode1(v.g), SrgbDecode1(v.b));
 }
 
+float SrgbEncode1(float v)
+{
+    if (v <= 0.0031308)
+        return v * 12.92;
+
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+float3 SrgbEncode(float3 v)
+{
+    return float3(SrgbEncode1(v.r), SrgbEncode1(v.g), SrgbEncode1(v.b));
+}
+
 static const float3x3 kBt709To2020 = {
     0.6274039, 0.3292830, 0.0433131,
     0.0690973, 0.9195404, 0.0113623,
@@ -67,7 +84,11 @@ float3 EncodePQ(float3 fraction)
 
 float4 SdrToHdrPS(float4 pos : SV_Position) : SV_Target
 {
-    const float3 c = saturate(Src.Load(int3((int2) pos.xy, 0)).rgb);
+    float3 c = saturate(Src.Load(int3((int2) pos.xy, 0)).rgb);
+
+    // A proxy read through an _SRGB view arrives decoded to linear: encode it again to get the values the game wrote
+    if (gSrcLinear != 0)
+        c = SrgbEncode(c);
 
     float3 nits;
 

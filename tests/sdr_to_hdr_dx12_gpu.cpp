@@ -467,7 +467,9 @@ Case Cases(int mode, int which)
 // One proxy format, both outputs, every case; three back buffer indexes, each case run twice in a row
 void Matrix(Gpu& g, SdrToHdr::Dx12Pass& pass, DXGI_FORMAT proxyFormat, const char* label)
 {
-    const bool bgra = proxyFormat == DXGI_FORMAT_B8G8R8A8_UNORM;
+    const bool bgra = proxyFormat == DXGI_FORMAT_B8G8R8A8_UNORM || proxyFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    // A typed _SRGB proxy (no relaxed casting) is read through an _SRGB view, which decodes: the shader encodes it again
+    const bool srgbTyped = proxyFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || proxyFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     const auto picture = Picture();
     constexpr UINT kBuffers = 3;
 
@@ -494,7 +496,8 @@ void Matrix(Gpu& g, SdrToHdr::Dx12Pass& pass, DXGI_FORMAT proxyFormat, const cha
 
         for (int which = 0; which < 6; ++which)
         {
-            const Case c = Cases(mode, which);
+            Case c = Cases(mode, which);
+            c.k.srcLinear = srgbTyped ? 1u : 0u;
             const UINT index = (UINT) which % kBuffers;
 
             // twice without waiting: the second must wait for the first's allocator
@@ -642,6 +645,8 @@ int main(int argc, char** argv)
 
         Matrix(g, pass, DXGI_FORMAT_R8G8B8A8_UNORM, "R8G8B8A8_UNORM proxy");
         Matrix(g, pass, DXGI_FORMAT_B8G8R8A8_UNORM, "B8G8R8A8_UNORM proxy");
+        Matrix(g, pass, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "R8G8B8A8_UNORM_SRGB typed proxy (gSrcLinear)");
+        Matrix(g, pass, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, "B8G8R8A8_UNORM_SRGB typed proxy (gSrcLinear)");
         Relaxed(g, pass);
 
         // A bad call is refused, not run

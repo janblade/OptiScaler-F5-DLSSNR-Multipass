@@ -26,6 +26,7 @@
 #include <native/PresentStageTiming.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <detours/detours.h>
@@ -1157,7 +1158,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     }
     else
     {
-        // "NR + upscaler & frame generation" was switched on after the game made its swapchain: the bridge is only made
+        // "NR + frame generation" was switched on after the game made its swapchain: the bridge is only made
         // with a swapchain, so the game is told to make a new one (once).
         if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && pPresentInfo->swapchainCount == 1 &&
             VkPresentBridge::WantsNewSwapchain(pPresentInfo->pSwapchains[0]))
@@ -1381,6 +1382,7 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         VkPresentBridge::OnDeviceDestroying(device);
         NativeMotionVk::OnDeviceDestroyed(device);
         GenericDepthVk::OnDeviceDestroyed(device);
+        DlssNr::ExposureScanVk::OnDeviceDestroyed(device);
         native::lowlatency::OnDeviceReleasedVulkan(device);
 
         // InputCommon's output on it stops while the device still lives (its semaphores are the device's), then the

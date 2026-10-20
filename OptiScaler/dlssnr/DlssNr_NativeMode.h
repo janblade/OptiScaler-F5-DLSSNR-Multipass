@@ -200,7 +200,7 @@ enum class Warning
 {
     None,
     GameUpscaler,        // a mode is on while the game calls an upscaler of its own: it stands aside
-    VulkanNeedsRestart,  // NR + upscaler & frame generation in a Vulkan game whose swapchain was made without the bridge
+    VulkanNeedsRestart,  // NR + frame generation in a Vulkan game whose swapchain was made without the bridge
     NrDisabled,           // Enable Neural Rendering is off
     NeedsFinishedPicture, // NR only, with NR Pass at: not on Finished Picture
     NeedsGameUpscaler,    // frame generation only, while the game makes no upscaler call (DLSS/FSR off in its settings)
@@ -209,7 +209,7 @@ enum class Warning
 
 // gameUpscaler: as for Selectable; it comes first, since nothing else matters while the mode stands aside.
 // NR only has no warning for a D3D11 or Vulkan game whose swap chain frame generation replaced: it runs from that swap
-// chain's present (NativeMotionDx11::OnFGPresent, the Vulkan present bridge), as NR + upscaler & frame generation does.
+// chain's present (NativeMotionDx11::OnFGPresent, the Vulkan present bridge), as NR + frame generation does.
 // vulkanNoBridge: a Vulkan game whose swapchain was made without the present bridge (native/VkPresentBridge.h): frame
 // generation starts with the next start of the game, once chosen.
 // on12Backend: frame generation only, the game's upscaler feature is a Vulkan-on-D3D12 one (the only kind that feeds

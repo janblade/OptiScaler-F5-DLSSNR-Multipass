@@ -41,7 +41,7 @@ For a game that makes no upscaler call of its own. Optical F5Low works out the m
 
 NR only: NR runs on the finished picture. Costs less, no frame generation. Sets NR Pass at: to Finished Picture.
 
-NR + upscaler & frame generation: also runs OptiScaler's upscaler (your choice in the menu, FSR when none) on the picture at the same size, to keep it steady. Frame generation needs this, and it unlocks the upscaler settings. Costs more. Moves NR Pass at: off Finished Picture.
+NR + frame generation: also starts OptiScaler's upscaler (your choice in the menu, FSR when none), which gives frame generation its input. Frame generation needs this, and it unlocks the upscaler settings. The upscaler does not process the picture unless you tick **Run the upscaler on the picture**: at the same size it adds no detail, but it can steady shimmer in games with weak anti-aliasing (about 1.5-3 ms more), with NR on or off. Moves NR Pass at: off Finished Picture.
 
 Both use the game's depth when Optical F5Low finds it (Advanced). Depth is optional: without it NR uses motion only. Choosing a mode turns depth on (Off turns it off); if depth was not running when the game started, restart the game to use it.
 

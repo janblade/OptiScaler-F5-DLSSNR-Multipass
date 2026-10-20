@@ -19,9 +19,12 @@
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ExposureFoundBlend.h>
 #include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/DlssNrVitReuse.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 #include <dlssnr/DlssNr_VkExtensions.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
@@ -161,9 +164,11 @@ struct VkState
     OwnedImage lutScratch;
     bool lutScratchFailed = false;
 
-    // Experimental input style (DlssNrInputStyle): the model's picture restyled, standing in for the model input and the
-    // resolve's proxy. Made on first use at the model picture's size; freed with the other sized images.
+    // Experimental input styles (DlssNr_InputStyles.h): the model's picture restyled, standing in for the model input and
+    // the resolve's proxy; styledB is the second image they alternate with when more than one is on. Made on first use at
+    // the model picture's size; freed with the other sized images.
     OwnedImage styled;
+    OwnedImage styledB;
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -248,6 +253,11 @@ struct VkState
     unsigned long long pairValidAt = 0; // meterFrames when the last valid game value arrived
     bool pairValiditySaid = false;
     bool followingGame = false;
+    // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
+    // none is in force. Read back a few frames behind, so while it holds the host's white point is in force. Eased in
+    // and out (DlssNr_ExposureFoundBlend.h).
+    float foundBaseWhitePoint = 0.0f;
+    DlssNrExposureFoundBlend::Blend foundBlend;
 };
 
 // The grid the meter writes, and the size of one readback. 64 * 64 * sizeof(float). The game's
@@ -719,6 +729,7 @@ FollowGameStatus FollowGameExposureStatusVk()
     FollowGameStatus s {};
     s.gameExposureSeen = g_vk.pairGameExposure > 0.0f;
     s.following = g_vk.followingGame;
+    s.foundInForce = g_vk.foundBaseWhitePoint > 0.0f;
     return s;
 }
 
@@ -977,7 +988,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                      : std::string(),
                                  paired ? g_vk.pairGameExposure : 0.0f, gameBase,
                                  paired && gameBase > 0.0f ? autoBase / gameBase : 0.0f,
-                                 paired ? "" : "; read only while following", DlssNr::KnownUnexposedGame() ? "yes" : "no",
+                                 paired ? "" : "; read only while following or scanning",
+                                 DlssNr::KnownUnexposedGame() ? "yes" : "no",
                                  DlssNr::FollowGameOn(cfg) ? "on" : "off");
                     }
                 }
@@ -1270,6 +1282,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         DestroyImage(g_vk.lutScratch); // recreated at the new size when a LutFile still wants it
         g_vk.lutScratchFailed = false;
         DestroyImage(g_vk.styled); // recreated at the model picture's size when an input style still wants it
+        DestroyImage(g_vk.styledB);
 
         const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
 
@@ -1459,6 +1472,31 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         g_vk.gameLiveSaid = false;
     }
 
+    // The exposure scan (DlssNr_ExposureScan_Vk.h): its values copied on NR's command buffer, and the frame's bookkeeping
+    // with what is known about the frame's brightness, as the D3D12 pass gives it (DlssNr_Dx12.cpp)
+    {
+        DlssNr::ExposureScan::FrameExposure scanFrame;
+        scanFrame.handed = exposure != nullptr && exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW
+                               ? (const void*) exposure->Resource.ImageViewInfo.Image
+                               : nullptr;
+        scanFrame.handedApi = DlssNr::ExposureScan::Api::Vulkan;
+        scanFrame.meter = requestedWhitePointSource == 3 ? g_vk.autoExposureRawValue : 0.0f;
+        scanFrame.game = requestedWhitePointSource == 1   ? g_vk.gameExposure
+                         : requestedWhitePointSource == 3 ? g_vk.pairGameExposure
+                                                          : 0.0f;
+        // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
+        scanFrame.pre = requestedWhitePointSource == 3 ? g_vk.autoExposurePreExposure : g_vk.gamePreExposure;
+        DlssNr::ExposureScanVk::Tick(cmdBuffer, device, physicalDevice, scanFrame);
+
+        if (scanFrame.handed != nullptr)
+        {
+            const auto& view = exposure->Resource.ImageViewInfo;
+            DlssNr::ExposureScanVk::ExplainHanded(view.Image, view.Width, view.Height, view.Format,
+                                                  view.SubresourceRange.baseMipLevel,
+                                                  view.SubresourceRange.baseArrayLayer);
+        }
+    }
+
     // Following the game's exposure (DlssNr_FollowGame.h): on (DlssNr_GameDefaults.h), the calibration locked, and a
     // valid reading of the game's exposure no more than eight readbacks old. Otherwise Automatic's own value stands.
     {
@@ -1471,6 +1509,39 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             LOG_INFO("DLSS-NR automatic exposure (Vulkan): {} the game's exposure", follow ? "following" : "no longer following");
 
         g_vk.followingGame = follow;
+
+        // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs.
+        // Moving to and from it is eased over a second, in stops, as on D3D12 (DlssNr_ExposureFoundBlend.h). Auto's
+        // scan is D3D12-only for now (DlssNr_ExposureScan.h), so this stays at 0 until a Vulkan game is checked.
+        float found = 0.0f;
+        float foundPre = 1.0f;
+        const float target = requestedWhitePointSource == 3 && linearHdr && !displayWhite && !follow &&
+                                     DlssNr::ExposureScan::FoundExposure(&found, &foundPre) && found > 1e-8f
+                                 ? foundPre / found
+                                 : 0.0f;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float own =
+            g_vk.autoExposureValue > 1e-8f ? g_vk.autoExposurePreExposure / g_vk.autoExposureValue : 0.0f;
+        g_vk.foundBaseWhitePoint =
+            g_vk.foundBlend.Step(target, own, now, requestedWhitePointSource == 3 && linearHdr && !displayWhite);
+
+        switch (g_vk.foundBlend.LastEvent())
+        {
+        case DlssNrExposureFoundBlend::Event::TookOver:
+            LOG_INFO("DLSS-NR automatic exposure (Vulkan): the game's own exposure (found by the scan) moves the white "
+                     "point from here: {:.4g}, from {:.4g} ({:+.2f} EV), eased over a second",
+                     target, g_vk.foundBaseWhitePoint, std::log2(g_vk.foundBaseWhitePoint / target));
+            break;
+        case DlssNrExposureFoundBlend::Event::Leaving:
+            LOG_INFO("DLSS-NR automatic exposure (Vulkan): the game's exposure is gone; back to Automatic's own meter, "
+                     "eased");
+            break;
+        case DlssNrExposureFoundBlend::Event::Left:
+            LOG_INFO("DLSS-NR automatic exposure (Vulkan): Automatic's own meter again");
+            break;
+        default:
+            break;
+        }
     }
 
     if (requestedWhitePointSource == 1 && g_vk.gameExposure > 1e-6f && !displayWhite)
@@ -1489,15 +1560,16 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         whitePoint = std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
         debugWhitePoint = std::clamp(baseWhitePoint, 0.01f, 4096.0f);
     }
-    else if (requestedWhitePointSource == 3 && g_vk.autoExposureValue > 1e-8f)
+    else if (requestedWhitePointSource == 3 && (g_vk.autoExposureValue > 1e-8f || g_vk.foundBaseWhitePoint > 0.0f))
     {
         // The fallback and the menu's number, from the readback a few frames behind. The shader
         // recomputes this from the live 1x1 image when it is bound. Following the game, this is the value in
         // force: the game's base white point times the calibration, and the shader is told not to recompute it.
         const float baseWhitePoint =
-            g_vk.followingGame
-                ? g_vk.pairPreExposure / g_vk.pairGameExposure * DlssNrFollowGame::Instance().Scale()
-                : g_vk.autoExposurePreExposure / g_vk.autoExposureValue;
+            g_vk.followingGame                ? g_vk.pairPreExposure / g_vk.pairGameExposure *
+                                                    DlssNrFollowGame::Instance().Scale()
+            : g_vk.foundBaseWhitePoint > 0.0f ? g_vk.foundBaseWhitePoint
+                                              : g_vk.autoExposurePreExposure / g_vk.autoExposureValue;
         const auto anchors = DlssNrTrim::Parse(cfg.DlssNrAutoExposureTrimAnchors.value_or_default());
         const float trim = DlssNrTrim::TrimForKey(baseWhitePoint, DlssNr::AutoTrimEffective(cfg),
                                                   anchors, cfg.DlssNrAutoExposureTrimPreview.value_or_default());
@@ -1679,7 +1751,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
                 Transition(cmdBuffer, g_vk.autoExposure, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 g_vk.autoExposureActive = true;
-                encode.UseExposureWhitePoint = g_vk.followingGame ? 0u : 1u;
+                encode.UseExposureWhitePoint = g_vk.followingGame || g_vk.foundBaseWhitePoint > 0.0f ? 0u : 1u;
 
                 // Queue the value for readback, for the menu and anchor capture only.
                 const unsigned long long slot = g_vk.meterFrames % kMeterSlots;
@@ -1735,14 +1807,15 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                              0, nullptr, 1, &rawToHost, 0, nullptr);
                     }
 
-                    // The game's exposure beside Automatic's, for following it (DlssNr_FollowGame.h). The game's image
-                    // is read through the same layout guess Game exposure's courier uses, so it is only touched where
-                    // it can matter: while following is on. The meter's tiles are reduced already.
+                    // The game's exposure beside Automatic's, for following it (DlssNr_FollowGame.h) and as the exposure
+                    // scan's known answer (as on D3D12, DlssNr_Dx12.cpp). The game's image is read through the same
+                    // layout guess Game exposure's courier uses, so it is only touched where it can matter: while
+                    // following is on or the scan runs. The meter's tiles are reduced already.
                     g_vk.meterPairHasGame[slot] = false;
 
                     if (exposure != nullptr && exposure->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW &&
                         exposure->Resource.ImageViewInfo.ImageView != VK_NULL_HANDLE &&
-                        DlssNr::FollowGameOn(cfg))
+                        (DlssNr::FollowGameOn(cfg) || DlssNr::ExposureScan::Scanning()))
                     {
                         DlssNrConstants courier {};
                         courier.Mode = DlssNrMode_Meter;
@@ -2165,78 +2238,107 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         mvY *= (float) workHeight / height;
     }
 
-    // Experimental input style (DlssNrInputStyle), as on D3D12: restyle the model's picture once it is final (after the
-    // shrink and the edge packing). It then stands in for the model input and the resolve's proxy (ordinaryProxy below,
-    // and through the edge unpacking), so Composed hands back only what the model painted on top of it. Skipped above
-    // 100% model resolution, where the resolve compares against the full proxy instead.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h), as on D3D12: restyle the model's
+    // picture once it is final (after the shrink and the edge packing), each style that is on in turn, each on the one
+    // before's result, alternating between two images. The last result stands in for the model input and the resolve's
+    // proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back only what the model painted on
+    // top of it. Skipped above 100% model resolution, where the resolve compares against the full proxy instead.
     bool inputRestyled = false;
     {
-        const uint32_t style = cfg.DlssNrInputStyle.value_or_default();
-        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), style == 2u ? 3.0f : 1.0f);
-        const bool facesOnly = cfg.DlssNrInputStyleFacesOnly.value_or_default();
-        const bool wanted = style >= 1u && style <= 3u && strength > 0.0f;
-        const char* skip = wanted && workScale > 1.0f ? "model resolution above 100%" : nullptr;
-        bool restyled = false;
+        const DlssNrInput::Styles styles = cfg.DlssNrInputStyles();
+        DlssNrInput::Pass passes[2];
+        const int passCount = DlssNrInput::Passes(styles, passes);
 
-        if (wanted && skip == nullptr)
+        const char* skip = passCount == 0 ? nullptr : workScale > 1.0f ? "model resolution above 100%" : nullptr;
+        int ran = 0;
+
+        if (passCount > 0 && skip == nullptr)
         {
-            if (g_vk.styled.Valid() && (g_vk.styled.width != modelInput->width ||
-                                        g_vk.styled.height != modelInput->height ||
-                                        g_vk.styled.format != modelInput->format))
+            OwnedImage* targets[2] = { &g_vk.styled, &g_vk.styledB };
+            const int targetCount = passCount > 1 ? 2 : 1;
+            bool waited = false;
+
+            for (int t = 0; t < targetCount; ++t)
             {
-                // Earlier frames may still read it (a switch of Compress screen edges changes the model picture's size)
-                vkDeviceWaitIdle(device);
-                DestroyImage(g_vk.styled);
+                OwnedImage& target = *targets[t];
+
+                if (target.Valid() && (target.width != modelInput->width || target.height != modelInput->height ||
+                                       target.format != modelInput->format))
+                {
+                    // Earlier frames may still read it (a switch of Compress screen edges changes the model picture's
+                    // size); one wait covers both images
+                    if (!waited)
+                        vkDeviceWaitIdle(device);
+
+                    waited = true;
+                    DestroyImage(target);
+                }
+
+                if (!target.Valid())
+                    CreateImage(target, modelInput->width, modelInput->height, modelInput->format, true);
             }
 
-            if (!g_vk.styled.Valid())
-                CreateImage(g_vk.styled, modelInput->width, modelInput->height, modelInput->format, true);
+            OwnedImage* source = modelInput;
 
-            if (g_vk.styled.Valid())
+            for (int k = 0; k < passCount; ++k)
             {
-                DlssNrConstants paint = encode;
-                paint.Mode = StyleMode(style);
-                paint.Width = modelInput->width;
-                paint.Height = modelInput->height;
-                paint.TransferStrength = strength;
-                paint.SkinProtection = facesOnly ? 1u : 0u; // the style passes read it as "faces only"
+                OwnedImage& target = *targets[k % 2];
 
-                Transition(cmdBuffer, *modelInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                Transition(cmdBuffer, g_vk.styled, VK_IMAGE_LAYOUT_GENERAL);
-
-                if (g_vk.pass->Dispatch(cmdBuffer, paint, modelInput->width, modelInput->height, modelInput->view,
-                                        VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, g_vk.styled.view, VK_NULL_HANDLE,
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+                if (!target.Valid())
                 {
-                    modelInput = &g_vk.styled;
-                    restyled = true;
-                    inputRestyled = true;
+                    skip = "its image could not be created";
+                    break;
                 }
-                else
+
+                DlssNrConstants paint = encode;
+                paint.Mode = StyleMode(passes[k].style);
+                paint.Width = source->width;
+                paint.Height = source->height;
+                paint.TransferStrength = passes[k].strength;
+                paint.SkinProtection = styles.facesOnly ? 1u : 0u; // the style passes read it as "faces only"
+
+                Transition(cmdBuffer, *source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                Transition(cmdBuffer, target, VK_IMAGE_LAYOUT_GENERAL);
+
+                // A failed dispatch: the model gets the picture up to the last style that ran
+                if (!g_vk.pass->Dispatch(cmdBuffer, paint, source->width, source->height, source->view, VK_NULL_HANDLE,
+                                         VK_NULL_HANDLE, VK_NULL_HANDLE, target.view, VK_NULL_HANDLE,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
                 {
                     skip = "its dispatch failed";
+                    break;
                 }
+
+                source = &target;
+                ++ran;
             }
-            else
+
+            if (ran > 0)
             {
-                skip = "its image could not be created";
+                modelInput = source;
+                inputRestyled = true;
             }
         }
 
         // Said when it changes, so a log shows each A/B toggle.
-        static int said = -1;
-        const int state = restyled ? (int) style + 10 + (facesOnly ? 10 : 0) : (skip != nullptr ? 2 : 0);
+        static std::string said = "-";
+        std::string state;
+
+        for (int k = 0; k < ran; ++k)
+            state += std::format("{}{} {:.2f}", k == 0 ? "" : ", ", StyleName(passes[k].style), passes[k].strength);
+
+        if (skip != nullptr)
+            state += std::format("{}skipped ({})", ran > 0 ? "; then " : "", skip);
 
         if (state != said)
         {
             said = state;
 
-            if (restyled)
-                LOG_INFO("DLSS-NR Vulkan input style: {} on (strength {:.2f}, {}x{}{}{})", StyleName(style), strength,
-                         modelInput->width, modelInput->height, facesOnly ? ", faces only" : "",
-                         spatial ? ", edge-compressed picture" : "");
+            if (ran > 0)
+                LOG_INFO("DLSS-NR Vulkan input style: {} ({}x{}{}{})", state, modelInput->width, modelInput->height,
+                         styles.facesOnly ? ", faces only" : "", spatial ? ", edge-compressed picture" : "");
             else if (skip != nullptr)
-                LOG_INFO("DLSS-NR Vulkan input style: skipped ({})", skip);
+                LOG_INFO("DLSS-NR Vulkan input style: {}", state);
             else
                 LOG_INFO("DLSS-NR Vulkan input style: off");
         }
@@ -2312,13 +2414,18 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
         const auto tuning = Profiles::PassTuning(cfg, pass);
         void* const passFeature = pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass];
-        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp), so the kernel set shows. Reuse
-        // bottleneck is forced off on Vulkan (every = 1 on both kernel sets, whatever the ini says): with the ViT run skipped, its kept result was
-        // overwritten between frames there (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel
-        // was kept), by something outside the model's own launches. D3D12 keeps it. No command list: the kernel
-        // profiler is D3D12's.
-        DlssNrNative::BeginEvaluate(passFeature, passReset, 1u, 1u, (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull),
-                                    nullptr, false);
+        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp). Reuse bottleneck runs in copy mode
+        // on both kernel sets here: with the ViT run skipped, its kept result was overwritten between frames on Vulkan
+        // (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel was kept) by something outside the
+        // model's own launches, so the decoder gets our own copy, restored right before it reads it. While detail reuse
+        // runs the bottleneck is computed every time (as on D3D12). No command list: the kernel profiler is D3D12's.
+        const bool vitEveryFrame = reusePlan.active;
+        DlssNrNative::VkEvaluateDevice(g_vk.device, g_vk.physicalDevice);
+        DlssNrNative::BeginEvaluate(passFeature, passReset,
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
+                                    (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull), nullptr, false,
+                                    DlssNrVitReuse::kCopyPlain | DlssNrVitReuse::kCopyFp8);
         evaluated = g_vk.evaluate(
             (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
             &input->ngx, modelDepth, spatial ? modelMotion : reusePlan.motion, &answer->ngx, modelWidth, modelHeight,
@@ -2330,8 +2437,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
         if (DlssNrNative::EndEvaluate(nullptr))
-            LOG_WARN("DLSS-NR Vulkan: the model's kernel launches were not in the expected order; Reuse bottleneck "
-                     "is off for this session");
+            LOG_WARN("DLSS-NR Vulkan: Reuse bottleneck is {}", DlssNrNative::VitStatus());
         if (evaluated != 1)
             break;
         if (pass + 1 < runPasses)
@@ -2718,6 +2824,7 @@ void ReleaseNrObjects()
     DestroyImage(g_vk.lutScratch);
     g_vk.lutScratchFailed = false;
     DestroyImage(g_vk.styled);
+    DestroyImage(g_vk.styledB);
     g_vk.autoExposureAdapter.Invalidate();
     DestroyMeterReadback();
 
@@ -2773,6 +2880,7 @@ void ShutdownVk(bool deviceAlive)
         g_vk.lutScratch = OwnedImage {};
         g_vk.lutScratchFailed = false;
         g_vk.styled = OwnedImage {};
+        g_vk.styledB = OwnedImage {};
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
         DetailReuseVk::Release(false);
@@ -2878,8 +2986,10 @@ void ShutdownVkForDevice(VkDevice device, const char* why)
         return;
 
     LOG_INFO("DLSS-NR Vulkan: {}; releasing the model and NGX first", why);
+    const VkDevice destroyed = g_vk.device;
     ShutdownVk(true);
-    // The model's kernels go with the device.
+    // Reuse bottleneck's own copy buffers and kernel are ours to destroy while the device is idle; the model's kernels go with the device.
+    DlssNrNative::VkDeviceDestroying(destroyed);
     DlssNrNative::VkDeviceLost();
 }
 

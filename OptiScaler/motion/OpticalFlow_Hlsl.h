@@ -245,6 +245,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     // best is where the search starts, so a steady pan carries over from frame to frame and an edge is not stuck with the
     // answer of a cell that lies across it.
     int2 centre = 0;
+    float2 centreExact = 0.0; // the candidate before rounding: its part of a pixel is kept where no sub-pixel step is solved
     float start = Cost(p, centre, w, cur);
 
     // How long the picture has been unchanged here (finest level only): the age last frame, and from this frame's
@@ -276,6 +277,7 @@ void Match(uint3 id : SV_DispatchThreadID)
             {
                 start = c;
                 centre = d;
+                centreExact = g.xy * scale;
             }
         }
     }
@@ -293,26 +295,30 @@ void Match(uint3 id : SV_DispatchThreadID)
         [loop] for (int k = 0; k < (int) coarseCells; ++k)
         {
             int2 cell = cp + kCells[k] * step;
-            int2 d = int2(round(Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0));
+            float2 exact = Prediction.Load(int3(clamp(cell, 0, coarseHi), 0)).xy * 2.0;
+            int2 d = int2(round(exact));
             float c = Cost(p, d, w, cur);
 
             if (c < start)
             {
                 start = c;
                 centre = d;
+                centreExact = exact;
             }
         }
     }
 
     if (hasHistory != 0)
     {
-        int2 d = int2(round(History.Load(int3(p, 0)).xy));
+        float2 exact = History.Load(int3(p, 0)).xy;
+        int2 d = int2(round(exact));
         float c = Cost(p, d, w, cur);
 
         if (c < start)
         {
             start = c;
             centre = d;
+            centreExact = exact;
         }
     }
 
@@ -339,7 +345,11 @@ void Match(uint3 id : SV_DispatchThreadID)
     // the picture did not move there. Only an offset within zeroReach is overruled (a real pan is far from it).
     if (zeroMargin > 0.0 && any(bestD != 0) && (zeroReach == 0 || max(abs(bestD.x), abs(bestD.y)) <= (int) zeroReach))
         if (Cost(p, int2(0, 0), w, cur) <= bestCost + zeroMargin)
+        {
             bestD = int2(0, 0);
+            centre = bestD;
+            centreExact = 0.0;
+        }
 
     // The part of a pixel: a few Lucas-Kanade steps. With the previous frame sampled at the matched offset, the remaining
     // difference is explained by the picture's gradient there; solve that for the shift. A match that is already exact has no
@@ -347,6 +357,7 @@ void Match(uint3 id : SV_DispatchThreadID)
     // the window is taken out first, so a brightness change does not read as a shift (the gradients are not centred).
     float2 sub = 0.0;
     float confidence = 0.0;
+    bool stepped = false; // a step was solved: the window had structure across
 
     if (inverseRefinement != 0)
     {
@@ -406,6 +417,7 @@ void Match(uint3 id : SV_DispatchThreadID)
 
             const float2 step = float2(c * e - b * f, a * f - b * e) / det;
             sub = clamp(sub + step, -1.5, 1.5);
+            stepped = true;
 
             if (max(abs(step.x), abs(step.y)) < 0.01)
                 break;
@@ -448,13 +460,23 @@ void Match(uint3 id : SV_DispatchThreadID)
         float det = a * c - b * b;
 
         if (det > 1e-9)
+        {
             sub = clamp(sub + float2(c * e - b * f, a * f - b * e) / det, -1.5, 1.5);
+            stepped = true;
+        }
 
         // The weaker direction of the picture's structure in the window: a match along an edge, or in a flat area, is not sure
         // across it.
         float weak = 0.5 * ((a + c) - sqrt((a - c) * (a - c) + 4.0 * b * b));
         confidence = weak / (weak + knee);
     }
+
+    // A window with no structure across it (a flat one, or one straight edge) gives the steps nothing to go on, so they
+    // leave the whole-pixel offset; there the part of a pixel the winning candidate had (when the search kept it) is kept,
+    // which carries a camera's or a neighbour's fraction across a flat fill. Where a step was solved it stands as before.
+    // The clamp is the rounding's own range, and keeps a non-finite candidate (history, the camera) out of the output.
+    if (!stepped && all(bestD == centre))
+        sub = clamp(centreExact - float2(centre), -0.5, 0.5);
 
     OutFlow[id.xy] = float4(float2(bestD) + sub, confidence, 1.0);
 

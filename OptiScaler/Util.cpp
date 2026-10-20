@@ -761,6 +761,170 @@ void Util::GetDeviceRemovedReason(ID3D11Device* pDevice)
     }
 }
 
+static const char* DredOpName(D3D12_AUTO_BREADCRUMB_OP op)
+{
+    switch (op)
+    {
+    case D3D12_AUTO_BREADCRUMB_OP_SETMARKER:
+        return "SetMarker";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT:
+        return "BeginEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT:
+        return "EndEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED:
+        return "DrawInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED:
+        return "DrawIndexedInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT:
+        return "ExecuteIndirect";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCH:
+        return "Dispatch";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION:
+        return "CopyBufferRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION:
+        return "CopyTextureRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE:
+        return "CopyResource";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE:
+        return "ResolveSubresource";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW:
+        return "ClearRenderTargetView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW:
+        return "ClearUnorderedAccessView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW:
+        return "ClearDepthStencilView";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER:
+        return "ResourceBarrier";
+    case D3D12_AUTO_BREADCRUMB_OP_PRESENT:
+        return "Present";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINSUBMISSION:
+        return "BeginSubmission";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDSUBMISSION:
+        return "EndSubmission";
+    case D3D12_AUTO_BREADCRUMB_OP_WRITEBUFFERIMMEDIATE:
+        return "WriteBufferImmediate";
+    case D3D12_AUTO_BREADCRUMB_OP_INITIALIZEMETACOMMAND:
+        return "InitializeMetaCommand";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEMETACOMMAND:
+        return "ExecuteMetaCommand";
+    case D3D12_AUTO_BREADCRUMB_OP_SETPIPELINESTATE1:
+        return "SetPipelineState1";
+    case D3D12_AUTO_BREADCRUMB_OP_INITIALIZEEXTENSIONCOMMAND:
+        return "InitializeExtensionCommand";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEEXTENSIONCOMMAND:
+        return "ExecuteExtensionCommand";
+    default:
+        return nullptr;
+    }
+}
+
+static std::string DredName(const char* a, const wchar_t* w)
+{
+    if (a != nullptr && a[0] != 0)
+        return a;
+
+    if (w != nullptr && w[0] != 0)
+        return wstring_to_string(w);
+
+    return "unnamed";
+}
+
+// The D3D12 DRED report ([Log] D3D12Dred): the command lists the GPU had not finished when the device was lost, with
+// the operations around the last one it completed, and the allocations near a page fault. Once per process.
+static void LogDredReport(ID3D12Device* device)
+{
+    // Spent only by a report that has breadcrumbs, so a device without them (another component's, lost first) does
+    // not use up the one for the bridge's
+    static std::atomic<bool> reported { false };
+
+    if (!Config::Instance()->D3D12Dred.value_or_default() || reported.load())
+        return;
+
+    ID3D12DeviceRemovedExtendedData1* dred = nullptr;
+
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred))) || dred == nullptr)
+    {
+        LOG_ERROR("DRED: this device has no DRED interface");
+        return;
+    }
+
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs {};
+
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs)) && crumbs.pHeadAutoBreadcrumbNode != nullptr)
+    {
+        if (reported.exchange(true))
+        {
+            dred->Release();
+            return;
+        }
+
+        UINT finished = 0;
+        UINT unfinished = 0;
+
+        for (auto node = crumbs.pHeadAutoBreadcrumbNode; node != nullptr; node = node->pNext)
+        {
+            const UINT count = node->BreadcrumbCount;
+            const UINT done = node->pLastBreadcrumbValue != nullptr ? *node->pLastBreadcrumbValue : 0;
+
+            if (done >= count)
+            {
+                ++finished;
+                continue;
+            }
+
+            if (++unfinished > 16)
+                continue;
+
+            LOG_ERROR("DRED: list {:X} \"{}\" on queue {:X} \"{}\": {} of {} operations done",
+                      (size_t) node->pCommandList, DredName(node->pCommandListDebugNameA, node->pCommandListDebugNameW),
+                      (size_t) node->pCommandQueue, DredName(node->pCommandQueueDebugNameA, node->pCommandQueueDebugNameW),
+                      done, count);
+
+            const UINT first = done > 6 ? done - 6 : 0;
+            const UINT last = std::min(count, done + 4);
+
+            for (UINT i = first; i < last && node->pCommandHistory != nullptr; ++i)
+            {
+                const char* name = DredOpName(node->pCommandHistory[i]);
+                LOG_ERROR("DRED:   {} {:3} {}", i == done ? "->" : "  ", i,
+                          name != nullptr ? name : std::to_string((int) node->pCommandHistory[i]));
+            }
+        }
+
+        LOG_ERROR("DRED: {} command list(s) unfinished, {} finished", unfinished, finished);
+    }
+    else
+    {
+        LOG_ERROR("DRED: no breadcrumbs (DRED was not on when this device was created)");
+        dred->Release();
+        return;
+    }
+
+    D3D12_DRED_PAGE_FAULT_OUTPUT1 fault {};
+
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&fault)) && fault.PageFaultVA != 0)
+    {
+        LOG_ERROR("DRED: page fault at GPU address {:X}", fault.PageFaultVA);
+
+        UINT shown = 0;
+        for (auto node = fault.pHeadExistingAllocationNode; node != nullptr && shown < 16; node = node->pNext, ++shown)
+            LOG_ERROR("DRED:   live there: \"{}\" type {}", DredName(node->ObjectNameA, node->ObjectNameW),
+                      (int) node->AllocationType);
+
+        shown = 0;
+        for (auto node = fault.pHeadRecentFreedAllocationNode; node != nullptr && shown < 16;
+             node = node->pNext, ++shown)
+            LOG_ERROR("DRED:   freed there recently: \"{}\" type {}", DredName(node->ObjectNameA, node->ObjectNameW),
+                      (int) node->AllocationType);
+    }
+    else
+    {
+        LOG_ERROR("DRED: no page fault recorded");
+    }
+
+    dred->Release();
+}
+
 void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
 {
     auto reason = pDevice->GetDeviceRemovedReason();
@@ -794,6 +958,9 @@ void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
     default:
         LOG_ERROR("Device removed reason: Unknown ({:X})", (UINT) reason);
     }
+
+    if (reason != S_OK)
+        LogDredReport(pDevice);
 }
 
 void Util::LoadProxyLibrary(const std::wstring& name, const std::wstring& optiPath, const std::wstring& overridePath,

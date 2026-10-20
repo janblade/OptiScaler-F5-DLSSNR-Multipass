@@ -695,9 +695,7 @@ static DlssNrLook::Settings ReadLook(Config* config)
     s.skinColour = config->DlssNrSkinColour.value_or_default();
     s.envDetail = config->DlssNrEnvironmentDetail.value_or_default();
     s.envColour = config->DlssNrEnvironmentColour.value_or_default();
-    s.inputStyle = config->DlssNrInputStyle.value_or_default();
-    s.inputStrength = config->DlssNrInputStyleStrength.value_or_default();
-    s.facesOnly = config->DlssNrInputStyleFacesOnly.value_or_default();
+    s.inputs = config->DlssNrInputStyles();
     return s;
 }
 
@@ -728,9 +726,7 @@ static void WriteLook(Config* config, const DlssNrLook::Settings& s)
     config->DlssNrSkinColour = s.skinColour;
     config->DlssNrEnvironmentDetail = s.envDetail;
     config->DlssNrEnvironmentColour = s.envColour;
-    config->DlssNrInputStyle = s.inputStyle;
-    config->DlssNrInputStyleStrength = s.inputStrength;
-    config->DlssNrInputStyleFacesOnly = s.facesOnly;
+    config->SetDlssNrInputStyles(s.inputs);
 }
 
 // "##lookbase": Natural and Cinematic are also look buttons on the same page, and ImGui takes the label as the ID
@@ -1021,7 +1017,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     static constexpr ModeChoice kModes[] = {
         { Mode::Off, Shown::Off, "Off##nativemode" },
         { Mode::NrOnly, Shown::NrOnly, "NR only##nativemode" },
-        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + upscaler & frame generation##nativemode" },
+        { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + frame generation##nativemode" },
         { Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, "FG only (game's upscaler)##nativemode" },
     };
 
@@ -1079,9 +1075,8 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
 
     HelpMarker("For games that don't call an upscaler: Optical F5Low works out the motion itself so NR can run.\n"
                "NR only: NR on the finished picture. Cheapest; no frame generation.\n"
-               "NR + upscaler & frame generation: adds OptiScaler's upscaler, which gives frame generation its input; "
-               "needed for frame generation. With NR on, NR works on the game's picture and the upscaler does not "
-               "process it.\n"
+               "NR + frame generation: adds OptiScaler's upscaler, which gives frame generation its input; needed for "
+               "frame generation. It does not process the picture unless you tick Run the upscaler on the picture.\n"
                "FG only (Vulkan): frame generation for Vulkan games that call DLSS, FSR or XeSS themselves.\n"
                "Needs Enable Neural Rendering. On Vulkan, set up frame generation before the game starts.");
 
@@ -1094,6 +1089,21 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                                         "is not needed.");
 
         return;
+    }
+
+    // The backend's own pass over the picture (NativeUpscalerPass), with NR on or off. Off (the default) it only gives frame
+    // generation its input.
+    if (shown == Shown::NrAndFrameGeneration)
+    {
+        bool pass = config->DlssNrNativeUpscalerPass.value_or_default();
+
+        if (ImGui::Checkbox("Run the upscaler on the picture##nativeupscalerpass", &pass))
+            config->DlssNrNativeUpscalerPass = pass;
+
+        HelpMarker("Runs the chosen upscaler (DLSS, FSR or XeSS) over the game's picture at the same size. It adds no "
+                   "detail, but can steady shimmer in games with weak anti-aliasing; it can also soften the picture "
+                   "or leave trails where the estimated motion is wrong. Costs about 1.5-3 ms. Off: the upscaler only "
+                   "gives frame generation its input. Works with NR on or off.");
     }
 
     const bool depthWanted = config->DlssNrNativeDepthFinder.value_or_default();
@@ -1331,7 +1341,7 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
     case DlssNrNativeMode::Shown::NrOnly:
         return "NR only";
     case DlssNrNativeMode::Shown::NrAndFrameGeneration:
-        return "NR + upscaler & frame generation";
+        return "NR + frame generation";
     case DlssNrNativeMode::Shown::MotionOnly:
         return "motion only";
     case DlssNrNativeMode::Shown::FrameGenerationOnly:
@@ -1663,7 +1673,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     ImGui::SeparatorText("Look Presets");
     {
         const auto now = ReadLook(config);
-        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h DlssNrInputStyle)
+        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h DlssNrInputFlatten ...)
         const bool inputStyleOff = config->DlssNrWorkingScale.value_or_default() > 1.0f + 0.005f ||
                                    config->DlssNrDeferredDlss.value_or_default();
 
@@ -1905,8 +1915,16 @@ static void RenderExposureSection(Config* config, float menuResScale)
 
         // Auto first, naming what it is now; the other entries are the values 0-3
         const uint32_t configuredSource = config->DlssNrWhitePointSource.value_or_default();
-        const std::string autoSource =
-            std::string("Auto (") + sourceNames[DlssNr::WhitePointSourceEffective(*config)] + ")";
+        // While the exposure scan's match moves the picture (story 5), Auto names that one. Asked of the pass, not the
+        // scan: the scan can hold a match the picture is not using (SDR, a finished picture, a white point override).
+        const bool autoFound = configuredSource == DlssNrExposureDefault::kSourceAuto &&
+                               DlssNr::WhitePointSourceEffective(*config) == DlssNrExposureDefault::kSourceAutomatic &&
+                               (vk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus())
+                                   .foundInForce;
+        const std::string autoSource = std::string("Auto (") +
+                                       (autoFound ? "Game's exposure, found in the game"
+                                                  : sourceNames[DlssNr::WhitePointSourceEffective(*config)]) +
+                                       ")";
         const char* sourceItems[] = { autoSource.c_str(), sourceNames[0], sourceNames[1], sourceNames[2],
                                       sourceNames[3] };
         int sourceItem = configuredSource == DlssNrExposureDefault::kSourceAuto
@@ -1926,11 +1944,22 @@ static void RenderExposureSection(Config* config, float menuResScale)
         const int source = (int) DlssNr::WhitePointSourceEffective(*config);
 
         HelpMarker("Where NR's brightness reference comes from.\n"
-                   "Auto: the game's exposure when the game gives one, else Automatic exposure.\n"
+                   "Auto: the game's exposure when the game gives one. Else, in D3D12 games, OptiScaler looks for\n"
+                   "the game's own exposure among its GPU buffers while you play; once found, the game's value moves\n"
+                   "the brightness at Automatic exposure's level. Until then, or if none is found, Automatic exposure.\n"
                    "Manual: Paper white.\n"
                    "Game exposure: the game's own value.\n"
                    "Scanned exposure: read from game buffers; needs calibration.\n"
                    "Automatic exposure: OptiScaler measures the frame itself.");
+
+        // Auto's exposure search, while Auto is chosen: searching, found, not needed, ...
+        if (configuredSource == DlssNrExposureDefault::kSourceAuto)
+        {
+            const std::string search = DlssNr::ExposureScan::AutoStatus();
+
+            if (!search.empty())
+                ImGui::TextDisabled("Exposure search: %s", search.c_str());
+        }
 
         // Availability, in colour, for the option currently chosen. Two lines at most, whichever source.
         if (ImGui::TreeNode("Exposure readout##autoexposure"))
@@ -2701,29 +2730,22 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
     // One setting per kernel set: the fp8 kernels (NVIDIA's DLL and fp8-based builds) and the plain FP16 kernels (used by some modified DLSS-NR DLLs).
     // Only the one for the kernels actually running is used.
     const char* kernelSet = DlssNrNative::VitKernelSet();
-    // Forced off for Vulkan games, natively and through the D3D12 bridge (DlssNrFeature_Vk.cpp, DlssNr_Dx12.cpp): shown
-    // off and greyed out; the settings stay as they are for D3D12 games.
-    const bool vitReuseVk = DlssNr::IsRunningVk() || State::Instance().api == Vulkan;
-    ImGui::BeginDisabled(vitReuseVk);
-    bool vitReuse = !vitReuseVk && config->DlssNrVitEvery.value_or_default() > 1;
+    bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
     if (ImGui::Checkbox("Reuse bottleneck: FP8 kernels", &vitReuse))
         config->DlssNrVitEvery = vitReuse ? 2u : 1u;
     HelpMarker("Reuses the model's slowest-changing stage every other frame. Saves about a tenth of NR's GPU time; "
                "fast motion can look slightly softer. On by default.");
-    bool vitReusePlain = !vitReuseVk && config->DlssNrVitEveryPlain.value_or_default() > 1;
+    bool vitReusePlain = config->DlssNrVitEveryPlain.value_or_default() > 1;
     if (ImGui::Checkbox("Reuse bottleneck: plain FP16 kernels", &vitReusePlain))
         config->DlssNrVitEveryPlain = vitReusePlain ? 2u : 1u;
     HelpMarker("The same as above, used when the model runs the plain FP16 kernels (used by some modified DLSS-NR DLLs).\nOn by default.");
-    ImGui::EndDisabled();
     ImGui::Text("Kernel set in use: %s", kernelSet);
     bool detailReuse = config->DlssNrDetailReuse.value_or_default();
     const auto detailReuseStatus = !detailReuse            ? DlssNr::DetailReuseInfo {}
                                    : DlssNr::IsRunningVk() ? DlssNr::DetailReuseStatusVk()
                                                            : DlssNr::DetailReuseStatus();
     const bool detailReuseRunning = detailReuse && detailReuseStatus.active;
-    if (vitReuseVk)
-        ImGui::TextWrapped("Reuse bottleneck: off in Vulkan games (the reused result can flash in dark scenes)");
-    else if (detailReuseRunning)
+    if (detailReuseRunning)
         ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
     else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
         ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
@@ -3261,40 +3283,81 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         HelpMarker("Filter used to reduce NR output when Model resolution exceeds 100%.\nSharper filters may introduce ringing around edges.");
     }
 
-    // Experimental input style (Config.h DlssNrInputStyle): restyle the picture the model is shown.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the picture the model is
+    // shown, as one card. One way to flatten first (watercolour and smooth canvas do the same job, so a choice of one),
+    // then the structure hint as a checkbox; each style's strength shows only while it is on. Its own section, open at start:
+    // with the modern style a top-level section is a card.
+    if (auto card = ScopedCollapsingHeader("Input style (experimental)", ImGuiTreeNodeFlags_DefaultOpen);
+        card.IsHeaderOpen())
     {
-        static const char* styleNames[] = { "Off", "Watercolour", "Structure hint", "Smooth canvas" };
-        int style = (int) std::min(config->DlssNrInputStyle.value_or_default(), 3u);
+        DlssNrInput::Styles styles = config->DlssNrInputStyles();
+        bool changed = false;
 
-        if (ImGui::Combo("Input style (experimental)", &style, styleNames, IM_ARRAYSIZE(styleNames)))
-            config->DlssNrInputStyle = (uint32_t) style;
+        ImGui::TextDisabled("Restyles the picture NR is shown; the styles combine.");
+        HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed. "
+                   "The styles combine and run in this order: flatten, then structure hint.\nWith a composed "
+                   "curve only what NR paints differently shows; with a replace curve you see NR's painting as it is "
+                   "(Restore Sharpness is off while a style is on, or it would put the game's texture back).\nEach "
+                   "style is one more pass before the model runs. No effect above 100% Model resolution.");
 
-        HelpMarker("A/B test: restyle the picture NR is shown before it runs. The game's own picture is not changed.\n"
-                   "Watercolour flattens texture into washes and keeps edges (can look blocky).\nStructure hint raises "
-                   "local contrast (brightness only) so NR has more structure to follow; high strength blurs with a "
-                   "composed curve.\nSmooth canvas shows NR skin like an untextured old-game surface: pores and fine "
-                   "shading flattened, contours kept, so NR paints its own skin detail.\nWith a composed curve only "
-                   "what NR paints differently shows; with a replace curve you see NR's painting as it is (Restore "
-                   "Sharpness is off while a style is on, or it would put the game's texture back).\nNo effect above "
-                   "100% Model resolution.");
-
-        if (style != 0)
+        // A strength slider for a style that is on, with its Reset (1.0) beside it
+        const auto strength = [&](const char* label, const char* resetId, float& value, uint32_t style)
         {
-            // Watercolour and smooth canvas are a blend (0..1); the structure hint's boost goes to 3x.
-            const float most = style == 2 ? 3.0f : 1.0f;
-            float strength = std::min(config->DlssNrInputStyleStrength.value_or_default(), most);
+            const float most = DlssNrInput::MostStrength(style);
+            ImGui::Indent();
+            float shown = std::min(value, most);
 
-            if (ImGui::SliderFloat("Input style strength", &strength, 0.0f, most, "%.2f"))
-                config->DlssNrInputStyleStrength = strength;
+            if (ImGui::SliderFloat(label, &shown, 0.0f, most, "%.2f"))
+            {
+                value = shown;
+                changed = true;
+            }
 
-            bool facesOnly = config->DlssNrInputStyleFacesOnly.value_or_default();
+            ImGui::SameLine();
 
-            if (ImGui::Checkbox("Faces only (skin colours)##inputstyle", &facesOnly))
-                config->DlssNrInputStyleFacesOnly = facesOnly;
+            if (ImGui::SmallButton(resetId))
+            {
+                value = 1.0f;
+                changed = true;
+            }
 
-            HelpMarker("Apply the input style only where the colour looks like skin (the same colour test as Skin "
+            ImGui::Unindent();
+        };
+
+        ImGui::TextUnformatted("Flatten first:");
+        ImGui::SameLine();
+        int flatten = (int) std::min(styles.flatten, DlssNrInput::kFlattenSmoothCanvas);
+        changed |= ImGui::RadioButton("Off##inputflatten", &flatten, (int) DlssNrInput::kFlattenOff);
+        ImGui::SameLine();
+        changed |= ImGui::RadioButton("Watercolour##inputflatten", &flatten, (int) DlssNrInput::kFlattenWatercolour);
+        ImGui::SameLine();
+        changed |= ImGui::RadioButton("Smooth canvas##inputflatten", &flatten, (int) DlssNrInput::kFlattenSmoothCanvas);
+        styles.flatten = (uint32_t) flatten;
+        HelpMarker("Watercolour flattens texture into washes and keeps edges (can look blocky).\nSmooth canvas shows NR "
+                   "skin like an untextured old-game surface: pores and fine shading flattened, contours kept, so NR "
+                   "paints its own skin detail.\nStrength blends with the picture as it was (0 to 1).");
+
+        if (styles.flatten != DlssNrInput::kFlattenOff)
+            strength("Strength##inputflattenstrength", "Reset##inputflattenstrength", styles.flattenStrength,
+                     DlssNrInput::FlattenStyle(styles.flatten));
+
+        changed |= ImGui::Checkbox("Structure hint##inputstructure", &styles.structure);
+        HelpMarker("Raises local contrast (brightness only) so NR has more structure to follow; high strength blurs "
+                   "with a composed curve. Strength 0 to 3.");
+
+        if (styles.structure)
+            strength("Strength##inputstructurestrength", "Reset##inputstructurestrength", styles.structureStrength,
+                     DlssNrInput::kStyleStructureHint);
+
+        if (DlssNrInput::Any(styles))
+        {
+            changed |= ImGui::Checkbox("Faces only (skin colours)##inputstyle", &styles.facesOnly);
+            HelpMarker("Apply the input styles only where the colour looks like skin (the same colour test as Skin "
                        "protection; warm materials can match too, coloured light can hide skin).");
         }
+
+        if (changed)
+            config->SetDlssNrInputStyles(styles);
     }
 
     RenderEdgeCompression(config, menuResScale, nr);
@@ -3490,6 +3553,16 @@ static void RenderPassesPage(Config* config, float menuResScale)
     ImGui::TextWrapped("Settings apply when you release a slider.");
     static const char* styles[] = { "Standard", "Natural", "Cinematic" };
     static const char* inheritedStyles[] = { "Auto (inherit pass 1)", "Standard", "Natural", "Cinematic" };
+    // [DlssNr] Preset / Pass2Preset / Pass3Preset, the model's DLSSNR.Hint.Render.Preset: 1 and 2 named as NVIDIA names
+    // its presets (A = 1, B = 2). On 310.9 DLLs 1 selects the main model and 2 the small one, and any other value (0,
+    // Default, included) falls back to 2; 310.8 DLLs have only the main model. A saved 3 behaves as 2 and shows as B.
+    static const char* presets[] = { "Default", "Preset A (main model)", "Preset B (small model)" };
+    static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset A (main model)",
+                                              "Preset B (small model)" };
+    static const char* presetHelp =
+        "Which model NR runs on this pass. Preset A: the main model (more detail). Preset B: the small model (about half "
+        "the cost, softer; only in 310.9 DLLs). Default: the DLL decides, which is the small model on 310.9 DLLs. 310.8 "
+        "DLLs have only the main model, so the preset changes nothing there. Passes 4 and up use Pass 1's preset.";
 
     if (ImGui::TreeNodeEx("Pass 1", ImGuiTreeNodeFlags_DefaultOpen))
     {
@@ -3497,6 +3570,10 @@ static void RenderPassesPage(Config* config, float menuResScale)
         if (ImGui::Combo("Style", &style, styles, IM_ARRAYSIZE(styles)))
             config->DlssNrStyle = (uint32_t) style;
         HelpMarker("Look profile: Standard, Natural or Cinematic. Intensity sets its strength.");
+        int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 2u);
+        if (ImGui::Combo("Preset", &preset, presets, IM_ARRAYSIZE(presets)))
+            config->DlssNrPreset = (uint32_t) preset;
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);
@@ -3513,6 +3590,8 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass2Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
+        InheritedProfileCombo("Preset", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrPass2Intensity, 0.0f, 2.0f, config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass2LocalStructure, 0.0f, 2.0f, config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
         DeferredSlider("Local tone", &config->DlssNrPass2LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
@@ -3530,6 +3609,8 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass3Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
+        InheritedProfileCombo("Preset", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
+        HelpMarker(presetHelp);
         DeferredSlider("Intensity", &config->DlssNrPass3Intensity, 0.0f, 2.0f, config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass3LocalStructure, 0.0f, 2.0f, config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
         DeferredSlider("Local tone", &config->DlssNrPass3LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
@@ -3564,18 +3645,6 @@ static void RenderPassesPage(Config* config, float menuResScale)
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Advanced preset hints (effect unverified)"))
-    {
-        ImGui::TextWrapped("Experimental model hints; visual effect unverified. Use Style to select a profile.");
-        static const char* presets[] = { "Default", "Preset 1", "Preset 2", "Preset 3" };
-        static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset 1", "Preset 2", "Preset 3" };
-        int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 3u);
-        if (ImGui::Combo("Pass 1 preset hint", &preset, presets, IM_ARRAYSIZE(presets)))
-            config->DlssNrPreset = (uint32_t) preset;
-        InheritedProfileCombo("Pass 2 preset hint", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        InheritedProfileCombo("Pass 3 preset hint", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        ImGui::TreePop();
-    }
     ImGui::TextWrapped("Pass settings apply to SR and RR on DX12 and native Vulkan. The driver-proxy backend supports one pass.");
 
     ImGui::SeparatorText("Colour");
@@ -3822,7 +3891,7 @@ void RenderF5LowUpscalerNote()
 {
     ImGui::TextWrapped(
         "Driven by Optical F5Low (the game makes no upscaler call): this upscaler runs at the same size as the game's "
-        "picture. With NR on, NR works on the game's picture and this upscaler only gives frame generation its input.");
+        "picture and only gives frame generation its input, unless Run the upscaler on the picture is ticked there.");
 
     if (ImGui::SmallButton("Optical F5Low settings##upscalernote"))
         MenuPages::RequestPage(MenuPages::Page::NrF5Low);
@@ -3838,7 +3907,7 @@ void RenderF5LowFrameGenHint(Config* config, bool noUpscalerFeature)
     if (!noUpscalerFeature || Decide(HeaderInputs(config, Feature::None, false)).action != Action::UseF5Low)
         return;
 
-    ImGui::TextWrapped("No upscaler call from the game? Optical F5Low's NR + upscaler & frame generation gives frame "
+    ImGui::TextWrapped("No upscaler call from the game? Optical F5Low's NR + frame generation gives frame "
                        "generation its input.");
 
     if (ImGui::SmallButton("Use Optical F5Low##framegenhint"))
@@ -3851,10 +3920,11 @@ void UpdateF5LowHint(Config* config)
 {
     // Once per session, and never again after it has been shown or once a game upscaler is in play.
     static bool shown = false;
+    static bool gameUpscalerSeen = false;
     static double quietMs = 0.0;
     static double lastCallMs = 0.0;
 
-    if (shown || !config->F5LowHint.value_or_default())
+    if (shown || gameUpscalerSeen || !config->F5LowHint.value_or_default())
         return;
 
     // Real time between presents (ImGui's DeltaTime stands still while no menu frame is drawn)
@@ -3864,6 +3934,13 @@ void UpdateF5LowHint(Config* config)
 
     const auto feature = State::Instance().currentFeature;
     const bool noFeature = feature == nullptr || !feature->IsInited();
+
+    // The game called an upscaler, or one ran: it has its own, also when it turns it off in a menu later
+    gameUpscalerSeen = HeaderBanner::GameUpscalerSeen(gameUpscalerSeen, NativeGameCallsUpscaler(CurrentNativeApi()),
+                                                      !noFeature);
+
+    if (gameUpscalerSeen)
+        return;
 
     // The header's offer: Optical F5Low off, NR available, no upscaler call from the game, and no upscaler running.
     const bool offerStands =

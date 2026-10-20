@@ -50,6 +50,14 @@ inline InputRule RuleForInput(Input input)
     }
 }
 
+// Auto is Game while Optical F5Low's virtual upscaler (the NR + frame generation mode) runs: only the game's own Reflex,
+// OptiScaler makes no latency calls next to it, even for XeFG or FSR FG (which then lower nothing in a game without
+// Reflex). OptiScaler, picked by hand, still starts ours. Standing aside for a game upscaler, Auto is Auto again.
+inline Input EffectiveInput(Input input, bool virtualUpscaler)
+{
+    return input == Input::Auto && virtualUpscaler ? Input::Game : input;
+}
+
 // DLSS frame generation cannot run without Reflex low latency on: Off leaves the game's Reflex alone then
 inline bool BlocksGameLowLatency(Input input, bool frameGenerationNeedsReflex)
 {
@@ -670,6 +678,16 @@ inline const char* StatusLabel(Decision decision)
     }
 }
 
+// The decision both pages show. With the Input on Game (or Auto acting as Game with NR + frame generation) Decide stops
+// at SettingOff before it looks at the game, so a game making its own Reflex calls read as "[Off]" next to "Active: Game
+// -> XeLL". For the menu that is the game's Reflex at work, and we stand aside for it. Off keeps its own wording (the
+// game's Reflex may be kept on for DLSS FG, which has its own line). The code runs on Decide's answer, not this one.
+inline Decision ShownDecision(Decision decision, Input input, bool gameCallsReflex)
+{
+    return decision == Decision::SettingOff && input != Input::Off && gameCallsReflex ? Decision::GameRunsReflex
+                                                                                      : decision;
+}
+
 // The Framerate page's "Active: <input> -> <output>": who makes the latency calls right now. The game's Reflex counts
 // whenever the game makes calls, whatever we decided about ours. Frame generation that runs Reflex itself (DLSS FG) makes
 // calls whatever the Input says, and so does a game's own XeLL; both are facts, not read off the order Decide checks in.
@@ -708,7 +726,8 @@ inline const char* DecisionText(Decision decision, bool gameReflexFeedsXell = fa
     switch (decision)
     {
     case Decision::SettingOff:
-        return "OptiScaler makes no latency calls: the Input is Game or Off";
+        return "OptiScaler makes no latency calls: the Input is Game (Auto acts as Game with NR + frame generation) "
+               "or Off";
     case Decision::LowLatencyOff:
         return "Input is Off: no low latency, the game's Reflex is sent with it off";
     case Decision::NoF5Low:

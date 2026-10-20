@@ -13,6 +13,7 @@
 
 #include <vulkan/vulkan_core.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 static std::map<std::string, bool> vkDeviceExtensions;
@@ -808,6 +809,10 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetInstanceProcAddr(const PFN_vkVoidFunct
     if (auto depth = GenericDepthVk::GetProcAddr(orgFunc, pName); depth != nullptr)
         return depth;
 
+    // The exposure scan's buffer and memory hooks, while the scan is wanted (dlssnr/DlssNr_ExposureScan_Vk.h)
+    if (auto scan = DlssNr::ExposureScanVk::GetProcAddr(orgFunc, pName); scan != nullptr)
+        return scan;
+
     auto result = Vulkan_wDx12::GetInstanceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -898,6 +903,10 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetDeviceProcAddr(const PFN_vkVoidFunctio
     if (auto depth = GenericDepthVk::GetProcAddr(orgFunc, pName); depth != nullptr)
         return depth;
 
+    // The exposure scan's buffer and memory hooks, while the scan is wanted (dlssnr/DlssNr_ExposureScan_Vk.h)
+    if (auto scan = DlssNr::ExposureScanVk::GetProcAddr(orgFunc, pName); scan != nullptr)
+        return scan;
+
     auto result = Vulkan_wDx12::GetDeviceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -985,6 +994,7 @@ void VulkanSpoofing::HookForVulkanSpoofing(HMODULE vulkanModule)
 {
     Vulkan_wDx12::Hook(vulkanModule);
     GenericDepthVk::Hook(vulkanModule);
+    DlssNr::ExposureScanVk::Hook(vulkanModule);
 
     if (Config::Instance()->VulkanSpoofing.value_or_default() && o_vkGetPhysicalDeviceProperties == nullptr)
     {

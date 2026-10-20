@@ -103,7 +103,7 @@ bool ApplyNativeInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd,
                       DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState, unsigned long long epoch);
 // The same for Optical F5Low's virtual upscaler (native/VirtualUpscalerDriver.h), which keeps its upscaler backend only for
 // frame generation and runs NR on the game's picture here. It skips the check that is about NR Only mode: Finished Picture
-// does not have to be on (the "NR + upscaler & frame generation" mode keeps it off). Needs Enable Neural Rendering.
+// does not have to be on (the "NR + frame generation" mode keeps it off). Needs Enable Neural Rendering.
 bool ApplyVirtualUpscalerInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
                                ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
                                bool depthReversed, bool reset, DXGI_COLOR_SPACE_TYPE colorSpace,
@@ -189,6 +189,9 @@ struct FollowGameStatus
     // While following: how far the followed base sits from Automatic's own, in EV (D3D12; 0 on Vulkan). Beyond
     // DlssNrExposureCalibrate::kFollowDisagreementLimitEv the learned calibration is stale and wants a Re-learn.
     float disagreementEv = 0.0f;
+    // Auto's found exposure (story 5) moves the white point this frame (DlssNr_ExposureScan.h FoundExposure): what the
+    // menu names Auto by, since the scan can hold a match the picture is not using (SDR, a finished picture, ...)
+    bool foundInForce = false;
 };
 
 FollowGameStatus FollowGameExposureStatus();

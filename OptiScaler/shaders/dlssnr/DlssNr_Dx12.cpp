@@ -8,6 +8,7 @@
 
 #include <dlssnr/DlssNr.h>
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/DlssNrVitReuse.h>
 #include <dlssnr/ResidualFg.h>
 #include <dlssnr/DlssNrDetailReuse.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
@@ -38,6 +39,7 @@
 #include "DlssNr_ExposureCalibrate_Run.h"
 #include "DlssNr_ProxyCurve.h"
 #include "DlssNr_ExposureAdapt.h"
+#include "DlssNr_ExposureFoundBlend.h"
 #include "DlssNr_ExposureMeter.h"
 #include "DlssNr_FinishedReady.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
@@ -332,11 +334,14 @@ struct NrState
     SGSR1_Dx12* sgsr1UpAnswer = nullptr;
     Scaler nrScaler = Scaler::Count;
 
-    // Experimental input style (DlssNrInputStyle): the model's picture restyled (DlssNrMode_Watercolor,
+    // Experimental input styles (DlssNr_InputStyles.h): the model's picture restyled (DlssNrMode_Watercolor,
     // DlssNrMode_StructureHint or DlssNrMode_SmoothCanvas), which then stands in for the model input and the resolve's proxy. Created when first
     // used, parked with the scratch set; its state is tracked because the resolve reads it.
     ID3D12Resource* styled = nullptr;
     D3D12_RESOURCE_STATES styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // The second texture the styles alternate with when more than one is on
+    ID3D12Resource* styledB = nullptr;
+    D3D12_RESOURCE_STATES styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     // Frame hold (design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
     // over the live output before the encode reads it while held, so a setting change re-renders the
@@ -380,6 +385,13 @@ struct NrState
     ID3D12Resource* autoExposure = nullptr;
     bool autoExposureReadable = false;
     float autoExposureValue = 0.0f;
+
+    // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
+    // none is in force. Read back a few frames behind like the meter's value, so while it holds the white point is the
+    // host's (the shader is not asked to recompute it from the meter's live texture). Eased in and out
+    // (DlssNr_ExposureFoundBlend.h).
+    float foundBaseWhitePoint = 0.0f;
+    DlssNrExposureFoundBlend::Blend foundBlend;
 
     // Eye adaptation (DlssNr_ExposureAdapt.h): the meter's own reading lands in autoExposureRaw (kept in the UAV state
     // between evaluations) and a one-texel pass eases autoExposure toward it, so autoExposure above is the eased value
@@ -534,11 +546,15 @@ float AutoOwnBaseWhitePoint()
 }
 
 // Automatic exposure's base white point, the value its Trim multiplies: the game's base white point times the
-// learned calibration while following the game (DlssNr_FollowGame.h), else Automatic's own.
+// learned calibration while following the game (DlssNr_FollowGame.h), Auto's found exposure while the scan has one,
+// else Automatic's own.
 float AutoBaseWhitePoint()
 {
     if (g_nr.followingGame && g_nr.autoPairGameExposure > 1e-8f)
         return g_nr.autoPairPreExposure / g_nr.autoPairGameExposure * DlssNrFollowGame::Instance().Scale();
+
+    if (g_nr.foundBaseWhitePoint > 0.0f)
+        return g_nr.foundBaseWhitePoint;
 
     return AutoOwnBaseWhitePoint();
 }
@@ -567,6 +583,12 @@ std::unique_ptr<DlssNrGpuTime> g_gpuTime;
 // we can actually do something about.
 std::unique_ptr<DlssNrGpuTime> g_ngxTime;
 std::optional<double> g_lastNgxTime;
+
+// A third, around the exposure scan's copies (DlssNr::ExposureScan::Tick), for what searching costs -- it runs by
+// itself on Auto, so its price is paid by everyone on Auto until it finds or gives up. Averaged over the log interval.
+std::unique_ptr<DlssNrGpuTime> g_scanTime;
+double g_scanTimeSum = 0.0, g_scanTimeMax = 0.0;
+unsigned g_scanTimeSamples = 0;
 std::optional<double> g_lastGpuTime;
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
@@ -1708,7 +1730,9 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
     // Measured off the frame the encode is about to read -- the upscaler's fresh output -- and never
     // off anything this pass has written. That is the difference from the statistical meter removed
     // below, which read its own output and chased it.
-    if (DlssNr::WhitePointSourceEffective(cfg) == 3 && g_nr.autoExposureValue > 1e-8f)
+    // A found exposure in force counts on its own: Automatic's reading starts over on a change of source, and the
+    // white point must not fall to the slider for the frames that takes (DlssNr_ExposureFoundBlend.h).
+    if (DlssNr::WhitePointSourceEffective(cfg) == 3 && (g_nr.autoExposureValue > 1e-8f || g_nr.foundBaseWhitePoint > 0.0f))
     {
         // Following the game (DlssNr_FollowGame.h): the game's base white point times the learned calibration, which
         // is where Automatic's own would sit. The shader does the same from the game's live texture.
@@ -3177,6 +3201,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.lutScratch);
             ParkNrResource(g_nr.styled);
             g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            ParkNrResource(g_nr.styledB);
+            g_nr.styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             g_nr.passScratchFailed = false;
             g_nr.passClampScratchFailed = false;
             g_nr.passClampScratch2Failed = false;
@@ -3651,6 +3677,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_ngxTime == nullptr)
         g_ngxTime = std::make_unique<DlssNrGpuTime>(device, "model");
 
+    if (g_scanTime == nullptr)
+        g_scanTime = std::make_unique<DlssNrGpuTime>(device, "exposure scan");
+
     if (g_gpuTime != nullptr)
         g_gpuTime->Start(cmdList);
 
@@ -3843,7 +3872,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // needs the two from the same frame. The meter's tiles have been reduced already; nothing else reads them now.
         // Same rule as Vulkan: only while following the game's exposure (DlssNr_GameDefaults.h), so nothing is learned
         // while it is off (switching it on later starts learning at that moment).
-        const bool pairGameExposure = frame.ExposureTexture != nullptr && DlssNr::FollowGameOn(cfg);
+        // Also while the exposure scan runs: its recording needs the game's exposure beside Automatic's reading.
+        const bool pairGameExposure =
+            frame.ExposureTexture != nullptr && (DlssNr::FollowGameOn(cfg) || DlssNr::ExposureScan::Scanning());
 
         if (pairGameExposure)
         {
@@ -3895,6 +3926,39 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.gamePreExposure = frame.PreExposure;
 
+    // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs, and
+    // never while following the game (that one is handed over, so Auto has no scan match then). Moving to and from it
+    // is eased over a second, in stops (DlssNr_ExposureFoundBlend.h): Cyberpunk 2077 took over 0.84 EV apart, in a
+    // scene it keeps darker than the meter would.
+    {
+        float found = 0.0f;
+        float foundPre = 1.0f;
+        const float target = usingAutoExposure && !g_nr.followingGame &&
+                                     DlssNr::ExposureScan::FoundExposure(&found, &foundPre) && found > 1e-8f
+                                 ? foundPre / found
+                                 : 0.0f;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float own = AutoOwnBaseWhitePoint();
+        g_nr.foundBaseWhitePoint = g_nr.foundBlend.Step(target, own, now, usingAutoExposure);
+
+        switch (g_nr.foundBlend.LastEvent())
+        {
+        case DlssNrExposureFoundBlend::Event::TookOver:
+            LOG_INFO("DLSS-NR automatic exposure: the game's own exposure (found by the scan) moves the white point from "
+                     "here: {:.4g}, from {:.4g} ({:+.2f} EV), eased over a second",
+                     target, g_nr.foundBaseWhitePoint, std::log2(g_nr.foundBaseWhitePoint / target));
+            break;
+        case DlssNrExposureFoundBlend::Event::Leaving:
+            LOG_INFO("DLSS-NR automatic exposure: the game's exposure is gone; back to Automatic's own meter, eased");
+            break;
+        case DlssNrExposureFoundBlend::Event::Left:
+            LOG_INFO("DLSS-NR automatic exposure: Automatic's own meter again");
+            break;
+        default:
+            break;
+        }
+    }
+
     float whitePoint = frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride : ResolveWhitePoint(cfg, isHdrBuffer);
 
     // While Tune for this scene runs, the white point is pinned on the CPU (the base frozen at its start times the
@@ -3945,7 +4009,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         params.WhitePoint = whitePoint;
         params.UseGameExposure = useGameExposure;
         params.ExposurePreMul = exposurePreMul;
-        params.UseExposureWhitePoint = usingAutoExposure && !calibrationPinned ? 1u : 0u;
+        params.UseExposureWhitePoint =
+            usingAutoExposure && !calibrationPinned && !(g_nr.foundBaseWhitePoint > 0.0f) ? 1u : 0u;
         params.ExposureBaseScale = exposureBaseScale;
         FillExposureConstants(params, cfg, usingAutoExposure ? 3u : 1u, frame.PreExposure);
     };
@@ -4289,8 +4354,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         modelInput = g_nr.colorSmall;
     }
 
-    // Read the exposure scan's candidates on the pass's own command list, once a frame.
-    DlssNr::ExposureScan::Tick(device, cmdList);
+    // Read the exposure scan's candidates on the pass's own command list, once a frame, with what is known about the
+    // frame's brightness for its recording: Automatic's raw reading (Automatic only) and the game's exposure (read on
+    // Game exposure, paired on Automatic while scanning).
+    {
+        DlssNr::ExposureScan::FrameExposure scanFrame;
+        scanFrame.handed = (ID3D12Resource*) frame.ExposureTexture;
+        scanFrame.meter = whitePointSource == 3 ? g_nr.autoExposureRawValue : 0.0f;
+        scanFrame.game = whitePointSource == 1   ? g_nr.gameExposure
+                         : whitePointSource == 3 ? g_nr.autoPairGameExposure
+                                                 : 0.0f;
+        // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
+        scanFrame.pre = whitePointSource == 3 ? g_nr.autoExposurePreExposure : frame.PreExposure;
+        // Timed only on frames that record copies: an empty pair would pull the average toward 0
+        const bool timeScan = g_scanTime != nullptr && DlssNr::ExposureScan::Holding();
+
+        if (timeScan)
+            g_scanTime->Start(cmdList);
+
+        const bool copied = DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
+
+        if (timeScan && copied)
+            g_scanTime->End(cmdList);
+        else if (timeScan)
+            g_scanTime->Abandon();
+    }
 
     // No depth gives depthIn == nullptr; only a depth that could not be cloned is a failure.
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
@@ -4377,43 +4465,71 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         modelMotion = EdgeCompression::motion;
     }
 
-    // Experimental input style (DlssNrInputStyle): restyle the model's picture once it is final (after the shrink and
-    // the edge packing). The restyled picture is both the model input and the resolve's proxy (ordinaryProxy below,
-    // and through the edge unpacking), so Composed hands back only what the model painted on top of it. Skipped above
-    // 100% model resolution (the resolve compares against colorCopy there) and on the deferred path.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the model's picture once
+    // it is final (after the shrink and the edge packing), each style that is on in turn (flatten, then structure hint),
+    // each on the one before's result, alternating between two textures. The last result is both the
+    // model input and the resolve's proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back
+    // only what the model painted on top of it. Skipped above 100% model resolution (the resolve compares against
+    // colorCopy there) and on the deferred path.
     bool inputRestyled = false;
     {
-        const uint32_t style = cfg.DlssNrInputStyle.value_or_default();
-        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), style == 2u ? 3.0f : 1.0f);
-        const bool facesOnly = cfg.DlssNrInputStyleFacesOnly.value_or_default();
-        const bool wanted = style >= 1u && style <= 3u && strength > 0.0f;
-        const char* skip = !wanted                                     ? nullptr
+        const DlssNrInput::Styles styles = cfg.DlssNrInputStyles();
+        DlssNrInput::Pass passes[2];
+        const int passCount = DlssNrInput::Passes(styles, passes);
+
+        const char* skip = passCount == 0                              ? nullptr
                            : cfg.DlssNrDeferredDlss.value_or_default() ? "the deferred Super Resolution path"
                            : workScale > 1.0f                          ? "model resolution above 100%"
                                                                        : nullptr;
-        bool restyled = false;
+        int ran = 0;
 
-        if (wanted && skip == nullptr)
+        if (passCount > 0 && skip == nullptr)
         {
             const D3D12_RESOURCE_DESC in = modelInput->GetDesc();
 
-            if (g_nr.styled != nullptr && (g_nr.styled->GetDesc().Width != in.Width ||
-                                           g_nr.styled->GetDesc().Height != in.Height ||
-                                           g_nr.styled->GetDesc().Format != in.Format))
+            // One texture for one style, two to alternate between for more (the second is let go while one is enough)
+            ID3D12Resource** targets[2] = { &g_nr.styled, &g_nr.styledB };
+            D3D12_RESOURCE_STATES* targetStates[2] = { &g_nr.styledState, &g_nr.styledBState };
+
+            if (passCount < 2 && g_nr.styledB != nullptr)
             {
-                ParkNrResource(g_nr.styled);
-                g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                ParkNrResource(g_nr.styledB);
+                g_nr.styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             }
 
-            if (g_nr.styled == nullptr)
+            for (int t = 0; t < (passCount > 1 ? 2 : 1); ++t)
             {
-                g_nr.styled = CreateScratch(device, in.Format, (unsigned int) in.Width, in.Height);
-                g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                ID3D12Resource*& target = *targets[t];
+
+                if (target != nullptr && (target->GetDesc().Width != in.Width || target->GetDesc().Height != in.Height ||
+                                          target->GetDesc().Format != in.Format))
+                {
+                    ParkNrResource(target);
+                    *targetStates[t] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                }
+
+                if (target == nullptr)
+                {
+                    target = CreateScratch(device, in.Format, (unsigned int) in.Width, in.Height);
+                    *targetStates[t] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                }
             }
 
-            if (g_nr.styled != nullptr)
+            ID3D12Resource* source = modelInput;
+
+            for (int k = 0; k < passCount; ++k)
             {
-                Barrier(cmdList, g_nr.styled, g_nr.styledState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                const uint32_t style = passes[k].style;
+                ID3D12Resource* target = *targets[k % 2];
+                D3D12_RESOURCE_STATES& targetState = *targetStates[k % 2];
+
+                if (target == nullptr)
+                {
+                    skip = "its texture could not be created";
+                    break;
+                }
+
+                Barrier(cmdList, target, targetState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
                 DlssNrConstants paint {};
                 paint.Mode = StyleMode(style);
@@ -4421,48 +4537,53 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 paint.Height = in.Height;
                 paint.Passthrough = isHdrBuffer ? 0u : 1u;
                 paint.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-                paint.TransferStrength = strength;
-                paint.SkinProtection = facesOnly ? 1u : 0u; // the style passes read it as "faces only"
-                const bool painted =
-                    DispatchPass(cmdList, paint, modelInput, nullptr, nullptr, nullptr, nullptr, g_nr.styled, nullptr);
+                paint.TransferStrength = passes[k].strength;
+                paint.SkinProtection = styles.facesOnly ? 1u : 0u; // the style passes read it as "faces only"
 
-                Barrier(cmdList, g_nr.styled, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                const bool painted = DispatchPass(cmdList, paint, source, nullptr, nullptr, nullptr, nullptr, target, nullptr);
+
+                Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                g_nr.styledState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                targetState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
-                // A failed dispatch left the texture as it was (never written, or last frame's): the model keeps the
-                // picture as it is, as on Vulkan
-                if (painted)
-                {
-                    modelInput = g_nr.styled;
-                    restyled = true;
-                    inputRestyled = true;
-                }
-                else
+                // A failed dispatch left its texture as it was: the model gets the picture up to the last style that ran
+                if (!painted)
                 {
                     skip = "its dispatch failed";
+                    break;
                 }
+
+                source = target;
+                ++ran;
             }
-            else
+
+            if (ran > 0)
             {
-                skip = "its texture could not be created";
+                modelInput = source;
+                inputRestyled = true;
             }
         }
 
         // Said when it changes, so a log shows each A/B toggle.
-        static int said = -1;
-        const int state = restyled ? (int) style + 10 + (facesOnly ? 10 : 0) : (skip != nullptr ? 2 : 0);
+        static std::string said = "-";
+        std::string state;
+
+        for (int k = 0; k < ran; ++k)
+            state += std::format("{}{} {:.2f}", k == 0 ? "" : ", ", StyleName(passes[k].style), passes[k].strength);
+
+        if (skip != nullptr)
+            state += std::format("{}skipped ({})", ran > 0 ? "; then " : "", skip);
 
         if (state != said)
         {
             said = state;
 
-            if (restyled)
-                LOG_INFO("DLSS-NR input style: {} on (strength {:.2f}, {}x{}{}{})", StyleName(style), strength,
-                         modelInput->GetDesc().Width, modelInput->GetDesc().Height, facesOnly ? ", faces only" : "",
+            if (ran > 0)
+                LOG_INFO("DLSS-NR input style: {} ({}x{}{}{})", state, modelInput->GetDesc().Width,
+                         modelInput->GetDesc().Height, styles.facesOnly ? ", faces only" : "",
                          spatial ? ", edge-compressed picture" : "");
             else if (skip != nullptr)
-                LOG_INFO("DLSS-NR input style: skipped ({})", skip);
+                LOG_INFO("DLSS-NR input style: {}", state);
             else
                 LOG_INFO("DLSS-NR input style: off");
         }
@@ -4763,16 +4884,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // and the frame slot (successfulDispatches counts NR frames and is constant across one frame's passes, so all passes compute on the
         // same frame and all reuse on the next; see DlssNrVitReuse.h for why the passes must not be offset)
         // While detail reuse runs, full frames are every other frame: a ViT slot keyed to them would compute only
-        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time. Also in a
-        // Vulkan game reaching this through the D3D12 bridge (IFeature_VkwDx12): Reuse bottleneck is off for Vulkan
-        // games, as on the native Vulkan path (the reused result flashed in dark scenes there).
+        // every fourth game frame (or never, on the odd parity), so the bottleneck is computed every time.
         // The edit cache likewise: the model runs one frame in N.
-        const bool vitEveryFrame = reusePlan.active || cachePlan.runs || State::Instance().api == Vulkan;
+        // Copy mode (DlssNrVitReuse.h): the plain set always reuses through our own copy of the ViT output. A Vulkan game
+        // reaching this through the D3D12 bridge (IFeature_VkwDx12) uses it for the fp8 set too: on the native Vulkan path
+        // the kept result was overwritten between frames (dark scenes flashed), and the copy does not depend on it staying.
+        const bool vitEveryFrame = reusePlan.active || cachePlan.runs;
+        const unsigned copySets =
+            DlssNrVitReuse::kCopyPlain | (State::Instance().api == Vulkan ? DlssNrVitReuse::kCopyFp8 : 0u);
         DlssNrNative::BeginEvaluate(passFeature, passReset,
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
-                                    cfg.DlssNrKernelProfile.value_or_default());
+                                    cfg.DlssNrKernelProfile.value_or_default(), copySets);
         result = g_nr.evaluate(
             cmdList, passFeature, g_nr.capabilityParams, passInput, modelDepth, spatial ? modelMotion : evalMotion,
             passOutput, modelWidth, modelHeight, evalGuideW, evalGuideH, evalMotionW, evalMotionH,
@@ -4784,8 +4908,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             tuning.autoMask ? 1 : 0, evalMvScaleX,
             evalMvScaleY);
         if (DlssNrNative::EndEvaluate(cmdList))
-            LOG_WARN("DLSS-NR: the model's kernel launches were not in the expected order; Reuse bottleneck is off for "
-                     "this session");
+            LOG_WARN("DLSS-NR: Reuse bottleneck is {}", DlssNrNative::VitStatus());
 
         for (const std::string& report : DlssNrNative::TakeProfileReports())
             LOG_INFO("{}", report);
@@ -5401,6 +5524,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     g_lastNgxTime = ngx;
             }
 
+            if (g_scanTime != nullptr)
+            {
+                g_scanTime->ReadGpuTime(queue);
+
+                for (const double sample : g_scanTime->TakeFresh())
+                {
+                    g_scanTimeSum += sample;
+                    g_scanTimeMax = std::max(g_scanTimeMax, sample);
+                    ++g_scanTimeSamples;
+                }
+
+                static unsigned long long lastScanLog = 0;
+
+                if (g_scanTimeSamples > 0 && g_frames - lastScanLog > 600)
+                {
+                    lastScanLog = g_frames;
+                    LOG_INFO("DLSS-NR exposure scan GPU cost: {:.4f} ms per frame on average, {:.4f} ms at most, over {} "
+                             "frames; {} candidates held ({})",
+                             g_scanTimeSum / g_scanTimeSamples, g_scanTimeMax, g_scanTimeSamples,
+                             DlssNr::ExposureScan::Report().size(), DlssNr::ExposureScan::AutoStatus());
+                    g_scanTimeSum = g_scanTimeMax = 0.0;
+                    g_scanTimeSamples = 0;
+                }
+            }
+
             // The split, once every few hundred frames. What is worth reading is not the total but the
             // remainder: the model's cost is NVIDIA's to set, and everything else is ours.
             static unsigned long long lastSplitLog = 0;
@@ -5496,6 +5644,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         g_nr.reset = true;
         if (g_gpuTime) g_gpuTime->ClearLast();
         if (g_ngxTime) g_ngxTime->ClearLast();
+        if (g_scanTime) g_scanTime->ClearLast();
         g_lastGpuTime.reset();
         g_lastNgxTime.reset();
         Late::Cancel();
@@ -5847,10 +5996,13 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             {
                 loggedScan = scanned;
 
-                if (g_nr.gameExposure > 1e-6f)
+                // Read on Game exposure, paired on Automatic while scanning
+                const float gameNow = g_nr.gameExposure > 1e-6f ? g_nr.gameExposure : g_nr.autoPairGameExposure;
+
+                if (gameNow > 1e-6f)
                     LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  the "
                              "game's own exposure is {:.5f}  |  ratio {:.4f}",
-                             which, scanned, low, high, g_nr.gameExposure, scanned / g_nr.gameExposure);
+                             which, scanned, low, high, gameNow, scanned / gameNow);
                 else
                     LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  this "
                              "game supplies no exposure to compare against",
@@ -6073,6 +6225,7 @@ FollowGameStatus FollowGameExposureStatus()
     s.gameExposureSeen = g_nr.autoPairGameExposure > 0.0f;
     s.following = g_nr.followingGame;
     s.disagreementEv = FollowDisagreementEv();
+    s.foundInForce = g_nr.foundBaseWhitePoint > 0.0f;
     return s;
 }
 
@@ -6238,6 +6391,13 @@ void Shutdown()
     }
     g_nr.styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
+    if (g_nr.styledB != nullptr)
+    {
+        g_nr.styledB->Release();
+        g_nr.styledB = nullptr;
+    }
+    g_nr.styledBState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
     if (g_nr.sgsr1UpAnswer != nullptr)
     {
         delete g_nr.sgsr1UpAnswer;
@@ -6363,6 +6523,7 @@ void Shutdown()
     g_capture.release();
     g_gpuTime.reset();
     g_ngxTime.reset();
+    g_scanTime.reset();
     g_lastNgxTime.reset();
     g_lastGpuTime.reset();
 

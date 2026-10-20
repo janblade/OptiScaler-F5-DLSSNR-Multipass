@@ -8,6 +8,7 @@
 
 #include <Config.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 
 #include <imgui/imgui.h>
@@ -64,6 +65,7 @@ ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
     // The one call site that closes the D3D11 depth finder's frame on this path; MenuOverlayDx::Present, which frame
     // generation's present still reaches, skips its own close under Dx11wDx12SC so this frame is not closed twice.
     GenericDepthDx11::OnPresent(real);
+    DlssNr::ExposureScanDx11::OnPresent(real);
     // The bridge copies the D3D12 result into frame generation's back buffer itself: no copy back to D3D11
     return RunFrame(real, device, false);
 }

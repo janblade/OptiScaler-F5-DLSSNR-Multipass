@@ -1,4 +1,4 @@
-// Host check of native/VirtualUpscalerMode.h: what Optical F5Low's virtual upscaler does with Neural Rendering, by the
+// Host check of native/VirtualUpscalerMode.h: what Optical F5Low's virtual upscaler does with the picture, by the
 // ini switch NativeUpscalerPass (auto, off, on). cl /std:c++20 /EHsc /W4 tests/f5low_vu_route_smoke.cpp
 #include "../OptiScaler/native/VirtualUpscalerMode.h"
 
@@ -19,10 +19,11 @@ static int fails = 0;
 
 int main()
 {
-    // NR off: nothing runs on the picture, whatever the switch says
+    // NR off: the picture goes on as the game made it, unless the switch asks for the backend's pass (a steadier picture
+    // with NR off too)
     CHECK(DecideVuNrRoute(false, VuPassSetting::Auto) == VuNrRoute::None);
     CHECK(DecideVuNrRoute(false, VuPassSetting::Off) == VuNrRoute::None);
-    CHECK(DecideVuNrRoute(false, VuPassSetting::On) == VuNrRoute::None);
+    CHECK(DecideVuNrRoute(false, VuPassSetting::On) == VuNrRoute::BackendPass);
 
     // NR on: on the game's picture (SDR, scRGB and HDR10 alike: native input converts HDR10 itself), unless the switch
     // asks for the backend's pass

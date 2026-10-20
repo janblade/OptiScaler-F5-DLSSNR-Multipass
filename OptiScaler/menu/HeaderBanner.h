@@ -15,7 +15,7 @@ enum class Feature
     None,   // no feature, or one that is not initialised
     Game,   // a game's feature, running
     Frozen, // a game's feature, not currently used by the game
-    F5Low   // Optical F5Low's own virtual upscaler (NR + upscaler & frame generation)
+    F5Low   // Optical F5Low's own virtual upscaler (NR + frame generation)
 };
 
 struct Inputs
@@ -120,4 +120,12 @@ inline double HintQuietAfter(double quietMs, bool offerStands, double stepMs)
 }
 
 inline bool HintDue(double quietMs) { return quietMs >= kHintQuietMs; }
+
+// Whether this session has seen the game use an upscaler of its own: once it called one, or one ran, the notice is off for
+// good. Some games turn their upscaler off in an inventory or a menu (Starfield), and a minute there would otherwise read
+// as a game without one.
+inline bool GameUpscalerSeen(bool seenBefore, bool gameCallsUpscaler, bool upscalerRunning)
+{
+    return seenBefore || gameCallsUpscaler || upscalerRunning;
+}
 } // namespace HeaderBanner

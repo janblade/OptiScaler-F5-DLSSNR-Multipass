@@ -19,6 +19,9 @@
 #include <detours/detours.h>
 #include <magic_enum_utility.hpp>
 #include <include/d3dx/d3dx12.h>
+#include <intrin.h>
+
+#pragma intrinsic(_ReturnAddress)
 
 #ifndef STDMETHODCALLTYPE
 #include <Unknwn.h> // or <objbase.h> to get STDMETHODCALLTYPE
@@ -733,7 +736,7 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
     // Every unordered access view the game makes passes through here, which is the one place a
     // buffer shaped like an exposure can be spotted without knowing anything about the game. Silent
     // and cheap for everything that does not match, and inert unless the scan is switched on.
-    DlssNr::ExposureScan::NoteUav(pResource, pDesc);
+    DlssNr::ExposureScan::NoteUav(pResource, pDesc, _ReturnAddress());
 
     o_CreateUnorderedAccessView(This, pResource, pCounterResource, pDesc, DestDescriptor);
 
@@ -1154,6 +1157,11 @@ CommandListBindingState* ResTrack_Dx12::GetOrCreateBindingState(ID3D12GraphicsCo
 {
     if (!_bindingTrackingEnabled.load(std::memory_order_acquire) || commandList == nullptr ||
         State::Instance().isShuttingDown)
+        return nullptr;
+
+    // Bindings are only read when hudfix is active (see IsHudFixActive)
+    const auto config = Config::Instance();
+    if (!config->IsFGEnabled() || !config->FGHUDFix.value_or_default())
         return nullptr;
 
     CommandListBindingState* state = nullptr;

@@ -1,6 +1,7 @@
 #include <pch.h>
 
 #include "VulkanwDx12_Hooks.h"
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <State.h>
@@ -1038,6 +1039,8 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents(VkCommandBuffer commandBuffer, uint32_t ev
                                       uint32_t imageMemoryBarrierCount,
                                       const VkImageMemoryBarrier* pImageMemoryBarriers)
 {
+    DlssNr::ExposureScanVk::NoteBarriers(imageMemoryBarrierCount, pImageMemoryBarriers);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -1065,6 +1068,9 @@ void Vulkan_wDx12::hk_vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, VkPipe
                                            uint32_t imageMemoryBarrierCount,
                                            const VkImageMemoryBarrier* pImageMemoryBarriers)
 {
+    // The layout each exposure scan image candidate is left in (dlssnr/DlssNr_ExposureScan_Vk.h); a no-op without any
+    DlssNr::ExposureScanVk::NoteBarriers(imageMemoryBarrierCount, pImageMemoryBarriers);
+
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
     if (State::Instance().gameQuirks & GameQuirk::VulkanDLSSBarrierFixup &&
         (primaryGpu.vendorId != VendorId::Nvidia || !primaryGpu.dlssCapable))
@@ -1557,6 +1563,9 @@ void Vulkan_wDx12::hk_vkCmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent ev
 void Vulkan_wDx12::hk_vkCmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents,
                                        const VkDependencyInfo* pDependencyInfos)
 {
+    for (uint32_t i = 0; pDependencyInfos != nullptr && i < eventCount; ++i)
+        DlssNr::ExposureScanVk::NoteBarriers2(&pDependencyInfos[i]);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -1577,6 +1586,8 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t e
 
 void Vulkan_wDx12::hk_vkCmdPipelineBarrier2(VkCommandBuffer commandBuffer, const VkDependencyInfo* pDependencyInfo)
 {
+    DlssNr::ExposureScanVk::NoteBarriers2(pDependencyInfo);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -2785,6 +2796,9 @@ void Vulkan_wDx12::hk_vkCmdResetEvent2KHR(VkCommandBuffer commandBuffer, VkEvent
 void Vulkan_wDx12::hk_vkCmdWaitEvents2KHR(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents,
                                           const VkDependencyInfo* pDependencyInfos)
 {
+    for (uint32_t i = 0; pDependencyInfos != nullptr && i < eventCount; ++i)
+        DlssNr::ExposureScanVk::NoteBarriers2(&pDependencyInfos[i]);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -2805,6 +2819,8 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents2KHR(VkCommandBuffer commandBuffer, uint32_
 
 void Vulkan_wDx12::hk_vkCmdPipelineBarrier2KHR(VkCommandBuffer commandBuffer, const VkDependencyInfo* pDependencyInfo)
 {
+    DlssNr::ExposureScanVk::NoteBarriers2(pDependencyInfo);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -3395,12 +3411,15 @@ void Vulkan_wDx12::hk_vkCmdCuLaunchKernelNVX(VkCommandBuffer commandBuffer, cons
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
-    // Reuse bottleneck drops the ViT run's launches of DLSS-NR's own evaluations (and records a barrier at the gap,
-    // into the buffer the launch goes to); every other launch goes out as before.
-    if (pLaunchInfo != nullptr && !DlssNrNative::VkLaunch(cmdBuffer, (uint64_t) pLaunchInfo->function))
+    // Reuse bottleneck drops the ViT run's launches of DLSS-NR's own evaluations (and records a barrier at the gap and
+    // its copies, into the buffer the launch goes to); every other launch goes out as before.
+    if (pLaunchInfo != nullptr && !DlssNrNative::VkLaunch(cmdBuffer, pLaunchInfo))
         return;
 
     o_vkCmdCuLaunchKernelNVX(cmdBuffer, pLaunchInfo);
+
+    if (pLaunchInfo != nullptr)
+        DlssNrNative::VkLaunched(cmdBuffer);
 }
 
 void Vulkan_wDx12::hk_vkCmdDrawIndirectCountAMD(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,

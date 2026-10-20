@@ -406,6 +406,7 @@ class State
 
     static UINT GetOwner()
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         _lastOwner++;
         return _lastOwner;
     }
@@ -417,6 +418,7 @@ class State
     /// <param name="dllName">Lower case dll name without `.dll` at the end. Leave blank for skipping all dll's</param>
     static void DisableChecks(UINT owner, std::string dllName = "")
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         // if (_skipOwner == 0 || _skipOwner < owner)
         //{
         _skipOwner = owner;
@@ -427,6 +429,7 @@ class State
 
     static void EnableChecks(UINT owner)
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         _skipDllName.erase(_skipOwner);
 
         // if (_skipOwner == owner)
@@ -447,6 +450,7 @@ class State
 
     static void DisableServeOriginal(UINT owner)
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         if (_serveOwner == 0 || _serveOwner == owner)
         {
             _serveOriginal = false;
@@ -456,6 +460,7 @@ class State
 
     static void EnableServeOriginal(UINT owner)
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         if (_serveOwner == 0 || _serveOwner == owner)
         {
             _serveOriginal = true;
@@ -463,14 +468,28 @@ class State
         }
     };
 
-    static bool SkipDllChecks() { return _skipChecks; }
+    static bool SkipDllChecks()
+    {
+        std::lock_guard<std::mutex> lock(_skipMutex);
+        return _skipChecks;
+    }
+
     static std::string SkipDllName()
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         return _skipOwner == 0 ? "" : (_skipDllName.contains(_skipOwner) ? _skipDllName[_skipOwner] : "");
     }
-    static bool ServeOriginal() { return _serveOriginal; }
+    static bool ServeOriginal()
+    {
+        std::lock_guard<std::mutex> lock(_skipMutex);
+        return _serveOriginal;
+    }
 
   private:
+    // The skip and serve-original state is global (one owner at a time, as before) but changed and read from any
+    // thread: OptiScaler's own Streamline start, the game's loads. Every access holds this lock; nothing under it loads
+    // a library.
+    inline static std::mutex _skipMutex;
     inline static bool _skipChecks = false;
     inline static std::map<UINT, std::string> _skipDllName;
     inline static UINT _skipOwner = 0;

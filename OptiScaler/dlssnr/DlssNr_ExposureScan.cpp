@@ -9,6 +9,8 @@
 #include "DlssNr_ExposureScanSource.h"
 #include "DlssNr_GameDefaults.h"
 
+#include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+
 #include <SysUtils.h>
 
 #include <Config.h>
@@ -458,6 +460,14 @@ struct AutoState
     uint32_t foundOwner = 0;
     DlssNrExposureMatch::Fit fit;
     float level = 0.0f;
+
+    // The found exposure as the picture uses it, worked out once per NR frame (FoundExposure reads it). A match that
+    // moves with our meter's unadapted reading (lag 0-1 rows) is the game's per-frame target, before its own eye
+    // adaptation: Cyberpunk 2077's jumps up to ~1 EV between frames when the camera pans and stops, a flash if used as
+    // it is. That one is eased as Automatic's own reading is (DlssNr_ExposureAdapt.h, the same seconds); a match that
+    // trails the meter is the game's eased value already and is used as it is.
+    float now = 0.0f;
+    std::chrono::steady_clock::time_point nowAt;
 };
 
 AutoState g_auto;
@@ -662,6 +672,36 @@ void AutoFrameLocked(const FrameExposure& frame)
             if (g_scan.tracked[i].alive && !(g_auto.life.CopiesMatchOnly() && (int) i == g_auto.found))
                 LetGoLocked(i);
         }
+    }
+
+    // The found exposure for this frame (AutoState::now)
+    {
+        float target = 0.0f;
+
+        if (g_auto.life.Now() == Phase::Found && f.matchAlive)
+            target = g_auto.level * DlssNrExposureMatch::AsExposure(g_auto.fit, g_scan.tracked[g_auto.found].latest);
+
+        if (!DlssNrExposureAdapt::Valid(target))
+        {
+            g_auto.now = 0.0f;
+        }
+        else if (std::abs(g_auto.fit.lag) > 1)
+        {
+            g_auto.now = target;
+        }
+        else
+        {
+            const Config& cfg = *Config::Instance();
+            const float dt = g_auto.now > 0.0f ? std::chrono::duration<float>(now - g_auto.nowAt).count() : 0.0f;
+            const float brighter = DlssNrExposureAdapt::Blend(
+                dt, DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(),
+                                                 DlssNrExposureAdapt::kDefaultBrighterSeconds));
+            const float darker = DlssNrExposureAdapt::Blend(
+                dt, DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptDarkerSeconds.value_or_default()));
+            g_auto.now = DlssNrExposureAdapt::Ease(g_auto.now, target, brighter, darker, g_auto.now <= 0.0f);
+        }
+
+        g_auto.nowAt = now;
     }
 
     if (g_auto.life.Now() != g_auto.said)
@@ -1481,15 +1521,10 @@ bool FoundExposure(float* multiplier)
 
     const Tracked& t = g_scan.tracked[g_auto.found];
 
-    if (!t.alive || t.generation != g_auto.foundOwner)
+    if (!t.alive || t.generation != g_auto.foundOwner || !DlssNrExposureAdapt::Valid(g_auto.now))
         return false;
 
-    const float e = g_auto.level * DlssNrExposureMatch::AsExposure(g_auto.fit, t.latest);
-
-    if (!(e > 0.0f) || !std::isfinite(e))
-        return false;
-
-    *multiplier = e;
+    *multiplier = g_auto.now;
     return true;
 }
 

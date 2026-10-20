@@ -1012,6 +1012,54 @@ void ForgetCalibration()
     g_nr.calibWhy = "measuring...";
 }
 
+// Which output the game hands us, and how often per present. A game that swaps its colour format (Watch Dogs: Legion,
+// RGBA8 <-> BGRA8) either alternates two output textures, one evaluate per present, or evaluates twice per present on
+// one handle (two views, one history): the rebuild line and the first two-in-one-present line tell which.
+struct TargetWatch
+{
+    UINT64 present = UINT64_MAX;
+    unsigned int inPresent = 0;
+    ID3D12Resource* last = nullptr;
+    DXGI_FORMAT lastFormat = DXGI_FORMAT_UNKNOWN;
+    unsigned long long changes = 0;
+    bool reportedTwo = false;
+} g_targetWatch;
+
+void WatchTarget(ID3D12Resource* target, const D3D12_RESOURCE_DESC& desc)
+{
+    auto& w = g_targetWatch;
+    const UINT64 present = State::Instance().frameCount;
+
+    if (present != w.present)
+    {
+        w.present = present;
+        w.inPresent = 0;
+    }
+
+    ++w.inPresent;
+
+    if (w.inPresent == 2 && !w.reportedTwo)
+    {
+        w.reportedTwo = true;
+        LOG_INFO("DLSS-NR: two evaluates in one present ({}): output {} format {} {}x{}, then {} format {}",
+                 present, (void*) w.last, (int) w.lastFormat, desc.Width, desc.Height, (void*) target,
+                 (int) desc.Format);
+    }
+
+    if (target != w.last)
+    {
+        if (w.last != nullptr && ++w.changes <= 20)
+            LOG_INFO("DLSS-NR: the game's output moved {} format {} -> {} format {} {}x{} (present {}, evaluate {} "
+                     "in it, change {})",
+                     (void*) w.last, (int) w.lastFormat, (void*) target, (int) desc.Format, desc.Width, desc.Height,
+                     present, w.inPresent, w.changes);
+
+        w.last = target;
+    }
+
+    w.lastFormat = desc.Format;
+}
+
 // modelFormat is the model surfaces' format: the game's, or RGBA16F while Compress screen edges packs the picture.
 // colourFormat is the game's colour format, which colorCopy, hdrCopy, colorSmall, activeColor, lutScratch and outputNative
 // are made in (hdrCopy may be RGBA16F instead, and is checked again at its creation). Both are checked: with compression
@@ -1025,8 +1073,9 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT colourF
         return;
 
     LOG_INFO("DLSS-NR rebuilding surfaces: model format {} -> {}, colour format {} -> {} (inject point or Compress "
-             "screen edges changed)",
-             (int) haveModel, (int) modelFormat, (int) haveColour, (int) colourFormat);
+             "screen edges changed; output {}, present {}, evaluate {} in it)",
+             (int) haveModel, (int) modelFormat, (int) haveColour, (int) colourFormat, (void*) g_targetWatch.last,
+             g_targetWatch.present, g_targetWatch.inPresent);
 
     ForgetCalibration();
 
@@ -2953,6 +3002,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
+    WatchTarget(target, desc);
     const auto active = frame.BeforeUpscale
         ? DlssNr::PreSrColorExtent(desc, frame.RenderSubrectWidth, frame.RenderSubrectHeight)
         : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { (unsigned int) desc.Width, desc.Height } };

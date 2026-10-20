@@ -28,7 +28,8 @@
 // of a row or less, is the scene's luminance -- the thing our meter measures -- not an exposure the game adapted
 // (Luminance: Doom Eternal's c8, Found as a divisor at corr -0.92..-0.98 over much of a run before this rule). A game's
 // adapted exposure trails the light; its per-frame target can lead it, and is stored as an exposure (a multiplier:
-// Cyberpunk 2077's c61, lag 0), which is kept.
+// Cyberpunk 2077's c61, lag 0), which is kept. Known limit: a game that stores its exposure as an average luminance it
+// divides by, adapted within a row (~0.1 s) or not at all, reads as Luminance and is not found (none seen so far).
 //
 // Confidence: no verdict before minRows rows with a reading and minTravelEv of meter travel over at least minLevels
 // brightness levels (a scene that never changes its light, or one cut between two levels, says nothing about units),

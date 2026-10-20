@@ -3939,7 +3939,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                  : 0.0f;
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const float own = AutoOwnBaseWhitePoint();
-        g_nr.foundBaseWhitePoint = g_nr.foundBlend.Step(target, own, now);
+        g_nr.foundBaseWhitePoint = g_nr.foundBlend.Step(target, own, now, usingAutoExposure);
 
         switch (g_nr.foundBlend.LastEvent())
         {

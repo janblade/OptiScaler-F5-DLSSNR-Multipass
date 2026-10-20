@@ -193,11 +193,16 @@ class Lifecycle
 };
 
 // Whether the upscaler call's pre-exposure moves with the light (audit HC16: Dawnwalker, UE5, 1.0 -> 0.59 -> 0.45 ->
-// 0.40 within a second), from one value a frame. Moving: it changed by more than 1% at least three times and spans at
-// least a quarter. Latched for the session: a game sets it once (a settings change) or moves it with the light.
+// 0.40 within a second), from one value a frame. Moving: it changed by more than 1% at least kChanges times, over at
+// least kLevels distinct values (0.05 EV apart), spanning at least a quarter. A game that switches between a few fixed
+// values (gameplay and a cutscene, a photo mode) does not move with the light, and stopping Auto's search for the session
+// on it would cost the scan its answer. Latched for the session once moving.
 class PreExposureMotion
 {
   public:
+    static constexpr unsigned int kChanges = 10;
+    static constexpr size_t kLevels = 6;
+
     void Note(float pre)
     {
         if (_moving || !std::isfinite(pre) || pre <= 0.0f)
@@ -206,10 +211,15 @@ class PreExposureMotion
         if (_last > 0.0f && std::fabs(std::log2(pre / _last)) > 0.0144f)
             ++_changes;
 
+        const int level = (int) std::lround(std::log2(pre) * 20.0f);
+
+        if (_levels < kLevels && std::find(_seen, _seen + _levels, level) == _seen + _levels)
+            _seen[_levels++] = level;
+
         _last = pre;
         _low = _low > 0.0f ? std::min(_low, pre) : pre;
         _high = std::max(_high, pre);
-        _moving = _changes >= 3 && _high >= _low * 1.25f;
+        _moving = _changes >= kChanges && _levels >= kLevels && _high >= _low * 1.25f;
     }
 
     bool Moving() const { return _moving; }
@@ -217,6 +227,8 @@ class PreExposureMotion
   private:
     float _last = 0.0f, _low = 0.0f, _high = 0.0f;
     unsigned int _changes = 0;
+    int _seen[kLevels] = {};
+    size_t _levels = 0;
     bool _moving = false;
 };
 

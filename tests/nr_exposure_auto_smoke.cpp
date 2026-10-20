@@ -205,12 +205,26 @@ int main()
         CHECK(l.Now() == Phase::Found && !l.Closed());
     }
 
-    // The pre-exposure rung: Dawnwalker's moves with the light; a constant one or a single change (a setting) does not
+    // The pre-exposure rung: Dawnwalker's moves with the light; a constant one, a single change (a setting) or a few
+    // values switched between (gameplay and cutscenes) do not
     {
         PreExposureMotion dawnwalker;
         for (float pre : { 1.0f, 1.0f, 0.59f, 0.45f, 0.40f })
             dawnwalker.Note(pre);
+        CHECK(!dawnwalker.Moving()); // a second of it is not enough yet
+        for (int i = 0; i < 120; ++i) // then the game's eye adaptation follows the light, both ways
+            dawnwalker.Note(0.4f * std::exp2(1.5f * std::sin((float) i * 0.05f)));
         CHECK(dawnwalker.Moving());
+
+        PreExposureMotion toggles;
+        for (int i = 0; i < 1000; ++i)
+            toggles.Note((i / 50) % 2 ? 1.0f : 0.5f);
+        CHECK(!toggles.Moving());
+
+        PreExposureMotion three;
+        for (int i = 0; i < 1000; ++i)
+            three.Note((i / 30) % 3 == 0 ? 1.0f : (i / 30) % 3 == 1 ? 0.5f : 0.25f);
+        CHECK(!three.Moving());
 
         PreExposureMotion still;
         for (int i = 0; i < 1000; ++i)

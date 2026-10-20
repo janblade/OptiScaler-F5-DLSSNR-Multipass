@@ -422,7 +422,7 @@ void FrameLocked(const FrameExposure& frame)
     }
 }
 
-bool ClosedLocked() { return On() && g_auto.life.Closed(); }
+bool ClosedLocked(int rank) { return On() && (g_auto.life.Closed() || (rank < 2 && !g_auto.life.CopiesAll())); }
 
 void AdoptedLocked(int rank)
 {

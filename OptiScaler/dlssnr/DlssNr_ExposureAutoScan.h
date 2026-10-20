@@ -24,9 +24,10 @@ bool On();
 // Once per NR frame, by the pass that runs NR (Core::EndFrameLocked), before the recording's row
 void FrameLocked(const FrameExposure& frame);
 
-// Auto has finished with candidates (the game hands its exposure over, the picture is already exposed, or the game's
-// upscaler is not D3D12): Core::AdoptLocked takes none
-bool ClosedLocked();
+// Core::AdoptLocked takes no candidate of this rank: Auto has finished with candidates (the game hands its exposure
+// over, the picture is already exposed, or the game's upscaler is not D3D12), or, once found or given up, a bigger
+// buffer (rank 1), which would be held without ever starting a search (AdoptedLocked)
+bool ClosedLocked(int rank);
 
 // Core::AdoptLocked took a candidate of this rank (DlssNrExposureScanShape::Rank)
 void AdoptedLocked(int rank);

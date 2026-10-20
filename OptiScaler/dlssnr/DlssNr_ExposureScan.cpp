@@ -536,7 +536,9 @@ float HalfToFloat(uint16_t h) { return HalfToFloatImpl(h); }
 int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, unsigned int bytes, bool isBuffer,
                 uint32_t format, uint64_t size, void (*drop)(size_t slot))
 {
-    if (handle == nullptr || AutoScan::ClosedLocked())
+    const int rank = DlssNrExposureScanShape::Rank(isBuffer, size);
+
+    if (handle == nullptr || AutoScan::ClosedLocked(rank))
         return -1;
 
     for (const Tracked& t : g_scan.tracked)
@@ -548,7 +550,6 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
     if (drop != nullptr)
         g_drop[(int) api] = drop;
 
-    const int rank = DlssNrExposureScanShape::Rank(isBuffer, size);
     int slot = DlssNrExposureScanShape::FreeSlot(g_scan.tracked, kMaxCandidates);
 
     // Full: a candidate less likely to be the exposure makes room
@@ -922,8 +923,25 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
 
 bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame)
 {
+    // No longer wanted (the source moved off Auto mid-search, say): what the scan holds is let go here, once, and the
+    // references are released as their last copies retire -- not left pinned until the next feature release
     if (!Wanted())
+    {
+        std::lock_guard<std::mutex> lock(g_scanMutex);
+
+        if (g_scan.retiring.empty() && !Core::AnyAliveLocked(Api::D3D12))
+            return false;
+
+        for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+        {
+            if (g_scan.tracked[i].alive && g_scan.tracked[i].api == Api::D3D12)
+                Core::DropLocked(i);
+        }
+
+        g_scan.frames12++;
+        ReleaseRetiredLocked(false);
         return false;
+    }
 
     if (device == nullptr || cmdList == nullptr)
         return false;

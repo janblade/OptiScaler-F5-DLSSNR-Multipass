@@ -105,15 +105,29 @@ int main()
         CHECK(b.Shown() == 0.0f);
     }
 
-    // Leaving with no reading of Automatic's own for longer than the hold: gives up holding
+    // Leaving with no reading of Automatic's own: holds as long as Automatic is the source (not the slider) ...
     {
         Blend b;
         b.Step(found, own, 0.0);
         b.Step(found, own, 1.5);
         CHECK(b.Step(0.0f, 0.0f, 2.0) > 0.0f);
-        CHECK(b.Step(0.0f, 0.0f, 2.0 + kHoldSeconds - 0.1) > 0.0f);
-        CHECK(b.Step(0.0f, 0.0f, 2.0 + kHoldSeconds + 0.1) == 0.0f);
+        CHECK(b.Step(0.0f, 0.0f, 10.0) > 0.0f);
+        // ... and lets go at once when another source is chosen (its own white point is in force then)
+        CHECK(b.Step(0.0f, 0.0f, 10.1, false) == 0.0f);
         CHECK(b.LastEvent() == Event::Left);
+    }
+
+    // Automatic's reading drops out halfway through leaving (a resize, a source change): the ease goes on from where the
+    // picture is, never back to where the leave started
+    {
+        Blend b;
+        double t = 0.0;
+        float last = 0.0f;
+        Run(b, t, 90, [&](int) { return found; }, [&](int) { return own; }, last);
+        CHECK(Run(b, t, 30, [](int) { return 0.0f; }, [&](int) { return own; }, last) <= bound);
+        CHECK(Run(b, t, 3, [](int) { return 0.0f; }, [](int) { return 0.0f; }, last) == 0.0);
+        CHECK(Run(b, t, 90, [](int) { return 0.0f; }, [&](int) { return own; }, last) <= bound);
+        CHECK(b.Shown() == 0.0f);
     }
 
     // Found again halfway through leaving: eased back from where the picture is, no jump

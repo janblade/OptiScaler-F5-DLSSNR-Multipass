@@ -1522,7 +1522,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const float own =
             g_vk.autoExposureValue > 1e-8f ? g_vk.autoExposurePreExposure / g_vk.autoExposureValue : 0.0f;
-        g_vk.foundBaseWhitePoint = g_vk.foundBlend.Step(target, own, now);
+        g_vk.foundBaseWhitePoint =
+            g_vk.foundBlend.Step(target, own, now, requestedWhitePointSource == 3 && linearHdr && !displayWhite);
 
         switch (g_vk.foundBlend.LastEvent())
         {

@@ -10,8 +10,10 @@
 //
 // While it gives a base (Step > 0) the host's white point is in force: the shader is not asked to recompute it from the
 // meter's live texture. Automatic's own value (`own`) is the CPU readback, a few frames behind, and is 0 while the meter
-// starts over (a change of source does that): taking over then waits for it, and leaving holds where the picture is,
-// for up to kHoldSeconds, instead of falling to the paper-white slider for the frames it takes to arrive.
+// starts over (a change of source or a resize does that): taking over then waits for it, and leaving holds where the
+// picture is until it arrives -- also when it drops out halfway through leaving -- instead of falling to the paper-white
+// slider. Only while Automatic is the source in force (`automatic`): once it is not, the host's base is not used and
+// there is nothing to hold for.
 //
 // Header-only: tests/nr_exposure_found_blend_smoke.cpp.
 
@@ -20,8 +22,7 @@
 
 namespace DlssNrExposureFoundBlend
 {
-inline constexpr double kSeconds = 1.0;     // the ease, both ways
-inline constexpr double kHoldSeconds = 2.0; // leaving without a reading of Automatic's own, at most
+inline constexpr double kSeconds = 1.0; // the ease, both ways
 
 inline bool Valid(float base) { return std::isfinite(base) && base > 1e-8f && base < 1e8f; }
 
@@ -39,8 +40,9 @@ class Blend
   public:
     // `target`: the found exposure's base white point this frame (pre-exposure / found), 0 when there is none.
     // `own`: Automatic's own base white point from the readback, 0 when it has no reading. `now`: seconds.
+    // `automatic`: Automatic is the white point source in force.
     // Returns the base white point the host pins, or 0: none, Automatic's own (the shader's live value) is in force.
-    float Step(float target, float own, double now)
+    float Step(float target, float own, double now, bool automatic = true)
     {
         _event = Event::None;
         const bool ownOk = Valid(own);
@@ -69,23 +71,22 @@ class Blend
         if (_shown <= 0.0f)
             return 0.0f;
 
+        if (!automatic)
+            return Finish();
+
         if (!_leaving)
         {
             Begin(_shown, now);
             _leaving = true;
-            _leftAt = now;
             _event = Event::Leaving;
         }
 
         if (!ownOk)
         {
-            if (now - _leftAt < kHoldSeconds)
-            {
-                _start = now; // the ease starts when Automatic's reading does
-                return _shown;
-            }
-
-            return Finish();
+            // Holds where the picture is; the ease (re)starts from here when Automatic's reading does
+            Begin(_shown, now);
+            _leaving = true;
+            return _shown;
         }
 
         const double t = Progress(now);
@@ -128,7 +129,6 @@ class Blend
     float _shown = 0.0f;
     float _from = 0.0f;
     double _start = 0.0;
-    double _leftAt = 0.0;
     bool _leaving = false;
     Event _event = Event::None;
 };

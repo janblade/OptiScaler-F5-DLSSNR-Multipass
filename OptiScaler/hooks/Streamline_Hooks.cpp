@@ -104,6 +104,22 @@ HMODULE StreamlineHooks::LoadIsolatedGamePlugin(LPCWSTR requestedPath)
     return nullptr;
 }
 
+// A null frame token from the game (Indiana Jones sends one to slPCLSetMarker at start). Reading it crashes, so the
+// hooks that read the token pass the call straight on. Logged once per hook
+static bool NullFrameToken(const sl::FrameToken& frame, const char* hook, std::atomic_bool& logged)
+{
+    // Through a volatile pointer: a reference is never null to the compiler, which would drop a plain check
+    const void* volatile framePtr = &frame;
+
+    if (framePtr != nullptr)
+        return false;
+
+    if (!logged.exchange(true))
+        LOG_WARN("{}: null frame token from the game, passed on unread", hook);
+
+    return true;
+}
+
 static bool IsSL1AndFGActive()
 {
     const auto& state = State::Instance();
@@ -654,6 +670,10 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
         return o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
     }
 
+    static std::atomic_bool nullTokenLogged = false;
+    if (NullFrameToken(frame, __FUNCTION__, nullTokenLogged))
+        return o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
+
     if (renderApi == sl::RenderAPI::eCount)
         LOG_WARN("Incomplete Streamline hooks");
 
@@ -728,6 +748,10 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
                                                 const sl::BaseStructure** inputs, uint32_t numInputs,
                                                 sl::CommandBuffer* cmdBuffer)
 {
+    static std::atomic_bool nullTokenLogged = false;
+    if (NullFrameToken(frame, __FUNCTION__, nullTokenLogged))
+        return o_slEvaluateFeature(feature, frame, inputs, numInputs, cmdBuffer);
+
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
 
     if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
@@ -1261,6 +1285,10 @@ bool StreamlineHooks::hklocal_dlssg_slOnPluginLoad(sl::param::IParameters* param
 sl::Result StreamlineHooks::hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,
                                              const sl::ViewportHandle& viewport)
 {
+    static std::atomic_bool nullTokenLogged = false;
+    if (NullFrameToken(frame, __FUNCTION__, nullTokenLogged))
+        return o_slSetConstants(values, frame, viewport);
+
     std::scoped_lock lock(setConstantsMutex);
     LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
 
@@ -1746,15 +1774,36 @@ void* StreamlineHooks::hkreflex_slGetPluginFunction(const char* functionName)
         (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
          State::Instance().activeFgInput == FGInput::DLSSG))
     {
-        o_slPCLSetMarker = (decltype(&slPCLSetMarker)) LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
-        return &hkslPCLSetMarker;
+        return HookPCLSetMarker(LoadOriginal(o_reflex_slGetPluginFunction)(functionName));
     }
 
     return LoadOriginal(o_reflex_slGetPluginFunction)(functionName);
 }
 
+// The reflex and the PCL plugin can both be asked for the marker function. Hooked only when Streamline gives one: a
+// null answer must not replace one found earlier, and the game then gets Streamline's null, not a hook with nothing
+// behind it
+void* StreamlineHooks::HookPCLSetMarker(void* original)
+{
+    if (original == nullptr)
+    {
+        LOG_WARN("Streamline has no marker function here, not hooked");
+        return nullptr;
+    }
+
+    o_slPCLSetMarker = (decltype(&slPCLSetMarker)) original;
+    return &hkslPCLSetMarker;
+}
+
 sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::FrameToken& frame)
 {
+    if (o_slPCLSetMarker == nullptr)
+        return sl::Result::eErrorFeatureMissing;
+
+    static std::atomic_bool nullTokenLogged = false;
+    if (NullFrameToken(frame, __FUNCTION__, nullTokenLogged))
+        return o_slPCLSetMarker(marker, frame);
+
     // if (State::Instance().activeFgOutput == FGOutput::DLSSG && StreamlineProxy::IsD3D12Inited() &&
     //     Config::Instance()->FGDLSSGUseGamesReflexMarkers.value_or_default())
     //{
@@ -1843,8 +1892,7 @@ void* StreamlineHooks::hkpcl_slGetPluginFunction(const char* functionName)
         (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
          State::Instance().activeFgInput == FGInput::DLSSG))
     {
-        o_slPCLSetMarker = (decltype(&slPCLSetMarker)) LoadOriginal(o_pcl_slGetPluginFunction)(functionName);
-        return &hkslPCLSetMarker;
+        return HookPCLSetMarker(LoadOriginal(o_pcl_slGetPluginFunction)(functionName));
     }
 
     if (strcmp(functionName, "slOnPluginLoad") == 0)

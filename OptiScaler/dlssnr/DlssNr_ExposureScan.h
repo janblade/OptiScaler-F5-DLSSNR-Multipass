@@ -128,6 +128,16 @@ std::vector<Candidate> Report();
 const char* Status();
 bool Scanning();
 
+// Auto (WhitePointSource auto, plan 2026-10-14-exposure-scan-all-apis story 5): the scan runs by itself, judges its
+// candidates with the matcher and lets go of what it does not need (DlssNr_ExposureAuto.h). Where it stands, in one
+// line for the menu and the log ("searching", "found ...", "the game hands its exposure over", ...); empty when the
+// white point source is not Auto.
+std::string AutoStatus();
+
+// While Auto has found the game's exposure: this frame's exposure multiplier in Automatic's units -- the game's value
+// for the movement, Automatic's level as measured while the scan searched. False otherwise.
+bool FoundExposure(float* multiplier);
+
 // ---------------------------------------------------------------------------------------------
 // Multi-point anchoring. See dlssnr/design/multi-point-anchoring.md.
 //

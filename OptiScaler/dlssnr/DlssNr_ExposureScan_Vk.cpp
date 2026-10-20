@@ -197,6 +197,14 @@ void DropVkLocked(size_t slot)
     Core::DropLocked(slot);
 }
 
+// A candidate let go of by the shared list (a full list making room, Auto letting go): DropVkLocked, then the count the
+// hooks check
+void DropVkCountedLocked(size_t slot)
+{
+    DropVkLocked(slot);
+    CountWatchedLocked();
+}
+
 void DropHandleLocked(const void* handle)
 {
     g_pending.erase(Key(handle));
@@ -223,7 +231,7 @@ void AdoptBoundLocked(const void* handle, VkDeviceMemory memory)
     g_pending.erase(it);
 
     const int slot = Core::AdoptLocked(Api::Vulkan, (void*) handle, p.device, p.shape, p.bytes, p.isBuffer, p.format,
-                                       p.size, DropVkLocked);
+                                       p.size, DropVkCountedLocked);
 
     if (slot < 0 && !p.isBuffer)
     {

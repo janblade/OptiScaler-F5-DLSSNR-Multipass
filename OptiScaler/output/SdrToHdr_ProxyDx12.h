@@ -86,7 +86,8 @@ class ProxyChain
     void ReleaseLocked();
     bool HeldLocked();
 
-    mutable std::mutex _lock;
+    // Recursive: DXGI's ResizeBuffers can send the window a message the game answers from inside it (GetBuffer, GetDesc)
+    mutable std::recursive_mutex _lock;
     std::vector<ID3D12Resource*> _proxies;
     Dx12Pass _pass;
     DXGI_FORMAT _gameFormat = DXGI_FORMAT_UNKNOWN;

@@ -139,19 +139,19 @@ bool ShouldWarnSrgbViewOnTypedProxy(const ID3D12Resource* resource, DXGI_FORMAT 
 
 bool ProxyChain::Active() const
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
     return !_proxies.empty() && _pass.Ready();
 }
 
 DXGI_FORMAT ProxyChain::GameFormat() const
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
     return _gameFormat;
 }
 
 bool ProxyChain::OwnsResource(const ID3D12Resource* resource, bool& relaxedCasting)
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
 
     for (auto* proxy : _proxies)
     {
@@ -188,7 +188,7 @@ void ProxyChain::ReleaseLocked()
 
 void ProxyChain::Release()
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
     ReleaseLocked();
     _gameFormat = DXGI_FORMAT_UNKNOWN;
 }
@@ -312,7 +312,7 @@ const char* ProxyChain::BuildLocked(ID3D12Device* device, IDXGISwapChain3* real,
 
 const char* ProxyChain::Start(ID3D12Device* device, IDXGISwapChain3* real, DXGI_FORMAT gameFormat, bool hdr10)
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
 
     if (real == nullptr)
         return "the HDR proxy was given no swap chain";
@@ -326,7 +326,7 @@ const char* ProxyChain::Start(ID3D12Device* device, IDXGISwapChain3* real, DXGI_
 HRESULT ProxyChain::Revert(IDXGISwapChain3* real, DXGI_FORMAT gameFormat, UINT flags,
                            DXGI_COLOR_SPACE_TYPE gameColourSpace)
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
     ReleaseLocked();
 
     if (real == nullptr)
@@ -356,13 +356,13 @@ bool ProxyChain::HeldLocked()
 
 bool ProxyChain::HeldByGame()
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
     return HeldLocked();
 }
 
 ResizeResult ProxyChain::Resize(ID3D12Device* device, IDXGISwapChain3* real, const ResizeRequest& request)
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
     ResizeResult result;
     const bool wasProxied = !_proxies.empty() && _pass.Ready();
 
@@ -451,7 +451,7 @@ ResizeResult ProxyChain::Resize(ID3D12Device* device, IDXGISwapChain3* real, con
 
 HRESULT ProxyChain::GetBuffer(UINT index, REFIID riid, void** surface)
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
 
     if (surface == nullptr)
         return E_POINTER;
@@ -467,7 +467,7 @@ HRESULT ProxyChain::GetBuffer(UINT index, REFIID riid, void** surface)
 
 const char* ProxyChain::Present(ID3D12CommandQueue* queue, IDXGISwapChain3* real, PassConstants constants)
 {
-    std::lock_guard lock(_lock);
+    std::lock_guard<std::recursive_mutex> lock(_lock);
 
     if (_proxies.empty() || !_pass.Ready())
         return "the HDR proxy is not set up";

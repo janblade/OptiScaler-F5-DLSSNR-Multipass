@@ -46,7 +46,8 @@ bool SameFolder(const std::filesystem::path& file, const std::wstring& folder)
 
 // Where a module's file comes from, in the words the menu uses. Without an OptiScaler subfolder OptiScaler's folder
 // is the game's own, and the label says so.
-std::string SourceOf(const std::filesystem::path& file, const std::wstring& overridePath, const std::wstring& optiFolder)
+std::string SourceOf(const std::filesystem::path& file, const std::wstring& overridePath,
+                     const std::wstring& optiFolder)
 {
     std::error_code error;
 
@@ -193,7 +194,8 @@ std::string DescribeOne(const Module& m, const std::wstring& optiFolder)
         const auto gamePath = PathOf(m.gameCopy);
         const auto gameVersion = VersionOf(gamePath);
 
-        LOG_INFO("{}: the game's own copy is loaded too: {}, file {}", m.what, wstring_to_string(gamePath), gameVersion);
+        LOG_INFO("{}: the game's own copy is loaded too: {}, file {}", m.what, wstring_to_string(gamePath),
+                 gameVersion);
         line += std::format("; the game's own {} is loaded too", gameVersion);
     }
 

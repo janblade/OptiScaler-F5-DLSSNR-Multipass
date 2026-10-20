@@ -760,14 +760,12 @@ std::optional<NTSTATUS> LibraryLoadHooks::FreeLibrary(PVOID lpLibrary)
     }
     // The rest OptiScaler keeps function pointers into too: freed by the game (or a plugin) they would point at
     // unloaded code. The game gets its reference back now as if freed; they go at OptiScaler's own unload.
-    else if (lpLibrary != nullptr &&
-             (lpLibrary == XeSSProxy::ModuleDx11() || lpLibrary == XeFGProxy::Module() ||
-              lpLibrary == XeLLProxy::Module() || lpLibrary == FfxApiProxy::Dx12Module_SR() ||
-              lpLibrary == FfxApiProxy::Dx12Module_FG()))
+    else if (lpLibrary != nullptr && (lpLibrary == XeSSProxy::ModuleDx11() || lpLibrary == XeFGProxy::Module() ||
+                                      lpLibrary == XeLLProxy::Module() || lpLibrary == FfxApiProxy::Dx12Module_SR() ||
+                                      lpLibrary == FfxApiProxy::Dx12Module_FG()))
     {
 #ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for XeSS Dx11 / XeFG / XeLL / FFX SR or FG, caller: {}",
-                 Util::WhoIsTheCaller(_ReturnAddress()));
+        LOG_WARN("Call for XeSS Dx11 / XeFG / XeLL / FFX SR or FG, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
         State::Instance().modulesToFree.insert(lpLibrary);
         result = TRUE;

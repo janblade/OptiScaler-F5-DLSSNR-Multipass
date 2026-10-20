@@ -485,8 +485,7 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
     for (size_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
     {
         auto extName = pCreateInfo->ppEnabledExtensionNames[i];
-        const bool lacking =
-            supported.empty() ? vendorId != (uint32_t) VendorId::Nvidia : !supported.contains(extName);
+        const bool lacking = supported.empty() ? vendorId != (uint32_t) VendorId::Nvidia : !supported.contains(extName);
 
         if (Config::Instance()->VulkanExtensionSpoofing.value_or_default() && lacking)
         {
@@ -518,7 +517,8 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
             coreAddressOn |= ((const VkPhysicalDeviceVulkan12Features*) next)->bufferDeviceAddress == VK_TRUE;
         else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)
-            coreAddressOn |= ((const VkPhysicalDeviceBufferDeviceAddressFeatures*) next)->bufferDeviceAddress == VK_TRUE;
+            coreAddressOn |=
+                ((const VkPhysicalDeviceBufferDeviceAddressFeatures*) next)->bufferDeviceAddress == VK_TRUE;
         else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)
             vulkan14 = (const VkPhysicalDeviceVulkan14Features*) next;
     }
@@ -551,9 +551,9 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
 
         addExtension(VK_NV_LOW_LATENCY_EXTENSION_NAME);
 
-        // InputCommon's Reflex output on Vulkan (low_latency/low_latency_tech/ll_reflex_vk.h): VK_NV_low_latency2 signals
-        // a timeline semaphore in its sleep (VulkanHooks switches the feature on for it). A game with Vulkan Reflex may
-        // have it already.
+        // InputCommon's Reflex output on Vulkan (low_latency/low_latency_tech/ll_reflex_vk.h): VK_NV_low_latency2
+        // signals a timeline semaphore in its sleep (VulkanHooks switches the feature on for it). A game with Vulkan
+        // Reflex may have it already.
         if (supported.contains(VK_NV_LOW_LATENCY_2_EXTENSION_NAME) &&
             addExtension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME))
             addExtension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);

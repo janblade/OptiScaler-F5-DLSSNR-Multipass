@@ -314,8 +314,7 @@ void LoadAsiPlugins()
 
                                 if (hMod != nullptr)
                                 {
-                                    LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(),
-                                             PluginVersion(entry.path()));
+                                    LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(), PluginVersion(entry.path()));
                                     _asiHandles.push_back(hMod);
 
                                     auto init =

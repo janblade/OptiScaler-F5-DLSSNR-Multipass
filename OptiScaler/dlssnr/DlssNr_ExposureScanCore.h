@@ -49,6 +49,7 @@ struct Tracked
     unsigned int bytes = 4; // size of the value's first channel: 2 (half) or 4 (float)
     uint32_t format = 0;    // D3D: the DXGI_FORMAT, Vulkan: the VkFormat (textures/images only)
     int rank = 0;           // how likely its shape is to hold the exposure (DlssNrExposureScanShape::Rank)
+    unsigned long long adoptedAt = 0; // D3D12: the backend's frame count (frames12) when it was taken
 
     float latest = 0.0f;
     float lowest = 0.0f;

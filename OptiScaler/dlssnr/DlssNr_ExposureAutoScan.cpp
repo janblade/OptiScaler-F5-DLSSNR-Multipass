@@ -462,6 +462,11 @@ std::string AutoStatus()
         (size_t) g_auto.found < tracked.size())
         line += " (" + tracked[g_auto.found].shape + ")";
 
+    // Searching with nothing held does not move on by itself: say what it waits for
+    if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Searching &&
+        std::none_of(tracked.begin(), tracked.end(), [](const Tracked& t) { return t.alive; }))
+        line += ": nothing to search yet, the game makes its buffers at a loading screen";
+
     return line;
 }
 

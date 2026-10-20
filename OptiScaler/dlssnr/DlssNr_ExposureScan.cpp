@@ -153,22 +153,6 @@ float HalfToFloatImpl(uint16_t h)
     return out;
 }
 
-void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
-             D3D12_RESOURCE_STATES to)
-{
-    if (res == nullptr || from == to)
-        return;
-
-    D3D12_RESOURCE_BARRIER barrier {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = res;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = from;
-    barrier.Transition.StateAfter = to;
-    cmdList->ResourceBarrier(1, &barrier);
-}
-
 bool EnsureReadback(ID3D12Device* device)
 {
     for (unsigned int i = 0; i < kSlots; ++i)
@@ -1258,6 +1242,37 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
     // assumption, which is why the whole scan is behind a setting that is off by default -- getting
     // this wrong on someone's machine costs them a frame or a device, and nobody who has not asked
     // for the scan should be exposed to that.
+    //
+    // The transitions go in two batches, all candidates at once on each side of the copies, not two per candidate:
+    // each ResourceBarrier call is a GPU sync point, and 128 of them a frame was most of the scan's cost while it held
+    // its full 64 (Cyberpunk: ~0.07 ms a frame).
+    std::vector<D3D12_RESOURCE_BARRIER> toCopy;
+    toCopy.reserve(g_scan.tracked.size());
+
+    for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+    {
+        const Tracked& t = g_scan.tracked[i];
+
+        if (!t.alive || t.api != Api::D3D12 || t.handle == nullptr)
+            continue;
+
+        D3D12_RESOURCE_BARRIER barrier {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = (ID3D12Resource*) t.handle;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        toCopy.push_back(barrier);
+    }
+
+    if (toCopy.empty())
+    {
+        g_scan.frames12++;
+        return;
+    }
+
+    cmdList->ResourceBarrier((UINT) toCopy.size(), toCopy.data());
+
     for (size_t i = 0; i < g_scan.tracked.size(); ++i)
     {
         Tracked& t = g_scan.tracked[i];
@@ -1267,8 +1282,6 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
 
         ID3D12Resource* resource = (ID3D12Resource*) t.handle;
         g_scan.readbackGeneration[slot][i] = t.generation;
-
-        Barrier(cmdList, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
         if (t.isBuffer)
         {
@@ -1294,9 +1307,12 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
             D3D12_BOX one { 0, 0, 0, 1, 1, 1 };
             cmdList->CopyTextureRegion(&to, 0, 0, 0, &src, &one);
         }
-
-        Barrier(cmdList, resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
+
+    for (D3D12_RESOURCE_BARRIER& barrier : toCopy)
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+
+    cmdList->ResourceBarrier((UINT) toCopy.size(), toCopy.data());
 
     g_scan.frames12++;
 }

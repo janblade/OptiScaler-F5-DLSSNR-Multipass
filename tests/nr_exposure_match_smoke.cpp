@@ -134,10 +134,25 @@ static void Synthetic()
         size_t clamped = 0;
         for (float a : partial)
             clamped += a == 6.0f ? 1 : 0;
-        CHECK(clamped * 5 >= rows && clamped * 2 <= rows); // the floor holds 20-50% of the rows
+        CHECK(clamped * 5 >= rows && clamped * 5 <= rows * 2); // the floor holds 20-40% of the rows
         const Fit f = Classify(meter, partial);
         CHECK(f.kind == Kind::Multiplier);
         CHECK(f.slope > 0.3f && f.slope < 0.5f);
+        CHECK(f.corr > 0.95f);
+    }
+
+    // A pause: the game's value stands still for 30 s while our meter reads a menu's near-black frames; those rows are
+    // left out, the rest still fit
+    {
+        auto paused = meter;
+        auto value = Map(e, [](float x, size_t) { return 0.7f * x; });
+        for (size_t i = 500; i < 800; ++i)
+        {
+            paused[i] = 1e5f;
+            value[i] = value[499];
+        }
+        const Fit f = Classify(paused, value);
+        CHECK(f.kind == Kind::Multiplier);
         CHECK(f.corr > 0.95f);
     }
 
@@ -391,6 +406,25 @@ static void Recordings(const std::string& folder)
             CHECK(k > 0.5f && k < 2.0f);
             printf("  cyberpunk: %s, slope %.3f, corr %.3f, lag %d, %.1f EV, k %.3f\n", r.columns[v.index].c_str(),
                    v.fit.slope, v.fit.corr, v.fit.lag, v.meterTravelEv, k);
+        }
+    }
+
+    // Doom Eternal (~4 min, with menus and pauses): its handed exposure (`game`) floors at 2.0 and eases about 0.4-0.6
+    // stop per meter stop, too loosely row by row to pass for a match (corr ~0.64); c8, a 2x2 image, follows the light
+    // as a scene luminance would (slope ~ -1). While the game stood in menus both held one value for minutes and our
+    // meter read near-black frames: those rows are left out (Plateaus), or c8 reads as unrelated (corr -0.2).
+    {
+        const Recording r = Load(folder + "/doom_eternal_long.csv");
+        CHECK(r.ok);
+        if (r.ok)
+        {
+            const Fit c8 = Classify(r.meter, Column(r, "c8"));
+            CHECK(c8.corr < -0.85f);
+            CHECK(c8.slope < -0.8f && c8.slope > -1.2f);
+            CHECK(Classify(r.meter, r.game).kind != Kind::Divisor);
+            CHECK(Match(r.meter, { r.game }).what != What::Found);
+            printf("  doom: c8 slope %.3f corr %.3f; game corr %.3f\n", c8.slope, c8.corr,
+                   Classify(r.meter, r.game).corr);
         }
     }
 }

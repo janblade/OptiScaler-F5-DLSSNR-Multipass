@@ -15,7 +15,8 @@
 // - a candidate that follows log2 of the meter linearly instead: a stop value (log2, ln or log10, either sign).
 // The fit is tried at a range of row lags, because a game's eye adaptation trails the meter's raw (unadapted) reading.
 // A game may adapt only part of the way (a log-log slope down to Settings::minExposureSlope) and clamp at a floor or a
-// ceiling; the rows a candidate spends on such a plateau are left out of its fit (detail::Plateaus).
+// ceiling; the rows a candidate spends on such a plateau, or standing still while the game is paused, are left out
+// of its fit (detail::Plateaus).
 //
 // What is not an exposure, rejected before any fit:
 // - Steady: changes in under 2% of rows. NBA 2K27's own handed exposure is this (one value per scene, 1.3195 for the
@@ -99,6 +100,7 @@ struct Settings
     // when the light changed. Under ~0.3 is a stop value with a large offset, fitted as one.
     float minExposureSlope = 0.3f;
     float maxExposureSlope = 1.5f;
+    size_t frozenRows = 20; // ~2 s holding one exact value: paused, not following (detail::Plateaus)
 };
 
 namespace detail
@@ -169,11 +171,14 @@ inline void BestLag(const std::vector<float>& x, const std::vector<float>& y, co
     }
 }
 
-// The rows where a series sits at its own lowest or highest value, when that value holds at least 5% of the rows: a
-// clamped exposure (Doom Eternal's floor of 2.0 in bright scenes) does not follow the light there, and fitting those
-// rows hides how well it follows it everywhere else. Nothing is marked when the plateaus would leave under 40% of the
-// rows -- a value that is mostly clamped is a stepped one, and its fit should say so.
-inline std::vector<char> Plateaus(const std::vector<float>& y)
+// The rows where a series does not follow anything: where it sits at its own lowest or highest value, when that value
+// holds at least 5% of the rows (a clamped exposure: Doom Eternal's floor of 2.0 in bright scenes), and runs of at least
+// `frozenRows` rows holding one exact value (the game paused, in a menu or a fade: Doom Eternal's exposure and its
+// scene luminance both stood still for minutes while our meter read the menu's near-black frames). Fitting those rows
+// hides how well the value follows the light everywhere else. Nothing is marked when that would leave under 60% of the
+// rows: a value that is mostly still is a stepped one, and fitting only its moves picks whatever changes when a scene
+// does (Cyberpunk 2077's c11 keeps 41% and would fit at corr 0.94; the exposures found keep 77-87%).
+inline std::vector<char> Plateaus(const std::vector<float>& y, size_t frozenRows)
 {
     std::vector<char> skip(y.size(), 0);
     if (y.empty())
@@ -187,13 +192,23 @@ inline std::vector<char> Plateaus(const std::vector<float>& y)
     const size_t atLow = (size_t) std::count(y.begin(), y.end(), low);
     const size_t atHigh = (size_t) std::count(y.begin(), y.end(), high);
     const bool skipLow = atLow * 20 >= y.size(), skipHigh = atHigh * 20 >= y.size();
-    const size_t left = y.size() - (skipLow ? atLow : 0) - (skipHigh ? atHigh : 0);
-
-    if ((!skipLow && !skipHigh) || left * 5 < y.size() * 2)
-        return skip;
 
     for (size_t i = 0; i < y.size(); ++i)
         skip[i] = (skipLow && y[i] == low) || (skipHigh && y[i] == high) ? 1 : 0;
+
+    for (size_t from = 0; from < y.size();)
+    {
+        size_t to = from + 1;
+        while (to < y.size() && y[to] == y[from])
+            ++to;
+        if (frozenRows > 0 && to - from >= frozenRows)
+            std::fill(skip.begin() + from, skip.begin() + to, (char) 1);
+        from = to;
+    }
+
+    const size_t left = (size_t) std::count(skip.begin(), skip.end(), (char) 0);
+    if (left * 5 < y.size() * 3)
+        std::fill(skip.begin(), skip.end(), (char) 0);
 
     return skip;
 }
@@ -293,14 +308,14 @@ inline Fit ClassifyRows(const std::vector<float>& logMeter, const std::vector<fl
             x.push_back(logMeter[i]);
             y.push_back(v[i] > 0.0f ? std::log2(v[i]) : y.back());
         }
-        const std::vector<char> skip = Plateaus(y);
+        const std::vector<char> skip = Plateaus(y, s.frozenRows);
         BestLag(x, y, s, logSlope, logCorr, logLag, &skip);
     }
 
     // Linear in log2 of the meter: a stop value
     float linSlope = 0, linCorr = 0;
     int linLag = 0;
-    const std::vector<char> linSkip = Plateaus(v);
+    const std::vector<char> linSkip = Plateaus(v, s.frozenRows);
     BestLag(logMeter, v, s, linSlope, linCorr, linLag, &linSkip);
 
     // Each fit's own verdict: log-log as a multiplier or divisor (a slope in the exposure band), linear as a stop value

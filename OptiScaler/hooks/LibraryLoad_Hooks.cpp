@@ -42,6 +42,54 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckA(std::string libName, LPCSTR lpLibFul
     return LoadLibraryCheckW(string_to_wstring(libName), string_to_wstring(fullPath).c_str());
 }
 
+// The game loading its own libxess_fg.dll or libxell.dll while OptiScaler has a copy loaded. With two copies the game
+// and OptiScaler talk to different ones: OptiScaler's XeLL hooks never see the game's calls, and XeFG may pair with
+// either XeLL. So the game is handed OptiScaler's copy (`ours`), unless the file it asked for is newer -- an XeFG
+// update that came with the game stays the game's. A copy the game had loaded before OptiScaler (`inMemory`) is what
+// the loader hands out again for that name anyway; it is left to it. nullptr = load normally.
+static HMODULE OurXeCopyFor(const char* what, LPCWSTR lpLibFullPath, HMODULE ours, HMODULE inMemory,
+                            const std::wstring& oursPath)
+{
+    if (ours == nullptr || oursPath.empty())
+        return nullptr;
+
+    if (inMemory != nullptr && inMemory != ours)
+    {
+        LOG_INFO("The game loads {} again; its own copy was loaded before OptiScaler's and stays in use", what);
+        return nullptr;
+    }
+
+    // The file the game asked for: its path as given, or the bare name next to the game's exe
+    std::filesystem::path asked(lpLibFullPath != nullptr ? lpLibFullPath : L"");
+    std::error_code error;
+
+    if (!asked.empty() && !asked.has_parent_path())
+        asked = Util::ExePath().parent_path() / asked;
+
+    version_t askedVersion {};
+    version_t oursVersion {};
+    const bool askedExists = !asked.empty() && std::filesystem::exists(asked, error);
+
+    if (askedExists && std::filesystem::equivalent(asked, oursPath, error))
+        return ours;
+
+    if (askedExists && Util::GetFileVersion(asked.wstring(), &askedVersion) &&
+        Util::GetFileVersion(oursPath, &oursVersion) && askedVersion > oursVersion)
+    {
+        LOG_INFO("The game loads its own {} v{}.{}.{}.{}, newer than OptiScaler's v{}.{}.{}.{}: the game keeps its own",
+                 what, askedVersion.major, askedVersion.minor, askedVersion.patch, askedVersion.reserved,
+                 oursVersion.major, oursVersion.minor, oursVersion.patch, oursVersion.reserved);
+        return nullptr;
+    }
+
+    LOG_INFO("The game loads {}{}: handed OptiScaler's copy ({}), so both use one", what,
+             askedExists ? std::format(" ({})", wstring_to_string(asked.wstring())) : std::string(),
+             wstring_to_string(oursPath));
+
+    // A reference of the game's own, as a load would take
+    return NtdllProxy::LoadLibraryExW_Ldr(oursPath.c_str(), NULL, 0);
+}
+
 HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath)
 {
     if (auto isolated = StreamlineHooks::LoadIsolatedGamePlugin(lpLibFullPath))
@@ -490,6 +538,20 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
         return module;
     }
 
+    if (CheckDllNameW(&libName, &xefgNamesW))
+    {
+        if (auto module = OurXeCopyFor("libxess_fg.dll", lpLibFullPath, XeFGProxy::Module(), XeFGProxy::MemModule(),
+                                       XeFGProxy::Module_Path()))
+            return module;
+    }
+
+    if (CheckDllNameW(&libName, &xellNamesW))
+    {
+        if (auto module = OurXeCopyFor("libxell.dll", lpLibFullPath, XeLLProxy::Module(), XeLLProxy::MemModule(),
+                                       XeLLProxy::Module_Path()))
+            return module;
+    }
+
     if (CheckDllNameW(&libName, &amdxc64NamesW))
     {
         HMODULE moduleAmdxc64 = nullptr;
@@ -659,6 +721,20 @@ std::optional<NTSTATUS> LibraryLoadHooks::FreeLibrary(PVOID lpLibrary)
     {
 #ifdef LOG_LIB_OPERATIONS
         LOG_WARN("Call for XeSS, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
+#endif
+        State::Instance().modulesToFree.insert(lpLibrary);
+        result = TRUE;
+    }
+    // The rest OptiScaler keeps function pointers into too: freed by the game (or a plugin) they would point at
+    // unloaded code. The game gets its reference back now as if freed; they go at OptiScaler's own unload.
+    else if (lpLibrary != nullptr &&
+             (lpLibrary == XeSSProxy::ModuleDx11() || lpLibrary == XeFGProxy::Module() ||
+              lpLibrary == XeLLProxy::Module() || lpLibrary == FfxApiProxy::Dx12Module_SR() ||
+              lpLibrary == FfxApiProxy::Dx12Module_FG()))
+    {
+#ifdef LOG_LIB_OPERATIONS
+        LOG_WARN("Call for XeSS Dx11 / XeFG / XeLL / FFX SR or FG, caller: {}",
+                 Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
         State::Instance().modulesToFree.insert(lpLibrary);
         result = TRUE;

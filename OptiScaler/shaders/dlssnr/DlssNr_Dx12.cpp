@@ -385,6 +385,11 @@ struct NrState
     bool autoExposureReadable = false;
     float autoExposureValue = 0.0f;
 
+    // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
+    // the scan has found none. Read back a few frames behind like the meter's value, so while it holds the white point
+    // is the host's (the shader is not asked to recompute it from the meter's live texture).
+    float foundBaseWhitePoint = 0.0f;
+
     // Eye adaptation (DlssNr_ExposureAdapt.h): the meter's own reading lands in autoExposureRaw (kept in the UAV state
     // between evaluations) and a one-texel pass eases autoExposure toward it, so autoExposure above is the eased value
     // and everything downstream reads that. autoExposureRawValue is the reading's readback, for the log.
@@ -538,11 +543,15 @@ float AutoOwnBaseWhitePoint()
 }
 
 // Automatic exposure's base white point, the value its Trim multiplies: the game's base white point times the
-// learned calibration while following the game (DlssNr_FollowGame.h), else Automatic's own.
+// learned calibration while following the game (DlssNr_FollowGame.h), Auto's found exposure while the scan has one,
+// else Automatic's own.
 float AutoBaseWhitePoint()
 {
     if (g_nr.followingGame && g_nr.autoPairGameExposure > 1e-8f)
         return g_nr.autoPairPreExposure / g_nr.autoPairGameExposure * DlssNrFollowGame::Instance().Scale();
+
+    if (g_nr.foundBaseWhitePoint > 0.0f)
+        return g_nr.foundBaseWhitePoint;
 
     return AutoOwnBaseWhitePoint();
 }
@@ -3903,6 +3912,28 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.gamePreExposure = frame.PreExposure;
 
+    // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs, and
+    // never while following the game (that one is handed over, so Auto has no scan match then)
+    {
+        float found = 0.0f;
+        const bool was = g_nr.foundBaseWhitePoint > 0.0f;
+        g_nr.foundBaseWhitePoint = usingAutoExposure && !g_nr.followingGame &&
+                                           DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
+                                       ? frame.PreExposure / found
+                                       : 0.0f;
+
+        if ((g_nr.foundBaseWhitePoint > 0.0f) != was)
+        {
+            const float own = AutoOwnBaseWhitePoint();
+            LOG_INFO("DLSS-NR automatic exposure: {}", g_nr.foundBaseWhitePoint > 0.0f
+                         ? std::format("the game's own exposure (found by the scan) moves the white point from here: "
+                                       "{:.4g}, Automatic's own {:.4g} ({:+.2f} EV)",
+                                       g_nr.foundBaseWhitePoint, own,
+                                       own > 0.0f ? std::log2(own / g_nr.foundBaseWhitePoint) : 0.0f)
+                         : std::string("Automatic's own meter again"));
+        }
+    }
+
     float whitePoint = frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride : ResolveWhitePoint(cfg, isHdrBuffer);
 
     // While Tune for this scene runs, the white point is pinned on the CPU (the base frozen at its start times the
@@ -3953,7 +3984,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         params.WhitePoint = whitePoint;
         params.UseGameExposure = useGameExposure;
         params.ExposurePreMul = exposurePreMul;
-        params.UseExposureWhitePoint = usingAutoExposure && !calibrationPinned ? 1u : 0u;
+        params.UseExposureWhitePoint =
+            usingAutoExposure && !calibrationPinned && !(g_nr.foundBaseWhitePoint > 0.0f) ? 1u : 0u;
         params.ExposureBaseScale = exposureBaseScale;
         FillExposureConstants(params, cfg, usingAutoExposure ? 3u : 1u, frame.PreExposure);
     };

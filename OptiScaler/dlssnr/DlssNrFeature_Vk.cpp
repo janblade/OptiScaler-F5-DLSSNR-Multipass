@@ -252,6 +252,9 @@ struct VkState
     unsigned long long pairValidAt = 0; // meterFrames when the last valid game value arrived
     bool pairValiditySaid = false;
     bool followingGame = false;
+    // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
+    // the scan has found none. Read back a few frames behind, so while it holds the host's white point is in force.
+    float foundBaseWhitePoint = 0.0f;
 };
 
 // The grid the meter writes, and the size of one readback. 64 * 64 * sizeof(float). The game's
@@ -1502,6 +1505,27 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             LOG_INFO("DLSS-NR automatic exposure (Vulkan): {} the game's exposure", follow ? "following" : "no longer following");
 
         g_vk.followingGame = follow;
+
+        // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs
+        float found = 0.0f;
+        const bool was = g_vk.foundBaseWhitePoint > 0.0f;
+        g_vk.foundBaseWhitePoint = requestedWhitePointSource == 3 && linearHdr && !displayWhite && !follow &&
+                                           DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
+                                       ? g_vk.gamePreExposure / found
+                                       : 0.0f;
+
+        if ((g_vk.foundBaseWhitePoint > 0.0f) != was)
+        {
+            const float own =
+                g_vk.autoExposureValue > 1e-8f ? g_vk.autoExposurePreExposure / g_vk.autoExposureValue : 0.0f;
+            LOG_INFO("DLSS-NR automatic exposure (Vulkan): {}",
+                     g_vk.foundBaseWhitePoint > 0.0f
+                         ? std::format("the game's own exposure (found by the scan) moves the white point from here: "
+                                       "{:.4g}, Automatic's own {:.4g} ({:+.2f} EV)",
+                                       g_vk.foundBaseWhitePoint, own,
+                                       own > 0.0f ? std::log2(own / g_vk.foundBaseWhitePoint) : 0.0f)
+                         : std::string("Automatic's own meter again"));
+        }
     }
 
     if (requestedWhitePointSource == 1 && g_vk.gameExposure > 1e-6f && !displayWhite)
@@ -1526,9 +1550,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         // recomputes this from the live 1x1 image when it is bound. Following the game, this is the value in
         // force: the game's base white point times the calibration, and the shader is told not to recompute it.
         const float baseWhitePoint =
-            g_vk.followingGame
-                ? g_vk.pairPreExposure / g_vk.pairGameExposure * DlssNrFollowGame::Instance().Scale()
-                : g_vk.autoExposurePreExposure / g_vk.autoExposureValue;
+            g_vk.followingGame                ? g_vk.pairPreExposure / g_vk.pairGameExposure *
+                                                    DlssNrFollowGame::Instance().Scale()
+            : g_vk.foundBaseWhitePoint > 0.0f ? g_vk.foundBaseWhitePoint
+                                              : g_vk.autoExposurePreExposure / g_vk.autoExposureValue;
         const auto anchors = DlssNrTrim::Parse(cfg.DlssNrAutoExposureTrimAnchors.value_or_default());
         const float trim = DlssNrTrim::TrimForKey(baseWhitePoint, DlssNr::AutoTrimEffective(cfg),
                                                   anchors, cfg.DlssNrAutoExposureTrimPreview.value_or_default());
@@ -1710,7 +1735,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
                 Transition(cmdBuffer, g_vk.autoExposure, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 g_vk.autoExposureActive = true;
-                encode.UseExposureWhitePoint = g_vk.followingGame ? 0u : 1u;
+                encode.UseExposureWhitePoint = g_vk.followingGame || g_vk.foundBaseWhitePoint > 0.0f ? 0u : 1u;
 
                 // Queue the value for readback, for the menu and anchor capture only.
                 const unsigned long long slot = g_vk.meterFrames % kMeterSlots;

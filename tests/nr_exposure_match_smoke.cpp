@@ -156,6 +156,20 @@ static void Synthetic()
         CHECK(f.corr > 0.95f);
     }
 
+    // In a game the candidates come at different times: each is judged on its own rows (MatchEach)
+    {
+        const std::vector<float> early = Map(e, [](float, size_t i) { return 1.0f + 0.001f * (float) (i % 7); });
+        std::vector<float> late = Map(e, [](float x, size_t) { return 0.7f * x; });
+        for (size_t i = 0; i < 400; ++i)
+            late[i] = 0.0f; // not made yet
+        const Verdict v = MatchEach(meter, { early, late }, { 0, 400 });
+        CHECK(v.what == What::Found);
+        CHECK(v.index == 1);
+        CHECK(v.fit.kind == Kind::Multiplier);
+        // too few rows of its own yet: not sure, even with plenty of rows overall
+        CHECK(MatchEach(meter, { late }, { 1100 }).what == What::NotSure);
+    }
+
     // What is not an exposure
     CHECK(Classify(meter, Map(e, [](float, size_t i) { return 0.1f * (float) i; })).kind == Kind::Timer);
     CHECK(Classify(meter, Map(e, [](float, size_t) { return Rand01(); })).kind == Kind::Noisy);
@@ -390,6 +404,16 @@ static void Recordings(const std::string& folder)
             CHECK(v.fit.kind == Kind::Multiplier);
             CHECK(v.fit.corr > 0.95f);
             CHECK(v.meterTravelEv > 6.0f);
+
+            // The same recording as the scan sees it in the game: each candidate from its first reading
+            std::vector<size_t> first(r.candidates.size(), 0);
+            for (size_t c = 0; c < r.candidates.size(); ++c)
+                while (first[c] < r.candidates[c].size() && r.candidates[c][first[c]] == 0.0f)
+                    ++first[c];
+            const Verdict each = MatchEach(r.meter, r.candidates, first);
+            CHECK(each.what == What::Found);
+            CHECK(each.index >= 0 && (r.columns[each.index] == "c61" || r.columns[each.index] == "c62" ||
+                                      r.columns[each.index] == "c63"));
 
             for (const char* exposure : { "c61", "c62", "c63" })
                 CHECK(Classify(r.meter, Column(r, exposure)).kind == Kind::Multiplier);

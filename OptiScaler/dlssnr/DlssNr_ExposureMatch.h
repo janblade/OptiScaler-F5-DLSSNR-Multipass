@@ -475,6 +475,47 @@ inline Verdict Match(const std::vector<float>& meter, const std::vector<std::vec
     return out;
 }
 
+// Match over candidates the scan took at different times, as it does in a game: candidate c has values from row
+// first[c] on (none before it was made). Each is judged on its own rows, as Match judges one: Found, the tightest of
+// those found; else Baked, the first so judged; else None once every candidate had enough rows and light to say; else
+// NotSure.
+inline Verdict MatchEach(const std::vector<float>& meter, const std::vector<std::vector<float>>& candidates,
+                         const std::vector<size_t>& first, const Settings& s = {})
+{
+    Verdict best, baked;
+    bool allSaid = !candidates.empty();
+
+    for (size_t c = 0; c < candidates.size(); ++c)
+    {
+        const size_t from = c < first.size() ? std::min(first[c], meter.size()) : 0;
+        const std::vector<float> m(meter.begin() + from, meter.end());
+        std::vector<float> v;
+        v.reserve(m.size());
+        for (size_t i = from; i < meter.size(); ++i)
+            v.push_back(i < candidates[c].size() ? candidates[c][i] : 0.0f);
+
+        Verdict one = Match(m, { v }, s);
+        if (one.index >= 0)
+            one.index = (int) c;
+
+        if (one.what == What::Found && (best.what != What::Found || std::fabs(one.fit.corr) > std::fabs(best.fit.corr)))
+            best = one;
+        else if (one.what == What::Baked && baked.what != What::Baked)
+            baked = one;
+
+        allSaid = allSaid && one.what != What::NotSure;
+    }
+
+    if (best.what == What::Found)
+        return best;
+    if (baked.what == What::Baked)
+        return baked;
+
+    Verdict out;
+    out.what = allSaid ? What::None : What::NotSure;
+    return out;
+}
+
 // A candidate's value as an exposure multiplier in our meter's sense, up to a constant factor; 0 when it has none.
 inline float AsExposure(const Fit& f, float value)
 {

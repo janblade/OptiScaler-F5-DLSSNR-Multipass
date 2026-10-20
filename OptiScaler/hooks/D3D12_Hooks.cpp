@@ -2085,7 +2085,7 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
 {
     auto* config = Config::Instance();
     const bool extendedStateRestore = config->ExtendedStateRestore.value_or_default();
-    const bool samplerOverride = config->MipmapBiasOverride.has_value() || config->AnisotropyOverride.has_value();
+    bool samplerOverride = config->MipmapBiasOverride.has_value() || config->AnisotropyOverride.has_value();
     const bool trackRootParameterCount = extendedStateRestore || samplerOverride;
     const bool trackHudfixRootSignature = config->FGHudfixPersistentBindings.value_or_default() &&
                                           State::Instance().activeFgInput == FGInput::Upscaler &&
@@ -2097,9 +2097,42 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
                                      ppvRootSignature);
     }
 
+    // The device hooks can be installed without D3D12Hooks::Hook() having run (seen in World of Warcraft), which leaves
+    // the export trampolines null. Use the export itself then: it is not detoured in that case, so the overrides are
+    // not applied twice.
+    const auto createDeserializer = D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_();
+    const auto serializeVersioned = o_D3D12SerializeVersionedRootSignature != nullptr
+                                        ? o_D3D12SerializeVersionedRootSignature
+                                        : D3d12Proxy::D3D12SerializeVersionedRootSignature_();
+
+    if (createDeserializer == nullptr)
+    {
+        static std::atomic<bool> warned { false };
+        if (!warned.exchange(true))
+            LOG_ERROR("D3D12 root signature deserializer unavailable, passing root signatures through unchanged: no "
+                      "mipmap bias/anisotropy override, ExtendedStateRestore or persistent HUDFix bindings");
+
+        return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
+                                     ppvRootSignature);
+    }
+
+    // Without a serializer only the sampler override is lost; the tracking below still works
+    if (samplerOverride && serializeVersioned == nullptr)
+    {
+        static std::atomic<bool> warned { false };
+        if (!warned.exchange(true))
+            LOG_ERROR("D3D12SerializeVersionedRootSignature unavailable: no mipmap bias/anisotropy override on root "
+                      "signature static samplers");
+
+        samplerOverride = false;
+
+        if (!extendedStateRestore && !trackHudfixRootSignature)
+            return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
+                                         ppvRootSignature);
+    }
+
     ID3D12VersionedRootSignatureDeserializer* deserializer = nullptr;
-    auto result = D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_()(
-        pBlobWithRootSignature, blobLengthInBytes, IID_PPV_ARGS(&deserializer));
+    auto result = createDeserializer(pBlobWithRootSignature, blobLengthInBytes, IID_PPV_ARGS(&deserializer));
 
     // Deserialize the blob
     if (FAILED(result))
@@ -2180,7 +2213,7 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
     result = S_OK;
 
     // Reserialize
-    result = o_D3D12SerializeVersionedRootSignature(&descCopy, &newBlob, &errorBlob);
+    result = serializeVersioned(&descCopy, &newBlob, &errorBlob);
 
     if (SUCCEEDED(result))
     {
@@ -2418,21 +2451,26 @@ static void UnhookDevice()
     ResTrack_Dx12::ReleaseDeviceHooks();
 }
 
-void D3D12Hooks::Hook()
+bool D3D12Hooks::Hook()
 {
-    std::lock_guard<std::mutex> lock(hookMutex);
-
-    LOG_DEBUG("");
+    d3d12_binding::Claim claim;
+    if (!claim || D3d12Proxy::Module() == nullptr)
+        return false;
+    loader_boundary::OriginalOnlyScope scope;
 
     if (o_D3D12CreateDevice == nullptr)
-        o_D3D12CreateDevice = D3d12Proxy::Hook_D3D12CreateDevice(hkD3D12CreateDevice);
+        D3d12Proxy::Hook_D3D12CreateDevice(hkD3D12CreateDevice, &o_D3D12CreateDevice);
 
     if (o_D3D12SerializeRootSignature == nullptr)
-        o_D3D12SerializeRootSignature = D3d12Proxy::Hook_D3D12SerializeRootSignature(hkD3D12SerializeRootSignature);
+        D3d12Proxy::Hook_D3D12SerializeRootSignature(hkD3D12SerializeRootSignature, &o_D3D12SerializeRootSignature);
 
     if (o_D3D12SerializeVersionedRootSignature == nullptr)
-        o_D3D12SerializeVersionedRootSignature =
-            D3d12Proxy::Hook_D3D12SerializeVersionedRootSignature(hkD3D12SerializeVersionedRootSignature);
+        D3d12Proxy::Hook_D3D12SerializeVersionedRootSignature(hkD3D12SerializeVersionedRootSignature,
+                                                              &o_D3D12SerializeVersionedRootSignature);
+    return o_D3D12CreateDevice != nullptr &&
+           (D3d12Proxy::D3D12SerializeRootSignature_() == nullptr || o_D3D12SerializeRootSignature != nullptr) &&
+           (D3d12Proxy::D3D12SerializeVersionedRootSignature_() == nullptr ||
+            o_D3D12SerializeVersionedRootSignature != nullptr);
 }
 
 void D3D12Hooks::HookAgility(HMODULE module)

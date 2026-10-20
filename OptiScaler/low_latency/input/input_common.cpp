@@ -864,8 +864,11 @@ InputResult InputCommon::set_async_marker(const InputContext& inputContext, ID3D
 
     auto current_tech = currently_active_tech.load();
 
-    if (current_tech == nullptr) // can't init using ID3D12CommandQueue, can only check if available
-        return InputResult::LowLatencyUpdateFail;
+    // Can't init using ID3D12CommandQueue, can only check if available. Opti's own context (the Anti-Lag 2 one injected
+    // into FSR-FG) marks frames whether or not a low latency tech runs; without one there is nothing to mark, which is
+    // not a failure
+    if (current_tech == nullptr)
+        return inputContext.localContext ? InputResult::Ok : InputResult::LowLatencyUpdateFail;
 
     if (!marker_supported(inputContext.markerMode, marker_params.marker_type))
         return InputResult::InputNotSupported;

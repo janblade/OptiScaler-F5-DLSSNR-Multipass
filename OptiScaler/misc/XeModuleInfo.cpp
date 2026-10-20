@@ -4,6 +4,7 @@
 #include <Config.h>
 #include <Util.h>
 
+#include <proxies/KernelBase_Proxy.h>
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/XeLL_Proxy.h>
@@ -22,6 +23,11 @@ std::mutex lineMutex;
 std::string xefgLine;
 std::string xellLine;
 
+// The modules last described, and whether a description is under way (all under lineMutex)
+HMODULE describedXefg = nullptr;
+HMODULE describedXell = nullptr;
+bool describing = false;
+
 std::wstring PathOf(HMODULE module)
 {
     if (module == nullptr)
@@ -38,19 +44,22 @@ bool SameFolder(const std::filesystem::path& file, const std::wstring& folder)
     return !folder.empty() && std::filesystem::equivalent(file.parent_path(), folder, error);
 }
 
-// Where a module's file comes from, in the words the menu uses
-std::string SourceOf(const std::filesystem::path& file, const std::optional<std::wstring>& overridePath)
+// Where a module's file comes from, in the words the menu uses. Without an OptiScaler subfolder OptiScaler's folder
+// is the game's own, and the label says so.
+std::string SourceOf(const std::filesystem::path& file, const std::wstring& overridePath, const std::wstring& optiFolder)
 {
     std::error_code error;
 
-    if (overridePath.has_value() && !overridePath->empty() &&
-        (std::filesystem::equivalent(file, *overridePath, error) || SameFolder(file, *overridePath)))
+    if (!overridePath.empty() &&
+        (std::filesystem::equivalent(file, overridePath, error) || SameFolder(file, overridePath)))
         return "the ini's path";
 
-    if (SameFolder(file, Config::Instance()->MainDllPath.value_or(L"")))
-        return "OptiScaler's folder";
+    const bool inGameFolder = SameFolder(file, Util::ExePath().parent_path().wstring());
 
-    if (SameFolder(file, Util::ExePath().parent_path().wstring()))
+    if (SameFolder(file, optiFolder))
+        return inGameFolder ? "the game's folder (also OptiScaler's)" : "OptiScaler's folder";
+
+    if (inGameFolder)
         return "the game's folder";
 
     return "elsewhere";
@@ -66,8 +75,7 @@ std::string VersionOf(const std::wstring& path)
     return std::format("v{}.{}.{}.{}", version.major, version.minor, version.patch, version.reserved);
 }
 
-// The file's Authenticode signature, checked offline (no revocation lookup). A file someone changed after signing
-// fails it, an unsigned one has none.
+// The file's Authenticode signature, checked offline (no revocation lookup)
 std::string SignatureOf(const std::wstring& path)
 {
     using PFN_WinVerifyTrust = LONG(WINAPI*)(HWND, GUID*, LPVOID);
@@ -75,7 +83,8 @@ std::string SignatureOf(const std::wstring& path)
     static const auto verify = []
     {
         const auto wintrust = NtdllProxy::LoadLibraryExW_Ldr(L"wintrust.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        return wintrust != nullptr ? (PFN_WinVerifyTrust) GetProcAddress(wintrust, "WinVerifyTrust") : nullptr;
+        return wintrust != nullptr ? (PFN_WinVerifyTrust) KernelBaseProxy::GetProcAddress_()(wintrust, "WinVerifyTrust")
+                                   : nullptr;
     }();
 
     if (verify == nullptr)
@@ -100,13 +109,20 @@ std::string SignatureOf(const std::wstring& path)
     data.dwStateAction = WTD_STATEACTION_CLOSE;
     verify(nullptr, &action, &data);
 
-    if (result == ERROR_SUCCESS)
+    switch (result)
+    {
+    case ERROR_SUCCESS:
         return "signed";
 
-    if (result == TRUST_E_NOSIGNATURE)
+    case TRUST_E_NOSIGNATURE:
         return "not signed";
 
-    return std::format("signature does not check out ({:#x}, modified?)", (uint32_t) result);
+    case TRUST_E_BAD_DIGEST:
+        return "changed after signing";
+
+    default:
+        return std::format("signature not trusted ({:#x})", (uint32_t) result);
+    }
 }
 
 std::string Sha256Of(const std::wstring& path)
@@ -115,7 +131,7 @@ std::string Sha256Of(const std::wstring& path)
     BCRYPT_HASH_HANDLE hash = nullptr;
 
     if (!file || BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &hash, nullptr, 0, nullptr, 0, 0) != 0)
-        return {};
+        return "unavailable";
 
     std::vector<char> chunk(1 << 20);
     bool ok = true;
@@ -133,7 +149,7 @@ std::string Sha256Of(const std::wstring& path)
     BCryptDestroyHash(hash);
 
     if (!ok)
-        return {};
+        return "unavailable";
 
     std::string hex;
     for (const auto byte : digest)
@@ -142,74 +158,133 @@ std::string Sha256Of(const std::wstring& path)
     return hex;
 }
 
-// The log line and the menu line of one module (libxess_fg.dll or libxell.dll)
-std::string DescribeOne(const char* what, HMODULE module, HMODULE gameCopy, const std::wstring& path,
-                        const std::optional<std::wstring>& overridePath)
+// One module (libxess_fg.dll or libxell.dll), as read on the calling thread
+struct Module
 {
-    if (module == nullptr || path.empty())
+    const char* what = nullptr;
+    HMODULE module = nullptr;
+    HMODULE gameCopy = nullptr;
+    std::wstring path;
+    std::wstring overridePath;
+};
+
+// The log line and the menu line of one module
+std::string DescribeOne(const Module& m, const std::wstring& optiFolder)
+{
+    if (m.module == nullptr || m.path.empty())
     {
-        LOG_INFO("{}: not loaded", what);
+        LOG_INFO("{}: not loaded", m.what);
         return {};
     }
 
-    const std::filesystem::path file(path);
-    const auto source = SourceOf(file, overridePath);
-    const auto version = VersionOf(path);
-    const auto signature = SignatureOf(path);
+    const std::filesystem::path file(m.path);
+    const auto source = SourceOf(file, m.overridePath, optiFolder);
+    const auto version = VersionOf(m.path);
+    const auto signature = SignatureOf(m.path);
 
-    LOG_INFO("{} in use: {} (from {}), file {}, {}, SHA-256 {}", what, wstring_to_string(path), source, version,
-             signature, Sha256Of(path));
+    LOG_INFO("{} in use: {} (from {}), file {}, {}, SHA-256 {}", m.what, wstring_to_string(m.path), source, version,
+             signature, Sha256Of(m.path));
 
-    std::string line = std::format("{}: {} {} from {}, {}", what, wstring_to_string(file.filename().wstring()),
+    std::string line = std::format("{}: {} {} from {}, {}", m.what, wstring_to_string(file.filename().wstring()),
                                    version, source, signature);
 
-    if (gameCopy != nullptr && gameCopy != module)
+    if (m.gameCopy != nullptr && m.gameCopy != m.module)
     {
-        const auto gamePath = PathOf(gameCopy);
+        const auto gamePath = PathOf(m.gameCopy);
         const auto gameVersion = VersionOf(gamePath);
 
-        LOG_INFO("{}: the game's own copy is loaded too: {}, file {}", what, wstring_to_string(gamePath), gameVersion);
+        LOG_INFO("{}: the game's own copy is loaded too: {}, file {}", m.what, wstring_to_string(gamePath), gameVersion);
         line += std::format("; the game's own {} is loaded too", gameVersion);
     }
 
     return line;
 }
+
+struct Work
+{
+    Module xefg;
+    Module xell;
+    std::wstring optiFolder;
+    HMODULE self = nullptr; // a reference on OptiScaler, so it stays mapped while the thread runs
+};
+
+DWORD WINAPI DescribeThread(LPVOID parameter)
+{
+    std::unique_ptr<Work> work(static_cast<Work*>(parameter));
+    const HMODULE self = work->self;
+
+    try
+    {
+        auto fg = DescribeOne(work->xefg, work->optiFolder);
+        auto ll = DescribeOne(work->xell, work->optiFolder);
+
+        std::scoped_lock lock(lineMutex);
+        xefgLine = std::move(fg);
+        xellLine = std::move(ll);
+    }
+    catch (...)
+    {
+        LOG_ERROR("Describing XeFG / XeLL failed");
+    }
+
+    {
+        std::scoped_lock lock(lineMutex);
+        describing = false;
+    }
+
+    work.reset();
+    FreeLibraryAndExitThread(self, 0);
+}
 } // namespace
 
 void XeModuleInfo::Describe()
 {
-    static std::once_flag once;
+    const HMODULE xefg = XeFGProxy::Module();
+    const HMODULE xell = XeLLProxy::Module();
 
-    std::call_once(once,
-                   []
-                   {
-                       // Read on this thread: the paths and handles do not change once the proxies have loaded
-                       const HMODULE xefg = XeFGProxy::Module();
-                       const HMODULE xefgGame = XeFGProxy::MemModule();
-                       const std::wstring xefgPath = XeFGProxy::Module_Path();
-                       const auto xefgOverride = Config::Instance()->XeFGLibrary.value_or(L"");
+    {
+        std::scoped_lock lock(lineMutex);
 
-                       const HMODULE xell = XeLLProxy::Module();
-                       const HMODULE xellGame = XeLLProxy::MemModule();
-                       const std::wstring xellPath = XeLLProxy::Module_Path();
-                       const auto xellOverride = Config::Instance()->XeLLLibrary.value_or(L"");
+        // Once per pair of modules: again only when one loaded (or changed) since
+        if (describing || (xefg == describedXefg && xell == describedXell))
+            return;
 
-                       std::thread(
-                           [=]
-                           {
-                               auto fg = DescribeOne("XeFG", xefg, xefgGame, xefgPath, xefgOverride);
-                               auto ll = DescribeOne("XeLL", xell, xellGame, xellPath, xellOverride);
+        describing = true;
+        describedXefg = xefg;
+        describedXell = xell;
+    }
 
-                               std::scoped_lock lock(lineMutex);
-                               xefgLine = std::move(fg);
-                               xellLine = std::move(ll);
-                           })
-                           .detach();
-                   });
+    // Read here: the paths and handles do not change once the proxies have loaded
+    auto work = std::make_unique<Work>();
+    work->xefg = { "XeFG", xefg, XeFGProxy::MemModule(), XeFGProxy::Module_Path(),
+                   Config::Instance()->XeFGLibrary.value_or(L"") };
+    work->xell = { "XeLL", xell, XeLLProxy::MemModule(), XeLLProxy::Module_Path(),
+                   Config::Instance()->XeLLLibrary.value_or(L"") };
+    work->optiFolder = Config::Instance()->MainDllPath.value_or(L"");
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR) &DescribeThread, &work->self))
+        work->self = nullptr;
+
+    if (work->self != nullptr)
+    {
+        if (const auto thread = CreateThread(nullptr, 0, DescribeThread, work.get(), 0, nullptr))
+        {
+            work.release(); // the thread owns it now
+            CloseHandle(thread);
+            return;
+        }
+
+        FreeLibrary(work->self);
+    }
+
+    std::scoped_lock lock(lineMutex);
+    describing = false;
 }
 
 std::string XeModuleInfo::XeFGLine()
 {
+    Describe(); // picks up an XeFG or XeLL loaded after start
+
     std::scoped_lock lock(lineMutex);
     return xefgLine;
 }

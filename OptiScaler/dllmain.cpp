@@ -211,6 +211,18 @@ static void RunAgilityUpgrade(HMODULE dx12Module)
     }
 }
 
+// " (v1.2.3.4)" from a plugin's version resource, for support logs (an unlocker built for one XeFG/DLSS-G version,
+// say); empty when it has none
+static std::wstring PluginVersion(const std::filesystem::path& plugin)
+{
+    version_t version {};
+
+    if (!Util::GetFileVersion(plugin.wstring(), &version))
+        return {};
+
+    return std::format(L" (v{}.{}.{}.{})", version.major, version.minor, version.patch, version.reserved);
+}
+
 void LoadAsiPlugins()
 {
     std::filesystem::path pluginPath(Config::Instance()->PluginPath.value_or(L"plugins"));
@@ -242,20 +254,9 @@ void LoadAsiPlugins()
             else
                 hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
 
-            if (hMod == nullptr && fileName.rfind(L"-loadlate") == std::wstring::npos)
-                LOG_ERROR(L"Could not load {}", entry.path().wstring());
-
             if (hMod != nullptr)
             {
-                // The plugin's own version, for support logs (an unlocker built for one XeFG/DLSS-G version, say)
-                version_t fileVersion {};
-                version_t productVersion {};
-
-                if (Util::GetFileVersion(entry.path().wstring(), &fileVersion, &productVersion))
-                    LOG_INFO(L"Loaded: {} (v{}.{}.{}.{})", entry.path().wstring(), fileVersion.major, fileVersion.minor,
-                             fileVersion.patch, fileVersion.reserved);
-                else
-                    LOG_INFO(L"Loaded: {}", entry.path().wstring());
+                LOG_INFO(L"Loaded: {}{}", entry.path().wstring(), PluginVersion(entry.path()));
                 _asiHandles.push_back(hMod);
 
                 auto init = (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
@@ -289,7 +290,7 @@ void LoadAsiPlugins()
                     }
                 }
             }
-            else
+            else if (fileName.rfind(L"-loadlate") == std::wstring::npos) // late ones load below
             {
                 DWORD err = GetLastError();
                 LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
@@ -313,7 +314,8 @@ void LoadAsiPlugins()
 
                                 if (hMod != nullptr)
                                 {
-                                    LOG_INFO(L"Loaded late: {}", entry.path().wstring());
+                                    LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(),
+                                             PluginVersion(entry.path()));
                                     _asiHandles.push_back(hMod);
 
                                     auto init =

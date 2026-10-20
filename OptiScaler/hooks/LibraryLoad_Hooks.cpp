@@ -44,13 +44,22 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckA(std::string libName, LPCSTR lpLibFul
 
 // The game loading its own libxess_fg.dll or libxell.dll while OptiScaler has a copy loaded. With two copies the game
 // and OptiScaler talk to different ones: OptiScaler's XeLL hooks never see the game's calls, and XeFG may pair with
-// either XeLL. So the game is handed OptiScaler's copy (`ours`), unless the file it asked for is newer -- an XeFG
-// update that came with the game stays the game's. A copy the game had loaded before OptiScaler (`inMemory`) is what
-// the loader hands out again for that name anyway; it is left to it. nullptr = load normally.
+// either XeLL. So the game is handed OptiScaler's copy (`ours`). nullptr = load normally.
+// - XeFG only (`newerStaysGames`): when the file the game asked for is newer, the game gets that file, loaded by its
+//   full path -- by bare name the loader would hand out the already loaded one of the same name, which is ours. XeLL
+//   always stays one copy: XeFG is steered to OptiScaler's XeLL (KernelHooks::AnswerXellLookup), so a game context
+//   from another copy would reach the wrong one.
+// - Only when OptiScaler's file carries the name asked for. An ini path to a wrapper (another file name) is not
+//   handed out: the wrapper loading the real DLL by name would get itself back.
+// - A copy the game had loaded before OptiScaler (`inMemory`) is what the loader hands out again for that name; it
+//   is left to it.
 static HMODULE OurXeCopyFor(const char* what, LPCWSTR lpLibFullPath, HMODULE ours, HMODULE inMemory,
-                            const std::wstring& oursPath)
+                            const std::wstring& oursPath, bool newerStaysGames)
 {
-    if (ours == nullptr || oursPath.empty())
+    // Reading a file's version can load it as a data file, which comes back through these hooks
+    thread_local bool inside = false;
+
+    if (inside || ours == nullptr || oursPath.empty() || lpLibFullPath == nullptr)
         return nullptr;
 
     if (inMemory != nullptr && inMemory != ours)
@@ -59,35 +68,59 @@ static HMODULE OurXeCopyFor(const char* what, LPCWSTR lpLibFullPath, HMODULE our
         return nullptr;
     }
 
-    // The file the game asked for: its path as given, or the bare name next to the game's exe
-    std::filesystem::path asked(lpLibFullPath != nullptr ? lpLibFullPath : L"");
+    std::filesystem::path asked(lpLibFullPath);
     std::error_code error;
 
-    if (!asked.empty() && !asked.has_parent_path())
+    auto oursStem = std::filesystem::path(oursPath).stem().wstring();
+    auto askedStem = asked.stem().wstring();
+    to_lower_in_place(oursStem);
+    to_lower_in_place(askedStem);
+
+    if (oursStem != askedStem)
+        return nullptr;
+
+    inside = true;
+
+    // The file the game asked for: its path as given, or the bare name next to the game's exe
+    const bool bareName = !asked.has_parent_path();
+
+    if (bareName)
         asked = Util::ExePath().parent_path() / asked;
+
+    if (asked.extension().empty())
+        asked += L".dll";
 
     version_t askedVersion {};
     version_t oursVersion {};
-    const bool askedExists = !asked.empty() && std::filesystem::exists(asked, error);
+    const bool askedExists = std::filesystem::exists(asked, error);
+    const bool same = askedExists && std::filesystem::equivalent(asked, oursPath, error);
 
-    if (askedExists && std::filesystem::equivalent(asked, oursPath, error))
-        return ours;
+    HMODULE result = nullptr;
 
-    if (askedExists && Util::GetFileVersion(asked.wstring(), &askedVersion) &&
+    if (newerStaysGames && askedExists && !same && Util::GetFileVersion(asked.wstring(), &askedVersion) &&
         Util::GetFileVersion(oursPath, &oursVersion) && askedVersion > oursVersion)
     {
-        LOG_INFO("The game loads its own {} v{}.{}.{}.{}, newer than OptiScaler's v{}.{}.{}.{}: the game keeps its own",
+        LOG_INFO("The game loads its own {} v{}.{}.{}.{}, newer than OptiScaler's v{}.{}.{}.{}: the game gets its own "
+                 "({})",
                  what, askedVersion.major, askedVersion.minor, askedVersion.patch, askedVersion.reserved,
-                 oursVersion.major, oursVersion.minor, oursVersion.patch, oursVersion.reserved);
-        return nullptr;
+                 oursVersion.major, oursVersion.minor, oursVersion.patch, oursVersion.reserved,
+                 wstring_to_string(asked.wstring()));
+
+        result = NtdllProxy::LoadLibraryExW_Ldr(asked.c_str(), NULL, 0);
+    }
+    else
+    {
+        if (!same)
+            LOG_INFO("The game loads {}{}: handed OptiScaler's copy ({}), so both use one", what,
+                     askedExists ? std::format(" ({})", wstring_to_string(asked.wstring())) : std::string(),
+                     wstring_to_string(oursPath));
+
+        // A reference of the game's own, as a load would take
+        result = NtdllProxy::LoadLibraryExW_Ldr(oursPath.c_str(), NULL, 0);
     }
 
-    LOG_INFO("The game loads {}{}: handed OptiScaler's copy ({}), so both use one", what,
-             askedExists ? std::format(" ({})", wstring_to_string(asked.wstring())) : std::string(),
-             wstring_to_string(oursPath));
-
-    // A reference of the game's own, as a load would take
-    return NtdllProxy::LoadLibraryExW_Ldr(oursPath.c_str(), NULL, 0);
+    inside = false;
+    return result;
 }
 
 HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath)
@@ -541,14 +574,14 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     if (CheckDllNameW(&libName, &xefgNamesW))
     {
         if (auto module = OurXeCopyFor("libxess_fg.dll", lpLibFullPath, XeFGProxy::Module(), XeFGProxy::MemModule(),
-                                       XeFGProxy::Module_Path()))
+                                       XeFGProxy::Module_Path(), true))
             return module;
     }
 
     if (CheckDllNameW(&libName, &xellNamesW))
     {
         if (auto module = OurXeCopyFor("libxell.dll", lpLibFullPath, XeLLProxy::Module(), XeLLProxy::MemModule(),
-                                       XeLLProxy::Module_Path()))
+                                       XeLLProxy::Module_Path(), false))
             return module;
     }
 

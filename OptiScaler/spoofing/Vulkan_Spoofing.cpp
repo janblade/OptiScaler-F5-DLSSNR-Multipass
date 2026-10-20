@@ -479,14 +479,16 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
 
     // Spoofed names the game may have taken from our enumerate hook: dropped when the device does not really have
     // them (asking for one would fail the create). One the device has stays, on any vendor: a game's own
-    // VK_EXT_buffer_device_address on AMD is real.
+    // VK_EXT_buffer_device_address on AMD is real. Without the device's list, the vendor decides as before: all of
+    // them go on a GPU that is not NVIDIA's.
     LOG_DEBUG("Checking extensions and removing spoofed ones the device lacks");
     for (size_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
     {
         auto extName = pCreateInfo->ppEnabledExtensionNames[i];
+        const bool lacking =
+            supported.empty() ? vendorId != (uint32_t) VendorId::Nvidia : !supported.contains(extName);
 
-        if (Config::Instance()->VulkanExtensionSpoofing.value_or_default() && !supported.empty() &&
-            !supported.contains(extName))
+        if (Config::Instance()->VulkanExtensionSpoofing.value_or_default() && lacking)
         {
             auto binaryImport = std::strcmp(extName, VK_NVX_BINARY_IMPORT_EXTENSION_NAME) == 0;
             auto imgViewHandle = std::strcmp(extName, VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME) == 0;

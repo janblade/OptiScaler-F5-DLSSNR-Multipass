@@ -83,11 +83,32 @@ static bool Adopt(std::vector<Slot>& slots, const std::string& word, int id)
     return true;
 }
 
+// Takes a waiting one into the first free slot, as Core::AdoptLocked does for the rotation
+static bool Take(std::vector<Slot>& slots, const Waiting& w)
+{
+    const int slot = FreeSlot(slots, 64);
+    if (slot < 0)
+        return false;
+    if ((size_t) slot == slots.size())
+        slots.emplace_back();
+    slots[slot] = { true, slots[slot].generation + 1, false, false, w.rank, 0, w.id };
+    return true;
+}
+
+// One NR frame of the real rotation (DlssNrExposureScanShape::Rotate, as RotateLocked calls it)
+static Rotation RotateOnce(std::vector<Slot>& slots, std::vector<Waiting>& waiting)
+{
+    return DlssNrExposureScanShape::Rotate(
+        slots, waiting, 64, [](const Slot&) { return true; }, [&](size_t i) { slots[i].alive = false; },
+        [&](const Waiting& w) { return Take(slots, w); });
+}
+
 // Witcher 3's case (2026-10-20): `count` buffers made at once at load, before NR reads any; only `exposureId` holds a
-// decimal number, the rest integers. The ones a full list turns away wait (Core::AdoptLocked); each NR second the
-// candidates that held no decimal are let go of and those waiting take their slots (RotateLocked). Returns the seconds
-// until the exposure is held, or -1.
-static int Rotate(int count, int exposureId, int maxSeconds)
+// decimal number, the rest integers. The ones a full list turns away wait (Core::AdoptLocked); each NR frame the
+// candidates that held no decimal are let go of and those waiting take their slots (Rotate). A value is read 4 frames
+// after its copy (the readback ring), so a newcomer has its first read 4 frames on. Returns the NR frames until the
+// exposure is held, or -1.
+static int Rotation60(int count, int exposureId, int maxFrames)
 {
     std::vector<Slot> slots;
     std::vector<Waiting> waiting;
@@ -98,39 +119,31 @@ static int Rotate(int count, int exposureId, int maxSeconds)
             waiting.push_back({ Rank(true, 24), id });
     }
 
-    for (int second = 0; second <= maxSeconds; ++second)
-    {
-        for (Slot& s : slots)
-        {
-            if (s.alive && s.id == exposureId)
-                return second;
-        }
+    std::vector<int> age(1024, 0); // frames each slot's owner has been held
 
-        // a second of reads: 60 per candidate
-        for (Slot& s : slots)
+    for (int frame = 0; frame <= maxFrames; ++frame)
+    {
+        for (size_t i = 0; i < slots.size(); ++i)
         {
+            Slot& s = slots[i];
             if (!s.alive)
                 continue;
-            s.reads += 60;
-            (s.id == exposureId ? s.inRange : s.notDecimal) += 60;
+            if (s.id == exposureId)
+                return frame;
+            if (++age[i] > 4)
+            {
+                s.reads++;
+                (s.id == exposureId ? s.inRange : s.notDecimal)++;
+            }
         }
 
-        for (Slot& s : slots)
-        {
-            if (s.alive && HoldsNoDecimal(s))
-                s.alive = false;
-        }
-
-        while (!waiting.empty() && FreeSlot(slots, 64) >= 0)
-        {
-            const int next = NextWaiting(waiting);
-            const Waiting w = waiting[(size_t) next];
-            waiting.erase(waiting.begin() + next);
-            const int slot = FreeSlot(slots, 64);
-            if ((size_t) slot == slots.size())
-                slots.emplace_back();
-            slots[slot] = { true, slots[slot].generation + 1, false, false, w.rank, 0, w.id };
-        }
+        std::vector<uint32_t> owners;
+        for (const Slot& s : slots)
+            owners.push_back(s.generation);
+        RotateOnce(slots, waiting);
+        for (size_t i = 0; i < slots.size(); ++i)
+            if (slots[i].generation != owners[i])
+                age[i] = 0;
     }
 
     return -1;
@@ -297,12 +310,12 @@ int main()
         CHECK(list[5].id == 5);
     }
     {
-        // A value that is not a decimal number: an integer read as a float (Witcher 3's 65536 is 9.18e-41), a
-        // sentinel; not zero (a buffer not yet written), not a plausible exposure, not a NaN
-        CHECK(NotADecimal(9.18355e-41f));
-        CHECK(NotADecimal(1e6f) && NotADecimal(-1e6f) && NotADecimal(-1e-30f));
+        // A value that is not a decimal number: an integer read as a float (Witcher 3's 65536 is 9.18e-41), beyond what
+        // the matcher reads as a float; not zero (a buffer not yet written), not a value in physical units, not a NaN
+        CHECK(NotADecimal(9.18355e-41f) && NotADecimal(-1e-35f) && NotADecimal(1e31f));
         CHECK(!NotADecimal(0.0f) && !NotADecimal(-0.0f));
         CHECK(!NotADecimal(0.5f) && !NotADecimal(1e-5f) && !NotADecimal(9000.0f) && !NotADecimal(-2.0f));
+        CHECK(!NotADecimal(1e6f) && !NotADecimal(5e4f) && !NotADecimal(1e-20f)); // a luminance in cd/m2, a tiny scale
         float nan = 0.0f;
         nan = nan / nan;
         CHECK(!NotADecimal(nan));
@@ -315,6 +328,13 @@ int main()
         CHECK(HoldsNoDecimal(s));
         s.inRange = 1;
         CHECK(!HoldsNoDecimal(s));
+
+        // One that stays zero gives way only after much longer
+        Slot zero;
+        zero.reads = kNothingReads - 1;
+        CHECK(!HoldsNoDecimal(zero));
+        zero.reads = kNothingReads;
+        CHECK(HoldsNoDecimal(zero));
     }
     {
         // A full list gives up one that holds no decimal for any newcomer, before one of a lower rank; never the handed
@@ -339,10 +359,41 @@ int main()
     }
     {
         // Witcher 3: 387 buffers at once at load. Without waiting, one made after the first 64 was never seen; now the
-        // list goes through them 64 a second
-        CHECK(Rotate(387, 10, 10) == 0);
-        CHECK(Rotate(387, 300, 10) == 4); // the fifth 64: 256..319
-        CHECK(Rotate(387, 386, 10) == 6);
+        // list goes through them 64 every 64 NR frames (4 of readback delay, 60 reads)
+        CHECK(Rotation60(387, 10, 1000) == 0);
+        CHECK(Rotation60(387, 300, 1000) == 4 * 64); // the fifth 64: 256..319
+        CHECK(Rotation60(387, 386, 1000) == 6 * 64);
+    }
+    {
+        // The rotation: nothing is let go of while nothing waits; the handed exposure and a candidate one read short
+        // stay; those waiting come in by rank
+        std::vector<Slot> held;
+        for (int i = 0; i < 64; ++i)
+            Adopt(held, "b24", i);
+        for (Slot& s : held)
+            s.notDecimal = s.reads = kNotADecimalReads;
+        std::vector<Waiting> none;
+        CHECK(RotateOnce(held, none).letGo == 0 && held[0].alive);
+
+        held[1].handed = true;
+        held[2].notDecimal = held[2].reads = kNotADecimalReads - 1;
+        std::vector<Waiting> waiting = { { 2, 100 }, { 3, 101 }, { 1, 102 } };
+        const Rotation r = RotateOnce(held, waiting);
+        CHECK(r.letGo == 62 && r.taken == 3 && waiting.empty());
+        CHECK(held[0].id == 101 && held[3].id == 100 && held[4].id == 102); // likeliest first, into the first free
+        CHECK(held[1].alive && held[1].id == 1 && held[2].alive && held[2].id == 2);
+
+        // Slots that stay zero hold the rotation up only until kNothingReads
+        std::vector<Slot> zeros;
+        for (int i = 0; i < 64; ++i)
+            Adopt(zeros, "b24", i);
+        for (Slot& s : zeros)
+            s.reads = kNothingReads - 1;
+        std::vector<Waiting> one = { { 2, 200 } };
+        CHECK(RotateOnce(zeros, one).taken == 0 && one.size() == 1);
+        for (Slot& s : zeros)
+            s.reads = kNothingReads;
+        CHECK(RotateOnce(zeros, one).taken == 1 && zeros[0].id == 200);
     }
 
     printf(fails == 0 ? "nr_exposure_scan_shape_smoke: PASS\n" : "nr_exposure_scan_shape_smoke: %d FAIL\n", fails);

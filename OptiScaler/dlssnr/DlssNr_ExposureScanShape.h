@@ -12,7 +12,7 @@
 // shifting the list, because each API's readback ring holds values by slot index for a few frames. A slot's generation
 // counts its owners, so a value copied for the old owner is never credited to the new one. A full list makes room for a
 // newcomer whose shape is likelier to be the exposure, or for any newcomer once a candidate has shown it holds no
-// decimal number (Rank, EvictFor, HoldsNoDecimal); on D3D12 one turned away waits for a slot (NextWaiting).
+// decimal number (Rank, EvictFor, HoldsNoDecimal); on D3D12 one turned away waits for a slot (NextWaiting, Rotate).
 //
 // Header-only, no D3D or Vulkan types: tests/nr_exposure_scan_shape_smoke.cpp.
 
@@ -121,23 +121,31 @@ template <class Slot> int FreeSlot(const std::vector<Slot>& slots, size_t cap)
 inline constexpr float kPlausibleFloor = 1e-6f;
 inline constexpr float kPlausibleCeiling = 1e4f;
 
-// A value read as a float that is not a decimal number: not zero (a buffer not yet written) and outside the plausible
-// range. An integer read as a float lands far below it -- Witcher 3's 244 UAV buffers held only values like 65536,
-// 9.18e-41 as a float (2026-10-20) -- and a sentinel far above it. A NaN or an infinity is not counted (the reader
-// skips those).
+// A value read as a float that is not a decimal number at all: not zero (a buffer not yet written), and beyond what the
+// matcher still reads as a float (DlssNrExposureMatch's NotFloat, 1e-30 to 1e30) -- wider than the plausible range, so
+// a value in physical units (a luminance past 1e4 cd/m2 in daylight) is not taken for one. An integer read as a float
+// is a denormal or close: Witcher 3's UAV buffers held only values like 65536, 9.18e-41 as a float (2026-10-20). A NaN
+// or an infinity is not counted (the reader skips those).
+inline constexpr float kNotADecimalBelow = 1e-30f;
+inline constexpr float kNotADecimalAbove = 1e30f;
+
 inline bool NotADecimal(float v)
 {
     const float a = v < 0.0f ? -v : v;
-    return v != 0.0f && a == a && (a <= kPlausibleFloor || a >= kPlausibleCeiling);
+    return v != 0.0f && a == a && (a < kNotADecimalBelow || a > kNotADecimalAbove);
 }
 
-// Reads of a candidate that never held a plausible value, all saying it holds something else, before a full list gives
-// it up for anything (EvictFor) and the scan lets it go for one that waits (Core: the waiting list). About a second of
-// NR frames: such a buffer says so from its first read.
+// NR frames of reads before a candidate that never held a plausible value is given up for anything (EvictFor) and let
+// go of for one that waits (Rotate): kNotADecimalReads that all say it holds something else (such a buffer says so from
+// its first read), or kNothingReads of anything (a buffer that stays zero: Witcher 3 had 12 among 256).
 inline constexpr unsigned int kNotADecimalReads = 60;
+inline constexpr unsigned int kNothingReads = 600;
 
-// `Slot` has `unsigned int inRange` (plausible reads) and `notDecimal` (NotADecimal reads)
-template <class Slot> bool HoldsNoDecimal(const Slot& s) { return s.inRange == 0 && s.notDecimal >= kNotADecimalReads; }
+// `Slot` has `unsigned int inRange` (plausible reads), `notDecimal` (NotADecimal reads) and `reads`
+template <class Slot> bool HoldsNoDecimal(const Slot& s)
+{
+    return s.inRange == 0 && (s.notDecimal >= kNotADecimalReads || s.reads >= kNothingReads);
+}
 
 // How likely a candidate's shape is to hold the exposure, for a full list (EvictFor). `size`: bytes for a buffer, texels
 // for a texture (every layer and slice counted). A texture of up to 4 texels ranks 4 (the exposures found so far:
@@ -180,7 +188,10 @@ template <class Slot, class MayGo> int EvictFor(const std::vector<Slot>& slots, 
         const Slot& b = slots[best];
         const bool bNoDecimal = HoldsNoDecimal(b);
 
-        if (noDecimal != bNoDecimal ? noDecimal : s.rank < b.rank || (s.rank == b.rank && s.reads > b.reads))
+        const bool better =
+            noDecimal != bNoDecimal ? noDecimal : (s.rank < b.rank || (s.rank == b.rank && s.reads > b.reads));
+
+        if (better)
             best = (int) i;
     }
 
@@ -200,6 +211,47 @@ template <class Waiting> int NextWaiting(const std::vector<Waiting>& waiting)
     }
 
     return best;
+}
+
+// One rotation of the waiting list (Core's RotateLocked, once per NR frame while every candidate is copied): the
+// candidates `ours` (the waiting list's API) that hold no decimal number and are not the handed exposure are let go of
+// (`letGo(slot)`), and those waiting take the free slots, the likeliest first (`take(waiting)`: true when a slot was
+// taken; the entry leaves the list either way). Nothing is let go of while nothing waits.
+struct Rotation
+{
+    unsigned int letGo = 0;
+    unsigned int taken = 0;
+};
+
+template <class Slot, class Waiting, class Ours, class LetGo, class Take>
+Rotation Rotate(const std::vector<Slot>& slots, std::vector<Waiting>& waiting, size_t cap, Ours ours, LetGo letGo,
+                Take take)
+{
+    Rotation r;
+
+    if (waiting.empty())
+        return r;
+
+    for (size_t i = 0; i < slots.size(); ++i)
+    {
+        if (slots[i].alive && !slots[i].handed && ours(slots[i]) && HoldsNoDecimal(slots[i]))
+        {
+            letGo(i);
+            r.letGo++;
+        }
+    }
+
+    while (!waiting.empty() && FreeSlot(slots, cap) >= 0)
+    {
+        const int next = NextWaiting(waiting);
+        Waiting w = std::move(waiting[(size_t) next]);
+        waiting.erase(waiting.begin() + next);
+
+        if (take(w))
+            r.taken++;
+    }
+
+    return r;
 }
 
 // Whether a value copied from slot `index` when its generation was `copied` still belongs to who holds it now.

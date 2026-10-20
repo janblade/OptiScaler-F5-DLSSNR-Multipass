@@ -169,7 +169,7 @@ bool IFGFeature::IsActive() { return _isActive || _waitingNewFrameData; }
 
 bool IFGFeature::IsPaused() { return _targetFrame != 0 && _targetFrame >= _frameCount; }
 
-bool IFGFeature::IsGenerating() { return _isActive && !_waitingNewFrameData && !IsPaused(); }
+bool IFGFeature::IsGenerating() { return _isActive && !_waitingNewFrameData && !IsPaused() && !_generationOff; }
 
 bool IFGFeature::IsDispatched() { return _lastDispatchedFrame == _frameCount; }
 

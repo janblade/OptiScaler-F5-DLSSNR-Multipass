@@ -13,6 +13,7 @@
 #include <hooks/Vulkan_Hooks.h>
 #include <hooks/Xell_Hooks.h>
 #include <low_latency/input/input_common.h>
+#include <misc/FrameLimit.h>
 #include <misc/IdentifyGpu.h>
 #include <nvapi/NvApiHooks.h>
 #include <nvapi/fakenvapi.h>
@@ -320,7 +321,7 @@ CapInputs FrameCapInputs(Api api)
 
     CapInputs in;
     in.running = true;
-    in.capFps = Config::Instance()->FramerateLimit.value_or_default();
+    in.capFps = FrameLimit::CapFps();
     in.method = CurrentMethod(api);
     in.fsrFgActive = state.activeFgOutput == FGOutput::FSRFG && fgGenerating;
     in.xefgGenerating = XefgGenerating();
@@ -495,9 +496,10 @@ void PresentEnd(Api api, IUnknown* device, PresentSource source)
     auto capInputs = FrameCapInputs(api);
     const auto method = capInputs.method;
 
-    // The plan in force: a new one once it has held for a few presents (frame generation's short pauses)
+    // The plan in force: a new one once it has held for a few presents (frame generation's short pauses), XeFG's
+    // count steps at once
     const auto planned = PlanCap(capInputs);
-    const auto cap = SettleCap(g_capSettle, planned, method);
+    const auto cap = SettleCapForCount(g_capSettle, planned, method, capInputs.shownPerRendered);
 
     SleepModeCall call;
     call.api = api;

@@ -45,6 +45,7 @@
 #include <type_traits>
 #include <misc/IdentifyGpu.h>
 #include <misc/XeModuleInfo.h>
+#include <misc/FrameLimit.h>
 #include <hooks/Xell_Hooks.h>
 #include <low_latency/input/input_common.h>
 
@@ -4132,6 +4133,115 @@ void MenuCommon::RenderFGFollowGame()
                            game.count + 1, running + 1);
 }
 
+// XeFG's Dynamic MFG: the multiplier follows a target frame rate (XeFG_Dx12::DynamicCount)
+void MenuCommon::RenderXeFGDynamicMFG(RenderMenuContext& ctx, int maxInterpolationCount, bool followsGame)
+{
+    auto config = ctx.config;
+    auto fg = ctx.state.currentFG;
+    const float menuResScale = ctx.menuResScale;
+
+    // Not while following the game's count: the game picks it then
+    ImGui::BeginDisabled(followsGame);
+
+    if (bool dynamic = config->FGXeFGDynamicMFG.value_or_default(); ImGui::Checkbox("Dynamic MFG##xefg", &dynamic))
+        config->FGXeFGDynamicMFG = dynamic;
+
+    ShowHelpMarker("Changes the multiplier on the fly to hit the target FPS,\n"
+                   "up to the MFG setting (at 2X: frame generation on or off).\n"
+                   "Not while following the game's DLSS FG count.");
+
+    const bool dynamicMFG = config->FGXeFGDynamicMFG.value_or_default() && !followsGame;
+
+    if (dynamicMFG && fg != nullptr && fg->IsActive())
+    {
+        ImGui::SameLine(0.0f, 16.0f);
+
+        if (fg->GenerationOff())
+            ImGui::TextColored(toneMapColor(ImVec4(1.0f, 0.647f, 0.0f, 1.0f)), "Now 1X (frame generation off)");
+        else
+            ImGui::Text("Now %uX", fg->GetInterpolatedFrameCount() + 1);
+    }
+
+    if (dynamicMFG)
+    {
+        // Applied on release, so dragging doesn't start Dynamic MFG over every frame; follows the setting otherwise
+        // (an ini reload). Whole numbers; the lowest step (9) is Auto, the lowest target 10.
+        constexpr float autoStep = 9.0f;
+        static float target = autoStep;
+        static bool dragging = false;
+
+        if (!dragging)
+            target = std::max(std::round(config->FGXeFGFramerateTargetDMFG.value_or_default()), autoStep);
+
+        ImGui::SetNextItemWidth(150.0f * menuResScale);
+        ImGui::SliderFloat("Target FPS##xefg", &target, autoStep, (float) std::max(200, refreshRate),
+                           std::round(target) <= autoStep ? "Auto" : "%.0f", ImGuiSliderFlags_AlwaysClamp);
+
+        dragging = ImGui::IsItemActive();
+
+        if (ImGui::IsItemDeactivatedAfterEdit())
+        {
+            target = std::round(target);
+
+            if (target <= autoStep)
+                config->FGXeFGFramerateTargetDMFG.reset();
+            else
+                config->FGXeFGFramerateTargetDMFG = target;
+        }
+
+        ShowHelpMarker("Presented FPS to aim for, never above the FPS limit.\n"
+                       "Auto: the FPS limit, or just under the refresh rate.");
+
+        // The cap picks from 2X up: it needs a higher MFG setting
+        const bool onOff =
+            std::clamp(config->FGXeFGInterpolationCount.value_or_default(), 1, std::max(maxInterpolationCount, 1)) == 1;
+        const bool targetAsCap = config->FGXeFGTargetAsCapDMFG.value_or_default() && !onOff;
+
+        if (!onOff)
+        {
+            ImGui::SameLine(0.0f, 16.0f);
+
+            if (bool cap = targetAsCap; ImGui::Checkbox("Use as FPS limit##xefg", &cap))
+                config->FGXeFGTargetAsCapDMFG = cap;
+
+            ShowHelpMarker("Also limits FPS to the target and uses the lowest\n"
+                           "multiplier that reaches it.");
+        }
+
+        // The cap holds the target with its own rules
+        ImGui::BeginDisabled(targetAsCap);
+
+        const char* roundings[] = { "At most target", "Around target", "At least target" };
+        int rounding = std::clamp(config->FGXeFGRoundingDMFG.value_or_default(), 0, 2);
+
+        ImGui::SetNextItemWidth(150.0f * menuResScale);
+        if (ImGui::Combo("##xefgRounding", &rounding, roundings, IM_ARRAYSIZE(roundings)))
+            config->FGXeFGRoundingDMFG = rounding;
+
+        ShowHelpMarker("Where FPS may land, as multipliers only come in steps:\n"
+                       "at most, around or at least the target FPS.");
+
+        // At 2X, 1X is the only other step
+        if (!onOff)
+        {
+            ImGui::SameLine(0.0f, 16.0f);
+
+            if (bool allow1X = config->FGXeFGDynamicAllow1X.value_or_default();
+                ImGui::Checkbox("Allow 1X##xefg", &allow1X))
+            {
+                config->FGXeFGDynamicAllow1X = allow1X;
+            }
+
+            ShowHelpMarker("Turns frame generation off when the game\n"
+                           "alone gets close enough to the target.");
+        }
+
+        ImGui::EndDisabled();
+    }
+
+    ImGui::EndDisabled();
+}
+
 void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -4504,18 +4614,24 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         auto maxInterpolationCount = fgOutput->GetMaxInterpolationCount();
 
+        // Dynamic MFG picks the count: the combo is the most it may use
+        const bool dynamicMFG = config->FGXeFGDynamicMFG.value_or_default() && !followsGame;
+
         if (maxInterpolationCount > 1)
         {
             ImGui::SameLine(0.0f, 16.0f);
             ImGui::BeginDisabled(followsGame);
 
-            auto currentSet = fgOutput->GetInterpolatedFrameCount() - 1;
+            auto currentSet =
+                dynamicMFG
+                    ? std::clamp(config->FGXeFGInterpolationCount.value_or_default(), 1, maxInterpolationCount) - 1
+                    : (int) fgOutput->GetInterpolatedFrameCount() - 1;
 
             std::string currentIntCountStr = std::to_string(currentSet + 2) + "X";
 
             ImGui::PushItemWidth(95.0f * menuResScale);
 
-            if (ImGui::BeginCombo("MFG", currentIntCountStr.c_str()))
+            if (ImGui::BeginCombo(dynamicMFG ? "Max MFG" : "MFG", currentIntCountStr.c_str()))
             {
                 for (int i = 0; i < maxInterpolationCount; i++)
                 {
@@ -4524,8 +4640,11 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     if (ImGui::Selectable(modeStr.c_str(), (currentSet == i)))
                     {
                         LOG_DEBUG("XeFG Interpolation Count set to: {}", i + 1);
-                        state.fgChanged = true;
                         config->FGXeFGInterpolationCount = i + 1;
+
+                        // Dynamic MFG takes a new most at the next frame, without restarting frame generation
+                        if (!dynamicMFG)
+                            state.fgChanged = true;
                     }
                 }
 
@@ -4535,7 +4654,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ImGui::PopItemWidth();
             ImGui::EndDisabled();
 
-            ShowHelpMarker("Set XeFG interpolation count");
+            ShowHelpMarker(dynamicMFG ? "The highest multiplier Dynamic MFG may use" : "Set XeFG interpolation count");
         }
 
         ImGui::SameLine(0.0f, 16.0f);
@@ -4548,6 +4667,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                        "Reverts back to previous XeFG 2 behaviour\n\n"
                        "Fixes artifacting transparent HUD/UI");
         ImGui::EndDisabled();
+
+        RenderXeFGDynamicMFG(ctx, maxInterpolationCount, followsGame);
 
         bool fgDV = config->FGXeFGDebugView.value_or_default();
         if (ImGui::Checkbox("Debug View##2", &fgDV))
@@ -5772,8 +5893,9 @@ void MenuCommon::RenderFramerateLowLatency(RenderMenuContext& ctx)
     if (status.decision == Decision::Run && status.xellIdle)
         ImGui::TextDisabled("XeLL does nothing on this GPU while XeFG generates no frames.");
 
-    // Who keeps the frame cap: one wait per frame (NativeLowLatencyRule.h PlanCap)
-    if (const float cap = config->FramerateLimit.value_or_default(); cap > 0.0f)
+    // Who keeps the frame cap: one wait per frame (NativeLowLatencyRule.h PlanCap). The cap in force, Dynamic MFG's
+    // "Use as FPS limit" included.
+    if (const float cap = FrameLimit::CapFps(); cap > 0.0f)
     {
         std::string keeper = "OptiScaler's limiter";
         bool outputKeeps = false; // the low latency output keeps it (not the limiter or the game's XeLL)

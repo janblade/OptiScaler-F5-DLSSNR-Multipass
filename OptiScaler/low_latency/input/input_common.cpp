@@ -6,6 +6,7 @@
 // (input_uell.cpp); its outputs Reflex (D3D, Vulkan's VK_NV_low_latency2 or NvAPI_Vulkan), Anti-Lag 2 / Anti-Lag Vk,
 // XeLL (also XeFG's) and LatencyFlex. The game's XeLL and D3D Anti-Lag 2 stay on our own hooks.
 
+#include <misc/FrameLimit.h>
 #include <misc/IdentifyGpu.h>
 
 #include "input_common.h"
@@ -786,9 +787,15 @@ InputResult InputCommon::sleep(const InputContext& inputContext, IUnknown* pDevi
 
 
     if (auto current_tech = currently_active_tech.load())
+    {
+        const auto start = Util::MillisecondsNow();
         current_tech->sleep(frame_id);
+        slept_ms.fetch_add(Util::MillisecondsNow() - start);
+    }
     else
+    {
         return InputResult::NoReadyOutput;
+    }
 
     return InputResult::Ok;
 }
@@ -864,8 +871,11 @@ InputResult InputCommon::set_async_marker(const InputContext& inputContext, ID3D
 
     auto current_tech = currently_active_tech.load();
 
-    if (current_tech == nullptr) // can't init using ID3D12CommandQueue, can only check if available
-        return InputResult::LowLatencyUpdateFail;
+    // Can't init using ID3D12CommandQueue, can only check if available. Opti's own context (the Anti-Lag 2 one injected
+    // into FSR-FG) marks frames whether or not a low latency tech runs; without one there is nothing to mark, which is
+    // not a failure
+    if (current_tech == nullptr)
+        return inputContext.localContext ? InputResult::Ok : InputResult::LowLatencyUpdateFail;
 
     if (!marker_supported(inputContext.markerMode, marker_params.marker_type))
         return InputResult::InputNotSupported;
@@ -1303,10 +1313,11 @@ void InputCommon::xefg_marker(void* xellContext, uint32_t frame_id, uint32_t mar
     if (own == nullptr || own->get_tech_context() != xellContext || own == currently_active_tech.load())
         return;
 
-    // Without generated frames XeFG sends both right away, DLSSG doesn't send them
+    // Without generated frames XeFG sends both right away, DLSSG doesn't send them. Generating, as the consumer
+    // (fg_output_present) checks: at Dynamic MFG's 1X no batch would be taken, and a backlog would outlive it
     auto fg = State::Instance().currentFG;
 
-    if (fg == nullptr || !fg->IsActive() || fg->IsPaused())
+    if (fg == nullptr || !fg->IsGenerating())
     {
         reset_xefg_batches();
         return;
@@ -1529,7 +1540,7 @@ void InputCommon::update()
         static const bool intelGpu = IdentifyGpu::getPrimaryGpu().vendorId == VendorId::Intel;
 
         lloutput::GameCapInputs in;
-        in.capFps = config->FramerateLimit.value_or_default();
+        in.capFps = FrameLimit::CapFps();
         in.externalFrameGeneration = state.externalFrameGeneration;
         in.markersRecently = ueFrameCap || ReflexHooks::markersRecently(); // the mod's calls made it the input
         in.gameSetSleepMode = game.set;
@@ -1578,7 +1589,7 @@ void InputCommon::update()
     // Who keeps the cap, said whenever it or the cap changes (the limiter's changes reach no sleep mode)
     {
         static std::string lastText;
-        const float capFps = config->FramerateLimit.value_or_default();
+        const float capFps = FrameLimit::CapFps();
         std::string text;
 
         if ((gameInput || ueFrameCap) && cap.outputHoldsCap)

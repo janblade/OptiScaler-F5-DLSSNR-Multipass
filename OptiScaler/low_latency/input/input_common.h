@@ -86,6 +86,8 @@ class InputCommon
     // it last marked
     inline static std::atomic<ID3D12CommandQueue*> xefg_present_queue = nullptr;
     inline static std::atomic_uint64_t xefg_frame_id = 0;
+    // Time the low latency output slept since XeFG's Dynamic MFG last asked (the frame time the game doesn't need)
+    inline static std::atomic<double> slept_ms = 0.0;
 
     static void mark_frame_generation(LowLatencyInput input)
     {
@@ -183,6 +185,8 @@ class InputCommon
 
     static InputResult sleep(const InputContext& inputContext, IUnknown* pDevice,
                              std::optional<uint32_t> frame_id = std::nullopt);
+    // The time the output slept since the last call, 0 if it didn't (XeFG's Dynamic MFG)
+    static double take_sleep_ms() { return slept_ms.exchange(0.0); }
     // toOutput false only tracks the marker, the output gets it another way
     static InputResult set_marker(const InputContext& inputContext, IUnknown* pDevice,
                                   const MarkerParams& marker_params, bool toOutput = true);

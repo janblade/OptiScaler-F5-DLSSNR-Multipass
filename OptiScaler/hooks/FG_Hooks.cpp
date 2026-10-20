@@ -208,11 +208,15 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
 
                 LOG_DEBUG("WaitForSingleObject result: {}", waitResult);
             }
-
-            oldSwapChain = State::Instance().currentFGSwapchain;
         }
 
         scResult = fg->CreateSwapchain(pFactory, cq, pDesc, ppSwapChain, true);
+
+        // Taken after the create. XeFG and FSR-FG release a same-window swapchain in there and leave none
+        // current, so the game's own Release of it goes through. Still current: one on another window (its
+        // Releases stay skipped, so it leaks, as before), a preserved one, or DLSSG's (which frees it itself).
+        // Null otherwise, so a later swapchain at a freed one's address is not skipped
+        oldSwapChain = State::Instance().currentFGSwapchain;
 
         if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
             State::Instance().skipHeapCapture = false;
@@ -315,11 +319,15 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
 
                 LOG_DEBUG("WaitForSingleObject result: {}", waitResult);
             }
-
-            oldSwapChain = State::Instance().currentFGSwapchain;
         }
 
         scResult = fg->CreateSwapchain1(pFactory, cq, hWnd, pDesc, pFullscreenDesc, ppSwapChain, true);
+
+        // Taken after the create. XeFG and FSR-FG release a same-window swapchain in there and leave none
+        // current, so the game's own Release of it goes through. Still current: one on another window (its
+        // Releases stay skipped, so it leaks, as before), a preserved one, or DLSSG's (which frees it itself).
+        // Null otherwise, so a later swapchain at a freed one's address is not skipped
+        oldSwapChain = State::Instance().currentFGSwapchain;
 
         if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
             State::Instance().skipHeapCapture = false;
@@ -1644,6 +1652,11 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         LOG_TRACE("Releasing FG->Mutex: {}", fg->Mutex.getOwner());
         fg->Mutex.unlockThis(2);
     }
+
+    // What this present waited (the present and OptiScaler's limiter), for XeFG's Dynamic MFG; the low latency sleep
+    // below counts apart (InputCommon::take_sleep_ms)
+    if (willPresent)
+        state.lastFGPresentMs = Util::MillisecondsNow() - presentStartMs;
 
     // After frame generation's lock is released: Sleep holds this thread until the next frame should start
     if (lowLatencyDevice != nullptr)

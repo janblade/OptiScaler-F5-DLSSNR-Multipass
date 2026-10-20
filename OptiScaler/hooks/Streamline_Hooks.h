@@ -290,6 +290,7 @@ class StreamlineHooks
     static bool hkpcl_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON, const char** pluginJSON);
     static void* hkpcl_slGetPluginFunction(const char* functionName);
     static sl::Result hkslPCLSetMarker(sl::PCLMarker marker, const sl::FrameToken& frame);
+    static void* HookPCLSetMarker(void* original);
 
     // Common
     inline static PFN_slGetPluginFunction o_common_slGetPluginFunction = nullptr;

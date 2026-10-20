@@ -4,6 +4,7 @@
 #include <magic_enum.hpp>
 #include <proxies/XeLL_Proxy.h>
 #include <low_latency/input/input_common.h>
+#include <misc/FrameLimit.h>
 
 #define HOOK(name)                                                                                                     \
     if (o_##name)                                                                                                      \
@@ -82,9 +83,9 @@ bool XellHooks::update()
     gamesContextCanLimitFps = true;
 
     static float lastFpslimit = 0.0f;
-    if (lastFpslimit == Config::Instance()->FramerateLimit.value_or_default())
+    if (lastFpslimit == FrameLimit::CapFps())
         return false;
-    lastFpslimit = Config::Instance()->FramerateLimit.value_or_default();
+    lastFpslimit = FrameLimit::CapFps();
     if (lastFpslimit <= 0.0f)
         currentParams.minimumIntervalUs = 0u;
     else

@@ -31,6 +31,10 @@ In that unlock, the fix for an unsynchronized read/write race in `MfgUnlock::Las
 
 The binary quirk patch that keeps Kingdom Come: Deliverance II's native HDR10 output working with frame generation active is adapted from [wilsjo2's fork](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass), commit [`34dfe6d9`](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/commit/34dfe6d9757837d79a8931b04af0e3955cbe29a7) ("Keep KCD2 HDR output compatible with native DLSSG").
 
+## XeFG Dynamic MFG
+
+Dynamic MFG for the XeFG output (the multiplier picked every frame to follow a target frame rate, and "Use as FPS limit") is ported from [upstream OptiScaler](https://github.com/optiscaler/OptiScaler) (GPL-3.0), by Michael Robles (@dashdogy), commits `b7536f77` and `071bb0a6`, with the menu from FakeMichau's `b35346e9`. Its count controllers are taken as they are; the hooks are adapted to this fork's frame cap (one cap value fed to every limiter path, PlanCap keeping who holds it).
+
 ## Streamline dual-runtime isolation
 
 The fix keeping the game's own Streamline plugins (Common, Reflex, PCL) separate from OptiScaler's

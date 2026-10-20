@@ -42,16 +42,19 @@ int main()
         offer.Update(false, false, false);
         CHECK(!offer.Usable()); // no texture: Automatic
 
+        CHECK(!offer.Pending() && !offer.Confirmed());
         offer.Update(true, false, false);
         CHECK(offer.Usable()); // a texture: Game exposure, which then reads it
         CHECK(Source(kSourceAuto, offer.Usable()) == kSourceGame);
+        CHECK(offer.Pending() && !offer.Confirmed()); // not read clean yet: Auto's scan keeps what it holds
 
         // Read without a clean value for kGiveUpFrames frames: Automatic back, for good
         for (uint32_t i = 0; i < kGiveUpFrames; ++i)
             offer.Update(true, false, true);
         CHECK(!offer.Usable() && offer.Unusable());
+        CHECK(!offer.Pending() && !offer.Confirmed()); // given up on: Auto's scan searches
         offer.Update(true, true, true);
-        CHECK(!offer.Usable());
+        CHECK(!offer.Usable() && !offer.Confirmed());
         CHECK(Source(kSourceAuto, offer.Usable()) == kSourceAutomatic);
     }
     {
@@ -60,9 +63,10 @@ int main()
         for (uint32_t i = 0; i < 4; ++i)
             offer.Update(true, false, true);
         offer.Update(true, true, true);
+        CHECK(offer.Confirmed() && !offer.Pending());
         for (uint32_t i = 0; i < kGiveUpFrames * 2; ++i)
             offer.Update(i % 2 == 0, false, true); // frames without the texture or a reading later do not matter
-        CHECK(offer.Usable());
+        CHECK(offer.Usable() && offer.Confirmed());
     }
     {
         // Frames while another source is chosen do not count (nothing reads the texture then)

@@ -159,8 +159,9 @@ int main()
     // A full list makes room for a likelier shape (Rank, EvictFor), on the order three games made their candidates in
     // (the first 64 from each run's log). Each exposure came late: Cyberpunk 2077's copy (a 16-byte buffer) as
     // candidate 63, RDR2's 1x1 and Doom Eternal's 2x2 after the list was full -- they were shut out before.
-    CHECK(Rank(false, 1) == 3 && Rank(false, 4) == 3 && Rank(false, 16) == 2 && Rank(false, 256) == 2);
-    CHECK(Rank(true, 4) == 2 && Rank(true, 16) == 2 && Rank(true, 20) == 1 && Rank(true, 128) == 1);
+    CHECK(Rank(false, 1) == 4 && Rank(false, 4) == 4 && Rank(false, 16) == 3 && Rank(false, 256) == 3);
+    CHECK(Rank(true, 4) == 3 && Rank(true, 16) == 3 && Rank(true, 20) == 2 && Rank(true, 64) == 2);
+    CHECK(Rank(true, 65) == 1 && Rank(true, 128) == 1);
     {
         const std::string cyberpunk =
             "b20 b20 b28 b4 b24 b96 b24 b24 b128 b4 b28 b28 b4 b96 b12 b96 b36 b36 b12 b4 b4 b4 b4 b4 b4 b24 b4 b96 b36 "
@@ -196,6 +197,25 @@ int main()
             full += "b128 ";
         CHECK(Replay(full, "b128", "", "") == -1);
         CHECK(Replay(full, "t1", "t1 t1", "") >= 0);
+
+        // An exposure kept in a small struct buffer (32 bytes), made first in Cyberpunk's order: the 128-byte buffers
+        // and its own size coming after do not push it out ...
+        CHECK(Replay("", "b32", cyberpunk + " b32 b48 b64 b128 b128", "") >= 0);
+        CHECK(Replay(cyberpunk, "b32", "b32 b48 b64 b128 b128", "") >= 0);
+        // likelier shapes take the 128-byte buffers' slots first (it went first when every buffer over 16 bytes ranked
+        // the same: the lowest slot)
+        CHECK(Replay("", "b32", cyberpunk + " b16 b16 t1 t4", "") == 0);
+        // ... but likelier shapes still can, once nothing bigger is left, before NR has read it (the known limit, as
+        // for a 16-byte one below a flood of tiny textures)
+        CHECK(Replay("", "b32", cyberpunk + " " + load, "") == -1);
+    }
+    {
+        // A full list gives up only what its backend allows (Core::AdoptLocked: the newcomer's own API)
+        std::vector<Slot> list;
+        for (int i = 0; i < 64; ++i)
+            Adopt(list, "b128", i);
+        CHECK(EvictFor(list, 4, [](const Slot&) { return false; }) == -1);
+        CHECK(EvictFor(list, 4, [](const Slot& s) { return s.id == 40; }) == 40);
     }
     {
         // a candidate seen moving, or the handed exposure, is never given up; of the rest, the one read longest

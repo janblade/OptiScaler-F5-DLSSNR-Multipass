@@ -73,9 +73,10 @@ class HeldScope
 
 bool Held();
 
-// The scan is wanted (WhitePointSource 2, ScanExposure or RecordExposureScan). Adopting also needs NR on (Active).
-bool Wanted();
-bool Active();
+// The scan is wanted on this API: WhitePointSource 2, ScanExposure or RecordExposureScan on any; Auto on D3D12 only for
+// now (DlssNr_ExposureAutoScan.h). Adopting also needs NR on (Active).
+bool Wanted(Api api);
+bool Active(Api api);
 
 // Whether the resource being created comes from the game (DlssNr_ExposureScanSource.h); `caller` is the creation
 // call's return address.
@@ -93,8 +94,12 @@ std::vector<Tracked>& ListLocked();
 int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, unsigned int bytes, bool isBuffer,
                 uint32_t format, uint64_t size, void (*drop)(size_t slot) = nullptr);
 
-// Lets go of a candidate: its reference (D3D) is released and its slot freed.
+// Lets go of a candidate: its reference (D3D) is released and its slot freed. D3D12's is released once the copies
+// already recorded from it have retired.
 void DropLocked(size_t slot);
+
+// Lets go of a candidate through its backend's own drop (the one AdoptLocked was given; else DropLocked).
+void LetGoLocked(size_t slot);
 
 // A value read back for `slot`, copied when the slot's generation was `generation`: decoded (2 bytes = half,
 // 4 = float) into the candidate's statistics, unless the slot has another owner by now.

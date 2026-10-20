@@ -39,6 +39,7 @@
 #include "DlssNr_ExposureCalibrate_Run.h"
 #include "DlssNr_ProxyCurve.h"
 #include "DlssNr_ExposureAdapt.h"
+#include "DlssNr_ExposureFoundBlend.h"
 #include "DlssNr_ExposureMeter.h"
 #include "DlssNr_FinishedReady.h"
 #include <dlssnr/DlssNr_GameDefaults.h>
@@ -386,11 +387,11 @@ struct NrState
     float autoExposureValue = 0.0f;
 
     // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
-    // the scan has found none. Read back a few frames behind like the meter's value, so while it holds the white point
-    // is the host's (the shader is not asked to recompute it from the meter's live texture).
+    // none is in force. Read back a few frames behind like the meter's value, so while it holds the white point is the
+    // host's (the shader is not asked to recompute it from the meter's live texture). Eased in and out
+    // (DlssNr_ExposureFoundBlend.h).
     float foundBaseWhitePoint = 0.0f;
-    float foundBlendFrom = 0.0f;   // Automatic's base white point when the found one took over, while easing
-    double foundBlendStart = 0.0;  // when it took over (seconds, steady clock)
+    DlssNrExposureFoundBlend::Blend foundBlend;
 
     // Eye adaptation (DlssNr_ExposureAdapt.h): the meter's own reading lands in autoExposureRaw (kept in the UAV state
     // between evaluations) and a one-texel pass eases autoExposure toward it, so autoExposure above is the eased value
@@ -1729,7 +1730,9 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
     // Measured off the frame the encode is about to read -- the upscaler's fresh output -- and never
     // off anything this pass has written. That is the difference from the statistical meter removed
     // below, which read its own output and chased it.
-    if (DlssNr::WhitePointSourceEffective(cfg) == 3 && g_nr.autoExposureValue > 1e-8f)
+    // A found exposure in force counts on its own: Automatic's reading starts over on a change of source, and the
+    // white point must not fall to the slider for the frames that takes (DlssNr_ExposureFoundBlend.h).
+    if (DlssNr::WhitePointSourceEffective(cfg) == 3 && (g_nr.autoExposureValue > 1e-8f || g_nr.foundBaseWhitePoint > 0.0f))
     {
         // Following the game (DlssNr_FollowGame.h): the game's base white point times the learned calibration, which
         // is where Automatic's own would sit. The shader does the same from the game's live texture.
@@ -3924,42 +3927,35 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     g_nr.gamePreExposure = frame.PreExposure;
 
     // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs, and
-    // never while following the game (that one is handed over, so Auto has no scan match then). Taking over from
-    // Automatic's own is eased over a second, in stops, from where Automatic stood: Cyberpunk 2077 took over 0.84 EV
-    // apart, in a scene it keeps darker than the meter would.
+    // never while following the game (that one is handed over, so Auto has no scan match then). Moving to and from it
+    // is eased over a second, in stops (DlssNr_ExposureFoundBlend.h): Cyberpunk 2077 took over 0.84 EV apart, in a
+    // scene it keeps darker than the meter would.
     {
         float found = 0.0f;
-        const bool was = g_nr.foundBaseWhitePoint > 0.0f;
+        float foundPre = 1.0f;
         const float target = usingAutoExposure && !g_nr.followingGame &&
-                                     DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
-                                 ? frame.PreExposure / found
+                                     DlssNr::ExposureScan::FoundExposure(&found, &foundPre) && found > 1e-8f
+                                 ? foundPre / found
                                  : 0.0f;
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float own = AutoOwnBaseWhitePoint();
+        g_nr.foundBaseWhitePoint = g_nr.foundBlend.Step(target, own, now);
 
-        if (target > 0.0f && !was)
+        switch (g_nr.foundBlend.LastEvent())
         {
-            g_nr.foundBlendFrom = AutoOwnBaseWhitePoint();
-            g_nr.foundBlendStart = now;
-
-            const float own = g_nr.foundBlendFrom;
+        case DlssNrExposureFoundBlend::Event::TookOver:
             LOG_INFO("DLSS-NR automatic exposure: the game's own exposure (found by the scan) moves the white point from "
-                     "here: {:.4g}, Automatic's own {:.4g} ({:+.2f} EV), eased over a second",
-                     target, own, own > 0.0f ? std::log2(own / target) : 0.0f);
-        }
-        else if (target <= 0.0f && was)
-        {
+                     "here: {:.4g}, from {:.4g} ({:+.2f} EV), eased over a second",
+                     target, g_nr.foundBaseWhitePoint, std::log2(g_nr.foundBaseWhitePoint / target));
+            break;
+        case DlssNrExposureFoundBlend::Event::Leaving:
+            LOG_INFO("DLSS-NR automatic exposure: the game's exposure is gone; back to Automatic's own meter, eased");
+            break;
+        case DlssNrExposureFoundBlend::Event::Left:
             LOG_INFO("DLSS-NR automatic exposure: Automatic's own meter again");
-        }
-
-        g_nr.foundBaseWhitePoint = target;
-
-        if (target > 0.0f && g_nr.foundBlendFrom > 0.0f)
-        {
-            const double t = std::clamp(now - g_nr.foundBlendStart, 0.0, 1.0);
-            g_nr.foundBaseWhitePoint = std::exp2(std::lerp(std::log2(g_nr.foundBlendFrom), std::log2(target), (float) t));
-
-            if (t >= 1.0)
-                g_nr.foundBlendFrom = 0.0f;
+            break;
+        default:
+            break;
         }
     }
 
@@ -4370,15 +4366,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                  : 0.0f;
         // The pre-exposure of the frame the meter read (it is read back a few frames late), not this frame's
         scanFrame.pre = whitePointSource == 3 ? g_nr.autoExposurePreExposure : frame.PreExposure;
+        // Timed only on frames that record copies: an empty pair would pull the average toward 0
         const bool timeScan = g_scanTime != nullptr && DlssNr::ExposureScan::Holding();
 
         if (timeScan)
             g_scanTime->Start(cmdList);
 
-        DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
+        const bool copied = DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
 
-        if (timeScan)
+        if (timeScan && copied)
             g_scanTime->End(cmdList);
+        else if (timeScan)
+            g_scanTime->Abandon();
     }
 
     // No depth gives depthIn == nullptr; only a depth that could not be cloned is a failure.
@@ -5645,6 +5644,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         g_nr.reset = true;
         if (g_gpuTime) g_gpuTime->ClearLast();
         if (g_ngxTime) g_ngxTime->ClearLast();
+        if (g_scanTime) g_scanTime->ClearLast();
         g_lastGpuTime.reset();
         g_lastNgxTime.reset();
         Late::Cancel();
@@ -6225,6 +6225,7 @@ FollowGameStatus FollowGameExposureStatus()
     s.gameExposureSeen = g_nr.autoPairGameExposure > 0.0f;
     s.following = g_nr.followingGame;
     s.disagreementEv = FollowDisagreementEv();
+    s.foundInForce = g_nr.foundBaseWhitePoint > 0.0f;
     return s;
 }
 

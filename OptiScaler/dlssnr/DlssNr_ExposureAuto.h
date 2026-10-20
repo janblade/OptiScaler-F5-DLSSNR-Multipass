@@ -13,20 +13,29 @@
 //
 // The scan's lifecycle on Auto (user-agreed 2026-10-19). Candidates are caught only when the game makes them, mostly at
 // load and before the first upscaler call tells whether a texture is handed, so the scan watches from launch:
-// - Watching: before the first NR frame.
+// - Watching: before the first NR frame, and while a handed texture has not yet read clean (the scan keeps what it
+//   holds: Game exposure may still give up on the texture, and the game made its candidates at load).
 // - Done: a texture or a moving pre-exposure is handed over, so the scan is not needed: every candidate is let go at
 //   once. Pinning the game's resources past its own teardown removed the device in Cyberpunk 2077, so letting go early
 //   is safety, not tidiness.
+// - NotHere: a game whose upscaler is not D3D12. Auto's scan runs on D3D12 only for now (stories 3 and 4 find the
+//   candidates on D3D11 and Vulkan; using one there is not checked in a game yet). Every candidate let go.
 // - Searching: nothing handed: copy every candidate each frame until the matcher's verdict.
-// - Found: keep only the match (and the copies of it the game keeps), let go of the rest, read one value a frame.
+// - Found: copy only the match, let go of the rest. Only the match: a ping-pong partner the game keeps (Cyberpunk's
+//   c61/c62) is let go too; reading one image of the pair is at most a frame late, and a lag of a row is eased.
 // - Baked: let go of every candidate.
 // - GaveUp: no verdict, or none found, within searchSeconds: let go of every candidate, Automatic. Candidates the game
-//   makes after that (a loading screen, a recreated feature) start a new search.
-// A match that goes away (the game destroyed it, or a feature release let go of it) searches again: nothing is kept by
-// candidate number from one session or one search to the next.
+//   makes after that (a loading screen, a recreated feature) are held, not copied, and start a new search once
+//   retrySeconds have passed, doubled with every search given up: a game that keeps making small buffers (Starfield
+//   remakes its frame generation resources hundreds of times) must not keep the scan copying for the whole session.
+// The backend lets go when a phase is entered; candidates taken after that, in Found or GaveUp, are held for the next
+// search without being copied. A match that goes away (the game destroyed it, or a feature release let go of it)
+// searches again: nothing is kept by candidate number from one session or one search to the next.
 //
 // Header-only, no D3D or Vulkan types: tests/nr_exposure_auto_smoke.cpp.
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace DlssNrExposureAuto
@@ -47,7 +56,8 @@ enum class Phase
     Searching,
     Found,
     Baked,
-    GaveUp
+    GaveUp,
+    NotHere
 };
 
 // What the matcher said last (DlssNrExposureMatch::What, kept apart so this header needs no matcher types)
@@ -62,6 +72,8 @@ enum class Verdict
 struct Settings
 {
     float searchSeconds = 300.0f; // NR time without a verdict, or with None, before giving up
+    float retrySeconds = 60.0f;   // after giving up, before new candidates start a search; doubled each time
+    float maxRetrySeconds = 1800.0f;
 };
 
 // One NR frame's news, from the backend that runs NR. `handed` and `preExposure` are latched for the session by the
@@ -69,11 +81,13 @@ struct Settings
 struct Frame
 {
     float seconds = 0.0f;         // NR time since the session started
-    bool handed = false;          // a usable exposure texture is handed over (Offer::Usable)
-    bool preExposure = false;     // the call's pre-exposure moves with the light
+    bool handed = false;          // an exposure texture is handed over and has read clean (Offer::Confirmed)
+    bool handedPending = false;   // one is handed over, not yet read clean nor given up on
+    bool preExposure = false;     // the call's pre-exposure moves with the light (PreExposureMotion)
+    bool supported = true;        // the game's upscaler is D3D12
     Verdict verdict = Verdict::NotSure;
     bool matchAlive = true;       // the found candidate is still there (only asked while Found)
-    bool newCandidates = false;   // the scan took a candidate since the last frame
+    bool newCandidates = false;   // the scan took a likely candidate since the last frame
 };
 
 class Lifecycle
@@ -83,6 +97,12 @@ class Lifecycle
 
     void OnFrame(const Frame& f)
     {
+        if (!f.supported)
+        {
+            _phase = Phase::NotHere;
+            return;
+        }
+
         if (f.handed || f.preExposure)
         {
             _phase = Phase::Done;
@@ -92,7 +112,12 @@ class Lifecycle
         switch (_phase)
         {
         case Phase::Watching:
+            if (!f.handedPending)
+                Search(f.seconds);
+            break;
+
         case Phase::Done: // what was handed stopped being usable: search what the game makes from here
+        case Phase::NotHere:
             Search(f.seconds);
             break;
 
@@ -102,7 +127,7 @@ class Lifecycle
             else if (f.verdict == Verdict::Baked)
                 _phase = Phase::Baked;
             else if (f.seconds - _since >= _s.searchSeconds)
-                _phase = Phase::GaveUp;
+                GiveUp(f.seconds);
             break;
 
         case Phase::Found:
@@ -111,7 +136,8 @@ class Lifecycle
             break;
 
         case Phase::GaveUp:
-            if (f.newCandidates)
+            _newSince = _newSince || f.newCandidates;
+            if (_newSince && f.seconds - _since >= _retry)
                 Search(f.seconds);
             break;
 
@@ -126,8 +152,17 @@ class Lifecycle
     bool CopiesAll() const { return _phase == Phase::Watching || _phase == Phase::Searching; }
     bool CopiesMatchOnly() const { return _phase == Phase::Found; }
 
-    // Every candidate is let go of (the match too, outside Found)
-    bool LetsGo() const { return _phase == Phase::Done || _phase == Phase::Baked || _phase == Phase::GaveUp; }
+    // On entering this phase every candidate is let go of (in Found, all but the match: CopiesMatchOnly)
+    bool LetsGo() const
+    {
+        return _phase == Phase::Done || _phase == Phase::Baked || _phase == Phase::GaveUp || _phase == Phase::NotHere;
+    }
+
+    // No candidate is taken any more (the backend's adopt): the scan is not needed while this holds
+    bool Closed() const { return _phase == Phase::Done || _phase == Phase::Baked || _phase == Phase::NotHere; }
+
+    // How long the current give-up waits before new candidates start a search
+    float RetrySeconds() const { return _retry; }
 
     // A new search starts from no history: the backend clears what the matcher reads when this changes
     unsigned int SearchNumber() const { return _searches; }
@@ -140,10 +175,49 @@ class Lifecycle
         ++_searches;
     }
 
+    void GiveUp(float seconds)
+    {
+        _phase = Phase::GaveUp;
+        _since = seconds;
+        _newSince = false;
+        _retry = _givenUp++ == 0 ? _s.retrySeconds : std::min(_retry * 2.0f, _s.maxRetrySeconds);
+    }
+
     Settings _s;
     Phase _phase = Phase::Watching;
     float _since = 0.0f;
     unsigned int _searches = 0;
+    unsigned int _givenUp = 0;
+    float _retry = 0.0f;
+    bool _newSince = false;
+};
+
+// Whether the upscaler call's pre-exposure moves with the light (audit HC16: Dawnwalker, UE5, 1.0 -> 0.59 -> 0.45 ->
+// 0.40 within a second), from one value a frame. Moving: it changed by more than 1% at least three times and spans at
+// least a quarter. Latched for the session: a game sets it once (a settings change) or moves it with the light.
+class PreExposureMotion
+{
+  public:
+    void Note(float pre)
+    {
+        if (_moving || !std::isfinite(pre) || pre <= 0.0f)
+            return;
+
+        if (_last > 0.0f && std::fabs(std::log2(pre / _last)) > 0.0144f)
+            ++_changes;
+
+        _last = pre;
+        _low = _low > 0.0f ? std::min(_low, pre) : pre;
+        _high = std::max(_high, pre);
+        _moving = _changes >= 3 && _high >= _low * 1.25f;
+    }
+
+    bool Moving() const { return _moving; }
+
+  private:
+    float _last = 0.0f, _low = 0.0f, _high = 0.0f;
+    unsigned int _changes = 0;
+    bool _moving = false;
 };
 
 // The rung in force for Auto. `handed` and `preExposure` as in Frame; the lifecycle gives the scan's answer.

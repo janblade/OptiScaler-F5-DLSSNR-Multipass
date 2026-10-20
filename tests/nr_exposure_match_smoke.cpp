@@ -93,9 +93,16 @@ static void Synthetic()
         CHECK(std::fabs(f.slope - 1.0f) < 0.1f);
     }
     {
-        const Fit f = Classify(meter, Map(e, [](float x, size_t) { return 3.0f / x; }));
+        // a divisor the game adapted (trailing the light): an exposure, white point style
+        const Fit f = Classify(meter, Map(Eased(e, 12.0f), [](float x, size_t) { return 3.0f / x; }));
         CHECK(f.kind == Kind::Divisor);
-        CHECK(std::fabs(f.slope + 1.0f) < 0.1f);
+        CHECK(std::fabs(f.slope + 1.0f) < 0.15f);
+    }
+    {
+        // the same at lag 0: the scene's luminance, our meter's own input, not an exposure (Doom Eternal's c8)
+        const Fit f = Classify(meter, Map(e, [](float x, size_t) { return 3.0f / x; }));
+        CHECK(f.kind == Kind::Luminance);
+        CHECK(f.lag == 0);
     }
     {
         // a stop value, crossing zero: no log of it can be taken
@@ -114,10 +121,15 @@ static void Synthetic()
         }
     }
     {
-        // natural log of a luminance: stops the other way, ln scale
-        const Fit f = Classify(meter, Map(e, [](float x, size_t) { return -std::log(x); }));
+        // natural log of an adapted luminance: stops the other way, ln scale
+        const Fit f = Classify(meter, Map(Eased(e, 12.0f), [](float x, size_t) { return -std::log(x); }));
         CHECK(f.kind == Kind::Stops);
         CHECK(std::fabs(f.scale + std::log(2.0f)) < 1e-6f);
+    }
+    {
+        // ... and of the luminance itself, at lag 0: a luminance
+        const Fit f = Classify(meter, Map(e, [](float x, size_t) { return -std::log(x); }));
+        CHECK(f.kind == Kind::Luminance);
     }
 
     // Eye adaptation: the game's value trails the meter's raw reading; the lag search finds it
@@ -449,13 +461,87 @@ static void Recordings(const std::string& folder)
             CHECK(Match(r.meter, { r.game }).what != What::Found);
             printf("  doom: c8 slope %.3f corr %.3f; game corr %.3f\n", c8.slope, c8.corr,
                    Classify(r.meter, r.game).corr);
+            CHECK(c8.kind == Kind::Luminance || c8.kind == Kind::Unrelated);
+
+            // As the scan sees it in the game: every 50 rows, on the rows so far. c8 (a scene luminance) must never be
+            // the answer while the game's exposure is there (it was Found as a divisor from row ~700 to ~2350)
+            std::vector<size_t> first(r.candidates.size(), 0);
+            for (size_t c = 0; c < r.candidates.size(); ++c)
+                while (first[c] < r.candidates[c].size() && r.candidates[c][first[c]] == 0.0f)
+                    ++first[c];
+            for (size_t n = 200; n <= r.meter.size(); n += 50)
+            {
+                const std::vector<float> m(r.meter.begin(), r.meter.begin() + n);
+                std::vector<std::vector<float>> c(r.candidates.size());
+                for (size_t k = 0; k < c.size(); ++k)
+                    c[k].assign(r.candidates[k].begin(), r.candidates[k].begin() + n);
+                const Verdict v = MatchEach(m, c, first);
+                if (v.what == What::Found)
+                {
+                    printf("  doom: rows %zu found %s (kind %d, corr %.3f, lag %d)\n", n, r.columns[v.index].c_str(),
+                           (int) v.fit.kind, v.fit.corr, v.fit.lag);
+                    CHECK(r.columns[v.index] != "c8");
+                }
+            }
         }
+    }
+}
+
+// MatchEach as the scan runs it in a game: candidates made at different times, judged on their own rows
+static void Each()
+{
+    const size_t rows = 2000;
+    const auto e = TrueExposure(rows, 6.0f);
+    const auto meter = Metered(e);
+
+    // A candidate made late, during a steadily lit stretch, swinging over levels of its own (an animated light): our
+    // meter is flat over its rows but not over the recording, so it is not Baked
+    {
+        std::vector<float> m = meter;
+        for (size_t i = 1700; i < rows; ++i)
+            m[i] = 0.25f * std::exp2((Rand01() - 0.5f) * 0.2f);
+        std::vector<float> light(rows, 0.0f);
+        for (size_t i = 1700; i < rows; ++i)
+            light[i] = std::exp2((float) ((i / 40) % 5)); // 5 levels, 4 EV
+        CHECK(MatchEach(m, { light }, { 1700 }).what != What::Baked);
+
+        // the same candidate over a recording that is flat throughout: Baked
+        std::vector<float> flat(rows), swing(rows);
+        for (size_t i = 0; i < rows; ++i)
+        {
+            flat[i] = 0.25f * std::exp2((Rand01() - 0.5f) * 0.2f);
+            swing[i] = std::exp2((float) ((i / 40) % 5));
+        }
+        CHECK(MatchEach(flat, { swing }, { 0 }).what == What::Baked);
+    }
+
+    // Two found: the exposure, noisy in its early rows and clean after, against a candidate made late that fits its
+    // own few rows tighter than the exposure fits all of its own. On the rows both have, the exposure is the tighter:
+    // it wins, whichever order they come in
+    {
+        std::vector<float> exposure(rows), late(rows, 0.0f);
+        for (size_t i = 0; i < rows; ++i)
+            exposure[i] = e[i] * std::exp2((Rand01() - 0.5f) * (i < 1000 ? 2.4f : 0.05f));
+        for (size_t i = 1500; i < rows; ++i)
+            late[i] = e[i] * std::exp2((Rand01() - 0.5f) * 1.0f);
+
+        const Verdict alone = MatchEach(meter, { exposure }, { 0 });
+        const Verdict lateAlone = MatchEach(meter, { late }, { 1500 });
+        CHECK(alone.what == What::Found);
+        CHECK(lateAlone.what == What::Found);
+        CHECK(std::fabs(lateAlone.fit.corr) > std::fabs(alone.fit.corr)); // what made the late one win before
+        printf("  each: exposure corr %.3f over all rows, late corr %.3f over its own\n", alone.fit.corr,
+               lateAlone.fit.corr);
+
+        CHECK(MatchEach(meter, { exposure, late }, { 0, 1500 }).index == 0);
+        CHECK(MatchEach(meter, { late, exposure }, { 1500, 0 }).index == 1);
     }
 }
 
 int main(int argc, char** argv)
 {
     Synthetic();
+    Each();
     Recordings(argc > 1 ? argv[1] : "tests/data/exposure_scan");
 
     printf(fails == 0 ? "nr_exposure_match_smoke: PASS\n" : "nr_exposure_match_smoke: %d FAIL\n", fails);

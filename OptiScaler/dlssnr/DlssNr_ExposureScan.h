@@ -20,11 +20,11 @@
 //
 // WHAT THIS DOES NOT DO
 //
-// It does not decide anything. It watches, and it reports what it found, and that is deliberate: the
-// last two times a number was inferred here it went straight into the interface as a suggestion and
-// was wrong -- 8 where 240 was right, and confidently offered on a black screen. So this ships as an
-// instrument. Whether a found value is worth consuming is a question for after the readout has been
-// looked at in real games, not a question this answers.
+// It does not decide anything by itself. It watches, and it reports what it found, and that was deliberate:
+// the last two times a number was inferred here it went straight into the interface as a suggestion and
+// was wrong -- 8 where 240 was right, and confidently offered on a black screen. Since story 5 of plan
+// 2026-10-14-exposure-scan-all-apis, Auto consumes a found value, but only once the matcher has judged it
+// against our own meter over minutes of play (DlssNr_ExposureMatch.h, DlssNr_ExposureAutoScan.h).
 //
 // A found buffer also carries no contract. NVIDIA's exposure texture is defined by the SDK as "the
 // final exposure scale"; a buffer we discovered ourselves might hold a multiplier, a divisor, or a
@@ -106,7 +106,8 @@ struct FrameExposure
     float pre = 1.0f;             // DLSS.Pre.Exposure
 };
 
-void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame);
+// Returns whether copies were recorded on cmdList this frame (for the GPU timer around it).
+bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame);
 
 // What the scan has to say right now, in one line, for an indicator that can be read while playing.
 enum class Verdict
@@ -128,18 +129,20 @@ std::vector<Candidate> Report();
 const char* Status();
 bool Scanning();
 
-// Whether the scan holds a D3D12 candidate, i.e. whether Tick records copies this frame (to time them).
+// Whether the scan holds a D3D12 candidate it copies, i.e. whether Tick will likely record copies this frame (to time
+// them).
 bool Holding();
 
-// Auto (WhitePointSource auto, plan 2026-10-14-exposure-scan-all-apis story 5): the scan runs by itself, judges its
-// candidates with the matcher and lets go of what it does not need (DlssNr_ExposureAuto.h). Where it stands, in one
-// line for the menu and the log ("searching", "found ...", "the game hands its exposure over", ...); empty when the
-// white point source is not Auto.
+// Auto (WhitePointSource auto, plan 2026-10-14-exposure-scan-all-apis story 5): the scan runs by itself in D3D12 games,
+// judges its candidates with the matcher and lets go of what it does not need (DlssNr_ExposureAuto.h,
+// DlssNr_ExposureAutoScan.cpp). Where it stands, in one line for the menu and the log ("searching", "found ...", "the
+// game hands its exposure over", ...); empty when the white point source is not Auto.
 std::string AutoStatus();
 
 // While Auto has found the game's exposure: this frame's exposure multiplier in Automatic's units -- the game's value
-// for the movement, Automatic's level as measured while the scan searched. False otherwise.
-bool FoundExposure(float* multiplier);
+// for the movement, Automatic's level as measured while the scan searched -- and the pre-exposure of the frame it goes
+// with (the one Automatic's own reading of that frame used). False otherwise.
+bool FoundExposure(float* multiplier, float* preExposure);
 
 // ---------------------------------------------------------------------------------------------
 // Multi-point anchoring. See dlssnr/design/multi-point-anchoring.md.

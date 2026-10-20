@@ -67,7 +67,7 @@ HRESULT STDMETHODCALLTYPE hkCreateBuffer(ID3D11Device* This, const D3D11_BUFFER_
 
     // Only what a shader writes is looked at (and counted): the lock is not taken for the rest
     if (Core::Held() || FAILED(hr) || pDesc == nullptr || ppBuffer == nullptr || *ppBuffer == nullptr ||
-        (pDesc->BindFlags & D3D11_BIND_UNORDERED_ACCESS) == 0 || !Core::Active())
+        (pDesc->BindFlags & D3D11_BIND_UNORDERED_ACCESS) == 0 || !Core::Active(Api::D3D11))
         return hr;
 
     std::lock_guard<std::mutex> lock(Core::Mutex());
@@ -91,7 +91,7 @@ HRESULT STDMETHODCALLTYPE hkCreateTexture2D(ID3D11Device* This, const D3D11_TEXT
     const HRESULT hr = o_CreateTexture2D(This, pDesc, pInitialData, ppTexture2D);
 
     if (Core::Held() || FAILED(hr) || pDesc == nullptr || ppTexture2D == nullptr || *ppTexture2D == nullptr ||
-        (pDesc->BindFlags & D3D11_BIND_UNORDERED_ACCESS) == 0 || !Core::Active())
+        (pDesc->BindFlags & D3D11_BIND_UNORDERED_ACCESS) == 0 || !Core::Active(Api::D3D11))
         return hr;
 
     std::lock_guard<std::mutex> lock(Core::Mutex());
@@ -108,7 +108,8 @@ HRESULT STDMETHODCALLTYPE hkCreateTexture2D(ID3D11Device* This, const D3D11_TEXT
 
     Core::AdoptLocked(Api::D3D11, (ID3D11Resource*) *ppTexture2D, This,
                       std::to_string(pDesc->Width) + "x" + std::to_string(pDesc->Height) + " " + format.name,
-                      format.bytes, false, (uint32_t) pDesc->Format, (uint64_t) pDesc->Width * pDesc->Height);
+                      format.bytes, false, (uint32_t) pDesc->Format,
+                      (uint64_t) pDesc->Width * pDesc->Height * pDesc->ArraySize);
     return hr;
 }
 
@@ -222,13 +223,13 @@ namespace ExposureScanDx11
 {
 void Install(ID3D11Device* device)
 {
-    if (Core::Wanted())
+    if (Core::Wanted(Api::D3D11))
         InstallOn(device);
 }
 
 void OnPresent(IDXGISwapChain* swapChain)
 {
-    if (swapChain == nullptr || !Core::Active())
+    if (swapChain == nullptr || !Core::Active(Api::D3D11))
         return;
 
     ID3D11Device* device = nullptr;
@@ -385,7 +386,7 @@ void OnPresent(IDXGISwapChain* swapChain)
 
 void NoteHanded(ID3D11Resource* exposure)
 {
-    if (exposure == nullptr || !Core::Active() || Core::Held())
+    if (exposure == nullptr || !Core::Active(Api::D3D11) || Core::Held())
         return;
 
     std::lock_guard<std::mutex> lock(Core::Mutex());

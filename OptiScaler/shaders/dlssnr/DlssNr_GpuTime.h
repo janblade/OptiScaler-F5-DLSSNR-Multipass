@@ -108,6 +108,15 @@ class DlssNrGpuTime
         recording = -1;
     }
 
+    // Started, then nothing worth timing was recorded: the slot is freed without a sample (its first timestamp is
+    // written but never resolved or read)
+    void Abandon()
+    {
+        if (recording < 0) return;
+        samples[(unsigned) recording].occupied = false;
+        recording = -1;
+    }
+
     void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
     {
         for (auto& s : samples)

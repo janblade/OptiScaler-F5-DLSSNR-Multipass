@@ -24,6 +24,11 @@
 // - NotFloat: integer bits read as float (1e-37 and the like);
 // - Timer: rises (or falls) on almost every changing row;
 // - Noisy: jumps across most of its range from row to row (a random seed, a dither index).
+// And one rejected after the fit: a divisor (or a falling stop value) that moves with our meter's raw reading, at a lag
+// of a row or less, is the scene's luminance -- the thing our meter measures -- not an exposure the game adapted
+// (Luminance: Doom Eternal's c8, Found as a divisor at corr -0.92..-0.98 over much of a run before this rule). A game's
+// adapted exposure trails the light; its per-frame target can lead it, and is stored as an exposure (a multiplier:
+// Cyberpunk 2077's c61, lag 0), which is kept.
 //
 // Confidence: no verdict before minRows rows with a reading and minTravelEv of meter travel over at least minLevels
 // brightness levels (a scene that never changes its light, or one cut between two levels, says nothing about units),
@@ -54,7 +59,8 @@ enum class Kind
     Unrelated,  // moves smoothly, but not with the light
     Multiplier, // an exposure as ours: slope ~ +1 in log-log
     Divisor,    // slope ~ -1 in log-log
-    Stops       // linear in log2 of the meter: a stop value; `scale` = its stops per our log2 stop
+    Stops,      // linear in log2 of the meter: a stop value; `scale` = its stops per our log2 stop
+    Luminance   // a divisor or falling stop value at lag 0-1: the scene's luminance, which is our meter's own input
 };
 
 struct Fit
@@ -340,8 +346,8 @@ inline Fit ClassifyRows(const std::vector<float>& logMeter, const std::vector<fl
         f.slope = linSlope;
         f.corr = linCorr;
         f.lag = linLag;
-        f.kind = linHolds ? Kind::Stops : Kind::Unrelated;
-        if (linHolds)
+        f.kind = linHolds ? (scale < 0.0f && std::abs(linLag) <= 1 ? Kind::Luminance : Kind::Stops) : Kind::Unrelated;
+        if (f.kind == Kind::Stops)
             f.scale = scale;
         return f;
     }
@@ -349,7 +355,10 @@ inline Fit ClassifyRows(const std::vector<float>& logMeter, const std::vector<fl
     f.slope = logSlope;
     f.corr = logCorr;
     f.lag = logLag;
-    f.kind = logHolds ? (logSlope > 0.0f ? Kind::Multiplier : Kind::Divisor) : Kind::Unrelated;
+    f.kind = !logHolds               ? Kind::Unrelated
+             : logSlope > 0.0f       ? Kind::Multiplier
+             : std::abs(logLag) <= 1 ? Kind::Luminance
+                                     : Kind::Divisor;
     return f;
 }
 
@@ -475,35 +484,81 @@ inline Verdict Match(const std::vector<float>& meter, const std::vector<std::vec
     return out;
 }
 
+namespace detail
+{
+// One candidate's rows from row `from` on, against the meter's same rows
+inline Verdict MatchFrom(const std::vector<float>& meter, const std::vector<float>& candidate, size_t from,
+                         const Settings& s)
+{
+    from = std::min(from, meter.size());
+    const std::vector<float> m(meter.begin() + from, meter.end());
+    std::vector<float> v;
+    v.reserve(m.size());
+    for (size_t i = from; i < meter.size(); ++i)
+        v.push_back(i < candidate.size() ? candidate[i] : 0.0f);
+    return Match(m, { v }, s);
+}
+} // namespace detail
+
 // Match over candidates the scan took at different times, as it does in a game: candidate c has values from row
 // first[c] on (none before it was made). Each is judged on its own rows, as Match judges one: Found, the tightest of
 // those found; else Baked, the first so judged; else None once every candidate had enough rows and light to say; else
 // NotSure.
+//
+// Two found candidates are compared on the rows both have (from the later one's first): a candidate made late, judged
+// on a few hundred lucky rows, would otherwise beat the exposure judged on thousands. When the shared rows cannot say,
+// the longer history wins. Baked needs our meter flat over the whole recording, not only over the rows of the candidate
+// that swings: a late candidate during a steadily lit stretch says nothing about the game.
 inline Verdict MatchEach(const std::vector<float>& meter, const std::vector<std::vector<float>>& candidates,
                          const std::vector<size_t>& first, const Settings& s = {})
 {
+    using namespace detail;
+
+    auto from = [&](size_t c) { return c < first.size() ? std::min(first[c], meter.size()) : (size_t) 0; };
+
+    std::vector<float> lm;
+    for (float a : meter)
+        if (a > 0.0f && std::isfinite(a))
+            lm.push_back(std::log2(a));
+    const bool flat = SpreadEv(lm) < s.bakedMeterEv;
+
     Verdict best, baked;
     bool allSaid = !candidates.empty();
 
     for (size_t c = 0; c < candidates.size(); ++c)
     {
-        const size_t from = c < first.size() ? std::min(first[c], meter.size()) : 0;
-        const std::vector<float> m(meter.begin() + from, meter.end());
-        std::vector<float> v;
-        v.reserve(m.size());
-        for (size_t i = from; i < meter.size(); ++i)
-            v.push_back(i < candidates[c].size() ? candidates[c][i] : 0.0f);
-
-        Verdict one = Match(m, { v }, s);
+        Verdict one = MatchFrom(meter, candidates[c], from(c), s);
         if (one.index >= 0)
             one.index = (int) c;
 
-        if (one.what == What::Found && (best.what != What::Found || std::fabs(one.fit.corr) > std::fabs(best.fit.corr)))
-            best = one;
-        else if (one.what == What::Baked && baked.what != What::Baked)
-            baked = one;
+        if (one.what == What::Found)
+        {
+            bool wins = best.what != What::Found;
 
-        allSaid = allSaid && one.what != What::NotSure;
+            if (!wins)
+            {
+                const size_t shared = std::max(from(c), from((size_t) best.index));
+                const Verdict mine = MatchFrom(meter, candidates[c], shared, s);
+                const Verdict theirs = MatchFrom(meter, candidates[(size_t) best.index], shared, s);
+
+                if (mine.what == What::Found && theirs.what == What::Found)
+                    wins = std::fabs(mine.fit.corr) > std::fabs(theirs.fit.corr);
+                else if (mine.what == What::Found || theirs.what == What::Found)
+                    wins = mine.what == What::Found;
+                else
+                    wins = from(c) < from((size_t) best.index);
+            }
+
+            if (wins)
+                best = one;
+        }
+        else if (one.what == What::Baked && flat && baked.what != What::Baked)
+        {
+            baked = one;
+        }
+
+        // A Baked judged on a flat stretch of a recording that is not flat is not an answer
+        allSaid = allSaid && one.what != What::NotSure && (one.what != What::Baked || flat);
     }
 
     if (best.what == What::Found)
@@ -532,15 +587,23 @@ inline float AsExposure(const Fit& f, float value)
     }
 }
 
-// The constant factor: the median over rows of our meter's reading / the candidate as an exposure. Automatic gives the
-// level, the candidate the movement (no lag, no HUD or bloom in it, no feedback from our own edit):
-// exposure = AnchorScale * AsExposure(candidate now). 0 when no row has both.
+// The constant factor: the median over rows of our meter's reading / the candidate as an exposure, the candidate taken
+// `f.lag` rows later (the row it answers that reading on). Automatic gives the level, the candidate the movement (no
+// lag, no HUD or bloom in it, no feedback from our own edit): exposure = AnchorScale * AsExposure(candidate now). 0 when
+// no row has both.
+//
+// For a game that adapts only part of the way, or clamps, the ratio is not one number across scenes, and its median
+// depends on where the search spent its time: the level is the one Automatic had on average while the scan searched
+// (user decision 2026-10-20, "our level, the game's movement"), not a calibration that holds in every scene.
 inline float AnchorScale(const Fit& f, const std::vector<float>& meter, const std::vector<float>& value)
 {
     std::vector<float> ratios;
-    for (size_t i = 0; i < meter.size() && i < value.size(); ++i)
+    for (size_t i = 0; i < meter.size(); ++i)
     {
-        const float e = AsExposure(f, value[i]);
+        const long long j = (long long) i + f.lag;
+        if (j < 0 || (size_t) j >= value.size())
+            continue;
+        const float e = AsExposure(f, value[(size_t) j]);
         if (meter[i] > 0.0f && std::isfinite(meter[i]) && e > 0.0f && std::isfinite(e))
             ratios.push_back(meter[i] / e);
     }

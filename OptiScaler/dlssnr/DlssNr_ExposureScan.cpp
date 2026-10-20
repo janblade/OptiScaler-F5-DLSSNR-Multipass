@@ -1,15 +1,12 @@
 #include "pch.h"
 
 #include "DlssNr_ExposureScan.h"
-#include "DlssNr_ExposureAuto.h"
-#include "DlssNr_ExposureMatch.h"
+#include "DlssNr_ExposureAutoScan.h"
 #include "DlssNr_ExposureScanCore.h"
 #include "DlssNr_ExposureScanRecord.h"
 #include "DlssNr_ExposureScanShape.h"
 #include "DlssNr_ExposureScanSource.h"
 #include "DlssNr_GameDefaults.h"
-
-#include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
 
 #include <SysUtils.h>
 
@@ -22,7 +19,6 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <future>
 #include <unordered_map>
 #include <mutex>
 #include <thread>
@@ -84,6 +80,15 @@ struct ScanState
     uint32_t readbackGeneration[kSlots][kMaxCandidates] = {};
     unsigned long long frames12 = 0;
 
+    // D3D12 candidates let go of, with the frame (frames12) of their last copy: the reference is released only once
+    // that copy has retired (kSlots frames on, as the readback ring assumes), not under a command list still in flight
+    struct Retiring
+    {
+        ID3D12Resource* resource;
+        unsigned long long frame;
+    };
+    std::vector<Retiring> retiring;
+
     // Core::NoteHandedLocked: the game's own handed exposure for the coming EndFrameLocked, when the pass sees a copy
     const void* handedNote = nullptr;
     Api handedNoteApi = Api::D3D12;
@@ -99,6 +104,9 @@ struct ScanState
 
 ScanState g_scan;
 std::mutex g_scanMutex;
+
+// Each API's own way to let go of a candidate (Core::AdoptLocked's `drop`; null: Core::DropLocked)
+void (*g_drop[3])(size_t slot) = {};
 
 // Formats an exposure could plausibly be in, the same table on every API (DlssNr_ExposureScanShape.h, where the reasons
 // are). outBytes is the size of the FIRST channel only -- that is the one texel this reads back. The copy uses the real
@@ -194,7 +202,8 @@ bool EnsureReadback(ID3D12Device* device)
 // validation work, not a control, and it does not belong in a panel.
 //
 // Auto (the default white point source) wants the scan too, since story 5: it looks for the game's exposure by itself
-// and lets go of what it does not need (AutoFrameLocked). The asked-for modes keep every candidate, as before.
+// and lets go of what it does not need (DlssNr_ExposureAutoScan.h), on D3D12 only for now. The asked-for modes keep
+// every candidate, as before, on every API.
 bool AskedFor()
 {
     return Config::Instance()->DlssNrWhitePointSource.value_or_default() == DlssNrExposureDefault::kSourceScan ||
@@ -202,12 +211,22 @@ bool AskedFor()
            Config::Instance()->DlssNrRecordExposureScan.value_or_default();
 }
 
-bool AutoOn()
-{
-    return Config::Instance()->DlssNrWhitePointSource.value_or_default() == DlssNrExposureDefault::kSourceAuto;
-}
+bool Wanted() { return AskedFor() || AutoScan::On(); }
 
-bool Wanted() { return AskedFor() || AutoOn(); }
+// Releases the D3D12 references whose last copy has retired (all of them when `all`: at feature teardown and shutdown,
+// where the GPU is done with them)
+void ReleaseRetiredLocked(bool all)
+{
+    auto& r = g_scan.retiring;
+    const auto done = [all](const ScanState::Retiring& x)
+    {
+        if (!all && g_scan.frames12 < x.frame + kSlots + 1)
+            return false;
+        x.resource->Release();
+        return true;
+    };
+    r.erase(std::remove_if(r.begin(), r.end(), done), r.end());
+}
 
 // What a module is to the scan: the game's, someone else's (OptiScaler, middleware), or one that only forwards the
 // game's call (Streamline's proxy device, DlssNrExposureScanSource::PassesThrough). Cached per module; a skipped module
@@ -408,300 +427,6 @@ void RecordLocked(const FrameExposure& frame)
     RecordWriter::Instance().Append(std::move(text));
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// Auto (story 5, DlssNr_ExposureAuto.h): the lifecycle, the history the matcher reads, and letting go of candidates.
-// Everything under g_scanMutex, except the matcher, which runs on a thread of its own over a copy of the history.
-
-constexpr unsigned int kMatchEveryRows = 50; // ~5 s at the recording's ~10 rows a second
-constexpr size_t kMaxHistoryRows = 6000;     // ~10 min: a search gives up after 5
-
-struct AutoState
-{
-    DlssNrExposureAuto::Lifecycle life;
-    DlssNrExposureAuto::Phase said = DlssNrExposureAuto::Phase::Watching;
-    bool started = false;
-    std::chrono::steady_clock::time_point start;
-    bool handedSeen = false;
-    unsigned long long frames = 0; // NR frames Auto has seen (the scan's own count stops while nothing is held)
-    unsigned int adoptions = 0; // candidates taken, ever
-    unsigned int adoptionsSeen = 0;
-    unsigned int search = 0; // the search the history belongs to (Lifecycle::SearchNumber)
-
-    // One row per recording row (DlssNrExposureScanRecord::Due): the meter, and each slot's value. A slot's column
-    // belongs to the owner of generation owner[slot], from row first[slot] on.
-    std::vector<float> meter;
-    std::vector<std::vector<float>> values;
-    std::vector<size_t> first;
-    std::vector<uint32_t> owner;
-    unsigned int rowsSinceMatch = 0;
-
-    std::future<DlssNrExposureMatch::Verdict> matching;
-    unsigned int matchingSearch = 0;
-    std::vector<uint32_t> matchingOwner; // the owners the running match was given
-
-    // What was found: the slot, its owner, its units and Automatic's level against it
-    int found = -1;
-    uint32_t foundOwner = 0;
-    DlssNrExposureMatch::Fit fit;
-    float level = 0.0f;
-
-    // The found exposure as the picture uses it, worked out once per NR frame (FoundExposure reads it). A match that
-    // moves with our meter's unadapted reading (lag 0-1 rows) is the game's per-frame target, before its own eye
-    // adaptation: Cyberpunk 2077's jumps up to ~1 EV between frames when the camera pans and stops, a flash if used as
-    // it is. That one is eased as Automatic's own reading is (DlssNr_ExposureAdapt.h, the same seconds); a match that
-    // trails the meter is the game's eased value already and is used as it is.
-    float now = 0.0f;
-    std::chrono::steady_clock::time_point nowAt;
-};
-
-AutoState g_auto;
-
-// Each API's own way to let go of a candidate (Core::AdoptLocked's `drop`; null: Core::DropLocked)
-void (*g_drop[3])(size_t slot) = {};
-
-void LetGoLocked(size_t slot)
-{
-    const Tracked& t = g_scan.tracked[slot];
-    void (*drop)(size_t) = g_drop[(int) t.api];
-    (drop != nullptr ? drop : Core::DropLocked)(slot);
-}
-
-const char* PhaseName(DlssNrExposureAuto::Phase p)
-{
-    using DlssNrExposureAuto::Phase;
-
-    switch (p)
-    {
-    case Phase::Watching:
-        return "watching";
-    case Phase::Done:
-        return "not needed: the game hands its exposure over";
-    case Phase::Searching:
-        return "searching";
-    case Phase::Found:
-        return "found the game's exposure";
-    case Phase::Baked:
-        return "the picture is already exposed";
-    case Phase::GaveUp:
-        return "found nothing, Automatic";
-    }
-
-    return "";
-}
-
-void ClearHistoryLocked()
-{
-    g_auto.meter.clear();
-    g_auto.values.clear();
-    g_auto.first.clear();
-    g_auto.owner.clear();
-    g_auto.rowsSinceMatch = 0;
-    g_auto.found = -1;
-}
-
-void AppendRowLocked(float meter)
-{
-    if (g_auto.meter.size() >= kMaxHistoryRows)
-        return;
-
-    const size_t row = g_auto.meter.size();
-    g_auto.meter.push_back(meter);
-
-    const size_t slots = g_scan.tracked.size();
-    g_auto.values.resize(slots);
-    g_auto.first.resize(slots, row);
-    g_auto.owner.resize(slots, 0);
-
-    for (size_t i = 0; i < slots; ++i)
-    {
-        const Tracked& t = g_scan.tracked[i];
-        std::vector<float>& column = g_auto.values[i];
-
-        // A new owner starts its own history here
-        if (g_auto.owner[i] != t.generation)
-        {
-            g_auto.owner[i] = t.generation;
-            g_auto.first[i] = row;
-        }
-
-        column.resize(row, 0.0f);
-        column.push_back(t.alive && std::isfinite(t.latest) ? t.latest : 0.0f);
-    }
-
-    g_auto.rowsSinceMatch++;
-}
-
-// The match started some rows ago, when done: Found (with the slot still held by the owner it judged), Baked, None or
-// not sure
-DlssNrExposureAuto::Verdict CollectMatchLocked()
-{
-    using DlssNrExposureAuto::Verdict;
-
-    if (!g_auto.matching.valid() ||
-        g_auto.matching.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-        return Verdict::NotSure;
-
-    const DlssNrExposureMatch::Verdict v = g_auto.matching.get();
-
-    if (g_auto.matchingSearch != g_auto.search)
-        return Verdict::NotSure;
-
-    switch (v.what)
-    {
-    case DlssNrExposureMatch::What::Found:
-    {
-        const size_t slot = (size_t) v.index;
-
-        if (v.index < 0 || slot >= g_scan.tracked.size() || slot >= g_auto.matchingOwner.size() ||
-            !g_scan.tracked[slot].alive || g_scan.tracked[slot].generation != g_auto.matchingOwner[slot])
-            return Verdict::NotSure;
-
-        // Automatic's level against the found value, over the rows the match judged
-        const size_t from = std::min(g_auto.first[slot], g_auto.meter.size());
-        const std::vector<float> meter(g_auto.meter.begin() + from, g_auto.meter.end());
-        const std::vector<float> value(g_auto.values[slot].begin() + std::min(from, g_auto.values[slot].size()),
-                                       g_auto.values[slot].end());
-        const float level = DlssNrExposureMatch::AnchorScale(v.fit, meter, value);
-
-        if (!(level > 0.0f) || !std::isfinite(level))
-            return Verdict::NotSure;
-
-        g_auto.found = (int) slot;
-        g_auto.foundOwner = g_scan.tracked[slot].generation;
-        g_auto.fit = v.fit;
-        g_auto.level = level;
-
-        static const char* kKinds[] = { "unsure",    "steady",     "not a float", "a timer",  "noisy",
-                                        "unrelated", "multiplier", "divisor",     "stop value" };
-        LOG_INFO("DLSS-NR exposure scan (Auto): candidate {} ({}{}) is the game's exposure: a {}, corr {:.3f}, slope "
-                 "{:.3f}, lag {} rows, over {} rows and {:.1f} EV; Automatic's level against it {:.4g}",
-                 slot + 1, g_scan.tracked[slot].shape, Core::ApiSuffix(g_scan.tracked[slot].api),
-                 kKinds[(int) v.fit.kind], v.fit.corr, v.fit.slope, v.fit.lag, v.rows, v.meterTravelEv, level);
-        return Verdict::Found;
-    }
-    case DlssNrExposureMatch::What::Baked:
-        return Verdict::Baked;
-    case DlssNrExposureMatch::What::None:
-        return Verdict::None;
-    default:
-        return Verdict::NotSure;
-    }
-}
-
-void StartMatchLocked()
-{
-    if (g_auto.matching.valid() || g_auto.rowsSinceMatch < kMatchEveryRows || g_auto.meter.empty())
-        return;
-
-    g_auto.rowsSinceMatch = 0;
-    g_auto.matchingSearch = g_auto.search;
-    g_auto.matchingOwner = g_auto.owner;
-
-    std::vector<std::vector<float>> values = g_auto.values;
-    for (std::vector<float>& column : values)
-        column.resize(g_auto.meter.size(), 0.0f);
-
-    g_auto.matching = std::async(std::launch::async,
-                                 [meter = g_auto.meter, values = std::move(values), first = g_auto.first]
-                                 { return DlssNrExposureMatch::MatchEach(meter, values, first); });
-}
-
-// Once per NR frame, before the recording's row. Only on Auto: the asked-for modes keep every candidate.
-void AutoFrameLocked(const FrameExposure& frame)
-{
-    using namespace DlssNrExposureAuto;
-
-    if (!AutoOn())
-        return;
-
-    const auto now = std::chrono::steady_clock::now();
-
-    if (!g_auto.started)
-    {
-        g_auto.started = true;
-        g_auto.start = now;
-    }
-
-    // What the game hands over, latched; a texture Game exposure gave up on reading does not count
-    g_auto.handedSeen = g_auto.handedSeen || frame.handed != nullptr;
-
-    if (g_auto.life.CopiesAll() && DlssNrExposureScanRecord::Due(g_auto.frames++))
-        AppendRowLocked(frame.meter);
-
-    Frame f;
-    f.seconds = std::chrono::duration<float>(now - g_auto.start).count();
-    f.handed = g_auto.handedSeen && !DlssNr::GameExposureOffer().Unusable();
-    f.verdict = CollectMatchLocked();
-    f.matchAlive = g_auto.found >= 0 && (size_t) g_auto.found < g_scan.tracked.size() &&
-                   g_scan.tracked[g_auto.found].alive && g_scan.tracked[g_auto.found].generation == g_auto.foundOwner;
-    f.newCandidates = g_auto.adoptions != g_auto.adoptionsSeen;
-    g_auto.adoptionsSeen = g_auto.adoptions;
-
-    g_auto.life.OnFrame(f);
-
-    if (g_auto.life.SearchNumber() != g_auto.search)
-    {
-        g_auto.search = g_auto.life.SearchNumber();
-        ClearHistoryLocked();
-    }
-
-    if (g_auto.life.Now() == Phase::Searching)
-        StartMatchLocked();
-
-    // Let go: everything, or everything but the match
-    if (g_auto.life.LetsGo() || g_auto.life.CopiesMatchOnly())
-    {
-        for (size_t i = 0; i < g_scan.tracked.size(); ++i)
-        {
-            if (g_scan.tracked[i].alive && !(g_auto.life.CopiesMatchOnly() && (int) i == g_auto.found))
-                LetGoLocked(i);
-        }
-    }
-
-    // The found exposure for this frame (AutoState::now)
-    {
-        float target = 0.0f;
-
-        if (g_auto.life.Now() == Phase::Found && f.matchAlive)
-            target = g_auto.level * DlssNrExposureMatch::AsExposure(g_auto.fit, g_scan.tracked[g_auto.found].latest);
-
-        if (!DlssNrExposureAdapt::Valid(target))
-        {
-            g_auto.now = 0.0f;
-        }
-        else if (std::abs(g_auto.fit.lag) > 1)
-        {
-            g_auto.now = target;
-        }
-        else
-        {
-            const Config& cfg = *Config::Instance();
-            const float dt = g_auto.now > 0.0f ? std::chrono::duration<float>(now - g_auto.nowAt).count() : 0.0f;
-            const float brighter = DlssNrExposureAdapt::Blend(
-                dt, DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptBrighterSeconds.value_or_default(),
-                                                 DlssNrExposureAdapt::kDefaultBrighterSeconds));
-            const float darker = DlssNrExposureAdapt::Blend(
-                dt, DlssNrExposureAdapt::Seconds(cfg.DlssNrAutoExposureAdaptDarkerSeconds.value_or_default()));
-            g_auto.now = DlssNrExposureAdapt::Ease(g_auto.now, target, brighter, darker, g_auto.now <= 0.0f);
-        }
-
-        g_auto.nowAt = now;
-    }
-
-    if (g_auto.life.Now() != g_auto.said)
-    {
-        g_auto.said = g_auto.life.Now();
-        LOG_INFO("DLSS-NR exposure scan (Auto): {}", PhaseName(g_auto.said));
-    }
-}
-
-// Auto has finished with candidates for the session (Done, Baked): none is taken any more
-bool AutoClosedLocked()
-{
-    using DlssNrExposureAuto::Phase;
-    return AutoOn() && (g_auto.life.Now() == Phase::Done || g_auto.life.Now() == Phase::Baked);
-}
-
 } // namespace
 
 // Everything the two entry points share: does this description look like a number rather than a
@@ -783,9 +508,9 @@ void NoteHandedLocked(Api api, const void* handle)
     g_scan.handedNoteApi = api;
 }
 
-bool Wanted() { return ExposureScan::Wanted(); }
+bool Wanted(Api api) { return api == Api::D3D12 ? ExposureScan::Wanted() : AskedFor(); }
 
-bool Active() { return Config::Instance()->DlssNrEnabled.value_or_default() && ExposureScan::Wanted(); }
+bool Active(Api api) { return Config::Instance()->DlssNrEnabled.value_or_default() && Wanted(api); }
 
 bool FromGameLocked(void* caller) { return ExposureScan::FromGameLocked(caller); }
 
@@ -811,7 +536,7 @@ float HalfToFloat(uint16_t h) { return HalfToFloatImpl(h); }
 int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, unsigned int bytes, bool isBuffer,
                 uint32_t format, uint64_t size, void (*drop)(size_t slot))
 {
-    if (handle == nullptr || AutoClosedLocked())
+    if (handle == nullptr || AutoScan::ClosedLocked())
         return -1;
 
     for (const Tracked& t : g_scan.tracked)
@@ -875,7 +600,7 @@ int AdoptLocked(Api api, void* handle, void* device, const std::string& shape, u
         ((IUnknown*) handle)->AddRef();
 
     g_scan.listVersion++;
-    g_auto.adoptions++;
+    AutoScan::AdoptedLocked(rank);
 
     LOG_INFO("DLSS-NR exposure scan: candidate {} -- {}{}", slot + 1, shape, ApiSuffix(api));
     return slot;
@@ -888,7 +613,11 @@ void DropLocked(size_t slot)
 
     Tracked& t = g_scan.tracked[slot];
 
-    if (t.api != Api::Vulkan && t.handle != nullptr)
+    // D3D12: a copy recorded in the last kSlots frames may still be running; release once it has retired. D3D11 tracks
+    // its own in-flight use of a resource; Vulkan holds no reference.
+    if (t.api == Api::D3D12 && t.handle != nullptr)
+        g_scan.retiring.push_back({ (ID3D12Resource*) t.handle, g_scan.frames12 });
+    else if (t.api == Api::D3D11 && t.handle != nullptr)
         ((IUnknown*) t.handle)->Release();
 
     t.alive = false;
@@ -965,6 +694,15 @@ void ConsumeLocked(size_t slot, uint32_t generation, const void* bytes)
     t.reads++;
 }
 
+void LetGoLocked(size_t slot)
+{
+    if (slot >= g_scan.tracked.size())
+        return;
+
+    void (*drop)(size_t) = g_drop[(int) g_scan.tracked[slot].api];
+    (drop != nullptr ? drop : DropLocked)(slot);
+}
+
 bool AnyAliveLocked(Api api)
 {
     for (const Tracked& t : g_scan.tracked)
@@ -990,7 +728,7 @@ void EndFrameLocked(const FrameExposure& passFrame)
 
     // Auto's lifecycle runs every NR frame, candidates or not: a handed texture, or new candidates after giving up,
     // change its course
-    AutoFrameLocked(frame);
+    AutoScan::FrameLocked(frame);
 
     bool anyAlive = false;
 
@@ -1128,7 +866,7 @@ void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource, voi
         return;
 
     Core::AdoptLocked(Api::D3D12, resource, nullptr, shape, bytes, isBuffer, (uint32_t) fmt,
-                      isBuffer ? desc->Width : desc->Width * desc->Height);
+                      isBuffer ? desc->Width : desc->Width * desc->Height * desc->DepthOrArraySize);
 }
 
 unsigned int Examined()
@@ -1179,26 +917,28 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
         return;
 
     Core::AdoptLocked(Api::D3D12, resource, nullptr, shape, bytes, isBuffer, (uint32_t) fmt,
-                      isBuffer ? rd.Width : rd.Width * rd.Height);
+                      isBuffer ? rd.Width : rd.Width * rd.Height * rd.DepthOrArraySize);
 }
 
-void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame)
+bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame)
 {
     if (!Wanted())
-        return;
+        return false;
 
     if (device == nullptr || cmdList == nullptr)
-        return;
+        return false;
 
     // Before the lock, deliberately. EnsureReadback creates a committed resource, and that call is
     // detoured to hkCreateCommittedResource -> NoteResource, which takes g_scanMutex. Holding it
     // here would be a self-deadlock on a non-recursive mutex the first frame the scan runs. The
     // readback ring is only ever touched on this (render) thread, so it needs no lock of its own.
     if (!EnsureReadback(device))
-        return;
+        return false;
 
     std::lock_guard<std::mutex> lock(g_scanMutex);
     Core::HeldScope held;
+
+    ReleaseRetiredLocked(false);
 
     // Read the slot written four frames ago before overwriting it. Retired by now, so this reads
     // mapped memory rather than waiting on the GPU.
@@ -1232,29 +972,57 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
     ID3D12Resource* dst = g_scan.readback[slot];
 
     if (dst == nullptr)
-        return;
+        return false;
+
+    // A candidate only we still hold: the game has let go of it (a level unloaded, a pool recycled). Copying it on reads
+    // memory the game may have given back (a placed resource in a heap it freed), and holding it pins what the game
+    // meant to free; Auto now holds candidates in every D3D12 game, so this is checked every frame.
+    for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+    {
+        Tracked& t = g_scan.tracked[i];
+
+        if (!t.alive || t.api != Api::D3D12 || t.handle == nullptr)
+            continue;
+
+        IUnknown* resource = (IUnknown*) t.handle;
+        resource->AddRef();
+
+        if (resource->Release() == 1)
+        {
+            LOG_INFO("DLSS-NR exposure scan: candidate {} ({}) let go: the game has released it", i + 1, t.shape);
+            Core::LetGoLocked(i);
+        }
+    }
 
     // The state a candidate is in is the game's business and nothing here has a contract about it.
     //
     // UNORDERED_ACCESS is the assumption, and it is the reasonable one: every candidate got here by
     // having an unordered access view created on it, which is what a compute shader writes through,
     // and an eye adaptation buffer is written every frame and read by the next pass. It is still an
-    // assumption, which is why the whole scan is behind a setting that is off by default -- getting
-    // this wrong on someone's machine costs them a frame or a device, and nobody who has not asked
-    // for the scan should be exposed to that.
+    // assumption, and since story 5 every D3D12 game on Auto (the default) runs it while the scan searches (checked
+    // in Cyberpunk 2077; NBA 2K27 hands its exposure over and lets go at the first frame). A game where it is wrong is
+    // exposed only while a search runs (5 minutes at most), and the copies stop once the game hands its exposure over.
     //
     // The transitions go in two batches, all candidates at once on each side of the copies, not two per candidate:
     // each ResourceBarrier call is a GPU sync point, and 128 of them a frame was most of the scan's cost while it held
     // its full 64 (Cyberpunk: ~0.07 ms a frame).
+    // Only the copies recorded below are read back into this slot four frames on: a candidate held but not copied (Auto
+    // found or gave up) must not be credited with what an older copy left at its offset
+    std::fill(std::begin(g_scan.readbackGeneration[slot]), std::end(g_scan.readbackGeneration[slot]), 0u);
+
     std::vector<D3D12_RESOURCE_BARRIER> toCopy;
+    std::vector<size_t> copied;
     toCopy.reserve(g_scan.tracked.size());
+    copied.reserve(g_scan.tracked.size());
 
     for (size_t i = 0; i < g_scan.tracked.size(); ++i)
     {
         const Tracked& t = g_scan.tracked[i];
 
-        if (!t.alive || t.api != Api::D3D12 || t.handle == nullptr)
+        if (!t.alive || t.api != Api::D3D12 || t.handle == nullptr || !AutoScan::CopiesLocked(i))
             continue;
+
+        copied.push_back(i);
 
         D3D12_RESOURCE_BARRIER barrier {};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1268,17 +1036,14 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
     if (toCopy.empty())
     {
         g_scan.frames12++;
-        return;
+        return false;
     }
 
     cmdList->ResourceBarrier((UINT) toCopy.size(), toCopy.data());
 
-    for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+    for (const size_t i : copied)
     {
         Tracked& t = g_scan.tracked[i];
-
-        if (!t.alive || t.api != Api::D3D12 || t.handle == nullptr)
-            continue;
 
         ID3D12Resource* resource = (ID3D12Resource*) t.handle;
         g_scan.readbackGeneration[slot][i] = t.generation;
@@ -1315,6 +1080,7 @@ void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
     cmdList->ResourceBarrier((UINT) toCopy.size(), toCopy.data());
 
     g_scan.frames12++;
+    return true;
 }
 
 // How many frames of watching without movement before saying so. At sixty frames a second this is
@@ -1515,42 +1281,14 @@ bool Holding()
         return false;
 
     std::lock_guard<std::mutex> lock(g_scanMutex);
-    return Core::AnyAliveLocked(Api::D3D12);
-}
 
-std::string AutoStatus()
-{
-    if (!AutoOn())
-        return {};
+    for (size_t i = 0; i < g_scan.tracked.size(); ++i)
+    {
+        if (g_scan.tracked[i].alive && g_scan.tracked[i].api == Api::D3D12 && AutoScan::CopiesLocked(i))
+            return true;
+    }
 
-    std::lock_guard<std::mutex> lock(g_scanMutex);
-    std::string line = PhaseName(g_auto.life.Now());
-
-    if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Found && g_auto.found >= 0 &&
-        (size_t) g_auto.found < g_scan.tracked.size())
-        line += " (" + g_scan.tracked[g_auto.found].shape + ")";
-
-    return line;
-}
-
-bool FoundExposure(float* multiplier)
-{
-    if (multiplier == nullptr || !AutoOn())
-        return false;
-
-    std::lock_guard<std::mutex> lock(g_scanMutex);
-
-    if (g_auto.life.Now() != DlssNrExposureAuto::Phase::Found || g_auto.found < 0 ||
-        (size_t) g_auto.found >= g_scan.tracked.size())
-        return false;
-
-    const Tracked& t = g_scan.tracked[g_auto.found];
-
-    if (!t.alive || t.generation != g_auto.foundOwner || !DlssNrExposureAdapt::Valid(g_auto.now))
-        return false;
-
-    *multiplier = g_auto.now;
-    return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1771,6 +1509,7 @@ void ReleaseTrackedResources()
             Core::DropLocked(i);
     }
 
+    ReleaseRetiredLocked(true);
     g_scan.complained = false;
 }
 
@@ -1781,6 +1520,7 @@ void Shutdown()
     for (size_t i = 0; i < g_scan.tracked.size(); ++i)
         Core::DropLocked(i);
 
+    ReleaseRetiredLocked(true);
     g_scan.tracked.clear();
 
     for (unsigned int i = 0; i < kSlots; ++i)

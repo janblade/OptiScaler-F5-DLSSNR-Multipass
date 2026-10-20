@@ -1915,13 +1915,14 @@ static void RenderExposureSection(Config* config, float menuResScale)
 
         // Auto first, naming what it is now; the other entries are the values 0-3
         const uint32_t configuredSource = config->DlssNrWhitePointSource.value_or_default();
-        // While the exposure scan's match drives Auto (story 5), Auto names that one
-        float foundExposure = 0.0f;
+        // While the exposure scan's match moves the picture (story 5), Auto names that one. Asked of the pass, not the
+        // scan: the scan can hold a match the picture is not using (SDR, a finished picture, a white point override).
         const bool autoFound = configuredSource == DlssNrExposureDefault::kSourceAuto &&
                                DlssNr::WhitePointSourceEffective(*config) == DlssNrExposureDefault::kSourceAutomatic &&
-                               DlssNr::ExposureScan::FoundExposure(&foundExposure);
+                               (vk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus())
+                                   .foundInForce;
         const std::string autoSource = std::string("Auto (") +
-                                       (autoFound ? "Game's exposure, found by OptiScaler"
+                                       (autoFound ? "Game's exposure, found in the game"
                                                   : sourceNames[DlssNr::WhitePointSourceEffective(*config)]) +
                                        ")";
         const char* sourceItems[] = { autoSource.c_str(), sourceNames[0], sourceNames[1], sourceNames[2],
@@ -1943,9 +1944,9 @@ static void RenderExposureSection(Config* config, float menuResScale)
         const int source = (int) DlssNr::WhitePointSourceEffective(*config);
 
         HelpMarker("Where NR's brightness reference comes from.\n"
-                   "Auto: the game's exposure when the game gives one. Else OptiScaler looks for the game's own\n"
-                   "exposure in its memory while you play; once found, the game's value moves the brightness at\n"
-                   "Automatic exposure's level. Until then, or if none is found, Automatic exposure.\n"
+                   "Auto: the game's exposure when the game gives one. Else, in D3D12 games, OptiScaler looks for\n"
+                   "the game's own exposure among its GPU buffers while you play; once found, the game's value moves\n"
+                   "the brightness at Automatic exposure's level. Until then, or if none is found, Automatic exposure.\n"
                    "Manual: Paper white.\n"
                    "Game exposure: the game's own value.\n"
                    "Scanned exposure: read from game buffers; needs calibration.\n"

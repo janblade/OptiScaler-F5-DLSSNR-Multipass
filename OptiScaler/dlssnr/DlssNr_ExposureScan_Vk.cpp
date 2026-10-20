@@ -261,7 +261,7 @@ VkResult VKAPI_CALL hkCreateBuffer(VkDevice device, const VkBufferCreateInfo* in
     const bool candidate =
         info != nullptr &&
         (info->usage & (VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)) != 0 &&
-        DlssNrExposureScanShape::SmallBuffer(info->size) && !Core::Held() && Core::Active();
+        DlssNrExposureScanShape::SmallBuffer(info->size) && !Core::Held() && Core::Active(Api::Vulkan);
     VkBufferCreateInfo local {};
 
     if (candidate && (info->usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT) == 0)
@@ -621,7 +621,7 @@ namespace ExposureScanVk
 {
 PFN_vkVoidFunction GetProcAddr(PFN_vkVoidFunction original, const char* name)
 {
-    if (original == nullptr || name == nullptr || !Core::Wanted())
+    if (original == nullptr || name == nullptr || !Core::Wanted(Api::Vulkan))
         return nullptr;
 
     for (const auto& hook : kHooks)
@@ -640,7 +640,7 @@ PFN_vkVoidFunction GetProcAddr(PFN_vkVoidFunction original, const char* name)
 
 void Hook(HMODULE vulkanModule)
 {
-    if (vulkanModule == nullptr || o_vkCreateBuffer != nullptr || !Core::Wanted())
+    if (vulkanModule == nullptr || o_vkCreateBuffer != nullptr || !Core::Wanted(Api::Vulkan))
         return;
 
     for (const auto& hook : kHooks)
@@ -674,7 +674,7 @@ bool WantsImage(const VkImageCreateInfo& info)
     return info.imageType == VK_IMAGE_TYPE_2D && info.samples == VK_SAMPLE_COUNT_1_BIT && info.extent.depth == 1 &&
            info.mipLevels == 1 && info.arrayLayers == 1 && (info.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 &&
            DlssNrExposureScanShape::VkFloatFormat((uint32_t) info.format).bytes != 0 &&
-           DlssNrExposureScanShape::SmallTexture(info.extent.width, info.extent.height) && Core::Active();
+           DlssNrExposureScanShape::SmallTexture(info.extent.width, info.extent.height) && Core::Active(Api::Vulkan);
 }
 
 void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage image, void* caller)
@@ -698,13 +698,13 @@ void OnImageCreated(VkDevice device, const VkImageCreateInfo& info, VkImage imag
                               std::to_string(info.extent.width) + "x" + std::to_string(info.extent.height) + " " +
                                   format.name,
                               format.bytes, false, (uint32_t) info.format,
-                              (uint64_t) info.extent.width * info.extent.height };
+                              (uint64_t) info.extent.width * info.extent.height * info.extent.depth * info.arrayLayers };
     CountWatchedLocked();
 }
 
 void RememberImage(VkDevice device, const VkImageCreateInfo& info, VkImage image, bool wanted)
 {
-    if (image == VK_NULL_HANDLE || Core::Held() || !Core::Active())
+    if (image == VK_NULL_HANDLE || Core::Held() || !Core::Active(Api::Vulkan))
         return;
 
     if (!wanted && (info.extent.width != 1 || info.extent.height != 1))
@@ -775,7 +775,7 @@ void NoteBarriers2(const VkDependencyInfo* info)
 
 void Tick(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, const ExposureScan::FrameExposure& frame)
 {
-    if (!Core::Active())
+    if (!Core::Active(Api::Vulkan))
         return;
 
     ReadAndCopy(cmd, device, physical, false);
@@ -786,7 +786,7 @@ void Tick(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, const
 
 void Record(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physical, bool ownSubmit)
 {
-    if (Core::Active())
+    if (Core::Active(Api::Vulkan))
         ReadAndCopy(cmd, device, physical, ownSubmit);
 }
 
@@ -806,7 +806,7 @@ void Submitted(VkDevice device, VkSemaphore timeline, uint64_t value)
 
 void NoteHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat format, uint32_t mip, uint32_t layer)
 {
-    if (exposure == VK_NULL_HANDLE || !Core::Active() || Core::Held())
+    if (exposure == VK_NULL_HANDLE || !Core::Active(Api::Vulkan) || Core::Held())
         return;
 
     {
@@ -819,7 +819,7 @@ void NoteHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat form
 
 void ExplainHanded(VkImage exposure, uint32_t width, uint32_t height, VkFormat format, uint32_t mip, uint32_t layer)
 {
-    if (exposure == VK_NULL_HANDLE || !Core::Active() || Core::Held())
+    if (exposure == VK_NULL_HANDLE || !Core::Active(Api::Vulkan) || Core::Held())
         return;
 
     std::lock_guard<std::mutex> lock(Core::Mutex());

@@ -19,6 +19,7 @@
 #include <shaders/dlssnr/DlssNr_AutoTrimDefault.h>
 #include <shaders/dlssnr/DlssNr_FollowGame.h>
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
+#include <shaders/dlssnr/DlssNr_ExposureFoundBlend.h>
 #include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNrNative.h>
@@ -253,10 +254,10 @@ struct VkState
     bool pairValiditySaid = false;
     bool followingGame = false;
     // Auto's found exposure (DlssNr_ExposureScan.h FoundExposure): the base white point it gives this frame, 0 when
-    // the scan has found none. Read back a few frames behind, so while it holds the host's white point is in force.
+    // none is in force. Read back a few frames behind, so while it holds the host's white point is in force. Eased in
+    // and out (DlssNr_ExposureFoundBlend.h).
     float foundBaseWhitePoint = 0.0f;
-    float foundBlendFrom = 0.0f;  // Automatic's base white point when the found one took over, while easing
-    double foundBlendStart = 0.0; // when it took over (seconds, steady clock)
+    DlssNrExposureFoundBlend::Blend foundBlend;
 };
 
 // The grid the meter writes, and the size of one readback. 64 * 64 * sizeof(float). The game's
@@ -728,6 +729,7 @@ FollowGameStatus FollowGameExposureStatusVk()
     FollowGameStatus s {};
     s.gameExposureSeen = g_vk.pairGameExposure > 0.0f;
     s.following = g_vk.followingGame;
+    s.foundInForce = g_vk.foundBaseWhitePoint > 0.0f;
     return s;
 }
 
@@ -1509,40 +1511,35 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         g_vk.followingGame = follow;
 
         // Auto's found exposure (story 5): the game's own movement at Automatic's level, only where Automatic runs.
-        // Taking over from Automatic's own is eased over a second, in stops, as on D3D12.
+        // Moving to and from it is eased over a second, in stops, as on D3D12 (DlssNr_ExposureFoundBlend.h). Auto's
+        // scan is D3D12-only for now (DlssNr_ExposureScan.h), so this stays at 0 until a Vulkan game is checked.
         float found = 0.0f;
-        const bool was = g_vk.foundBaseWhitePoint > 0.0f;
+        float foundPre = 1.0f;
         const float target = requestedWhitePointSource == 3 && linearHdr && !displayWhite && !follow &&
-                                     DlssNr::ExposureScan::FoundExposure(&found) && found > 1e-8f
-                                 ? g_vk.gamePreExposure / found
+                                     DlssNr::ExposureScan::FoundExposure(&found, &foundPre) && found > 1e-8f
+                                 ? foundPre / found
                                  : 0.0f;
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float own =
+            g_vk.autoExposureValue > 1e-8f ? g_vk.autoExposurePreExposure / g_vk.autoExposureValue : 0.0f;
+        g_vk.foundBaseWhitePoint = g_vk.foundBlend.Step(target, own, now);
 
-        if (target > 0.0f && !was)
+        switch (g_vk.foundBlend.LastEvent())
         {
-            g_vk.foundBlendFrom =
-                g_vk.autoExposureValue > 1e-8f ? g_vk.autoExposurePreExposure / g_vk.autoExposureValue : 0.0f;
-            g_vk.foundBlendStart = now;
-
-            const float own = g_vk.foundBlendFrom;
+        case DlssNrExposureFoundBlend::Event::TookOver:
             LOG_INFO("DLSS-NR automatic exposure (Vulkan): the game's own exposure (found by the scan) moves the white "
-                     "point from here: {:.4g}, Automatic's own {:.4g} ({:+.2f} EV), eased over a second",
-                     target, own, own > 0.0f ? std::log2(own / target) : 0.0f);
-        }
-        else if (target <= 0.0f && was)
-        {
+                     "point from here: {:.4g}, from {:.4g} ({:+.2f} EV), eased over a second",
+                     target, g_vk.foundBaseWhitePoint, std::log2(g_vk.foundBaseWhitePoint / target));
+            break;
+        case DlssNrExposureFoundBlend::Event::Leaving:
+            LOG_INFO("DLSS-NR automatic exposure (Vulkan): the game's exposure is gone; back to Automatic's own meter, "
+                     "eased");
+            break;
+        case DlssNrExposureFoundBlend::Event::Left:
             LOG_INFO("DLSS-NR automatic exposure (Vulkan): Automatic's own meter again");
-        }
-
-        g_vk.foundBaseWhitePoint = target;
-
-        if (target > 0.0f && g_vk.foundBlendFrom > 0.0f)
-        {
-            const double t = std::clamp(now - g_vk.foundBlendStart, 0.0, 1.0);
-            g_vk.foundBaseWhitePoint = std::exp2(std::lerp(std::log2(g_vk.foundBlendFrom), std::log2(target), (float) t));
-
-            if (t >= 1.0)
-                g_vk.foundBlendFrom = 0.0f;
+            break;
+        default:
+            break;
         }
     }
 
@@ -1562,7 +1559,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         whitePoint = std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
         debugWhitePoint = std::clamp(baseWhitePoint, 0.01f, 4096.0f);
     }
-    else if (requestedWhitePointSource == 3 && g_vk.autoExposureValue > 1e-8f)
+    else if (requestedWhitePointSource == 3 && (g_vk.autoExposureValue > 1e-8f || g_vk.foundBaseWhitePoint > 0.0f))
     {
         // The fallback and the menu's number, from the readback a few frames behind. The shader
         // recomputes this from the live 1x1 image when it is bound. Following the game, this is the value in

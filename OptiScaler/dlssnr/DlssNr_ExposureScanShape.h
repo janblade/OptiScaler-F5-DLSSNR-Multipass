@@ -116,15 +116,16 @@ template <class Slot> int FreeSlot(const std::vector<Slot>& slots, size_t cap)
 }
 
 // How likely a candidate's shape is to hold the exposure, for a full list (EvictFor). `size`: bytes for a buffer, texels
-// for a texture. A texture of up to 4 texels ranks 3 (the exposures found so far: Cyberpunk 2077's and Arkham Knight's
-// 1x1, RDR2's 1x1, Doom Eternal's 2x2); another small texture, or a buffer of up to 16 bytes (Cyberpunk's copy of its
-// exposure), ranks 2; a bigger buffer ranks 1.
+// for a texture (every layer and slice counted). A texture of up to 4 texels ranks 4 (the exposures found so far:
+// Cyberpunk 2077's and Arkham Knight's 1x1, RDR2's 1x1, Doom Eternal's 2x2); another small texture, or a buffer of up to
+// 16 bytes (Cyberpunk's copy of its exposure), ranks 3; a buffer of up to 64 bytes (an exposure kept in a small struct,
+// beside its target and history) ranks 2; a bigger one ranks 1 (Cyberpunk's 28 never-useful 128-byte buffers).
 inline int Rank(bool isBuffer, uint64_t size)
 {
     if (isBuffer)
-        return size <= 16 ? 2 : 1;
+        return size <= 16 ? 3 : size <= 64 ? 2 : 1;
 
-    return size <= 4 ? 3 : 2;
+    return size <= 4 ? 4 : 3;
 }
 
 // The slot a newcomer of `rank` takes when the list is full, or -1. Games make most candidates at load, before NR has

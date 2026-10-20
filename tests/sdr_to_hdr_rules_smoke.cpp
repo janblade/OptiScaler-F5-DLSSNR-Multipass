@@ -47,7 +47,8 @@ int main()
     off.gameFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
     off.flipModel = false;
     off.displayHdr = false;
-    off.frameGen = off.dxvk = off.streamlineDlssg = off.multiNode = true;
+    off.frameGen = off.dxvk = off.streamlineDlssg = off.multiNode = off.composition = off.d3d11 = true;
+    off.displayKnown = false;
     Check(Is(off, Reason::Off), "Enabled=false: Off, although every other reason would also hold");
 
     // The supported formats
@@ -99,6 +100,19 @@ int main()
     Check(Is(in, Reason::MultiNode), "multi-GPU chain is MultiNode");
 
     in = Good();
+    in.composition = true;
+    Check(Is(in, Reason::Composition), "composition swap chain is Composition");
+
+    in = Good();
+    in.d3d11 = true;
+    Check(Is(in, Reason::D3D11NotYet), "Direct3D 11 is D3D11NotYet");
+
+    in = Good();
+    in.displayKnown = false;
+    in.displayHdr = false;
+    Check(Is(in, Reason::DisplayUnknown), "display not read yet is DisplayUnknown");
+
+    in = Good();
     in.displayHdr = false;
     Check(Is(in, Reason::DisplayNotHdr), "display not in HDR mode is DisplayNotHdr");
 
@@ -115,11 +129,16 @@ int main()
     in.dxvk = true;
     in.displayHdr = false;
     Check(Is(in, Reason::Dxvk), "dxvk outranks the display");
+    in = Good();
+    in.d3d11 = true;
+    in.displayKnown = false;
+    Check(Is(in, Reason::D3D11NotYet), "D3D11 outranks an unknown display");
 
     // Every reason has its own one-line text, starting the same way
     const Reason all[] = { Reason::Off,         Reason::GameHdrFormat,   Reason::DisplayNotHdr,
                            Reason::BitBlt,      Reason::FrameGen,        Reason::Dxvk,
-                           Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Active };
+                           Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
+                           Reason::D3D11NotYet, Reason::DisplayUnknown, Reason::Active };
     bool texts = true;
 
     for (size_t i = 0; i < std::size(all); ++i)

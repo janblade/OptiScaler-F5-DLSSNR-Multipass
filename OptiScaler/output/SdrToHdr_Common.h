@@ -24,6 +24,9 @@ enum class Reason
     StreamlineDlssg,  // the chain is Streamline's DLSS-G proxy
     UnsupportedFormat, // not one of the four 8-bit formats
     MultiNode,        // a multi-GPU swap chain
+    Composition,      // a composition swap chain (UWP / XAML), presented through the compositor
+    D3D11NotYet,      // a D3D11 swap chain: the D3D11 pass is not written yet
+    DisplayUnknown,   // the display could not be read yet: decided again at the next resize
     Active,
 };
 
@@ -37,6 +40,9 @@ struct Inputs
     bool dxvk = false;
     bool streamlineDlssg = false;
     bool multiNode = false;
+    bool composition = false;
+    bool d3d11 = false;
+    bool displayKnown = true;                      // false: the output the window is on could not be found
 };
 
 struct Decision
@@ -70,7 +76,7 @@ inline bool IsGameHdrFormat(DXGI_FORMAT format)
 }
 
 // Order matters: Off first (nothing else counts while the feature is off), then what the game made, then the chain, then
-// who else owns it, then the display.
+// who else owns it, then the API, then the display.
 inline Decision Decide(const Inputs& in)
 {
     if (!in.enabled)
@@ -94,8 +100,17 @@ inline Decision Decide(const Inputs& in)
     if (in.streamlineDlssg)
         return { false, Reason::StreamlineDlssg };
 
+    if (in.composition)
+        return { false, Reason::Composition };
+
     if (in.multiNode)
         return { false, Reason::MultiNode };
+
+    if (in.d3d11)
+        return { false, Reason::D3D11NotYet };
+
+    if (!in.displayKnown)
+        return { false, Reason::DisplayUnknown };
 
     if (!in.displayHdr)
         return { false, Reason::DisplayNotHdr };
@@ -126,6 +141,12 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: standing aside, this swap chain format is not supported";
     case Reason::MultiNode:
         return "HDR output: standing aside, multi-GPU swap chains are not supported";
+    case Reason::Composition:
+        return "HDR output: standing aside, composition swap chains are not supported";
+    case Reason::D3D11NotYet:
+        return "HDR output: standing aside, Direct3D 11 games are not supported yet";
+    case Reason::DisplayUnknown:
+        return "HDR output: not decided yet, the display is checked again at the next resize";
     case Reason::Active:
         return "HDR output: active";
     }

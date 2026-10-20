@@ -49,6 +49,7 @@
 #include <magic_enum.hpp>
 #include <version_check.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/XeModuleInfo.h>
 #include <sha1/sha1.hpp>
 
 static std::vector<HMODULE> _asiHandles;
@@ -241,9 +242,20 @@ void LoadAsiPlugins()
             else
                 hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
 
+            if (hMod == nullptr && fileName.rfind(L"-loadlate") == std::wstring::npos)
+                LOG_ERROR(L"Could not load {}", entry.path().wstring());
+
             if (hMod != nullptr)
             {
-                LOG_INFO(L"Loaded: {}", entry.path().wstring());
+                // The plugin's own version, for support logs (an unlocker built for one XeFG/DLSS-G version, say)
+                version_t fileVersion {};
+                version_t productVersion {};
+
+                if (Util::GetFileVersion(entry.path().wstring(), &fileVersion, &productVersion))
+                    LOG_INFO(L"Loaded: {} (v{}.{}.{}.{})", entry.path().wstring(), fileVersion.major, fileVersion.minor,
+                             fileVersion.patch, fileVersion.reserved);
+                else
+                    LOG_INFO(L"Loaded: {}", entry.path().wstring());
                 _asiHandles.push_back(hMod);
 
                 auto init = (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
@@ -1762,6 +1774,9 @@ void CheckMemoryForProxies()
     XeLLProxy::InitXeLL();
 
     XellHooks::Hook();
+
+    // Which XeFG / XeLL files are in use, to the log (and later the menu)
+    XeModuleInfo::Describe();
 
     NVNGXProxy::InitNVNGX();
 }

@@ -3193,11 +3193,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatialReset)
         g_nr.reset = true;
 
-    if (spatial && (!SpatialReady() || !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f)))
+    bool superiorPacked =
+        superior && spatial &&
+        DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, true,
+                                               EdgeCompression::Layout().modelW, EdgeCompression::Layout().modelH);
+    // Exposure calibration alone still needs the original unpacked proxy. Normal Superior rendering bypasses it.
+    const bool spatialNeedsUnpack = !superiorPacked || CalibrationWanted() || CalibrationActive();
+    if (spatial && (!SpatialReady() ||
+                    !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f, spatialNeedsUnpack)))
     {
         EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffResources);
         g_nr.reset = true;
         spatial = false;
+        superiorPacked = false;
     }
 
     if (!spatial)
@@ -3211,7 +3219,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // edges would land on screen with nothing to cancel it. The unpack then adds it back, measured against the picture the
     // uncompressed path would have shown the model (mode 103), which is built below the way that path builds it.
     const bool replaceCorrection =
-        spatial && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
+        spatial && !superiorPacked && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
 
     ReleaseSurfacesIfFormatChanged(modelFormat, colourFormat);
 
@@ -3662,10 +3670,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ResTrack_Dx12::HookLateNrQueue(device);
         const bool temporal = DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, spatial,
                                                                      modelWidth, modelHeight);
-        if (!SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height, workWidth, workHeight, frame,
-                                temporal, depth && guides.depth.valid(),
-                                timingQueue ? timingQueue
-                                            : (ID3D12CommandQueue*) State::Instance().currentCommandQueue))
+        if (!SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height,
+                                superiorPacked ? modelWidth : workWidth, superiorPacked ? modelHeight : workHeight,
+                                frame, temporal, depth && guides.depth.valid(),
+                                timingQueue ? timingQueue : (ID3D12CommandQueue*) State::Instance().currentCommandQueue,
+                                superiorPacked ? &EdgeCompression::Layout() : nullptr))
         {
             device->Release();
             return;
@@ -5002,12 +5011,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     unsigned int evalMotionBaseX = cachePlan.runs ? cachePlan.motionBaseX : reusePlan.motionBaseX;
     unsigned int evalMotionBaseY = cachePlan.runs ? cachePlan.motionBaseY : reusePlan.motionBaseY;
 
-    if (superiorGeneration && superiorGeneration->temporal && !cached)
+    if (superiorGeneration && superiorGeneration->temporal && !superiorPacked && !cached)
     {
         auto matchedRegions = guides;
         matchedRegions.motion.x = evalMotionBaseX;
         matchedRegions.motion.y = evalMotionBaseY;
-        // Packed NR keeps janblade's packed guides; private DLSS works on the unpacked grid.
+        // Uncompressed Superior matches its guides once; compressed NR/private DLSS share packed guides.
         const bool ok =
             SuperiorRun::MatchGuides(*superiorGeneration, *this, cmdList, depthIn, spatial ? motionIn : evalMotion,
                                      spatial ? guides : matchedRegions, frame);
@@ -5250,17 +5259,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     g_nr.reset = superior && (superiorBoundaryFailed || result != NVSDK_NGX_Result_Success);
 
-    // Compress screen edges: the packed model input and the model's answer back to the ordinary grid, both through the
-    // same resampling, so what the resolve takes from the pair is the model's change. The resolve, the enlargement and
-    // the supersample down-leg below work on these two instead of the packed ones.
+    // Legacy Compress and exposure calibration unpack the pair to the ordinary grid. Superior temporal reconstruction
+    // instead reads the packed pair directly and combines unwarping with its final guided resolve.
+    // In the ordinary path, both halves use the same resampling so their difference cancels the resampling loss.
     ID3D12Resource* ordinaryProxy = modelInput;
     ID3D12Resource* ordinaryAnswer = finalAnswer;
     bool spatialUnpacked = false;
     bool spatialFailed = false;
 
-    if (spatial && result == NVSDK_NGX_Result_Success && finalAnswer != nullptr)
+    if (spatial && (!superiorPacked || CalibrationActive()) && result == NVSDK_NGX_Result_Success &&
+        finalAnswer != nullptr)
     {
         spatialUnpacked =
+            EdgeCompression::PrepareUnpack(device, EdgeCompression::Layout()) &&
             DispatchSpatial(cmdList,
                             DlssNr::Spatial::MakeConstants(EdgeCompression::Layout(), replaceCorrection ? 103 : 102,
                                                            guides, 1.0f, 1.0f),
@@ -5601,11 +5612,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         else if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScale < 1.0f)))
         {
             auto& g = *superiorGeneration;
-            auto* shapingProxy = g.temporal ? ordinaryProxy : resolveProxy;
-            auto* residual = g.temporal
-                                 ? SuperiorRun::Stabilize(g, *this, cmdList, ordinaryProxy, ordinaryAnswer, motionIn,
-                                                          guides, frame, superiorReset, g_nr.heldActive)
-                                 : resolveAnswer;
+            auto* shapingProxy = g.packed ? modelInput : g.temporal ? ordinaryProxy : resolveProxy;
+            auto* residual = g.temporal ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy,
+                                                                 g.packed ? finalAnswer : ordinaryAnswer, motionIn,
+                                                                 guides, frame, superiorReset, g_nr.heldActive,
+                                                                 g.packed ? EdgeCompression::depth : nullptr,
+                                                                 g.packed ? EdgeCompression::motion : nullptr)
+                                        : resolveAnswer;
             const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
                                                                    superiorGainScale, g_nr.superiorMainOnlyGains);
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
@@ -5615,11 +5628,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             resolveParams.MvScaleY = gains.low;
             resolveParams.GuideWidth = low ? 1u : 0u;
             resolveParams.GuideHeight = g.temporal ? 0u : 1u; // raw NR answer when temporal stabilization is inactive
-            auto* pso = SuperiorResolvePipeline(resolveParams.Passthrough != 0, !g.temporal);
+            auto* pso = SuperiorResolvePipeline(resolveParams.Passthrough != 0, !g.temporal, g.packed);
             const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
             composed = residual && lowReady && pso &&
-                       DispatchPass(cmdList, resolveParams, shapingProxy, residual, resolveOriginal, motionIn,
-                                    exposureTex, resolveTarget, nullptr, low, pso);
+                       DispatchPass(cmdList, resolveParams, shapingProxy, residual, resolveOriginal,
+                                    g.packed ? g.warp.Get() : motionIn, exposureTex, resolveTarget, nullptr, low, pso);
             SuperiorRun::Say(composed ? "" : "Superior reconstruction failed; keeping the game frame.");
         }
         else

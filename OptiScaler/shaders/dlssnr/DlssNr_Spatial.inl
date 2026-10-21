@@ -41,7 +41,7 @@ ID3D12Resource* answerNative = nullptr;
 OS_Dx12* proxyDown = nullptr; // the down-leg for the proxy; the answer goes through g_nr.superDown, the same filter
 Scaler proxyDownScaler = Scaler::Count; // the filter proxyDown was built with: it must be the answer's, or halos
 unsigned int madeFor[6] = {}; // packed w/h, ordinary w/h, native w/h the textures above were made for
-bool madeSuper = false;
+bool madeSuper = false, madeUnpack = true;
 
 std::mutex publishedLock;
 Sp::Published published;
@@ -127,22 +127,33 @@ bool Make(ID3D12Resource*& slot, ID3D12Device* device, DXGI_FORMAT format, unsig
     return slot != nullptr;
 }
 
+// Calibration can start after Prepare in this frame. Add only its ordinary pair without replacing live packed guides.
+bool PrepareUnpack(ID3D12Device* device, const Sp::Layout& l)
+{
+    const bool ok = (proxy || Make(proxy, device, kFormat, l.ordinaryW, l.ordinaryH)) &&
+                    (answer || Make(answer, device, kFormat, l.ordinaryW, l.ordinaryH));
+    if (ok)
+        madeUnpack = true;
+    return ok;
+}
+
 // The textures for this layout, made again when the sizes change. False if one could not be made.
-bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample)
+bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample, bool unpack)
 {
     const unsigned int want[6] = { l.modelW, l.modelH, l.ordinaryW, l.ordinaryH, l.nativeW, l.nativeH };
 
     if (color != nullptr && std::equal(std::begin(want), std::end(want), std::begin(madeFor)) &&
-        madeSuper == supersample)
+        madeSuper == supersample && madeUnpack == unpack)
         return true;
 
     Release();
 
     bool ok = Make(color, device, kFormat, l.modelW, l.modelH) &&
               Make(depth, device, DXGI_FORMAT_R32_FLOAT, l.modelW, l.modelH) &&
-              Make(motion, device, DXGI_FORMAT_R32G32_FLOAT, l.modelW, l.modelH) &&
-              Make(proxy, device, kFormat, l.ordinaryW, l.ordinaryH) &&
-              Make(answer, device, kFormat, l.ordinaryW, l.ordinaryH);
+              Make(motion, device, DXGI_FORMAT_R32G32_FLOAT, l.modelW, l.modelH);
+
+    if (ok && unpack)
+        ok = PrepareUnpack(device, l);
 
     if (ok && supersample)
         ok = Make(proxyNative, device, kFormat, l.nativeW, l.nativeH) &&
@@ -156,6 +167,7 @@ bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample)
 
     std::copy(std::begin(want), std::end(want), std::begin(madeFor));
     madeSuper = supersample;
+    madeUnpack = unpack;
     return true;
 }
 

@@ -34,7 +34,13 @@ reference = reference.replace('float3 SuperiorGuidedEdit(float2 uvq, float3 nati
         const float3 delta = gModel.SampleLevel(gLinear, uvq, 0).rgb - gSource.SampleLevel(gLinear, uvq, 0).rgb;
         return gGuideWidth != 0u ? gMvScaleX * delta + (gMvScaleY-gMvScaleX) * gSuperiorLow.SampleLevel(gLinear, uvq, 0).rgb : delta;
     }''')
-reference = 'Texture2D<float4> gSuperiorLow : register(t5);\n' + reference
+# Scalar mapping from the CPU specification; no production mapping HLSL is included.
+packed_reference = (root / 'tests/nr_gpu/packed_reference.hlsli').read_text(encoding='utf-8')
+reference = reference.replace('    if (gGuideHeight != 0u)', """#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
+    uvq = PackedReferenceUv(uvq);
+#endif
+    if (gGuideHeight != 0u)""")
+reference = packed_reference + '\nTexture2D<float4> gSuperiorLow : register(t5);\n' + reference
 reference_source = source.replace('#include "../superior/HostResolve.hlsli"', reference)
 (out / 'reference.hlsl').write_text(reference_source, encoding='utf-8')
 
@@ -51,11 +57,13 @@ compile_shader(out / 'upstream.hlsl', 'upstream_recompiled')
 # used for the new Superior-only PSOs.
 original_blob = subprocess.check_output(['git', 'show', '2a5be38d:OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.cso'], cwd=root)
 assert original_blob == (host / 'DlssNr_Shader.cso').read_bytes()
-for variant in ('hdr', 'sdr', 'raw_hdr', 'raw_sdr'):
+for variant in ('hdr', 'sdr', 'raw_hdr', 'raw_sdr', 'packed_hdr', 'packed_sdr'):
     defines = ['DLSSNR_SUPERIOR_HOST_RESOLVE=1', 'DLSSNR_SUPERIOR_RESOLVE=1', 'DLSSNR_SUPERIOR_NORMAL=1']
     if variant.endswith('sdr'):
         defines += ['DLSSNR_SUPERIOR_SDR=1', 'DLSSNR_SUPERIOR_HOST_SDR=1']
     if variant.startswith('raw_'):
         defines += ['DLSSNR_SUPERIOR_HOST_RAW=1']
+    if variant.startswith('packed_'):
+        defines += ['DLSSNR_SUPERIOR_HOST_PACKED=1']
     compile_shader(out / 'reference.hlsl', 'reference_' + variant, defines)
 print('Host reference shaders compiled')

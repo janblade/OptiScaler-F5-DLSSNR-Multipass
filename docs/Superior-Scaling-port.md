@@ -25,7 +25,7 @@ The same mapping feeds both inter-pass scheduling/shaping and final block shapin
 At 100% without compression, janblade's original multipass boundaries remain in use. At 100% with active edge compression that actually reduces NR, private DLSS and guided reconstruction also run. Above 100% their previous behavior is retained. Native guide units are corrected from their actual valid/reference dimensions.
 Below 100%, depth and MV are matched to the working grid with independent regions/offsets; the private DLSS path reuses current depth.
 After frames skipped by the edit cache, private DLSS resets its history on the next refresh.
-Edge compression keeps its packed NR guides and unpacks before temporal enlargement. Its inter-pass correction operates on the packed model grid.
+With edge compression at or below 100%, private DLSS now works on the packed NR grid and reuses its current depth and endpoint-transformed motion. Guided reconstruction unwarps the signed residual directly into the native composition. Inter-pass correction stays on the packed model grid.
 The fixed Area/inter-pass/carrier/low shaders retain v59 bytecode and their lazy PSOs. The host composition PSOs use janblade's existing 256-byte ABI.
 
 | NR model | Style | High/medium | Low |
@@ -50,26 +50,77 @@ reference (selected by MVLowRes). Missing reference dimensions fall back to the 
 or the depth dimensions. This applies on D3D12 and Vulkan, before/after SR, at 100% and reduced NR resolution.
 Packed motion is already in packed pixels; NR receives scale 1. Depth stays point sampled on the matching warped grid.
 
-Superior keeps its exact ordinary raster through pack/unpack; only the actual packed NR raster is aligned to 16 pixels.
-For example, at 3840x2160 / 65%, the ordinary image is 2496x1404 throughout, rather than mixing in a 1408-row unpack.
+Superior's ordinary raster remains exact, while the actual packed NR raster is aligned to 16 pixels. Normal Superior
+rendering at or below 100% bypasses the ordinary raster after packing. Legacy enlargement, above-native processing and
+on-demand exposure calibration still use the original unpacker with the exact ordinary size.
 
 Frequency gains use **one scale for the whole image**, as requested:
 `sqrt((modelWidth/nativeWidth) * (modelHeight/nativeHeight))`, using the actual final packed model dimensions after both
 resolution controls and rounding. Center and edges share the same gains. This scale feeds lookahead scheduling, every
 inter-pass block and final tail shaping, including when the resolution slider says 100% but compression shrinks NR.
-At 100% with active compression, NR's answer is unpacked to the ordinary native grid, then private DLSS stabilizes its
-residual and the guided pass filters/shapes it on that same native grid. There is no enlargement in that last step.
-It does not replace the original Compress pack/unpack filters. NR keeps packed guides; private DLSS receives independent,
-current depth and motion at its ordinary working size. The private feature is recreated/reset when this path is toggled.
+At or below 100% with active compression, the sequence is:
+
+| Stage, 3840x2160 output | 65% + Balanced | 100% + Balanced |
+| --- | --- | --- |
+| Original Compress colour/depth/motion pack | 2240x1264 | 3456x1952 |
+| NR and inter-passes | 2240x1264 | 3456x1952 |
+| Private DLSS residual stabilization (DLAA A/K) | 2240x1264 | 3456x1952 |
+| Low64 frequency field | Packed grid / 8, rounded up | Packed grid / 8, rounded up |
+| Guided unwarp + native composition, one dispatch | 3840x2160 | 3840x2160 |
+
+**The colour packer and the packed NR guide shaders are unchanged, including their compiled bytecode.** There is no
+intermediate bilinear unpack of proxy/answer in normal Superior rendering. The original full-resolution encoded colour
+guides the final 3x3 residual reconstruction: each output query is mapped with the original nonlinear Pack transform,
+then the guided taps and Low64 lookup use packed coordinates. Only the stabilized, shaped residual is carried back;
+the original image remains the composition base. Center/edge density affects sample mapping, never the global gain scale.
+Packed vectors already contain `Pack(p+v)-Pack(p)` in packed pixels; carrier preparation uses scale 1, sanitizes nonfinite
+pairs and writes zero motion on Hold. The private feature receives the current packed depth directly, preserving inversion.
+Its input/output dimensions are the actual packed model dimensions. Layout/offset/shift, packed/ordinary mode and size
+changes recreate/reset the feature through the existing deferred GPU lifetime mechanism.
+
+The packed HDR/SDR resolve uses two separate PSOs and the otherwise unused D3D12 motion slot t3 for immutable 11-float4
+warp metadata. It uploads once per feature generation, with no per-frame metadata copy/dispatch, no new root signature
+and no full-resolution mapping texture. Exposure remains at t4. Ordinary guide matching, the separate unpack dispatch
+and its two intermediate colour allocations are omitted. Exposure calibration alone can request its original unpacked
+proxy on demand; this does not move rendering or private DLSS off the packed grid. Other enlargement modes retain their
+original resamplers. Above-100% behavior is unchanged.
 If compression is disabled, invalid or does not reduce NR, native 100% retains ordinary NR without private DLSS.
 A raw-answer PSO remains for above-native ordinary grids where compression reduces the actual NR pixel count below native.
 Its raw low field uses the cooperative 8x16 Low64 cache, with exactly the reference N-P arithmetic.
-Separate raw/temporal PSOs remove dynamic branches; the existing temporal SDR/HDR bytecode remains identical to 24a2d7bf.
+Separate raw/temporal/packed PSOs avoid a per-pixel mode branch. The four existing host PSOs remain byte-identical to 389e8d96; the ordinary temporal SDR/HDR bytecode also remains identical to 24a2d7bf.
 
 Validation on RTX 4090 / driver 616.56: 48 CPU metadata/size/gain cases; D3D12 pack/unpack with native, pre/post-SR,
 independent/clipped/offset depth and MV, low/high-resolution vectors and exact P59/P65 grids; Vulkan spatial smoke;
 2304 host-composition comparisons / 5,974,272 words (including native signed-residual guided resolve); 216 raw cached-low comparisons / 59,616 words. GPU comparisons passed
 bit-exact where applicable. Proprietary NR/DLSS inference and full-game temporal behavior still require game validation.
+
+The packed-guided path additionally passed **3072 comparisons / 666,267,648 components**, bit-exact against an
+independent scalar warp plus the extracted v59 estimator in janblade composition: P50/P65/P100, Light/Balanced/Strong,
+asymmetric offsets/shifts, odd dimensions, HDR curves, SDR, split/zoom, debug views, input encoding, exposure sources and
+FP16/FP32 source/target storage. Packed carrier/motion preparation passed 48 comparisons / 4,202,496 words, bit-exact
+for unit motion scale, Hold, nonfinite pairs and FP16/FP32. These validate the requested new pipeline's arithmetic,
+**not temporal equivalence to the previous unpack-before-DLSS pipeline**. NGX inference and moving footage require game validation.
+
+### Current packed-route stage timing
+
+RTX 4090 / 616.56, synthetic 3840x2160, Balanced compression, NR Small/Standard shaping coefficients,
+Structure=Intensity=1. Resident GPU timestamps, 8 ABBA/BAAB blocks with separate warm-up, 640 samples per variant.
+FP16 production colour/intermediate/output formats, R32/RG32 guides, FP32 original frame.
+
+| Profile | NR slider | Previous route ms | Packed route ms | Paired delta ms | Previous / packed stddev ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SDR | 65% | 0.697088 | 0.398848 | -0.299904 | 0.133596 / 0.094521 |
+| SDR | 100% | 1.130496 | 0.567296 | -0.609984 | 0.074536 / 0.056834 |
+| HDR 0 | 65% | 0.673536 | 0.368896 | -0.309696 | 0.077042 / 0.059670 |
+| HDR 0 | 100% | 1.096320 | 0.534272 | -0.601984 | 0.079325 / 0.059789 |
+
+Baseline: 389e8d96, ordinary-grid stabilization after bilinear unpack. Measured stages include ordinary unpack/guide
+matching when present, fused carrier/motion preparation, identity carrier decode, Low64 and guided composition.
+**NR and private DLSS inference are excluded**; both variants use identity carrier output in place of private inference.
+Common colour/guide packing is prepared outside timestamps. The new feature has fewer private-DLSS pixels, but the actual
+inference saving is unmeasured. These figures are component results and do not establish total in-game performance or
+visual parity. [Raw samples](validation/superior-packed-route-timing.csv) and
+[statistics/metadata](validation/superior-packed-route-timing.json) preserve all samples and variability.
 
 ### Cost of the spatial correction before native temporal stabilization
 
@@ -176,6 +227,7 @@ From Windows with MSVC x64 tools and Python:
 ./tools/test_superior_port.ps1 -GpuHost -GpuSpatial
 ./tools/test_superior_port.ps1 -GpuSpatialTiming
 ./tools/test_superior_port.ps1 -GpuNativeTemporalTiming
+./tools/test_superior_port.ps1 -GpuPackedTiming
 ./tools/test_superior_port.ps1 -GpuQuality -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ./tools/test_superior_port.ps1 -GpuTiming -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ```

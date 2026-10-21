@@ -93,11 +93,12 @@ try {
 # the residual estimator. Default janblade/Vulkan blobs are not overwritten.
 Push-Location (Join-Path $PSScriptRoot "../OptiScaler/shaders/dlssnr/precompile")
 try {
-    foreach ($variant in @("hdr", "sdr", "raw_hdr", "raw_sdr")) {
+    foreach ($variant in @("hdr", "sdr", "raw_hdr", "raw_sdr", "packed_hdr", "packed_sdr")) {
         $stem = "host_resolve_$variant"
         $defines = @("-D", "DLSSNR_SUPERIOR_HOST_RESOLVE=1")
         if ($variant.EndsWith("sdr")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_SDR=1") }
         if ($variant.StartsWith("raw_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_RAW=1") }
+        if ($variant.StartsWith("packed_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_PACKED=1") }
         $dest = "../superior/precompile/${stem}_Shader"
         & ../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect @defines dlssnr.hlsl -Fo "$dest.cso"
         if ($LASTEXITCODE -ne 0) { throw "Host resolve DXC failed: $variant" }

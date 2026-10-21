@@ -30,7 +30,10 @@ struct Generation
     unsigned width = 0, height = 0, workWidth = 0, workHeight = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool inverted = false, beforeSr = false, reset = true;
-    bool temporal = false, submitted = false, failed = false;
+    bool temporal = false, packed = false, submitted = false, failed = false;
+    DlssNr::Spatial::Layout layout {};
+    Texture warp;
+    ComPtr<ID3D12Resource> warpUpload;
     int preset = 1;
     ID3D12GraphicsCommandList* creation = nullptr; // normalized identity only
     NVSDK_NGX_Parameter* parameters = nullptr;
@@ -177,13 +180,51 @@ Constants GuideConstants(unsigned w, unsigned h, const DlssNr::GuideRegions& reg
     return c;
 }
 
+// Immutable 11-float4 warp metadata uses the resolve's otherwise unused D3D12 motion SRV (t3).
+// The generation owns its upload until all recorded command lists have retired. No per-frame copy/dispatch.
+bool CreateWarp(Generation& g, ID3D12GraphicsCommandList* cmd)
+{
+    if (!g.packed)
+        return true;
+    if (!Ensure(g.warp, g.device.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, 11, 1))
+        return false;
+    const auto data = pw::MakeShaderConstants(g.layout.warp);
+    static_assert(sizeof(data) == 11 * 16);
+    const auto desc = g.warp.Get()->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    UINT64 bytes = 0;
+    g.device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    const auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    const auto buffer = CD3DX12_RESOURCE_DESC::Buffer(bytes);
+    if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                 IID_PPV_ARGS(&g.warpUpload))))
+        return false;
+    void* mapped = nullptr;
+    const D3D12_RANGE noRead { 0, 0 };
+    if (FAILED(g.warpUpload->Map(0, &noRead, &mapped)))
+        return false;
+    std::memcpy(static_cast<char*>(mapped) + footprint.Offset, &data, sizeof(data));
+    g.warpUpload->Unmap(0, nullptr);
+    g.warp.To(cmd, D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION src {}, dst {};
+    src.pResource = g.warpUpload.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = footprint;
+    dst.pResource = g.warp.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    g.warp.To(cmd, Srv);
+    return true;
+}
+
 bool CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd)
 {
     Record(cmd); // includes unit-exposure initialization even if NGX creation fails
     const auto w = g.workWidth, h = g.workHeight;
     if (!Ensure(g.carrier, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, w, h) ||
         !Ensure(g.temporalOutput, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, w, h) ||
-        !Ensure(g.temporalMotion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, w, h) ||
+        !Ensure(g.temporalMotion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, w, h) || !CreateWarp(g, cmd) ||
         !Ensure(g.unit, g.device.Get(), DXGI_FORMAT_R32_FLOAT, 1, 1))
         return false;
     Constants unit {};
@@ -275,18 +316,32 @@ bool InterPass(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cm
 
 ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy,
                           ID3D12Resource* answer, ID3D12Resource* originalMotion, const DlssNr::GuideRegions& regions,
-                          const DlssNrFrameInfo& frame, bool reset, bool hold)
+                          const DlssNrFrameInfo& frame, bool reset, bool hold, ID3D12Resource* packedDepth,
+                          ID3D12Resource* packedMotion)
 {
     auto encode = GuideConstants(g.workWidth, g.workHeight, regions, frame, true, hold);
     encode.Mode = 39u; // v50: fixed carrier + motion; reuse this frame's exact NR depth.
-    if (!Dispatch(shader, cmd, encode, proxy, answer, originalMotion, nullptr, nullptr, nullptr, g.carrier,
-                  &g.temporalMotion))
+    auto* motion = originalMotion;
+    if (g.packed)
+    {
+        if (!packedDepth || !packedMotion)
+            return nullptr;
+        // Packed vectors already contain PwPack(p+v)-PwPack(p), in packed pixels. Never scale/warp twice.
+        motion = packedMotion;
+        encode.TransferStrength = float(g.workWidth);
+        encode.ColourStrength = float(g.workHeight);
+        encode.CompareSwap = encode.Transfer = 0;
+        encode.MvScaleX = encode.MvScaleY = hold ? 0.f : 1.f;
+        // Fused carrier pass preserves the exact finite packed vector, sanitizes non-finite pairs,
+        // and writes zero motion while held. No extra resample or guide dispatch is needed.
+    }
+    if (!Dispatch(shader, cmd, encode, proxy, answer, motion, nullptr, nullptr, nullptr, g.carrier, &g.temporalMotion))
         return nullptr;
     g.temporalOutput.To(cmd, Uav);
     auto* p = g.parameters;
     p->Set(NVSDK_NGX_Parameter_Color, g.carrier.Get());
     p->Set(NVSDK_NGX_Parameter_Output, g.temporalOutput.Get());
-    p->Set(NVSDK_NGX_Parameter_Depth, g.depth.Get());
+    p->Set(NVSDK_NGX_Parameter_Depth, g.packed ? packedDepth : g.depth.Get());
     p->Set(NVSDK_NGX_Parameter_MotionVectors, g.temporalMotion.Get());
     p->Set(NVSDK_NGX_Parameter_ExposureTexture, g.unit.Get());
     p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, g.workWidth);
@@ -322,7 +377,7 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
 // creation gets a submission-only frame, exactly like NR feature creation above it.
 bool Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* device, DXGI_FORMAT format,
            unsigned width, unsigned height, unsigned workWidth, unsigned workHeight, const DlssNrFrameInfo& frame,
-           bool temporal, bool haveDepth, ID3D12CommandQueue* queue)
+           bool temporal, bool haveDepth, ID3D12CommandQueue* queue, const DlssNr::Spatial::Layout* layout)
 {
     auto& state = GetState();
     state.lifetime.Collect();
@@ -334,11 +389,12 @@ bool Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* de
     const int preset =
         DlssNr::SuperiorScaling::Preset(Config::Instance()->DlssNrSuperiorScalingPreset.value_or_default());
     auto* previous = state.current.get();
-    if (previous &&
-        (previous->device.Get() != device || previous->width != width || previous->height != height ||
-         previous->workWidth != workWidth || previous->workHeight != workHeight || previous->format != format ||
-         previous->inverted != frame.DepthInverted || previous->beforeSr != frame.BeforeUpscale ||
-         previous->temporal != temporal || previous->preset != preset || (queue && previous->queue.Get() != queue)))
+    if (previous && (previous->device.Get() != device || previous->width != width || previous->height != height ||
+                     previous->workWidth != workWidth || previous->workHeight != workHeight ||
+                     previous->format != format || previous->inverted != frame.DepthInverted ||
+                     previous->beforeSr != frame.BeforeUpscale || previous->temporal != temporal ||
+                     previous->packed != (layout != nullptr) || (layout && previous->layout != *layout) ||
+                     previous->preset != preset || (queue && previous->queue.Get() != queue)))
     {
         auto old = std::move(state.current);
         state.lifetime.Retire([old] {});
@@ -359,6 +415,9 @@ bool Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* de
         g.inverted = frame.DepthInverted;
         g.beforeSr = frame.BeforeUpscale;
         g.temporal = temporal;
+        g.packed = layout != nullptr;
+        if (layout)
+            g.layout = *layout;
         g.preset = preset;
     }
     auto& g = *state.current;

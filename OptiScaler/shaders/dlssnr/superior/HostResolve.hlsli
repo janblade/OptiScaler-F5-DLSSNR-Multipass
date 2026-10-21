@@ -2,6 +2,24 @@
 // t0: working proxy, t1: decoded signed DLSS residual (or raw NR with GuideHeight=1), t5: Low64 field.
 // No exposure, colour encoding or tone-mapping logic belongs in this include.
 Texture2D<float4> gSuperiorLow : register(t5);
+#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
+// Immutable warp metadata; t3 has no motion/exposure role in the D3D12 host resolve.
+#define gNativeWorkSize gMotion.Load(int3(0, 0, 0))
+#define gBandCenter gMotion.Load(int3(4, 0, 0))
+#define gSideNeg gMotion.Load(int3(5, 0, 0))
+#define gSidePos gMotion.Load(int3(6, 0, 0))
+#define gSideWorkNeg gMotion.Load(int3(7, 0, 0))
+#define gSideWorkPos gMotion.Load(int3(8, 0, 0))
+#define gSideEdgeSlope gMotion.Load(int3(9, 0, 0))
+#define gWorkScale gMotion.Load(int3(10, 0, 0))
+#include "../precompile/dlssnr_spatial_warp.hlsli"
+float2 SuperiorPackedUv(float2 uv)
+{
+    // Fix evaluation order near integer packed coordinates, where a one-ULP shift can change the 3x3 tap set.
+    precise float2 packedPixel = PwPack(uv * float2(gWidth, gHeight));
+    return packedPixel / gNativeWorkSize.zw;
+}
+#endif
 float3 SuperiorShapeEdit(float3 edit, float2 uvq)
 {
     return gGuideWidth != 0u
@@ -10,13 +28,17 @@ float3 SuperiorShapeEdit(float3 edit, float2 uvq)
 }
 float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
 {
-    // Native colour with edge compression: shape the unpacked raw NR answer
-    // without introducing private DLSS or a second guided enlargement at 1:1.
+    // Non-temporal fallback (e.g. an above-native ordinary grid with reduced packed NR).
+    // Packed temporal reconstruction instead uses the direct warped query below.
     if (gGuideHeight != 0u)
         return SuperiorShapeEdit(gModel.SampleLevel(gLinear, uvq, 0).rgb -
                                   gSource.SampleLevel(gLinear, uvq, 0).rgb, uvq);
     uint srcW, srcH;
     gSource.GetDimensions(srcW, srcH);
+#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
+    // Map the native query directly to the packed lattice; no bilinear intermediate images.
+    uvq = SuperiorPackedUv(uvq);
+#endif
     const float3 fallback = gModel.SampleLevel(gLinear, saturate(uvq), 0).rgb;
     const float rangeSigma = max(abs(0.015), 1e-5);
     const float spatialSigma = max(abs(3.0), 1e-4);

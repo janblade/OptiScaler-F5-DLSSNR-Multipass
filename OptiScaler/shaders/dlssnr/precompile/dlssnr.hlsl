@@ -1672,8 +1672,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
 
     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
-    float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
-    float4 modelSample = gModel.SampleLevel(gLinear, cmpUv, 0);
+#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
+    const float2 modelUv = SuperiorPackedUv(cmpUv);
+#else
+    const float2 modelUv = cmpUv;
+#endif
+    float4 proxySample = gSource.SampleLevel(gLinear, modelUv, 0);
+    float4 modelSample = gModel.SampleLevel(gLinear, modelUv, 0);
 #if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
     if (gGuideHeight == 0u)
         modelSample.rgb += proxySample.rgb; // decoded signed DLSS residual, otherwise an ordinary NR answer

@@ -5,7 +5,8 @@ param(
     [switch]$GpuHost,
     [switch]$GpuSpatial,
     [switch]$GpuSpatialTiming,
-    [switch]$GpuNativeTemporalTiming
+    [switch]$GpuNativeTemporalTiming,
+    [switch]$GpuPackedTiming
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -26,16 +27,17 @@ try {
     $names = @($cpu)
     if ($GpuQuality) { $names += $quality }
     if ($GpuTiming) { $names += 'superior_tall_low_timing' }
-    if ($GpuSpatial) { $names += @('nr_spatial_dx12_gpu', 'spatial_raw_low_quality') }
+    if ($GpuSpatial) { $names += @('nr_spatial_dx12_gpu', 'spatial_raw_low_quality', 'packed_prepare_quality') }
     if ($GpuSpatialTiming -or $GpuNativeTemporalTiming) {
         python tools/prepare_superior_host_tests.py --timing-baseline
         if ($LASTEXITCODE -ne 0) { throw 'Spatial timing baseline missing (fetch full history)' }
         $names += 'spatial_timing'
     }
+    if ($GpuPackedTiming) { $names += 'packed_stage_timing' }
     if ($GpuHost) {
         python tools/prepare_superior_host_tests.py
         if ($LASTEXITCODE -ne 0) { throw 'Host shader reference compilation failed' }
-        $names += 'superior_host_quality'
+        $names += @('superior_host_quality', 'packed_host_quality')
     }
     foreach ($name in $names) {
         $src = if ($name -like 'nr_*_smoke' -or $name -eq 'nr_spatial_dx12_gpu') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
@@ -51,10 +53,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Spatial GPU validation failed' }
         & "$out/spatial_raw_low_quality.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Spatial raw low GPU comparison failed' }
+        & "$out/packed_prepare_quality.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Packed carrier/guide comparison failed' }
     }
     if ($GpuHost) {
         & "$out/superior_host_quality.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Host composition comparison failed' }
+        & "$out/packed_host_quality.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Packed host composition comparison failed' }
     }
     if ($GpuSpatialTiming) {
         & "$out/spatial_timing.exe"
@@ -63,6 +69,10 @@ try {
     if ($GpuNativeTemporalTiming) {
         & "$out/spatial_timing.exe" --native-temporal
         if ($LASTEXITCODE -ne 0) { throw 'Native temporal stage timing failed' }
+    }
+    if ($GpuPackedTiming) {
+        & "$out/packed_stage_timing.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Packed route GPU timing failed' }
     }
     $candidate = 'OptiScaler/shaders/dlssnr/superior/precompile'
     if ($GpuQuality -or $GpuTiming) {

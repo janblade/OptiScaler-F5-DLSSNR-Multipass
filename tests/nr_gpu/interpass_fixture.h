@@ -95,7 +95,8 @@ struct Runner
                               const DlssNrConstants& constants, int fixture, bool half, UINT groupWidth = 8,
                               UINT sourceW = 0, UINT sourceH = 0, double* gpuMs = nullptr, int pattern = 0,
                               const std::vector<uint32_t>* lowWords = nullptr, UINT lowW = 0, UINT lowH = 0,
-                              UINT groupHeight = 8)
+                              UINT groupHeight = 8, ID3D12Resource* metadata = nullptr,
+                              uint16_t (*halfSource)(float) = nullptr)
     {
         begin(); std::vector<ComPtr<ID3D12Resource>> keep;
         std::mt19937 rng(1414 + fixture);
@@ -105,7 +106,7 @@ struct Runner
             UINT w=n==2?nw:(sourceW?sourceW:ww), h=n==2?nh:(sourceH?sourceH:wh);
             D3D12_RESOURCE_DESC d{}; d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             d.Width=w; d.Height=h; d.DepthOrArraySize=d.MipLevels=1; d.SampleDesc.Count=1;
-            d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+            d.Format = halfSource && n < 2 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
             inputs[n]=resource(d,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST);
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; UINT64 bytes;
             device->GetCopyableFootprints(&d,0,1,0,&fp,nullptr,nullptr,&bytes);
@@ -154,7 +155,15 @@ struct Runner
                     }
                     v[3]=.7f;
                 }
-                std::memcpy(mapped+y*fp.Footprint.RowPitch+x*16,v,16);
+                if (halfSource && n < 2)
+                {
+                    uint16_t packed[4];
+                    for (unsigned c = 0; c < 4; ++c)
+                        packed[c] = halfSource(v[c]);
+                    std::memcpy(mapped + y * fp.Footprint.RowPitch + x * 8, packed, 8);
+                }
+                else
+                    std::memcpy(mapped + y * fp.Footprint.RowPitch + x * 16, v, 16);
             }
             upload->Unmap(0,nullptr); keep.push_back(upload);
             D3D12_TEXTURE_COPY_LOCATION src{},dst{};
@@ -189,8 +198,11 @@ struct Runner
             D3D12_SHADER_RESOURCE_VIEW_DESC v{}; v.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
             v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             v.Texture2D.MipLevels=1;
-            if (i==5 && suppliedLow) v.Format=half?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_R32G32B32A32_FLOAT;
-            device->CreateShaderResourceView(i==5 && suppliedLow?suppliedLow.Get():inputs[i<3?i:0].Get(),&v,{cpu.ptr+SIZE_T(i)*stride});
+            auto* input = i == 3 && metadata      ? metadata
+                          : i == 5 && suppliedLow ? suppliedLow.Get()
+                                                  : inputs[i < 3 ? i : 0].Get();
+            v.Format = input->GetDesc().Format;
+            device->CreateShaderResourceView(input, &v, { cpu.ptr + SIZE_T(i) * stride });
         }
         D3D12_RESOURCE_DESC d{}; d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width=ww; d.Height=wh;
         d.DepthOrArraySize=d.MipLevels=1; d.SampleDesc.Count=1;

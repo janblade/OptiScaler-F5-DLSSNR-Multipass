@@ -1,15 +1,16 @@
 #pragma once
 
 // Where Auto's exposure comes from, and what the exposure scan does meanwhile (plan 2026-10-14-exposure-scan-all-apis,
-// story 5). The source ladder, first that holds:
-// 1. Handed: the game's upscaler call carries an exposure texture that reads clean (DlssNrExposureDefault::Offer).
-// 2. PreExposure: no texture, but the call's pre-exposure moves with the light (Dawnwalker, UE5): the game's own
-//    exposure, carried on the call.
-// 3. Found: the scan's matcher found the game's exposure among its candidates (DlssNr_ExposureMatch.h). Automatic gives
-//    the level, measured while the scan searched; the game's value gives the movement (user decision 2026-10-20: no
-//    meter lag, no HUD or bloom in it, the game's own adaptation range and timing).
-// 4. Baked: the game already exposed the colour (our meter flat while a candidate swings): nothing more is applied.
-// 5. Automatic: OptiScaler's own meter, as before story 5 when nothing holds.
+// story 5). What the picture uses on Auto:
+// - Game exposure, when the game's upscaler call carries an exposure texture that reads clean
+//   (DlssNrExposureDefault::Offer).
+// - The found exposure, when the scan's matcher found the game's exposure among its candidates
+//   (DlssNr_ExposureMatch.h; FoundExposure in DlssNr_ExposureScan.h). Automatic gives the level, measured while the
+//   scan searched; the game's value gives the movement (user decision 2026-10-20: no meter lag, no HUD or bloom in it,
+//   the game's own adaptation range and timing).
+// - Automatic exposure (OptiScaler's own meter) otherwise. That includes a call whose pre-exposure moves with the light
+//   (Dawnwalker, UE5) and a picture the matcher judged already exposed (Baked: our meter flat while a candidate
+//   swings): both only stop the scan, Automatic stays in force.
 //
 // The scan's lifecycle on Auto (user-agreed 2026-10-19). Candidates are caught only when the game makes them, mostly at
 // load and before the first upscaler call tells whether a texture is handed, so the scan watches from launch:
@@ -18,8 +19,10 @@
 // - Done: a texture or a moving pre-exposure is handed over, so the scan is not needed: every candidate is let go at
 //   once. Pinning the game's resources past its own teardown removed the device in Cyberpunk 2077, so letting go early
 //   is safety, not tidiness.
-// - NotHere: a game whose upscaler is not D3D12. Auto's scan runs on D3D12 only for now (stories 3 and 4 find the
-//   candidates on D3D11 and Vulkan; using one there is not checked in a game yet). Every candidate let go.
+// - NotHere: a game that does not render with D3D12, though NR may run on D3D12 for it (the D3D11 and Vulkan bridges,
+//   the native path's private device), where the scan would only watch OptiScaler's own resources. Auto's scan runs on
+//   D3D12 only for now (stories 3 and 4 find the candidates on D3D11 and Vulkan; using one there is not checked in a
+//   game yet). Every candidate let go.
 // - Searching: nothing handed: copy every candidate each frame until the matcher's verdict.
 // - Found: copy only the match, let go of the rest. Only the match: a ping-pong partner the game keeps (Cyberpunk's
 //   c61/c62) is let go too; reading one image of the pair is at most a frame late, and a lag of a row is eased.
@@ -40,15 +43,6 @@
 
 namespace DlssNrExposureAuto
 {
-enum class Rung
-{
-    Handed,
-    PreExposure,
-    Found,
-    Baked,
-    Automatic
-};
-
 enum class Phase
 {
     Watching,
@@ -84,7 +78,7 @@ struct Frame
     bool handed = false;          // an exposure texture is handed over and has read clean (Offer::Confirmed)
     bool handedPending = false;   // one is handed over, not yet read clean nor given up on
     bool preExposure = false;     // the call's pre-exposure moves with the light (PreExposureMotion)
-    bool supported = true;        // the game's upscaler is D3D12
+    bool supported = true;        // the game renders with D3D12
     Verdict verdict = Verdict::NotSure;
     bool matchAlive = true;       // the found candidate is still there (only asked while Found)
     bool newCandidates = false;   // the scan took a likely candidate since the last frame
@@ -231,18 +225,4 @@ class PreExposureMotion
     size_t _levels = 0;
     bool _moving = false;
 };
-
-// The rung in force for Auto. `handed` and `preExposure` as in Frame; the lifecycle gives the scan's answer.
-inline Rung Ladder(bool handed, bool preExposure, Phase phase)
-{
-    if (handed)
-        return Rung::Handed;
-    if (preExposure)
-        return Rung::PreExposure;
-    if (phase == Phase::Found)
-        return Rung::Found;
-    if (phase == Phase::Baked)
-        return Rung::Baked;
-    return Rung::Automatic;
-}
 } // namespace DlssNrExposureAuto

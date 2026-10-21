@@ -422,7 +422,9 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     Late::ComPtr<ID3D12Resource> color;
     Late::ComPtr<ID3D12Device> currentDevice;
     if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
-        FAILED(sc->GetBuffer(sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))) ||
+        // The game's picture: its proxy back buffer while HDR output converts the chain (SDR, before the pass), else the
+        // chain's own
+        FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))) ||
         FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != Late::device)
         return;
     const auto desc = color->GetDesc();

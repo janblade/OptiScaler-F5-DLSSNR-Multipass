@@ -29,14 +29,6 @@ static Frame At(float seconds)
 
 int main()
 {
-    // The ladder: first that holds
-    CHECK(Ladder(true, true, Phase::Found) == Rung::Handed);
-    CHECK(Ladder(false, true, Phase::Found) == Rung::PreExposure);
-    CHECK(Ladder(false, false, Phase::Found) == Rung::Found);
-    CHECK(Ladder(false, false, Phase::Baked) == Rung::Baked);
-    for (Phase p : { Phase::Watching, Phase::Done, Phase::Searching, Phase::GaveUp })
-        CHECK(Ladder(false, false, p) == Rung::Automatic);
-
     // Before NR: watching, copying (the game makes its candidates at load)
     {
         Lifecycle l;
@@ -163,7 +155,6 @@ int main()
         f.supported = false;
         l.OnFrame(f);
         CHECK(l.Now() == Phase::NotHere && l.LetsGo() && l.Closed() && !l.CopiesAll());
-        CHECK(Ladder(false, false, l.Now()) == Rung::Automatic);
     }
 
     // Given up: new candidates wait out the retry time, doubled with each search given up

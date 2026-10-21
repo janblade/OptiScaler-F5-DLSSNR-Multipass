@@ -7,6 +7,7 @@
 #include <native/VkPresentBridge.h>
 
 #include <Config.h>
+#include <State.h>
 #include <misc/IdentifyGpu.h>
 #include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
@@ -55,6 +56,13 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
     // (NativeDriverVk.cpp), which reads dxvk's own Vulkan calls instead. OnFGPresent needs no such check: with the key on
     // a dxvk game never gets Dx11wDx12SC (hooks/DxgiFactory_Hooks.cpp); its frame generation is the Vulkan present bridge.
     if (VkPresentBridge::DxvkThroughVulkan())
+        return;
+
+    // Under Dx11wDx12SC the frame is OnFGPresent's. Frame generation's own presents still reach the overlay, which
+    // calls here: a second run in the same frame fed NR and frame generation twice per frame (GTA V, 2026-10-21: half
+    // the frame rate, the native step's inputs alternating between two pictures, a scene cut every few frames,
+    // blinking).
+    if (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
         return;
 
     RunFrame(swapChain, device, true);

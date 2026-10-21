@@ -4,6 +4,7 @@
 
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <output/SdrToHdr_ProxyDx12.h>
 
 namespace native
 {
@@ -79,7 +80,8 @@ AcquireStatus Dx12FrameSource::Acquire(FrameInput& input)
         chain3->Release();
     }
 
-    if (FAILED(_swapChain->GetBuffer(index, IID_PPV_ARGS(&_backBuffer))))
+    // The game's picture: its proxy back buffer while HDR output converts the chain, else the chain's own
+    if (FAILED(SdrToHdr::GameBuffer(_swapChain, index, IID_PPV_ARGS(&_backBuffer))))
         return AcquireStatus::Unavailable;
 
     const D3D12_RESOURCE_DESC desc = _backBuffer->GetDesc();

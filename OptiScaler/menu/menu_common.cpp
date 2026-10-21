@@ -11,6 +11,7 @@
 #include <native/VirtualUpscalerDriver.h>
 #include <native/NativeLowLatency.h>
 #include <native/VkPresentBridge.h>
+#include <output/SdrToHdr_Create.h>
 
 #include "input/input_system.h"
 
@@ -224,6 +225,7 @@ static float lastMenuScale = 0.0f;
 static CustomOptional<uint32_t> comboPreset { 0 };
 static int lastKey = 0;
 static bool inputDlssNr = false;
+static bool inputHdrCompare = false;
 static bool capturingKey = false;
 
 template <typename T, size_t N> struct RingBuffer
@@ -363,6 +365,8 @@ void MenuCommon::UpdateManualInput(HWND targetHwnd)
                       "Menu key pressed, will be switching FPS mode");
         CheckShortcut(config->DlssNrToggleKey.value_or_default(), inputDlssNr,
                       "Neural Rendering key pressed, will be toggling the pass");
+        CheckShortcut(config->HdrCompareKey.value_or_default(), inputHdrCompare,
+                      "HDR compare key pressed, will be flipping Convert");
     }
     else if (capturingKey)
     {
@@ -1682,6 +1686,24 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
             ImGuiToast toast { ImGuiToastType::Info, 2000 };
             toast.setTitle("DLSS Neural Rendering");
             toast.setContent(config->DlssNrEnabled.value_or_default() ? "On" : "Off");
+            ImGui::InsertNotification(toast);
+        }
+
+        if (inputHdrCompare)
+        {
+            inputHdrCompare = false;
+
+            // Only while the picture is being converted: otherwise the key would say the picture changed when nothing did
+            const bool hdrActive = SdrToHdr::Status().active;
+
+            if (hdrActive)
+                config->HdrOutputConvert = !config->HdrOutputConvert.value_or_default();
+
+            ImGuiToast toast { ImGuiToastType::Info, 2000 };
+            toast.setTitle("HDR output");
+            toast.setContent(!hdrActive                                      ? "HDR output is not active"
+                             : config->HdrOutputConvert.value_or_default() ? "Converted"
+                                                                             : "As Windows shows it");
             ImGui::InsertNotification(toast);
         }
 
@@ -6057,6 +6079,108 @@ void MenuCommon::RenderFakenvapiSettings(RenderMenuContext& ctx)
     PopulateCombo("Force Reflex", config->FN_ForceReflex, reflex_modes);
 }
 
+// HDR output for SDR games (output/SdrToHdr_*). Always shown, with or without an upscaler.
+void MenuCommon::RenderHdrOutputSettings(RenderMenuContext& ctx)
+{
+    auto config = ctx.config;
+
+    ImGui::SeparatorText("HDR output");
+
+    bool enabled = config->HdrOutputEnabled.value_or_default();
+
+    if (ImGui::Checkbox("HDR output", &enabled))
+        config->HdrOutputEnabled = enabled;
+
+    ShowHelpMarker("Shows SDR games correctly on an HDR display: the picture is converted to HDR at the end, with the "
+                   "brightness and gamma of an SDR monitor. It does not add highlights the game never drew.\n"
+                   "Needs Windows HDR turned on for the display. Off by default.\n"
+                   "Applies at the next start (or at a resolution / window change, in most games).\n"
+                   "Direct3D 11 and 12 games (no Vulkan yet). Works with XeFG and FSR frame generation: every frame, "
+                   "generated ones included, goes through the same conversion before it is shown. Not available with "
+                   "DLSS-G (OptiScaler's DLSS-G output, or a game that uses DLSS-G itself). Older swap chain types are "
+                   "made flip model for it. Stands aside for games that already output HDR and for exclusive full screen "
+                   "with an older swap chain type.");
+
+    SdrToHdr::StatusSettings settings;
+    settings.enabled = enabled;
+    settings.hdr10 = config->UseHDR10.value_or_default();
+    settings.gameNits = config->HdrOutputGameNits.value_or_default();
+    settings.configuredPeak = config->HdrOutputPeakNits.value_or_default();
+    settings.nonDxgiApi = State::Instance().swapchainApi == Vulkan;
+
+    const auto status = SdrToHdr::Status();
+    const auto line = SdrToHdr::StatusLine(status, settings);
+
+    if (line.colour != SdrToHdr::StatusColour::None)
+    {
+        const ImVec4 amber(0.95f, 0.70f, 0.20f, 1.0f);
+        const ImVec4 green(0.35f, 0.80f, 0.40f, 1.0f);
+        ImGui::TextColored(toneMapColor(line.colour == SdrToHdr::StatusColour::Green ? green : amber), "%s",
+                           line.text.c_str());
+    }
+
+    // The signal is chosen before the chain is made (it applies at the next create / resize), so it shows as soon as HDR
+    // output is ticked; the rest only while the picture is being converted (hidden, not greyed, otherwise)
+    const auto signalCombo = [&]()
+    {
+        const char* signals[] = { "scRGB", "HDR10" };
+        int signal = settings.hdr10 ? 1 : 0;
+
+        if (ImGui::Combo("Signal", &signal, signals, IM_ARRAYSIZE(signals)))
+            config->UseHDR10 = signal == 1;
+
+        ShowHelpMarker("scRGB: 16-bit float, the most precise. HDR10: 10-bit, for displays or setups that prefer it.\n"
+                       "Applies at the next resolution / window change.");
+    };
+
+    if (!status.active)
+    {
+        if (enabled)
+            signalCombo();
+
+        return;
+    }
+
+    if (!line.signalHint.empty())
+        ImGui::TextColored(toneMapColor(ImVec4(0.95f, 0.70f, 0.20f, 1.0f)), "%s", line.signalHint.c_str());
+
+    bool convert = config->HdrOutputConvert.value_or_default();
+
+    if (ImGui::Checkbox("Convert SDR to HDR", &convert))
+        config->HdrOutputConvert = convert;
+
+    const std::string compareKey = Keybind::KeyNameFromVirtualKeyCode(config->HdrCompareKey.value_or_default());
+    const std::string convertTip = std::string("Off shows the game the way Windows shows an SDR game on an HDR display, "
+                                               "for comparing. The menu does not save this: it starts as the ini "
+                                               "says (on by default).\n"
+                                               "Key to flip it while playing (Input page): ") +
+                                   compareKey;
+    ShowHelpMarker(convertTip.c_str());
+
+    float gameNits = SdrToHdr::ClampGameNits(config->HdrOutputGameNits.value_or_default());
+
+    if (ImGui::SliderFloat("Game brightness", &gameNits, 80.0f, 1000.0f, "%.0f nits"))
+        config->HdrOutputGameNits = SdrToHdr::ClampGameNits(gameNits);
+
+    ImGui::SameLine();
+    if (ImGui::Button("Reset##hdrgamenits"))
+        config->HdrOutputGameNits = 203.0f;
+
+    ShowHelpMarker("How bright the game's white is. 203 nits is the HDR reference white; raise it in a bright room. "
+                   "Default 203 nits.");
+
+    const char* gammas[] = { "2.2", "sRGB" };
+    int decode = std::clamp(config->HdrOutputDecode.value_or_default(), 0, 1);
+
+    if (ImGui::Combo("Gamma", &decode, gammas, IM_ARRAYSIZE(gammas)))
+        config->HdrOutputDecode = decode;
+
+    ShowHelpMarker("2.2: deeper blacks, how most SDR games looked on an SDR monitor.\n"
+                   "sRGB: the exact inverse of the sRGB curve, lifts the darkest shades.");
+
+    signalCombo();
+}
+
 void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -7809,12 +7933,14 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
         static auto fpsOverlayCycle = Keybind("FPS Overlay Cycle", 12);
         static auto fgEnable = Keybind("Frame Generation", 13);
         static auto dlssNrToggle = Keybind("Neural Rendering", 14);
+        static auto hdrCompare = Keybind("HDR compare", 15);
 
         menu.Render(config->ShortcutKey);
         fpsOverlay.Render(config->FpsShortcutKey);
         fpsOverlayCycle.Render(config->FpsCycleShortcutKey);
         fgEnable.Render(config->FGShortcutKey);
         dlssNrToggle.Render(config->DlssNrToggleKey);
+        hdrCompare.Render(config->HdrCompareKey);
     }
 }
 
@@ -7981,6 +8107,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             break;
         case Page::Image:
             section(RenderActiveImageSettings);
+            section(RenderHdrOutputSettings);
             break;
         case Page::Framerate:
             section(RenderFramerateLowLatency);

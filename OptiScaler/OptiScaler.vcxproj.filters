@@ -497,6 +497,45 @@
     <ClInclude Include="native\DepthSnapshotDx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Display.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Hlsl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Create.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Status.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyBase.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Pass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyDx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx11Present.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Fullscreen.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\MsaaPictureDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1443,6 +1482,33 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\DepthResolveDx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Display.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyDx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Create.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyBase.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyDx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx11Present.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Fullscreen.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\MsaaPictureDx11.cpp">

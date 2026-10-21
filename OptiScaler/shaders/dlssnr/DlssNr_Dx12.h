@@ -69,6 +69,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     uint32_t _heapIndex = 0;
 
     ID3D12PipelineState* _superiorResolve[2] {};
+    bool _superiorResolveAttempted[2] {};
     ID3D12PipelineState* SuperiorResolvePipeline(bool sdr);
     ID3D12PipelineState* _superiorPipeline[16] {};
     bool _superiorAttempted[16] {};

@@ -5064,7 +5064,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         finalAnswer = passOutput;
         MakeModelReadable(finalAnswer);
         superiorCompleted = pass + 1u;
-        if (superiorGeneration && pass + 1u < effectivePasses)
+        if (superiorGeneration && superiorGeneration->temporal && pass + 1u < effectivePasses)
         {
             const bool due = superiorSchedule.Due(pass, superiorCovered);
             const bool ran = due && SuperiorRun::InterPass(*superiorGeneration, *this, cmdList, cfg,
@@ -5205,6 +5205,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (superiorGeneration)
     {
+        // Edit cache skips the private DLSS evaluation too. Its next refresh must
+        // not reproject an older history with only the current frame's vectors.
+        if (cached)
+            superiorGeneration->reset = true;
         if (reused)
         {
             superiorCompleted = superiorGeneration->lastCompleted;
@@ -5595,6 +5599,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                     exposureTex, resolveTarget, nullptr);
         if (cached)
             composed = true;
+        if (superiorGeneration && !composed)
+            superiorGeneration->reset = true;
 
         // A refresh: the model's output becomes the anchor (and the crossfade's first frame is written)
         if (composed && cachePlan.runs && cachePlan.refresh && targetSupportsUav)

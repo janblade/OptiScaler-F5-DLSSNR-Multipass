@@ -17,8 +17,9 @@ The private DLSS feature still forces HDR + Auto Exposure and uses unit exposure
 
 The UI adds **DLSS to temporally stabilize NR**: A (higher performance) and K (slower, more stable in motion).
 NR model A/B is independent. Model resolution and pass settings stay configurable.
-At 100%, enlargement/private DLSS are inactive; native guide units are still corrected from their actual valid/reference dimensions.
+At 100%, janblade's original multipass boundaries remain in use and enlargement/private DLSS are inactive; native guide units are still corrected from their actual valid/reference dimensions.
 Below 100%, depth and MV are matched to the working grid with independent regions/offsets; the private DLSS path reuses current depth.
+After frames skipped by the edit cache, private DLSS resets its history on the next refresh.
 Edge compression keeps its packed NR guides and unpacks before temporal enlargement. Its inter-pass correction operates on the packed model grid.
 The fixed Area/inter-pass/carrier/low shaders retain v59 bytecode and their lazy PSOs. The host composition PSOs use janblade's existing 256-byte ABI.
 

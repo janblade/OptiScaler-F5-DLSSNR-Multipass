@@ -17,7 +17,8 @@
 #include <imgui/imgui_impl_win32.h>
 
 // menu
-static int const NUM_BACK_BUFFERS = 8;
+// DXGI allows up to 16 buffers; XeFG with many generated frames (6X) has more than 8
+static int const NUM_BACK_BUFFERS = 16;
 static int const SRV_HEAP_SIZE = 64;
 static bool _dx11Device = false;
 static bool _dx12Device = false;
@@ -94,6 +95,8 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
         LOG_ERROR("pSwapChain->GetDesc: {0:X}", (unsigned long) hr);
         return;
     }
+
+    LOG_INFO("Swapchain has {} buffers, the menu has {}", sd.BufferCount, (int) NUM_BACK_BUFFERS);
 
     for (UINT i = 0; i < sd.BufferCount; ++i)
     {
@@ -528,6 +531,26 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 ImGui::Render();
 
                 UINT backBufferIdx = pSwapChain->GetCurrentBackBufferIndex();
+
+                // Past the arrays (or a buffer that has no view) reads whatever lies next to them as an allocator
+                if (backBufferIdx >= NUM_BACK_BUFFERS || g_mainRenderTargetResource[backBufferIdx] == nullptr)
+                {
+                    static bool said = false;
+
+                    if (!said)
+                    {
+                        said = true;
+                        DXGI_SWAP_CHAIN_DESC scDescIdx {};
+                        pSwapChain->GetDesc(&scDescIdx);
+                        LOG_WARN("The menu has no render target for back buffer {} (swapchain has {} buffers, the menu "
+                                 "{}): no menu this frame",
+                                 backBufferIdx, scDescIdx.BufferCount, (int) NUM_BACK_BUFFERS);
+                    }
+
+                    pSwapChain->Release();
+                    return;
+                }
+
                 ID3D12CommandAllocator* commandAllocator = g_commandAllocators[backBufferIdx];
 
                 auto result = commandAllocator->Reset();

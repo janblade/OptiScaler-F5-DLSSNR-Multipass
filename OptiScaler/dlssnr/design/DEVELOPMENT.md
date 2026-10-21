@@ -70,7 +70,9 @@ review for its change type below, against the specs here.**
 
 ### 2.1 Colour → White-point source menu (`DlssNr_Menu.cpp`)
 
-`WhitePointSource`: 0 paper-white-only, 1 game exposure, 2 scan buffer. What each state SHOWS. A menu
+`WhitePointSource`: 0 paper-white-only, 1 game exposure, 2 scan buffer, 3 Automatic exposure, 4 Auto (the default:
+game exposure when the game hands one over, else Automatic, moved by the exposure scan's match once found; not in the
+table below, which predates 3 and 4). What each state SHOWS. A menu
 change is reviewed by walking every row of this table and confirming the code matches it — no extra
 control, no missing one.
 

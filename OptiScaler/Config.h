@@ -598,37 +598,23 @@ class Config
     // Off until it is shown to produce the same picture. If it does, the forwarder can go.
     CustomOptional<bool> DlssNrUseProxy { false };
 
-    // Look for the exposure the game computed but never handed to the upscaler.
+    // Force the exposure scan on (it looks for the exposure the game computed but never handed to the upscaler), for
+    // diagnosis: the log compares every candidate, and nothing it finds moves the picture through this flag.
     //
-    // Off by default, and it has to be. Reading a resource the game owns means assuming what state
-    // it is in, and unlike depth and motion vectors -- where NGX documents the contract -- a buffer
-    // found by its shape comes with no promise at all. UNORDERED_ACCESS is the reasonable
-    // assumption, since every candidate got here by having a UAV made on it, but it is an
-    // assumption, and nobody who has not asked for the scan should be carrying that risk.
-    //
-    // It decides nothing either way. It watches and it reports, because the last two times a number
-    // was inferred here it went straight into the interface and was wrong.
+    // The scan also runs without it: the white point source Auto, the default, searches in a D3D12 game that hands over
+    // no exposure, and a match it finds moves the white point (user decision 2026-10-19/20; DlssNr_ExposureAuto.h).
+    // That carries the risk this flag once kept opt-in: reading a resource the game owns means assuming what state it
+    // is in, and unlike depth and motion vectors -- where NGX documents the contract -- a buffer found by its shape
+    // comes with no promise at all. UNORDERED_ACCESS is the reasonable assumption, since every candidate got here by
+    // having a UAV made on it. Auto keeps the exposure short: it lets go of every candidate it has finished with (a
+    // game's teardown with its resources still pinned removed the device in Cyberpunk 2077), and of all of them in a
+    // game that hands its exposure over. Under Auto this flag does not stop that.
     CustomOptional<bool> DlssNrScanExposure { false };
 
     // Write the exposure scan's recording (<log>.exposurescan.csv: every candidate beside NR's brightness reading) for
     // diagnosis. Turns the scan on. Separate from ScanExposure so a scan that runs for the picture never writes a file.
     CustomOptional<bool> DlssNrRecordExposureScan { false };
 
-    // Anchoring the scan: the white point that looked right, and the scan's value at that moment.
-    //
-    // The absolute white point cannot be derived from a buffer whose units are unknown. What CAN be
-    // derived is every value after the first: if the scan's number halves, the scene got twice as
-    // bright, and the white point follows -- whatever the number actually means, because only the
-    // ratio is used and the units cancel.
-    //
-    // So the user sets it once, in one lighting condition, and presses a button. After that it stays
-    // correct through every cave and every noon without being touched again. Which is also the shape
-    // that makes per-game profiles work: one person anchors a game, everybody else gets the number.
-    //
-    // Zero means not anchored, and then nothing happens at all.
-    // A lamp in the corner showing what the scan currently thinks the light is doing: red for dark,
-    // green for full light, and the shades between. Off by default; it is for watching the thing
-    // work, not for playing with.
     // Where the white point comes from. One control, because there is one answer.
     //
     //   0  the paper white slider, and nothing else
@@ -778,8 +764,23 @@ class Config
     CustomOptional<bool> DlssNrGameExposureTrimPreview { false };
     CustomOptional<bool> DlssNrAutoExposureTrimPreview { false };
 
+    // A lamp in the corner showing what the scan currently thinks the light is doing: red for dark,
+    // green for full light, and the shades between. Off by default; it is for watching the thing
+    // work, not for playing with.
     CustomOptional<bool> DlssNrScanMeter { false };
 
+    // Anchoring the scan (WhitePointSource 2): the white point that looked right, and the scan's value at that moment.
+    //
+    // The absolute white point cannot be derived from a buffer whose units are unknown. What CAN be
+    // derived is every value after the first: if the scan's number halves, the scene got twice as
+    // bright, and the white point follows -- whatever the number actually means, because only the
+    // ratio is used and the units cancel.
+    //
+    // So the user sets it once, in one lighting condition, and presses a button. After that it stays
+    // correct through every cave and every noon without being touched again. Which is also the shape
+    // that makes per-game profiles work: one person anchors a game, everybody else gets the number.
+    //
+    // Zero means not anchored, and then nothing happens at all.
     CustomOptional<float> DlssNrScanAnchorValue { 0.0f };       // legacy single anchor, migrated then unused
     CustomOptional<float> DlssNrScanAnchorWhitePoint { 0.0f };  // legacy single anchor, migrated then unused
 

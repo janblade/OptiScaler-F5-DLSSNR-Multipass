@@ -2019,7 +2019,7 @@ static void RenderExposureSection(Config* config, float menuResScale)
             }
             else if (source == 2 && vk)
             {
-                // The scan watches D3D12 resource creation only; the Vulkan path resolves source 2 to Paper white.
+                // The scan finds Vulkan candidates too, but the Vulkan path resolves source 2 to Paper white.
                 ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
                                    "Scanned exposure is DirectX 12 only. Using Paper white.");
             }

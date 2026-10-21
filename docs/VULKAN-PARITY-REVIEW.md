@@ -40,7 +40,8 @@ WorkingScale=1.0
 Select DLSS quality in the game. Pre-SR NR working scale is relative to the active input size.
 Start with one pass and check the logged model/frame dimensions before trying two.
 `RunBeforeSR=false` selects post-SR NR. Native Vulkan **does not yet implement deferred DLSS residual
-composition, residual FG or async-latest NR**. Exposure scanning remains D3D12-only.
+composition, residual FG or async-latest NR**. The exposure scan finds candidates on Vulkan too, but only a D3D12
+game's are used for the picture (Auto's search, Scanned exposure).
 
 ## Adopted fixes and options
 

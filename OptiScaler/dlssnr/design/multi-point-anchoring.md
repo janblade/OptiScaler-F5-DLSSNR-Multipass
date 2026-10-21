@@ -1,7 +1,8 @@
 # Multi-point anchoring for the scanned-exposure white point
 
 Status: BUILT (2026-09-03), compiles clean, not yet in-game tested. Written before code, per the
-project's design-doc-first rule. D3D12 only for now (the scan is D3D12 only).
+project's design-doc-first rule. D3D12 only for now (the scan finds candidates on D3D11 and Vulkan too since
+2026-10-19, but using one there is not checked in a game).
 
 ## The problem this solves
 

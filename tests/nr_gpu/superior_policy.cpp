@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../../OptiScaler/dlssnr/DlssNr_SuperiorScaling.h"
+#include "../../OptiScaler/dlssnr/DlssNr_InterPassSchedule.h"
 #include "../../OptiScaler/shaders/dlssnr/superior/Constants.h"
 using namespace DlssNr::Superior;
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_Guides.h"
@@ -19,6 +20,8 @@ int main() {
         require(Enabled(cfg) && InterPassMode(cfg)==8 && DownscaleFilter(cfg)==0);
         require(Radius(cfg)==1 && RangeSigma(cfg)==.015f && SpatialSigma(cfg)==3 && GuideStrength(cfg)==1);
         require(ShapingMode(cfg)==2);
+        require(ExposureSource(0)==0 && ExposureSource(1)==1);
+        require(ExposureSource(2)==3 && ExposureSource(3)==3 && ExposureSource(4)==3);
         require(High(0)==.8f && Low(0)==.661f && High(1)==.75f && Low(1)==.787f);
         require(High(2)==.95f && Low(2)==.784f && High(99)==High(2));
         require(High(0,2)==.950f && Low(0,2)==.861f);
@@ -27,6 +30,22 @@ int main() {
         require(EffectiveBand(.8f,.5f,1,1)==.8f);
         require(EffectiveBand(.8f,1,1,1)==1 && EffectiveBand(.8f,.5f,.75f,0)==1);
         require(std::abs(EffectiveBand(.8f,.5f,.5f,.5f)-.95f)<1e-6f);
+        // Mixed NR models: each pass uses its own table, then block high is a product
+        // and low an arithmetic mean. SR A/K never participates in this calculation.
+        const auto mixed = DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
+            [](unsigned pass) -> DlssNr::InterPass::ScheduleGains {
+                const unsigned style = pass == 2 ? 2u : 1u;
+                const unsigned model = pass == 1 ? 2u : 1u;
+                return { EffectiveBand(High(style,model),.5f,1,1),
+                         EffectiveBand(Low(style,model),.5f,1,1) };
+            });
+        require(std::abs(mixed.Block(0,2).high - .75f*.925f)<1e-6f);
+        require(std::abs(mixed.Block(0,2).low - (.787f+.838f)/2)<1e-6f);
+        require(mixed.expectedMask == 0u); // both next-pass gaps stay below .15
+        const auto mainNatural = DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
+            [](unsigned) -> DlssNr::InterPass::ScheduleGains { return { High(1),Low(1) }; });
+        require(mainNatural.expectedMask == 3u); // .787 - .75*.75 > .15 before either next pass
+        require(mainNatural.Block(2,3).low == Low(1)); // final low covers only the tail
         require(WorkingExtent(3840,.65f)==2496 && WorkingExtent(2160,.65f)==1404);
         require(WorkingExtent(3840,.59f)==2266 && WorkingExtent(2160,.59f)==1274);
         require(WorkingExtent(1919,1.0f)==1919 && WorkingExtent(1079,1.0f)==1079);

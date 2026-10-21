@@ -7,6 +7,7 @@
 #include "DlssNr_ExposureScanShape.h"
 #include "DlssNr_ExposureScanSource.h"
 #include "DlssNr_GameDefaults.h"
+#include "DlssNr_SuperiorScaling.h"
 
 #include <SysUtils.h>
 
@@ -225,6 +226,8 @@ bool EnsureReadback(ID3D12Device* device)
 // every candidate, as before, on every API.
 bool AskedFor()
 {
+    if (DlssNr::SuperiorScaling::Enabled(*Config::Instance()))
+        return false;
     return Config::Instance()->DlssNrWhitePointSource.value_or_default() == DlssNrExposureDefault::kSourceScan ||
            Config::Instance()->DlssNrScanExposure.value_or_default() ||
            Config::Instance()->DlssNrRecordExposureScan.value_or_default();

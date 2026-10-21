@@ -1840,9 +1840,65 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                "Green = in effect; changing those clears it.");
 }
 
+// The v59 exposure path has no scan, readbacks, adaptive meter or calibration pass.
+// Keep its actual HDR controls in janblade's NR Input page.
+static void RenderSuperiorExposure(Config* config)
+{
+    ImGui::SeparatorText("NR Exposure");
+    const auto encoding = DlssNr::ReadColourEncodingStatus();
+    const bool pinned = encoding.seen && encoding.exposureState == DlssNrExposureState::State::DisplayPinned;
+    const bool toneMapped = encoding.seen && encoding.exposureState == DlssNrExposureState::State::ToneMapped;
+    if (pinned)
+        DeferredSlider("Game's HDR paper white", &config->DlssNrDisplayPaperWhiteNits,
+                       DlssNrExposureState::kMinPaperWhiteNits, DlssNrExposureState::kMaxPaperWhiteNits,
+                       DlssNrExposureState::kReferenceWhiteNits, "%.0f nits");
+    if (toneMapped)
+        ImGui::TextDisabled("Exposure is inactive on a tone-mapped input.");
+    ImGui::BeginDisabled(pinned || toneMapped);
+    unsigned source = DlssNr::SuperiorScaling::ExposureSource(config->DlssNrWhitePointSource.value_or_default());
+    const char* sources[] = { "Manual paper white", "Game exposure", "Automatic HDR exposure" };
+    int selected = source == 3u ? 2 : int(source);
+    if (ImGui::Combo("White point source", &selected, sources, IM_ARRAYSIZE(sources)))
+    {
+        source = selected == 2 ? 3u : unsigned(selected);
+        config->DlssNrWhitePointSource = source;
+    }
+    HelpMarker("Superior Scaling uses the v59 exposure meter. Automatic measures the HDR input on the GPU. "
+               "Game exposure uses the texture supplied by the game. Without a usable texture, Paper white applies.");
+    DeferredSlider("Paper white", &config->DlssNrWhitePointScale, .25f, 2000.0f, 1.0f, "%.2fx");
+    if (source != 0u)
+    {
+        auto& trim = source == 3u ? config->DlssNrAutoExposureTrim : config->DlssNrWhitePointTrim;
+        DeferredSlider("Exposure trim", &trim, .001f, 1000.0f, source == 3u ? 5.0f : 1.0f, "%.3fx");
+        auto& anchors = source == 3u ? config->DlssNrAutoExposureTrimAnchors : config->DlssNrGameExposureTrimAnchors;
+        if (ImGui::TreeNode("Trim anchors"))
+        {
+            char text[1024] {};
+            const auto value = anchors.value_or_default();
+            std::copy_n(value.c_str(), std::min(value.size(), sizeof(text) - 1u), text);
+            if (ImGui::InputText("White:trim pairs", text, sizeof(text), ImGuiInputTextFlags_EnterReturnsTrue))
+                anchors = std::string(text);
+            HelpMarker("Up to eight white:trim pairs separated by spaces or semicolons. Press Enter to apply. "
+                       "Example: 1:5; 10:3. Anchors override the trim slider.");
+            ImGui::TreePop();
+        }
+    }
+    if (source == 3u)
+        DeferredSlider("Highlight protection", &config->DlssNrAutoExposureHighlightProtection,
+                       0.0f, 100.0f, 0.0f, "%.0f%%");
+    ImGui::EndDisabled();
+    DeferredSlider("Highlight guard", &config->DlssNrMaxRatio, 1.0f, MaxHighlightGuard, 2.0f, "%.1fx");
+    DeferredSlider("Maximum darkening", &config->DlssNrMaxDarkening, 0.0f, 100.0f, 100.0f, "%.0f%%");
+}
+
 // NR Exposure, drawn at the end of the NR Input page.
 static void RenderExposureSection(Config* config, float menuResScale)
 {
+    if (DlssNr::SuperiorScaling::Enabled(*config))
+    {
+        RenderSuperiorExposure(config);
+        return;
+    }
     ImGui::SeparatorText("NR Exposure");
     ImGui::TextDisabled("HDR input settings. Adjust the brightness range presented to NR.");
 
@@ -3526,13 +3582,6 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                    "resolution; most useful with Replace.");
     }
 
-    if (DlssNr::SuperiorScaling::Enabled(*config))
-    {
-        float protection = config->DlssNrAutoExposureHighlightProtection.value_or_default();
-        if (ImGui::SliderFloat("Highlight protection", &protection, 0.0f, 100.0f, "%.0f%%"))
-            config->DlssNrAutoExposureHighlightProtection = protection;
-    }
-
     if (DlssNr::SuperiorScaling::Enabled(*config) && ImGui::TreeNode("Final colour recovery"))
     {
         DeferredSlider("Chromaticity recovery", &config->DlssNrFinalChromaticityRecovery, 0.0f, 100.0f, 0.0f, "%.0f%%");
@@ -3735,19 +3784,23 @@ static void RenderDebugPage(Config* config, float menuResScale)
 
     HelpMarker("Freezes NR's input to compare settings. HUD may keep updating; SR/RR changes don't show.");
 
-    bool frameStats = config->DlssNrFrameStats.value_or_default();
-    if (ImGui::Checkbox("Log frame brightness stats", &frameStats))
-        config->DlssNrFrameStats = frameStats;
+    if (!DlssNr::SuperiorScaling::Enabled(*config))
+    {
+        bool frameStats = config->DlssNrFrameStats.value_or_default();
+        if (ImGui::Checkbox("Log frame brightness stats", &frameStats))
+            config->DlssNrFrameStats = frameStats;
 
-    HelpMarker("Writes the frame's brightness stats to OptiScaler.log about every 2 s. For diagnosis.");
+        HelpMarker("Writes the frame's brightness stats to OptiScaler.log about every 2 s. For diagnosis.");
 
-    RenderMeasureDetail();
+        RenderMeasureDetail();
 
-    bool kernelProfile = config->DlssNrKernelProfile.value_or_default();
-    if (ImGui::Checkbox("Log NR kernel profile", &kernelProfile))
-        config->DlssNrKernelProfile = kernelProfile;
+        bool kernelProfile = config->DlssNrKernelProfile.value_or_default();
+        if (ImGui::Checkbox("Log NR kernel profile", &kernelProfile))
+            config->DlssNrKernelProfile = kernelProfile;
 
-    HelpMarker("Writes where NR's GPU time goes to OptiScaler.log about every 4 s. For diagnosis.");
+        HelpMarker("Writes where NR's GPU time goes to OptiScaler.log about every 4 s. For diagnosis.");
+
+    }
 
     static const char* compareNames[] = { "Off", "Side by side", "Wipe" };
     int compare = (int) config->DlssNrCompare.value_or_default();

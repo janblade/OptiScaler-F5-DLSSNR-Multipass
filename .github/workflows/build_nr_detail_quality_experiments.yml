@@ -35,15 +35,8 @@ jobs:
       - name: Test gains, scheduling and PSO policy
         shell: powershell
         run: |
-          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $vc = Join-Path $vs "VC/Auxiliary/Build/vcvars64.bat"
-          New-Item -ItemType Directory -Force artifacts/validation | Out-Null
-          foreach ($name in @("superior_policy", "interpass_policy")) {
-            cmd /c "`"$vc`" && cl /nologo /std:c++17 /EHsc /O2 tests/nr_gpu/$name.cpp /Fe:artifacts/validation/$name.exe /Fo:artifacts/validation/$name.obj"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & "artifacts/validation/$name.exe"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          ./tools/test_superior_port.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Release DLL
         shell: powershell
         run: |

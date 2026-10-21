@@ -20,6 +20,6 @@
 * Ability to modify [Mipmap Lod Bias](https://github.com/optiscaler/OptiScaler/blob/master/Config.md#mipmap-lod-bias-override-dx12-only) game value
 * Supports [Fakenvapi](https://github.com/FakeMichau/fakenvapi) integration which enables Reflex hooking and injecting Anti-Lag 2 or LatencyFlex (LFX)
 * Supports Nukem's FSR FG mod [dlssg-to-fsr3](https://github.com/Nukem9/dlssg-to-fsr3) (since version 0.7.7)  
-* Optional HDR output for SDR games (Dx11 and Dx12, also with XeFG and FSR frame generation): correct brightness and gamma in an HDR signal, live comparison against how Windows shows the game ([details](Config.md#hdr-output-sdr-games-dx11-and-dx12))
+* Optional HDR output for SDR games (Dx11 and Dx12, also with XeFG and FSR frame generation; not with DLSS-G): correct brightness and gamma in an HDR signal, live comparison against how Windows shows the game ([details](Config.md#hdr-output-sdr-games-dx11-and-dx12))
  
 **To overcome DLSS 3.7's signature check requirements, OptiScaler uses a method developed by **Artur** (creator of [DLSS Enabler](https://www.nexusmods.com/site/mods/757?tab=description)).**

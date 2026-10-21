@@ -6095,9 +6095,10 @@ void MenuCommon::RenderHdrOutputSettings(RenderMenuContext& ctx)
                    "brightness and gamma of an SDR monitor. It does not add highlights the game never drew.\n"
                    "Needs Windows HDR turned on for the display. Off by default.\n"
                    "Applies at the next start (or at a resolution / window change, in most games).\n"
-                   "Direct3D 11 and 12 games (no Vulkan yet). Older swap chain types are made flip model for it. "
-                   "Stands aside for games that already output HDR, for exclusive full screen with an older swap "
-                   "chain type, and with frame generation.");
+                   "Direct3D 11 and 12 games (no Vulkan yet). Works with XeFG and FSR frame generation, the generated "
+                   "frames included; not with DLSS-G output yet. Older swap chain types are made flip model for it. "
+                   "Stands aside for games that already output HDR and for exclusive full screen with an older swap "
+                   "chain type.");
 
     SdrToHdr::StatusSettings settings;
     settings.enabled = enabled;

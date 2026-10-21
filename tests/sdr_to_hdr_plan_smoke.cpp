@@ -140,6 +140,19 @@ int main()
         Check(!fs.upgraded, "exclusive full screen: never an upgraded chain");
     }
 
+    // The frame generation library's exclusive full screen request: an HDR chain is made windowed, the fullscreen desc is not passed
+    {
+        Plan plan;
+        BOOL windowed = FALSE;
+        ApplyWindowed(plan, windowed);
+        Check(windowed == FALSE && KeepFullscreenDesc(plan, true) && !KeepFullscreenDesc(plan, false),
+              "no exclusiveToWindowed: the desc is left as it was");
+        plan.exclusiveToWindowed = true;
+        ApplyWindowed(plan, windowed);
+        Check(windowed == TRUE && !KeepFullscreenDesc(plan, true),
+              "exclusiveToWindowed: Windowed becomes TRUE and the fullscreen desc is not passed on");
+    }
+
     std::printf(g_failures == 0 ? "sdr_to_hdr_plan_smoke: PASS\n" : "sdr_to_hdr_plan_smoke: %d FAIL\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

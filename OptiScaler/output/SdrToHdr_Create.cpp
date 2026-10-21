@@ -134,7 +134,26 @@ void CheckLateStandDown(ProxyChainBase& proxy, bool upgraded)
 
 void FillEnvironment(Inputs& inputs)
 {
-    inputs.frameGen = inputs.frameGen || State::Instance().currentFG != nullptr;
+    inputs.frameGen = inputs.frameGen || State::Instance().currentFG != nullptr ||
+                      State::Instance().activeFgOutput == FGOutput::DLSSG;
+
+    if (inputs.frameGen && inputs.fgBackend == FgBackend::None)
+    {
+        switch (State::Instance().activeFgOutput)
+        {
+        case FGOutput::XeFG:
+            inputs.fgBackend = FgBackend::XeFG;
+            break;
+        case FGOutput::FSRFG:
+            inputs.fgBackend = FgBackend::FsrFG;
+            break;
+        case FGOutput::DLSSG:
+            inputs.fgBackend = FgBackend::Dlssg;
+            break;
+        default:
+            break;
+        }
+    }
     inputs.dxvk = inputs.dxvk || VkPresentBridge::DxvkThroughVulkan() || VkPresentBridge::DxvkGame() ||
                   IdentifyGpu::getPrimaryGpu().usesDxvk;
     // OptiScaler's own DLSS-G output, or the game's own Streamline DLSS-G switched on: its last slDLSSGSetOptions, seen by
@@ -142,7 +161,8 @@ void FillEnvironment(Inputs& inputs)
     // games ship and load it with DLSS-G off (NBA 2K27). Known only once the game sends options, so a game that turns
     // DLSS-G on after its chain is made is caught at its next resize.
     const auto& dlssg = DlssgTelemetry::Get();
-    inputs.streamlineDlssg = inputs.streamlineDlssg || State::Instance().activeFgOutput == FGOutput::DLSSG ||
+    // (OptiScaler's own DLSS-G output is the frame generation backend FgBackend::Dlssg, not this)
+    inputs.streamlineDlssg = inputs.streamlineDlssg ||
                              (dlssg.optionsSeen.load(std::memory_order_acquire) &&
                               dlssg.active.load(std::memory_order_relaxed));
 }
@@ -151,6 +171,7 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
 {
     Plan plan;
     plan.gameFormat = format;
+    plan.fgInner = request.frameGen;
 
     // Off: nothing is looked at, logged or changed
     if (!Config::Instance()->HdrOutputEnabled.value_or_default())
@@ -167,6 +188,7 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     in.windowed = request.windowed;
     in.canUpgradeBitBlt = true; // a chain being created
     in.frameGen = request.frameGen;
+    in.fgInnerChain = request.frameGen;
     in.composition = request.composition;
     in.coreWindow = request.coreWindow;
     in.multiNode = request.multiNode;
@@ -187,11 +209,16 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
         return plan;
 
     plan.proxied = true;
+    plan.exclusiveToWindowed = request.frameGen && !request.windowed;
     plan.realFormat = RealFormat(plan.hdr10);
     format = plan.realFormat;
 
     MakeUpgradePlan(request, decision.upgrade, plan);
     RecordUpgraded(plan.upgraded);
+
+    if (plan.exclusiveToWindowed)
+        LOG_INFO("HDR output: the frame generation library asked for exclusive full screen; its HDR swap chain is made windowed "
+                 "and kept borderless");
 
     if (plan.editDesc)
         LOG_INFO("HDR output: the game asked for an older swap chain type; made it flip model for HDR");
@@ -208,6 +235,7 @@ void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure)
 {
     plan.upgraded = false; // (the site restored the desc first, RestoreSwapDesc)
     plan.editDesc = false;
+    plan.exclusiveToWindowed = false;
     LOG_WARN("HDR output: the swap chain could not be made as HDR ({:X}), making it as the game asked", (UINT) failure);
     plan.proxied = false;
     plan.reason = Reason::StartFailed;
@@ -221,19 +249,32 @@ void NoteFrameGenChain()
     if (!Config::Instance()->HdrOutputEnabled.value_or_default())
         return;
 
-    // The inner chain a frame generation library makes through the factory already logged and recorded it
-    const auto before = Status();
+    // XeFG and FSR FG: the library's own real chain (made through the factory hooks, before this) is the one HDR output
+    // decides on and records; this game-facing chain on top of it is not touched and says nothing
+    if (State::Instance().activeFgOutput != FGOutput::DLSSG)
+        return;
 
-    if (!(before.decided && before.enabledAtDecision && before.reason == Reason::FrameGen))
-        LOG_INFO("{}", ReasonText(Reason::FrameGen));
-
-    RecordStatus(Reason::FrameGen, false, Config::Instance()->UseHDR10.value_or_default(), true, 0.0f);
+    NoteStandDown(Reason::DlssgOutput);
 }
 
 void NoteStandDown(Reason reason)
 {
-    if (Config::Instance()->HdrOutputEnabled.value_or_default())
-        LOG_INFO("{}", ReasonText(reason));
+    if (!Config::Instance()->HdrOutputEnabled.value_or_default())
+        return;
+
+    // The chain of OptiScaler's own DLSS-G output is the one stand-down that is recorded here (the Streamline twin sites make
+    // no plan); logged once
+    if (reason == Reason::DlssgOutput)
+    {
+        const auto before = Status();
+
+        if (before.decided && before.enabledAtDecision && before.reason == reason)
+            return;
+
+        RecordStatus(reason, false, Config::Instance()->UseHDR10.value_or_default(), true, 0.0f);
+    }
+
+    LOG_INFO("{}", ReasonText(reason));
 }
 } // namespace SdrToHdr
 

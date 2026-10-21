@@ -156,7 +156,8 @@ int main()
                            Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                            Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
                            Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::DlssgStartedLater,
-                           Reason::ExclusiveBitBlt, Reason::DlssgKeptUpgraded, Reason::DisplayLeftHdrKept, Reason::Active };
+                           Reason::ExclusiveBitBlt, Reason::DlssgKeptUpgraded, Reason::DisplayLeftHdrKept, Reason::DlssgOutput,
+                           Reason::Active };
     bool texts = true;
 
     for (size_t i = 0; i < std::size(all); ++i)
@@ -253,7 +254,8 @@ int main()
         for (Reason reason : { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
                                Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                                Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
-                               Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::ExclusiveBitBlt })
+                               Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::ExclusiveBitBlt,
+                               Reason::DlssgOutput })
         {
             snap.reason = reason;
             line = StatusLine(snap, on);
@@ -439,6 +441,76 @@ int main()
         Check(line.colour == StatusColour::Amber && line.text == ReasonText(Reason::DisplayLeftHdrKept) &&
                   line.text.find("restart the game to go back to SDR") != std::string::npos,
               "status: Windows HDR went off under an upgraded chain: amber, restart to go back to SDR (not a green active line)");
+    }
+
+    // ---- frame generation: only the library's own real chain of XeFG and FSR FG is converted ----
+    {
+        const FgBackend backends[] = { FgBackend::None, FgBackend::XeFG, FgBackend::FsrFG, FgBackend::Dlssg };
+        const char* names[] = { "none", "XeFG", "FSR FG", "DLSS-G output" };
+        char what[200];
+
+        for (int b = 0; b < 4; ++b)
+            for (int inner = 0; inner < 2; ++inner)
+            {
+                {
+                    Inputs row = Good();
+                    row.frameGen = backends[b] != FgBackend::None;
+                    row.fgBackend = backends[b];
+                    row.fgInnerChain = inner != 0;
+                    const Decision d = Decide(row);
+                    std::snprintf(what, sizeof(what), "FG %s, library's own chain %d", names[b], inner);
+
+                    if (!row.frameGen)
+                        Check(d.use && d.reason == Reason::Active, what); // FG off: exactly the plain rule
+                    else if (backends[b] == FgBackend::Dlssg)
+                        Check(!d.use && d.reason == Reason::DlssgOutput, what);
+                    else if (!row.fgInnerChain)
+                        Check(!d.use && d.reason == Reason::FrameGen, what);
+                    else
+                        Check(d.use && d.reason == Reason::Active, what);
+                }
+            }
+
+        // an inner chain whose backend is not named is left alone
+        Inputs unnamed = Good();
+        unnamed.frameGen = true;
+        unnamed.fgInnerChain = true;
+        Check(Is(unnamed, Reason::FrameGen), "a library chain with no named backend: FrameGen");
+
+        // the rest of the rules still apply to the library's chain: display, game HDR format, dxvk, the game's own DLSS-G
+        Inputs lib = Good();
+        lib.frameGen = true;
+        lib.fgBackend = FgBackend::XeFG;
+        lib.fgInnerChain = true;
+        lib.displayHdr = false;
+        Check(Is(lib, Reason::DisplayNotHdr), "XeFG's chain on a display without HDR: DisplayNotHdr");
+        lib.displayHdr = true;
+        lib.gameFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+        Check(Is(lib, Reason::GameHdrFormat), "XeFG's chain made 10-bit: GameHdrFormat");
+        lib.gameFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        lib.dxvk = true;
+        Check(Is(lib, Reason::Dxvk), "XeFG's chain on dxvk: Dxvk");
+        lib.dxvk = false;
+        lib.streamlineDlssg = true;
+        Check(Is(lib, Reason::StreamlineDlssg), "XeFG's chain with the game's own DLSS-G on: StreamlineDlssg");
+        lib.streamlineDlssg = false;
+        lib.flipModel = false;
+        lib.windowed = false;
+        Check(Is(lib, Reason::ExclusiveBitBlt), "XeFG's chain asked as exclusive bitblt: ExclusiveBitBlt");
+
+        // both backends are converted on the library's own chain (frame generation never sees the real chain's format)
+        for (FgBackend backend : { FgBackend::XeFG, FgBackend::FsrFG })
+        {
+            Inputs sig = Good();
+            sig.frameGen = true;
+            sig.fgBackend = backend;
+            sig.fgInnerChain = true;
+            Check(Decide(sig).use, "the library's chain is converted");
+        }
+
+        Check(std::strstr(ReasonText(Reason::DlssgOutput), "DLSS-G") != nullptr &&
+                  std::strstr(ReasonText(Reason::FrameGen), "XeFG and FSR FG") != nullptr,
+              "texts: DlssgOutput names DLSS-G output, FrameGen names the supported backends");
     }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_rules_smoke: PASS\n" : "sdr_to_hdr_rules_smoke: %d FAIL\n", g_failures);

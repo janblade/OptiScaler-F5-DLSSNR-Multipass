@@ -27,7 +27,7 @@ struct CreateRequest
     DXGI_SWAP_EFFECT originalSwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     UINT originalBufferCount = 2;
     UINT originalFlags = 0;
-    bool frameGen = false;             // this is a frame generation library's own inner chain (_skipFGSwapChainCreation)
+    bool frameGen = false;             // this is a frame generation library's own real chain (_skipFGSwapChainCreation)
     bool composition = false;
     bool coreWindow = false;
     bool multiNode = false;
@@ -44,6 +44,12 @@ struct Plan
     DXGI_FORMAT realFormat = DXGI_FORMAT_UNKNOWN; // what the chain is made as when proxied
     bool hdr10 = false;
     DisplayInfo display;
+    // The frame generation library's own chain (CreateRequest::frameGen): the wrapper keeps asking for it at every resize
+    bool fgInner = false;
+    // ... and the library asked for exclusive full screen: an HDR chain is made windowed instead (a real exclusive HDR chain was
+    // refused by DXGI, or never came back from the library's destroy), and the wrapper keeps the window borderless when the
+    // library calls SetFullscreenState(TRUE)
+    bool exclusiveToWindowed = false;
     bool displayKnown = false;
 
     // An older (bitblt) chain made flip model for HDR output: the edit for the site to apply to its desc, and what the game
@@ -95,6 +101,16 @@ inline void MakeUpgradePlan(const CreateRequest& request, bool decisionUpgrade, 
         plan.gameFlags = originalFlags;
     }
 }
+
+// For a site that has just got a plan: the library's exclusive full screen request becomes a windowed chain
+inline void ApplyWindowed(const Plan& plan, BOOL& windowed)
+{
+    if (plan.exclusiveToWindowed)
+        windowed = TRUE;
+}
+
+// ... and for the HWND variants: whether the fullscreen desc is passed on (it is not when the chain is made windowed)
+inline bool KeepFullscreenDesc(const Plan& plan, bool hasDesc) { return hasDesc && !plan.exclusiveToWindowed; }
 
 // For a site that has just got a plan: applies the swap chain edit of an upgrade to its desc fields; nothing otherwise.
 inline void ApplySwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags)

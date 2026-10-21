@@ -533,6 +533,9 @@
     <ClInclude Include="output\SdrToHdr_Dx11Present.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Fullscreen.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\MsaaPictureDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1503,6 +1506,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="output\SdrToHdr_Dx11Present.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Fullscreen.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\MsaaPictureDx11.cpp">

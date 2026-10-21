@@ -32,6 +32,7 @@
 #include <thread>
 #include <vector>
 
+#include "../OptiScaler/output/SdrToHdr_Fullscreen.h"
 #include "../OptiScaler/output/SdrToHdr_ProxyDx11.h"
 
 #pragma comment(lib, "user32.lib")
@@ -1363,6 +1364,136 @@ void FlipFacts(Gpu& g)
     DestroyWindow(window);
 }
 
+// ---- exclusive full screen on a flip chain (the Arkham Knight Alt+Enter freeze) ----
+void PumpMessages()
+{
+    MSG m;
+
+    for (int i = 0; i < 15; ++i)
+    {
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+
+        Sleep(10);
+    }
+}
+
+void FullscreenFacts(Gpu& g, bool warp)
+{
+    for (int upgraded = 0; upgraded < 2; ++upgraded)
+    {
+        const char* label = upgraded != 0 ? "upgraded flip chain (bitblt DISCARD count 1 -> FP16 flip, 2 buffers)" : "native flip chain (8-bit)";
+
+        for (int variant = 0; variant < 3; ++variant)
+        {
+            HWND window = MakeWindow();
+            ShowWindow(window, SW_SHOW);
+            PumpMessages();
+            DXGI_SWAP_CHAIN_DESC1 desc {};
+            desc.Width = 64;
+            desc.Height = 32;
+            desc.Format = upgraded != 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            desc.BufferCount = 2;
+            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+            ComPtr<IDXGISwapChain1> chain;
+            g.factory->CreateSwapChainForHwnd(g.device.Get(), window, &desc, nullptr, nullptr, &chain);
+
+            if (chain != nullptr)
+            {
+                const HRESULT full = chain->SetFullscreenState(TRUE, nullptr);
+
+                if (FAILED(full))
+                {
+                    std::printf("      %s: SetFullscreenState(TRUE) -> %08lX%s: skipped\n", label, (unsigned long) full,
+                                warp ? " (WARP refuses it)" : "");
+                    chain.Reset();
+                    DestroyWindow(window);
+                    break;
+                }
+
+                PumpMessages();
+                HRESULT after;
+                char what[220];
+
+                if (variant == 0)
+                {
+                    after = chain->Present(0, 0);
+                    std::snprintf(what, sizeof(what), "fact: %s: SetFullscreenState(TRUE) then Present WITHOUT ResizeBuffers -> %08lX (the game's sequence)",
+                                  label, (unsigned long) after);
+                    Check(after == DXGI_ERROR_INVALID_CALL, what);
+                }
+                else if (variant == 1)
+                {
+                    const HRESULT resize = chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+                    after = chain->Present(0, 0);
+                    std::snprintf(what, sizeof(what), "fact: %s: SetFullscreenState(TRUE), ResizeBuffers(0) %08lX, then Present -> %08lX",
+                                  label, (unsigned long) resize, (unsigned long) after);
+                    Check(SUCCEEDED(resize) && SUCCEEDED(after), what);
+                }
+                else
+                {
+                    chain->SetFullscreenState(FALSE, nullptr);
+                    PumpMessages();
+                    after = chain->Present(0, 0);
+                    std::printf("      %s: SetFullscreenState(TRUE) then (FALSE) then Present without a resize -> %08lX\n", label,
+                                (unsigned long) after);
+                }
+
+                chain->SetFullscreenState(FALSE, nullptr);
+            }
+
+            chain.Reset();
+            DestroyWindow(window);
+        }
+    }
+
+    // The borderless stand-in: the window changes, the real chain does not leave windowed mode and keeps presenting, and the
+    // style and rectangle come back exactly
+    {
+        HWND window = MakeWindow();
+        ShowWindow(window, SW_SHOW);
+        PumpMessages();
+        auto real = MakeChain(g, window, DXGI_FORMAT_R16G16B16A16_FLOAT, 2, 64, 32);
+        const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+        const LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        RECT before {};
+        GetWindowRect(window, &before);
+        const RECT monitor { 0, 0, 800, 600 };
+
+        SdrToHdr::BorderlessFullscreen borderless;
+        Check(borderless.Enter(window, monitor) && borderless.Active() && borderless.Enter(window, monitor),
+              "borderless full screen: Enter (twice is fine)");
+        RECT now {};
+        GetWindowRect(window, &now);
+        Check((GetWindowLongPtrW(window, GWL_STYLE) & WS_POPUP) != 0 && (GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION) == 0 &&
+                  now.left == 0 && now.top == 0 && now.right == 800 && now.bottom == 600,
+              "borderless full screen: a popup window over the monitor rectangle");
+
+        if (real != nullptr)
+        {
+            BOOL fs = TRUE;
+            real->GetFullscreenState(&fs, nullptr);
+            Check(!fs && SUCCEEDED(real->Present(0, 0)), "borderless full screen: the real chain stays windowed and keeps presenting");
+        }
+
+        Check(borderless.Leave(window) && !borderless.Active() && borderless.Leave(window), "borderless full screen: Leave (twice is fine)");
+        RECT back {};
+        GetWindowRect(window, &back);
+        Check((GetWindowLongPtrW(window, GWL_STYLE) & ~(LONG_PTR) WS_VISIBLE) == (style & ~(LONG_PTR) WS_VISIBLE) &&
+                  GetWindowLongPtrW(window, GWL_EXSTYLE) == exStyle && back.left == before.left && back.top == before.top &&
+                  back.right == before.right && back.bottom == before.bottom,
+              "borderless full screen: the window's style and rectangle are back exactly");
+        real.Reset();
+        DestroyWindow(window);
+    }
+}
+
 int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0); // (a crash must not swallow the lines before it)
@@ -1398,6 +1529,7 @@ int main(int argc, char** argv)
         Check(!pass.Ready(), "not ready after Release");
     }
 
+    FullscreenFacts(g, warp);
     Chains(g, warp);
     Upgraded(g, DXGI_SWAP_EFFECT_DISCARD, "bitblt DISCARD");
     Upgraded(g, DXGI_SWAP_EFFECT_SEQUENTIAL, "bitblt SEQUENTIAL");

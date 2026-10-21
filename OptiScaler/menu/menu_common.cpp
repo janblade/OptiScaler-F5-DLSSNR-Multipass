@@ -1692,11 +1692,18 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
         if (inputHdrCompare)
         {
             inputHdrCompare = false;
-            config->HdrOutputConvert = !config->HdrOutputConvert.value_or_default();
+
+            // Only while the picture is being converted: otherwise the key would say the picture changed when nothing did
+            const bool hdrActive = SdrToHdr::Status().active;
+
+            if (hdrActive)
+                config->HdrOutputConvert = !config->HdrOutputConvert.value_or_default();
 
             ImGuiToast toast { ImGuiToastType::Info, 2000 };
             toast.setTitle("HDR output");
-            toast.setContent(config->HdrOutputConvert.value_or_default() ? "Converted" : "As Windows shows it");
+            toast.setContent(!hdrActive                                      ? "HDR output is not active"
+                             : config->HdrOutputConvert.value_or_default() ? "Converted"
+                                                                             : "As Windows shows it");
             ImGui::InsertNotification(toast);
         }
 
@@ -6088,13 +6095,15 @@ void MenuCommon::RenderHdrOutputSettings(RenderMenuContext& ctx)
                    "brightness and gamma of an SDR monitor. It does not add highlights the game never drew.\n"
                    "Needs Windows HDR turned on for the display. Off by default.\n"
                    "Applies at the next start or resolution / window change.\n"
-                   "Stands aside for games that already output HDR, and with frame generation.");
+                   "Direct3D 12 games only for now. Stands aside for games that already output HDR, and with frame "
+                   "generation.");
 
     SdrToHdr::StatusSettings settings;
     settings.enabled = enabled;
     settings.hdr10 = config->UseHDR10.value_or_default();
     settings.gameNits = config->HdrOutputGameNits.value_or_default();
     settings.configuredPeak = config->HdrOutputPeakNits.value_or_default();
+    settings.nonDxgiApi = State::Instance().swapchainApi == Vulkan;
 
     const auto status = SdrToHdr::Status();
     const auto line = SdrToHdr::StatusLine(status, settings);
@@ -6139,7 +6148,8 @@ void MenuCommon::RenderHdrOutputSettings(RenderMenuContext& ctx)
 
     const std::string compareKey = Keybind::KeyNameFromVirtualKeyCode(config->HdrCompareKey.value_or_default());
     const std::string convertTip = std::string("Off shows the game the way Windows shows an SDR game on an HDR display, "
-                                               "for comparing. Not saved: it is on again at the next start.\n"
+                                               "for comparing. The menu does not save this: it starts as the ini "
+                                               "says (on by default).\n"
                                                "Key to flip it while playing (Input page): ") +
                                    compareKey;
     ShowHelpMarker(convertTip.c_str());
@@ -6150,7 +6160,7 @@ void MenuCommon::RenderHdrOutputSettings(RenderMenuContext& ctx)
         config->HdrOutputGameNits = SdrToHdr::ClampGameNits(gameNits);
 
     ImGui::SameLine();
-    if (ImGui::SmallButton("Reset##hdrgamenits"))
+    if (ImGui::Button("Reset##hdrgamenits"))
         config->HdrOutputGameNits = 203.0f;
 
     ShowHelpMarker("How bright the game's white is. 203 nits is the HDR reference white; raise it in a bright room. "

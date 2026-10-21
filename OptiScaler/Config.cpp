@@ -1114,9 +1114,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (readBool("HDR", "ForceHDR").value_or(false))
             {
                 if (!HdrOutputEnabled.has_value())
+                {
                     HdrOutputEnabled.set_from_config(true);
-
-                LOG_INFO("[HDR] ForceHDR is now 'HDR output' (Enabled=true)");
+                    LOG_INFO("[HDR] ForceHDR is now 'HDR output' (Enabled=true)");
+                }
+                else
+                {
+                    LOG_INFO("[HDR] ForceHDR ignored, Enabled={} is set", HdrOutputEnabled.value());
+                }
             }
 
             HdrOutputConvert.set_from_config(readBool("HDR", "Convert"));
@@ -1126,8 +1131,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             HdrOutputGameNits.set_from_config(readFloat("HDR", "GameNits"));
             HdrOutputDecode.set_from_config(readInt("HDR", "Decode"));
 
-            if (HdrOutputPeakNits.has_value() && HdrOutputPeakNits.value() < 0.0f)
+            // NaN / Inf would pass through the clamps and the pass would draw them: back to the default
+            if (HdrOutputPeakNits.has_value() &&
+                (!std::isfinite(HdrOutputPeakNits.value()) || HdrOutputPeakNits.value() < 0.0f))
                 HdrOutputPeakNits.reset();
+
+            if (HdrOutputGameNits.has_value() && !std::isfinite(HdrOutputGameNits.value()))
+                HdrOutputGameNits.reset();
 
             if (HdrOutputGameNits.has_value())
                 HdrOutputGameNits = std::clamp(HdrOutputGameNits.value(), 80.0f, 1000.0f);

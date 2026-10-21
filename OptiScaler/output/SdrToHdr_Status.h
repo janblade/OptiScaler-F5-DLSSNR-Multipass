@@ -42,6 +42,7 @@ struct StatusSettings
     bool hdr10 = false;         // [HDR] UseHDR10 now
     float gameNits = 203.0f;    // clamped
     float configuredPeak = 0.0f; // [HDR] PeakNits (0 = the display's)
+    bool nonDxgiApi = false;    // the game presents through Vulkan: it never makes a DXGI swap chain of its own
 };
 
 inline const char* AppliesLaterText()
@@ -55,6 +56,14 @@ inline StatusLineResult StatusLine(const StatusSnapshot& status, const StatusSet
 {
     StatusLineResult result;
     const bool didEnabled = status.decided && status.enabledAtDecision;
+
+    // A Vulkan game never makes a swap chain HDR output could decide on: "applies at the next start" would be forever
+    if (settings.enabled && !status.decided && settings.nonDxgiApi)
+    {
+        result.text = "HDR output: not available for Vulkan games yet";
+        result.colour = StatusColour::Amber;
+        return result;
+    }
 
     if (settings.enabled != didEnabled)
     {

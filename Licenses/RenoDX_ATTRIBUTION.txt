@@ -30,6 +30,10 @@ from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
     the whole colour by one factor so only saturation gives way, and is the
     identity when nothing is out of gamut.
 
+The colour composition above is their design. It was reimplemented here with
+different names and comments, which does not make it original work, and it is
+credited as theirs.
+
 HDR output for SDR games (OptiScaler/output/SdrToHdr_*) follows the generic swap chain
 pass of RenoDX's generic add-on, as documented in clshortfuse/renodx@6d563066
 (src/games/generic, src/shaders/draw.hlsl). The method used:
@@ -44,9 +48,6 @@ pass of RenoDX's generic add-on, as documented in clshortfuse/renodx@6d563066
 
 Our code for it is our own implementation of that documented method, with its own
 structure, names and tests; it is credited here because the method is theirs.
-
-This is their design. It was reimplemented here with different names and
-comments, which does not make it original work, and it is credited as theirs.
 
 What is not derived from it
 ---------------------------

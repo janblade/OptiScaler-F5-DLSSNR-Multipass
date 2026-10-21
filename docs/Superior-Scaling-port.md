@@ -47,7 +47,10 @@ No K/headroom analysis is introduced. Native Vulkan is outside the original v59 
 Depth and MV use independent active rectangles and offsets. Before the nonlinear endpoint transform, game MV units are
 converted into the current NR colour frame's pixels using its native extent divided by the declared render/output MV
 reference (selected by MVLowRes). Missing reference dimensions fall back to the valid motion region, never its allocation
-or the depth dimensions. This applies on D3D12 and Vulkan, before/after SR, at 100% and reduced NR resolution.
+or the depth dimensions. **This additional unit conversion is enabled only with Superior Scaling, on D3D12/bridges.**
+Without Superior, D3D12 and native Vulkan keep janblade's original raw MV scale and original packer. The packer's existing
+endpoint transform remains part of original Compress behavior; it has not been disabled. Superior frequency gains and
+inter-pass shaping are likewise confined to Superior. The native Vulkan off-Superior evaluation body matches upstream.
 Packed motion is already in packed pixels; NR receives scale 1. Depth stays point sampled on the matching warped grid.
 
 Superior's ordinary raster remains exact, while the actual packed NR raster is aligned to 16 pixels. Normal Superior
@@ -121,6 +124,54 @@ Common colour/guide packing is prepared outside timestamps. The new feature has 
 inference saving is unmeasured. These figures are component results and do not establish total in-game performance or
 visual parity. [Raw samples](validation/superior-packed-route-timing.csv) and
 [statistics/metadata](validation/superior-packed-route-timing.json) preserve all samples and variability.
+
+### Superior isolation, residual flags and lossless host optimization
+
+The model-resolution tooltip now explains that a few percentage points higher or lower can give a better match to native NR.
+The residual DLSS feature explicitly requests **IsHDR + AutoExposure + MVLowRes** with unit exposure and A/K DLAA; these
+flags are independent of the game's exposure settings and are passed to the private parameter object through the direct
+NGX proxy entry point. No game/NR exposure flags or options are changed.
+
+The motion audit covers raw versus matched motion subrects, pre/post-SR, low/high-resolution vectors, independent/clipped
+guide rectangles, missing reference dimensions, packed endpoint transforms, Hold and changes of layout. NR uses units
+of the motion subrect it actually reads (the matched grid below native; otherwise the game's valid motion region).
+Private DLSS receives work-grid pixel vectors, or unit-scale packed vectors after the nonlinear transform. If render/output
+reference metadata is absent, Superior now consistently falls back to the original valid motion region. Other enlargement
+modes retain their original guide conversion, model grid, gains-free composition and resamplers.
+
+Packed host resolve now samples/decode the initial proxy/model pair only for diagnostics. The normal path rebuilds these
+values later from the native guide and guided residual, so those initial reads were unused. All guided taps, weights,
+Low64, FP16/FP32 storage and frequency coefficients are retained. Debug views still execute their original samples.
+Only packed HDR/SDR PSOs use the optimization: applying it to ordinary grids regressed the synthetic fixture and was
+rejected. The four ordinary/raw host PSOs and the default janblade, colour-packing and guide shader binaries remain unchanged.
+
+Validation: 2304 ordinary/raw host comparisons plus 3072 packed comparisons, bit-exact against the frozen 67318a5d host
+source with an independent warp/estimator reference. Coverage includes HDR/SDR debug views and clean output. CPU checks
+verify the off-Superior guide constants are byte-identical to original constants; GPU tests additionally cover legacy
+low/high-resolution vectors at native/reduced scale. D3D12 spatial/raw-low/carrier tests and native Vulkan smoke pass.
+These fixtures validate arithmetic and resource layouts; they do not run proprietary NGX inference or establish full-game parity.
+
+RTX 4090 / 616.56, synthetic 3840x2160, Balanced compression, Small/Standard shaping, Structure=Intensity=1, debug off.
+Resident final-composition timestamps, 8 ABBA/BAAB blocks, separate warm-up, 640 samples per variant/profile/scale:
+
+| Profile | NR slider | Before ms | After ms | Paired delta ms | Before / after stddev ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Packed SDR | 65% | 0.342400 | 0.335616 | -0.005760 | 0.045816 / 0.045176 |
+| Packed SDR | 100% | 0.363648 | 0.346880 | -0.013952 | 0.043253 / 0.040590 |
+| Packed HDR 0 | 65% | 0.320768 | 0.298240 | -0.021504 | 0.045300 / 0.038454 |
+| Packed HDR 0 | 100% | 0.339456 | 0.317184 | -0.021824 | 0.091630 / 0.088421 |
+| Ordinary SDR control | 65% | 0.299904 | 0.299904 | -0.000064 | 0.040056 / 0.039698 |
+| Ordinary HDR 0 control | 65% | 0.268544 | 0.270336 | -0.000576 | 0.074417 / 0.078824 |
+
+All eight paired block medians are negative for each packed profile. Ordinary controls use identical bytecode and show
+only sampling variability. These are **final-shader-only** timings, excluding NR/DLSS inference and other pipeline stages.
+[Raw samples](validation/superior-host-opt-timing.csv) and [metadata/spread](validation/superior-host-opt-timing.json)
+retain all samples. Full in-game savings remain unmeasured.
+
+Audit of the other Superior stages: fixed Area and colour packing, cached inter-pass Low36/Cross5, carrier preparation,
+Low64 and private DLSS retain their prior algorithms. Removing the carrier decode store or approximating filtered samples
+could change FP16 rounding/interpolation and was not adopted as a quality-preserving optimization. No extra per-frame
+diagnostics, GPU readbacks, textures, dispatches or synchronization are introduced by this change.
 
 ### Cost of the spatial correction before native temporal stabilization
 
@@ -228,6 +279,7 @@ From Windows with MSVC x64 tools and Python:
 ./tools/test_superior_port.ps1 -GpuSpatialTiming
 ./tools/test_superior_port.ps1 -GpuNativeTemporalTiming
 ./tools/test_superior_port.ps1 -GpuPackedTiming
+./tools/test_superior_port.ps1 -GpuHostOptTiming
 ./tools/test_superior_port.ps1 -GpuQuality -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ./tools/test_superior_port.ps1 -GpuTiming -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ```

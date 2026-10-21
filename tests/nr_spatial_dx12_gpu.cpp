@@ -489,7 +489,7 @@ void RunColour(Gpu& gpu, const Sp::Settings& settings, float scale, const char* 
 
 void RunGuides(Gpu& gpu, const Sp::Settings& settings, float scale, const char* label,
                DlssNr::GuideExtent depthSize = { 320, 192 }, DlssNr::GuideExtent motionSize = { 320, 192 },
-               DlssNr::GuideExtent motionReference = {}, bool gridOrdinary = true)
+               DlssNr::GuideExtent motionReference = {}, bool gridOrdinary = true, bool superior = true)
 {
     constexpr UINT W = 320, H = 192;
     // The guides live in larger allocations, and the depth subrect starts off the origin.
@@ -531,8 +531,8 @@ void RunGuides(Gpu& gpu, const Sp::Settings& settings, float scale, const char* 
     auto packedMotion = gpu.Texture(DXGI_FORMAT_R32G32_FLOAT, layout.modelW, layout.modelH, true);
     const DlssNr::GuideRegions regions { { depthX, depthY, depthSize.width, depthSize.height },
                                          { motionX, motionY, motionSize.width, motionSize.height } };
-    gpu.Dispatch(Sp::MakeGuideConstants(layout, regions, motionReference, mvScaleX, mvScaleY), colourStandIn.Get(),
-                 depthTex.Get(), motionTex.Get(), packedDepth.Get(), packedMotion.Get());
+    gpu.Dispatch(Sp::MakeEnlargementGuideConstants(superior, layout, regions, motionReference, mvScaleX, mvScaleY),
+                 colourStandIn.Get(), depthTex.Get(), motionTex.Get(), packedDepth.Get(), packedMotion.Get());
 
     const auto depthBytes = gpu.Read(packedDepth.Get(), 4);
     const auto motionBytes = gpu.Read(packedMotion.Get(), 8);
@@ -553,8 +553,8 @@ void RunGuides(Gpu& gpu, const Sp::Settings& settings, float scale, const char* 
             const auto m = Motion(sx, sy);
             const float refW = float(motionReference.width ? motionReference.width : motionSize.width);
             const float refH = float(motionReference.height ? motionReference.height : motionSize.height);
-            const float mx = m.first * mvScaleX * (float(W) / refW);
-            const float my = m.second * mvScaleY * (float(H) / refH);
+            const float mx = m.first * mvScaleX * (superior ? float(W) / refW : 1.f);
+            const float my = m.second * mvScaleY * (superior ? float(H) / refH : 1.f);
             // The half-float rounding of the source, and one texel of choice in where the sample landed.
             const float ex = pw::Pack(nx + mx, layout.warp.x) - pw::Pack(nx, layout.warp.x);
             const float ey = pw::Pack(ny + my, layout.warp.y) - pw::Pack(ny, layout.warp.y);
@@ -715,6 +715,10 @@ int main()
               false);
     RunGuides(gpu, lopsided, .59f, "independent depth/MV Superior 59%", { 160, 96 }, { 640, 384 }, { 640, 384 }, false);
     RunGuides(gpu, defaults, 1.0f, "clipped MV reference 100%", { 160, 96 }, { 156, 92 }, { 160, 96 });
+    RunGuides(gpu, defaults, 1.0f, "legacy low MV 100% original units", { 160, 96 }, { 160, 96 }, { 160, 96 }, true,
+              false);
+    RunGuides(gpu, lopsided, .65f, "legacy high MV 65% original units", { 160, 96 }, { 640, 384 }, { 640, 384 }, true,
+              false);
     RunReplace(gpu, defaults, 1.0f, "replace default 100%");
     RunReplace(gpu, defaults, 0.8f, "replace default 80%");
     RunReplace(gpu, defaults, 1.5f, "replace default 150%");

@@ -89,6 +89,9 @@ int main() {
         require(MotionScale(1920,2496,1920)==2496); // P65 of 3840, matched guides
         require(MotionScale(3840,2496,3840)==2496); // high-resolution motion texture
         require(MotionScale(-1,1274,1440)==-1*(1274.f/1440.f));
+        require(MotionScale(1, 1274, 0, 1440) ==
+                1274.f / 1440.f); // missing declared reference uses valid source, not allocation/depth
+        require(MotionScale(1920, 2496, 0, 1920) == 2496);
         require(MotionScale(1,1274,0)==1); // unspecified game reference
         for(int i=-5;i<30;++i)require(Preset(i)==(i==11?11:1));
         // Native-scale fallback is tested by the host integration contract.

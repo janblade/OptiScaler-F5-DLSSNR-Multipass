@@ -31,7 +31,13 @@ int main()
                                                                 { 3840, 2160 }, true, 16, 8, 64, 32);
                 for (auto reference : { DlssNr::GuideExtent { 1920, 1080 }, { 3840, 2160 }, { 0, 0 } })
                 {
-                    const auto constants = Sp::MakeGuideConstants(layout, guides, reference, 1920, -1080);
+                    const auto constants =
+                        Sp::MakeEnlargementGuideConstants(true, layout, guides, reference, 1920, -1080);
+                    const auto legacy =
+                        Sp::MakeEnlargementGuideConstants(false, layout, guides, reference, 1920, -1080);
+                    const auto original = Sp::MakeConstants(layout, 101, guides, 1920, -1080);
+                    require(std::memcmp(&legacy, &original, sizeof(legacy)) == 0);
+                    require(legacy.motionScale[0] == 1920 && legacy.motionScale[1] == -1080);
                     const auto rw = reference.width ? reference.width : guides.motion.width;
                     const auto rh = reference.height ? reference.height : guides.motion.height;
                     require(std::abs(constants.motionScale[0] - 1920.f * size.width / rw) < .001f);

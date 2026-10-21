@@ -53,7 +53,7 @@ int main()
                                 h.Width = dims.first;
                                 h.Height = dims.second;
                                 h.WhitePoint = .4f;
-                                h.ApplyModel = 1;
+                                h.ApplyModel = scenario == 4 ? 0u : 1u;
                                 h.TransferStrength = 1;
                                 h.ColourStrength = 1;
                                 h.MaxRatio = 2;
@@ -63,7 +63,7 @@ int main()
                                 h.ExposureTrim = 1.2f;
                                 h.DebugView = scenario >= 4 ? scenario - 4 : 0;
                                 h.InputEncoding = scenario == 4 ? 3 : scenario == 5 ? 4 : 0;
-                                h.Passthrough = scenario == 0;
+                                h.Passthrough = scenario == 0 || (scenario >= 4 && curve % 2 == 0);
                                 h.OriginalIsGameColour = 1;
                                 h.UseGameExposure = scenario == 1;
                                 h.UseExposureWhitePoint = scenario == 2;

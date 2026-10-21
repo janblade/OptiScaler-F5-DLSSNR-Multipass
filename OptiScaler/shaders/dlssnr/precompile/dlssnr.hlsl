@@ -1673,6 +1673,12 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
 #if defined(DLSSNR_SUPERIOR_HOST_PACKED)
+    // Packed Superior rebuilds both at native resolution below. Only diagnostics need these initial samples.
+    float3 proxy = 0.0, model = 0.0;
+    [branch] if (gDebugView != 0u)
+    {
+#endif
+#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
     const float2 modelUv = SuperiorPackedUv(cmpUv);
 #else
     const float2 modelUv = cmpUv;
@@ -1685,8 +1691,14 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
 #endif
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
+#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
+    proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
+    model = gPassthrough != 0 ? modelSample.rgb : SrgbToLinear(modelSample.rgb);
+    }
+#else
     float3 proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
     float3 model = gPassthrough != 0 ? modelSample.rgb : SrgbToLinear(modelSample.rgb);
+#endif
 
     // The model's own answer, kept before the matched-residual block below can rewrite `model`, so the
     // replace decode uses what the model returned rather than the residual reconstruction.

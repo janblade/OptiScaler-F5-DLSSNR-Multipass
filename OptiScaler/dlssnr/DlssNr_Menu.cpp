@@ -3240,8 +3240,12 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         // the layout's own sliders).
     }
 
-    HelpMarker("Size NR works at, relative to its input. Lower: faster, less fine detail. Above 100%: costs more. "
-               "The game's resolution is unchanged.");
+    HelpMarker(
+        "Size NR works at, relative to its input. Lower: faster, less fine detail. Above 100%: costs more. "
+        "The game's resolution is unchanged.\n\n"
+        "At some percentages, the result may look unusual or differ significantly from native-resolution NR. "
+        "If this happens, try adjusting the resolution a few percentage points at a time, either higher or lower, "
+        "to find a setting with better image quality and a closer match to native NR.");
 
     {
         unsigned int modelWidth = 0;

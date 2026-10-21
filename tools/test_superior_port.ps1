@@ -6,7 +6,8 @@ param(
     [switch]$GpuSpatial,
     [switch]$GpuSpatialTiming,
     [switch]$GpuNativeTemporalTiming,
-    [switch]$GpuPackedTiming
+    [switch]$GpuPackedTiming,
+    [switch]$GpuHostOptTiming
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -34,6 +35,11 @@ try {
         $names += 'spatial_timing'
     }
     if ($GpuPackedTiming) { $names += 'packed_stage_timing' }
+    if ($GpuHostOptTiming) {
+        python tools/prepare_superior_host_tests.py --host-opt-baseline
+        if ($LASTEXITCODE -ne 0) { throw 'Host baseline missing (fetch full history)' }
+        $names += 'host_opt_timing'
+    }
     if ($GpuHost) {
         python tools/prepare_superior_host_tests.py
         if ($LASTEXITCODE -ne 0) { throw 'Host shader reference compilation failed' }
@@ -73,6 +79,10 @@ try {
     if ($GpuPackedTiming) {
         & "$out/packed_stage_timing.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Packed route GPU timing failed' }
+    }
+    if ($GpuHostOptTiming) {
+        & "$out/host_opt_timing.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Host optimization GPU timing failed' }
     }
     $candidate = 'OptiScaler/shaders/dlssnr/superior/precompile'
     if ($GpuQuality -or $GpuTiming) {

@@ -1,0 +1,135 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "driver": "616.56",
+  "native": [
+    3840,
+    2160
+  ],
+  "baseline": "67318a5dca778e4f33a6f302f07974580ae01ac1",
+  "settings": "Synthetic resident final composition, ordinary P65 control and Balanced packed P65/P100; NR B Small/Standard coefficients, Structure=Intensity=1; debug off",
+  "method": "8 ABBA/BAAB blocks, 8 warm-up quartets/block, 40 measured quartets/block, 4 repetitions/timestamp; 640 samples per variant/profile/scale; no sample filtering",
+  "formats": "FP16 proxy/residual/low/output; FP32 original and warp metadata",
+  "scope": "Only final host resolve; excludes NR/private DLSS inference, colour/guide pack/unpack, carrier preparation/decode, Low64 preparation, CPU setup and full game. Ordinary control PSOs are byte-identical. Identical inputs and shaping coefficients for each A/B pair.",
+  "results": [
+    {
+      "stage": "ordinary_hdr0",
+      "percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.268544,
+      "candidate_median_ms": 0.270336,
+      "paired_median_delta_ms": -0.0005759999999999932,
+      "base_stdev_ms": 0.07441744834927426,
+      "candidate_stdev_ms": 0.07882416019088984,
+      "paired_block_medians_ms": [
+        -0.0023040000000000282,
+        0.002367999999999995,
+        -0.001920000000000005,
+        0.0017919999999999742,
+        -0.0016640000000000266,
+        0.001472000000000001,
+        -0.002176000000000025,
+        0.001472000000000001
+      ]
+    },
+    {
+      "stage": "ordinary_sdr",
+      "percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.299904,
+      "candidate_median_ms": 0.299904,
+      "paired_median_delta_ms": -6.399999999998074e-05,
+      "base_stdev_ms": 0.04005551164584771,
+      "candidate_stdev_ms": 0.039697548416051553,
+      "paired_block_medians_ms": [
+        -0.0024959999999999982,
+        0.0015999999999999903,
+        -0.0017280000000000073,
+        0.001472000000000001,
+        -0.0015360000000000096,
+        0.0011520000000000419,
+        -0.0012799999999999478,
+        0.0015360000000000096
+      ]
+    },
+    {
+      "stage": "packed_hdr0",
+      "percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.320768,
+      "candidate_median_ms": 0.29824,
+      "paired_median_delta_ms": -0.021504000000000023,
+      "base_stdev_ms": 0.04529985501810169,
+      "candidate_stdev_ms": 0.038454020727188086,
+      "paired_block_medians_ms": [
+        -0.007039999999999991,
+        -0.02080000000000004,
+        -0.01632,
+        -0.023616000000000026,
+        -0.02816000000000002,
+        -0.026368000000000058,
+        -0.016192000000000012,
+        -0.025088
+      ]
+    },
+    {
+      "stage": "packed_hdr0",
+      "percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.339456,
+      "candidate_median_ms": 0.317184,
+      "paired_median_delta_ms": -0.02182400000000001,
+      "base_stdev_ms": 0.09162964700176252,
+      "candidate_stdev_ms": 0.08842050318484768,
+      "paired_block_medians_ms": [
+        -0.019967999999999986,
+        -0.020159999999999983,
+        -0.021439999999999987,
+        -0.026111999999999996,
+        -0.02745599999999998,
+        -0.018687999999999982,
+        -0.023871999999999977,
+        -0.023104000000000013
+      ]
+    },
+    {
+      "stage": "packed_sdr",
+      "percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.34240000000000004,
+      "candidate_median_ms": 0.335616,
+      "paired_median_delta_ms": -0.005759999999999987,
+      "base_stdev_ms": 0.045815850446408825,
+      "candidate_stdev_ms": 0.04517551004572145,
+      "paired_block_medians_ms": [
+        -0.004096000000000016,
+        -0.0042240000000000055,
+        -0.0062720000000000276,
+        -0.007552000000000003,
+        -0.008511999999999992,
+        -0.0033279999999999976,
+        -0.008127999999999996,
+        -0.005247999999999919
+      ]
+    },
+    {
+      "stage": "packed_sdr",
+      "percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.36364799999999997,
+      "candidate_median_ms": 0.34688,
+      "paired_median_delta_ms": -0.01395200000000002,
+      "base_stdev_ms": 0.04325300842679125,
+      "candidate_stdev_ms": 0.04059034581191095,
+      "paired_block_medians_ms": [
+        -0.014399999999999968,
+        -0.012415999999999983,
+        -0.012032000000000015,
+        -0.014528000000000013,
+        -0.01708800000000002,
+        -0.011391999999999985,
+        -0.017408000000000035,
+        -0.013440000000000007
+      ]
+    }
+  ]
+}

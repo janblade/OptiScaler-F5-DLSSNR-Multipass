@@ -435,4 +435,12 @@ inline Constants MakeGuideConstants(const Layout& layout, const GuideRegions& re
     return MakeConstants(layout, 101, regions, x, y);
 }
 
+// Explicit opt-in: other Enlargement modes retain janblade's original raw-scale constants.
+inline Constants MakeEnlargementGuideConstants(bool superior, const Layout& layout, const GuideRegions& regions,
+                                               GuideExtent reference, float mvX, float mvY)
+{
+    return superior ? MakeGuideConstants(layout, regions, reference, mvX, mvY)
+                    : MakeConstants(layout, 101, regions, mvX, mvY);
+}
+
 } // namespace DlssNr::Spatial

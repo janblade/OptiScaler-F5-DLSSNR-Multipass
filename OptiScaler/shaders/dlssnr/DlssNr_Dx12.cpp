@@ -4530,8 +4530,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             frame.MotionVectorsLowResolution
                 ? DlssNr::GuideExtent { frame.RenderSubrectWidth, frame.RenderSubrectHeight }
                 : DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
-        auto guideConstants =
-            DlssNr::Spatial::MakeGuideConstants(spatialLayout, guides, motionReference, frame.MvScaleX, frame.MvScaleY);
+        auto guideConstants = DlssNr::Spatial::MakeEnlargementGuideConstants(
+            superior, spatialLayout, guides, motionReference, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
 
         if (!guides.depth.valid())
         {
@@ -5033,12 +5033,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     if (superior && !spatial)
     {
-        evalMvScaleX = DlssNr::SuperiorScaling::MotionScale(frame.MvScaleX, evalMotionW,
-                                                            frame.MotionVectorsLowResolution ? frame.RenderSubrectWidth
-                                                                                             : frame.OutputWidth);
-        evalMvScaleY = DlssNr::SuperiorScaling::MotionScale(frame.MvScaleY, evalMotionH,
-                                                            frame.MotionVectorsLowResolution ? frame.RenderSubrectHeight
-                                                                                             : frame.OutputHeight);
+        // NR reads displacement in pixels of its motion subrect: the matched grid below native,
+        // the game's valid motion region otherwise. Allocation/depth dimensions never set these units.
+        evalMvScaleX = DlssNr::SuperiorScaling::MotionScale(
+            frame.MvScaleX, evalMotionW,
+            frame.MotionVectorsLowResolution ? frame.RenderSubrectWidth : frame.OutputWidth, guides.motion.width);
+        evalMvScaleY = DlssNr::SuperiorScaling::MotionScale(
+            frame.MvScaleY, evalMotionH,
+            frame.MotionVectorsLowResolution ? frame.RenderSubrectHeight : frame.OutputHeight, guides.motion.height);
     }
     const bool superiorReset = g_nr.reset || frame.Reset;
 

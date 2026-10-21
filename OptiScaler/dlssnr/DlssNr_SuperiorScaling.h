@@ -56,8 +56,11 @@ inline bool NeedsTemporal(unsigned nativeW, unsigned nativeH, unsigned ordinaryW
     return ordinaryW < nativeW || ordinaryH < nativeH ||
            (compressed && ordinaryW == nativeW && ordinaryH == nativeH && (modelW < nativeW || modelH < nativeH));
 }
-inline float MotionScale(float gameScale, unsigned motionExtent, unsigned referenceExtent)
+// Missing render/output metadata falls back to the original valid motion region, before any resample.
+inline float MotionScale(float gameScale, unsigned motionExtent, unsigned referenceExtent,
+                         unsigned validSourceExtent = 0)
 {
+    referenceExtent = referenceExtent ? referenceExtent : validSourceExtent;
     return referenceExtent ? gameScale * (float(motionExtent) / float(referenceExtent)) : gameScale;
 }
 

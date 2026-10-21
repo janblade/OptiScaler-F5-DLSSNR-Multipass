@@ -2217,17 +2217,13 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         const DlssNrSpatial_Vk::Read colourReads[3] = { { g_vk.proxy.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                                                          {}, {} };
         const DlssNrSpatial_Vk::Read guideReads[3] = { {}, depthRead, motionRead };
-        const DlssNr::GuideExtent motionReference = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0
-                                                ? DlssNr::GuideExtent { renderWidth, renderHeight }
-                                                : DlssNr::GuideExtent { outputWidth, outputHeight };
-        const auto guideConstants =
-            DlssNr::Spatial::MakeGuideConstants(spatialLayout, guides, motionReference, gameMvX, gameMvY);
 
         const bool packed =
             depthRead.view != VK_NULL_HANDLE &&
             EdgeCompressionVk::pass->Dispatch(cmdBuffer, MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f),
                                               colourReads, EdgeCompressionVk::color.view, VK_NULL_HANDLE) &&
-            EdgeCompressionVk::pass->Dispatch(cmdBuffer, guideConstants, guideReads, EdgeCompressionVk::depth.view,
+            EdgeCompressionVk::pass->Dispatch(cmdBuffer, MakeConstants(spatialLayout, 101, guides, gameMvX, gameMvY),
+                                              guideReads, EdgeCompressionVk::depth.view,
                                               EdgeCompressionVk::motion.view);
 
         if (!packed)

@@ -15,8 +15,18 @@ if sys.argv[1:] == ['--timing-baseline']:
         data = subprocess.check_output(['git', 'show', '24a2d7bf:OptiScaler/shaders/dlssnr/superior/precompile/' + name], cwd=root)
         (baseline / name).write_bytes(data)
     raise SystemExit(0)
+# Retain the exact shipped pre-optimization PSOs for timing and direct quality checks.
+baseline = root / 'artifacts/validation/pre-host-opt'
+baseline.mkdir(parents=True, exist_ok=True)
+for variant in ('hdr', 'sdr', 'raw_hdr', 'raw_sdr', 'packed_hdr', 'packed_sdr'):
+    name = 'host_resolve_' + variant + '_Shader.cso'
+    data = subprocess.check_output(['git', 'show', '67318a5d:OptiScaler/shaders/dlssnr/superior/precompile/' + name], cwd=root)
+    (baseline / name).write_bytes(data)
+if sys.argv[1:] == ['--host-opt-baseline']:
+    raise SystemExit(0)
 dxc = root / 'OptiScaler/shaders/shader_tools/dxc.exe'
-source = (host / 'dlssnr.hlsl').read_text(encoding='utf-8')
+# Freeze the pre-optimization host source as well as the independent estimator.
+source = subprocess.check_output(['git', 'show', '67318a5d:OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl'], cwd=root).decode('utf-8')
 frozen = (host / '../superior/precompile/dlssnr.hlsl').read_text(encoding='utf-8')
 begin = frozen.index('float3 P100GuidedResidualAt(')
 end = frozen.index('\n\n#if !defined(VK_MODE)', begin)

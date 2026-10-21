@@ -13,7 +13,7 @@
 //
 //   vcvars64, then from the repo root:
 //   cl /std:c++20 /EHsc /O2 tests\sdr_to_hdr_dx11_gpu.cpp OptiScaler\output\SdrToHdr_ProxyDx11.cpp OptiScaler\output\SdrToHdr_Dx11.cpp
-//      OptiScaler\output\SdrToHdr_ProxyBase.cpp d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+//      OptiScaler\output\SdrToHdr_ProxyBase.cpp OptiScaler\output\SdrToHdr_Fullscreen.cpp d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -709,7 +709,16 @@ void ProxyStillBound(Gpu& g, SdrToHdr::Dx11Pass& pass)
 }
 
 // ---- a real windowed flip chain ----
-LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l) { return DefWindowProcW(window, message, w, l); }
+// A test can hook the window procedure (like a game answering window messages with calls back into the swap chain)
+void (*g_windowHook)(HWND window, UINT message) = nullptr;
+
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l)
+{
+    if (g_windowHook != nullptr)
+        g_windowHook(window, message);
+
+    return DefWindowProcW(window, message, w, l);
+}
 
 HWND MakeWindow()
 {
@@ -1381,6 +1390,122 @@ void PumpMessages()
     }
 }
 
+// ---- the borderless stand-in's edge cases (re-review): re-entrancy, no Enter, empty rectangle, minimised / maximised ----
+SdrToHdr::BorderlessFullscreen* g_reentrantTarget = nullptr;
+int g_reentrantCalls = 0;
+bool g_reentrantResult = false;
+
+void ReentrantLeaveHook(HWND window, UINT message)
+{
+    // The first style / position message of the Enter: the game answers with SetFullscreenState(FALSE)
+    if (g_reentrantTarget != nullptr && g_reentrantCalls == 0 &&
+        (message == WM_STYLECHANGING || message == WM_STYLECHANGED || message == WM_WINDOWPOSCHANGING))
+    {
+        ++g_reentrantCalls;
+        g_reentrantResult = g_reentrantTarget->Leave(window);
+    }
+}
+
+void BorderlessEdgeCases()
+{
+    const RECT monitor { 0, 0, 800, 600 };
+
+    // Leave without Enter: nothing happens
+    {
+        HWND window = MakeWindow();
+        ShowWindow(window, SW_SHOW);
+        PumpMessages();
+        const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+        RECT before {};
+        GetWindowRect(window, &before);
+        SdrToHdr::BorderlessFullscreen borderless;
+        RECT after {};
+        GetWindowRect(window, &after);
+        Check(borderless.Leave(window) && !borderless.Active() && GetWindowLongPtrW(window, GWL_STYLE) == style &&
+                  after.left == before.left && after.right == before.right && after.bottom == before.bottom,
+              "borderless full screen: Leave without Enter changes nothing");
+        DestroyWindow(window);
+    }
+
+    // An empty monitor rectangle (the monitor query failed): refused, the window is left alone
+    {
+        HWND window = MakeWindow();
+        ShowWindow(window, SW_SHOW);
+        PumpMessages();
+        const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+        RECT before {};
+        GetWindowRect(window, &before);
+        SdrToHdr::BorderlessFullscreen borderless;
+        const RECT empty {};
+        const RECT inverted { 10, 10, 5, 5 };
+        const bool refused = !borderless.Enter(window, empty) && !borderless.Enter(window, inverted) && !borderless.Enter(nullptr, monitor);
+        RECT after {};
+        GetWindowRect(window, &after);
+        Check(refused && !borderless.Active() && GetWindowLongPtrW(window, GWL_STYLE) == style && after.right - after.left == before.right - before.left &&
+                  after.bottom - after.top == before.bottom - before.top,
+              "borderless full screen: an empty rectangle (or no window) is refused and nothing changes");
+        DestroyWindow(window);
+    }
+
+    // A SetFullscreenState(FALSE) from inside Enter's window messages does nothing; Enter finishes whole
+    {
+        HWND window = MakeWindow();
+        ShowWindow(window, SW_SHOW);
+        PumpMessages();
+        SdrToHdr::BorderlessFullscreen borderless;
+        g_reentrantTarget = &borderless;
+        g_reentrantCalls = 0;
+        g_reentrantResult = false;
+        g_windowHook = ReentrantLeaveHook;
+        const bool entered = borderless.Enter(window, monitor);
+        g_windowHook = nullptr;
+        g_reentrantTarget = nullptr;
+        RECT now {};
+        GetWindowRect(window, &now);
+        Check(g_reentrantCalls == 1 && g_reentrantResult, "borderless full screen: the window procedure did call Leave from inside Enter, and it returned");
+        Check(entered && borderless.Active() && (GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION) == 0 && now.right - now.left == 800 &&
+                  now.bottom - now.top == 600,
+              "borderless full screen: a re-entrant Leave during Enter does nothing, Enter finishes as a popup over the monitor");
+        Check(borderless.Leave(window) && !borderless.Active() && (GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION) != 0,
+              "borderless full screen: the later Leave restores the window");
+        DestroyWindow(window);
+    }
+
+    // Minimised and maximised windows come back through the placement
+    for (int mode = 0; mode < 2; ++mode)
+    {
+        const bool minimised = mode == 0;
+        HWND window = MakeWindow();
+        ShowWindow(window, SW_SHOW);
+        PumpMessages();
+        WINDOWPLACEMENT normal {};
+        normal.length = sizeof(normal);
+        GetWindowPlacement(window, &normal);
+        ShowWindow(window, minimised ? SW_MINIMIZE : SW_MAXIMIZE);
+        PumpMessages();
+
+        SdrToHdr::BorderlessFullscreen borderless;
+        const bool entered = borderless.Enter(window, monitor);
+        RECT now {};
+        GetWindowRect(window, &now);
+        Check(entered && now.left == 0 && now.top == 0 && now.right == 800 && now.bottom == 600 && !IsIconic(window),
+              minimised ? "borderless full screen: a minimised window is shown over the monitor" : "borderless full screen: a maximised window is shown over the monitor");
+
+        borderless.Leave(window);
+        PumpMessages();
+        WINDOWPLACEMENT back {};
+        back.length = sizeof(back);
+        GetWindowPlacement(window, &back);
+        const bool state = minimised ? IsIconic(window) != FALSE : IsZoomed(window) != FALSE;
+        const bool rect = back.rcNormalPosition.left == normal.rcNormalPosition.left && back.rcNormalPosition.top == normal.rcNormalPosition.top &&
+                          back.rcNormalPosition.right == normal.rcNormalPosition.right && back.rcNormalPosition.bottom == normal.rcNormalPosition.bottom;
+        Check(state && rect,
+              minimised ? "borderless full screen: Leave brings a minimised window back minimised, normal rectangle intact (not -32000)"
+                        : "borderless full screen: Leave brings a maximised window back maximised, normal rectangle intact");
+        DestroyWindow(window);
+    }
+}
+
 void FullscreenFacts(Gpu& g, bool warp)
 {
     for (int upgraded = 0; upgraded < 2; ++upgraded)
@@ -1492,6 +1617,8 @@ void FullscreenFacts(Gpu& g, bool warp)
         real.Reset();
         DestroyWindow(window);
     }
+
+    BorderlessEdgeCases();
 }
 
 int main(int argc, char** argv)

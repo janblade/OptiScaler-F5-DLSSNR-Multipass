@@ -448,14 +448,19 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
         if (o_FGSCResizeBuffers1 != nullptr)
             DetourAttach(&(PVOID&) o_FGSCResizeBuffers1, hkResizeBuffers1);
 
-        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+        // What the game is told about full screen (hkGetFullscreenState / hkGetFullscreenDesc change nothing unless the chain is kept
+        // borderless: FGXeFGForceBorderless, or HDR output's windowed chain, FGHooks::KeepBorderless)
+        if (FgAnswersFullscreenForGame(State::Instance().activeFgOutput))
         {
             if (o_FGSCGetFullscreenState != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenState, hkGetFullscreenState);
 
             if (o_FGSCGetFullscreenDesc != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenDesc, hkGetFullscreenDesc);
+        }
 
+        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+        {
             if ((Config::Instance()->SimulateWaitableObject.value_or_default() ||
                  (State::Instance().gameEngine == GameEngineType::Unity &&
                   State::Instance().activeFgOutput == FGOutput::XeFG)) &&

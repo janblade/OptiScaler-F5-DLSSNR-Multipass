@@ -146,6 +146,9 @@ int main()
                   FgBackendOf(FGOutput::DLSSG) == FgBackend::Dlssg && FgBackendOf(FGOutput::NoFG) == FgBackend::None,
               "FgBackendOf: every output");
         Check(FgBackendOf((FGOutput) 99) == FgBackend::None, "FgBackendOf: an unknown output is none");
+        Check(FgAnswersFullscreenForGame(FGOutput::XeFG) && FgAnswersFullscreenForGame(FGOutput::FSRFG) &&
+                  !FgAnswersFullscreenForGame(FGOutput::DLSSG) && !FgAnswersFullscreenForGame(FGOutput::NoFG),
+              "the game is told full screen for XeFG and FSR FG chains kept borderless");
     }
 
     // The frame generation library's exclusive full screen request: an HDR chain is made windowed, the fullscreen desc is not passed

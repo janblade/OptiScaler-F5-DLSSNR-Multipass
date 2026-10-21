@@ -11,3 +11,8 @@ enum class FGOutput : uint32_t
     DLSSG,
     XeFG,
 };
+
+// The outputs whose game-facing swap chain gets the full screen answers of FGXeFGForceBorderless (FGHooks::hkGetFullscreenState /
+// hkGetFullscreenDesc): the game is told full screen while the chain is windowed. XeFG's chain forwards to the real chain
+// or answers itself; FSR FG's (FrameInterpolationSwapChainDX12) forwards both calls to the real chain, which is windowed.
+inline bool FgAnswersFullscreenForGame(FGOutput output) { return output == FGOutput::XeFG || output == FGOutput::FSRFG; }

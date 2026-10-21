@@ -429,7 +429,7 @@ Shows a game that renders SDR correctly on an HDR display. The swap chain is mad
 
 Off by default. Turn it on from the in-game menu (Image page, "HDR output") or with `Enabled=true`. It applies at the next start or resolution / window change, and Windows HDR must be on for the display.
 
-It stands aside, and logs why, when the game already outputs HDR (a 16-bit float or 10-bit swap chain), Windows HDR is off, the swap chain is not flip model (a Direct3D 11 game that asks for the older bitblt swap effect, or a multisampled swap chain), frame generation or Streamline DLSS-G owns the swap chain, or the game runs on dxvk (Vulkan). It works for Direct3D 11 and Direct3D 12 games; not Vulkan, and not with frame generation yet.
+It stands aside, and logs why, when the game already outputs HDR (a 16-bit float or 10-bit swap chain), Windows HDR is off, the game uses exclusive full screen with an older (bitblt) swap chain type (switch it to borderless or windowed), the swap chain is multisampled, frame generation or Streamline DLSS-G owns the swap chain, or the game runs on dxvk (Vulkan). Older swap chain types are made flip model automatically while HDR output is on (windowed or borderless; V-Sync and tearing are not touched), and the game keeps being told what it asked for. It works for Direct3D 11 and Direct3D 12 games; not Vulkan, and not with frame generation yet.
 
 ```ini
 [HDR]

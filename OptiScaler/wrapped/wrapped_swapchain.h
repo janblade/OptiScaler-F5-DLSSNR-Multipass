@@ -124,6 +124,14 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     bool _displayKnown = false;
     bool _hdrColourSpaceLogged = false;
 
+    // An older (bitblt) chain that was made flip model for HDR output (SdrToHdr::Plan::upgraded). It stays flip for good (a chain
+    // cannot change its model), whether or not HDR output is still converting it. The game keeps being told what it asked for.
+    bool _upgraded = false;
+    DXGI_SWAP_EFFECT _gameSwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    std::atomic<UINT> _gameBufferCount { 0 };
+    std::atomic<bool> _presentParamsLogged { false };
+    void NoteUpgrade(const SdrToHdr::Plan& plan);
+
     void StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags);
     SdrToHdr::ProxyChainBase* Proxy() const { return _proxyPtr.load(std::memory_order_acquire); }
     SdrToHdr::ProxyChainBase* EnsureProxy(bool d3d11)

@@ -424,6 +424,10 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
     {
         SdrToHdr::CreateRequest hdrRequest;
         hdrRequest.format = localDesc.BufferDesc.Format;
+        hdrRequest.windowed = localDesc.Windowed;
+        hdrRequest.swapEffect = localDesc.SwapEffect;
+        hdrRequest.bufferCount = localDesc.BufferCount;
+        hdrRequest.flags = localDesc.Flags;
         hdrRequest.sampleCount = localDesc.SampleDesc.Count;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
@@ -432,6 +436,10 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
     }
 
     _skipDx11Create = true;
+
+    // An older (bitblt) chain is made flip model for HDR (the wrapper keeps telling the game what it asked for)
+    if (hdrPlan.proxied)
+        SdrToHdr::ApplySwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
 
     // (nested creation hooks pass through while the chain being made is the HDR one)
     SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
@@ -442,6 +450,7 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
 
     if (FAILED(result) && hdrPlan.proxied)
     {
+        SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
         SdrToHdr::Unproxy(hdrPlan, localDesc.BufferDesc.Format, result);
         result = o_D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,
                                                  SDKVersion, &localDesc, ppSwapChain, ppDevice, pFeatureLevel,

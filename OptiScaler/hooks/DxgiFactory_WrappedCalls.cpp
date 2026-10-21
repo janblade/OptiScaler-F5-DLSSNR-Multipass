@@ -352,6 +352,10 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
         SdrToHdr::CreateRequest hdrRequest;
         hdrRequest.device = pDevice;
         hdrRequest.format = localDesc.BufferDesc.Format;
+        hdrRequest.windowed = localDesc.Windowed;
+        hdrRequest.swapEffect = localDesc.SwapEffect;
+        hdrRequest.bufferCount = localDesc.BufferCount;
+        hdrRequest.flags = localDesc.Flags;
         hdrRequest.sampleCount = localDesc.SampleDesc.Count;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
@@ -360,6 +364,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
         hdrRequest.factory = realFactory;
         SdrToHdr::Plan hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.BufferDesc.Format);
         SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
+        // An older (bitblt) chain is made flip model for HDR (the wrapper keeps telling the game what it asked for)
+        SdrToHdr::ApplySwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
 
         // !_skipFGSwapChainCreation for preventing early enablement flags
         if (!_skipFGSwapChainCreation)
@@ -376,6 +382,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
 
             if (FAILED(result) && hdrPlan.proxied)
             {
+                SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.BufferDesc.Format, result);
                 result = realFactory->CreateSwapChain(pDevice, &localDesc, ppSwapChain);
             }
@@ -777,6 +784,10 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
         SdrToHdr::CreateRequest hdrRequest;
         hdrRequest.device = pDevice;
         hdrRequest.format = localDesc.Format;
+        hdrRequest.windowed = pFullscreenDesc == nullptr || localFullscreenDesc.Windowed;
+        hdrRequest.swapEffect = localDesc.SwapEffect;
+        hdrRequest.bufferCount = localDesc.BufferCount;
+        hdrRequest.flags = localDesc.Flags;
         hdrRequest.sampleCount = localDesc.SampleDesc.Count;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
@@ -785,6 +796,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
         hdrRequest.factory = realFactory;
         SdrToHdr::Plan hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.Format);
         SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
+        // An older (bitblt) chain is made flip model for HDR (the wrapper keeps telling the game what it asked for)
+        SdrToHdr::ApplySwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
 
         // !_skipFGSwapChainCreation for preventing early enablement flags
         if (!_skipFGSwapChainCreation)
@@ -803,6 +816,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
 
             if (FAILED(result) && hdrPlan.proxied)
             {
+                SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.Format, result);
                 result = realFactory->CreateSwapChainForHwnd(pDevice, hWnd, &localDesc,
                                                              pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,

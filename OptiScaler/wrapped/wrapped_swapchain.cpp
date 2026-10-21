@@ -759,7 +759,10 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
 
     // HDR output decided to make this chain HDR (the real chain already is): the game gets proxies in its own format
     if (plan != nullptr)
+    {
+        NoteUpgrade(*plan);
         StartHdrPlan(*plan, flags);
+    }
 
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
 }
@@ -809,10 +812,21 @@ void WrappedIDXGISwapChain4::StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags
     }
 }
 
+void WrappedIDXGISwapChain4::NoteUpgrade(const SdrToHdr::Plan& plan)
+{
+    if (!plan.upgraded)
+        return;
+
+    _upgraded = true;
+    _gameSwapEffect = plan.gameSwapEffect;
+    _gameBufferCount = plan.gameBufferCount;
+}
+
 void WrappedIDXGISwapChain4::AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags)
 {
     if (plan.proxied && !Proxied())
     {
+        NoteUpgrade(plan);
         LOG_INFO("HDR output: this swap chain was already wrapped by a nested hook, giving it the plan");
         StartHdrPlan(plan, flags);
     }
@@ -1172,6 +1186,13 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
     if (auto* proxy = Proxy(); SUCCEEDED(result) && pDesc != nullptr && proxy != nullptr && proxy->Engaged())
         pDesc->BufferDesc.Format = proxy->ReportedFormat();
 
+    // The chain was made flip model for HDR output: the game is told the swap effect and buffer count it asked for
+    if (_upgraded && SUCCEEDED(result) && pDesc != nullptr)
+    {
+        pDesc->SwapEffect = _gameSwapEffect;
+        pDesc->BufferCount = _gameBufferCount;
+    }
+
     return result;
 }
 
@@ -1182,6 +1203,16 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
     // refused; one from another thread waits for the running one (SdrToHdr::ProxyChainBase::Resize)
     if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
+
+    // A chain made flip model for HDR output needs two buffers at least: the game's count is remembered for GetDesc, the real
+    // call gets the raised one (0 keeps the count)
+    const UINT previousGameCount = _gameBufferCount;
+
+    if (_upgraded && BufferCount != 0)
+    {
+        _gameBufferCount = BufferCount;
+        BufferCount = SdrToHdr::UpgradedResizeCount(BufferCount);
+    }
 
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
@@ -1342,6 +1373,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         State::Instance().lastMipBiasMax = -100.0f;
     }
 
+    if (_upgraded && FAILED(result))
+        _gameBufferCount = previousGameCount; // DXGI keeps the old count when a resize fails
+
     LOG_DEBUG("result: {0:X}", (UINT) result);
 
     if (lockedFg != nullptr)
@@ -1383,6 +1417,12 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc1(DXGI_SWAP_CHAIN_DESC1
     if (auto* proxy = Proxy(); SUCCEEDED(result) && pDesc != nullptr && proxy != nullptr && proxy->Engaged())
         pDesc->Format = proxy->ReportedFormat();
 
+    if (_upgraded && SUCCEEDED(result) && pDesc != nullptr)
+    {
+        pDesc->SwapEffect = _gameSwapEffect;
+        pDesc->BufferCount = _gameBufferCount;
+    }
+
     return result;
 }
 
@@ -1415,6 +1455,20 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
 
     HRESULT result;
 
+    // A flip model chain refuses dirty rectangles (FLIP_DISCARD) and a scroll rectangle (both flip effects) with
+    // DXGI_ERROR_INVALID_CALL, which a bitblt chain took (read from DXGI on WARP and hardware). They are hints for a game that
+    // asked for bitblt: a chain made flip model for HDR output presents without them.
+    if (_upgraded && pPresentParameters != nullptr)
+    {
+        if (pPresentParameters->DirtyRectsCount != 0 || pPresentParameters->pScrollRect != nullptr)
+        {
+            if (!_presentParamsLogged.exchange(true))
+                LOG_INFO("HDR output: Present1 dirty / scroll rectangles are left out on a chain made flip model");
+        }
+
+        pPresentParameters = nullptr;
+    }
+
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
         result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp, Proxy(),
@@ -1428,7 +1482,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
     }
     else
     {
-        result = _real1->Present1(SyncInterval, Flags, pPresentParameters);
+        // (Present1 does not take a null pointer: with the rectangles left out it is a plain Present)
+        result = pPresentParameters != nullptr ? _real1->Present1(SyncInterval, Flags, pPresentParameters)
+                                               : _real->Present(SyncInterval, Flags);
     }
 
     return result;
@@ -1615,6 +1671,16 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     // refused; one from another thread waits for the running one (SdrToHdr::ProxyChainBase::Resize)
     if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
+
+    // A chain made flip model for HDR output needs two buffers at least: the game's count is remembered for GetDesc, the real
+    // call gets the raised one (0 keeps the count)
+    const UINT previousGameCount = _gameBufferCount;
+
+    if (_upgraded && BufferCount != 0)
+    {
+        _gameBufferCount = BufferCount;
+        BufferCount = SdrToHdr::UpgradedResizeCount(BufferCount);
+    }
 
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
@@ -1806,6 +1872,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         State::Instance().lastMipBiasMax = -100.0f;
     }
 
+    if (_upgraded && FAILED(result))
+        _gameBufferCount = previousGameCount; // DXGI keeps the old count when a resize fails
+
     LOG_DEBUG("result: {0:X}", (UINT) result);
 
     if (lockedFg != nullptr)
@@ -1849,6 +1918,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     in.displayKnown = _displayKnown;
     in.displayHdr = _display.hdrOn;
     in.multisampled = current.SampleDesc.Count > 1;
+    in.windowed = current.Windowed != FALSE; // (a chain that exists cannot be upgraded: canUpgradeBitBlt stays false)
     in.composition = _composition;
     in.coreWindow = _uwp && !_composition;
 

@@ -761,7 +761,9 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     // HDR output decided to make this chain HDR (the real chain already is): the game gets proxies in its own format
     if (plan != nullptr)
     {
+        _fgInner = plan->fgInner;
         NoteUpgrade(*plan);
+        NoteFullscreenEmulation(*plan);
         StartHdrPlan(*plan, flags);
     }
 
@@ -833,6 +835,20 @@ void WrappedIDXGISwapChain4::NoteUpgrade(const SdrToHdr::Plan& plan)
     _gameSwapEffect = plan.gameSwapEffect;
     _gameBufferCount = plan.gameBufferCount;
 
+    DisableAltEnter();
+}
+
+void WrappedIDXGISwapChain4::NoteFullscreenEmulation(const SdrToHdr::Plan& plan)
+{
+    if (!plan.proxied || !plan.exclusiveToWindowed || _fsEmulated)
+        return;
+
+    _fsEmulated = true;
+    DisableAltEnter();
+}
+
+void WrappedIDXGISwapChain4::DisableAltEnter()
+{
     // DXGI's Alt+Enter on this window would put the real flip chain into exclusive full screen behind everyone's back, and
     // Present then fails for good (Batman: Arkham Knight). Same call, same reason as hooks/DxgiFactory_Hooks.cpp's for the Vulkan
     // bridge's swap chain.
@@ -901,7 +917,7 @@ HRESULT WrappedIDXGISwapChain4::EmulateFullscreen(BOOL fullscreen, IDXGIOutput* 
 // it is resized; leaving full screen makes it valid again (read from DXGI, tests/sdr_to_hdr_dx11_gpu.cpp)
 void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
 {
-    if (!_upgraded || presentResult != DXGI_ERROR_INVALID_CALL)
+    if (!EmulatesFullscreen() || presentResult != DXGI_ERROR_INVALID_CALL)
         return;
 
     BOOL fullscreen = FALSE;
@@ -919,9 +935,12 @@ void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
 
 void WrappedIDXGISwapChain4::AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags)
 {
+    _fgInner = _fgInner || plan.fgInner;
+
     if (plan.proxied && !Proxied())
     {
         NoteUpgrade(plan);
+        NoteFullscreenEmulation(plan);
         LOG_INFO("HDR output: this swap chain was already wrapped by a nested hook, giving it the plan");
         StartHdrPlan(plan, flags);
     }
@@ -1226,7 +1245,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
 
     // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen). It deliberately
     // skips the FG mutex and the realExclusiveFullscreen bookkeeping below: upgraded chains are not used with frame generation.
-    if (_upgraded)
+    if (EmulatesFullscreen())
         return EmulateFullscreen(Fullscreen, pTarget);
 
     HRESULT result = S_OK;
@@ -1318,6 +1337,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
 
         if (_borderless.Active())
             pDesc->Windowed = FALSE;
+    }
+    else if (_fsEmulated && SUCCEEDED(result) && pDesc != nullptr && _borderless.Active())
+    {
+        pDesc->Windowed = FALSE;
     }
 
     return result;
@@ -2106,6 +2129,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     in.windowed = current.Windowed != FALSE; // (a chain that exists cannot be upgraded: canUpgradeBitBlt stays false)
     in.composition = _composition;
     in.coreWindow = _uwp && !_composition;
+    in.fgInnerChain = _fgInner;
 
     const UINT count = BufferCount != 0 ? BufferCount : current.BufferCount;
 

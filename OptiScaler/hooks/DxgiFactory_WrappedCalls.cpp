@@ -368,6 +368,9 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
         hdrRequest.factory = realFactory;
         SdrToHdr::Plan hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.BufferDesc.Format);
         SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
+        // The frame generation library asked for exclusive full screen: its HDR chain is made windowed
+        const BOOL hdrGameWindowed = localDesc.Windowed;
+        SdrToHdr::ApplyWindowed(hdrPlan, localDesc.Windowed);
         // An older (bitblt) chain is made flip model for HDR (the wrapper keeps telling the game what it asked for)
         SdrToHdr::ApplySwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
 
@@ -388,6 +391,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
             {
                 SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.BufferDesc.Format, result);
+                localDesc.Windowed = hdrGameWindowed;
                 result = realFactory->CreateSwapChain(pDevice, &localDesc, ppSwapChain);
             }
         }
@@ -819,7 +823,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
         {
             ScopedSkipParentWrapping skipParentWrapping {};
             result = realFactory->CreateSwapChainForHwnd(pDevice, hWnd, &localDesc,
-                                                         pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
+                                                         SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
                                                          pRestrictToOutput, ppSwapChain);
 
             if (FAILED(result) && hdrPlan.proxied)
@@ -827,7 +831,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
                 SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.Format, result);
                 result = realFactory->CreateSwapChainForHwnd(pDevice, hWnd, &localDesc,
-                                                             pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
+                                                             SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
                                                              pRestrictToOutput, ppSwapChain);
             }
         }

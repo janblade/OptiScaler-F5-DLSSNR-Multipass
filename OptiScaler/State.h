@@ -5,6 +5,7 @@
 #include "misc/SkipSpoof.h"
 #include "framegen/IFGFeature_Dx12.h"
 #include "framegen/FGFollowGameRule.h"
+#include "framegen/FGOutput.h"
 #include <inputs/FG/Streamline_Inputs_Dx12.h>
 #include <inputs/FG/Streamline_Inputs_Sl1_Dx12.h>
 
@@ -41,14 +42,6 @@ enum class FGInput : uint32_t
     XeFG,
 
     ForceXeLL, // Do not expose this option
-};
-
-enum class FGOutput : uint32_t
-{
-    NoFG,
-    FSRFG,
-    DLSSG,
-    XeFG,
 };
 
 enum class FGNvngxReplacement : uint32_t

@@ -1,6 +1,7 @@
 #pragma once
 #include "SysUtils.h"
 #include <wrapped/wrapped_factory.h>
+#include <output/SdrToHdr_Create.h>
 #include <dxgi1_6.h>
 
 class DxgiFactoryWrappedCalls
@@ -32,6 +33,7 @@ class DxgiFactoryWrappedCalls
     {
       private:
         bool previousState;
+        SdrToHdr::ScopedFgLibraryCreate fgLibrary; // the chains made inside are the frame generation library's own
 
       public:
         ScopedSkipFGSCCreation()

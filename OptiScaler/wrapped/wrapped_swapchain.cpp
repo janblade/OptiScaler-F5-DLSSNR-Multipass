@@ -761,9 +761,9 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     // HDR output decided to make this chain HDR (the real chain already is): the game gets proxies in its own format
     if (plan != nullptr)
     {
-        _fgInner = plan->fgInner;
+        _fgLibraryChain = plan->fgLibraryChain;
         NoteUpgrade(*plan);
-        NoteFullscreenEmulation(*plan);
+        NoteLibraryWindowed(*plan);
         StartHdrPlan(*plan, flags);
     }
 
@@ -838,12 +838,12 @@ void WrappedIDXGISwapChain4::NoteUpgrade(const SdrToHdr::Plan& plan)
     DisableAltEnter();
 }
 
-void WrappedIDXGISwapChain4::NoteFullscreenEmulation(const SdrToHdr::Plan& plan)
+void WrappedIDXGISwapChain4::NoteLibraryWindowed(const SdrToHdr::Plan& plan)
 {
-    if (!plan.proxied || !plan.exclusiveToWindowed || _fsEmulated)
+    if (!plan.proxied || !plan.exclusiveToWindowed || _libraryWindowed)
         return;
 
-    _fsEmulated = true;
+    _libraryWindowed = true;
     DisableAltEnter();
 }
 
@@ -917,7 +917,7 @@ HRESULT WrappedIDXGISwapChain4::EmulateFullscreen(BOOL fullscreen, IDXGIOutput* 
 // it is resized; leaving full screen makes it valid again (read from DXGI, tests/sdr_to_hdr_dx11_gpu.cpp)
 void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
 {
-    if (!EmulatesFullscreen() || presentResult != DXGI_ERROR_INVALID_CALL)
+    if ((!_upgraded && !_libraryWindowed) || presentResult != DXGI_ERROR_INVALID_CALL)
         return;
 
     BOOL fullscreen = FALSE;
@@ -935,12 +935,12 @@ void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
 
 void WrappedIDXGISwapChain4::AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags)
 {
-    _fgInner = _fgInner || plan.fgInner;
+    _fgLibraryChain = _fgLibraryChain || plan.fgLibraryChain;
 
     if (plan.proxied && !Proxied())
     {
         NoteUpgrade(plan);
-        NoteFullscreenEmulation(plan);
+        NoteLibraryWindowed(plan);
         LOG_INFO("HDR output: this swap chain was already wrapped by a nested hook, giving it the plan");
         StartHdrPlan(plan, flags);
     }
@@ -1243,9 +1243,12 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
     LOG_DEBUG("Fullscreen: {}, pTarget: {:X}, Caller: {}", Fullscreen, (size_t) pTarget,
               Util::WhoIsTheCaller(_ReturnAddress()));
 
-    // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen). It deliberately
-    // skips the FG mutex and the realExclusiveFullscreen bookkeeping below: upgraded chains are not used with frame generation.
-    if (EmulatesFullscreen())
+    // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen). It
+    // deliberately skips the FG mutex and the realExclusiveFullscreen bookkeeping below: the emulation only changes the
+    // window, never the swap chain, so there is nothing for the mutex to protect from the frame generation present, and
+    // the chain stays what it is. (The frame generation library's chain is not here: the game's calls reach the
+    // game-facing chain, whose hook answers them.)
+    if (_upgraded)
         return EmulateFullscreen(Fullscreen, pTarget);
 
     HRESULT result = S_OK;
@@ -1337,10 +1340,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
 
         if (_borderless.Active())
             pDesc->Windowed = FALSE;
-    }
-    else if (_fsEmulated && SUCCEEDED(result) && pDesc != nullptr && _borderless.Active())
-    {
-        pDesc->Windowed = FALSE;
     }
 
     return result;
@@ -2129,7 +2128,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     in.windowed = current.Windowed != FALSE; // (a chain that exists cannot be upgraded: canUpgradeBitBlt stays false)
     in.composition = _composition;
     in.coreWindow = _uwp && !_composition;
-    in.fgInnerChain = _fgInner;
+    in.fgLibraryChain = _fgLibraryChain;
 
     const UINT count = BufferCount != 0 ? BufferCount : current.BufferCount;
 
@@ -2232,10 +2231,8 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     // A resize kept the proxy of a chain that was made flip model: what it was kept through is said over the active line
     if (kept && result.proxied)
     {
-        if (decided.reason == SdrToHdr::Reason::DisplayNotHdr || decided.reason == SdrToHdr::Reason::DisplayUnknown)
-            SdrToHdr::RecordNote(SdrToHdr::Reason::DisplayLeftHdrKept);
-        else if (decided.reason == SdrToHdr::Reason::StreamlineDlssg)
-            SdrToHdr::RecordNote(SdrToHdr::Reason::DlssgKeptUpgraded);
+        if (const auto note = SdrToHdr::KeptNote(decided.reason); note != SdrToHdr::Reason::Off)
+            SdrToHdr::RecordNote(note);
     }
 
     if (result.stuckHdr)

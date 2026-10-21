@@ -1,6 +1,7 @@
 #pragma once
 #include "SysUtils.h"
 #include "FG_Hooks.h"
+#include <output/SdrToHdr_Create.h>
 #include <dxgi1_6.h>
 
 #include "Hook_Utils.h"
@@ -93,6 +94,7 @@ class DxgiFactoryHooks
     {
       private:
         bool previousState;
+        SdrToHdr::ScopedFgLibraryCreate fgLibrary; // the chains made inside are the frame generation library's own
 
       public:
         ScopedSkipFGSCCreation()

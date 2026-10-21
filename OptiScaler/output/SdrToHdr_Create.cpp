@@ -17,6 +17,8 @@ namespace SdrToHdr
 namespace
 {
 thread_local int t_proxiedCreateDepth = 0;
+thread_local int t_fgLibraryCreateDepth = 0;
+thread_local int t_vulkanBridgeCreateDepth = 0;
 std::mutex g_statusLock;
 StatusSnapshot g_status;
 
@@ -138,24 +140,12 @@ void FillEnvironment(Inputs& inputs)
                       State::Instance().activeFgOutput == FGOutput::DLSSG;
 
     if (inputs.frameGen && inputs.fgBackend == FgBackend::None)
-    {
-        switch (State::Instance().activeFgOutput)
-        {
-        case FGOutput::XeFG:
-            inputs.fgBackend = FgBackend::XeFG;
-            break;
-        case FGOutput::FSRFG:
-            inputs.fgBackend = FgBackend::FsrFG;
-            break;
-        case FGOutput::DLSSG:
-            inputs.fgBackend = FgBackend::Dlssg;
-            break;
-        default:
-            break;
-        }
-    }
+        inputs.fgBackend = FgBackendOf(State::Instance().activeFgOutput);
+
+    // (a native Vulkan game on the Vulkan bridge's Direct3D 12 swap chain stands aside like dxvk)
     inputs.dxvk = inputs.dxvk || VkPresentBridge::DxvkThroughVulkan() || VkPresentBridge::DxvkGame() ||
-                  IdentifyGpu::getPrimaryGpu().usesDxvk;
+                  IdentifyGpu::getPrimaryGpu().usesDxvk ||
+                  State::Instance().swapchainInteropApi == SwapchainInteropApi::VkwDx12;
     // OptiScaler's own DLSS-G output, or the game's own Streamline DLSS-G switched on: its last slDLSSGSetOptions, seen by
     // the Streamline hooks (DlssgTelemetry, filled only for the game's own), left it on. Not "sl.dlss_g.dll is loaded":
     // games ship and load it with DLSS-G off (NBA 2K27). Known only once the game sends options, so a game that turns
@@ -170,7 +160,7 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
 {
     Plan plan;
     plan.gameFormat = format;
-    plan.fgInner = request.frameGen;
+    plan.fgLibraryChain = InFgLibraryCreate();
 
     // Off: nothing is looked at, logged or changed
     if (!Config::Instance()->HdrOutputEnabled.value_or_default())
@@ -186,13 +176,17 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     in.flipModel = request.flipModel;
     in.windowed = request.windowed;
     in.canUpgradeBitBlt = true; // a chain being created
-    in.frameGen = request.frameGen;
-    in.fgInnerChain = request.frameGen;
+    in.frameGen = plan.fgLibraryChain;
+    in.fgLibraryChain = plan.fgLibraryChain;
+    // borderless is switched off for frame generation by the player: an exclusive request is then not made windowed
+    in.fgWindowable =
+        !Config::Instance()->FGXeFGForceBorderless.has_value() || Config::Instance()->FGXeFGForceBorderless.value();
     in.composition = request.composition;
     in.coreWindow = request.coreWindow;
     in.multiNode = request.multiNode;
     in.multisampled = request.sampleCount > 1;
     FillEnvironment(in);
+    in.dxvk = in.dxvk || t_vulkanBridgeCreateDepth > 0;
 
     plan.displayKnown = DisplayForWindow(request.factory, request.hwnd, plan.display);
     in.displayKnown = plan.displayKnown;
@@ -208,7 +202,7 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
         return plan;
 
     plan.proxied = true;
-    plan.exclusiveToWindowed = request.frameGen && !request.windowed;
+    plan.exclusiveToWindowed = ExclusiveToWindowed(plan.fgLibraryChain, request.windowed);
     plan.realFormat = RealFormat(plan.hdr10);
     format = plan.realFormat;
 
@@ -217,8 +211,7 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
 
     if (plan.exclusiveToWindowed)
         LOG_INFO("HDR output: the frame generation library asked for exclusive full screen; its HDR swap chain is made "
-                 "windowed "
-                 "and kept borderless");
+                 "windowed and kept borderless");
 
     if (plan.editDesc)
         LOG_INFO("HDR output: the game asked for an older swap chain type; made it flip model for HDR");
@@ -233,28 +226,35 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
 
 void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure)
 {
-    plan.upgraded = false; // (the site restored the desc first, RestoreSwapDesc)
-    plan.editDesc = false;
-    plan.exclusiveToWindowed = false;
+    ClearForRetry(plan); // (the site restored the desc first, RestoreSwapDesc)
     LOG_WARN("HDR output: the swap chain could not be made as HDR ({:X}), making it as the game asked", (UINT) failure);
-    plan.proxied = false;
     plan.reason = Reason::StartFailed;
     RecordStatus(plan.reason, false, plan.hdr10, true, plan.display.maxLuminance);
     RecordUpgraded(false);
     format = plan.gameFormat;
 }
 
-void NoteFrameGenChain()
+void NoteGameFacingFrameGenChain()
 {
     if (!Config::Instance()->HdrOutputEnabled.value_or_default())
         return;
 
     // XeFG and FSR FG: the library's own real chain (made through the factory hooks, before this) is the one HDR output
-    // decides on and records; this game-facing chain on top of it is not touched and says nothing
+    // decides on and records; the chain on top of it is not touched and says nothing
     if (State::Instance().activeFgOutput != FGOutput::DLSSG)
         return;
 
     NoteStandDown(Reason::DlssgOutput);
+}
+
+void NoteTwinStandDown()
+{
+    if (State::Instance().activeFgOutput == FGOutput::DLSSG)
+        NoteStandDown(Reason::DlssgOutput);
+    else if (InFgLibraryCreate())
+        NoteStandDown(Reason::FrameGen); // (an XeFG / FSR FG library chain is not the game's Streamline DLSS-G)
+    else
+        NoteStandDown(Reason::StreamlineDlssg);
 }
 
 void NoteStandDown(Reason reason)
@@ -280,6 +280,16 @@ void NoteStandDown(Reason reason)
 
 namespace SdrToHdr
 {
+ScopedFgLibraryCreate::ScopedFgLibraryCreate() { ++t_fgLibraryCreateDepth; }
+
+ScopedFgLibraryCreate::~ScopedFgLibraryCreate() { --t_fgLibraryCreateDepth; }
+
+bool InFgLibraryCreate() { return t_fgLibraryCreateDepth > 0; }
+
+ScopedVulkanBridgeCreate::ScopedVulkanBridgeCreate() { ++t_vulkanBridgeCreateDepth; }
+
+ScopedVulkanBridgeCreate::~ScopedVulkanBridgeCreate() { --t_vulkanBridgeCreateDepth; }
+
 ScopedProxiedCreate::ScopedProxiedCreate(bool on) : _on(on)
 {
     if (_on)

@@ -140,8 +140,15 @@ int main()
         Check(!fs.upgraded, "exclusive full screen: never an upgraded chain");
     }
 
-    // The frame generation library's exclusive full screen request: an HDR chain is made windowed, the fullscreen desc
-    // is not passed
+    // Classification: OptiScaler's frame generation output as HDR output sees it
+    {
+        Check(FgBackendOf(FGOutput::XeFG) == FgBackend::XeFG && FgBackendOf(FGOutput::FSRFG) == FgBackend::FsrFG &&
+                  FgBackendOf(FGOutput::DLSSG) == FgBackend::Dlssg && FgBackendOf(FGOutput::NoFG) == FgBackend::None,
+              "FgBackendOf: every output");
+        Check(FgBackendOf((FGOutput) 99) == FgBackend::None, "FgBackendOf: an unknown output is none");
+    }
+
+    // The frame generation library's exclusive full screen request: an HDR chain is made windowed, the fullscreen desc is not passed
     {
         Plan plan;
         BOOL windowed = FALSE;
@@ -152,6 +159,17 @@ int main()
         ApplyWindowed(plan, windowed);
         Check(windowed == TRUE && !KeepFullscreenDesc(plan, true),
               "exclusiveToWindowed: Windowed becomes TRUE and the fullscreen desc is not passed on");
+
+        Check(ExclusiveToWindowed(true, false) && !ExclusiveToWindowed(true, true) && !ExclusiveToWindowed(false, false),
+              "ExclusiveToWindowed: only the library's chain asked for exclusive full screen");
+
+        // the create with the HDR format failed: the retry passes the game's fullscreen desc again
+        plan.proxied = true;
+        plan.upgraded = true;
+        plan.editDesc = true;
+        ClearForRetry(plan);
+        Check(!plan.exclusiveToWindowed && !plan.proxied && !plan.upgraded && !plan.editDesc && KeepFullscreenDesc(plan, true),
+              "ClearForRetry: the plan stands down and the retry passes the fullscreen desc");
     }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_plan_smoke: PASS\n" : "sdr_to_hdr_plan_smoke: %d FAIL\n", g_failures);

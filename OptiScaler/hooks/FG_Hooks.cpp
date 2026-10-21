@@ -234,7 +234,7 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
             resizeFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         }
 
-        SdrToHdr::NoteFrameGenChain();
+        SdrToHdr::NoteGameFacingFrameGenChain();
         SetFGSwapchain(*ppSwapChain, pDesc->OutputWindow);
 
         return S_OK;
@@ -346,7 +346,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
             resizeFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         }
 
-        SdrToHdr::NoteFrameGenChain();
+        SdrToHdr::NoteGameFacingFrameGenChain();
         SetFGSwapchain((IDXGISwapChain*) *ppSwapChain, hWnd);
 
         return S_OK;
@@ -562,6 +562,30 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
     }
 
     return result;
+}
+
+void FGHooks::KeepBorderless(HWND hwnd)
+{
+    if (hwnd == nullptr)
+        return;
+
+    auto& state = State::Instance();
+
+    // The player may have switched it off on purpose: this chain is then not made windowed
+    // (SdrToHdr::Inputs::fgWindowable)
+    if (!Config::Instance()->FGXeFGForceBorderless.has_value())
+        Config::Instance()->FGXeFGForceBorderless.set_volatile_value(true);
+
+    // The game's full screen is the emulated one from here on: SCExclusiveFullscreen is what the game is told
+    // (hkGetFullscreenState, hkGetFullscreenDesc), realExclusiveFullscreen what the chain is (tearing flags, the frame
+    // limiter, low latency)
+    state.SCExclusiveFullscreen = true;
+    state.realExclusiveFullscreen = false;
+
+    const Util::MonitorInfo info = Util::GetMonitorInfoForWindow(hwnd);
+    LOG_INFO("Frame generation chain kept borderless over the monitor: {}x{} at {}x{}", info.width, info.height, info.x,
+             info.y);
+    RestyleWindowLater({ hwnd, true, info.x, info.y, info.width, info.height });
 }
 
 void FGHooks::ApplyRestyle(const WindowRestyle& restyle)
@@ -1478,8 +1502,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
-        // (HDR output converts the library's own real chain, behind `This`: `This` hands out the game's SDR buffers,
-        // which are the proxies of that chain when HDR output is on, so this reads the picture before the pass)
+        // (`This` is the game-facing chain and hands out the game's SDR picture. HDR output converts later, in the
+        // library's own real chain behind it: XeFG draws on that chain's buffers, which are HDR output's proxies, FSR
+        // FG keeps replacement buffers of its own and composites them into the proxies. Either way this reads the
+        // picture before the pass.)
         DlssNr::ApplyToFinishedPicture(This, gameQueue);
         fg->Present();
     }

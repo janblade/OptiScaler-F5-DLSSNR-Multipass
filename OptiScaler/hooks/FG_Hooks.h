@@ -83,6 +83,14 @@ class FGHooks
     inline static std::atomic<UINT> _restyleMessage = 0;
 
     static void RestyleWindowLater(const WindowRestyle& restyle);
+
+  public:
+    // HDR output made the frame generation library's chain windowed where the game asked for exclusive full screen: the game-facing
+    // chain is answered as for FGXeFGForceBorderless (full screen to the game, a borderless window over the monitor, no exclusive
+    // switch), whichever frame generation output it is. The window is restyled from its own message loop.
+    static void KeepBorderless(HWND hwnd);
+
+  private:
     static void ApplyRestyle(const WindowRestyle& restyle);
     static LRESULT CALLBACK RestyleMessageHook(int code, WPARAM wParam, LPARAM lParam);
 

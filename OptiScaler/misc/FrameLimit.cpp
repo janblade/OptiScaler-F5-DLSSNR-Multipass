@@ -2,6 +2,7 @@
 #include "FrameLimit.h"
 
 #include "Config.h"
+#include "State.h"
 // #include "hooks/D3D11Hooks.h"
 
 inline uint64_t FrameLimit::get_timestamp()
@@ -61,9 +62,36 @@ inline int FrameLimit::combined_sleep(int64_t ns)
     return status;
 }
 
+namespace
+{
+std::atomic<double> sleptMs = 0.0;
+}
+
+float FrameLimit::CapFps()
+{
+    auto& state = State::Instance();
+    const float limit = Config::Instance()->FramerateLimit.value_or_default();
+    const float dynamic = state.xefgDynamicCapFps.load(std::memory_order_relaxed);
+    const auto fg = state.currentFG;
+
+    // While XeFG is on, through its short pauses (UI composition or hudless changes pause it for 10 frames): switching
+    // back to the FPS limit and again would resend every sleep mode twice a pause. Not when XeFG passes frames through
+    // (real exclusive full screen) or generates none (1X, which the cap never picks): it would cap the game's own
+    // frames.
+    if (dynamic <= 0.0f || state.activeFgOutput != FGOutput::XeFG || fg == nullptr || !fg->IsActive() ||
+        fg->GenerationOff() || state.realExclusiveFullscreen)
+    {
+        return limit;
+    }
+
+    return limit > 0.0f ? std::min(limit, dynamic) : dynamic;
+}
+
+double FrameLimit::TakeSleptMs() { return sleptMs.exchange(0.0); }
+
 void FrameLimit::sleep(uint32_t shownPerRendered)
 {
-    if (auto fpsCap = Config::Instance()->FramerateLimit.value_or_default(); fpsCap != 0.0f)
+    if (auto fpsCap = CapFps(); fpsCap != 0.0f)
     {
         uint64_t min_interval_us = std::clamp((uint64_t) (1'000'000 / fpsCap), 0ULL, 100'000'000ULL);
 
@@ -79,5 +107,6 @@ void FrameLimit::sleep(uint32_t shownPerRendered)
                 LOG_ERROR("Sleep command failed: {}", res);
         }
         previous_frame_time = get_timestamp();
+        sleptMs.fetch_add((double) (previous_frame_time - current_time) / 1'000'000.0);
     }
 }

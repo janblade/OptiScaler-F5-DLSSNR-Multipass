@@ -678,6 +678,16 @@ inline const char* StatusLabel(Decision decision)
     }
 }
 
+// The decision both pages show. With the Input on Game (or Auto acting as Game with NR + frame generation) Decide stops
+// at SettingOff before it looks at the game, so a game making its own Reflex calls read as "[Off]" next to "Active: Game
+// -> XeLL". For the menu that is the game's Reflex at work, and we stand aside for it. Off keeps its own wording (the
+// game's Reflex may be kept on for DLSS FG, which has its own line). The code runs on Decide's answer, not this one.
+inline Decision ShownDecision(Decision decision, Input input, bool gameCallsReflex)
+{
+    return decision == Decision::SettingOff && input != Input::Off && gameCallsReflex ? Decision::GameRunsReflex
+                                                                                      : decision;
+}
+
 // The Framerate page's "Active: <input> -> <output>": who makes the latency calls right now. The game's Reflex counts
 // whenever the game makes calls, whatever we decided about ours. Frame generation that runs Reflex itself (DLSS FG) makes
 // calls whatever the Input says, and so does a game's own XeLL; both are facts, not read off the order Decide checks in.
@@ -938,6 +948,7 @@ struct CapSettle
     CapPlan pending;
     int held = 0;                       // presents `pending` has held
     Method method = Method::RealReflex; // the method `applied` was planned for (the overload with a method)
+    uint32_t shown = 1;                 // frames XeFG showed per rendered one at the last call (SettleCapForCount)
 };
 
 inline CapPlan SettleCap(CapSettle& settle, const CapPlan& planned, int needed = kCapSettlePresents)
@@ -979,6 +990,25 @@ inline CapPlan SettleCap(CapSettle& settle, const CapPlan& planned, Method metho
 
     const auto cap = SettleCap(settle, planned, needed);
     settle.method = method;
+    return cap;
+}
+
+// A change of XeFG's count while it keeps generating, the same method keeping the cap (XeFG's Dynamic MFG steps every
+// few seconds). Settled, the split's interval (the cap per rendered frame) would pace the new count by the old one for
+// `kCapSettlePresents` frames, and Dynamic MFG's check of the step (about 12 frames) would read that as the step
+// failing and undo it. A pause or 1X shows one frame per rendered one: not a count step, it still settles.
+inline bool CountStep(const CapSettle& settle, const CapPlan& planned, Method method, uint32_t shownPerRendered)
+{
+    return settle.started && settle.method == method && planned.owner == settle.applied.owner && settle.shown > 1 &&
+           shownPerRendered > 1 && shownPerRendered != settle.shown;
+}
+
+// SettleCap with a method, a count step taken at once (CountStep)
+inline CapPlan SettleCapForCount(CapSettle& settle, const CapPlan& planned, Method method, uint32_t shownPerRendered)
+{
+    const bool step = CountStep(settle, planned, method, shownPerRendered);
+    const auto cap = SettleCap(settle, planned, method, step ? 1 : kCapSettlePresents);
+    settle.shown = shownPerRendered;
     return cap;
 }
 

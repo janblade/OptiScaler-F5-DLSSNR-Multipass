@@ -234,6 +234,8 @@ class XeLLProxy
 
   public:
     static HMODULE Module() { return _dll; }
+    // A libxell.dll that was already loaded (the game's own) when OptiScaler loaded its copy
+    static HMODULE MemModule() { return _memoryDll; }
     static std::wstring Module_Path() { return _dllPath; }
 
     static bool InitXeLL() { return InitXeLLProper() && InitXeLLInput(); }

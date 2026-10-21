@@ -26,6 +26,7 @@
 #include <native/PresentStageTiming.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <detours/detours.h>
@@ -478,6 +479,7 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     // memory and it may read it later as its own choice.
     VkBool32* nrBorrowedFlag = nullptr;
     VkBool32* nrBorrowedWriteFlag = nullptr; // the same for shaderStorageImageWriteWithoutFormat
+    VkBool32* nrBorrowedPushFlag = nullptr;  // and for Vulkan 1.4's pushDescriptor
     VkPhysicalDeviceFeatures nrCoreFeatures {};
     bool nrWritesWithoutFormat = false;
 
@@ -608,6 +610,53 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             {
                 localCreteInfo.ppEnabledExtensionNames = nrExtensions.names.data();
                 localCreteInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
+            }
+
+            // With Vulkan 1.4's feature struct in the chain, VK_KHR_push_descriptor may only be named with its
+            // pushDescriptor on there. When it was added here (not the game's own), the flag is set for the call and
+            // put back after, like the address flag below; where that is not possible the extension goes again.
+            if (!DlssNr::VkExt::ListHas(gameNames, gameCount, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) &&
+                DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
+                                       VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+            {
+                for (auto* node = (VkBaseOutStructure*) localCreteInfo.pNext; node != nullptr; node = node->pNext)
+                {
+                    if (node->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)
+                        continue;
+
+                    VkBool32* flag = &((VkPhysicalDeviceVulkan14Features*) node)->pushDescriptor;
+
+                    if (*flag)
+                        break;
+
+                    VkPhysicalDeviceVulkan14Features offered {};
+                    offered.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+                    VkPhysicalDeviceFeatures2 query {};
+                    query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                    query.pNext = &offered;
+
+                    if (o_vkGetPhysicalDeviceFeatures2)
+                        o_vkGetPhysicalDeviceFeatures2(physicalDevice, &query);
+
+                    if (offered.pushDescriptor && DlssNr::VkExt::IsWritable(flag))
+                    {
+                        *flag = VK_TRUE;
+                        nrBorrowedPushFlag = flag;
+                        LOG_INFO("DLSS-NR Vulkan: pushDescriptor switched on in the game's Vulkan 1.4 features for the "
+                                 "create call");
+                    }
+                    else
+                    {
+                        std::erase_if(nrExtensions.names, [](const char* name)
+                                      { return std::strcmp(name, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) == 0; });
+                        localCreteInfo.ppEnabledExtensionNames = nrExtensions.names.data();
+                        localCreteInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
+                        LOG_WARN("DLSS-NR Vulkan: VK_KHR_push_descriptor left out -- the game's Vulkan 1.4 features "
+                                 "have pushDescriptor off and it cannot be switched on here");
+                    }
+
+                    break;
+                }
             }
 
             // VK_KHR_buffer_device_address does nothing until its feature is switched on too. Where the game already
@@ -903,6 +952,9 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     if (nrBorrowedWriteFlag != nullptr)
         *nrBorrowedWriteFlag = VK_FALSE;
+
+    if (nrBorrowedPushFlag != nullptr)
+        *nrBorrowedPushFlag = VK_FALSE;
 
     if (result == VK_SUCCESS && pDevice != nullptr)
         DlssNr::VkExt::NoteDevice(*pDevice, nrWritesWithoutFormat);
@@ -1381,6 +1433,7 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         VkPresentBridge::OnDeviceDestroying(device);
         NativeMotionVk::OnDeviceDestroyed(device);
         GenericDepthVk::OnDeviceDestroyed(device);
+        DlssNr::ExposureScanVk::OnDeviceDestroyed(device);
         native::lowlatency::OnDeviceReleasedVulkan(device);
 
         // InputCommon's output on it stops while the device still lives (its semaphores are the device's), then the

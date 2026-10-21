@@ -2,6 +2,7 @@
 #include <dlssnr/DlssNr.h>
 #include "FG_Hooks.h"
 #include <Config.h>
+#include <output/SdrToHdr_Create.h>
 
 #include <framegen/ffx/FSRFG_Dx12.h>
 #include <framegen/xefg/XeFG_Dx12.h>
@@ -208,11 +209,15 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
 
                 LOG_DEBUG("WaitForSingleObject result: {}", waitResult);
             }
-
-            oldSwapChain = State::Instance().currentFGSwapchain;
         }
 
         scResult = fg->CreateSwapchain(pFactory, cq, pDesc, ppSwapChain, true);
+
+        // Taken after the create. XeFG and FSR-FG release a same-window swapchain in there and leave none
+        // current, so the game's own Release of it goes through. Still current: one on another window (its
+        // Releases stay skipped, so it leaks, as before), a preserved one, or DLSSG's (which frees it itself).
+        // Null otherwise, so a later swapchain at a freed one's address is not skipped
+        oldSwapChain = State::Instance().currentFGSwapchain;
 
         if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
             State::Instance().skipHeapCapture = false;
@@ -229,6 +234,7 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
             resizeFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         }
 
+        SdrToHdr::NoteGameFacingFrameGenChain();
         SetFGSwapchain(*ppSwapChain, pDesc->OutputWindow);
 
         return S_OK;
@@ -315,11 +321,15 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
 
                 LOG_DEBUG("WaitForSingleObject result: {}", waitResult);
             }
-
-            oldSwapChain = State::Instance().currentFGSwapchain;
         }
 
         scResult = fg->CreateSwapchain1(pFactory, cq, hWnd, pDesc, pFullscreenDesc, ppSwapChain, true);
+
+        // Taken after the create. XeFG and FSR-FG release a same-window swapchain in there and leave none
+        // current, so the game's own Release of it goes through. Still current: one on another window (its
+        // Releases stay skipped, so it leaks, as before), a preserved one, or DLSSG's (which frees it itself).
+        // Null otherwise, so a later swapchain at a freed one's address is not skipped
+        oldSwapChain = State::Instance().currentFGSwapchain;
 
         if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
             State::Instance().skipHeapCapture = false;
@@ -336,6 +346,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
             resizeFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         }
 
+        SdrToHdr::NoteGameFacingFrameGenChain();
         SetFGSwapchain((IDXGISwapChain*) *ppSwapChain, hWnd);
 
         return S_OK;
@@ -437,14 +448,21 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
         if (o_FGSCResizeBuffers1 != nullptr)
             DetourAttach(&(PVOID&) o_FGSCResizeBuffers1, hkResizeBuffers1);
 
-        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+        // What the game is told about full screen. hkGetFullscreenState / hkGetFullscreenDesc change nothing unless the
+        // chain is kept borderless (FGXeFGForceBorderless, or HDR output's windowed chain, KeepBorderless);
+        // FGXeFGForceBorderless thereby also governs what an FSR FG game is told, whose swap chain forwards both calls
+        // to the real (windowed) chain
+        if (FgAnswersFullscreenForGame(State::Instance().activeFgOutput))
         {
             if (o_FGSCGetFullscreenState != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenState, hkGetFullscreenState);
 
             if (o_FGSCGetFullscreenDesc != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenDesc, hkGetFullscreenDesc);
+        }
 
+        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+        {
             if ((Config::Instance()->SimulateWaitableObject.value_or_default() ||
                  (State::Instance().gameEngine == GameEngineType::Unity &&
                   State::Instance().activeFgOutput == FGOutput::XeFG)) &&
@@ -485,7 +503,7 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
     bool modeChanged = false;
     bool orgFS = Fullscreen;
-    if (Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (BorderlessForced())
     {
         if (Fullscreen)
         {
@@ -494,6 +512,12 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
             if (!State::Instance().SCExclusiveFullscreen)
             {
                 State::Instance().SCExclusiveFullscreen = true;
+                modeChanged = true;
+            }
+            else if (_hdrKeeper.Active())
+            {
+                // HDR output already keeps it borderless; the game asking again restyles the window once more (it may
+                // have been restyled by the game in between)
                 modeChanged = true;
             }
 
@@ -516,7 +540,7 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
     auto result = S_OK;
 
-    if (!Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (!BorderlessForced())
     {
         result = o_FGSCSetFullscreenState(This, Fullscreen, pTarget);
         LOG_DEBUG("Fullscreen: {}, pTarget: {:X}, Result: {:X}", Fullscreen, (size_t) pTarget, (UINT) result);
@@ -551,6 +575,56 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
     }
 
     return result;
+}
+
+bool FGHooks::BorderlessForced()
+{
+    return ::BorderlessForced(Config::Instance()->FGXeFGForceBorderless.value_or_default(), _hdrKeeper.Active());
+}
+
+void FGHooks::KeepBorderless(HWND hwnd, const void* owner)
+{
+    if (hwnd == nullptr || owner == nullptr)
+        return;
+
+    auto& state = State::Instance();
+
+    // A separate state: the player's FGXeFGForceBorderless is never changed (a player who switched it off on purpose
+    // does not get here, SdrToHdr::Inputs::fgWindowable). It is undone by ReleaseBorderless.
+    _hdrKeeper.Keep(owner);
+
+    // The game's full screen is the emulated one from here on: SCExclusiveFullscreen is what the game is told
+    // (hkGetFullscreenState, hkGetFullscreenDesc), realExclusiveFullscreen what the chain is (tearing flags, the frame
+    // limiter, low latency)
+    state.SCExclusiveFullscreen = true;
+    state.realExclusiveFullscreen = false;
+
+    const Util::MonitorInfo info = Util::GetMonitorInfoForWindow(hwnd);
+
+    if (info.width <= 0 || info.height <= 0)
+    {
+        LOG_WARN("Frame generation chain kept borderless, but the monitor of the window could not be read: window left "
+                 "as it "
+                 "is until the game's next full screen switch");
+        return;
+    }
+
+    LOG_INFO("Frame generation chain kept borderless over the monitor: {}x{} at {}x{}", info.width, info.height, info.x,
+             info.y);
+    RestyleWindowLater({ hwnd, true, info.x, info.y, info.width, info.height });
+}
+
+void FGHooks::ReleaseBorderless(const void* owner)
+{
+    if (!_hdrKeeper.Release(owner))
+        return;
+
+    // What the game is told goes back to what the player's option says; the emulated state is dropped with it, so a
+    // later chain or a stood-down one does not start from a stale "exclusive" answer
+    if (!Config::Instance()->FGXeFGForceBorderless.value_or_default())
+        State::Instance().SCExclusiveFullscreen = false;
+
+    LOG_INFO("Frame generation chain no longer kept borderless by HDR output");
 }
 
 void FGHooks::ApplyRestyle(const WindowRestyle& restyle)
@@ -712,8 +786,7 @@ HRESULT FGHooks::hkGetFullscreenDesc(IDXGISwapChain1* This, DXGI_SWAP_CHAIN_FULL
 {
     auto result = o_FGSCGetFullscreenDesc(This, pDesc);
 
-    if (result == S_OK && State::Instance().SCExclusiveFullscreen &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (result == S_OK && State::Instance().SCExclusiveFullscreen && BorderlessForced())
     {
         pDesc->Windowed = false;
     }
@@ -725,8 +798,7 @@ HRESULT FGHooks::hkGetFullscreenState(IDXGISwapChain* This, BOOL* pFullscreen, I
 {
     auto result = o_FGSCGetFullscreenState(This, pFullscreen, ppTarget);
 
-    if (result == S_OK && State::Instance().SCExclusiveFullscreen &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (result == S_OK && State::Instance().SCExclusiveFullscreen && BorderlessForced())
     {
         *pFullscreen = true;
     }
@@ -768,7 +840,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
 
     if (State::Instance().activeFgOutput == FGOutput::XeFG)
     {
-        if (Config::Instance()->FGXeFGForceBorderless.value_or_default())
+        if (BorderlessForced())
         {
             SwapChainFlags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
         }
@@ -934,8 +1006,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
     }
 
     // Resize window to cover the screen
-    if (result == S_OK && Config::Instance()->FGXeFGForceBorderless.value_or_default() &&
-        State::Instance().SCExclusiveFullscreen)
+    if (result == S_OK && BorderlessForced() && State::Instance().SCExclusiveFullscreen)
     {
         Util::MonitorInfo info;
         info = Util::GetMonitorInfoForWindow(_hwnd);
@@ -951,7 +1022,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
 
 HRESULT FGHooks::hkResizeTarget(IDXGISwapChain* This, const DXGI_MODE_DESC* pNewTargetParameters)
 {
-    if (Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (BorderlessForced())
     {
         // The display mode is not changed (borderless), but the game asked for a new size and expects its window to
         // follow: games on the blt model take the new size from the window (WM_SIZE) or call ResizeBuffers after it.
@@ -1040,7 +1111,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
 
     if (State::Instance().activeFgOutput == FGOutput::XeFG)
     {
-        if (Config::Instance()->FGXeFGForceBorderless.value_or_default())
+        if (BorderlessForced())
         {
             SwapChainFlags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
         }
@@ -1208,8 +1279,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
     }
 
     // Resize window to cover the screen
-    if (result == S_OK && Config::Instance()->FGXeFGForceBorderless.value_or_default() &&
-        State::Instance().SCExclusiveFullscreen)
+    if (result == S_OK && BorderlessForced() && State::Instance().SCExclusiveFullscreen)
     {
         Util::MonitorInfo info;
         info = Util::GetMonitorInfoForWindow(_hwnd);
@@ -1467,6 +1537,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
+        // (`This` is the game-facing chain and hands out the game's SDR picture. HDR output converts later, in the
+        // library's own real chain behind it: XeFG draws on that chain's buffers, which are HDR output's proxies, FSR
+        // FG keeps replacement buffers of its own and composites them into the proxies. Either way this reads the
+        // picture before the pass.)
         DlssNr::ApplyToFinishedPicture(This, gameQueue);
         fg->Present();
     }
@@ -1644,6 +1718,11 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         LOG_TRACE("Releasing FG->Mutex: {}", fg->Mutex.getOwner());
         fg->Mutex.unlockThis(2);
     }
+
+    // What this present waited (the present and OptiScaler's limiter), for XeFG's Dynamic MFG; the low latency sleep
+    // below counts apart (InputCommon::take_sleep_ms)
+    if (willPresent)
+        state.lastFGPresentMs = Util::MillisecondsNow() - presentStartMs;
 
     // After frame generation's lock is released: Sleep holds this thread until the next frame should start
     if (lowLatencyDevice != nullptr)

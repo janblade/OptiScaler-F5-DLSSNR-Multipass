@@ -4,6 +4,7 @@
 #include "GenericDepth_VkEvents.h"
 
 #include <Config.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <dlssnr/DlssNr_NativeMode.h>
 
 #include <native/DepthFinderCore.h>
@@ -252,6 +253,7 @@ VkResult VKAPI_CALL hkCreateImage(VkDevice device, const VkImageCreateInfo* info
                                   VkImage* image)
 {
     const bool watch = g_installed.load(std::memory_order_relaxed) && info != nullptr && IsDepthFormat(info->format);
+    const VkImageCreateInfo* gameInfo = info; // as the game asked, before the copy usage added below
     VkImageCreateInfo local {};
 
     // Depth for rendering, single-sampled, not yet copyable: made copyable so the finder can copy the scene's.
@@ -264,7 +266,24 @@ VkResult VKAPI_CALL hkCreateImage(VkDevice device, const VkImageCreateInfo* info
         info = &local;
     }
 
+    // The exposure scan's candidates (a small float storage image) are made copyable the same way; never a depth image
+    const bool scanImage = info != nullptr && DlssNr::ExposureScanVk::WantsImage(*info);
+
+    if (scanImage && (info->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0)
+    {
+        local = *info;
+        local.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        info = &local;
+    }
+
     const VkResult result = o_vkCreateImage(device, info, allocator, image);
+
+    // Remembered first: OnImageCreated notes on the remembered entry when the image is not the game's
+    if (gameInfo != nullptr && result == VK_SUCCESS && image != nullptr)
+        DlssNr::ExposureScanVk::RememberImage(device, *gameInfo, *image, scanImage);
+
+    if (scanImage && result == VK_SUCCESS && image != nullptr)
+        DlssNr::ExposureScanVk::OnImageCreated(device, *info, *image, _ReturnAddress());
 
     if (watch && result == VK_SUCCESS && image != nullptr)
     {
@@ -277,6 +296,8 @@ VkResult VKAPI_CALL hkCreateImage(VkDevice device, const VkImageCreateInfo* info
 
 void VKAPI_CALL hkDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator)
 {
+    DlssNr::ExposureScanVk::OnImageDestroyed(image);
+
     if (g_installed.load(std::memory_order_relaxed) && image != VK_NULL_HANDLE)
         g_tracker.OnImageDestroyed(image);
 

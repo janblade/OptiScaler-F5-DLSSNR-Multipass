@@ -334,6 +334,8 @@ class Config
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
+    // HDR output: flips [HDR] Convert live (the A/B against how Windows shows the game). Unbound by default.
+    CustomOptional<int> HdrCompareKey { UnboundKey };
     // The model's render preset hint: 1 Preset A (the main model), 2 Preset B (the small model, 310.9 DLLs only); 0 and
     // any other value: the DLL's choice, the small model on 310.9 DLLs. 310.8 DLLs have only the main model.
     CustomOptional<uint32_t> DlssNrPreset { 0 };
@@ -598,33 +600,23 @@ class Config
     // Off until it is shown to produce the same picture. If it does, the forwarder can go.
     CustomOptional<bool> DlssNrUseProxy { false };
 
-    // Look for the exposure the game computed but never handed to the upscaler.
+    // Force the exposure scan on (it looks for the exposure the game computed but never handed to the upscaler), for
+    // diagnosis: the log compares every candidate, and nothing it finds moves the picture through this flag.
     //
-    // Off by default, and it has to be. Reading a resource the game owns means assuming what state
-    // it is in, and unlike depth and motion vectors -- where NGX documents the contract -- a buffer
-    // found by its shape comes with no promise at all. UNORDERED_ACCESS is the reasonable
-    // assumption, since every candidate got here by having a UAV made on it, but it is an
-    // assumption, and nobody who has not asked for the scan should be carrying that risk.
-    //
-    // It decides nothing either way. It watches and it reports, because the last two times a number
-    // was inferred here it went straight into the interface and was wrong.
+    // The scan also runs without it: the white point source Auto, the default, searches in a D3D12 game that hands over
+    // no exposure, and a match it finds moves the white point (user decision 2026-10-19/20; DlssNr_ExposureAuto.h).
+    // That carries the risk this flag once kept opt-in: reading a resource the game owns means assuming what state it
+    // is in, and unlike depth and motion vectors -- where NGX documents the contract -- a buffer found by its shape
+    // comes with no promise at all. UNORDERED_ACCESS is the reasonable assumption, since every candidate got here by
+    // having a UAV made on it. Auto keeps the exposure short: it lets go of every candidate it has finished with (a
+    // game's teardown with its resources still pinned removed the device in Cyberpunk 2077), and of all of them in a
+    // game that hands its exposure over. Under Auto this flag does not stop that.
     CustomOptional<bool> DlssNrScanExposure { false };
 
-    // Anchoring the scan: the white point that looked right, and the scan's value at that moment.
-    //
-    // The absolute white point cannot be derived from a buffer whose units are unknown. What CAN be
-    // derived is every value after the first: if the scan's number halves, the scene got twice as
-    // bright, and the white point follows -- whatever the number actually means, because only the
-    // ratio is used and the units cancel.
-    //
-    // So the user sets it once, in one lighting condition, and presses a button. After that it stays
-    // correct through every cave and every noon without being touched again. Which is also the shape
-    // that makes per-game profiles work: one person anchors a game, everybody else gets the number.
-    //
-    // Zero means not anchored, and then nothing happens at all.
-    // A lamp in the corner showing what the scan currently thinks the light is doing: red for dark,
-    // green for full light, and the shades between. Off by default; it is for watching the thing
-    // work, not for playing with.
+    // Write the exposure scan's recording (<log>.exposurescan.csv: every candidate beside NR's brightness reading) for
+    // diagnosis. Turns the scan on. Separate from ScanExposure so a scan that runs for the picture never writes a file.
+    CustomOptional<bool> DlssNrRecordExposureScan { false };
+
     // Where the white point comes from. One control, because there is one answer.
     //
     //   0  the paper white slider, and nothing else
@@ -774,8 +766,23 @@ class Config
     CustomOptional<bool> DlssNrGameExposureTrimPreview { false };
     CustomOptional<bool> DlssNrAutoExposureTrimPreview { false };
 
+    // A lamp in the corner showing what the scan currently thinks the light is doing: red for dark,
+    // green for full light, and the shades between. Off by default; it is for watching the thing
+    // work, not for playing with.
     CustomOptional<bool> DlssNrScanMeter { false };
 
+    // Anchoring the scan (WhitePointSource 2): the white point that looked right, and the scan's value at that moment.
+    //
+    // The absolute white point cannot be derived from a buffer whose units are unknown. What CAN be
+    // derived is every value after the first: if the scan's number halves, the scene got twice as
+    // bright, and the white point follows -- whatever the number actually means, because only the
+    // ratio is used and the units cancel.
+    //
+    // So the user sets it once, in one lighting condition, and presses a button. After that it stays
+    // correct through every cave and every noon without being touched again. Which is also the shape
+    // that makes per-game profiles work: one person anchors a game, everybody else gets the number.
+    //
+    // Zero means not anchored, and then nothing happens at all.
     CustomOptional<float> DlssNrScanAnchorValue { 0.0f };       // legacy single anchor, migrated then unused
     CustomOptional<float> DlssNrScanAnchorWhitePoint { 0.0f };  // legacy single anchor, migrated then unused
 
@@ -1137,15 +1144,10 @@ class Config
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
     CustomOptional<bool> ExternalFrameGeneration { false };
-    CustomOptional<bool> FGDLSSGAdaMfgUnlock { false };
-    CustomOptional<bool, NoDefault> FGDLSSGAdaBlackwellKernels;
-    CustomOptional<std::string, NoDefault> FGDLSSGAdaTemporalFix; // Auto / Retarget / Ptx
-    CustomOptional<bool> FGDLSSGAdaFlipMeteringPatch { false };  // pin sl.dlss_g to software frame pacing
-    // Ampere/Turing (SM86/SM75) MFG unlocker — sideloads the dlssg_for_sm86 proxy
-    CustomOptional<bool> FGDLSSGAmpereMfgUnlock { false };
-    CustomOptional<int>  FGDLSSGAmpereMfgMaxFrames { 3 };       // 0-3: 0=runtime default (3X), 1=2X, 2=3X, 3=4X
-    CustomOptional<std::string, NoDefault> FGDLSSGAmpereMfgKernelImage;     // Auto / PTX / Cubin
-    CustomOptional<bool> FGDLSSGAmpereMfgHardwareBilinear { false };        // Optional approximate sampling (SM86 only)
+    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: the built-in MFG unlocks were removed in 0.1.32,
+    // and startup says so once. Read only, never saved.
+    bool RemovedAdaMfgUnlockSet = false;
+    bool RemovedAmpereMfgUnlockSet = false;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
     // Keeps Streamline from picking up the driver's OTA/downloaded plugins; only files in
     // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll
@@ -1232,6 +1234,11 @@ class Config
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
+    CustomOptional<bool> FGXeFGDynamicMFG { false };          // Count picked per frame, up to the InterpolationCount
+    CustomOptional<float> FGXeFGFramerateTargetDMFG { 0.0f }; // 0: the FPS limit, else just under the refresh rate
+    CustomOptional<int> FGXeFGRoundingDMFG { 1 };             // 0 at most, 1 around, 2 at least the target
+    CustomOptional<bool> FGXeFGDynamicAllow1X { true };       // Dynamic MFG may turn frame generation off (1X)
+    CustomOptional<bool> FGXeFGTargetAsCapDMFG { false };     // The Dynamic MFG target is also the FPS limit
     CustomOptional<bool> FGXeFGUIComposition { false };
     CustomOptional<bool> FGXeFGDepthInverted { true };
     CustomOptional<bool> FGXeFGJitteredMV { false };
@@ -1295,10 +1302,14 @@ class Config
     // Reflex (low_latency/input/OutputRule.h PlanOutput).
     CustomOptional<bool> FramerateFrameCapOnly { false };
 
-    // HDR
-    CustomOptional<bool> ForceHDR { false };
-    CustomOptional<bool> UseHDR10 { false };
-    CustomOptional<bool> SkipColorSpace { false };
+    // HDR output for SDR games (output/SdrToHdr_*): the real swap chain becomes scRGB / HDR10 and one pass converts the
+    // game's picture. Enabled applies at the next swap chain create / resize; the rest is read every frame.
+    CustomOptional<bool> HdrOutputEnabled { false };  // [HDR] Enabled (the old ForceHDR=true is read into it)
+    CustomOptional<bool> HdrOutputConvert { true };   // [HDR] Convert: the A/B toggle, never saved
+    CustomOptional<bool> UseHDR10 { false };          // [HDR] UseHDR10: PQ instead of scRGB
+    CustomOptional<float> HdrOutputPeakNits { 0.0f }; // [HDR] PeakNits: clamp, 0 = the display's MaxLuminance
+    CustomOptional<float> HdrOutputGameNits { 203.0f }; // [HDR] GameNits: SDR white, 80..1000
+    CustomOptional<int> HdrOutputDecode { 0 };        // [HDR] Decode: 0 = gamma 2.2, 1 = sRGB
 
     // V-Sync
     CustomOptional<bool> OverrideVsync { false };

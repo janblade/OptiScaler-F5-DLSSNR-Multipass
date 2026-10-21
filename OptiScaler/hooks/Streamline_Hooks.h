@@ -146,22 +146,16 @@ class StreamlineHooks
     static HMODULE LoadIsolatedGamePlugin(LPCWSTR requestedPath);
     static void hookInterposer(HMODULE slInterposer);
 
-    static void unhookDlss();
     static void hookDlss(HMODULE slDlss);
 
-    static void unhookDlssg();
     static void hookDlssg(HMODULE slDlssg);
 
-    static void unhookLocalDlssg();
     static void hookLocalDlssg(HMODULE slDlssg);
 
-    static void unhookReflex();
     static void hookReflex(HMODULE slReflex);
 
-    static void unhookPcl();
     static void hookPcl(HMODULE slPcl);
 
-    static void unhookCommon();
     static void hookCommon(HMODULE slCommon);
 
     static bool isInterposerHooked();
@@ -296,6 +290,7 @@ class StreamlineHooks
     static bool hkpcl_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON, const char** pluginJSON);
     static void* hkpcl_slGetPluginFunction(const char* functionName);
     static sl::Result hkslPCLSetMarker(sl::PCLMarker marker, const sl::FrameToken& frame);
+    static void* HookPCLSetMarker(void* original);
 
     // Common
     inline static PFN_slGetPluginFunction o_common_slGetPluginFunction = nullptr;

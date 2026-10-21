@@ -11,6 +11,7 @@
 
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeLowLatency.h>
+#include <output/SdrToHdr_ProxyDx12.h>
 
 #include <algorithm>
 #include <future>
@@ -19,6 +20,9 @@
 #include <detours/detours.h>
 #include <magic_enum_utility.hpp>
 #include <include/d3dx/d3dx12.h>
+#include <intrin.h>
+
+#pragma intrinsic(_ReturnAddress)
 
 #ifndef STDMETHODCALLTYPE
 #include <Unknwn.h> // or <objbase.h> to get STDMETHODCALLTYPE
@@ -613,22 +617,11 @@ void ResTrack_Dx12::hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource*
                                              D3D12_RENDER_TARGET_VIEW_DESC* pDesc,
                                              D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
-    // force hdr for swapchain buffer
-    if (pResource != nullptr && pDesc != nullptr && Config::Instance()->ForceHDR.value_or_default())
-    {
-        for (size_t i = 0; i < State::Instance().scBuffers.size(); i++)
-        {
-            if (State::Instance().scBuffers[i] == pResource)
-            {
-                if (Config::Instance()->UseHDR10.value_or_default())
-                    pDesc->Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-                else
-                    pDesc->Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-
-                break;
-            }
-        }
-    }
+    // HDR output: a typed (no relaxed casting) proxy back buffer given an _SRGB view may not behave like the swap chain's
+    // own buffer would. Detection only, once; the view is not changed.
+    if (pResource != nullptr && pDesc != nullptr && SdrToHdr::ShouldWarnSrgbViewOnTypedProxy(pResource, pDesc->Format))
+        LOG_WARN("HDR output: the game made an _SRGB render target view of its (typed) back buffer; this device has no "
+                 "relaxed format casting, so the colours may differ from a plain swap chain");
 
     o_CreateRenderTargetView(This, pResource, pDesc, DestDescriptor);
 
@@ -663,23 +656,6 @@ void ResTrack_Dx12::hkCreateShaderResourceView(ID3D12Device* This, ID3D12Resourc
                                                D3D12_SHADER_RESOURCE_VIEW_DESC* pDesc,
                                                D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
-    // force hdr for swapchain buffer
-    if (pResource != nullptr && pDesc != nullptr && Config::Instance()->ForceHDR.value_or_default())
-    {
-        for (size_t i = 0; i < State::Instance().scBuffers.size(); i++)
-        {
-            if (State::Instance().scBuffers[i] == pResource)
-            {
-                if (Config::Instance()->UseHDR10.value_or_default())
-                    pDesc->Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-                else
-                    pDesc->Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-
-                break;
-            }
-        }
-    }
-
     o_CreateShaderResourceView(This, pResource, pDesc, DestDescriptor);
 
     ResourceInfo resInfo {};
@@ -714,26 +690,10 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
                                                 D3D12_UNORDERED_ACCESS_VIEW_DESC* pDesc,
                                                 D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
-    if (pResource != nullptr && pDesc != nullptr && Config::Instance()->ForceHDR.value_or_default())
-    {
-        for (size_t i = 0; i < State::Instance().scBuffers.size(); i++)
-        {
-            if (State::Instance().scBuffers[i] == pResource)
-            {
-                if (Config::Instance()->UseHDR10.value_or_default())
-                    pDesc->Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-                else
-                    pDesc->Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-
-                break;
-            }
-        }
-    }
-
     // Every unordered access view the game makes passes through here, which is the one place a
     // buffer shaped like an exposure can be spotted without knowing anything about the game. Silent
     // and cheap for everything that does not match, and inert unless the scan is switched on.
-    DlssNr::ExposureScan::NoteUav(pResource, pDesc);
+    DlssNr::ExposureScan::NoteUav(pResource, pDesc, _ReturnAddress());
 
     o_CreateUnorderedAccessView(This, pResource, pCounterResource, pDesc, DestDescriptor);
 

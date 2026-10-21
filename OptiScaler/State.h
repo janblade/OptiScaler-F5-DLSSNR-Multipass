@@ -5,6 +5,7 @@
 #include "misc/SkipSpoof.h"
 #include "framegen/IFGFeature_Dx12.h"
 #include "framegen/FGFollowGameRule.h"
+#include "framegen/FGOutput.h"
 #include <inputs/FG/Streamline_Inputs_Dx12.h>
 #include <inputs/FG/Streamline_Inputs_Sl1_Dx12.h>
 
@@ -41,14 +42,6 @@ enum class FGInput : uint32_t
     XeFG,
 
     ForceXeLL, // Do not expose this option
-};
-
-enum class FGOutput : uint32_t
-{
-    NoFG,
-    FSRFG,
-    DLSSG,
-    XeFG,
 };
 
 enum class FGNvngxReplacement : uint32_t
@@ -276,6 +269,9 @@ class State
 
     bool WAR_xefgRequestFGToggle = false;
 
+    // XeFG's Dynamic MFG with "Use target as cap": its target while it runs, 0: none (FrameLimit::CapFps)
+    std::atomic<float> xefgDynamicCapFps = 0.0f;
+
     bool dlssgGameDMFGSupported = false;
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
@@ -343,6 +339,9 @@ class State
     std::deque<double> frameTimes;
     std::vector<DetailedGpuTime> detailedGpuTimes;
     double lastFGFrameTime = 0.0;
+    // How long the last present to the FG swapchain waited: the present itself (V-Sync, a full queue) and OptiScaler's
+    // limiter, not the low latency sleep after it (InputCommon::take_sleep_ms). For XeFG's Dynamic MFG.
+    std::atomic<double> lastFGPresentMs = 0.0;
     double presentFrameTime = 0.0;
     std::mutex frameTimeMutex;
 
@@ -370,7 +369,6 @@ class State
     UINT SCLastFlags = 0;
 
     // HDR
-    std::vector<IUnknown*> scBuffers;
     OutputColorSpace outputColorSpace {};
     bool hdrOutputActive = false;
 
@@ -406,6 +404,7 @@ class State
 
     static UINT GetOwner()
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         _lastOwner++;
         return _lastOwner;
     }
@@ -417,6 +416,7 @@ class State
     /// <param name="dllName">Lower case dll name without `.dll` at the end. Leave blank for skipping all dll's</param>
     static void DisableChecks(UINT owner, std::string dllName = "")
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         // if (_skipOwner == 0 || _skipOwner < owner)
         //{
         _skipOwner = owner;
@@ -427,6 +427,7 @@ class State
 
     static void EnableChecks(UINT owner)
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         _skipDllName.erase(_skipOwner);
 
         // if (_skipOwner == owner)
@@ -447,6 +448,7 @@ class State
 
     static void DisableServeOriginal(UINT owner)
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         if (_serveOwner == 0 || _serveOwner == owner)
         {
             _serveOriginal = false;
@@ -456,6 +458,7 @@ class State
 
     static void EnableServeOriginal(UINT owner)
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         if (_serveOwner == 0 || _serveOwner == owner)
         {
             _serveOriginal = true;
@@ -463,14 +466,28 @@ class State
         }
     };
 
-    static bool SkipDllChecks() { return _skipChecks; }
+    static bool SkipDllChecks()
+    {
+        std::lock_guard<std::mutex> lock(_skipMutex);
+        return _skipChecks;
+    }
+
     static std::string SkipDllName()
     {
+        std::lock_guard<std::mutex> lock(_skipMutex);
         return _skipOwner == 0 ? "" : (_skipDllName.contains(_skipOwner) ? _skipDllName[_skipOwner] : "");
     }
-    static bool ServeOriginal() { return _serveOriginal; }
+    static bool ServeOriginal()
+    {
+        std::lock_guard<std::mutex> lock(_skipMutex);
+        return _serveOriginal;
+    }
 
   private:
+    // The skip and serve-original state is global (one owner at a time, as before) but changed and read from any
+    // thread: OptiScaler's own Streamline start, the game's loads. Every access holds this lock; nothing under it loads
+    // a library.
+    inline static std::mutex _skipMutex;
     inline static bool _skipChecks = false;
     inline static std::map<UINT, std::string> _skipDllName;
     inline static UINT _skipOwner = 0;

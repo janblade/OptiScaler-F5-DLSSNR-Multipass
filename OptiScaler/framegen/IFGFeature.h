@@ -71,6 +71,7 @@ class IFGFeature
     UINT64 _lastFGFrame = 0;
     bool _waitingNewFrameData = false;
     int _framesToInterpolate = -1;
+    bool _generationOff = false; // Dynamic MFG's 1X: the output generates nothing, it keeps its count and stays active
     int _maxInterpolationCount = 1;
     bool _supportsDMFG = false;
 
@@ -125,8 +126,9 @@ class IFGFeature
     bool IsActive();
     bool IsPaused();
     // Generating frames now: active, not paused, and not stood down waiting for the game's next frame data (IsActive
-    // stays true while it waits, so frame generation is picked up again on the next frame)
+    // stays true while it waits, so frame generation is picked up again on the next frame), nor at Dynamic MFG's 1X
     bool IsGenerating();
+    bool GenerationOff() const { return _generationOff; } // Dynamic MFG's 1X
     bool IsDispatched();
     bool IsLowResMV();
     bool IsAsync();

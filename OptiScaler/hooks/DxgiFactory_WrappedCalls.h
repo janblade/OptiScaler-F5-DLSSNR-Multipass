@@ -1,6 +1,7 @@
 #pragma once
 #include "SysUtils.h"
 #include <wrapped/wrapped_factory.h>
+#include <output/SdrToHdr_Create.h>
 #include <dxgi1_6.h>
 
 class DxgiFactoryWrappedCalls
@@ -32,6 +33,9 @@ class DxgiFactoryWrappedCalls
     {
       private:
         bool previousState;
+        // The chains made while this lives are the frame generation library's own (HDR output converts those). Removing
+        // this member silently turns that off: they would be plain chains, and stand aside.
+        SdrToHdr::ScopedFgLibraryCreate fgLibrary;
 
       public:
         ScopedSkipFGSCCreation()

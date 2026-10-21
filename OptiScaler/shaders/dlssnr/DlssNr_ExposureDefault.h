@@ -70,6 +70,12 @@ class Offer
     bool Usable() const { return _offered && !_unusable; }
     bool Unusable() const { return _unusable; }
 
+    // Offered and read clean at least once: what Auto's scan stops for (DlssNr_ExposureAuto.h)
+    bool Confirmed() const { return _offered && _read && !_unusable; }
+
+    // Offered, but neither read clean nor given up on yet
+    bool Pending() const { return _offered && !_read && !_unusable; }
+
   private:
     std::atomic<bool> _offered { false };
     std::atomic<bool> _read { false };

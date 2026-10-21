@@ -53,9 +53,9 @@ constexpr int Count(bool follows, Request game, int menuCount, int outputMax)
     return std::clamp(follows ? game.count : menuCount, 1, std::max(outputMax, 1));
 }
 
-// numFramesToGenerateMax told to the game: the running output's max, or what is known before it exists
-// (the MFG unlock for OptiScaler's DLSSG output). At least 1, so a game always offers 2x.
-constexpr int ReportedMax(int outputMax, int earlyMax) { return std::max({ outputMax, earlyMax, 1 }); }
+// numFramesToGenerateMax told to the game: the running output's max (0 before it exists). At least 1, so a game
+// always offers 2x.
+constexpr int ReportedMax(int outputMax) { return std::max(outputMax, 1); }
 
 // numFramesActuallyPresented: the real frame plus the generated ones while OptiScaler's FG runs
 constexpr int Presented(bool fgRunning, int generated) { return fgRunning ? std::max(generated, 0) + 1 : 1; }

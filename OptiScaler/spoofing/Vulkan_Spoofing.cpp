@@ -13,10 +13,51 @@
 
 #include <vulkan/vulkan_core.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_ExposureScan_Vk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
-static std::map<std::string, bool> vkDeviceExtensions;
 static std::map<std::string, bool> vkInstanceExtensions;
+
+static bool ListHas(const std::vector<const char*>& list, const char* name)
+{
+    return std::any_of(list.begin(), list.end(), [name](const char* entry) { return std::strcmp(entry, name) == 0; });
+}
+
+// The physical device's real device extensions, read for each vkCreateDevice: a list kept from an earlier call can be
+// another GPU's. Through the unhooked enumerate (o_), so spoofed names are not in it. Empty when it cannot be read.
+static std::set<std::string> RealDeviceExtensions(PFN_vkEnumerateDeviceExtensionProperties enumerate,
+                                                  VkPhysicalDevice physicalDevice)
+{
+    std::set<std::string> names;
+
+    if (enumerate == nullptr)
+        return names;
+
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        uint32_t count = 0;
+
+        if (enumerate(physicalDevice, nullptr, &count, nullptr) != VK_SUCCESS)
+            break;
+
+        std::vector<VkExtensionProperties> extensions(count);
+        const auto result = enumerate(physicalDevice, nullptr, &count, extensions.data());
+
+        // VK_INCOMPLETE: the list grew between the two calls, read it again
+        if (result == VK_INCOMPLETE)
+            continue;
+
+        if (result == VK_SUCCESS)
+        {
+            for (uint32_t i = 0; i < count; ++i)
+                names.insert(extensions[i].extensionName);
+        }
+
+        break;
+    }
+
+    return names;
+}
 
 typedef struct VkDummyProps
 {
@@ -295,47 +336,26 @@ VkResult VulkanSpoofing::hkvkCreateInstance(VkInstanceCreateInfo* pCreateInfo, c
     // asked either: under Proton it is dxvk, whose adapter enumeration creates a Vulkan instance
     // and re-enters this hook. Every extension below is added only where the loader advertises it,
     // which is the condition that decides whether adding it is legal.
-    if (Config::Instance()->DLSSEnabled.value_or_default())
+    // Each once, and only where the loader offers it
+    const auto addExtension = [&](const char* name)
     {
-        LOG_INFO("Adding NVNGX Vulkan extensions");
-        if (vkInstanceExtensions.contains(std::string(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)))
-        {
-            LOG_DEBUG("  Adding {}", VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-            newExtensionList.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-        }
+        if (ListHas(newExtensionList, name) || !vkInstanceExtensions.contains(name))
+            return;
 
-        if (vkInstanceExtensions.contains(std::string(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME)))
-        {
-            LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
-            newExtensionList.push_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
-        }
+        LOG_DEBUG("  Adding {}", name);
+        newExtensionList.push_back(name);
+    };
 
-        if (vkInstanceExtensions.contains(std::string(VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME)))
-        {
-            LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME);
-            newExtensionList.push_back(VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME);
-        }
-    }
+    // A Vulkan 1.0 game needs it for the device extensions added at vkCreateDevice (their feature and property
+    // queries); core from 1.1, where naming it is still allowed
+    addExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
     LOG_INFO("Adding FFX Vulkan extensions");
-    if (vkInstanceExtensions.contains(std::string(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        newExtensionList.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    }
+    addExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
-    LOG_INFO("Adding Vulkan w/Dx12 extensions");
-    if (vkInstanceExtensions.contains(std::string(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
-    }
-
-    if (vkInstanceExtensions.contains(std::string(VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME);
-    }
+    LOG_INFO("Adding NVNGX and Vulkan w/Dx12 extensions");
+    addExtension(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
+    addExtension(VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME);
 
     LOG_DEBUG("Layer count: {}", pCreateInfo->enabledLayerCount);
     for (size_t i = 0; i < pCreateInfo->enabledLayerCount; i++)
@@ -372,7 +392,8 @@ VkResult VulkanSpoofing::hkvkCreateInstance(VkInstanceCreateInfo* pCreateInfo, c
 
     next->pNext = &debugCreateInfo;
 
-    newExtensionList.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    if (!ListHas(newExtensionList, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
+        newExtensionList.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 #endif
 
     pCreateInfo->enabledExtensionCount = static_cast<uint32_t>(newExtensionList.size());
@@ -392,43 +413,27 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
 
     LOG_FUNC();
 
-    if (vkDeviceExtensions.size() == 0)
+    auto enumerate = o_vkEnumerateDeviceExtensionProperties;
+    if (enumerate == nullptr)
     {
-        LOG_INFO("vkDeviceExtensions is empty, enumerating device extensions");
-        auto enumarate = o_vkEnumerateDeviceExtensionProperties;
-        if (o_vkEnumerateDeviceExtensionProperties == nullptr)
+        if (vulkanModule == nullptr)
+            vulkanModule = KernelBaseProxy::GetModuleHandleA_()("vulkan-1.dll");
+
+        if (vulkanModule != nullptr)
         {
-            if (vulkanModule == nullptr)
-                vulkanModule = KernelBaseProxy::GetModuleHandleA_()("vulkan-1.dll");
-
-            if (vulkanModule != nullptr)
-            {
-                enumarate = (PFN_vkEnumerateDeviceExtensionProperties) KernelBaseProxy::GetProcAddress_()(
-                    vulkanModule, "vkEnumerateDeviceExtensionProperties");
-            }
-
-            if (enumarate == nullptr)
-            {
-                enumarate = vkEnumerateDeviceExtensionProperties;
-            }
+            enumerate = (PFN_vkEnumerateDeviceExtensionProperties) KernelBaseProxy::GetProcAddress_()(
+                vulkanModule, "vkEnumerateDeviceExtensionProperties");
         }
 
-        if (enumarate != nullptr)
-        {
-            vkEnumerateDeviceExtensionPropertiesListed = true;
-            vkEnumerateDeviceExtensionPropertiesCount = 0;
-
-            enumarate(physicalDevice, nullptr, &vkEnumerateDeviceExtensionPropertiesCount, nullptr);
-            std::vector<VkExtensionProperties> extensions(vkEnumerateDeviceExtensionPropertiesCount);
-            enumarate(physicalDevice, nullptr, &vkEnumerateDeviceExtensionPropertiesCount, extensions.data());
-
-            for (const auto& ext : extensions)
-            {
-                vkDeviceExtensions[ext.extensionName] = true;
-                LOG_DEBUG("  {}", ext.extensionName);
-            }
-        }
+        if (enumerate == nullptr)
+            enumerate = vkEnumerateDeviceExtensionProperties;
     }
+
+    const auto supported = RealDeviceExtensions(enumerate, physicalDevice);
+    LOG_INFO("The device offers {} extensions", supported.size());
+
+    if (supported.empty())
+        LOG_WARN("The device's extension list could not be read: the game's list is kept and nothing is added");
 
     static std::vector<const char*> newExtensionList;
     newExtensionList.clear();
@@ -472,12 +477,17 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
         LOG_WARN("vkGetPhysicalDeviceProperties did not resolve, NVNGX Vulkan extensions not added");
     }
 
-    LOG_DEBUG("Checking extensions and removing Streamline ones");
+    // Spoofed names the game may have taken from our enumerate hook: dropped when the device does not really have
+    // them (asking for one would fail the create). One the device has stays, on any vendor: a game's own
+    // VK_EXT_buffer_device_address on AMD is real. Without the device's list, the vendor decides as before: all of
+    // them go on a GPU that is not NVIDIA's.
+    LOG_DEBUG("Checking extensions and removing spoofed ones the device lacks");
     for (size_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
     {
         auto extName = pCreateInfo->ppEnabledExtensionNames[i];
+        const bool lacking = supported.empty() ? vendorId != (uint32_t) VendorId::Nvidia : !supported.contains(extName);
 
-        if (Config::Instance()->VulkanExtensionSpoofing.value_or_default() && vendorId != (uint32_t) VendorId::Nvidia)
+        if (Config::Instance()->VulkanExtensionSpoofing.value_or_default() && lacking)
         {
             auto binaryImport = std::strcmp(extName, VK_NVX_BINARY_IMPORT_EXTENSION_NAME) == 0;
             auto imgViewHandle = std::strcmp(extName, VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME) == 0;
@@ -490,147 +500,121 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
             if (binaryImport || imgViewHandle || bufferDeviceAddr || mvPerViewAttr || nvLowLatency || nvOpticalFlow ||
                 nvPresentMeter)
             {
-                LOG_DEBUG("Removing {}", extName);
+                LOG_DEBUG("Removing {} (spoofed, not on this device)", extName);
                 continue;
             }
         }
 
-        // LOG_DEBUG("Adding {}", extName);
         newExtensionList.push_back(extName);
     }
+
+    // The game's feature structs that decide what may be added next to its list
+    const VkPhysicalDeviceVulkan14Features* vulkan14 = nullptr;
+    bool coreAddressOn = false; // bufferDeviceAddress in the Vulkan 1.2 or the KHR feature struct
+
+    for (auto next = (const VkBaseInStructure*) pCreateInfo->pNext; next != nullptr; next = next->pNext)
+    {
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+            coreAddressOn |= ((const VkPhysicalDeviceVulkan12Features*) next)->bufferDeviceAddress == VK_TRUE;
+        else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)
+            coreAddressOn |=
+                ((const VkPhysicalDeviceBufferDeviceAddressFeatures*) next)->bufferDeviceAddress == VK_TRUE;
+        else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)
+            vulkan14 = (const VkPhysicalDeviceVulkan14Features*) next;
+    }
+
+    // Added only when the device has it and the list does not; each extension once. An extension that became core
+    // in a later Vulkan may still be named on a device of that version, so a dependency is simply added too.
+    const auto addExtension = [&](const char* name)
+    {
+        if (ListHas(newExtensionList, name))
+            return true;
+
+        if (!supported.contains(name))
+        {
+            LOG_DEBUG("  {} not offered, skipped", name);
+            return false;
+        }
+
+        LOG_DEBUG("  Adding {}", name);
+        newExtensionList.push_back(name);
+        return true;
+    };
 
     if (vendorId == (uint32_t) VendorId::Nvidia)
     {
         LOG_INFO("Adding NVNGX Vulkan extensions");
-        if (vkDeviceExtensions.contains(std::string(VK_NVX_MULTIVIEW_PER_VIEW_ATTRIBUTES_EXTENSION_NAME)))
-        {
-            LOG_DEBUG("  Adding {}", VK_NVX_MULTIVIEW_PER_VIEW_ATTRIBUTES_EXTENSION_NAME);
-            newExtensionList.push_back(VK_NVX_MULTIVIEW_PER_VIEW_ATTRIBUTES_EXTENSION_NAME);
-        }
 
-        if (vkDeviceExtensions.contains(std::string(VK_NV_LOW_LATENCY_EXTENSION_NAME)))
-        {
-            LOG_DEBUG("  Adding {}", VK_NV_LOW_LATENCY_EXTENSION_NAME);
-            newExtensionList.push_back(VK_NV_LOW_LATENCY_EXTENSION_NAME);
-        }
+        // Needs VK_KHR_multiview (core in 1.1)
+        if (addExtension(VK_KHR_MULTIVIEW_EXTENSION_NAME))
+            addExtension(VK_NVX_MULTIVIEW_PER_VIEW_ATTRIBUTES_EXTENSION_NAME);
 
-        // InputCommon's Reflex output on Vulkan (low_latency/low_latency_tech/ll_reflex_vk.h): VK_NV_low_latency2 signals
-        // a timeline semaphore in its sleep (VulkanHooks switches the feature on for it). A game with Vulkan Reflex may
-        // have it already.
-        if (vkDeviceExtensions.contains(std::string(VK_NV_LOW_LATENCY_2_EXTENSION_NAME)) &&
-            vkDeviceExtensions.contains(std::string(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)) &&
-            std::none_of(newExtensionList.begin(), newExtensionList.end(),
-                         [](const char* name) { return std::strcmp(name, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) == 0; }))
-        {
-            LOG_DEBUG("  Adding {}", VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
-            newExtensionList.push_back(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
-        }
+        addExtension(VK_NV_LOW_LATENCY_EXTENSION_NAME);
 
-        if (vkDeviceExtensions.contains(std::string(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)))
-        {
-            LOG_DEBUG("  Adding {}", VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-            newExtensionList.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-        }
+        // InputCommon's Reflex output on Vulkan (low_latency/low_latency_tech/ll_reflex_vk.h): VK_NV_low_latency2
+        // signals a timeline semaphore in its sleep (VulkanHooks switches the feature on for it). A game with Vulkan
+        // Reflex may have it already.
+        if (supported.contains(VK_NV_LOW_LATENCY_2_EXTENSION_NAME) &&
+            addExtension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME))
+            addExtension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
 
-        if (vkDeviceExtensions.contains(std::string(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)))
-        {
-            LOG_DEBUG("  Adding {}", VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
-            newExtensionList.push_back(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
-        }
+        // With Vulkan 1.4's feature struct in the chain, the extension may only be named with its feature on there
+        if (vulkan14 != nullptr && vulkan14->pushDescriptor != VK_TRUE)
+            LOG_DEBUG("  {} skipped: the game's Vulkan 1.4 features have pushDescriptor off",
+                      VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+        else
+            addExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+
+        // The EXT form may not be named next to the KHR one, nor with the KHR/1.2 feature on
+        if (ListHas(newExtensionList, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) || coreAddressOn)
+            LOG_DEBUG("  {} skipped: the game uses the KHR / Vulkan 1.2 buffer device address",
+                      VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+        else
+            addExtension(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
 
         if (dlssCapable)
         {
-            if (vkDeviceExtensions.contains(std::string(VK_NVX_BINARY_IMPORT_EXTENSION_NAME)))
-            {
-                LOG_DEBUG("  Adding {}", VK_NVX_BINARY_IMPORT_EXTENSION_NAME);
-                newExtensionList.push_back(VK_NVX_BINARY_IMPORT_EXTENSION_NAME);
-            }
-
-            if (vkDeviceExtensions.contains(std::string(VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME)))
-            {
-                LOG_DEBUG("  Adding {}", VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME);
-                newExtensionList.push_back(VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME);
-            }
+            addExtension(VK_NVX_BINARY_IMPORT_EXTENSION_NAME);
+            addExtension(VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME);
         }
     }
 
     LOG_INFO("Adding FFX Vulkan extensions");
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
-    }
+    addExtension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+    addExtension(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+    addExtension(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
+    addExtension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
-    }
-
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
-    }
-
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
-    }
-
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
-    }
+    // Needs VK_KHR_get_memory_requirements2 (core in 1.1)
+    if (ListHas(newExtensionList, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME))
+        addExtension(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
 
     LOG_INFO("Adding XeSS Vulkan extensions");
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
-    }
+    addExtension(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+    addExtension(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
 
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
-    }
-
-    if (vkDeviceExtensions.contains(std::string(VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME);
-        newExtensionList.push_back(VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME);
-    }
+    // Needs VK_KHR_maintenance3 (core in 1.1)
+    if (addExtension(VK_KHR_MAINTENANCE_3_EXTENSION_NAME))
+        addExtension(VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME);
 
     LOG_INFO("Adding Vk w/Dx12 Vulkan extensions");
 
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
-    }
+    // Each needs its base extension, added above
+    if (ListHas(newExtensionList, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME))
+        addExtension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
 
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
-    }
+    if (ListHas(newExtensionList, VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME))
+        addExtension(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
 
 #ifdef USE_QUEUE_SUBMIT_2_KHR
     LOG_INFO("Adding QueueSubmit2 Vulkan extensions");
-    if (vkDeviceExtensions.contains(std::string(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)))
-    {
-        LOG_DEBUG("  Adding {}", VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
-        newExtensionList.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
-    }
+    addExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
 #endif
 
     if (State::Instance().vkAntiLagSupported)
     {
         LOG_INFO("Adding AntiLag extension");
-        newExtensionList.push_back(VK_AMD_ANTI_LAG_EXTENSION_NAME);
+        addExtension(VK_AMD_ANTI_LAG_EXTENSION_NAME);
     }
 
     pCreateInfo->enabledExtensionCount = static_cast<uint32_t>(newExtensionList.size());
@@ -731,21 +715,10 @@ inline static VkResult hkvkEnumerateDeviceExtensionProperties(VkPhysicalDevice p
     {
         vkEnumerateDeviceExtensionPropertiesListed = true;
 
-        auto minusCount = 5;
-        if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgInput == FGInput::NvngxFG)
-            minusCount = 7;
-
-        LOG_DEBUG("Extensions returned:");
+        // Logged only: vkCreateDevice reads the device's real list itself (RealDeviceExtensions)
+        LOG_DEBUG("Device extensions returned:");
         for (uint32_t i = 0; i < *pPropertyCount; i++)
-        {
             LOG_DEBUG("  {}", pProperties[i].extensionName);
-
-            if (Config::Instance()->VulkanExtensionSpoofing.value_or_default() && !SkipVulkanSpoofing() &&
-                i < (*pPropertyCount - minusCount))
-            {
-                vkDeviceExtensions.insert_or_assign(std::string(pProperties[i].extensionName), true);
-            }
-        }
     }
 
     LOG_FUNC_RESULT(result);
@@ -807,6 +780,10 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetInstanceProcAddr(const PFN_vkVoidFunct
     // The depth finder's image and render pass hooks (resource_tracking/GenericDepth_Vk.h).
     if (auto depth = GenericDepthVk::GetProcAddr(orgFunc, pName); depth != nullptr)
         return depth;
+
+    // The exposure scan's buffer and memory hooks, while the scan is wanted (dlssnr/DlssNr_ExposureScan_Vk.h)
+    if (auto scan = DlssNr::ExposureScanVk::GetProcAddr(orgFunc, pName); scan != nullptr)
+        return scan;
 
     auto result = Vulkan_wDx12::GetInstanceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
@@ -898,6 +875,10 @@ PFN_vkVoidFunction VulkanSpoofing::hkvkGetDeviceProcAddr(const PFN_vkVoidFunctio
     if (auto depth = GenericDepthVk::GetProcAddr(orgFunc, pName); depth != nullptr)
         return depth;
 
+    // The exposure scan's buffer and memory hooks, while the scan is wanted (dlssnr/DlssNr_ExposureScan_Vk.h)
+    if (auto scan = DlssNr::ExposureScanVk::GetProcAddr(orgFunc, pName); scan != nullptr)
+        return scan;
+
     auto result = Vulkan_wDx12::GetDeviceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -985,6 +966,7 @@ void VulkanSpoofing::HookForVulkanSpoofing(HMODULE vulkanModule)
 {
     Vulkan_wDx12::Hook(vulkanModule);
     GenericDepthVk::Hook(vulkanModule);
+    DlssNr::ExposureScanVk::Hook(vulkanModule);
 
     if (Config::Instance()->VulkanSpoofing.value_or_default() && o_vkGetPhysicalDeviceProperties == nullptr)
     {

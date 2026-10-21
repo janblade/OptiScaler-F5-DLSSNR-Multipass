@@ -6,6 +6,7 @@
 
 #include <proxies/KernelBase_Proxy.h>
 
+#include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeLowLatency.h>
 
@@ -104,6 +105,8 @@ static void HookToDeviceLocal(ID3D11Device* InDevice)
     // The depth finder hooks the immediate context the first time any D3D11 device is captured, whether or not this device's
     // own sampler hooks are already in (a second call with the same device is a no-op inside Install()).
     GenericDepthDx11::Install(InDevice);
+    // The exposure scan's creation hooks, while the scan is wanted (dlssnr/DlssNr_ExposureScan_Dx11.h)
+    DlssNr::ExposureScanDx11::Install(InDevice);
 
     if (o_CreateSamplerState != nullptr || InDevice == nullptr)
         return;
@@ -413,11 +416,51 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         }
     }
 
+    // HDR output (output/SdrToHdr_*): on the desc after the edits above. The device does not exist yet, and there is no factory
+    // either: the display is found on a plain one by the window.
+    SdrToHdr::Plan hdrPlan;
+
+    if (pSwapChainDesc != nullptr)
+    {
+        SdrToHdr::CreateRequest hdrRequest;
+        hdrRequest.format = localDesc.BufferDesc.Format;
+        hdrRequest.windowed = localDesc.Windowed;
+        hdrRequest.swapEffect = localDesc.SwapEffect;
+        hdrRequest.bufferCount = localDesc.BufferCount;
+        hdrRequest.flags = localDesc.Flags;
+        hdrRequest.sampleCount = localDesc.SampleDesc.Count;
+        hdrRequest.hasOriginal = true; // the game's own desc, before the V-Sync override
+        hdrRequest.originalSwapEffect = pSwapChainDesc->SwapEffect;
+        hdrRequest.originalBufferCount = pSwapChainDesc->BufferCount;
+        hdrRequest.originalFlags = pSwapChainDesc->Flags;
+        hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+                               localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        hdrRequest.hwnd = localDesc.OutputWindow;
+        hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.BufferDesc.Format);
+    }
+
     _skipDx11Create = true;
+
+    // An older (bitblt) chain is made flip model for HDR (the wrapper keeps telling the game what it asked for)
+    if (hdrPlan.proxied)
+        SdrToHdr::ApplySwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
+
+    // (nested creation hooks pass through while the chain being made is the HDR one)
+    SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
 
     auto result = o_D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,
                                                   SDKVersion, pSwapChainDesc != nullptr ? &localDesc : nullptr,
                                                   ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+
+    if (FAILED(result) && hdrPlan.proxied)
+    {
+        SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
+        SdrToHdr::Unproxy(hdrPlan, localDesc.BufferDesc.Format, result);
+        result = o_D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,
+                                                 SDKVersion, &localDesc, ppSwapChain, ppDevice, pFeatureLevel,
+                                                 ppImmediateContext);
+    }
+
     _skipDx11Create = false;
 
     if (result == S_OK && *ppDevice != nullptr && State::Instance().currentD3D12Device == nullptr)
@@ -449,11 +492,20 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         if (State::Instance().currentWrappedSwapchain == *ppSwapChain)
         {
             LOG_DEBUG("Same as current wrapped swapchain, skipping wrapping");
+
+            // A nested hook wrapped it first, without the plan: give it the plan
+            WrappedIDXGISwapChain4* wrapped = nullptr;
+
+            if (hdrPlan.proxied && (*ppSwapChain)->QueryInterface(IID_PPV_ARGS(&wrapped)) == S_OK)
+            {
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
+                wrapped->Release();
+            }
         }
         else
         {
             *ppSwapChain = new WrappedIDXGISwapChain4(realSC, realDevice, pSwapChainDesc->OutputWindow,
-                                                      pSwapChainDesc->Flags, false);
+                                                      localDesc.Flags, false, false, &hdrPlan);
 
             State::Instance().currentSwapchain = *ppSwapChain;
             State::Instance().currentWrappedSwapchain = *ppSwapChain;

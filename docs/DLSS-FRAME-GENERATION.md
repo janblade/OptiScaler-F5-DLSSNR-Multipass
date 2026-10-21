@@ -11,8 +11,9 @@ with DLSS Quality, Neural Rendering and DLSS FG in SDR.
 
 The [manifest](../redist/streamline/manifest.json) pins the official ZIP checksum, each extracted
 file's checksum, and the NVIDIA signing certificates. No DLL is patched or downloaded from a mirror.
-This change publishes source, a downloader and instructions only: **no NVIDIA FG DLLs or
-DLL-containing FG archive are uploaded**. The local bundle from development is not a public release.
+Since v0.1.33 the release zip (`...-with-dlss-fg.zip`) includes these unmodified files under
+`OptiScaler\streamline`, together with NVIDIA's licence and notice files; they are not in Git. Older
+packages and source checkouts can fetch them with the downloader below.
 
 ## Add the files to an existing OptiScaler install
 
@@ -149,19 +150,18 @@ plugins from being replaced by the driver cache. NVIDIA's binaries are unmodifie
   can throttle rendering to about 37.5 FPS. Increasing the multiplier does not raise the cap.
   Existing INI limits are preserved on upgrade; resetting the limit is a user setting, not a code fix.
 
-## Local packaging only
+## Packaging with the NVIDIA files
 
-The DLL-containing local build is retained for development. It is **not cleared for redistribution**
-by this review. Do not upload it to this repo's releases without resolving the licensing questions below.
-
-In PowerShell 7 on Windows, from this checkout after building OptiScaler:
+The release workflow builds the package with `-IncludeDlssFrameGeneration -AcceptNvidiaLicenses`
+(the maintainer's decision for v0.1.33, with the licence points below in mind). Locally, in PowerShell 7 on
+Windows, from this checkout after building OptiScaler:
 
 ```powershell
-.\package_release.ps1 -Version v0.6.0-fg-preview -SkipBuild -IncludeDlssFrameGeneration -AcceptNvidiaLicenses
+.\package_release.ps1 -Version v0.1.33 -SkipBuild -IncludeDlssFrameGeneration -AcceptNvidiaLicenses
 ```
 
 Omit `-SkipBuild` to build first. `-StreamlineArchive` supplies the official ZIP offline.
-The output is `release/OptiScaler-DLSSNR-v0.6.0-fg-preview-with-dlss-fg.zip`. Normal packages omit
+The output is `release/OptiScaler-DLSSNR-F5-0.1.33-with-dlss-fg.zip`. Normal packages omit
 the NVIDIA DLLs but include the downloader and manifest. Both variants keep FG and NR off by
 default, and include `SHA256SUMS.txt`. Existing version outputs are never overwritten.
 

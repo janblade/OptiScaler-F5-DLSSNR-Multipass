@@ -94,7 +94,9 @@ class DxgiFactoryHooks
     {
       private:
         bool previousState;
-        SdrToHdr::ScopedFgLibraryCreate fgLibrary; // the chains made inside are the frame generation library's own
+        // The chains made while this lives are the frame generation library's own (HDR output converts those). Removing
+        // this member silently turns that off: they would be plain chains, and stand aside.
+        SdrToHdr::ScopedFgLibraryCreate fgLibrary;
 
       public:
         ScopedSkipFGSCCreation()

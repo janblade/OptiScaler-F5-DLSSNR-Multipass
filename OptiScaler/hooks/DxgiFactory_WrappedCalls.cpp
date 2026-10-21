@@ -129,8 +129,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
               localDesc.BufferCount, localDesc.Flags, (SIZE_T) localDesc.OutputWindow, localDesc.Windowed,
               _skipFGSwapChainCreation);
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (!localDesc.Windowed)
         {
@@ -405,11 +404,6 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
 
         if (result == S_OK)
         {
-            // The frame generation library asked for exclusive full screen and got a windowed HDR chain: the window is
-            // kept borderless the way FGXeFGForceBorderless does it for the game-facing chain
-            if (hdrPlan.proxied && hdrPlan.exclusiveToWindowed)
-                FGHooks::KeepBorderless(localDesc.OutputWindow);
-
             State::Instance().currentSwapchainDesc = localDesc;
 
             if (hdrPlan.proxied)
@@ -456,8 +450,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
             }
             else
             {
-                wrapped->AdoptHdrPlan(hdrPlan,
-                                      localDesc.Flags); // (also a plan that stood aside: it marks the library chain)
+                // (also a plan that stood aside: it marks the library chain)
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
 
                 wrapped->Release();
             }
@@ -558,8 +552,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
     if (pFullscreenDesc != nullptr)
         memcpy(&localFullscreenDesc, pFullscreenDesc, sizeof(DXGI_SWAP_CHAIN_FULLSCREEN_DESC));
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed)
         {
@@ -851,11 +844,6 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
 
         if (result == S_OK)
         {
-            // The frame generation library asked for exclusive full screen and got a windowed HDR chain: the window is
-            // kept borderless the way FGXeFGForceBorderless does it for the game-facing chain
-            if (hdrPlan.proxied && hdrPlan.exclusiveToWindowed)
-                FGHooks::KeepBorderless(hWnd);
-
             if (!(VkPresentBridge::DxvkThroughVulkan() && VkPresentBridge::IsUp()))
                 State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
 
@@ -899,8 +887,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
             }
             else
             {
-                wrapped->AdoptHdrPlan(hdrPlan,
-                                      localDesc.Flags); // (also a plan that stood aside: it marks the library chain)
+                // (also a plan that stood aside: it marks the library chain)
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
 
                 wrapped->Release();
             }

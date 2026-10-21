@@ -5,6 +5,7 @@
 #include "SdrToHdr_ProxyBase.h"
 #include "SdrToHdr_Status.h"
 
+#include "../framegen/FGBorderless.h"
 #include "../framegen/FGOutput.h"
 
 #include <dxgi.h>
@@ -194,16 +195,21 @@ void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure);
 // DxgiFactoryHooks::ScopedSkipFGSCCreation). This, and only this, marks a chain as the library's own: a game quirk that
 // skips frame generation for the game's first chain does not. Per thread: the library creates it synchronously on the
 // calling thread.
+// A library that makes its chain on another thread is not seen here: that chain is then a plain one for these rules and
+// stands aside (the frame generation rule), which is safe. XeFG and FSR FG create it synchronously on the calling
+// thread.
+inline thread_local int g_fgLibraryCreateDepth = 0;
+
 class ScopedFgLibraryCreate
 {
   public:
-    ScopedFgLibraryCreate();
-    ~ScopedFgLibraryCreate();
+    ScopedFgLibraryCreate() { ++g_fgLibraryCreateDepth; }
+    ~ScopedFgLibraryCreate() { --g_fgLibraryCreateDepth; }
     ScopedFgLibraryCreate(const ScopedFgLibraryCreate&) = delete;
     ScopedFgLibraryCreate& operator=(const ScopedFgLibraryCreate&) = delete;
 };
 
-bool InFgLibraryCreate();
+inline bool InFgLibraryCreate() { return g_fgLibraryCreateDepth > 0; }
 
 // The Vulkan bridge is making its Direct3D 12 swap chain for a Vulkan game: HDR output is not available there
 class ScopedVulkanBridgeCreate

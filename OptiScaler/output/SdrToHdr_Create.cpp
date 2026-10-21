@@ -17,7 +17,6 @@ namespace SdrToHdr
 namespace
 {
 thread_local int t_proxiedCreateDepth = 0;
-thread_local int t_fgLibraryCreateDepth = 0;
 thread_local int t_vulkanBridgeCreateDepth = 0;
 std::mutex g_statusLock;
 StatusSnapshot g_status;
@@ -179,8 +178,8 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     in.frameGen = plan.fgLibraryChain;
     in.fgLibraryChain = plan.fgLibraryChain;
     // borderless is switched off for frame generation by the player: an exclusive request is then not made windowed
-    in.fgWindowable =
-        !Config::Instance()->FGXeFGForceBorderless.has_value() || Config::Instance()->FGXeFGForceBorderless.value();
+    in.fgWindowable = FgWindowable(Config::Instance()->FGXeFGForceBorderless.has_value(),
+                                   Config::Instance()->FGXeFGForceBorderless.value_or_default());
     in.composition = request.composition;
     in.coreWindow = request.coreWindow;
     in.multiNode = request.multiNode;
@@ -280,12 +279,6 @@ void NoteStandDown(Reason reason)
 
 namespace SdrToHdr
 {
-ScopedFgLibraryCreate::ScopedFgLibraryCreate() { ++t_fgLibraryCreateDepth; }
-
-ScopedFgLibraryCreate::~ScopedFgLibraryCreate() { --t_fgLibraryCreateDepth; }
-
-bool InFgLibraryCreate() { return t_fgLibraryCreateDepth > 0; }
-
 ScopedVulkanBridgeCreate::ScopedVulkanBridgeCreate() { ++t_vulkanBridgeCreateDepth; }
 
 ScopedVulkanBridgeCreate::~ScopedVulkanBridgeCreate() { --t_vulkanBridgeCreateDepth; }

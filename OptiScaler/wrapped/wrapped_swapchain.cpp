@@ -27,6 +27,7 @@
 #include <misc/IdentifyGpu.h>
 #include <misc/REFrameworkCompat.h>
 #include <hooks/Xell_Hooks.h>
+#include <hooks/FG_Hooks.h>
 
 #include <magic_enum.hpp>
 
@@ -763,8 +764,8 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     {
         _fgLibraryChain = plan->fgLibraryChain;
         NoteUpgrade(*plan);
-        NoteLibraryWindowed(*plan);
         StartHdrPlan(*plan, flags);
+        NoteLibraryWindowed(*plan);
     }
 
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
@@ -840,11 +841,13 @@ void WrappedIDXGISwapChain4::NoteUpgrade(const SdrToHdr::Plan& plan)
 
 void WrappedIDXGISwapChain4::NoteLibraryWindowed(const SdrToHdr::Plan& plan)
 {
-    if (!plan.proxied || !plan.exclusiveToWindowed || _libraryWindowed)
+    // Only a chain that is proxied now (the start can fail and put the chain back)
+    if (!plan.proxied || !plan.exclusiveToWindowed || _libraryWindowed || !Proxied())
         return;
 
     _libraryWindowed = true;
     DisableAltEnter();
+    FGHooks::KeepBorderless(_handle, this);
 }
 
 void WrappedIDXGISwapChain4::DisableAltEnter()
@@ -917,7 +920,7 @@ HRESULT WrappedIDXGISwapChain4::EmulateFullscreen(BOOL fullscreen, IDXGIOutput* 
 // it is resized; leaving full screen makes it valid again (read from DXGI, tests/sdr_to_hdr_dx11_gpu.cpp)
 void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
 {
-    if ((!_upgraded && !_libraryWindowed) || presentResult != DXGI_ERROR_INVALID_CALL)
+    if (!_upgraded || presentResult != DXGI_ERROR_INVALID_CALL)
         return;
 
     BOOL fullscreen = FALSE;
@@ -940,9 +943,9 @@ void WrappedIDXGISwapChain4::AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags
     if (plan.proxied && !Proxied())
     {
         NoteUpgrade(plan);
-        NoteLibraryWindowed(plan);
         LOG_INFO("HDR output: this swap chain was already wrapped by a nested hook, giving it the plan");
         StartHdrPlan(plan, flags);
+        NoteLibraryWindowed(plan);
     }
 }
 
@@ -1106,6 +1109,10 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
         // generation are the bridge's, on this same window, and it lets go of them itself when dxvk's Vulkan swapchain goes
         // (in _real->Release() below). Tearing them down here would pull XeFG out from under its queued presents.
         const bool bridgeOwns = VkPresentBridge::DxvkThroughVulkan();
+
+        // HDR output no longer keeps the window borderless for this chain
+        if (_libraryWindowed)
+            FGHooks::ReleaseBorderless(this);
 
         if (!bridgeOwns)
             MenuOverlayDx::CleanupRenderTarget(true, _handle);
@@ -2227,6 +2234,14 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
                            : failedStart   ? SdrToHdr::Reason::StartFailed
                                            : decision.reason,
                            result.proxied, hdr10, in.enabled || kept, _display.maxLuminance);
+
+    // The library's HDR chain stood down (HDR output off, Windows HDR off, a start that failed): the window is no
+    // longer kept borderless for it
+    if (_libraryWindowed && !result.proxied)
+    {
+        _libraryWindowed = false;
+        FGHooks::ReleaseBorderless(this);
+    }
 
     // A resize kept the proxy of a chain that was made flip model: what it was kept through is said over the active line
     if (kept && result.proxied)

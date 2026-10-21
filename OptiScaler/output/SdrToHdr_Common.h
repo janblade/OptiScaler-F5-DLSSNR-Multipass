@@ -136,7 +136,12 @@ inline Decision Decide(const Inputs& in)
 
     if (!in.flipModel)
     {
-        if (!in.windowed && !(libraryChain && in.fgWindowable))
+        // (the library's chains are flip model; one that is not does not take the bitblt upgrade, which does not mix with
+        // keeping the window borderless for frame generation)
+        if (libraryChain)
+            return { false, Reason::BitBlt };
+
+        if (!in.windowed)
             exclusiveBitBlt = true; // named last, below: the display, frame generation and the rest are the real blockers first
         else if (!in.canUpgradeBitBlt)
             return { false, Reason::BitBlt };
@@ -249,8 +254,8 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: standing aside, the game uses exclusive full screen with an older swap chain type; switch the "
                "game to borderless or windowed";
     case Reason::FrameGen:
-        return "HDR output: standing aside, this picture path is not supported together with frame generation (works with "
-               "XeFG and FSR FG)";
+        return "HDR output: standing aside, not available for this swap chain while frame generation is on (works with XeFG "
+               "and FSR FG)";
     case Reason::FgExclusive:
         return "HDR output: standing aside, the frame generation swap chain is in exclusive full screen; switch the game to "
                "borderless or windowed";

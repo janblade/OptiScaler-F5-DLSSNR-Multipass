@@ -554,8 +554,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
               localDesc.BufferCount, localDesc.Flags, (SIZE_T) localDesc.OutputWindow, localDesc.Windowed,
               _skipFGSwapChainCreation);
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (!localDesc.Windowed)
         {
@@ -835,11 +834,6 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
         if (result == S_OK)
         {
-            // The frame generation library asked for exclusive full screen and got a windowed HDR chain: the window is
-            // kept borderless the way FGXeFGForceBorderless does it for the game-facing chain
-            if (hdrPlan.proxied && hdrPlan.exclusiveToWindowed)
-                FGHooks::KeepBorderless(localDesc.OutputWindow);
-
             if (sizeToWindow)
             {
                 // Keep the dimensions actually created by DXGI authoritative for menu sizing.
@@ -898,8 +892,8 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
             }
             else
             {
-                wrapped->AdoptHdrPlan(hdrPlan,
-                                      localDesc.Flags); // (also a plan that stood aside: it marks the library chain)
+                // (also a plan that stood aside: it marks the library chain)
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
 
                 wrapped->Release();
             }
@@ -997,8 +991,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
     if (pFullscreenDesc != nullptr)
         memcpy(&localFullscreenDesc, pFullscreenDesc, sizeof(DXGI_SWAP_CHAIN_FULLSCREEN_DESC));
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed)
         {
@@ -1299,11 +1292,6 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
         if (result == S_OK)
         {
-            // The frame generation library asked for exclusive full screen and got a windowed HDR chain: the window is
-            // kept borderless the way FGXeFGForceBorderless does it for the game-facing chain
-            if (hdrPlan.proxied && hdrPlan.exclusiveToWindowed)
-                FGHooks::KeepBorderless(hWnd);
-
             SetPlainSwapchainInterop();
 
             // check for SL proxy
@@ -1346,8 +1334,8 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
             }
             else
             {
-                wrapped->AdoptHdrPlan(hdrPlan,
-                                      localDesc.Flags); // (also a plan that stood aside: it marks the library chain)
+                // (also a plan that stood aside: it marks the library chain)
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
 
                 wrapped->Release();
             }
@@ -1618,8 +1606,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChain(IDXGIFactory* realFactory, IUnkno
               localDesc.BufferCount, localDesc.Flags, (SIZE_T) localDesc.OutputWindow, localDesc.Windowed,
               _skipFGSwapChainCreation);
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (!localDesc.Windowed)
         {
@@ -1928,8 +1915,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForHwnd(IDXGIFactory2* realFactory
     if (pFullscreenDesc != nullptr)
         memcpy(&localFullscreenDesc, pFullscreenDesc, sizeof(DXGI_SWAP_CHAIN_FULLSCREEN_DESC));
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed)
         {

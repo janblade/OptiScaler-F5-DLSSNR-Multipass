@@ -494,7 +494,7 @@ int main()
         lib.streamlineDlssg = true;
         Check(Is(lib, Reason::StreamlineDlssg), "XeFG's chain with the game's own DLSS-G on: StreamlineDlssg");
         lib.streamlineDlssg = false;
-        lib.flipModel = false;
+        lib.flipModel = true;
         lib.windowed = false;
         Check(Is(lib, Reason::FgExclusive), "XeFG's chain that is exclusive (a resize): FgExclusive");
 
@@ -507,6 +507,19 @@ int main()
             sig.fgLibraryChain = true;
             Check(Decide(sig).use, "the library's chain is converted");
         }
+
+        // a library chain that is not flip model does not take the bitblt upgrade (it would not mix with keeping the window
+        // borderless): it stands aside
+        Inputs bitbltLib = Good();
+        bitbltLib.frameGen = true;
+        bitbltLib.fgBackend = FgBackend::XeFG;
+        bitbltLib.fgLibraryChain = true;
+        bitbltLib.flipModel = false;
+        bitbltLib.canUpgradeBitBlt = true;
+        Check(Is(bitbltLib, Reason::BitBlt), "the library's bitblt chain: BitBlt, not upgraded");
+        bitbltLib.fgWindowable = true;
+        bitbltLib.windowed = false;
+        Check(Is(bitbltLib, Reason::BitBlt), "... also when it was asked exclusive");
 
         // the library's chain without frame generation on is a plain chain (the flag means nothing alone), exclusive or not
         Inputs plainLib = Good();
@@ -548,6 +561,7 @@ int main()
                   !KeepUpgradedProxy({ false, Reason::DlssgOutput }, false).use,
               "an upgraded chain keeps its proxy when DLSS-G output starts");
 
+        Check(std::strstr(ReasonText(Reason::FgExclusive), "borderless") != nullptr, "FgExclusive says what to do");
         Check(std::strstr(ReasonText(Reason::DlssgOutput), "DLSS-G") != nullptr &&
                   std::strstr(ReasonText(Reason::FrameGen), "XeFG and FSR FG") != nullptr,
               "texts: DlssgOutput names DLSS-G output, FrameGen names the supported backends");

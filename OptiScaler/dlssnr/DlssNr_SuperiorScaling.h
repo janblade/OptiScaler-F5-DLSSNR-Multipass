@@ -18,15 +18,41 @@ inline int Preset(int preset) { return preset == 11 ? 11 : 1; } // K or A; no de
 // and the legacy saved value 3 select Small. This is independent of SR's A/K.
 inline bool MainOnlyRuntime(unsigned major, unsigned minor) { return major == 310u && minor < 9u; }
 inline unsigned EffectiveNrPreset(unsigned requested, bool mainOnly) { return mainOnly || requested == 1u ? 1u : 2u; }
+// Calibrated IDs: styles Standard/Natural/Cinematic; presets Default/A/B and legacy Small alias 3.
+constexpr float UncalibratedHigh = .950f, UncalibratedLow = .850f;
+inline bool Calibrated(unsigned style, unsigned nrPreset) { return style < 3u && nrPreset <= 3u; }
+// Preserve future identifiers for gain selection. Janblade's model/menu validation remains unchanged.
+template <class C> inline unsigned GainPresetSelection(const C& cfg, unsigned pass)
+{
+    if (pass == 1 && cfg.DlssNrPass2Preset.has_value())
+        return cfg.DlssNrPass2Preset.value();
+    if (pass == 2 && cfg.DlssNrPass3Preset.has_value())
+        return cfg.DlssNrPass3Preset.value();
+    return cfg.DlssNrPreset.value_or_default();
+}
+template <class C> inline unsigned GainStyleSelection(const C& cfg, unsigned pass)
+{
+    if (pass == 1 && cfg.DlssNrPass2Style.has_value())
+        return cfg.DlssNrPass2Style.value();
+    if (pass == 2 && cfg.DlssNrPass3Style.has_value())
+        return cfg.DlssNrPass3Style.value();
+    if (pass >= 3 && pass < 30 && cfg.DlssNrExtraPasses[pass - 3].style.has_value())
+        return cfg.DlssNrExtraPasses[pass - 3].style.value();
+    return cfg.DlssNrStyle.value_or_default();
+}
 inline float High(unsigned style, unsigned nrPreset = 1u, bool mainOnly = false)
 {
+    if (!Calibrated(style, nrPreset))
+        return UncalibratedHigh;
     constexpr float main[] { .8f, .75f, .95f }, smallModel[] { .950f, .925f, .955f };
-    return (EffectiveNrPreset(nrPreset, mainOnly) == 2u ? smallModel : main)[std::min(style, 2u)];
+    return (EffectiveNrPreset(nrPreset, mainOnly) == 2u ? smallModel : main)[style];
 }
 inline float Low(unsigned style, unsigned nrPreset = 1u, bool mainOnly = false)
 {
+    if (!Calibrated(style, nrPreset))
+        return UncalibratedLow;
     constexpr float main[] { .661f, .787f, .784f }, smallModel[] { .861f, .838f, .861f };
-    return (EffectiveNrPreset(nrPreset, mainOnly) == 2u ? smallModel : main)[std::min(style, 2u)];
+    return (EffectiveNrPreset(nrPreset, mainOnly) == 2u ? smallModel : main)[style];
 }
 
 inline float EffectiveBand(float p50, float scale, float structure, float intensity)

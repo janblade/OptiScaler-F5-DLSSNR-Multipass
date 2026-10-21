@@ -4,8 +4,19 @@
 #include "../../OptiScaler/shaders/dlssnr/superior/Constants.h"
 using namespace DlssNr::Superior;
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_Guides.h"
+#include <optional>
 
 template<class T> struct Setting { T value; T value_or_default() const { return value; } };
+struct GainSelections
+{
+    Setting<unsigned> DlssNrPreset { 0 }, DlssNrStyle { 0 };
+    std::optional<unsigned> DlssNrPass2Preset, DlssNrPass3Preset, DlssNrPass2Style, DlssNrPass3Style;
+    struct Extra
+    {
+        std::optional<unsigned> style;
+    };
+    std::array<Extra, 27> DlssNrExtraPasses {};
+};
 struct SavedSettings {
     Setting<uint32_t> DlssNrTransfer {11}, DlssNrInterPassReconstruction {0},
         DlssNrProxyDownscaleFilter {11}, DlssNrGuidedResidualRadius {3}, DlssNrGuidedResidualShaping {0};
@@ -21,7 +32,7 @@ int main() {
         require(Radius(cfg)==1 && RangeSigma(cfg)==.015f && SpatialSigma(cfg)==3 && GuideStrength(cfg)==1);
         require(ShapingMode(cfg)==2);
         require(High(0)==.8f && Low(0)==.661f && High(1)==.75f && Low(1)==.787f);
-        require(High(2)==.95f && Low(2)==.784f && High(99)==High(2));
+        require(High(2) == .95f && Low(2) == .784f && High(99) == .950f && Low(99) == .850f);
         require(High(0,2)==.950f && Low(0,2)==.861f);
         require(High(1,2)==.925f && Low(1,2)==.838f);
         require(High(2,2)==.955f && Low(2,2)==.861f);
@@ -48,6 +59,39 @@ int main() {
                             EffectiveBand(Low(style, 2), scale, .75f, .6f));
                 }
             }
+        for (unsigned newStyle : { 3u, 4u, 99u, UINT32_MAX })
+            for (unsigned preset : { 0u, 1u, 2u, 3u, 4u, 99u, UINT32_MAX })
+                for (bool mainOnly : { false, true })
+                    require(High(newStyle, preset, mainOnly) == .950f && Low(newStyle, preset, mainOnly) == .850f);
+        for (unsigned newPreset : { 4u, 5u, 99u, UINT32_MAX })
+            for (unsigned style : { 0u, 1u, 2u })
+                for (bool mainOnly : { false, true })
+                    require(High(style, newPreset, mainOnly) == .950f && Low(style, newPreset, mainOnly) == .850f);
+        GainSelections future;
+        future.DlssNrPreset.value = 7;
+        future.DlssNrStyle.value = 4;
+        future.DlssNrPass2Preset = 0;
+        future.DlssNrPass2Style = 1;
+        future.DlssNrPass3Preset = 1;
+        future.DlssNrPass3Style = 9;
+        future.DlssNrExtraPasses[0].style = 2;
+        future.DlssNrExtraPasses[26].style = 8;
+        require(GainPresetSelection(future, 0) == 7 && GainStyleSelection(future, 0) == 4);
+        require(GainPresetSelection(future, 1) == 0 && GainStyleSelection(future, 1) == 1);
+        require(High(GainStyleSelection(future, 1), GainPresetSelection(future, 1)) == .925f);
+        require(GainPresetSelection(future, 2) == 1 && GainStyleSelection(future, 2) == 9);
+        require(GainStyleSelection(future, 3) == 2 && GainPresetSelection(future, 3) == 7);
+        require(GainStyleSelection(future, 29) == 8 && GainStyleSelection(future, 30) == 4);
+        const auto futureSchedule =
+            DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
+                                                [&](unsigned pass) -> DlssNr::InterPass::ScheduleGains
+                                                {
+                                                    const auto style = GainStyleSelection(future, pass),
+                                                               preset = GainPresetSelection(future, pass);
+                                                    return { High(style, preset), Low(style, preset) };
+                                                });
+        require(std::abs(futureSchedule.Block(0, 3).high - .950f * .925f * .950f) < 1e-6f);
+        require(std::abs(futureSchedule.Block(0, 3).low - (.850f + .838f + .850f) / 3) < 1e-6f);
         require(EffectiveBand(.8f,.5f,1,1)==.8f);
         require(EffectiveBand(.8f,1,1,1)==1 && EffectiveBand(.8f,.5f,.75f,0)==1);
         require(std::abs(EffectiveBand(.8f,.5f,.5f,.5f)-.95f)<1e-6f);

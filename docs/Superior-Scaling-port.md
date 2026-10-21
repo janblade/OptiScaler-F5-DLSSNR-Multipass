@@ -37,6 +37,14 @@ The fixed Area/inter-pass/carrier/low shaders retain v59 bytecode and their lazy
 | B small | Natural | 0.925 | 0.838 |
 | B small | Cinematic | 0.955 | 0.861 |
 
+New, uncalibrated NR preset/style identifiers use high/medium **0.950** and low **0.850**. Existing styles 0..2 and
+preset identifiers Default/A/B/legacy Small 0..3 keep their current tables and runtime mapping. Either an unknown style
+or an unknown preset selects the fallback for that pass, including inherited settings and passes 2..30. Gain selection
+preserves identifiers before the host's current model-validation clamps; this does not add unsupported models/styles to
+NR or the menu. The fallback feeds both inter-pass scheduling and final shaping, with the same resolution/slider scaling,
+high products and low means. A future change to the NR runtime's meaning of an existing ID (such as Default) still needs
+an explicit model-mapping update; the fallback detects new IDs, not undocumented changes behind an old ID.
+
 Gains use the v59 resolution correction and Structure * Intensity. High/medium multiply within a block; low is the block's arithmetic mean.
 An inter-pass runs before the next pass only if the absolute high/low gap would both increase and exceed 0.15.
 Final shaping uses only the tail after the last successful inter-pass. Carrier K=1, fixed linear 0.5 encoding, guided radius 1, range sigma .015, spatial sigma 3, strength 1.

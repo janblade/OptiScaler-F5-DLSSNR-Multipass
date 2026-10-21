@@ -11,8 +11,8 @@ namespace DlssNr::SuperiorScaling
 inline InterPass::ScheduleGains PassGains(const Config& cfg, unsigned pass, float scale, bool mainOnly)
 {
     const auto tuning = Profiles::PassTuning(cfg, pass);
-    const auto style = Profiles::PassStyle(cfg, pass);
-    const auto preset = Profiles::PassPreset(cfg, pass);
+    const auto style = GainStyleSelection(cfg, pass);
+    const auto preset = GainPresetSelection(cfg, pass);
     const auto gain = [&](float p50) { return EffectiveBand(p50, scale, tuning.structure, tuning.intensity); };
     return { gain(High(style, preset, mainOnly)), gain(Low(style, preset, mainOnly)) };
 }

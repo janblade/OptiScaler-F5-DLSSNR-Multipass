@@ -156,7 +156,7 @@ int main()
                            Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                            Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
                            Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::DlssgStartedLater,
-                           Reason::ExclusiveBitBlt, Reason::DlssgKeptUpgraded, Reason::Active };
+                           Reason::ExclusiveBitBlt, Reason::DlssgKeptUpgraded, Reason::DisplayLeftHdrKept, Reason::Active };
     bool texts = true;
 
     for (size_t i = 0; i < std::size(all); ++i)
@@ -390,6 +390,55 @@ int main()
         Check(StatusLine(snap, turnedOn).colour == StatusColour::Green, "status: turned back on: the active line again");
         snap.active = false;
         Check(StatusLine(snap, turnedOff).text != TurnsOffAtStartText(), "status: the line is only for a chain that converts");
+    }
+
+    // ---- Review Pass: names the real blocker, notes, flags ----
+    {
+        Inputs ex = Good();
+        ex.flipModel = false;
+        ex.windowed = false;
+        ex.canUpgradeBitBlt = true;
+        Check(Is(ex, Reason::ExclusiveBitBlt), "exclusive full screen bitblt, nothing else wrong: ExclusiveBitBlt");
+        ex.displayHdr = false;
+        Check(Is(ex, Reason::DisplayNotHdr), "exclusive full screen bitblt on a display without HDR: DisplayNotHdr (the real blocker first)");
+        ex = Good();
+        ex.flipModel = false;
+        ex.windowed = false;
+        ex.frameGen = true;
+        Check(Is(ex, Reason::FrameGen), "exclusive full screen bitblt with frame generation: FrameGen first");
+        ex.frameGen = false;
+        ex.dxvk = true;
+        Check(Is(ex, Reason::Dxvk), "exclusive full screen bitblt on dxvk: Dxvk first");
+        ex.dxvk = false;
+        ex.streamlineDlssg = true;
+        Check(Is(ex, Reason::StreamlineDlssg), "exclusive full screen bitblt with Streamline DLSS-G: StreamlineDlssg first");
+
+        Check(UpgradedResizeFlags(DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) ==
+                  (UINT) DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING,
+              "resize flags: GDI-compatible dropped, the others kept");
+        Check(std::strstr(ReasonText(Reason::BitBlt), "only be changed when the game starts") != nullptr,
+              "BitBlt text: a swap chain that can only be changed when the game starts");
+        Check(std::strstr(AppliesLaterText(), "next start") != nullptr, "applies-later text names the next start first");
+
+        StatusSettings on;
+        on.enabled = true;
+        StatusSnapshot snap;
+        snap.decided = true;
+        snap.enabledAtDecision = true;
+        snap.active = true;
+        snap.reason = Reason::Active;
+        snap.upgraded = true;
+        snap.endsAtResize = true;
+        snap.endReason = Reason::DlssgKeptUpgraded;
+        auto line = StatusLine(snap, on);
+        Check(line.colour == StatusColour::Amber && line.text == ReasonText(Reason::DlssgKeptUpgraded) &&
+                  line.text.find("stays on until the next start") != std::string::npos,
+              "status: the game turned on DLSS-G on an upgraded chain: stays on until the next start (amber)");
+        snap.endReason = Reason::DisplayLeftHdrKept;
+        line = StatusLine(snap, on);
+        Check(line.colour == StatusColour::Amber && line.text == ReasonText(Reason::DisplayLeftHdrKept) &&
+                  line.text.find("restart the game to go back to SDR") != std::string::npos,
+              "status: Windows HDR went off under an upgraded chain: amber, restart to go back to SDR (not a green active line)");
     }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_rules_smoke: PASS\n" : "sdr_to_hdr_rules_smoke: %d FAIL\n", g_failures);

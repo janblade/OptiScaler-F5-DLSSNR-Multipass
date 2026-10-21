@@ -34,6 +34,7 @@ enum class Reason
     StartFailed,      // the proxy or the pass could not be made: the chain is shown as the game made it
     StuckHdr,         // the proxy could not be made and the chain could not be put back: it stays HDR (known limit: for good)
     DlssgStartedLater, // (a note, never a Decide result) the game turned on its own DLSS-G after the chain was proxied
+    DisplayLeftHdrKept, // (a note) Windows HDR went off for the display, on a chain that was made flip model for HDR output
     DlssgKeptUpgraded, // (a note) the same, on a chain that was made flip model for HDR output: it stays on until the next start
     Active,
 };
@@ -108,16 +109,16 @@ inline Decision Decide(const Inputs& in)
     // An older (bitblt) chain: made flip model at creation when it is windowed (or borderless) and single-sample. In exclusive
     // full screen it cannot be, and a chain that already exists cannot change its model.
     bool upgrade = false;
+    bool exclusiveBitBlt = false;
 
     if (!in.flipModel)
     {
         if (!in.windowed)
-            return { false, Reason::ExclusiveBitBlt };
-
-        if (!in.canUpgradeBitBlt)
+            exclusiveBitBlt = true; // named last, below: the display, frame generation and the rest are the real blockers first
+        else if (!in.canUpgradeBitBlt)
             return { false, Reason::BitBlt };
-
-        upgrade = true;
+        else
+            upgrade = true;
     }
 
     if (in.frameGen)
@@ -146,6 +147,9 @@ inline Decision Decide(const Inputs& in)
 
     if (!in.displayHdr)
         return { false, Reason::DisplayNotHdr };
+
+    if (exclusiveBitBlt)
+        return { false, Reason::ExclusiveBitBlt };
 
     return { true, Reason::Active, upgrade };
 }
@@ -186,8 +190,8 @@ inline const char* ReasonText(Reason reason)
     case Reason::DisplayNotHdr:
         return "HDR output: standing aside, Windows HDR is off for this display";
     case Reason::BitBlt:
-        return "HDR output: standing aside, this swap chain was made as an older type before HDR output was on; restart "
-               "the game";
+        return "HDR output: standing aside, this game's swap chain is an older type that can only be changed when the game "
+               "starts; restart the game with HDR output and Windows HDR on";
     case Reason::ExclusiveBitBlt:
         return "HDR output: standing aside, the game uses exclusive full screen with an older swap chain type; switch the "
                "game to borderless or windowed";
@@ -217,6 +221,8 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: could not undo the HDR swap chain; restart the game";
     case Reason::DlssgStartedLater:
         return "HDR output: the game turned on DLSS frame generation; HDR output stops at the next resolution / window change";
+    case Reason::DisplayLeftHdrKept:
+        return "HDR output: Windows HDR is off for this display; restart the game to go back to SDR";
     case Reason::DlssgKeptUpgraded:
         return "HDR output: the game turned on DLSS frame generation; this game's swap chain was changed for HDR, so HDR "
                "output stays on until the next start";
@@ -271,6 +277,10 @@ inline SwapDescEdit UpgradeSwapDesc(DXGI_SWAP_EFFECT swapEffect, UINT bufferCoun
     edit.flags = flags & ~(UINT) DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
     return edit;
 }
+
+// A flip model chain refuses the GDI-compatible flag (read from DXGI, tests/sdr_to_hdr_dx11_gpu.cpp): a resize of a chain made
+// flip model for HDR output goes without it. (GetDesc therefore does not show the flag the game asked for: known limit.)
+inline UINT UpgradedResizeFlags(UINT flags) { return flags & ~(UINT) DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE; }
 
 // A game's ResizeBuffers count on a chain that was made flip model for it: 0 keeps the count, anything else is at least 2
 inline UINT UpgradedResizeCount(UINT requested) { return requested == 0 ? 0 : (requested < 2 ? 2 : requested); }

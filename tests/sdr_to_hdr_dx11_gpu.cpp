@@ -1023,6 +1023,8 @@ void Chains(Gpu& g, bool warp)
             SdrToHdr::ProxyChainBase::Hooks().duringRealResize = [](void* context)
             {
                 auto& d = *static_cast<During*>(context);
+                // once: a resize of another thread, started below, passes this hook too when it gets its turn
+                SdrToHdr::ProxyChainBase::Hooks().duringRealResize = nullptr;
                 d.ran = true;
                 d.inResize = d.chain->InResize();
                 d.engaged = d.chain->Engaged();
@@ -1259,6 +1261,26 @@ void Upgraded(Gpu& g, DXGI_SWAP_EFFECT asked, const char* label)
             }
 
             // (the base class can still unproxy when asked to, as it does for a game that took over)
+            // A failure on an upgraded chain is never put back to a plain flip buffer for the game (Review Pass B-P1): stuck
+            {
+                request.wantProxy = true;
+                request.rawFormat = kGame;
+                request.noRevert = true;
+                SdrToHdr::ProxyChainBase::Hooks().failBuild = true;
+                result = chain.Resize(g.device.Get(), real.Get(), request);
+                real->GetDesc(&realDesc);
+                ComPtr<ID3D11Texture2D> handed;
+                const HRESULT got = chain.GetBuffer(0, IID_PPV_ARGS(&handed));
+                std::snprintf(what, sizeof(what), "%s: the build fails on an upgraded chain: stuck, not reverted", label);
+                Check(result.stuckHdr && !result.reverted && !result.proxied && realDesc.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT, what);
+                Check(chain.Engaged() && FAILED(got) && handed == nullptr,
+                      "... still engaged: the game is refused a buffer, never handed the real HDR buffer");
+                result = chain.Resize(g.device.Get(), real.Get(), request);
+                Check(SUCCEEDED(result.hr) && result.proxied, "... and the next resize makes the proxy again");
+                request.noRevert = false;
+                SdrToHdr::ProxyChainBase::Hooks() = {};
+            }
+
             // unproxied: the real chain stays flip model, still two buffers
             request.wantProxy = false;
             request.rawFormat = DXGI_FORMAT_UNKNOWN;
@@ -1326,6 +1348,16 @@ void FlipFacts(Gpu& g)
         }
 
         Check(SUCCEEDED(chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0)), "fact: ResizeBuffers with a kept count (0) works");
+
+        {
+            const HRESULT gdi = chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE);
+            char gdiText[160];
+            std::snprintf(gdiText, sizeof(gdiText), "fact: a flip chain REFUSES a resize with the GDI-compatible flag (%08lX; why the wrapper strips it)",
+                          (unsigned long) gdi);
+            Check(FAILED(gdi), gdiText);
+            Check(SUCCEEDED(chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, SdrToHdr::UpgradedResizeFlags(DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE))),
+                  "... and the same resize without it works");
+        }
     }
 
     DestroyWindow(window);

@@ -362,7 +362,8 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
 
     const auto finish = [&]()
     {
-        if (!result.proxied)
+        // (stuck on an upgraded chain: stays engaged, so GetBuffer / GetDesc keep answering for the game, never the real chain)
+        if (!result.proxied && !(request.noRevert && result.stuckHdr))
             _reportFormat = DXGI_FORMAT_UNKNOWN;
 
         return result;
@@ -382,14 +383,23 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
             }
             else
             {
-                // The real chain is still HDR and there is no proxy: put it back to the game's format
+                // The real chain is still HDR and there is no proxy: put it back to the game's format -- except an upgraded
+                // chain (noRevert), whose game must never be handed the real flip buffer
                 result.note = why;
-                const HRESULT revert = RevertRealLocked(real, request, previousFormat, false);
 
-                if (SUCCEEDED(revert))
-                    result.reverted = true;
+                if (request.noRevert)
+                {
+                    result.stuckHdr = true;
+                }
                 else
-                    result.stuckHdr = true; // honest: it stays HDR, nothing converts it (known limit: for good)
+                {
+                    const HRESULT revert = RevertRealLocked(real, request, previousFormat, false);
+
+                    if (SUCCEEDED(revert))
+                        result.reverted = true;
+                    else
+                        result.stuckHdr = true; // honest: it stays HDR, nothing converts it (known limit: for good)
+                }
             }
         }
 
@@ -408,10 +418,17 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
         {
             // Never leave the game with an HDR chain and no pass: back to its own format, unproxied
             ReleaseLocked();
-            const HRESULT revert = RevertRealLocked(real, request, request.resolvedFormat, true);
-            result.hr = revert;
             result.proxied = false;
             result.note = why;
+
+            if (request.noRevert)
+            {
+                result.stuckHdr = true; // (see above: an upgraded chain is never handed to the game as a plain flip buffer)
+                return finish();
+            }
+
+            const HRESULT revert = RevertRealLocked(real, request, request.resolvedFormat, true);
+            result.hr = revert;
 
             if (SUCCEEDED(revert))
                 result.reverted = true;

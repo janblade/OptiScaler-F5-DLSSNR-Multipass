@@ -1,4 +1,4 @@
-// Not built with the precompiled header: Direct3D and DXGI only, so tests/sdr_to_hdr_swapchain_dx11_gpu.cpp compiles it
+// Not built with the precompiled header: Direct3D and DXGI only, so tests/sdr_to_hdr_dx11_gpu.cpp compiles it
 // alone.
 #include "SdrToHdr_ProxyDx11.h"
 

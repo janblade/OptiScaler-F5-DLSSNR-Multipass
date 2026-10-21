@@ -527,6 +527,8 @@ int main(int argc, char** argv)
             SdrToHdr::ProxyChain::Hooks().duringRealResize = [](void* context)
             {
                 auto& d = *static_cast<During*>(context);
+                // once: a resize of another thread, started below, passes this hook too when it gets its turn
+                SdrToHdr::ProxyChain::Hooks().duringRealResize = nullptr;
                 d.ran = true;
                 d.inResize = d.chain->InResize();
                 d.engaged = d.chain->Engaged();

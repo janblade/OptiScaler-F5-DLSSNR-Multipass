@@ -1,7 +1,7 @@
 #pragma once
 
 // Direct3D 11 and DXGI only (no OptiScaler headers but SdrToHdr_Common.h, SdrToHdr_ProxyBase.h, SdrToHdr_Dx11.h and
-// native/F5LowShaderBytecode.h), so tests/sdr_to_hdr_swapchain_dx11_gpu.cpp builds it alone.
+// native/F5LowShaderBytecode.h), so tests/sdr_to_hdr_dx11_gpu.cpp builds it alone.
 #include "SdrToHdr_Dx11.h"
 #include "SdrToHdr_ProxyBase.h"
 
@@ -12,7 +12,7 @@ namespace SdrToHdr
 // The Direct3D 11 proxy back buffer.
 //
 // A Direct3D 11 flip-model chain shows the game one buffer: GetBuffer(0) is the one being drawn, DXGI rotates the others
-// behind it, and GetBuffer(1..) fail (read from DXGI on WARP and a hardware adapter, tests/sdr_to_hdr_swapchain_dx11_gpu.cpp).
+// behind it, and GetBuffer(1..) fail (read from DXGI on WARP and a hardware adapter, tests/sdr_to_hdr_dx11_gpu.cpp).
 // So the proxy is one texture, GetBuffer(0) returns it and any other index is INVALID_CALL, as the real chain says. At present
 // the pass converts it into the real chain's buffer 0 (which is whichever back buffer is current).
 //

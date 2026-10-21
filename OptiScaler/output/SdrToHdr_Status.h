@@ -58,7 +58,7 @@ inline const char* TurnsOffAtStartText()
 
 inline const char* AppliesLaterText()
 {
-    return "HDR output: applies at the next start or resolution / window change";
+    return "HDR output: applies at the next start (or at a resolution / window change, in most games)";
 }
 
 // Off: no line. A change of [HDR] Enabled the chain has not picked up yet: amber, in both directions. Active: green with the

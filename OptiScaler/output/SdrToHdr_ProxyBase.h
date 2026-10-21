@@ -29,6 +29,10 @@ struct ResizeRequest
     IUnknown* const* queues = nullptr;  // ResizeBuffers1 only
     bool wantProxy = false;             // Decide() said use, for the new state
     bool hdr10 = false;                 // PQ instead of scRGB
+    // The chain was made flip model for HDR output (an older, bitblt one): a failure never puts the real chain back to a plain
+    // flip back buffer for the game (it is unbound at every Present, which a bitblt-era game does not expect). It stays
+    // engaged -- GetBuffer refuses -- and the result says stuckHdr: restart-required.
+    bool noRevert = false;
     DXGI_COLOR_SPACE_TYPE gameColourSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; // set again when leaving the proxy
 };
 
@@ -65,6 +69,10 @@ class ProxyChainBase
     // be put back) the real chain stays HDR with nothing converting it for good -- only a restart helps, and the status says
     // so. And while a resize runs the lock is not held, so a CheckColorSpaceSupport / SetColorSpace1 the game makes meanwhile
     // reaches the real chain for that moment (the wrapper answers for the game's format only while the chain is Active).
+    // Also: a resize from another thread waits on _resizeGate for the running one (DXGI serialises them too); Direct3D 11
+    // views of the proxy do not hold a resize (DXGI would refuse while a view of its own buffer lives); other rare flags a
+    // flip chain refuses fail the create, which the creation sites retry as the game asked; and GetDesc's Flags do not show
+    // the GDI-compatible flag the resize drops (SdrToHdr::UpgradedResizeFlags).
     ResizeResult Resize(IUnknown* device, IDXGISwapChain3* real, const ResizeRequest& request);
 
     // Puts the real chain back to the game's format and colour space without a proxy (a failed Start, a dropped plan).
@@ -90,13 +98,16 @@ class ProxyChainBase
     DXGI_FORMAT ReportedFormat() const { return _reportFormat.load(std::memory_order_acquire); }
     DXGI_FORMAT GameFormat() const { return ReportedFormat(); }
 
+    // After a failure on an upgraded chain: the game keeps being shown a (broken) proxy chain, never the real HDR buffer.
+    void HoldEngaged(DXGI_FORMAT gameFormat) { _reportFormat.store(gameFormat, std::memory_order_release); }
+
     // True the first time it is asked, once per chain: the present's failure is logged once.
     bool NoteFailureLogged() { return !_failureLogged.exchange(true); }
 
     // True the first time it is asked, once per chain: a late stand-down (the game turned on its own DLSS-G) is logged once.
     bool NoteLateStandDownLogged() { return !_lateLogged.exchange(true); }
 
-    // Test hooks (tests/sdr_to_hdr_swapchain_*_gpu.cpp): fault injection and a callback run where the real DXGI resize would
+    // Test hooks (tests/sdr_to_hdr_swapchain_dx12_gpu.cpp and tests/sdr_to_hdr_dx11_gpu.cpp): fault injection and a callback run where the real DXGI resize would
     // be, with the lock released and the in-resize state set, to stand in for a window message the game answers.
     struct TestHooks
     {

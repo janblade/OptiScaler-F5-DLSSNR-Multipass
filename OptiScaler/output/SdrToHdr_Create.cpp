@@ -6,6 +6,7 @@
 #include <State.h>
 
 #include <misc/IdentifyGpu.h>
+#include <proxies/Dxgi_Proxy.h>
 #include <native/VkPresentBridge.h>
 #include <framegen/dlssg/DlssgTelemetry.h>
 
@@ -30,9 +31,15 @@ bool DisplayForWindow(IDXGIFactory* factory, HWND window, DisplayInfo& info)
 
     if (factory == nullptr)
     {
-        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&ownFactory))) || ownFactory == nullptr)
+        // The unhooked export (DxgiProxy), not the one this DLL exports and hooks: that would come back through our own factory
+        // hooks from inside a swap chain creation
+        const auto create = DxgiProxy::CreateDxgiFactory1_();
+        IDXGIFactory1* made = nullptr;
+
+        if (create == nullptr || FAILED(create(__uuidof(IDXGIFactory1), &made)) || made == nullptr)
             return false;
 
+        ownFactory.Attach(made);
         factory = ownFactory.Get();
     }
 
@@ -99,7 +106,14 @@ void RecordUpgraded(bool upgraded)
     g_status.upgraded = upgraded;
 }
 
-void CheckLateStandDown(ProxyChainBase& proxy)
+void RecordNote(Reason note)
+{
+    std::lock_guard lock(g_statusLock);
+    g_status.endsAtResize = true;
+    g_status.endReason = note;
+}
+
+void CheckLateStandDown(ProxyChainBase& proxy, bool upgraded)
 {
     // (cheap: two atomics and one state read, every present of a proxied chain)
     const auto& dlssg = DlssgTelemetry::Get();
@@ -112,7 +126,7 @@ void CheckLateStandDown(ProxyChainBase& proxy)
     std::lock_guard lock(g_statusLock);
 
     // On a chain made flip model for HDR output the next resize does not end it either
-    const Reason note = g_status.upgraded ? Reason::DlssgKeptUpgraded : Reason::DlssgStartedLater;
+    const Reason note = upgraded ? Reason::DlssgKeptUpgraded : Reason::DlssgStartedLater;
     LOG_INFO("{}", ReasonText(note));
     g_status.endsAtResize = true;
     g_status.endReason = note;
@@ -168,7 +182,6 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     LOG_INFO("{}", ReasonText(decision.reason));
     plan.hdr10 = Config::Instance()->UseHDR10.value_or_default();
     RecordStatus(decision.reason, decision.use, plan.hdr10, true, plan.display.maxLuminance);
-    RecordUpgraded(decision.use && decision.upgrade);
 
     if (!decision.use)
         return plan;
@@ -177,18 +190,13 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     plan.realFormat = RealFormat(plan.hdr10);
     format = plan.realFormat;
 
-    if (decision.upgrade)
-    {
-        const SwapDescEdit edit = UpgradeSwapDesc(request.swapEffect, request.bufferCount, request.flags);
-        plan.upgraded = true;
-        plan.gameSwapEffect = request.swapEffect;
-        plan.gameBufferCount = request.bufferCount;
-        plan.gameFlags = request.flags;
-        plan.swapEffect = edit.swapEffect;
-        plan.bufferCount = edit.bufferCount;
-        plan.flags = edit.flags;
+    MakeUpgradePlan(request, decision.upgrade, plan);
+    RecordUpgraded(plan.upgraded);
+
+    if (plan.editDesc)
         LOG_INFO("HDR output: the game asked for an older swap chain type; made it flip model for HDR");
-    }
+    else if (plan.upgraded)
+        LOG_INFO("HDR output: the game asked for an older swap chain type; the V-Sync override already made it flip model");
 
     LOG_INFO("HDR output: the swap chain is made as {} ({}), the game keeps back buffers of its own format ({})",
              plan.hdr10 ? "R10G10B10A2 / PQ" : "R16G16B16A16_FLOAT / scRGB", plan.hdr10 ? "HDR10" : "scRGB",
@@ -196,29 +204,10 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     return plan;
 }
 
-void ApplySwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags)
-{
-    if (!plan.upgraded)
-        return;
-
-    swapEffect = plan.swapEffect;
-    bufferCount = plan.bufferCount;
-    flags = plan.flags;
-}
-
-void RestoreSwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags)
-{
-    if (!plan.upgraded)
-        return;
-
-    swapEffect = plan.gameSwapEffect;
-    bufferCount = plan.gameBufferCount;
-    flags = plan.gameFlags;
-}
-
 void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure)
 {
     plan.upgraded = false; // (the site restored the desc first, RestoreSwapDesc)
+    plan.editDesc = false;
     LOG_WARN("HDR output: the swap chain could not be made as HDR ({:X}), making it as the game asked", (UINT) failure);
     plan.proxied = false;
     plan.reason = Reason::StartFailed;

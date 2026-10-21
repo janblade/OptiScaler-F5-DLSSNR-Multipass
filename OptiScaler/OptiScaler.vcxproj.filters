@@ -515,6 +515,9 @@
     <ClInclude Include="output\SdrToHdr_Create.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Status.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\MsaaPictureDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>

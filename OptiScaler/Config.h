@@ -334,6 +334,8 @@ class Config
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
+    // HDR output: flips [HDR] Convert live (the A/B against how Windows shows the game). Unbound by default.
+    CustomOptional<int> HdrCompareKey { UnboundKey };
     // The model's render preset hint: 1 Preset A (the main model), 2 Preset B (the small model, 310.9 DLLs only); 0 and
     // any other value: the DLL's choice, the small model on 310.9 DLLs. 310.8 DLLs have only the main model.
     CustomOptional<uint32_t> DlssNrPreset { 0 };

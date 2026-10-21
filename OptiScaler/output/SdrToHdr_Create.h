@@ -2,6 +2,7 @@
 
 #include "SdrToHdr_Common.h"
 #include "SdrToHdr_Display.h"
+#include "SdrToHdr_Status.h"
 
 #include <dxgi.h>
 
@@ -43,6 +44,16 @@ void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure);
 
 // For the sites that never proxy (Streamline's DLSS-G twins): logs the stand-down when HDR output is on.
 void NoteStandDown(Reason reason);
+
+// The last decision made for the game's swap chain, for the menu (thread safe).
+StatusSnapshot Status();
+
+// Records a decision (creation, resize, a failed start). `enabled` is [HDR] Enabled when it was made.
+void RecordStatus(Reason reason, bool active, bool hdr10, bool enabled, float displayMaxLuminance);
+
+// A frame generation swap chain was made for the game (it returns before any wrapper exists): HDR output stands aside.
+// Logs and records it when HDR output is on.
+void NoteFrameGenChain();
 
 // What the environment says about frame generation, dxvk and Streamline DLSS-G right now (Decide inputs shared by the
 // creation sites and every resize).

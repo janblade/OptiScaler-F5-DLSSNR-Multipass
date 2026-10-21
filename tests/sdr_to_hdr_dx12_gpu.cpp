@@ -516,6 +516,36 @@ void Matrix(Gpu& g, SdrToHdr::Dx12Pass& pass, DXGI_FORMAT proxyFormat, const cha
     }
 }
 
+// The live Convert toggle: two passes over the same proxy, Convert on then off (the hotkey / checkbox), each presented
+// frame has its own values: ours (gamma 2.2, 203 nits) and the Windows baseline (piecewise sRGB at the SDR white level)
+void ConvertToggle(Gpu& g, SdrToHdr::Dx12Pass& pass)
+{
+    const auto picture = Picture();
+    Check(pass.Init(g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1) == nullptr, "Init");
+    auto proxy = BackBuffer(g, DXGI_FORMAT_R8G8B8A8_UNORM);
+    auto real = BackBuffer(g, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    Fill(g, proxy.Get(), false, picture);
+    std::vector<uint8_t> frames[3];
+    SdrToHdr::PassConstants k = Cases(0, 0).k;
+    k.sdrWhiteNits = 120.0f;
+    const uint32_t converts[3] = { 1, 0, 1 };
+
+    for (int i = 0; i < 3; ++i)
+    {
+        k.convert = converts[i];
+        const char* ran = pass.Run(g.queue.Get(), 0, proxy.Get(), real.Get(), k);
+        g.Wait();
+        frames[i] = Read(g, real.Get(), 8);
+        double worst = 0.0;
+        char what[160];
+        std::snprintf(what, sizeof(what), "Convert toggle, frame %d (Convert %u) matches its reference", i, converts[i]);
+        Check(ran == nullptr && Compare(frames[i], k, picture, worst), what);
+    }
+
+    Check(frames[0] != frames[1] && frames[0] == frames[2],
+          "Convert toggle: the next presented frame changes (on, off, on gives A, B, A)");
+}
+
 // Relaxed format casting: a B8G8R8A8_UNORM proxy the game draws through an _SRGB view
 void Relaxed(Gpu& g, SdrToHdr::Dx12Pass& pass)
 {
@@ -647,6 +677,7 @@ int main(int argc, char** argv)
         Matrix(g, pass, DXGI_FORMAT_B8G8R8A8_UNORM, "B8G8R8A8_UNORM proxy");
         Matrix(g, pass, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "R8G8B8A8_UNORM_SRGB typed proxy (gSrcLinear)");
         Matrix(g, pass, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, "B8G8R8A8_UNORM_SRGB typed proxy (gSrcLinear)");
+        ConvertToggle(g, pass);
         Relaxed(g, pass);
 
         // A bad call is refused, not run

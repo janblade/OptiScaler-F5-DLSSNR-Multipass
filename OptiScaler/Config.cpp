@@ -1120,6 +1120,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             }
 
             HdrOutputConvert.set_from_config(readBool("HDR", "Convert"));
+            HdrCompareKey.set_from_config(readInt("HDR", "CompareKey"));
             UseHDR10.set_from_config(readBool("HDR", "UseHDR10"));
             HdrOutputPeakNits.set_from_config(readFloat("HDR", "PeakNits"));
             HdrOutputGameNits.set_from_config(readFloat("HDR", "GameNits"));
@@ -2181,6 +2182,10 @@ bool Config::SaveIni()
         ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->HdrOutputPeakNits.value_for_config()).c_str());
         ini.SetValue("HDR", "GameNits", GetFloatValue(Instance()->HdrOutputGameNits.value_for_config()).c_str());
         ini.SetValue("HDR", "Decode", GetIntValue(Instance()->HdrOutputDecode.value_for_config()).c_str());
+        {
+            auto compare = Instance()->HdrCompareKey.value_for_config();
+            ini.SetValue("HDR", "CompareKey", GetIntValue(compare, compare > 0).c_str());
+        }
         ini.Delete("HDR", "ForceHDR", true);
         ini.Delete("HDR", "SkipColorSpace", true);
     }

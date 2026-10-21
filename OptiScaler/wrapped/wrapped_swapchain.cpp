@@ -736,6 +736,8 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
                 _proxy->Revert(_real3, plan->gameFormat, flags, _gameColourSpace);
 
             _proxy.reset();
+            SdrToHdr::RecordStatus(SdrToHdr::Reason::UnsupportedFormat, false, plan->hdr10, true,
+                                   plan->display.maxLuminance);
         }
         else
         {
@@ -1751,7 +1753,11 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
         LOG_INFO("{}", SdrToHdr::ReasonText(decision.reason));
 
     if (!decision.use && !wasProxied)
+    {
+        SdrToHdr::RecordStatus(decision.reason, false, Config::Instance()->UseHDR10.value_or_default(), in.enabled,
+                               _display.maxLuminance);
         return S_OK;
+    }
 
     handled = true;
 
@@ -1783,6 +1789,10 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
 
     if (result.note != nullptr)
         LOG_WARN("HDR output: {}", result.note);
+
+    if (!result.refused)
+        SdrToHdr::RecordStatus(result.reverted ? SdrToHdr::Reason::UnsupportedFormat : decision.reason, result.proxied,
+                               hdr10, in.enabled, _display.maxLuminance);
 
     if (result.reverted)
         LOG_WARN("HDR output: the swap chain was put back to the game's format");

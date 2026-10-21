@@ -2,6 +2,7 @@
 //
 //   cl /std:c++20 /EHsc /W4 tests\sdr_to_hdr_rules_smoke.cpp
 #include "../OptiScaler/output/SdrToHdr_Common.h"
+#include "../OptiScaler/output/SdrToHdr_Status.h"
 
 #include <cmath>
 #include <cstdio>
@@ -163,6 +164,73 @@ int main()
     Check(RealFormat(false) == DXGI_FORMAT_R16G16B16A16_FLOAT && RealFormat(true) == DXGI_FORMAT_R10G10B10A2_UNORM,
           "scRGB is FP16, HDR10 is 10-bit");
     Check(PassMode(false) == 0u && PassMode(true) == 1u, "pass mode 0 = scRGB, 1 = PQ");
+
+    // ---- the menu's status line ----
+    {
+        StatusSettings on;
+        on.enabled = true;
+        on.gameNits = 203.0f;
+        StatusSnapshot snap;
+
+        Check(StatusLine(snap, StatusSettings {}).colour == StatusColour::None && StatusLine(snap, StatusSettings {}).text.empty(),
+              "status: off and never decided: no line");
+
+        auto line = StatusLine(snap, on);
+        Check(line.colour == StatusColour::Amber && line.text == AppliesLaterText(),
+              "status: turned on, no chain decided yet: applies later (amber)");
+
+        snap.decided = true;
+        snap.enabledAtDecision = true;
+        snap.active = true;
+        snap.reason = Reason::Active;
+        snap.displayMaxLuminance = 800.0f;
+        line = StatusLine(snap, on);
+        Check(line.colour == StatusColour::Green && line.text.find("active") != std::string::npos &&
+                  line.text.find("scRGB") != std::string::npos && line.text.find("203 nits") != std::string::npos &&
+                  line.text.find("800 nits (display)") != std::string::npos && line.signalHint.empty(),
+              "status: active scRGB, 203 nits, peak 800 from the display (green)");
+
+        StatusSettings ini = on;
+        ini.configuredPeak = 600.0f;
+        Check(StatusLine(snap, ini).text.find("600 nits (ini)") != std::string::npos, "status: peak from the ini says so");
+        snap.displayMaxLuminance = 0.0f;
+        Check(StatusLine(snap, on).text.find("1000 nits (default)") != std::string::npos, "status: no display peak: 1000 (default)");
+        snap.displayMaxLuminance = 800.0f;
+
+        StatusSettings hdr10 = on;
+        hdr10.hdr10 = true;
+        line = StatusLine(snap, hdr10);
+        Check(line.colour == StatusColour::Green && line.signalHint.find("HDR10") != std::string::npos,
+              "status: signal setting differs from the active chain: a hint");
+        snap.hdr10 = true;
+        Check(StatusLine(snap, hdr10).signalHint.empty() && StatusLine(snap, hdr10).text.find("HDR10") != std::string::npos,
+              "status: HDR10 chain, HDR10 setting: no hint");
+        snap.hdr10 = false;
+
+        StatusSettings offSettings = on;
+        offSettings.enabled = false;
+        line = StatusLine(snap, offSettings);
+        Check(line.colour == StatusColour::Amber && line.text == AppliesLaterText(),
+              "status: turned off while the chain converts: applies later");
+
+        snap.enabledAtDecision = false;
+        snap.active = false;
+        snap.reason = Reason::Off;
+        Check(StatusLine(snap, offSettings).colour == StatusColour::None, "status: off and the chain was off: no line");
+        Check(StatusLine(snap, on).text == AppliesLaterText(), "status: turned on, the chain was made with it off: applies later");
+
+        snap.enabledAtDecision = true;
+
+        for (Reason reason : { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
+                               Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
+                               Reason::D3D11NotYet, Reason::DisplayUnknown })
+        {
+            snap.reason = reason;
+            line = StatusLine(snap, on);
+            Check(line.colour == StatusColour::Amber && line.text == ReasonText(reason) && line.signalHint.empty(),
+                  ReasonText(reason));
+        }
+    }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_rules_smoke: PASS\n" : "sdr_to_hdr_rules_smoke: %d FAIL\n", g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -8,10 +8,15 @@
 #include <misc/IdentifyGpu.h>
 #include <native/VkPresentBridge.h>
 
+#include <mutex>
+
 namespace SdrToHdr
 {
 namespace
 {
+std::mutex g_statusLock;
+StatusSnapshot g_status;
+
 bool IsD3D12Queue(IUnknown* device)
 {
     if (device == nullptr)
@@ -71,6 +76,23 @@ bool DisplayForWindow(IDXGIFactory* factory, HWND window, DisplayInfo& info)
 }
 } // namespace
 
+StatusSnapshot Status()
+{
+    std::lock_guard lock(g_statusLock);
+    return g_status;
+}
+
+void RecordStatus(Reason reason, bool active, bool hdr10, bool enabled, float displayMaxLuminance)
+{
+    std::lock_guard lock(g_statusLock);
+    g_status.decided = true;
+    g_status.enabledAtDecision = enabled;
+    g_status.reason = reason;
+    g_status.active = active;
+    g_status.hdr10 = hdr10;
+    g_status.displayMaxLuminance = displayMaxLuminance;
+}
+
 void FillEnvironment(Inputs& inputs)
 {
     inputs.frameGen = inputs.frameGen || State::Instance().currentFG != nullptr;
@@ -105,12 +127,13 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     const Decision decision = Decide(in);
     plan.reason = decision.reason;
     LOG_INFO("{}", ReasonText(decision.reason));
+    plan.hdr10 = Config::Instance()->UseHDR10.value_or_default();
+    RecordStatus(decision.reason, decision.use, plan.hdr10, true, plan.display.maxLuminance);
 
     if (!decision.use)
         return plan;
 
     plan.proxied = true;
-    plan.hdr10 = Config::Instance()->UseHDR10.value_or_default();
     plan.realFormat = RealFormat(plan.hdr10);
     format = plan.realFormat;
 
@@ -125,7 +148,17 @@ void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure)
     LOG_WARN("HDR output: the swap chain could not be made as HDR ({:X}), making it as the game asked", (UINT) failure);
     plan.proxied = false;
     plan.reason = Reason::UnsupportedFormat;
+    RecordStatus(plan.reason, false, plan.hdr10, true, plan.display.maxLuminance);
     format = plan.gameFormat;
+}
+
+void NoteFrameGenChain()
+{
+    if (!Config::Instance()->HdrOutputEnabled.value_or_default())
+        return;
+
+    LOG_INFO("{}", ReasonText(Reason::FrameGen));
+    RecordStatus(Reason::FrameGen, false, Config::Instance()->UseHDR10.value_or_default(), true, 0.0f);
 }
 
 void NoteStandDown(Reason reason)

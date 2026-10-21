@@ -85,6 +85,9 @@ void NoteStandDown(Reason reason);
 // The last decision made for the game's swap chain, for the menu (thread safe).
 StatusSnapshot Status();
 
+// The chain being decided on is an older one made flip model for HDR output (set at creation, kept through resizes).
+void RecordUpgraded(bool upgraded);
+
 // Records a decision (creation, resize, a failed start). `enabled` is [HDR] Enabled when it was made.
 void RecordStatus(Reason reason, bool active, bool hdr10, bool enabled, float displayMaxLuminance);
 

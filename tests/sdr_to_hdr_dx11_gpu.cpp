@@ -1156,6 +1156,27 @@ void Upgraded(Gpu& g, DXGI_SWAP_EFFECT asked, const char* label)
             result = chain.Resize(g.device.Get(), real.Get(), request);
             Check(SUCCEEDED(result.hr) && result.proxied, "resize with a kept count (0) works");
 
+            // HDR output turned off at a resize on an upgraded chain: the decision (KeepUpgradedProxy) keeps the proxy and the
+            // chain stays proxied and converting, the real chain stays FP16 flip
+            {
+                SdrToHdr::Inputs off;
+                off.enabled = false;
+                SdrToHdr::Decision decision = SdrToHdr::Decide(off);
+                const bool endsWithoutKeep = !decision.use;
+                decision = SdrToHdr::KeepUpgradedProxy(decision, true);
+                request.wantProxy = decision.use;
+                request.rawFormat = DXGI_FORMAT_UNKNOWN;
+                result = chain.Resize(g.device.Get(), real.Get(), request);
+                real->GetDesc(&realDesc);
+                std::snprintf(what, sizeof(what), "%s: HDR output turned off at a resize keeps the upgraded chain proxied", label);
+                Check(endsWithoutKeep && SUCCEEDED(result.hr) && result.proxied && chain.Active() &&
+                          realDesc.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
+                      what);
+                Check(Frame(g, chain, real.Get(), 0.6f), "and it keeps converting");
+                request.rawFormat = kGame;
+            }
+
+            // (the base class can still unproxy when asked to, as it does for a game that took over)
             // unproxied: the real chain stays flip model, still two buffers
             request.wantProxy = false;
             request.rawFormat = DXGI_FORMAT_UNKNOWN;

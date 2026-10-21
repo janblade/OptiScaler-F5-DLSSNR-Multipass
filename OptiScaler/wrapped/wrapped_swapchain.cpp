@@ -1939,10 +1939,21 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     }
 
     SdrToHdr::FillEnvironment(in);
-    const SdrToHdr::Decision decision = SdrToHdr::Decide(in);
+    const SdrToHdr::Decision decided = SdrToHdr::Decide(in);
+
+    // A chain made flip model for HDR output keeps its proxy through a resize that would end HDR output (see
+    // SdrToHdr::KeepUpgradedProxy): the game would otherwise get a real flip buffer, unbound at every Present
+    const SdrToHdr::Decision decision = SdrToHdr::KeepUpgradedProxy(decided, _upgraded && wasProxied);
+    const bool kept = decision.use && !decided.use;
 
     if (in.enabled || wasProxied)
-        LOG_INFO("{}", SdrToHdr::ReasonText(decision.reason));
+    {
+        if (kept)
+            LOG_INFO("{} (kept: this game's swap chain was changed for HDR; it ends at the next start)",
+                     SdrToHdr::ReasonText(decided.reason));
+        else
+            LOG_INFO("{}", SdrToHdr::ReasonText(decision.reason));
+    }
 
     // Neither a Direct3D 12 queue nor a Direct3D 11 device: nothing to make proxies on
     if (decision.use && device == nullptr)
@@ -1999,10 +2010,12 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
                   "converting it");
 
     const bool failedStart = result.reverted || result.stuckHdr;
+    // (a chain kept through a resize that would have ended HDR output still did HDR output: recorded as enabled, so turning
+    // it back on does not read as a change waiting for a restart)
     SdrToHdr::RecordStatus(result.stuckHdr ? SdrToHdr::Reason::StuckHdr
                            : failedStart   ? SdrToHdr::Reason::StartFailed
                                            : decision.reason,
-                           result.proxied, hdr10, in.enabled, _display.maxLuminance);
+                           result.proxied, hdr10, in.enabled || kept, _display.maxLuminance);
 
     if (result.stuckHdr)
         return result.hr; // the colour space is still the HDR one: do not claim otherwise

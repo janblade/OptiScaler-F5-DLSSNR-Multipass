@@ -156,7 +156,7 @@ int main()
                            Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                            Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
                            Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::DlssgStartedLater,
-                           Reason::ExclusiveBitBlt, Reason::Active };
+                           Reason::ExclusiveBitBlt, Reason::DlssgKeptUpgraded, Reason::Active };
     bool texts = true;
 
     for (size_t i = 0; i < std::size(all); ++i)
@@ -345,6 +345,51 @@ int main()
         Check(edit.swapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, "edit: a flip effect stays as it is");
         Check(UpgradedResizeCount(0) == 0 && UpgradedResizeCount(1) == 2 && UpgradedResizeCount(2) == 2 && UpgradedResizeCount(4) == 4,
               "resize count: 0 keeps, 1 becomes 2, others stay");
+    }
+
+    // ---- an upgraded chain keeps its proxy at a resize (S2b follow-up) ----
+    {
+        const Decision stand { false, Reason::DisplayNotHdr };
+        Check(KeepUpgradedProxy(stand, true).use && KeepUpgradedProxy(stand, true).reason == Reason::Active,
+              "upgraded and proxied: a resize that would end HDR output (display) keeps the proxy");
+        Check(!KeepUpgradedProxy(stand, false).use, "not upgraded, or not proxied: the decision is what it was");
+        const Decision off { false, Reason::Off };
+        Check(KeepUpgradedProxy(off, true).use, "upgraded: HDR output turned off keeps the proxy until the next start");
+
+        for (Reason keeps : { Reason::Off, Reason::DisplayNotHdr, Reason::DisplayUnknown, Reason::FrameGen, Reason::Dxvk,
+                              Reason::StreamlineDlssg, Reason::BitBlt, Reason::ExclusiveBitBlt, Reason::Multisampled })
+            Check(KeepUpgradedProxy({ false, keeps }, true).use, ReasonText(keeps));
+
+        for (Reason ends : { Reason::GameHdrFormat, Reason::UnsupportedFormat, Reason::MultiNode, Reason::OtherPresentQueue })
+        {
+            const auto kept = KeepUpgradedProxy({ false, ends }, true);
+            Check(!kept.use && kept.reason == ends, ReasonText(ends));
+        }
+
+        const Decision active { true, Reason::Active };
+        Check(KeepUpgradedProxy(active, true).use, "an Active decision is left alone");
+
+        // the status line
+        StatusSettings turnedOff;
+        turnedOff.enabled = false;
+        StatusSnapshot snap;
+        snap.decided = true;
+        snap.enabledAtDecision = true;
+        snap.active = true;
+        snap.reason = Reason::Active;
+        snap.upgraded = true;
+        auto line = StatusLine(snap, turnedOff);
+        Check(line.colour == StatusColour::Amber && line.text == TurnsOffAtStartText() &&
+                  line.text.find("turns off at the next start") != std::string::npos && line.text != AppliesLaterText(),
+              "status: HDR output turned off on an upgraded, converting chain: amber 'turns off at the next start', not the generic text");
+        snap.upgraded = false;
+        Check(StatusLine(snap, turnedOff).text == AppliesLaterText(), "status: the same on a chain that was not upgraded: the generic text");
+        snap.upgraded = true;
+        StatusSettings turnedOn;
+        turnedOn.enabled = true;
+        Check(StatusLine(snap, turnedOn).colour == StatusColour::Green, "status: turned back on: the active line again");
+        snap.active = false;
+        Check(StatusLine(snap, turnedOff).text != TurnsOffAtStartText(), "status: the line is only for a chain that converts");
     }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_rules_smoke: PASS\n" : "sdr_to_hdr_rules_smoke: %d FAIL\n", g_failures);

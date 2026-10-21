@@ -93,6 +93,12 @@ void RecordStatus(Reason reason, bool active, bool hdr10, bool enabled, float di
     g_status.endsAtResize = false;
 }
 
+void RecordUpgraded(bool upgraded)
+{
+    std::lock_guard lock(g_statusLock);
+    g_status.upgraded = upgraded;
+}
+
 void CheckLateStandDown(ProxyChainBase& proxy)
 {
     // (cheap: two atomics and one state read, every present of a proxied chain)
@@ -103,11 +109,13 @@ void CheckLateStandDown(ProxyChainBase& proxy)
     if (!on || proxy.NoteLateStandDownLogged())
         return;
 
-    LOG_INFO("{}", ReasonText(Reason::DlssgStartedLater));
-
     std::lock_guard lock(g_statusLock);
+
+    // On a chain made flip model for HDR output the next resize does not end it either
+    const Reason note = g_status.upgraded ? Reason::DlssgKeptUpgraded : Reason::DlssgStartedLater;
+    LOG_INFO("{}", ReasonText(note));
     g_status.endsAtResize = true;
-    g_status.endReason = Reason::DlssgStartedLater;
+    g_status.endReason = note;
 }
 
 void FillEnvironment(Inputs& inputs)
@@ -160,6 +168,7 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     LOG_INFO("{}", ReasonText(decision.reason));
     plan.hdr10 = Config::Instance()->UseHDR10.value_or_default();
     RecordStatus(decision.reason, decision.use, plan.hdr10, true, plan.display.maxLuminance);
+    RecordUpgraded(decision.use && decision.upgrade);
 
     if (!decision.use)
         return plan;
@@ -214,6 +223,7 @@ void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure)
     plan.proxied = false;
     plan.reason = Reason::StartFailed;
     RecordStatus(plan.reason, false, plan.hdr10, true, plan.display.maxLuminance);
+    RecordUpgraded(false);
     format = plan.gameFormat;
 }
 

@@ -23,6 +23,8 @@ struct StatusSnapshot
     // a note over the active line. Cleared by the next decision.
     bool endsAtResize = false;
     Reason endReason = Reason::Off;
+    // The chain was an older (bitblt) one made flip model for HDR output: it keeps converting until the next start
+    bool upgraded = false;
 };
 
 enum class StatusColour
@@ -49,6 +51,11 @@ struct StatusSettings
     bool nonDxgiApi = false;    // the game presents through Vulkan: it never makes a DXGI swap chain of its own
 };
 
+inline const char* TurnsOffAtStartText()
+{
+    return "HDR output: turns off at the next start (this game's swap chain was changed for HDR)";
+}
+
 inline const char* AppliesLaterText()
 {
     return "HDR output: applies at the next start or resolution / window change";
@@ -60,6 +67,14 @@ inline StatusLineResult StatusLine(const StatusSnapshot& status, const StatusSet
 {
     StatusLineResult result;
     const bool didEnabled = status.decided && status.enabledAtDecision;
+
+    // Turned off, but the game's swap chain was changed for HDR and keeps converting: it ends at the next start
+    if (!settings.enabled && status.decided && status.active && status.upgraded)
+    {
+        result.text = TurnsOffAtStartText();
+        result.colour = StatusColour::Amber;
+        return result;
+    }
 
     // A Vulkan game never makes a swap chain HDR output could decide on: "applies at the next start" would be forever
     if (settings.enabled && !status.decided && settings.nonDxgiApi)

@@ -34,6 +34,7 @@ enum class Reason
     StartFailed,      // the proxy or the pass could not be made: the chain is shown as the game made it
     StuckHdr,         // the proxy could not be made and the chain could not be put back: it stays HDR (known limit: for good)
     DlssgStartedLater, // (a note, never a Decide result) the game turned on its own DLSS-G after the chain was proxied
+    DlssgKeptUpgraded, // (a note) the same, on a chain that was made flip model for HDR output: it stays on until the next start
     Active,
 };
 
@@ -149,6 +150,30 @@ inline Decision Decide(const Inputs& in)
     return { true, Reason::Active, upgrade };
 }
 
+// A chain that was made flip model for HDR output (an older, bitblt one) never goes back to the game's own buffer at a resize:
+// the real flip buffer is unbound from the pipeline at every Present, which a bitblt-era game that binds its render target once
+// does not expect, so it would draw into nothing. So a resize that would end HDR output on such a chain (HDR output turned
+// off, Windows HDR turned off, frame generation or the game's DLSS-G started, dxvk) keeps the proxy and the pass until the next
+// start. Four stand-downs stay what they are, because keeping the proxy there is impossible or the game takes over: the game
+// resizes to an FP16 / 10-bit format (it draws HDR itself, and binds per frame like any HDR game), an 8-bit format the proxy
+// cannot stand in for, a multi-GPU chain, and a present queue the pass cannot run on.
+inline Decision KeepUpgradedProxy(const Decision& decision, bool upgradedAndProxied)
+{
+    if (!upgradedAndProxied || decision.use)
+        return decision;
+
+    switch (decision.reason)
+    {
+    case Reason::GameHdrFormat:
+    case Reason::UnsupportedFormat:
+    case Reason::MultiNode:
+    case Reason::OtherPresentQueue:
+        return decision;
+    default:
+        return { true, Reason::Active, false };
+    }
+}
+
 // One player-readable line for the log, and for the menu's status line.
 inline const char* ReasonText(Reason reason)
 {
@@ -192,6 +217,9 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: could not undo the HDR swap chain; restart the game";
     case Reason::DlssgStartedLater:
         return "HDR output: the game turned on DLSS frame generation; HDR output stops at the next resolution / window change";
+    case Reason::DlssgKeptUpgraded:
+        return "HDR output: the game turned on DLSS frame generation; this game's swap chain was changed for HDR, so HDR "
+               "output stays on until the next start";
     case Reason::Active:
         return "HDR output: active";
     }

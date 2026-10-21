@@ -131,13 +131,24 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
         if (auto* existing = Proxy())
             return existing;
 
-        if (d3d11)
-            _proxyOwner = std::make_unique<SdrToHdr::ProxyChainDx11>();
-        else
-            _proxyOwner = std::make_unique<SdrToHdr::ProxyChain>();
+        // Built first, published by compare-exchange: of two threads that get here at once one chain wins, the other is
+        // dropped and its caller uses the winner. Ownership moves to the wrapper only for the winner.
+        std::unique_ptr<SdrToHdr::ProxyChainBase> fresh;
 
-        _proxyPtr.store(_proxyOwner.get(), std::memory_order_release);
-        return _proxyOwner.get();
+        if (d3d11)
+            fresh = std::make_unique<SdrToHdr::ProxyChainDx11>();
+        else
+            fresh = std::make_unique<SdrToHdr::ProxyChain>();
+
+        SdrToHdr::ProxyChainBase* expected = nullptr;
+
+        if (_proxyPtr.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel))
+        {
+            _proxyOwner = std::move(fresh);
+            return _proxyOwner.get();
+        }
+
+        return expected;
     }
     bool Proxied() const
     {

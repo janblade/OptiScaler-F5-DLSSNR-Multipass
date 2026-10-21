@@ -60,6 +60,30 @@ const GUID IID_IUnwrappedDXGISwapChain = {
     0xe8a33b4a, 0x1405, 0x424c, { 0xae, 0x88, 0xd, 0x3e, 0x9d, 0x46, 0xc9, 0x14 }
 };
 
+// The identity of a COM object, to compare queues that may be reached through different interfaces
+static IUnknown* IdentityOfObject(IUnknown* object)
+{
+    IUnknown* identity = nullptr;
+
+    if (object == nullptr || FAILED(object->QueryInterface(IID_PPV_ARGS(&identity))) || identity == nullptr)
+        return nullptr;
+
+    identity->Release();
+    return identity;
+}
+
+// The identity of a queue with Streamline's proxy taken away (the chain's creation queue was unwrapped the same way, so a
+// present queue the game passes through Streamline compares equal to it)
+static IUnknown* UnwrappedQueueIdentity(IUnknown* queue)
+{
+    IUnknown* real = nullptr;
+
+    if (queue != nullptr && Util::CheckForRealObject("UnwrappedQueueIdentity", queue, &real) && real != nullptr)
+        queue = real;
+
+    return IdentityOfObject(queue);
+}
+
 static ID3D12Fence* resizeFence = nullptr;
 static UINT64 resizeFenceValue = 0;
 static HANDLE resizeFenceEvent = nullptr;
@@ -586,6 +610,9 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                                                        display != nullptr ? display->maxLuminance : 0.0f);
                 k.sdrWhiteNits = display != nullptr ? display->sdrWhiteNits : 80.0f;
 
+                // The game may have turned on its own DLSS-G since the chain was proxied: noted, decided at the next resize
+                SdrToHdr::CheckLateStandDown(*proxy);
+
                 if (isD3D11)
                 {
                     // Direct3D 11: the pass runs inside MenuOverlayDx::Present, right after the motion step that reads the
@@ -727,15 +754,8 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
 
     CheckForHdrOutput();
 
-    {
-        IUnknown* queue = nullptr;
-
-        if (pDevice != nullptr && SUCCEEDED(pDevice->QueryInterface(IID_PPV_ARGS(&queue))) && queue != nullptr)
-        {
-            _creationQueue = queue; // identity only; the device keeps the object alive
-            queue->Release();
-        }
-    }
+    // identity only; the device keeps the object alive
+    _creationQueue = UnwrappedQueueIdentity(pDevice);
 
     // HDR output decided to make this chain HDR (the real chain already is): the game gets proxies in its own format
     if (plan != nullptr)
@@ -776,7 +796,8 @@ void WrappedIDXGISwapChain4::StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags
                           "with nothing converting it",
                           (UINT) revert);
 
-            SdrToHdr::RecordStatus(SdrToHdr::Reason::StartFailed, false, plan.hdr10, true, plan.display.maxLuminance);
+            SdrToHdr::RecordStatus(FAILED(revert) ? SdrToHdr::Reason::StuckHdr : SdrToHdr::Reason::StartFailed, false,
+                                   plan.hdr10, true, plan.display.maxLuminance);
         }
         else
         {
@@ -1157,8 +1178,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height,
                                                                 DXGI_FORMAT NewFormat, UINT SwapChainFlags)
 {
-    // HDR output: a resize inside a resize (a window message the game answers with its own ResizeBuffers) is refused
-    if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResize())
+    // HDR output: a resize inside a resize on this thread (a window message the game answers with its own ResizeBuffers) is
+    // refused; one from another thread waits for the running one (SdrToHdr::ProxyChainBase::Resize)
+    if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
 
     if (!DlssNr::WaitForFinishedPicture())
@@ -1589,8 +1611,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
                                                                  const UINT* pCreationNodeMask,
                                                                  IUnknown* const* ppPresentQueue)
 {
-    // HDR output: a resize inside a resize (a window message the game answers with its own ResizeBuffers) is refused
-    if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResize())
+    // HDR output: a resize inside a resize on this thread (a window message the game answers with its own ResizeBuffers) is
+    // refused; one from another thread waits for the running one (SdrToHdr::ProxyChainBase::Resize)
+    if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
 
     if (!DlssNr::WaitForFinishedPicture())
@@ -1796,18 +1819,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     return result;
 }
 
-// The identity of a COM object, to compare queues that may be reached through different interfaces
-static IUnknown* IdentityOfObject(IUnknown* object)
-{
-    IUnknown* identity = nullptr;
-
-    if (object == nullptr || FAILED(object->QueryInterface(IID_PPV_ARGS(&identity))) || identity == nullptr)
-        return nullptr;
-
-    identity->Release();
-    return identity;
-}
-
 // HDR output's part of a resize (see SdrToHdr::ProxyChain::Resize). `handled` is false when it left the resize to the caller:
 // the chain is not, and does not become, proxied.
 HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format,
@@ -1854,7 +1865,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     {
         for (UINT i = 0; i < count; ++i)
             in.presentQueueDiffers = in.presentQueueDiffers || ppPresentQueue[i] == nullptr ||
-                                     IdentityOfObject(ppPresentQueue[i]) != _creationQueue;
+                                     UnwrappedQueueIdentity(ppPresentQueue[i]) != _creationQueue;
     }
 
     SdrToHdr::FillEnvironment(in);
@@ -1918,8 +1929,10 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
                   "converting it");
 
     const bool failedStart = result.reverted || result.stuckHdr;
-    SdrToHdr::RecordStatus(failedStart ? SdrToHdr::Reason::StartFailed : decision.reason, result.proxied, hdr10, in.enabled,
-                           _display.maxLuminance);
+    SdrToHdr::RecordStatus(result.stuckHdr ? SdrToHdr::Reason::StuckHdr
+                           : failedStart   ? SdrToHdr::Reason::StartFailed
+                                           : decision.reason,
+                           result.proxied, hdr10, in.enabled, _display.maxLuminance);
 
     if (result.stuckHdr)
         return result.hr; // the colour space is still the HDR one: do not claim otherwise

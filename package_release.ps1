@@ -126,6 +126,7 @@ $sourceFiles = @(
     "get_streamline.ps1",
     "README.md",
     "INSTALL-DLSSNR.md",
+    "TROUBLESHOOTING.md",
     "LICENSE"
 )
 

@@ -27,6 +27,10 @@ int main() {
         require(EffectiveBand(.8f,.5f,1,1)==.8f);
         require(EffectiveBand(.8f,1,1,1)==1 && EffectiveBand(.8f,.5f,.75f,0)==1);
         require(std::abs(EffectiveBand(.8f,.5f,.5f,.5f)-.95f)<1e-6f);
+        require(WorkingExtent(3840,.65f)==2496 && WorkingExtent(2160,.65f)==1404);
+        require(WorkingExtent(3840,.59f)==2266 && WorkingExtent(2160,.59f)==1274);
+        require(WorkingExtent(1919,1.0f)==1919 && WorkingExtent(1079,1.0f)==1079);
+        require(WorkingExtent(1919,.65f)==1247 && WorkingExtent(1079,.65f)==701);
         require(MotionScale(1920,1920,1920)==1920); // native NR, game uses render-size vectors
         require(MotionScale(1920,2496,1920)==2496); // P65 of 3840, matched guides
         require(MotionScale(3840,2496,3840)==2496); // high-resolution motion texture

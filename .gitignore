@@ -451,3 +451,7 @@ release
 
 # Temp dlssg_sm86 files
 dlssg_for_sm86/
+
+# Superior shader disassembly and local validation runs.
+/artifacts/
+/OptiScaler/shaders/dlssnr/superior/precompile/*.asm

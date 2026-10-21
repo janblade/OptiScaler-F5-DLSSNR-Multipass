@@ -14,9 +14,10 @@ float value(const std::vector<uint32_t>& words,size_t index,bool half) {
 int main(int argc,char**argv) {
  try {
   if(argc<3 || argc>4)throw std::runtime_error("baseline candidate");
-  Runner r(true);auto a=r.pipeline(argv[1],"dlssnr_interpass_low36");
+  Runner r(true);auto a=r.pipeline(argv[1],"dlssnr_interpass_low36_cached");
   auto b=r.pipeline(argv[2],"dlssnr_interpass_low36_cached");
-  auto cross=r.pipeline(argv[1],"dlssnr_interpass_cross5");
+  auto cross=r.pipeline(argv[1],"dlssnr_superior_cross5");
+  auto crossAfter=r.pipeline(argv[2],"dlssnr_superior_cross5");
   const bool full=argc==4 && std::string(argv[3])=="--4k";
   unsigned checks=0;double lowMax=0,chainMax=0,lowRms=0,chainRms=0,lowMaxFP32=0,chainMaxFP32=0;size_t n=0,nChain=0;
   const std::vector<std::pair<UINT,UINT>> sizes=full ? std::vector<std::pair<UINT,UINT>>{{3840,2160}} :
@@ -36,7 +37,7 @@ int main(int argc,char**argv) {
    c={};c.Mode=36;c.Width=ww;c.Height=wh;c.ResidualScale=3;c.ResidualBlend=.015f;c.ResidualConfidenceSensitivity=1;
    c.GuideWidth=1;c.MvScaleX=1.13f;c.MvScaleY=.71f;
    auto before=r.run(cross.Get(),dims.first,dims.second,ww,wh,c,stress,half,8,0,0,nullptr,0,&old,lw,lh);
-   auto after=r.run(cross.Get(),dims.first,dims.second,ww,wh,c,stress,half,8,0,0,nullptr,0,&now,lw,lh);
+   auto after=r.run(crossAfter.Get(),dims.first,dims.second,ww,wh,c,stress,half,8,0,0,nullptr,0,&now,lw,lh);
    for(size_t i=0;i<size_t(ww)*wh*4;++i){double av=value(before,i,half),bv=value(after,i,half),diff=std::abs(av-bv);
     if(!std::isfinite(av)||!std::isfinite(bv))throw std::runtime_error("Invalid chain");
     if(i%4==3 && diff!=0)throw std::runtime_error("Alpha changed");
@@ -50,8 +51,8 @@ int main(int argc,char**argv) {
    }
    ++checks;
   }
-  if(lowMaxFP32>4e-5 || chainMaxFP32>2e-5 || chainMax>0.02)
-   throw std::runtime_error("Coordinate rounding exceeds recorded stress bounds");
+  if(lowMax != 0 || chainMax != 0)
+   throw std::runtime_error("Port changed cached Low36/Cross5 output");
   std::cout<<"PASS comparisons="<<checks<<" lowMax="<<lowMax<<" lowRms="<<std::sqrt(lowRms/n)<<" chainMax="<<chainMax<<" chainRms="<<std::sqrt(chainRms/nChain)<<" lowMaxFP32="<<lowMaxFP32<<" chainMaxFP32="<<chainMaxFP32<<"\n";
  }catch(const std::exception&e){std::cerr<<e.what()<<"\n";return 1;}
 }

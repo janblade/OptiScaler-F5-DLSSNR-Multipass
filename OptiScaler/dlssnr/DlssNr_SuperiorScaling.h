@@ -31,6 +31,11 @@ inline float EffectiveBand(float p50, float scale, float structure, float intens
     const float value = std::pow(std::max(0.0f, p50), exponent);
     return Profiles::ModelAdjustedGain(std::isfinite(value) ? value : 1.0f, structure, intensity);
 }
+// v59's exact requested raster; janblade's optional 16-pixel NR grid must not alter Superior.
+inline unsigned WorkingExtent(unsigned native, float scale)
+{
+    return std::max(1u, static_cast<unsigned>(native * scale + .5f));
+}
 inline float MotionScale(float gameScale, unsigned motionExtent, unsigned referenceExtent)
 {
     return referenceExtent ? gameScale * (float(motionExtent) / float(referenceExtent)) : gameScale;

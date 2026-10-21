@@ -43,6 +43,8 @@ struct Generation
     NVSDK_NGX_Handle* feature = nullptr;
     Texture proxy, original, workProxy, depth, motion, interLow, interWorking, finalLow;
     Texture carrier, temporalOutput, temporalMotion, unit, meter, exposure, active, held;
+    Texture interDebug;
+    bool interDebugValid = false;
     Texture nativeAnswer, finalColour, colourStats[2], colourHistory[2];
     bool colourHistoryValid = false;
     unsigned colourCursor = 0;
@@ -167,8 +169,8 @@ Constants GuideConstants(unsigned w, unsigned h, const DlssNr::GuideRegions& reg
     {
         const auto rw = frame.MotionVectorsLowResolution ? frame.RenderSubrectWidth : frame.OutputWidth;
         const auto rh = frame.MotionVectorsLowResolution ? frame.RenderSubrectHeight : frame.OutputHeight;
-        c.MvScaleX = frame.MvScaleX * float(w) / std::max(rw ? rw : regions.motion.width, 1u);
-        c.MvScaleY = frame.MvScaleY * float(h) / std::max(rh ? rh : regions.motion.height, 1u);
+        c.MvScaleX = frame.MvScaleX * (float(w) / std::max(rw ? rw : regions.motion.width, 1u));
+        c.MvScaleY = frame.MvScaleY * (float(h) / std::max(rh ? rh : regions.motion.height, 1u));
         if (hold) c.MvScaleX = c.MvScaleY = 0;
     }
     return c;
@@ -538,8 +540,9 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
     ID3D12Resource* passOutput = g_nr.output;
     unsigned covered = 0, completed = 0;
     uint32_t successfulMask = 0, clampSlots[2] { UINT32_MAX, UINT32_MAX };
-    bool correctionFailed = false;
+    bool correctionFailed = false, modelFailed = false;
     g_ngxTime->Start(cmd);
+    g.interDebugValid = false;
     for (unsigned pass = 0; pass < passes; ++pass)
     {
         writable(passOutput);
@@ -565,7 +568,7 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
                 tuning.autoMask ? 1 : 0, mvX, mvY);
             DlssNrNative::EndEvaluate(cmd);
         }
-        if (result != NVSDK_NGX_Result_Success) break;
+        if (result != NVSDK_NGX_Result_Success) { modelFailed = true; break; }
         if (pass > 0) g_nr.passNeedsReset[pass] = false;
         answer = passOutput; readable(answer); completed = pass + 1u;
         if (completed == passes) break;
@@ -578,15 +581,22 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
             writable(g_nr.passClampScratch);
             Constants clamp {}; clamp.Mode = 8u; clamp.Width = workWidth; clamp.Height = workHeight;
             if (!shader.DispatchSuperiorPass(cmd, clamp, answer, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                            g_nr.passClampScratch, nullptr, &clampSlots[pass % 2u])) break;
+                                            g_nr.passClampScratch, nullptr, &clampSlots[pass % 2u]))
+            { correctionFailed = true; break; }
             readable(g_nr.passClampScratch); passInput = g_nr.passClampScratch;
+        }
+        if (pass == 0 && cfg.DlssNrDebugView.value_or_default() == 7u &&
+            Ensure(g.interDebug, device, format, workWidth, workHeight))
+        {
+            Constants copy {}; copy.Mode = 26u; copy.Width = workWidth; copy.Height = workHeight;
+            g.interDebugValid = Dispatch(shader, cmd, copy, passInput, nullptr, nullptr, nullptr, nullptr, nullptr, g.interDebug);
         }
         passOutput = passOutput == g_nr.output ? g_nr.passScratch : g_nr.output;
     }
     g_ngxTime->End(cmd);
     for (unsigned skipped = completed; skipped < passes; ++skipped) g_nr.passNeedsReset[skipped] = true;
-    g_nr.reset = correctionFailed || completed == 0;
-    if (!answer || !completed) { g.reset = true; Say("NR evaluation failed; keeping the game frame."); return false; }
+    g_nr.reset = correctionFailed || modelFailed || completed == 0;
+    if (modelFailed || !answer || !completed) { g.reset = true; Say("NR evaluation failed; keeping the game frame."); return false; }
     if (g.successfulMask != successfulMask) g.reset = true;
     g.successfulMask = successfulMask;
     ID3D12Resource* resolveAnswer = answer;
@@ -646,6 +656,7 @@ bool Run(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* devi
         }
     }
     if (resolve.DebugView == 4u) { resolveProxy = modelInput; resolve.DebugView = 1u; }
+    if (resolve.DebugView == 7u) { resolveProxy = g.interDebugValid ? g.interDebug.Get() : modelInput; resolve.DebugView = 1u; }
     // v59's optional final colour recovery; no dispatch/allocation when disabled.
     const float chroma = std::clamp(cfg.DlssNrFinalChromaticityRecovery.value_or_default(), 0.0f, 100.0f);
     const float saturation = std::clamp(cfg.DlssNrFinalSaturationRecovery.value_or_default(), 0.0f, 100.0f);

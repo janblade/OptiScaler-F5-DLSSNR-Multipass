@@ -1141,7 +1141,7 @@ void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devic
 void CopyAutoExposureToReadback(ID3D12GraphicsCommandList* cmdList, float preExposure, bool withGameExposure,
                                 ID3D12Resource* raw)
 {
-    if (!superior && g_nr.autoExposure == nullptr)
+    if (g_nr.autoExposure == nullptr)
         return;
 
     const unsigned int slot = (unsigned int) (g_nr.meterFrames % 4);
@@ -3120,8 +3120,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         workScale = 1.0f;
     workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
     g_nr.appliedWorkScale = workScale;
-    const auto workWidth = AlignWorkSize((unsigned int) (width * workScale + 0.5f), width);
-    const auto workHeight = AlignWorkSize((unsigned int) (height * workScale + 0.5f), height);
+    const auto workWidth = superior ? DlssNr::SuperiorScaling::WorkingExtent(width, workScale)
+                                   : AlignWorkSize((unsigned int) (width * workScale + 0.5f), width);
+    const auto workHeight = superior ? DlssNr::SuperiorScaling::WorkingExtent(height, workScale)
+                                    : AlignWorkSize((unsigned int) (height * workScale + 0.5f), height);
     const bool reduced = workWidth != width || workHeight != height;
     const unsigned int configuredPasses =
         std::clamp(cfg.DlssNrPasses.value_or_default(),
@@ -3387,7 +3389,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_INFO("DLSS-NR: white point meter up, {}x{} tiles", kDlssNrMeterGrid, kDlssNrMeterGrid);
     }
 
-    if (g_nr.autoExposure == nullptr)
+    if (!superior && g_nr.autoExposure == nullptr)
     {
         g_nr.autoExposure = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, 1, 1);
         g_nr.autoExposureReadable = false;

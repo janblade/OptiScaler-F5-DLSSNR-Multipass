@@ -81,6 +81,13 @@ cbuffer Params : register(b0)
     uint  gOriginalIsGameColour;
 };
 
+// Only the separate Superior PSOs specialize the shared composition. The default
+// shader and Vulkan compile exactly the original janblade path.
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+#define gMode 1u
+#define gTransfer 11u
+#endif
+
 // Bringing an impossible colour back into a possible one.
 //
 // A colour with a negative component is not a colour any display can show, and the composition can
@@ -423,6 +430,10 @@ float4 OriginalInPassDomain(float4 original)
 }
 
 // The edit at an arbitrary position, exactly as the resolve computes its own.
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+#include "../superior/HostResolve.hlsli"
+#endif
+
 float3 EditAt(float2 uvq)
 {
     float3 p = gSource.SampleLevel(gLinear, uvq, 0).rgb;
@@ -1658,6 +1669,9 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
     float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
     float4 modelSample = gModel.SampleLevel(gLinear, cmpUv, 0);
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+    modelSample.rgb += proxySample.rgb; // existing raw-model/difference debug views
+#endif
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
     float3 proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
@@ -1762,6 +1776,18 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // a few hundred lines down): once an enlarge pass has already run, the bound proxy reads native
     // regardless of what resolution the model actually evaluated at, so a size check silently answers
     // the wrong question the moment SGSR1 enlarges the proxy.
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+    {
+        const float3 nativeLinear = gPassthrough != 0 ? saturate(original)
+            : (ProxyCurve(gReversibleMode) == kCurveKnee ? saturate(SoftKnee(original)) : ProxyEncode(original));
+        const float3 nativeRaw = gPassthrough != 0 ? nativeLinear : LinearToSrgb(nativeLinear);
+        const float3 rawEdit = SuperiorGuidedEdit(cmpUv, nativeRaw);
+        proxy = nativeLinear;
+        model = gPassthrough != 0 ? nativeRaw + rawEdit : SrgbToLinear(nativeRaw + rawEdit);
+        modelDirect = model;
+        proxyLuma = dot(proxy, kLuma);
+    }
+#else
     if (gTransfer >= 1 && gModelWorkScale < 0.999)
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
@@ -1796,6 +1822,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         // 1 is the cube-scaled additive edit, 2 is the OkLab residual (see NvidiaResidualModel).
         model = gTransfer == 2 ? NvidiaResidualModel(fullProxy, cmpUv) : CubeScaleResidual(fullProxy, fullProxy + edit);
     }
+
+#endif
 
     // The signal curves (HLG, PQ, linear) compose in scene light.
     //

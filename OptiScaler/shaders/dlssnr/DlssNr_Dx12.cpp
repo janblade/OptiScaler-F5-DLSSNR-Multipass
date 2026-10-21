@@ -2200,10 +2200,9 @@ DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice)
 }
 
 bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
-                                  ID3D12Resource* InSource, ID3D12Resource* InModel,
-                                  ID3D12Resource* InOriginal, ID3D12Resource* InMotion,
-                                  ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
-                                  ID3D12Resource* OutKeep)
+                               ID3D12Resource* InSource, ID3D12Resource* InModel, ID3D12Resource* InOriginal,
+                               ID3D12Resource* InMotion, ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
+                               ID3D12Resource* OutKeep, ID3D12Resource* InLow, ID3D12PipelineState* overridePipeline)
 {
     if (!_init || InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr)
         return false;
@@ -2222,7 +2221,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
         InOriginal != nullptr ? InOriginal : InSource,
         InMotion != nullptr ? InMotion : InSource,
         InPrevEdit != nullptr ? InPrevEdit : InSource,
-        InSource,
+        InLow != nullptr ? InLow : InSource,
     };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
@@ -2245,7 +2244,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
     InCmdList->SetComputeRootSignature(_rootSignature);
-    InCmdList->SetPipelineState(_pipelineState);
+    InCmdList->SetPipelineState(overridePipeline ? overridePipeline : _pipelineState);
     InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
 
     // Sized from the constants rather than from a resource, because the pass that shrinks the proxy
@@ -2266,8 +2265,12 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 
 DlssNr_Dx12::~DlssNr_Dx12()
 {
+    for (auto* pipeline : _superiorResolve)
+        if (pipeline)
+            pipeline->Release();
     for (auto* pipeline : _superiorPipeline)
-        if (pipeline) pipeline->Release();
+        if (pipeline)
+            pipeline->Release();
     if (_finishedColorPipelineState)
         _finishedColorPipelineState->Release();
     if (_detailStatsPipelineState)
@@ -3150,9 +3153,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
     g_nr.appliedWorkScale = workScale;
     const auto workWidth = superior ? DlssNr::SuperiorScaling::WorkingExtent(width, workScale)
-                                   : AlignWorkSize((unsigned int) (width * workScale + 0.5f), width);
+                                    : AlignWorkSize((unsigned int) (width * workScale + 0.5f), width);
     const auto workHeight = superior ? DlssNr::SuperiorScaling::WorkingExtent(height, workScale)
-                                    : AlignWorkSize((unsigned int) (height * workScale + 0.5f), height);
+                                     : AlignWorkSize((unsigned int) (height * workScale + 0.5f), height);
     const bool reduced = workWidth != width || workHeight != height;
     const unsigned int configuredPasses =
         std::clamp(cfg.DlssNrPasses.value_or_default(),
@@ -3181,7 +3184,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
 
     bool spatialReset = false;
-    bool spatial = !superior && EdgeCompression::Begin(cfg, width, height, workScale, proxyBackend, spatialSignature, spatialReset);
+    bool spatial = EdgeCompression::Begin(cfg, width, height, workScale, proxyBackend, spatialSignature, spatialReset);
 
     if (spatialReset)
         g_nr.reset = true;
@@ -3283,9 +3286,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.workHeight = modelHeight;
     }
 
-    if (!superior && g_nr.colorCopy == nullptr)
+    if (g_nr.colorCopy == nullptr)
         g_nr.colorCopy = CreateScratch(device, colourFormat, width, height);
-    if (!superior && g_nr.hdrCopy == nullptr)
+    if (g_nr.hdrCopy == nullptr)
         g_nr.hdrCopy = CreateScratch(device, keepFormat, width, height);
 
     // The crop is a CopyTextureRegion from the game's colour: exact format
@@ -3339,7 +3342,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // passClampScratch, so a Passes=2 configuration doesn't permanently carry a full working-resolution
     // texture it structurally can never use. A failure here doesn't disable multipass outright, only
     // caps the chain one pass short at that second boundary (the pass loop's own null-target check).
-    if (!superior && requestedPasses > 2 && g_nr.passClampScratch2 == nullptr && !g_nr.passClampScratch2Failed)
+    if (requestedPasses > 2 && g_nr.passClampScratch2 == nullptr && !g_nr.passClampScratch2Failed)
     {
         g_nr.passClampScratch2 = CreateScratch(device, modelFormat, modelWidth, modelHeight);
         g_nr.passClampScratch2Failed = g_nr.passClampScratch2 == nullptr;
@@ -3370,17 +3373,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (spatial && !replaceCorrection)
         ParkNrResource(g_nr.colorSmall);
-    else if (!superior && reduced && g_nr.colorSmall == nullptr)
+    else if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, colourFormat, workWidth, workHeight);
 
     // The up/down-leg target is native (the answer is brought back to frame size before the
     // resolve) -- shared by both the supersampling down-leg (> 1) and the reduced up-leg (< 1),
     // mutually exclusive per frame.
     // Packed and supersampling, the pair is averaged into Compress screen edges' own native pair instead.
-    if (!superior && workScale != 1.0f && !(spatial && workScale > 1.0f) && g_nr.outputNative == nullptr)
+    if (workScale != 1.0f && !(spatial && workScale > 1.0f) && g_nr.outputNative == nullptr)
         g_nr.outputNative = CreateScratch(device, colourFormat, width, height);
 
-    if (!superior && g_nr.meter == nullptr)
+    if (g_nr.meter == nullptr)
     {
         g_nr.meter = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, kDlssNrMeterGrid, kDlssNrMeterGrid);
 
@@ -3422,7 +3425,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_INFO("DLSS-NR: white point meter up, {}x{} tiles", kDlssNrMeterGrid, kDlssNrMeterGrid);
     }
 
-    if (!superior && g_nr.autoExposure == nullptr)
+    if (g_nr.autoExposure == nullptr)
     {
         g_nr.autoExposure = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, 1, 1);
         g_nr.autoExposureReadable = false;
@@ -3437,7 +3440,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // Tried once per device: a failure is not retried (and logged) every frame.
-    if (!superior && g_nr.autoExposureRaw == nullptr && !g_nr.autoExposureRawFailed)
+    if (g_nr.autoExposureRaw == nullptr && !g_nr.autoExposureRawFailed)
     {
         g_nr.autoExposureRaw = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, 1, 1);
         g_nr.autoExposureRawFailed = g_nr.autoExposureRaw == nullptr;
@@ -3446,8 +3449,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_WARN("DLSS-NR: could not allocate the eye adaptation texture; Automatic follows every frame at once");
     }
 
-    if (g_nr.feature == nullptr && g_nr.output != nullptr &&
-        (superior || (g_nr.colorCopy != nullptr && g_nr.hdrCopy != nullptr)))
+    if (g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr && g_nr.hdrCopy != nullptr)
     {
         auto snippet = FindSelectedModel();
 
@@ -3644,12 +3646,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (superior)
     {
         ResTrack_Dx12::HookLateNrQueue(device);
-        SuperiorRun::Run(*this, cmdList, device, target, depth, motion, frame, guides,
-                         width, height, workWidth, workHeight, workScale, requestedPasses,
-                         timingQueue ? timingQueue : (ID3D12CommandQueue*) State::Instance().currentCommandQueue,
-                         outputArrival);
-        device->Release();
-        return;
+        if (!SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height, workWidth, workHeight, frame,
+                                depth && guides.depth.valid(),
+                                timingQueue ? timingQueue
+                                            : (ID3D12CommandQueue*) State::Instance().currentCommandQueue))
+        {
+            device->Release();
+            return;
+        }
     }
 
     // The upscaler has just written this, so it is a UAV. The model needs it readable.
@@ -4360,6 +4364,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
     // enlarged during the resolve while the frame underneath stays full size and untouched.
+    bool superiorInputReady = true;
     ID3D12Resource* modelInput = g_nr.colorCopy;
 
     if (reduced && (!spatial || replaceCorrection) && g_nr.colorSmall != nullptr)
@@ -4422,8 +4427,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // to be harmless only because the old box-average never branched on either field.
             down.Passthrough = isHdrBuffer ? 0u : 1u;
             down.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-            DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
-                                g_nr.colorSmall, nullptr);
+            if (superior)
+            {
+                DlssNr::Superior::DlssNrConstants area {};
+                area.Mode = 2u;
+                area.Width = workWidth;
+                area.Height = workHeight;
+                area.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
+                superiorInputReady = DispatchSuperiorPass(cmdList, area, modelInput, nullptr, nullptr, nullptr, nullptr,
+                                                          nullptr, g_nr.colorSmall, nullptr);
+            }
+            else
+                DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr, g_nr.colorSmall, nullptr);
             Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
@@ -4742,6 +4757,25 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    auto* superiorGeneration = superior ? superiorState.current.get() : nullptr;
+    const auto superiorSchedule = superior ? DlssNr::SuperiorScaling::Schedule(cfg, effectivePasses, workScale)
+                                           : DlssNr::InterPass::GainSchedule {};
+    unsigned superiorCovered = 0, superiorCompleted = 0;
+    bool superiorBoundaryFailed = false;
+    uint32_t superiorMask = 0, superiorClampSlots[4] { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+    if (superiorGeneration)
+    {
+        auto& g = *superiorGeneration;
+        if (!g.haveSchedule || g.expectedMask != superiorSchedule.expectedMask || g.previousPasses != effectivePasses)
+        {
+            g_nr.reset = true;
+            g.reset = true;
+            g.haveSchedule = true;
+            g.expectedMask = superiorSchedule.expectedMask;
+            g.previousPasses = effectivePasses;
+        }
+    }
+
     // Encode happened once above. Keep that base proxy immutable and ping-pong only model answers:
     //   pass 0: base -> A, pass 1: A -> B, pass 2: B -> A.
     // The final answer is resolved once against the original base, so matched-residual transfer is the
@@ -4811,18 +4845,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.passNeedsReset[skipped] = true;
     };
 
-    int result = NVSDK_NGX_Result_Success;
+    int result = superiorInputReady ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 
     // What the model is handed as its guides: the game's, at the game's sizes and scale; or packed, where all three are
     // the packed picture's own (motion in packed pixels, so a scale of 1).
-    const unsigned int evalGuideW = spatial ? modelWidth : guideWidth;
-    const unsigned int evalGuideH = spatial ? modelHeight : guideHeight;
-    const unsigned int evalMotionW = spatial ? modelWidth : motionWidth;
-    const unsigned int evalMotionH = spatial ? modelHeight : motionHeight;
-    const unsigned int evalDepthX = spatial ? 0u : depthBaseX;
-    const unsigned int evalDepthY = spatial ? 0u : depthBaseY;
-    const float evalMvScaleX = spatial ? 1.0f : g_nr.guideMvScaleX * mvToWorkX;
-    const float evalMvScaleY = spatial ? 1.0f : g_nr.guideMvScaleY * mvToWorkY;
+    unsigned int evalGuideW = spatial ? modelWidth : guideWidth;
+    unsigned int evalGuideH = spatial ? modelHeight : guideHeight;
+    unsigned int evalMotionW = spatial ? modelWidth : motionWidth;
+    unsigned int evalMotionH = spatial ? modelHeight : motionHeight;
+    unsigned int evalDepthX = spatial ? 0u : depthBaseX;
+    unsigned int evalDepthY = spatial ? 0u : depthBaseY;
+    float evalMvScaleX = spatial ? 1.0f : g_nr.guideMvScaleX * mvToWorkX;
+    float evalMvScaleY = spatial ? 1.0f : g_nr.guideMvScaleY * mvToWorkY;
 
     // Reuse detail between frames (DlssNr_DetailReuse.inl): every other frame skips the model and moves the previous
     // frame's detail onto this frame's input instead. On such a frame the answer lands in g_nr.output (at rest, UAV).
@@ -4940,9 +4974,40 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool cached = cachePlan.cached;
     if (cachePlan.resetModel)
         g_nr.reset = true;
-    ID3D12Resource* const evalMotion = cachePlan.runs ? cachePlan.motion : reusePlan.motion;
-    const unsigned int evalMotionBaseX = cachePlan.runs ? cachePlan.motionBaseX : reusePlan.motionBaseX;
-    const unsigned int evalMotionBaseY = cachePlan.runs ? cachePlan.motionBaseY : reusePlan.motionBaseY;
+    ID3D12Resource* evalMotion = cachePlan.runs ? cachePlan.motion : reusePlan.motion;
+    unsigned int evalMotionBaseX = cachePlan.runs ? cachePlan.motionBaseX : reusePlan.motionBaseX;
+    unsigned int evalMotionBaseY = cachePlan.runs ? cachePlan.motionBaseY : reusePlan.motionBaseY;
+
+    if (superiorGeneration && superiorGeneration->temporal && !cached)
+    {
+        auto matchedRegions = guides;
+        matchedRegions.motion.x = evalMotionBaseX;
+        matchedRegions.motion.y = evalMotionBaseY;
+        // Packed NR keeps janblade's packed guides; private DLSS works on the unpacked grid.
+        const bool ok =
+            SuperiorRun::MatchGuides(*superiorGeneration, *this, cmdList, depthIn, spatial ? motionIn : evalMotion,
+                                     spatial ? guides : matchedRegions, frame);
+        if (!ok)
+            result = NVSDK_NGX_Result_Fail;
+        else if (!spatial)
+        {
+            modelDepth = superiorGeneration->depth.Get();
+            evalMotion = superiorGeneration->motion.Get();
+            evalGuideW = evalMotionW = workWidth;
+            evalGuideH = evalMotionH = workHeight;
+            evalDepthX = evalDepthY = evalMotionBaseX = evalMotionBaseY = 0;
+        }
+    }
+    if (superior && !spatial)
+    {
+        evalMvScaleX = DlssNr::SuperiorScaling::MotionScale(frame.MvScaleX, evalMotionW,
+                                                            frame.MotionVectorsLowResolution ? frame.RenderSubrectWidth
+                                                                                             : frame.OutputWidth);
+        evalMvScaleY = DlssNr::SuperiorScaling::MotionScale(frame.MvScaleY, evalMotionH,
+                                                            frame.MotionVectorsLowResolution ? frame.RenderSubrectHeight
+                                                                                             : frame.OutputHeight);
+    }
+    const bool superiorReset = g_nr.reset || frame.Reset;
 
     // The model's own time: the passes alone, so the detail reuse work above counts as surrounding work (and a reused
     // frame's model time is about zero).
@@ -4998,6 +5063,72 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         finalAnswer = passOutput;
         MakeModelReadable(finalAnswer);
+        superiorCompleted = pass + 1u;
+        if (superiorGeneration && pass + 1u < effectivePasses)
+        {
+            const bool due = superiorSchedule.Due(pass, superiorCovered);
+            const bool ran = due && SuperiorRun::InterPass(*superiorGeneration, *this, cmdList, cfg,
+                                                           spatial ? modelInput : g_nr.colorCopy, modelInput,
+                                                           finalAnswer, superiorCovered, superiorCompleted, workScale);
+            if (ran)
+            {
+                superiorCovered = superiorCompleted;
+                superiorMask |= 1u << pass;
+            }
+            else if (due)
+            {
+                superiorBoundaryFailed = true;
+                g_nr.reset = true;
+                superiorGeneration->reset = true;
+            }
+            auto* nextInput = ran ? superiorGeneration->interWorking.Get() : finalAnswer;
+            const float feedback = std::clamp(cfg.DlssNrPassFeedback.value_or_default(), 0.0f, 1.0f);
+            if (!ran || feedback != 1.0f)
+            {
+                if (!passClampTarget)
+                {
+                    result = NVSDK_NGX_Result_Fail;
+                    ArmSkippedPassResets(pass + 1u);
+                    break;
+                }
+                MakeModelWritable(passClampTarget);
+                bool clamped = false;
+                if (feedback == 1.0f)
+                {
+                    DlssNr::Superior::DlssNrConstants clamp {};
+                    clamp.Mode = 8u;
+                    clamp.Width = modelWidth;
+                    clamp.Height = modelHeight;
+                    const auto slot =
+                        (passClampTarget == g_nr.passClampScratch ? 0u : 2u) + (finalAnswer == g_nr.output ? 0u : 1u);
+                    clamped = DispatchSuperiorPass(cmdList, clamp, nextInput, nullptr, nullptr, nullptr, nullptr,
+                                                   nullptr, passClampTarget, nullptr, &superiorClampSlots[slot]);
+                }
+                else
+                {
+                    DlssNrConstants clamp {};
+                    clamp.Mode = DlssNrMode_ClampProxy;
+                    clamp.Width = modelWidth;
+                    clamp.Height = modelHeight;
+                    clamp.PassFeedback = feedback;
+                    clamped = DispatchPass(cmdList, clamp, nextInput, passInput, nullptr, nullptr, nullptr,
+                                           passClampTarget, nullptr);
+                }
+                if (!clamped)
+                {
+                    result = NVSDK_NGX_Result_Fail;
+                    ArmSkippedPassResets(pass + 1u);
+                    break;
+                }
+                MakeModelReadable(passClampTarget);
+                nextInput = passClampTarget;
+                passClampTarget =
+                    passClampTarget == g_nr.passClampScratch ? g_nr.passClampScratch2 : g_nr.passClampScratch;
+            }
+            passInput = nextInput;
+            passOutput = passOutput == g_nr.output ? g_nr.passScratch : g_nr.output;
+            continue;
+        }
 
         if (pass + 1 < effectivePasses)
         {
@@ -5072,7 +5203,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (cachePlan.runs)
         EditCache::AfterModel(cacheFrame);
 
-    g_nr.reset = false;
+    if (superiorGeneration)
+    {
+        if (reused)
+        {
+            superiorCompleted = superiorGeneration->lastCompleted;
+            superiorCovered = superiorGeneration->lastCovered;
+        }
+        if (superiorGeneration->successfulMask != superiorMask && !reused && !cached)
+            superiorGeneration->reset = true;
+        if (!reused && !cached)
+        {
+            superiorGeneration->successfulMask = superiorMask;
+            superiorGeneration->lastCompleted = superiorCompleted;
+            superiorGeneration->lastCovered = superiorCovered;
+        }
+    }
+    g_nr.reset = superior && (superiorBoundaryFailed || result != NVSDK_NGX_Result_Success);
 
     // Compress screen edges: the packed model input and the model's answer back to the ordinary grid, both through the
     // same resampling, so what the resolve takes from the pair is the model's change. The resolve, the enlargement and
@@ -5341,7 +5488,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // softer-filtered one.
         bool sgsrAnswerOk = false;
         const uint32_t upscaleMethod = cfg.DlssNrReducedUpscaleMethod.value_or_default();
-        const bool wantsSgsr1Answer = upscaleMethod == 1;
+        const bool wantsSgsr1Answer = !superior && upscaleMethod == 1;
         // Gated on `reduced` (the actual rounded-size flag), not just workScale < 1.0f -- a workScale
         // that rounds back to the native size (e.g. Auto's continuous ratio landing at 0.9998) would
         // otherwise engage SGSR1 at 1:1, wasted work that also isn't guaranteed identity-preserving.
@@ -5382,7 +5529,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 hasLoggedSgsrUp = true;
             }
         }
-        else if (reduced && workScale < 1.0f)
+        else if (!superior && reduced && workScale < 1.0f)
         {
             // Parity with the SGSR1 branch's own log above, change-gated the same way, so a log
             // scan can confirm the user's Bilinear choice actually took effect without needing a
@@ -5422,19 +5569,41 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // the output takes a UAV, so resolveTarget is the output there)
         if (cached)
             EditCache::ApplyCached(cacheFrame, resolveTarget);
+        else if (superiorGeneration && superiorGeneration->temporal)
+        {
+            auto& g = *superiorGeneration;
+            auto* residual = SuperiorRun::Stabilize(g, *this, cmdList, ordinaryProxy, ordinaryAnswer, motionIn, guides,
+                                                    frame, superiorReset, g_nr.heldActive);
+            const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted, workScale);
+            auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
+                            ? SuperiorRun::FinalLow(g, *this, cmdList, ordinaryProxy, residual)
+                            : nullptr;
+            resolveParams.MvScaleX = gains.high;
+            resolveParams.MvScaleY = gains.low;
+            resolveParams.GuideWidth = low ? 1u : 0u;
+            auto* pso = SuperiorResolvePipeline(resolveParams.Passthrough != 0);
+            const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
+            composed = residual && lowReady && pso &&
+                       DispatchPass(cmdList, resolveParams, ordinaryProxy, residual, resolveOriginal, motionIn,
+                                    exposureTex, resolveTarget, nullptr, low, pso);
+            SuperiorRun::Say(
+                composed ? "Area, cached inter-pass and temporal enlargement; janblade input/exposure/composition."
+                         : "Superior reconstruction failed; keeping the game frame.");
+        }
         else
-            DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal, motionIn,
-                         exposureTex, resolveTarget, nullptr);
-        composed = true;
+            composed = DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal, motionIn,
+                                    exposureTex, resolveTarget, nullptr);
+        if (cached)
+            composed = true;
 
         // A refresh: the model's output becomes the anchor (and the crossfade's first frame is written)
-        if (cachePlan.runs && cachePlan.refresh && targetSupportsUav)
+        if (composed && cachePlan.runs && cachePlan.refresh && targetSupportsUav)
         {
             TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             EditCache::AfterResolve(cacheFrame, target, [&] { TransitionTarget(D3D12_RESOURCE_STATE_UNORDERED_ACCESS); });
         }
 
-        if (!targetSupportsUav)
+        if (!targetSupportsUav && composed)
         {
             Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -5445,6 +5614,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
+
+        if (!targetSupportsUav && !composed)
+            Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         if (CalibrationActive())
         {
@@ -5979,8 +6152,6 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &frame.MotionSubrectBaseY);
 
     params->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, &frame.FrameTimeMs);
-    frame.ExposureState = Config::Instance()->ExposureResourceBarrier.has_value()
-        ? Config::Instance()->ExposureResourceBarrier.value() : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
         frame.MvScaleX = 1.0f;
 

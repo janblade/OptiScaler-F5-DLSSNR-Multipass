@@ -1944,4 +1944,7 @@
     <ClInclude Include="shaders\dlssnr\superior\Shader.inl"><Filter>Header Files</Filter></ClInclude>
     <ClCompile Include="dlssnr\DlssNr_GpuLifetime.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="shaders\dlssnr\superior\HostResolve.hlsli"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
 </Project>

@@ -5,7 +5,6 @@
 #include "DlssNr_ExposureMatch.h"
 #include "DlssNr_ExposureScanRecord.h"
 #include "DlssNr_GameDefaults.h"
-#include "DlssNr_SuperiorScaling.h"
 
 #include <shaders/dlssnr/DlssNr_ExposureAdapt.h>
 
@@ -399,9 +398,7 @@ namespace AutoScan
 {
 bool On()
 {
-    const auto& cfg = *Config::Instance();
-    return !DlssNr::SuperiorScaling::Enabled(cfg) &&
-           cfg.DlssNrWhitePointSource.value_or_default() == DlssNrExposureDefault::kSourceAuto;
+    return Config::Instance()->DlssNrWhitePointSource.value_or_default() == DlssNrExposureDefault::kSourceAuto;
 }
 
 void FrameLocked(const FrameExposure& frame)

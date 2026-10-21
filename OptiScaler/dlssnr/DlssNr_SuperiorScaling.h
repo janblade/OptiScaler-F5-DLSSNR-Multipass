@@ -14,9 +14,6 @@ constexpr uint32_t LowGroupHeight = 16u;
 inline bool Enabled(uint32_t transfer) { return transfer == Transfer; }
 template <class C> inline bool Enabled(const C& cfg) { return Enabled(cfg.DlssNrTransfer.value_or_default()); }
 inline int Preset(int preset) { return preset == 11 ? 11 : 1; } // K or A; no default/latest ambiguity.
-// v59 has manual/game/automatic exposure. Janblade's Auto and scan selection use
-// the fixed v59 automatic meter here, without starting its separate scan/readback path.
-inline unsigned ExposureSource(unsigned configured) { return configured < 2u ? configured : 3u; }
 inline float High(unsigned style, unsigned nrPreset = 1u)
 {
     constexpr float main[] { .8f, .75f, .95f }, smallModel[] { .950f, .925f, .955f };

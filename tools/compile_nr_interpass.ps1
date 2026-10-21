@@ -78,3 +78,22 @@ try {
     }
 
 } finally { Pop-Location }
+
+# The host resolve preserves janblade's exposure and composition and substitutes only
+# the residual estimator. Default janblade/Vulkan blobs are not overwritten.
+Push-Location (Join-Path $PSScriptRoot "../OptiScaler/shaders/dlssnr/precompile")
+try {
+    foreach ($variant in @("hdr", "sdr")) {
+        $stem = "host_resolve_$variant"
+        $defines = @("-D", "DLSSNR_SUPERIOR_HOST_RESOLVE=1")
+        if ($variant -eq "sdr") { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_SDR=1") }
+        $dest = "../superior/precompile/${stem}_Shader"
+        & ../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect @defines dlssnr.hlsl -Fo "$dest.cso"
+        if ($LASTEXITCODE -ne 0) { throw "Host resolve DXC failed: $variant" }
+        & $Python ../../shader_tools/create_header.py "$dest.cso" "$dest.h" "${stem}_cso"
+        if ($LASTEXITCODE -ne 0) { throw "Host resolve header failed: $variant" }
+        [IO.File]::WriteAllLines((Join-Path (Get-Location) "$dest.h"),
+            @([IO.File]::ReadAllLines((Join-Path (Get-Location) "$dest.h")) | ForEach-Object { $_.TrimEnd() }),
+            [Text.UTF8Encoding]::new($false))
+    }
+} finally { Pop-Location }

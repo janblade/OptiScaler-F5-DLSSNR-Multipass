@@ -189,3 +189,19 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
 
     return true;
 }
+
+namespace DlssNr::Superior::HostBytecode
+{
+#include "precompile/host_resolve_hdr_Shader.h"
+#include "precompile/host_resolve_sdr_Shader.h"
+} // namespace DlssNr::Superior::HostBytecode
+
+ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(bool sdr)
+{
+    using namespace DlssNr::Superior::HostBytecode;
+    auto*& pso = _superiorResolve[sdr ? 1 : 0];
+    if (!pso)
+        CreateComputePipeline(_device, &pso, sdr ? host_resolve_sdr_cso : host_resolve_hdr_cso,
+                              sdr ? sizeof(host_resolve_sdr_cso) : sizeof(host_resolve_hdr_cso), nullptr);
+    return pso;
+}

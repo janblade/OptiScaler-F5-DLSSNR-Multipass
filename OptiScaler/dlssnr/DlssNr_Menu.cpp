@@ -1840,65 +1840,9 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                "Green = in effect; changing those clears it.");
 }
 
-// The v59 exposure path has no scan, readbacks, adaptive meter or calibration pass.
-// Keep its actual HDR controls in janblade's NR Input page.
-static void RenderSuperiorExposure(Config* config)
-{
-    ImGui::SeparatorText("NR Exposure");
-    const auto encoding = DlssNr::ReadColourEncodingStatus();
-    const bool pinned = encoding.seen && encoding.exposureState == DlssNrExposureState::State::DisplayPinned;
-    const bool toneMapped = encoding.seen && encoding.exposureState == DlssNrExposureState::State::ToneMapped;
-    if (pinned)
-        DeferredSlider("Game's HDR paper white", &config->DlssNrDisplayPaperWhiteNits,
-                       DlssNrExposureState::kMinPaperWhiteNits, DlssNrExposureState::kMaxPaperWhiteNits,
-                       DlssNrExposureState::kReferenceWhiteNits, "%.0f nits");
-    if (toneMapped)
-        ImGui::TextDisabled("Exposure is inactive on a tone-mapped input.");
-    ImGui::BeginDisabled(pinned || toneMapped);
-    unsigned source = DlssNr::SuperiorScaling::ExposureSource(config->DlssNrWhitePointSource.value_or_default());
-    const char* sources[] = { "Manual paper white", "Game exposure", "Automatic HDR exposure" };
-    int selected = source == 3u ? 2 : int(source);
-    if (ImGui::Combo("White point source", &selected, sources, IM_ARRAYSIZE(sources)))
-    {
-        source = selected == 2 ? 3u : unsigned(selected);
-        config->DlssNrWhitePointSource = source;
-    }
-    HelpMarker("Superior Scaling uses the v59 exposure meter. Automatic measures the HDR input on the GPU. "
-               "Game exposure uses the texture supplied by the game. Without a usable texture, Paper white applies.");
-    DeferredSlider("Paper white", &config->DlssNrWhitePointScale, .25f, 2000.0f, 1.0f, "%.2fx");
-    if (source != 0u)
-    {
-        auto& trim = source == 3u ? config->DlssNrAutoExposureTrim : config->DlssNrWhitePointTrim;
-        DeferredSlider("Exposure trim", &trim, .001f, 1000.0f, source == 3u ? 5.0f : 1.0f, "%.3fx");
-        auto& anchors = source == 3u ? config->DlssNrAutoExposureTrimAnchors : config->DlssNrGameExposureTrimAnchors;
-        if (ImGui::TreeNode("Trim anchors"))
-        {
-            char text[1024] {};
-            const auto value = anchors.value_or_default();
-            std::copy_n(value.c_str(), std::min(value.size(), sizeof(text) - 1u), text);
-            if (ImGui::InputText("White:trim pairs", text, sizeof(text), ImGuiInputTextFlags_EnterReturnsTrue))
-                anchors = std::string(text);
-            HelpMarker("Up to eight white:trim pairs separated by spaces or semicolons. Press Enter to apply. "
-                       "Example: 1:5; 10:3. Anchors override the trim slider.");
-            ImGui::TreePop();
-        }
-    }
-    if (source == 3u)
-        DeferredSlider("Highlight protection", &config->DlssNrAutoExposureHighlightProtection,
-                       0.0f, 100.0f, 0.0f, "%.0f%%");
-    ImGui::EndDisabled();
-    DeferredSlider("Highlight guard", &config->DlssNrMaxRatio, 1.0f, MaxHighlightGuard, 2.0f, "%.1fx");
-    DeferredSlider("Maximum darkening", &config->DlssNrMaxDarkening, 0.0f, 100.0f, 100.0f, "%.0f%%");
-}
-
 // NR Exposure, drawn at the end of the NR Input page.
 static void RenderExposureSection(Config* config, float menuResScale)
 {
-    if (DlssNr::SuperiorScaling::Enabled(*config))
-    {
-        RenderSuperiorExposure(config);
-        return;
-    }
     ImGui::SeparatorText("NR Exposure");
     ImGui::TextDisabled("HDR input settings. Adjust the brightness range presented to NR.");
 
@@ -2784,8 +2728,6 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         config->DlssNrPrecision = precisionChoice == 1 ? 4u : 0u;
     HelpMarker("NVIDIA: the original FP8 model. Default.\n"
                "FP8+NVFP4: this fork's mixed-precision model for RTX 50; output may differ slightly. D3D12 only.");
-    if (!DlssNr::SuperiorScaling::Enabled(*config))
-    {
     // One setting per kernel set: the fp8 kernels (NVIDIA's DLL and fp8-based builds) and the plain FP16 kernels (used by some modified DLSS-NR DLLs).
     // Only the one for the kernels actually running is used.
     const char* kernelSet = DlssNrNative::VitKernelSet();
@@ -2905,7 +2847,6 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         }
     }
     RenderSceneCutToggle(config);
-    }
     if (precisionChoice > 0 && DlssNr::IsRunningVk())
     {
         // The hybrid rewrites the model's kernels through NvAPI's D3D12 entry points; on Vulkan the model runs
@@ -3343,8 +3284,6 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         HelpMarker("Filter used to reduce NR output when Model resolution exceeds 100%.\nSharper filters may introduce ringing around edges.");
     }
 
-    if (!DlssNr::SuperiorScaling::Enabled(*config))
-    {
     // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h): restyle the picture the model is
     // shown, as one card. One way to flatten first (watercolour and smooth canvas do the same job, so a choice of one),
     // then the structure hint as a checkbox; each style's strength shows only while it is on. Its own section, open at start:
@@ -3425,8 +3364,6 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     RenderEdgeCompression(config, menuResScale, nr);
 
     RenderLutSection(config);
-    }
-
 
     ImGui::PopItemWidth();
 
@@ -3462,8 +3399,6 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         if (ImGui::Combo("Enlargement", &selected, names, IM_ARRAYSIZE(names)))
         {
             config->DlssNrTransfer = selected == 3 ? DlssNr::SuperiorScaling::Transfer : (uint32_t) selected;
-            if (selected == 3 && config->DlssNrReversibleMode.value_or_default() > 4u)
-                config->DlssNrReversibleMode = 0u;
         }
         HelpMarker("How NR is reconstructed below 100% model resolution. Superior Scaling uses its own Area "
                    "downsample, frequency shaping and temporal DLSS stabilization. Model resolution and each "
@@ -3472,7 +3407,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         {
             ImGui::TextDisabled("Downsample: Area (Superior Scaling)");
             static const char* presets[] = { "A - higher performance", "K - slower, more stable NR in motion" };
-            int preset = DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
+            int preset =
+                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
             if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
                 config->DlssNrSuperiorScalingPreset = preset == 1 ? 11 : 1;
             HelpMarker("Private DLSS SR in DLAA mode, applied to NR's residual at its working resolution. "
@@ -3482,7 +3418,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             else if (!reduced)
                 ImGui::TextDisabled("Temporal stabilization is inactive at 100% or above.");
             const auto status = DlssNr::SuperiorScaling::Status();
-            if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
+            if (!status.empty())
+                ImGui::TextWrapped("%s", status.c_str());
         }
         else
         {
@@ -3548,7 +3485,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
     const int reversible = DlssNrProxyCurve::Valid(reversibleValue) ? (int) reversibleValue : 0;
     if (ImGui::BeginCombo("Final Image Composition (experimental)", reversibleNames[reversible]))
     {
-        for (int i = 0; i < (DlssNr::SuperiorScaling::Enabled(*config) ? 5 : (int) DlssNrProxyCurve::kPickable); ++i)
+        for (int i = 0; i < (int) DlssNrProxyCurve::kPickable; ++i)
         {
             const bool selected = i == reversible;
             if (ImGui::Selectable(reversibleNames[i], selected))
@@ -3580,22 +3517,6 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
 
         HelpMarker("Sharpens fine edges using the original frame. Higher: sharper. 0: off. Only below 100% Model "
                    "resolution; most useful with Replace.");
-    }
-
-    if (DlssNr::SuperiorScaling::Enabled(*config) && ImGui::TreeNode("Final colour recovery"))
-    {
-        DeferredSlider("Chromaticity recovery", &config->DlssNrFinalChromaticityRecovery, 0.0f, 100.0f, 0.0f, "%.0f%%");
-        DeferredSlider("Saturation recovery", &config->DlssNrFinalSaturationRecovery, 0.0f, 100.0f, 0.0f, "%.0f%%");
-        DeferredSlider("Colour smoothing", &config->DlssNrFinalColourSmoothingMs, 0.0f, 5000.0f, 250.0f, "%.0f ms");
-        bool preserve = config->DlssNrFinalChromaticityPreserveSaturation.value_or_default();
-        if (ImGui::Checkbox("Preserve saturation during chromaticity recovery", &preserve))
-            config->DlssNrFinalChromaticityPreserveSaturation = preserve;
-        int saturationMode = (int) std::min(config->DlssNrFinalSaturationMode.value_or_default(), 1u);
-        const char* saturationModes[] = { "Saturation", "Vibrance" };
-        if (ImGui::Combo("Recovery mode", &saturationMode, saturationModes, IM_ARRAYSIZE(saturationModes)))
-            config->DlssNrFinalSaturationMode = (uint32_t) saturationMode;
-        DeferredSlider("Protect highly saturated colours", &config->DlssNrFinalHighSaturationProtection, 0.0f, 100.0f, 0.0f, "%.0f%%");
-        ImGui::TreePop();
     }
 
     ImGui::SeparatorText("Effect strength");
@@ -3784,23 +3705,19 @@ static void RenderDebugPage(Config* config, float menuResScale)
 
     HelpMarker("Freezes NR's input to compare settings. HUD may keep updating; SR/RR changes don't show.");
 
-    if (!DlssNr::SuperiorScaling::Enabled(*config))
-    {
-        bool frameStats = config->DlssNrFrameStats.value_or_default();
-        if (ImGui::Checkbox("Log frame brightness stats", &frameStats))
-            config->DlssNrFrameStats = frameStats;
+    bool frameStats = config->DlssNrFrameStats.value_or_default();
+    if (ImGui::Checkbox("Log frame brightness stats", &frameStats))
+        config->DlssNrFrameStats = frameStats;
 
-        HelpMarker("Writes the frame's brightness stats to OptiScaler.log about every 2 s. For diagnosis.");
+    HelpMarker("Writes the frame's brightness stats to OptiScaler.log about every 2 s. For diagnosis.");
 
-        RenderMeasureDetail();
+    RenderMeasureDetail();
 
-        bool kernelProfile = config->DlssNrKernelProfile.value_or_default();
-        if (ImGui::Checkbox("Log NR kernel profile", &kernelProfile))
-            config->DlssNrKernelProfile = kernelProfile;
+    bool kernelProfile = config->DlssNrKernelProfile.value_or_default();
+    if (ImGui::Checkbox("Log NR kernel profile", &kernelProfile))
+        config->DlssNrKernelProfile = kernelProfile;
 
-        HelpMarker("Writes where NR's GPU time goes to OptiScaler.log about every 4 s. For diagnosis.");
-
-    }
+    HelpMarker("Writes where NR's GPU time goes to OptiScaler.log about every 4 s. For diagnosis.");
 
     static const char* compareNames[] = { "Off", "Side by side", "Wipe" };
     int compare = (int) config->DlssNrCompare.value_or_default();
@@ -3849,19 +3766,6 @@ static void RenderDebugPage(Config* config, float menuResScale)
         HelpMarker("Where the dividing line sits.");
     }
 
-    if (DlssNr::SuperiorScaling::Enabled(*config))
-    {
-        const char* labels[] = { "Off", "Native proxy", "Model output", "Difference (amplified)",
-                                 "NR input", "Stabilized residual", "First inter-pass input" };
-        const uint32_t views[] = { 0, 1, 2, 3, 4, 6, 7 }; // v59 has no pre-DLAA carrier copy
-        int selected = 0;
-        for (int i = 0; i < IM_ARRAYSIZE(views); ++i)
-            if (config->DlssNrDebugView.value_or_default() == views[i]) selected = i;
-        if (ImGui::Combo("Debug view", &selected, labels, IM_ARRAYSIZE(labels)))
-            config->DlssNrDebugView = views[selected];
-    }
-    else
-    {
     static const char* debugNames[] = { "Off", "Proxy (what the model sees)", "Model output (raw)",
                                         "Difference (amplified)" };
     int debugView = (int) config->DlssNrDebugView.value_or_default();
@@ -3869,7 +3773,6 @@ static void RenderDebugPage(Config* config, float menuResScale)
         config->DlssNrDebugView = (uint32_t) debugView;
 
     HelpMarker("Shows the model input, its raw output, or the difference x20 (grey = no change).");
-    }
 
     ImGui::PopItemWidth();
 }

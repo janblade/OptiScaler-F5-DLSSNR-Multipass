@@ -20,8 +20,6 @@ int main() {
         require(Enabled(cfg) && InterPassMode(cfg)==8 && DownscaleFilter(cfg)==0);
         require(Radius(cfg)==1 && RangeSigma(cfg)==.015f && SpatialSigma(cfg)==3 && GuideStrength(cfg)==1);
         require(ShapingMode(cfg)==2);
-        require(ExposureSource(0)==0 && ExposureSource(1)==1);
-        require(ExposureSource(2)==3 && ExposureSource(3)==3 && ExposureSource(4)==3);
         require(High(0)==.8f && Low(0)==.661f && High(1)==.75f && Low(1)==.787f);
         require(High(2)==.95f && Low(2)==.784f && High(99)==High(2));
         require(High(0,2)==.950f && Low(0,2)==.861f);

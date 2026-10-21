@@ -470,14 +470,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
             DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
             DlssNrSuperiorScalingPreset.set_from_config(readInt("DlssNr", "SuperiorScalingPreset"));
-            DlssNrAutoExposureHighlightProtection.set_from_config(readFloat("DlssNr", "AutoExposureHighlightProtection"));
-            DlssNrMaxDarkening.set_from_config(readFloat("DlssNr", "MaxDarkening"));
-            DlssNrFinalChromaticityRecovery.set_from_config(readFloat("DlssNr", "FinalChromaticityRecovery"));
-            DlssNrFinalChromaticityPreserveSaturation.set_from_config(readBool("DlssNr", "FinalChromaticityPreserveSaturation"));
-            DlssNrFinalSaturationRecovery.set_from_config(readFloat("DlssNr", "FinalSaturationRecovery"));
-            DlssNrFinalSaturationMode.set_from_config(readUInt("DlssNr", "FinalSaturationMode"));
-            DlssNrFinalHighSaturationProtection.set_from_config(readFloat("DlssNr", "FinalHighSaturationProtection"));
-            DlssNrFinalColourSmoothingMs.set_from_config(readFloat("DlssNr", "FinalColourSmoothingMs"));
 
             DlssNrWhitePointFromExposure.set_from_config(readBool("DlssNr", "WhitePointFromExposure"));
             DlssNrProbeD3D11.set_from_config(readBool("DlssNr", "ProbeD3D11"));
@@ -1610,15 +1602,8 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrReplaceDetailStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "MaxRatio", GetFloatValue(Instance()->DlssNrMaxRatio.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Transfer", GetIntValue(Instance()->DlssNrTransfer.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "SuperiorScalingPreset", GetIntValue(Instance()->DlssNrSuperiorScalingPreset.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "AutoExposureHighlightProtection", GetFloatValue(Instance()->DlssNrAutoExposureHighlightProtection.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "MaxDarkening", GetFloatValue(Instance()->DlssNrMaxDarkening.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "FinalChromaticityRecovery", GetFloatValue(Instance()->DlssNrFinalChromaticityRecovery.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "FinalChromaticityPreserveSaturation", GetBoolValue(Instance()->DlssNrFinalChromaticityPreserveSaturation.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "FinalSaturationRecovery", GetFloatValue(Instance()->DlssNrFinalSaturationRecovery.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "FinalSaturationMode", GetIntValue(Instance()->DlssNrFinalSaturationMode.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "FinalHighSaturationProtection", GetFloatValue(Instance()->DlssNrFinalHighSaturationProtection.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "FinalColourSmoothingMs", GetFloatValue(Instance()->DlssNrFinalColourSmoothingMs.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SuperiorScalingPreset",
+                 GetIntValue(Instance()->DlssNrSuperiorScalingPreset.value_for_config()).c_str());
 
     ini.SetValue("DlssNr", "ProbeD3D11",
                  GetBoolValue(Instance()->DlssNrProbeD3D11.value_for_config()).c_str());

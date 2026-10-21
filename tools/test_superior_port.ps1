@@ -1,7 +1,8 @@
 param(
     [string]$ReferenceShaderDirectory,
     [switch]$GpuQuality,
-    [switch]$GpuTiming
+    [switch]$GpuTiming,
+    [switch]$GpuHost
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -22,6 +23,11 @@ try {
     $names = @($cpu)
     if ($GpuQuality) { $names += $quality }
     if ($GpuTiming) { $names += 'superior_tall_low_timing' }
+    if ($GpuHost) {
+        python tools/prepare_superior_host_tests.py
+        if ($LASTEXITCODE -ne 0) { throw 'Host shader reference compilation failed' }
+        $names += 'superior_host_quality'
+    }
     foreach ($name in $names) {
         $src = if ($name -like 'nr_*_smoke') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
         cmd /c "`"$vc`" && cl /nologo /std:c++17 /EHsc /O2 `"$src`" /Fe:$out/$name.exe /Fo:$out/$name.obj /link d3d12.lib dxgi.lib"
@@ -30,6 +36,10 @@ try {
     foreach ($name in $cpu) {
         & "$out/$name.exe"
         if ($LASTEXITCODE -ne 0) { throw "Test failed: $name" }
+    }
+    if ($GpuHost) {
+        & "$out/superior_host_quality.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Host composition comparison failed' }
     }
     $candidate = 'OptiScaler/shaders/dlssnr/superior/precompile'
     if ($GpuQuality -or $GpuTiming) {

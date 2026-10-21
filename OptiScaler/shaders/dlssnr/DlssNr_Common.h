@@ -158,7 +158,6 @@ struct DlssNrFrameInfo
     // undo it. Usually 1. Divided out before the exposure is applied, exactly as FSR's PrepareRgb does.
     float PreExposure = 1.0f;
     float FrameTimeMs = 16.67f;
-    uint32_t ExposureState = 0x40u; // D3D12 NON_PIXEL_SHADER_RESOURCE; override at the seam when configured
 
     // How much of the depth and motion vector textures the game actually rendered into.
     // Before SR this also selects the origin-zero active colour rectangle, not its allocation.

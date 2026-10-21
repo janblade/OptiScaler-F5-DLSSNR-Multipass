@@ -68,6 +68,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 
     uint32_t _heapIndex = 0;
 
+    ID3D12PipelineState* _superiorResolve[2] {};
+    ID3D12PipelineState* SuperiorResolvePipeline(bool sdr);
     ID3D12PipelineState* _superiorPipeline[16] {};
     bool _superiorAttempted[16] {};
     ID3D12PipelineState* SuperiorPipeline(const DlssNr::Superior::DlssNrConstants&, ID3D12Resource*);
@@ -175,7 +177,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                   // nothing reads it now and every caller passes nullptr. Kept only so the binding
                   // table keeps its shape -- not evidence that temporal accumulation exists.
                   ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
-                  ID3D12Resource* OutKeep);
+                  ID3D12Resource* OutKeep, ID3D12Resource* InLow = nullptr, ID3D12PipelineState* overridePipeline = nullptr);
 
     // v59 shaders keep their ABI and share the existing descriptor/constant ring.
     bool DispatchSuperiorPass(ID3D12GraphicsCommandList* cmd, const DlssNr::Superior::DlssNrConstants& constants,

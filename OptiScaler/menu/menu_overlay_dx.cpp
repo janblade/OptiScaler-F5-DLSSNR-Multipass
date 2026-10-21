@@ -10,6 +10,7 @@
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
+#include <output/SdrToHdr_Dx11Present.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -303,6 +304,10 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
 
     // The motion step reads the finished picture before the menu is drawn onto it (does nothing unless it is on).
     NativeMotionDx11::OnPresent(pSwapChain, g_pd3dDevice);
+
+    // HDR output (Direct3D 11): the game's picture, with that step's result in it, becomes the real HDR buffer before the menu
+    // is drawn on it
+    SdrToHdr::RunPendingDx11Pass();
 
     ImGuiIO& io = ImGui::GetIO();
     (void) io;
@@ -649,6 +654,7 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         {
             NativeMotionDx11::OnPresent(pSwapChain, device);
             device->Release();
+            SdrToHdr::RunPendingDx11Pass();
         }
 
         MenuOverlayBase::Present();

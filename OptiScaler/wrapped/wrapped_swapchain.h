@@ -7,7 +7,15 @@
 #include "dxgi1_6.h"
 #include "d3d12.h"
 
+#include <output/SdrToHdr_Create.h>
+#include <output/SdrToHdr_Fullscreen.h>
+#include <output/SdrToHdr_ProxyBase.h>
+#include <output/SdrToHdr_ProxyDx11.h>
+#include <output/SdrToHdr_ProxyDx12.h>
+
 #include <atomic>
+#include <memory>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -16,8 +24,9 @@ using Microsoft::WRL::ComPtr;
 class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChain4 final : public IDXGISwapChain4
 {
   public:
+    // `plan` is HDR output's decision for this chain (output/SdrToHdr_Create.h); null: the chain is not touched by it.
     WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP,
-                          bool isComposition = false);
+                          bool isComposition = false, const SdrToHdr::Plan* plan = nullptr);
     virtual ~WrappedIDXGISwapChain4();
 
     // implement IUnknown
@@ -82,6 +91,11 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     // implement IDXGISwapChain4
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
 
+    // HDR output: a creation hook that found this wrapper already made for the chain it just created (a nested hook
+    // wrapped it first) hands over its plan here, so the chain it made HDR gets its proxies. Safe to call with a plan
+    // that is not proxied (nothing happens).
+    void AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags);
+
   private:
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
@@ -100,6 +114,76 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     IUnknown* _device = nullptr;
 
     HWND _handle = nullptr;
+
+    // HDR output (output/SdrToHdr_*): null until the chain is first proxied, then set once and never reset or replaced
+    // (GetBuffer / GetDesc read it on any thread). While it is Active the game's GetBuffer returns the proxies and the real
+    // chain is HDR; when HDR output ends it stays, inactive.
+    std::unique_ptr<SdrToHdr::ProxyChainBase> _proxyOwner; // a Direct3D 12 or a Direct3D 11 chain, by the game's device
+    std::atomic<SdrToHdr::ProxyChainBase*> _proxyPtr { nullptr };
+    IUnknown* _creationQueue = nullptr; // identity of the queue the chain was made with (not owned)
+    DXGI_COLOR_SPACE_TYPE _gameColourSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; // what the game last asked for
+    SdrToHdr::DisplayInfo _display;
+    bool _displayKnown = false;
+    bool _hdrColourSpaceLogged = false;
+
+    // An older (bitblt) chain that was made flip model for HDR output (SdrToHdr::Plan::upgraded). It stays flip for good (a chain
+    // cannot change its model), whether or not HDR output is still converting it. The game keeps being told what it asked for.
+    bool _upgraded = false;
+    DXGI_SWAP_EFFECT _gameSwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    std::atomic<UINT> _gameBufferCount { 0 };
+    std::atomic<bool> _presentParamsLogged { false };
+    void NoteUpgrade(const SdrToHdr::Plan& plan);
+
+    // Exclusive full screen is never entered by an upgraded chain (it would be invalid until a resize, which a bitblt-era game
+    // never does): the game's SetFullscreenState(TRUE) is answered with a borderless window (SdrToHdr_Fullscreen.h), and DXGI's
+    // own Alt+Enter is switched off for the window. Alt+Enter itself is therefore not handled for such a game; its own menu is.
+    // The window itself is changed by the thread that calls SetFullscreenState (BorderlessFullscreen guards the transition and
+    // answers Active from an atomic); the output the game is told about is read from other threads, so it has its own small mutex
+    // (not _localMutex: Present holds that).
+    SdrToHdr::BorderlessFullscreen _borderless;
+    std::mutex _borderlessMutex;
+    ComPtr<IDXGIOutput> _borderlessTarget;
+    std::atomic<bool> _exclusiveRecoveryLogged { false };
+    std::atomic<bool> _borderlessRefusedLogged { false };
+    HRESULT EmulateFullscreen(BOOL fullscreen, IDXGIOutput* target);
+    void RecoverFromExclusive(HRESULT presentResult);
+
+    void StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags);
+    SdrToHdr::ProxyChainBase* Proxy() const { return _proxyPtr.load(std::memory_order_acquire); }
+    SdrToHdr::ProxyChainBase* EnsureProxy(bool d3d11)
+    {
+        if (auto* existing = Proxy())
+            return existing;
+
+        // Built first, published by compare-exchange: of two threads that get here at once one chain wins, the other is
+        // dropped and its caller uses the winner. Ownership moves to the wrapper only for the winner.
+        std::unique_ptr<SdrToHdr::ProxyChainBase> fresh;
+
+        if (d3d11)
+            fresh = std::make_unique<SdrToHdr::ProxyChainDx11>();
+        else
+            fresh = std::make_unique<SdrToHdr::ProxyChain>();
+
+        SdrToHdr::ProxyChainBase* expected = nullptr;
+
+        if (_proxyPtr.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel))
+        {
+            _proxyOwner = std::move(fresh);
+            return _proxyOwner.get();
+        }
+
+        return expected;
+    }
+    bool Proxied() const
+    {
+        auto* proxy = Proxy();
+        return proxy != nullptr && proxy->Active();
+    }
+    // The game's device: the Direct3D 12 device behind the queue the chain was made with, or the Direct3D 11 device (d3d11).
+    // Null when it is neither.
+    IUnknown* ApiDevice(bool& d3d11) const;
+    HRESULT ResizeHdr(bool v1, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags,
+                      const UINT* pCreationNodeMask, IUnknown* const* ppPresentQueue, bool& handled);
 
 #ifdef USE_LOCAL_MUTEX
     OwnedMutex _localMutex;
@@ -120,6 +204,13 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
                 if (SUCCEEDED(output6->GetDesc1(&desc)))
                 {
                     State::Instance().hdrOutputActive = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+
+                    // HDR output also wants the SDR white level and the peak: only read while it is on
+                    if (Config::Instance()->HdrOutputEnabled.value_or_default() || Proxy() != nullptr)
+                    {
+                        _display = SdrToHdr::QueryDisplay(output.Get());
+                        _displayKnown = true;
+                    }
                 }
             }
         }

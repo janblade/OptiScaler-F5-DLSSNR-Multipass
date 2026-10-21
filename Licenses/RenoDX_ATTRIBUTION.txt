@@ -30,8 +30,24 @@ from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
     the whole colour by one factor so only saturation gives way, and is the
     identity when nothing is out of gamut.
 
-This is their design. It was reimplemented here with different names and
-comments, which does not make it original work, and it is credited as theirs.
+The colour composition above is their design. It was reimplemented here with
+different names and comments, which does not make it original work, and it is
+credited as theirs.
+
+HDR output for SDR games (OptiScaler/output/SdrToHdr_*) follows the generic swap chain
+pass of RenoDX's generic add-on, as documented in clshortfuse/renodx@6d563066
+(src/games/generic, src/shaders/draw.hlsl). The method used:
+
+  * The swap chain proxy idea: the real swap chain is made HDR (scRGB or HDR10)
+    and the game draws into a back buffer of its own, which a final full-screen
+    pass converts into the real one.
+
+  * Decoding the SDR picture with gamma 2.2 (or the sRGB curve), scaling SDR
+    white to a chosen number of nits (203 nits, the BT.2408 reference white by
+    default), clamping to a peak, and encoding scRGB or PQ.
+
+Our code for it is our own implementation of that documented method, with its own
+structure, names and tests; it is credited here because the method is theirs.
 
 What is not derived from it
 ---------------------------

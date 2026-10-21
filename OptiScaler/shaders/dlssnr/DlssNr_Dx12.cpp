@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <dlssnr/PassProfiles.h>
+#include <output/SdrToHdr_ProxyDx12.h>
 #include <native/DriverInitGate.h>
 
 #include <set>

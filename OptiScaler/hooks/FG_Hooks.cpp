@@ -2,6 +2,7 @@
 #include <dlssnr/DlssNr.h>
 #include "FG_Hooks.h"
 #include <Config.h>
+#include <output/SdrToHdr_Create.h>
 
 #include <framegen/ffx/FSRFG_Dx12.h>
 #include <framegen/xefg/XeFG_Dx12.h>
@@ -233,6 +234,7 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
             resizeFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         }
 
+        SdrToHdr::NoteFrameGenChain();
         SetFGSwapchain(*ppSwapChain, pDesc->OutputWindow);
 
         return S_OK;
@@ -344,6 +346,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
             resizeFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         }
 
+        SdrToHdr::NoteFrameGenChain();
         SetFGSwapchain((IDXGISwapChain*) *ppSwapChain, hWnd);
 
         return S_OK;
@@ -1475,6 +1478,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
+        // (HDR output stands down under frame generation, so `This` has no proxy back buffers here)
         DlssNr::ApplyToFinishedPicture(This, gameQueue);
         fg->Present();
     }

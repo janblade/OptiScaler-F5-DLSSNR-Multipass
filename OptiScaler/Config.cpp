@@ -1109,9 +1109,41 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // HDR
         {
-            ForceHDR.set_from_config(readBool("HDR", "ForceHDR"));
+            HdrOutputEnabled.set_from_config(readBool("HDR", "Enabled"));
+
+            if (readBool("HDR", "ForceHDR").value_or(false))
+            {
+                if (!HdrOutputEnabled.has_value())
+                {
+                    HdrOutputEnabled.set_from_config(true);
+                    LOG_INFO("[HDR] ForceHDR is now 'HDR output' (Enabled=true)");
+                }
+                else
+                {
+                    LOG_INFO("[HDR] ForceHDR ignored, Enabled={} is set", HdrOutputEnabled.value());
+                }
+            }
+
+            HdrOutputConvert.set_from_config(readBool("HDR", "Convert"));
+            HdrCompareKey.set_from_config(readInt("HDR", "CompareKey"));
             UseHDR10.set_from_config(readBool("HDR", "UseHDR10"));
-            SkipColorSpace.set_from_config(readBool("HDR", "SkipColorSpace"));
+            HdrOutputPeakNits.set_from_config(readFloat("HDR", "PeakNits"));
+            HdrOutputGameNits.set_from_config(readFloat("HDR", "GameNits"));
+            HdrOutputDecode.set_from_config(readInt("HDR", "Decode"));
+
+            // NaN / Inf would pass through the clamps and the pass would draw them: back to the default
+            if (HdrOutputPeakNits.has_value() &&
+                (!std::isfinite(HdrOutputPeakNits.value()) || HdrOutputPeakNits.value() < 0.0f))
+                HdrOutputPeakNits.reset();
+
+            if (HdrOutputGameNits.has_value() && !std::isfinite(HdrOutputGameNits.value()))
+                HdrOutputGameNits.reset();
+
+            if (HdrOutputGameNits.has_value())
+                HdrOutputGameNits = std::clamp(HdrOutputGameNits.value(), 80.0f, 1000.0f);
+
+            if (HdrOutputDecode.has_value() && (HdrOutputDecode.value() < 0 || HdrOutputDecode.value() > 1))
+                HdrOutputDecode.reset();
         }
 
         // V-Sync
@@ -2151,6 +2183,21 @@ bool Config::SaveIni()
         ini.SetValue("Inputs", "EnableFsr3Inputs",
                      GetBoolValue(Instance()->EnableFsr3Inputs.value_for_config()).c_str());
         ini.SetValue("Inputs", "EnableFfxInputs", GetBoolValue(Instance()->EnableFfxInputs.value_for_config()).c_str());
+    }
+
+    // HDR (Convert is the live A/B toggle and is not written; ForceHDR is read into Enabled and not written back)
+    {
+        ini.SetValue("HDR", "Enabled", GetBoolValue(Instance()->HdrOutputEnabled.value_for_config()).c_str());
+        ini.SetValue("HDR", "UseHDR10", GetBoolValue(Instance()->UseHDR10.value_for_config()).c_str());
+        ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->HdrOutputPeakNits.value_for_config()).c_str());
+        ini.SetValue("HDR", "GameNits", GetFloatValue(Instance()->HdrOutputGameNits.value_for_config()).c_str());
+        ini.SetValue("HDR", "Decode", GetIntValue(Instance()->HdrOutputDecode.value_for_config()).c_str());
+        {
+            auto compare = Instance()->HdrCompareKey.value_for_config();
+            ini.SetValue("HDR", "CompareKey", GetIntValue(compare, compare > 0).c_str());
+        }
+        ini.Delete("HDR", "ForceHDR", true);
+        ini.Delete("HDR", "SkipColorSpace", true);
     }
 
     // V-Sync

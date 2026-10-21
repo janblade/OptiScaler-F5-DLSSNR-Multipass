@@ -376,7 +376,6 @@ class State
     UINT SCLastFlags = 0;
 
     // HDR
-    std::vector<IUnknown*> scBuffers;
     OutputColorSpace outputColorSpace {};
     bool hdrOutputActive = false;
 

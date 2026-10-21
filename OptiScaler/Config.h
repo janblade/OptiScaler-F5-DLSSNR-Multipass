@@ -334,6 +334,8 @@ class Config
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
+    // HDR output: flips [HDR] Convert live (the A/B against how Windows shows the game). Unbound by default.
+    CustomOptional<int> HdrCompareKey { UnboundKey };
     // The model's render preset hint: 1 Preset A (the main model), 2 Preset B (the small model, 310.9 DLLs only); 0 and
     // any other value: the DLL's choice, the small model on 310.9 DLLs. 310.8 DLLs have only the main model.
     CustomOptional<uint32_t> DlssNrPreset { 0 };
@@ -1300,10 +1302,14 @@ class Config
     // Reflex (low_latency/input/OutputRule.h PlanOutput).
     CustomOptional<bool> FramerateFrameCapOnly { false };
 
-    // HDR
-    CustomOptional<bool> ForceHDR { false };
-    CustomOptional<bool> UseHDR10 { false };
-    CustomOptional<bool> SkipColorSpace { false };
+    // HDR output for SDR games (output/SdrToHdr_*): the real swap chain becomes scRGB / HDR10 and one pass converts the
+    // game's picture. Enabled applies at the next swap chain create / resize; the rest is read every frame.
+    CustomOptional<bool> HdrOutputEnabled { false };  // [HDR] Enabled (the old ForceHDR=true is read into it)
+    CustomOptional<bool> HdrOutputConvert { true };   // [HDR] Convert: the A/B toggle, never saved
+    CustomOptional<bool> UseHDR10 { false };          // [HDR] UseHDR10: PQ instead of scRGB
+    CustomOptional<float> HdrOutputPeakNits { 0.0f }; // [HDR] PeakNits: clamp, 0 = the display's MaxLuminance
+    CustomOptional<float> HdrOutputGameNits { 203.0f }; // [HDR] GameNits: SDR white, 80..1000
+    CustomOptional<int> HdrOutputDecode { 0 };        // [HDR] Decode: 0 = gamma 2.2, 1 = sRGB
 
     // V-Sync
     CustomOptional<bool> OverrideVsync { false };

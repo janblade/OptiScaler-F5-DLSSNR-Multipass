@@ -429,6 +429,10 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         hdrRequest.bufferCount = localDesc.BufferCount;
         hdrRequest.flags = localDesc.Flags;
         hdrRequest.sampleCount = localDesc.SampleDesc.Count;
+        hdrRequest.hasOriginal = true; // the game's own desc, before the V-Sync override
+        hdrRequest.originalSwapEffect = pSwapChainDesc->SwapEffect;
+        hdrRequest.originalBufferCount = pSwapChainDesc->BufferCount;
+        hdrRequest.originalFlags = pSwapChainDesc->Flags;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         hdrRequest.hwnd = localDesc.OutputWindow;
@@ -501,7 +505,7 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         else
         {
             *ppSwapChain = new WrappedIDXGISwapChain4(realSC, realDevice, pSwapChainDesc->OutputWindow,
-                                                      pSwapChainDesc->Flags, false, false, &hdrPlan);
+                                                      localDesc.Flags, false, false, &hdrPlan);
 
             State::Instance().currentSwapchain = *ppSwapChain;
             State::Instance().currentWrappedSwapchain = *ppSwapChain;

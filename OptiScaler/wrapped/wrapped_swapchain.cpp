@@ -306,7 +306,8 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
 // `proxy` and `display` are HDR output's (output/SdrToHdr_*): null for a chain it is not on
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP,
-                            SdrToHdr::ProxyChainBase* proxy = nullptr, const SdrToHdr::DisplayInfo* display = nullptr)
+                            SdrToHdr::ProxyChainBase* proxy = nullptr, const SdrToHdr::DisplayInfo* display = nullptr,
+                            bool upgraded = false)
 {
     if (State::Instance().isShuttingDown)
     {
@@ -611,7 +612,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 k.sdrWhiteNits = display != nullptr ? display->sdrWhiteNits : 80.0f;
 
                 // The game may have turned on its own DLSS-G since the chain was proxied: noted, decided at the next resize
-                SdrToHdr::CheckLateStandDown(*proxy);
+                SdrToHdr::CheckLateStandDown(*proxy, upgraded);
 
                 if (isD3D11)
                 {
@@ -787,6 +788,17 @@ void WrappedIDXGISwapChain4::StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags
 
         if (why != nullptr)
         {
+            if (_upgraded)
+            {
+                // A chain made flip model for HDR output is never handed to the game as a plain flip buffer (unbound at every
+                // Present: a bitblt-era game would draw into nothing). It stays a broken proxy chain: restart-required.
+                LOG_ERROR("HDR output: {}; this game's swap chain was changed for HDR and cannot be put back: restart the game",
+                          why);
+                proxy->HoldEngaged(plan.gameFormat);
+                SdrToHdr::RecordStatus(SdrToHdr::Reason::StuckHdr, false, plan.hdr10, true, plan.display.maxLuminance);
+                return;
+            }
+
             // Never leave the game with an HDR chain and no pass
             LOG_WARN("HDR output: {}; putting the swap chain back to the game's format", why);
             HRESULT revert = E_POINTER;
@@ -1092,7 +1104,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp, Proxy(), &_display);
+        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp, Proxy(), &_display, _upgraded);
 
         // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
         if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
@@ -1204,19 +1216,25 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
     if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
 
-    // A chain made flip model for HDR output needs two buffers at least: the game's count is remembered for GetDesc, the real
-    // call gets the raised one (0 keeps the count)
-    const UINT previousGameCount = _gameBufferCount;
-
-    if (_upgraded && BufferCount != 0)
-    {
-        _gameBufferCount = BufferCount;
-        BufferCount = SdrToHdr::UpgradedResizeCount(BufferCount);
-    }
-
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
     LOG_DEBUG("");
+
+    // A chain made flip model for HDR output needs two buffers at least: the game's count is remembered for GetDesc, the real
+    // call gets the raised one (0 keeps the count). Flip refuses the GDI-compatible flag, so the resize goes without it (GetDesc
+    // therefore does not show that flag: known limit). Done after the early return above, which must leave the count alone.
+    const UINT previousGameCount = _gameBufferCount;
+
+    if (_upgraded)
+    {
+        SwapChainFlags = SdrToHdr::UpgradedResizeFlags(SwapChainFlags);
+
+        if (BufferCount != 0)
+        {
+            _gameBufferCount = BufferCount;
+            BufferCount = SdrToHdr::UpgradedResizeCount(BufferCount);
+        }
+    }
 
 #ifdef USE_LOCAL_MUTEX
     // dlssg calls this from present it seems
@@ -1472,7 +1490,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
         result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp, Proxy(),
-                              &_display);
+                              &_display, _upgraded);
 
         // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
         if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
@@ -1672,19 +1690,60 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
 
-    // A chain made flip model for HDR output needs two buffers at least: the game's count is remembered for GetDesc, the real
-    // call gets the raised one (0 keeps the count)
-    const UINT previousGameCount = _gameBufferCount;
-
-    if (_upgraded && BufferCount != 0)
-    {
-        _gameBufferCount = BufferCount;
-        BufferCount = SdrToHdr::UpgradedResizeCount(BufferCount);
-    }
-
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
     LOG_DEBUG("");
+
+    // As in ResizeBuffers: two buffers at least, no GDI-compatible flag, after the early return above
+    const UINT previousGameCount = _gameBufferCount;
+    const UINT askedCount = BufferCount;
+    std::vector<UINT> upgradedMasks;
+    std::vector<IUnknown*> upgradedQueues;
+
+    if (_upgraded)
+    {
+        SwapChainFlags = SdrToHdr::UpgradedResizeFlags(SwapChainFlags);
+
+        if (BufferCount != 0)
+        {
+            _gameBufferCount = BufferCount;
+            BufferCount = SdrToHdr::UpgradedResizeCount(BufferCount);
+        }
+
+        // The node mask and present queue arrays have the GAME's count of entries; the real call needs one per real buffer.
+        // The missing entries repeat the last one (a chain that is proxied has one node and one queue, see MultiNode /
+        // OtherPresentQueue), so no loop below or in DXGI reads past an array.
+        if (pCreationNodeMask != nullptr || ppPresentQueue != nullptr)
+        {
+            const UINT gameCount = askedCount != 0 ? askedCount : previousGameCount;
+            UINT realCount = BufferCount;
+
+            if (realCount == 0)
+            {
+                DXGI_SWAP_CHAIN_DESC now {};
+
+                if (SUCCEEDED(_real->GetDesc(&now)))
+                    realCount = now.BufferCount;
+            }
+
+            if (gameCount != 0 && realCount > gameCount)
+            {
+                if (pCreationNodeMask != nullptr)
+                {
+                    upgradedMasks.assign(pCreationNodeMask, pCreationNodeMask + gameCount);
+                    upgradedMasks.resize(realCount, upgradedMasks.back());
+                    pCreationNodeMask = upgradedMasks.data();
+                }
+
+                if (ppPresentQueue != nullptr)
+                {
+                    upgradedQueues.assign(ppPresentQueue, ppPresentQueue + gameCount);
+                    upgradedQueues.resize(realCount, upgradedQueues.back());
+                    ppPresentQueue = upgradedQueues.data();
+                }
+            }
+        }
+    }
 
 #ifdef USE_LOCAL_MUTEX
     // dlssg calls this from present it seems
@@ -1943,7 +2002,9 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
 
     // A chain made flip model for HDR output keeps its proxy through a resize that would end HDR output (see
     // SdrToHdr::KeepUpgradedProxy): the game would otherwise get a real flip buffer, unbound at every Present
-    const SdrToHdr::Decision decision = SdrToHdr::KeepUpgradedProxy(decided, _upgraded && wasProxied);
+    // (also a chain whose proxy failed after the upgrade and is held engaged: it must not fall back to the real buffer)
+    const bool upgradedLive = _upgraded && (wasProxied || (proxy != nullptr && proxy->Engaged()));
+    const SdrToHdr::Decision decision = SdrToHdr::KeepUpgradedProxy(decided, upgradedLive);
     const bool kept = decision.use && !decided.use;
 
     if (in.enabled || wasProxied)
@@ -1988,6 +2049,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     request.wantProxy = decision.use;
     request.hdr10 = hdr10;
     request.gameColourSpace = _gameColourSpace;
+    request.noRevert = _upgraded;
 
     SdrToHdr::ResizeResult result;
 
@@ -2016,6 +2078,15 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
                            : failedStart   ? SdrToHdr::Reason::StartFailed
                                            : decision.reason,
                            result.proxied, hdr10, in.enabled || kept, _display.maxLuminance);
+
+    // A resize kept the proxy of a chain that was made flip model: what it was kept through is said over the active line
+    if (kept && result.proxied)
+    {
+        if (decided.reason == SdrToHdr::Reason::DisplayNotHdr || decided.reason == SdrToHdr::Reason::DisplayUnknown)
+            SdrToHdr::RecordNote(SdrToHdr::Reason::DisplayLeftHdrKept);
+        else if (decided.reason == SdrToHdr::Reason::StreamlineDlssg)
+            SdrToHdr::RecordNote(SdrToHdr::Reason::DlssgKeptUpgraded);
+    }
 
     if (result.stuckHdr)
         return result.hr; // the colour space is still the HDR one: do not claim otherwise

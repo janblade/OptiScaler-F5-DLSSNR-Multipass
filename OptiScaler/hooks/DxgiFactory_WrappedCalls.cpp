@@ -357,6 +357,10 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
         hdrRequest.bufferCount = localDesc.BufferCount;
         hdrRequest.flags = localDesc.Flags;
         hdrRequest.sampleCount = localDesc.SampleDesc.Count;
+        hdrRequest.hasOriginal = true; // the game's own desc, before the V-Sync override and the rest
+        hdrRequest.originalSwapEffect = pDesc->SwapEffect;
+        hdrRequest.originalBufferCount = pDesc->BufferCount;
+        hdrRequest.originalFlags = pDesc->Flags;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         hdrRequest.frameGen = _skipFGSwapChainCreation;
@@ -789,6 +793,10 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
         hdrRequest.bufferCount = localDesc.BufferCount;
         hdrRequest.flags = localDesc.Flags;
         hdrRequest.sampleCount = localDesc.SampleDesc.Count;
+        hdrRequest.hasOriginal = true; // the game's own desc, before the V-Sync override and the rest
+        hdrRequest.originalSwapEffect = pDesc->SwapEffect;
+        hdrRequest.originalBufferCount = pDesc->BufferCount;
+        hdrRequest.originalFlags = pDesc->Flags;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         hdrRequest.frameGen = _skipFGSwapChainCreation;

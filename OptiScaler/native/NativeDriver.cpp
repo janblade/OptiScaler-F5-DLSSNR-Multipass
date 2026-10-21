@@ -445,16 +445,6 @@ void NativeDriver::DrawFlowTuning()
     ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
                        ImGuiSliderFlags_Logarithmic);
 
-    if (ImGui::Button("Close to the earlier build##flowold"))
-    {
-        tune.smoothRadius = 0;
-        tune.radius = 2;
-        tune.coarseCells = 1;
-        tune.useHistory = false;
-    }
-
-    ImGui::SameLine();
-
     if (ImGui::Button("Defaults##flowdefaults"))
         native::motion::ApplyProfile(Profile::Default, {}, tune, guides);
 

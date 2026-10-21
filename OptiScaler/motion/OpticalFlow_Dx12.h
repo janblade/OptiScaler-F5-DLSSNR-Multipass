@@ -35,6 +35,8 @@
 #include <dxgiformat.h>
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <unordered_set>
 
 class OpticalFlowDx12
 {
@@ -298,6 +300,18 @@ class OpticalFlowDx12
     ID3D12PipelineState* _cameraModel = nullptr;
 
 
+    // Cache only views of resources owned by this producer. External colour/depth
+    // views are rewritten every dispatch: a recycled external pointer is not an
+    // identity guarantee. Texture release/resize invalidates every cached slot.
+    struct CachedView
+    {
+        ID3D12Resource* resource = nullptr;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        bool unordered = false;
+        bool valid = false;
+    };
+    std::vector<CachedView> _cachedViews;
+    std::unordered_set<ID3D12Resource*> _ownedResources;
     ID3D12DescriptorHeap* _heap = nullptr;
     UINT _descriptorSize = 0;
     UINT _heapCursor = 0;

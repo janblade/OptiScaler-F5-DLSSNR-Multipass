@@ -199,6 +199,7 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
         return false;
     }
 
+    _cachedViews.assign(heap.NumDescriptors, CachedView {});
     _descriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     // All bytecode is generated offline. Selecting an experiment never compiles
     // HLSL on a present thread, and feature zero uses the upstream-sized shader.
@@ -238,6 +239,7 @@ bool OpticalFlowDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, D
                                                 IID_PPV_ARGS(&tex.resource))))
         return false;
 
+    _ownedResources.insert(tex.resource);
     tex.resource->SetName(name);
     tex.width = width;
     tex.height = height;
@@ -246,6 +248,8 @@ bool OpticalFlowDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, D
 
 void OpticalFlowDx12::ReleaseTextures()
 {
+    std::fill(_cachedViews.begin(), _cachedViews.end(), CachedView {});
+    _ownedResources.clear();
     for(auto& tex:_trace){if(tex.resource)tex.resource->Release();tex=Tex{};}
     _traceValid=false;
     auto release = [](Tex& tex)
@@ -378,6 +382,18 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
                                      src6 != nullptr ? format6 : format0,
                                      _passAgeIn != nullptr ? kAgeFormat : format0 };
 
+    // A hit skips only the CPU descriptor creation, never a shader read,
+    // transition, dispatch, or fence. The descriptor ring remains unchanged.
+    auto needsView = [&](UINT slot, ID3D12Resource* resource, DXGI_FORMAT format, bool unordered)
+    {
+        auto& cached = _cachedViews[slot];
+        const bool owned = resource == nullptr || _ownedResources.count(resource) != 0;
+        if (owned && cached.valid && cached.resource == resource &&
+            cached.format == format && cached.unordered == unordered)
+            return false;
+        cached = {resource, format, unordered, owned};
+        return true;
+    };
     for (int i = 0; i < 8; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
@@ -385,27 +401,32 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = 1;
-        _device->CreateShaderResourceView(sources[i], &srv, cpu);
+        if (needsView(first + i, sources[i], formats[i], false))
+            _device->CreateShaderResourceView(sources[i], &srv, cpu);
         cpu.ptr += _descriptorSize;
     }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav {};
     uav.Format = dstFormat;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
+    if (needsView(first + 8, dst.resource, dstFormat, true))
+        _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
     cpu.ptr += _descriptorSize;
 
     // The second UAV is the still age the finest match writes; every other pass gets a view of nothing.
     D3D12_UNORDERED_ACCESS_VIEW_DESC ageUav {};
     ageUav.Format = auxUavFormat;
     ageUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
+    if (needsView(first + 9, _passAgeOut, auxUavFormat, true))
+        _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
     if (_passTrace) {
+        UINT slot = first + 10;
         for (auto& tex:_trace) {
             cpu.ptr += _descriptorSize;
             D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
             view.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;view.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
-            _device->CreateUnorderedAccessView(tex.resource,nullptr,&view,cpu);
+            if (needsView(slot++, tex.resource, view.Format, true))
+                _device->CreateUnorderedAccessView(tex.resource,nullptr,&view,cpu);
         }
     }
 
@@ -475,6 +496,15 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 {
     if (_device == nullptr || _match == nullptr || list == nullptr || color == nullptr)
         return false;
+
+    // Keep each frame in its own existing ring bank. Otherwise an optional
+    // camera/debug pass shifts every subsequent slot, defeating immutable-view
+    // reuse. The eight-frame lifetime and descriptor capacity are unchanged.
+    // Round forward from the last actual allocation, including any diagnostic
+    // calls after Dispatch. Never jump backward into that frame's descriptors.
+    const UINT frameSpan = kDescriptorsPerPass * kPassesPerFrame;
+    _heapCursor = ((_heapCursor + frameSpan - 1) / frameSpan * frameSpan) %
+                  (frameSpan * kFramesInFlight);
 
     const D3D12_RESOURCE_DESC colorDesc = color->GetDesc();
 
@@ -658,9 +688,10 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         constants.stillFrames=uint32_t(std::clamp(_settings.stillFrames,0,255));
         constants.stillMargin=_settings.stillMargin;
         constants.hasAge=wroteAge?1u:0u;
+        constants.hasHistory=(history && _settings.useHistory)?1u:0u;
         _passAgeIn=wroteAge?_age[_current].resource:nullptr;
         Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, previous[0].resource,
-             kLumaFormat, _flow, kFlowFormat, constants, nullptr, DXGI_FORMAT_UNKNOWN,
+             kLumaFormat, _flow, kFlowFormat, constants, (history && _settings.useHistory)?levelBefore[0].resource:nullptr, kFlowFormat,
              depthMatching ? depth : nullptr, depthFormat,currentCameraReady?_cameraFlow.resource:nullptr,kFlowFormat);
         _passAgeIn=nullptr;
 

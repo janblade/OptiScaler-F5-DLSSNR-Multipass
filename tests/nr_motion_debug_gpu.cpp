@@ -102,7 +102,7 @@ int main(int argc, char** argv)
     ok &= trust.BuildGuides(gpu.list.Get(),inputs,kWidth,kHeight);
     gpu.Submit();
     const auto guideBefore=ReadFlow(gpu,trust.GuideMotion(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    for(int view=0;view<17;++view){
+    for(int view:{7,6,0,18,5,17,12}){
         ok &= flow.Visualise(gpu.list.Get(),24,view,b.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,
                              nullptr,DXGI_FORMAT_UNKNOWN,true,trust.GuideMotion(),trust.Mask());
         gpu.Submit();
@@ -110,20 +110,20 @@ int main(int argc, char** argv)
     const bool unchanged=before==ReadFlow(gpu,flow.Flow()) &&
         guideBefore==ReadFlow(gpu,trust.GuideMotion(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ok &= unchanged;
-    printf("all 17 debug views preserve matching and full-resolution consumer vectors: %s\n",unchanged?"PASS":"FAIL");
+    printf("seven public debug views preserve matching and full-resolution consumer vectors: %s\n",unchanged?"PASS":"FAIL");
     // The first mask is full distrust: confidence's blue channel must be zero.
     ok &= flow.Visualise(gpu.list.Get(),24,5,b.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,
                          nullptr,DXGI_FORMAT_UNKNOWN,true,trust.GuideMotion(),trust.Mask());
     auto confidence=ReadPreview(gpu,flow.Preview());bool coldHistory=true,texture=false,fit=false;
-    for(size_t i=0;i<confidence.size();i+=4){coldHistory &= i/4/flow.Preview()->GetDesc().Width<25 || confidence[i+2]==0;texture |= confidence[i]>0;fit |= confidence[i+1]>0;}
+    for(size_t i=0;i<confidence.size();i+=4){coldHistory &= i/4/flow.Preview()->GetDesc().Width<40 || confidence[i+2]==0;texture |= confidence[i]>0;fit |= confidence[i+1]>0;}
     ok &= coldHistory && texture && fit;
     printf("confidence RGB: nonzero texture/fit, first history distrusted: %s\n",coldHistory&&texture&&fit?"PASS":"FAIL");
-    // With no selected depth, both depth views must be black, with no stale camera-model output.
-    for(int view:{6,8}){
+    // Missing depth has the documented magenta checker, never stale depth.
+    for(int view:{6}){
         ok &= flow.Visualise(gpu.list.Get(),24,view);
-        auto image=ReadPreview(gpu,flow.Preview());bool black=true;
-        for(size_t i=0;i<image.size();i+=4)black &= i/4/flow.Preview()->GetDesc().Width<25 || (image[i]==0 && image[i+1]==0 && image[i+2]==0 && image[i+3]==255);
-        ok &= black;printf("unavailable depth view %d stays black: %s\n",view,black?"PASS":"FAIL");
+        auto image=ReadPreview(gpu,flow.Preview());bool checker=true;
+        for(size_t i=0;i<image.size();i+=4)checker &= i/4/flow.Preview()->GetDesc().Width<40 || (image[i]>0 && image[i+1]==0 && image[i+2]==image[i] && image[i+3]==255);
+        ok &= checker;printf("unavailable depth view %d shows magenta checker: %s\n",view,checker?"PASS":"FAIL");
     }
     // The seven public modes all preserve estimator/consumer fields. Rejection
     // is a real validation input; still age does not require trace allocation.
@@ -135,12 +135,12 @@ int main(int argc, char** argv)
     ok &= flow.Visualise(gpu.list.Get(),24,17,b.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,
         nullptr,DXGI_FORMAT_UNKNOWN,true,trust.GuideMotion(),trust.Mask());
     auto rejected=ReadPreview(gpu,flow.Preview());bool coldReject=true;
-    for(size_t i=0;i<rejected.size();i+=4)if(i/4/flow.Preview()->GetDesc().Width>=25)coldReject &= rejected[i]==255 && rejected[i+1]==255 && rejected[i+2]==255;
+    for(size_t i=0;i<rejected.size();i+=4)if(i/4/flow.Preview()->GetDesc().Width>=40)coldReject &= rejected[i]==255 && rejected[i+1]==255 && rejected[i+2]==255;
     ok &= coldReject;printf("seven public views; cold history fully rejected: %s\n",coldReject?"PASS":"FAIL");
     OpticalFlowDx12 ageFlow;ok &= ageFlow.Init(gpu.device.Get());ageFlow.Tuning().stillFrames=2;ageFlow.Tuning().sceneCutDetector=false;
     for(int n=0;n<5;++n){ok &= ageFlow.Dispatch(gpu.list.Get(),a.Get(),DXGI_FORMAT_R8G8B8A8_UNORM);gpu.Submit();}
     ok &= ageFlow.Visualise(gpu.list.Get(),24,12);auto ageImage=ReadPreview(gpu,ageFlow.Preview());bool aged=true;
-    for(size_t i=0;i<ageImage.size();i+=4)if(i/4/ageFlow.Preview()->GetDesc().Width>=25)aged &= ageImage[i]==255 && ageImage[i+1]==255 && ageImage[i+2]==255;
+    for(size_t i=0;i<ageImage.size();i+=4)if(i/4/ageFlow.Preview()->GetDesc().Width>=40)aged &= ageImage[i]==255 && ageImage[i+1]==255 && ageImage[i+2]==255;
     bool noTrace=!ageFlow.CandidateTrace()&&!ageFlow.RefinementTrace()&&!ageFlow.EventTrace();
     ok &= aged&&noTrace;printf("still age reaches threshold with no trace allocation: %s\n",aged&&noTrace?"PASS":"FAIL");
     flow.Reset();

@@ -4,7 +4,7 @@
 #include "nr_optical_flow_gpu.cpp"
 #undef main
 #include "nr_motion_readback.h"
-#include "TrustMask_Dx12.h"
+#include "../OptiScaler/motion/TrustMask_Dx12.h"
 #include <array>
 #include <map>
 

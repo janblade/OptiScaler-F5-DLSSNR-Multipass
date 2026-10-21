@@ -916,17 +916,18 @@ void Median(uint3 id : SV_DispatchThreadID)
 // is to this pixel's and how close its brightness is, so noise in a flat area is averaged out and the edge of something that
 // moves differently is not. A 16x16 group cooperates over a 24x24 tile (2.25 input loads per output instead of 4), which
 // the group's threads share, with the picture's edge repeated outward.
-groupshared float4 gTile[576]; // x, y and confidence of the flow, and the guide's luma
+groupshared float4 gTile[576]; // original immutable flow record; no decision is shared or recomputed
 groupshared float gSurface[576];
+groupshared float gGuideLuma[576];
 )HLSL" F5LOW_CAMERA_FUSION_HLSL R"HLSL(
 float4 SmoothRegion(int2 at,float4 centre) {
     static const int2 offsets[8]={int2(-4,-4),int2(0,-4),int2(4,-4),int2(-4,0),int2(4,0),int2(-4,4),int2(0,4),int2(4,4)};
     float2 sum=0.0,directionSum=0.0;float total=0.0,energy=0.0,movingWeight=0.0;uint count=0u,movingCount=0u;
     float hereDepth=depthMatching!=0u?gSurface[at.y*24+at.x]:1.0;
-    float lumaScale=max(0.08,0.3*(centre.w+0.05));
+    float lumaScale=max(0.08,0.3*(gGuideLuma[at.y*24+at.x]+0.05));
     [unroll]for(int k=0;k<8;++k) {
         int2 q=at+offsets[k];float4 f=gTile[q.y*24+q.x];
-        float w=(min(f.z,0.25)+0.02)*saturate(1.0-abs(f.w-centre.w)/lumaScale);
+        float w=(min(f.z,0.25)+0.02)*saturate(1.0-abs(gGuideLuma[q.y*24+q.x]-gGuideLuma[at.y*24+at.x])/lumaScale);
         if(depthMatching!=0u) {
             float z=gSurface[q.y*24+q.x];
             if(abs(z-hereDepth)>0.05*min(z,hereDepth))w=0.0;
@@ -988,7 +989,8 @@ void Smooth(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 loca
         int2 tile = int2(e % 24, e / 24);
         int2 q = clamp(origin + tile, 0, hi);
         float4 loaded=FlowIn.Load(int3(q,0));
-        gTile[e]=float4(loaded.xyz,GuideLuma.Load(int3(q,0)));
+        gTile[e]=loaded;
+        gGuideLuma[e]=GuideLuma.Load(int3(q,0));
         if (depthMatching != 0) gSurface[e] = Distance((float2(q)+0.5)/float2(size));
     }
 
@@ -1000,14 +1002,15 @@ void Smooth(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 loca
     int2 at = int2(local.xy) + 4;
     float4 here = gTile[at.y * 24 + at.x];
     float3 centre = here.xyz;
-    float lumaCentre = here.w;
+    float lumaCentre = gGuideLuma[at.y*24+at.x];
     float surfaceCentre = depthMatching != 0 ? gSurface[at.y*24+at.x] : 1.0;
 
     precise float2 sum = centre.xy * (centre.z + 0.05);
     precise float total = centre.z + 0.05;
-    // Support is consumed only by its own output pixel. Read that identical
-    // component directly, instead of staging 576 values for 256 consumers.
-    // This also avoids sharing confidence through the cooperative sample tile.
+    // Each centre retains its own direct support read. Neighbour support
+    // remains the same already-defined Smooth input at the same clamped index;
+    // staging it changes neither the stencil nor any per-pixel weight. This
+    // optimization requires independent byte-exact stage/route validation.
     float centreSupport = FlowIn.Load(int3(id.xy, 0)).w;
     float centreEvidence = (motionFlags & 4u) != 0u ? centreSupport : 1.0;
     sum *= max(centreEvidence, 0.05); total *= max(centreEvidence, 0.05);
@@ -1030,8 +1033,8 @@ void Smooth(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 loca
             int2 q = at + int2(i, j);
             float4 other = gTile[q.y * 24 + q.x];
             precise float2 df = other.xy - centre.xy;
-            precise float dl = (other.w - lumaCentre) / lumaRange;
-            float evidence = (motionFlags & 4u) != 0u ? FlowIn.Load(int3(clamp(int2(id.xy) + int2(i,j), 0, hi), 0)).w : 1.0;
+            precise float dl = (gGuideLuma[q.y*24+q.x] - lumaCentre) / lumaRange;
+            float evidence = (motionFlags & 4u) != 0u ? gTile[q.y*24+q.x].w : 1.0;
             float surfacePenalty=0.0;
             // Strong centres keep the original filter. Only the expanded
             // ambiguous support needs this additional surface guard; identical

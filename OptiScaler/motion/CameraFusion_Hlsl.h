@@ -55,14 +55,14 @@ float2 CameraFuse(int2 p,float2 motion,float structure,float vectorEvidence,bool
     int2 origin=(p>>4)*16-4; // p is a valid nonnegative output pixel
     int2 local=p-origin;
     float zc=depthMatching!=0u ? (cached?gSurface[local.y*24+local.x]:Distance((float2(p)+0.5)/float2(size))):0.0;
-    float lc=cached?gTile[local.y*24+local.x].w:GuideLuma.Load(int3(p,0));
+    float lc=cached?gGuideLuma[local.y*24+local.x]:GuideLuma.Load(int3(p,0));
     [unroll] for(int j=0;j<4;++j)
         [unroll] for(int i=0;i<4;++i) {
             int k=j*4+i;
             int2 offset=int2(2*i-3,2*j-3);
             int2 q=clamp(p+offset,0,int2(size)-1);
             int2 at=q-origin;
-            cur[k]=cached?gTile[at.y*24+at.x].w:GuideLuma.Load(int3(q,0));
+            cur[k]=cached?gGuideLuma[at.y*24+at.x]:GuideLuma.Load(int3(q,0));
             float z=depthMatching!=0u ? (cached?gSurface[at.y*24+at.x]:Distance((float2(q)+0.5)/float2(size))):0.0;
             foregroundEdge=foregroundEdge || (depthMatching!=0u && z>zc*1.10);
             w[k]=depthMatching!=0u?SameSurface(z,zc):1.0;
@@ -108,6 +108,36 @@ float2 CameraFuse(int2 p,float2 motion,float structure,float vectorEvidence,bool
         float motionCertainty=smoothstep(0.02,0.15,vectorEvidence);
         regionEvidence*=confirmedRegion?1.0:motionCertainty;
         float localEvidence=ownPreference*max(motionCertainty*smoothstep(0.15,0.65,coherence),regionEvidence);
+        // A coherent independent low-contrast correspondence can be valid
+        // despite a small structure score. Require both relative and absolute
+        // improvement in this pixel's original weighted photometric window.
+        // Do not infer it from darkness or from the camera fit itself.
+        float photoGain=max(cameraCost-bestCost,0.0);
+        float advection=smoothstep(0.70,0.95,coherence)
+            *smoothstep(0.015,0.10,length(regional-camera))
+            *smoothstep(0.08,0.35,photoGain/max(cameraCost,1e-4))
+            *smoothstep(0.0001,0.0008,photoGain);
+        if(advection>0.0) {
+            // Without reliable geometry, a high-contrast mixed window at a
+            // horizon must not masquerade as weak independent fog/advection.
+            float lo=cur[0],hi=cur[0];
+            [unroll]for(int k=1;k<16;++k){lo=min(lo,cur[k]);hi=max(hi,cur[k]);}
+            advection*=1.0-smoothstep(0.08,0.18,hi-lo);
+            // Confirm the same pixel's independently measured correspondence
+            // in the previous frame, at its own reprojected position. This is
+            // raw matched history, before camera fusion: a suppressed prior
+            // must not permanently prevent genuine small motion from returning.
+            float temporal=0.0;
+            if(hasHistory!=0u) {
+                float2 prior=History.SampleLevel(Linear,(float2(p)+motion*0.5+0.5)/float2(size),0).xy*2.0;
+                float speed=length(motion),oldSpeed=length(prior);
+                float agreement=dot(motion,prior)/max(speed*oldSpeed,1e-6);
+                float change=length(motion-prior)/max(max(speed,oldSpeed),0.05);
+                temporal=smoothstep(0.75,0.95,agreement)*(1.0-smoothstep(0.25,0.75,change));
+            }
+            advection*=temporal;
+        }
+        localEvidence=max(localEvidence,advection);
         float cameraStrength=saturate(my.w/0.75);
         float blend=ambiguity*cameraStrength*compatible*compatible*(3.0-2.0*compatible)*(1.0-localEvidence);
         support=max(support,0.85*localEvidence);

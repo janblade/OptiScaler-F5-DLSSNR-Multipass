@@ -364,8 +364,11 @@ void Reference(const SdrToHdr::PassConstants& k, const Rgb& p, double out[3])
 }
 
 // Compares the pass's output with the reference; returns the largest error (scRGB units, or PQ codes at 10 bit)
+// `relative`: an extra allowance (scRGB only) as a fraction of the value, for a typed _SRGB proxy (gSrcLinear): the hardware's
+// fixed-function sRGB decoder is not bit-exact with the exact CPU curve in the reference, but stays below one 8-bit step (0.5%).
+// Every other case keeps max(1e-3, one FP16 step) and 1 PQ code.
 bool Compare(const std::vector<uint8_t>& out, const SdrToHdr::PassConstants& k, const std::vector<Rgb>& picture,
-             double& worst)
+             double& worst, double relative = 0.0)
 {
     worst = 0.0;
     bool ok = out.size() == (size_t) kWidth * kHeight * (k.mode == 0 ? 8 : 4);
@@ -384,7 +387,7 @@ bool Compare(const std::vector<uint8_t>& out, const SdrToHdr::PassConstants& k, 
                 const float got = HalfToFloat(half);
                 const double error = std::fabs(got - expected[channel]);
                 // FP16 near 2.5 cannot be closer than a step of 2e-3: allow one step where that exceeds 1e-3
-                const double allowed = std::max(1e-3, (double) HalfUlp((float) expected[channel]));
+                const double allowed = std::max({ 1e-3, (double) HalfUlp((float) expected[channel]), relative * expected[channel] });
                 if (error > worst && error > 1e-3)
                     std::printf("      worst so far: pixel %zu channel %d (%d,%d,%d) got %.6f expected %.6f\n", i, channel, picture[i].r, picture[i].g,
                                 picture[i].b, got, expected[channel]);
@@ -507,11 +510,34 @@ void Matrix(Gpu& g, SdrToHdr::Dx12Pass& pass, DXGI_FORMAT proxyFormat, const cha
 
             const auto out = Read(g, reals[index].Get(), mode == 0 ? 8 : 4);
             double worst = 0.0;
-            const bool ok = first == nullptr && second == nullptr && Compare(out, c.k, picture, worst);
-            char what[256];
+            const double relative = srgbTyped ? 0.005 : 0.0; // WARP and hardware alike (see Compare)
+            const bool ok = first == nullptr && second == nullptr && Compare(out, c.k, picture, worst, relative);
+            char what[320];
             std::snprintf(what, sizeof(what), "%s -> %s, %s: max error %.5f%s", label, mode == 0 ? "scRGB FP16" : "PQ 10 bit",
                           c.name, worst, mode == 0 ? "" : " codes");
             Check(ok, what);
+
+            // The tolerance must not hide the bug beside it: if the shader did not encode again (gSrcLinear not applied), the
+            // view's decode would be decoded a second time. The output of this run, compared with what that bug gives (the
+            // reference for the picture decoded once beforehand), must be far outside the tolerance.
+            if (srgbTyped && mode == 0)
+            {
+                std::vector<Rgb> twice = picture;
+
+                for (auto& px : twice)
+                {
+                    px.r = (uint8_t) std::lround(255.0 * SrgbDecode(px.r / 255.0));
+                    px.g = (uint8_t) std::lround(255.0 * SrgbDecode(px.g / 255.0));
+                    px.b = (uint8_t) std::lround(255.0 * SrgbDecode(px.b / 255.0));
+                }
+
+                double bugWorst = 0.0;
+                const bool bugPasses = Compare(out, c.k, twice, bugWorst, relative);
+                std::snprintf(what, sizeof(what),
+                              "%s, %s: a double decode would be caught: it differs by %.4f, the seen error is %.5f (x%.0f margin)", label,
+                              c.name, bugWorst, worst, bugWorst / std::max(worst, 1e-9));
+                Check(!bugPasses && bugWorst > 10.0 * worst, what);
+            }
         }
     }
 }

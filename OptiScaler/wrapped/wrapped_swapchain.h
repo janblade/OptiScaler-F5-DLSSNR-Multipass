@@ -8,6 +8,7 @@
 #include "d3d12.h"
 
 #include <output/SdrToHdr_Create.h>
+#include <output/SdrToHdr_Fullscreen.h>
 #include <output/SdrToHdr_ProxyBase.h>
 #include <output/SdrToHdr_ProxyDx11.h>
 #include <output/SdrToHdr_ProxyDx12.h>
@@ -131,6 +132,15 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     std::atomic<UINT> _gameBufferCount { 0 };
     std::atomic<bool> _presentParamsLogged { false };
     void NoteUpgrade(const SdrToHdr::Plan& plan);
+
+    // Exclusive full screen is never entered by an upgraded chain (it would be invalid until a resize, which a bitblt-era game
+    // never does): the game's SetFullscreenState(TRUE) is answered with a borderless window (SdrToHdr_Fullscreen.h), and DXGI's
+    // own Alt+Enter is switched off for the window. Alt+Enter itself is therefore not handled for such a game; its own menu is.
+    SdrToHdr::BorderlessFullscreen _borderless;
+    ComPtr<IDXGIOutput> _borderlessTarget;
+    std::atomic<bool> _exclusiveRecoveryLogged { false };
+    HRESULT EmulateFullscreen(BOOL fullscreen, IDXGIOutput* target);
+    void RecoverFromExclusive(HRESULT presentResult);
 
     void StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags);
     SdrToHdr::ProxyChainBase* Proxy() const { return _proxyPtr.load(std::memory_order_acquire); }

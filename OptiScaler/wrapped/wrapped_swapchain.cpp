@@ -832,6 +832,64 @@ void WrappedIDXGISwapChain4::NoteUpgrade(const SdrToHdr::Plan& plan)
     _upgraded = true;
     _gameSwapEffect = plan.gameSwapEffect;
     _gameBufferCount = plan.gameBufferCount;
+
+    // DXGI's Alt+Enter on this window would put the real flip chain into exclusive full screen behind everyone's back, and
+    // Present then fails for good (Batman: Arkham Knight). Same call, same reason as hooks/DxgiFactory_Hooks.cpp's for the Vulkan
+    // bridge's swap chain.
+    ComPtr<IDXGIFactory> factory;
+
+    if (_real != nullptr && _handle != nullptr && SUCCEEDED(_real->GetParent(IID_PPV_ARGS(&factory))) && factory != nullptr)
+    {
+        factory->MakeWindowAssociation(_handle, DXGI_MWA_NO_ALT_ENTER);
+        LOG_INFO("HDR output: Alt+Enter is switched off for this game's swap chain (it was changed for HDR; exclusive full screen "
+                 "is kept borderless)");
+    }
+}
+
+HRESULT WrappedIDXGISwapChain4::EmulateFullscreen(BOOL fullscreen, IDXGIOutput* target)
+{
+    if (fullscreen)
+    {
+        if (_borderless.Active())
+            return S_OK;
+
+        const Util::MonitorInfo info = target != nullptr ? Util::GetMonitorInfoForOutput(target) : Util::GetMonitorInfoForWindow(_handle);
+
+        if (!_borderless.Enter(_handle, info.monitorRect))
+            return DXGI_ERROR_INVALID_CALL;
+
+        _borderlessTarget.Reset();
+
+        if (target != nullptr)
+            _borderlessTarget = target;
+        else
+            GetContainingOutput(&_borderlessTarget);
+
+        LOG_INFO("HDR output: exclusive full screen kept borderless for this game's swap chain");
+        return S_OK;
+    }
+
+    _borderless.Leave(_handle);
+    _borderlessTarget.Reset();
+    return S_OK;
+}
+
+// A real flip chain that ended up in exclusive full screen anyway (the game re-enabled Alt+Enter, say) fails every Present until
+// it is resized; leaving full screen makes it valid again (read from DXGI, tests/sdr_to_hdr_dx11_gpu.cpp)
+void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
+{
+    if (!_upgraded || presentResult != DXGI_ERROR_INVALID_CALL)
+        return;
+
+    BOOL fullscreen = FALSE;
+
+    if (SUCCEEDED(_real->GetFullscreenState(&fullscreen, nullptr)) && fullscreen)
+    {
+        _real->SetFullscreenState(FALSE, nullptr);
+
+        if (!_exclusiveRecoveryLogged.exchange(true))
+            LOG_WARN("HDR output: this game's swap chain was in exclusive full screen; took it out again");
+    }
 }
 
 void WrappedIDXGISwapChain4::AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags)
@@ -1105,6 +1163,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
         result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp, Proxy(), &_display, _upgraded);
+        RecoverFromExclusive(result);
 
         // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
         if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
@@ -1135,6 +1194,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
 {
     LOG_DEBUG("Fullscreen: {}, pTarget: {:X}, Caller: {}", Fullscreen, (size_t) pTarget,
               Util::WhoIsTheCaller(_ReturnAddress()));
+
+    // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen)
+    if (_upgraded)
+        return EmulateFullscreen(Fullscreen, pTarget);
 
     HRESULT result = S_OK;
 
@@ -1187,6 +1250,23 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetFullscreenState(BOOL* pFullscreen, IDXGIOutput** ppTarget)
 {
+    // The game believes it is full screen
+    if (_borderless.Active())
+    {
+        if (pFullscreen != nullptr)
+            *pFullscreen = TRUE;
+
+        if (ppTarget != nullptr)
+        {
+            *ppTarget = _borderlessTarget.Get();
+
+            if (*ppTarget != nullptr)
+                (*ppTarget)->AddRef();
+        }
+
+        return S_OK;
+    }
+
     return _real->GetFullscreenState(pFullscreen, ppTarget);
 }
 
@@ -1203,6 +1283,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
     {
         pDesc->SwapEffect = _gameSwapEffect;
         pDesc->BufferCount = _gameBufferCount;
+
+        if (_borderless.Active())
+            pDesc->Windowed = FALSE;
     }
 
     return result;
@@ -1446,7 +1529,12 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc1(DXGI_SWAP_CHAIN_DESC1
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc)
 {
-    return _real1->GetFullscreenDesc(pDesc);
+    const HRESULT result = _real1->GetFullscreenDesc(pDesc);
+
+    if (SUCCEEDED(result) && pDesc != nullptr && _borderless.Active())
+        pDesc->Windowed = FALSE;
+
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetHwnd(HWND* pHwnd) { return _real1->GetHwnd(pHwnd); }
@@ -1491,6 +1579,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
     {
         result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp, Proxy(),
                               &_display, _upgraded);
+        RecoverFromExclusive(result);
 
         // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
         if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&

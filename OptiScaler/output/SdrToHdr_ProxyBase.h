@@ -60,6 +60,11 @@ class ProxyChainBase
     const char* Start(IUnknown* device, IDXGISwapChain3* real, DXGI_FORMAT gameFormat, bool hdr10);
 
     // The game's ResizeBuffers / ResizeBuffers1 (see ResizeResult). Works from a proxied or an unproxied chain to either.
+    //
+    // Known limits (documented, not fixed): after ResizeResult::stuckHdr (the proxy could not be rebuilt and the chain could not
+    // be put back) the real chain stays HDR with nothing converting it for good -- only a restart helps, and the status says
+    // so. And while a resize runs the lock is not held, so a CheckColorSpaceSupport / SetColorSpace1 the game makes meanwhile
+    // reaches the real chain for that moment (the wrapper answers for the game's format only while the chain is Active).
     ResizeResult Resize(IUnknown* device, IDXGISwapChain3* real, const ResizeRequest& request);
 
     // Puts the real chain back to the game's format and colour space without a proxy (a failed Start, a dropped plan).
@@ -75,12 +80,21 @@ class ProxyChainBase
     //  ReportedFormat the format GetDesc / GetDesc1 must report while Engaged (the target's during a resize)
     bool Active() const { return _active.load(std::memory_order_acquire); }
     bool InResize() const { return _inResize.load(std::memory_order_acquire); }
+    // A resize that runs on THIS thread: the only re-entrancy DXGI refuses (a window message sent from inside it, answered by
+    // the game's own ResizeBuffers). A resize from another thread waits its turn instead (see Resize).
+    bool InResizeOnThisThread() const
+    {
+        return _inResize.load(std::memory_order_acquire) && _resizeThread.load(std::memory_order_acquire) == CurrentThread();
+    }
     bool Engaged() const { return _reportFormat.load(std::memory_order_acquire) != DXGI_FORMAT_UNKNOWN; }
     DXGI_FORMAT ReportedFormat() const { return _reportFormat.load(std::memory_order_acquire); }
     DXGI_FORMAT GameFormat() const { return ReportedFormat(); }
 
     // True the first time it is asked, once per chain: the present's failure is logged once.
     bool NoteFailureLogged() { return !_failureLogged.exchange(true); }
+
+    // True the first time it is asked, once per chain: a late stand-down (the game turned on its own DLSS-G) is logged once.
+    bool NoteLateStandDownLogged() { return !_lateLogged.exchange(true); }
 
     // Test hooks (tests/sdr_to_hdr_swapchain_*_gpu.cpp): fault injection and a callback run where the real DXGI resize would
     // be, with the lock released and the in-resize state set, to stand in for a window message the game answers.
@@ -128,10 +142,15 @@ class ProxyChainBase
   private:
     const char* BuildLocked(IUnknown* device, IDXGISwapChain3* real, DXGI_FORMAT gameFormat);
     void ReleaseLocked();
-    HRESULT RevertRealLocked(IDXGISwapChain3* real, const ResizeRequest& request, bool realResized);
+    HRESULT RevertRealLocked(IDXGISwapChain3* real, const ResizeRequest& request, DXGI_FORMAT format, bool realResized);
 
     std::atomic<bool> _active { false };
+    static unsigned long CurrentThread();
+
     std::atomic<bool> _inResize { false };
+    std::atomic<unsigned long> _resizeThread { 0 };
+    std::mutex _resizeGate; // one resize at a time; a second thread waits for the first
+    std::atomic<bool> _lateLogged { false };
     std::atomic<DXGI_FORMAT> _reportFormat { DXGI_FORMAT_UNKNOWN };
     std::atomic<bool> _failureLogged { false };
     IUnknown* _identity = nullptr; // the real chain's IUnknown, the registry key (not owned)

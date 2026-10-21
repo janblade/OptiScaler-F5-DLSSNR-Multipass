@@ -516,7 +516,12 @@ int main(int argc, char** argv)
                 SdrToHdr::ResizeRequest request;
                 bool ran = false, inResize = false, engaged = false, formatIsGame = false, getBufferRefused = false;
                 bool nestedRefused = false, otherThreadDone = false;
-            } during { &chain, g.device.Get(), real.Get(), request };
+                bool activeInside = true; // Active() inside the real call: false (the gate the wrapper routes on is Engaged())
+                HANDLE resizer = nullptr;  // a second thread's resize, started inside, not waited for there
+                SdrToHdr::ResizeResult secondResult;
+            };
+            // static: the helper threads below may touch it after a failing run has left this block
+            static During during { &chain, g.device.Get(), real.Get(), request };
 
             SdrToHdr::ProxyChain::Hooks().context = &during;
             SdrToHdr::ProxyChain::Hooks().duringRealResize = [](void* context)
@@ -525,6 +530,7 @@ int main(int argc, char** argv)
                 d.ran = true;
                 d.inResize = d.chain->InResize();
                 d.engaged = d.chain->Engaged();
+                d.activeInside = d.chain->Active();
                 d.formatIsGame = d.chain->ReportedFormat() == kGame;
                 ID3D12Resource* buffer = reinterpret_cast<ID3D12Resource*>(1);
                 d.getBufferRefused = d.chain->GetBuffer(0, IID_PPV_ARGS(&buffer)) == DXGI_ERROR_INVALID_CALL &&
@@ -546,6 +552,18 @@ int main(int argc, char** argv)
                     &d, 0, nullptr);
                 WaitForSingleObject(thread, 2000);
                 CloseHandle(thread);
+
+                // A resize from another thread waits for this one (DXGI serialises them); it is not refused. Started here,
+                // joined after the outer resize returns.
+                d.resizer = CreateThread(
+                    nullptr, 0,
+                    [](void* p) -> DWORD
+                    {
+                        auto* c = static_cast<During*>(p);
+                        c->secondResult = c->chain->Resize(c->device, c->real, c->request);
+                        return 0;
+                    },
+                    &d, 0, nullptr);
             };
 
             request.width = 72;
@@ -556,10 +574,37 @@ int main(int argc, char** argv)
             Check(during.inResize && during.engaged && during.formatIsGame,
                   "inside it: in resize, still engaged, the game's format reported (not FP16)");
             Check(during.getBufferRefused, "inside it: GetBuffer is INVALID_CALL, not the real HDR buffer");
+            Check(during.engaged && !during.activeInside,
+                  "inside it: Engaged() is true while Active() is false (the gate GetBuffer / GetDesc are routed on)");
             Check(during.nestedRefused, "inside it: a nested resize is refused with INVALID_CALL");
             Check(during.otherThreadDone, "inside it: another thread takes the chain's lock without waiting");
+            if (during.resizer != nullptr)
+            {
+                WaitForSingleObject(during.resizer, 10000);
+                CloseHandle(during.resizer);
+            }
+
+            Check(during.secondResult.hr == S_OK && !during.secondResult.refused,
+                  "a resize from another thread, started inside the first, waits for it and succeeds (not refused)");
             Check(!chain.InResize() && chain.Active() && Frame(g, chain, real.Get(), 0.5f),
                   "after it: out of the resize, active, a frame converts");
+        }
+
+        // ---- a failed real resize that asked for another format (finding 6): DXGI keeps the old one ----
+        {
+            const auto saved = request;
+            request.count = 17; // the real resize fails
+            request.rawFormat = request.resolvedFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            ComPtr<ID3D12Resource> proxy;
+            chain.GetBuffer(0, IID_PPV_ARGS(&proxy));
+            Check(FAILED(result.hr) && result.proxied && chain.Active() && chain.ReportedFormat() == kGame && proxy != nullptr &&
+                      proxy->GetDesc().Format == kGame,
+                  "a failed resize that asked for B8G8R8A8: the proxy is rebuilt in the previous format, still reported as it was");
+            proxy.Reset();
+            request = saved;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            Check(SUCCEEDED(result.hr) && result.proxied, "and the next resize works");
         }
 
         // ---- failures (Review Pass A3): the real resize fails, then the proxy rebuild fails too ----

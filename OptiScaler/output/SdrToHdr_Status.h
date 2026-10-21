@@ -19,6 +19,10 @@ struct StatusSnapshot
     bool active = false;            // the chain is proxied and converted
     bool hdr10 = false;             // the signal the active chain was made with
     float displayMaxLuminance = 0.0f;
+    // The chain keeps converting, but something happened that ends it at the next resize (the game turned on its own DLSS-G):
+    // a note over the active line. Cleared by the next decision.
+    bool endsAtResize = false;
+    Reason endReason = Reason::Off;
 };
 
 enum class StatusColour
@@ -86,6 +90,15 @@ inline StatusLineResult StatusLine(const StatusSnapshot& status, const StatusSet
     const char* source = settings.configuredPeak > 0.0f      ? "ini"
                          : status.displayMaxLuminance > 0.0f ? "display"
                                                              : "default";
+    // Still converting, but the next resize ends it: the real chain is HDR and cannot stop on its own (a pass-through would be
+    // wrong), so the line says what happens and when
+    if (status.endsAtResize)
+    {
+        result.text = ReasonText(status.endReason);
+        result.colour = StatusColour::Amber;
+        return result;
+    }
+
     char line[160];
     std::snprintf(line, sizeof(line), "HDR output: active, %s, game white %.0f nits, peak %.0f nits (%s)",
                   status.hdr10 ? "HDR10" : "scRGB", ClampGameNits(settings.gameNits), peak, source);

@@ -30,6 +30,8 @@ enum class Reason
     CoreWindow,       // a CoreWindow (UWP) swap chain
     OtherPresentQueue, // ResizeBuffers1 presents on a queue other than the one the chain was made with
     StartFailed,      // the proxy or the pass could not be made: the chain is shown as the game made it
+    StuckHdr,         // the proxy could not be made and the chain could not be put back: it stays HDR (known limit: for good)
+    DlssgStartedLater, // (a note, never a Decide result) the game turned on its own DLSS-G after the chain was proxied
     Active,
 };
 
@@ -165,6 +167,10 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: standing aside, multisampled swap chains are not supported";
     case Reason::DisplayUnknown:
         return "HDR output: not decided yet, the display is checked again at the next resize";
+    case Reason::StuckHdr:
+        return "HDR output: could not undo the HDR swap chain; restart the game";
+    case Reason::DlssgStartedLater:
+        return "HDR output: the game turned on DLSS frame generation; HDR output stops at the next resolution / window change";
     case Reason::Active:
         return "HDR output: active";
     }

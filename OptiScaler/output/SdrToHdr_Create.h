@@ -2,6 +2,7 @@
 
 #include "SdrToHdr_Common.h"
 #include "SdrToHdr_Display.h"
+#include "SdrToHdr_ProxyBase.h"
 #include "SdrToHdr_Status.h"
 
 #include <dxgi.h>
@@ -66,6 +67,12 @@ StatusSnapshot Status();
 
 // Records a decision (creation, resize, a failed start). `enabled` is [HDR] Enabled when it was made.
 void RecordStatus(Reason reason, bool active, bool hdr10, bool enabled, float displayMaxLuminance);
+
+// Per present of a proxied chain: the game turned on its own Streamline DLSS-G since the chain was proxied. Logs once per
+// chain and records a status note that HDR output stops at the next resolution / window change. It does not stop converting:
+// the real chain is HDR, so a pass-through would show the game's SDR picture as scRGB. The next ResizeBuffers decides again
+// and leaves it.
+void CheckLateStandDown(ProxyChainBase& proxy);
 
 // A frame generation swap chain was made for the game (it returns before any wrapper exists): HDR output stands aside.
 // Logs and records it when HDR output is on.

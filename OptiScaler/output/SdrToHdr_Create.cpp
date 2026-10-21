@@ -90,6 +90,24 @@ void RecordStatus(Reason reason, bool active, bool hdr10, bool enabled, float di
     g_status.active = active;
     g_status.hdr10 = hdr10;
     g_status.displayMaxLuminance = displayMaxLuminance;
+    g_status.endsAtResize = false;
+}
+
+void CheckLateStandDown(ProxyChainBase& proxy)
+{
+    // (cheap: two atomics and one state read, every present of a proxied chain)
+    const auto& dlssg = DlssgTelemetry::Get();
+    const bool on = State::Instance().activeFgOutput == FGOutput::DLSSG ||
+                    (dlssg.optionsSeen.load(std::memory_order_acquire) && dlssg.active.load(std::memory_order_relaxed));
+
+    if (!on || proxy.NoteLateStandDownLogged())
+        return;
+
+    LOG_INFO("{}", ReasonText(Reason::DlssgStartedLater));
+
+    std::lock_guard lock(g_statusLock);
+    g_status.endsAtResize = true;
+    g_status.endReason = Reason::DlssgStartedLater;
 }
 
 void FillEnvironment(Inputs& inputs)

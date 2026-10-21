@@ -229,17 +229,19 @@ bool ProxyChainBase::HeldByGame()
 // Puts the real chain back to the game's format with the arguments of the game's own call (ResizeBuffers1 keeps its node
 // masks and queues). `realResized`: the real resize went through, so the size and count it asked for are the chain's;
 // otherwise the chain still has its old ones and only the format goes back.
-HRESULT ProxyChainBase::RevertRealLocked(IDXGISwapChain3* real, const ResizeRequest& request, bool realResized)
+HRESULT ProxyChainBase::RevertRealLocked(IDXGISwapChain3* real, const ResizeRequest& request, DXGI_FORMAT format,
+                                         bool realResized)
 {
     if (Hooks().failRevert)
         return E_FAIL;
 
-    // The real resize failed: the chain keeps its old size and count, only the format goes back. Plain ResizeBuffers: the
-    // game's node mask / queue arrays are sized for the count it asked for, not the one the chain still has (and a
-    // proxied chain has one node and its creation queue only, see Reason::MultiNode / OtherPresentQueue)
+    // The real resize failed: the chain keeps its old size, count and format (as DXGI leaves them), only the format goes
+    // back to the game's previous one. Plain ResizeBuffers: the game's node mask / queue arrays are sized for the count it
+    // asked for, not the one the chain still has (and a proxied chain has one node and its creation queue only, see
+    // Reason::MultiNode / OtherPresentQueue)
     if (!realResized)
     {
-        const HRESULT hr = real->ResizeBuffers(0, 0, 0, request.resolvedFormat, request.flags);
+        const HRESULT hr = real->ResizeBuffers(0, 0, 0, format, request.flags);
 
         if (SUCCEEDED(hr))
             real->SetColorSpace1(request.gameColourSpace);
@@ -247,11 +249,10 @@ HRESULT ProxyChainBase::RevertRealLocked(IDXGISwapChain3* real, const ResizeRequ
         return hr;
     }
 
-    const HRESULT hr = request.useV1 ? real->ResizeBuffers1(request.count, request.width, request.height,
-                                                             request.resolvedFormat, request.flags, request.nodeMask,
-                                                             request.queues)
-                                     : real->ResizeBuffers(request.count, request.width, request.height,
-                                                           request.resolvedFormat, request.flags);
+    const HRESULT hr = request.useV1 ? real->ResizeBuffers1(request.count, request.width, request.height, format,
+                                                             request.flags, request.nodeMask, request.queues)
+                                     : real->ResizeBuffers(request.count, request.width, request.height, format,
+                                                           request.flags);
 
     if (SUCCEEDED(hr))
         real->SetColorSpace1(request.gameColourSpace);
@@ -259,13 +260,42 @@ HRESULT ProxyChainBase::RevertRealLocked(IDXGISwapChain3* real, const ResizeRequ
     return hr;
 }
 
+unsigned long ProxyChainBase::CurrentThread() { return (unsigned long) GetCurrentThreadId(); }
+
+namespace
+{
+// The chain is in a resize from construction to destruction, on this thread
+class ResizeFlag
+{
+  public:
+    ResizeFlag(std::atomic<bool>& flag, std::atomic<unsigned long>& thread) : _flag(flag), _thread(thread)
+    {
+        _thread.store((unsigned long) GetCurrentThreadId(), std::memory_order_release);
+        _flag.store(true, std::memory_order_release);
+    }
+
+    ~ResizeFlag()
+    {
+        _flag.store(false, std::memory_order_release);
+        _thread.store(0, std::memory_order_release);
+    }
+
+    ResizeFlag(const ResizeFlag&) = delete;
+    ResizeFlag& operator=(const ResizeFlag&) = delete;
+
+  private:
+    std::atomic<bool>& _flag;
+    std::atomic<unsigned long>& _thread;
+};
+} // namespace
+
 ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, const ResizeRequest& request)
 {
     ResizeResult result;
 
-    // A resize inside a resize (a window message the game answers with its own ResizeBuffers) is refused, as DXGI refuses
-    // a resize it is already doing
-    if (_inResize.exchange(true))
+    // A resize inside a resize on this thread (a window message the game answers with its own ResizeBuffers) is refused, as
+    // DXGI refuses it. A resize from another thread waits for the one running, as DXGI serialises them.
+    if (InResizeOnThisThread())
     {
         result.hr = DXGI_ERROR_INVALID_CALL;
         result.refused = true;
@@ -274,15 +304,19 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
         return result;
     }
 
+    std::lock_guard<std::mutex> gate(_resizeGate);
+    ResizeFlag inResize(_inResize, _resizeThread);
+
     bool wasProxied = false;
+    DXGI_FORMAT previousFormat = DXGI_FORMAT_UNKNOWN; // the game's format before this resize: what a failed one leaves
 
     {
         std::lock_guard<std::recursive_mutex> lock(_lock);
         wasProxied = ResourcesLocked();
+        previousFormat = _gameFormat;
 
         if (real == nullptr)
         {
-            _inResize = false;
             result.hr = E_POINTER;
             result.proxied = wasProxied;
             return result;
@@ -295,7 +329,6 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
 
             if (HeldResourcesLocked())
             {
-                _inResize = false;
                 result.hr = DXGI_ERROR_INVALID_CALL;
                 result.proxied = true;
                 result.refused = true;
@@ -332,16 +365,16 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
         if (!result.proxied)
             _reportFormat = DXGI_FORMAT_UNKNOWN;
 
-        _inResize = false;
         return result;
     };
 
     if (FAILED(hr))
     {
-        // The chain is as it was: give the game its back buffers again
+        // The chain is as it was, in the format it had: give the game its back buffers again (DXGI keeps the old format
+        // when a resize fails, so the game's format is the previous one, not the one it asked for)
         if (wasProxied)
         {
-            const char* why = BuildLocked(device, real, request.resolvedFormat);
+            const char* why = BuildLocked(device, real, previousFormat);
 
             if (why == nullptr)
             {
@@ -351,12 +384,12 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
             {
                 // The real chain is still HDR and there is no proxy: put it back to the game's format
                 result.note = why;
-                const HRESULT revert = RevertRealLocked(real, request, false);
+                const HRESULT revert = RevertRealLocked(real, request, previousFormat, false);
 
                 if (SUCCEEDED(revert))
                     result.reverted = true;
                 else
-                    result.stuckHdr = true; // honest: it stays HDR, nothing converts it
+                    result.stuckHdr = true; // honest: it stays HDR, nothing converts it (known limit: for good)
             }
         }
 
@@ -375,7 +408,7 @@ ResizeResult ProxyChainBase::Resize(IUnknown* device, IDXGISwapChain3* real, con
         {
             // Never leave the game with an HDR chain and no pass: back to its own format, unproxied
             ReleaseLocked();
-            const HRESULT revert = RevertRealLocked(real, request, true);
+            const HRESULT revert = RevertRealLocked(real, request, request.resolvedFormat, true);
             result.hr = revert;
             result.proxied = false;
             result.note = why;

@@ -155,7 +155,8 @@ int main()
                            Reason::BitBlt,      Reason::FrameGen,        Reason::Dxvk,
                            Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                            Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
-                           Reason::OtherPresentQueue, Reason::StartFailed, Reason::Active };
+                           Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::DlssgStartedLater,
+                           Reason::Active };
     bool texts = true;
 
     for (size_t i = 0; i < std::size(all); ++i)
@@ -252,13 +253,29 @@ int main()
         for (Reason reason : { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
                                Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                                Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
-                               Reason::OtherPresentQueue, Reason::StartFailed })
+                               Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr })
         {
             snap.reason = reason;
             line = StatusLine(snap, on);
             Check(line.colour == StatusColour::Amber && line.text == ReasonText(reason) && line.signalHint.empty(),
                   ReasonText(reason));
         }
+
+        Check(std::strstr(ReasonText(Reason::StuckHdr), "restart the game") != nullptr &&
+                  std::strstr(ReasonText(Reason::StuckHdr), "shown as it is") == nullptr,
+              "stuck HDR says to restart, not that the picture is shown as it is");
+
+        // Still converting, but the game turned on its own DLSS-G: the line says when it ends, the controls stay
+        snap.active = true;
+        snap.reason = Reason::Active;
+        snap.endsAtResize = true;
+        snap.endReason = Reason::DlssgStartedLater;
+        line = StatusLine(snap, on);
+        Check(line.colour == StatusColour::Amber && line.text == ReasonText(Reason::DlssgStartedLater) &&
+                  line.text.find("next resolution / window change") != std::string::npos,
+              "status: active, then the game turned on DLSS-G: amber, stops at the next resolution / window change");
+        snap.endsAtResize = false;
+        Check(StatusLine(snap, on).colour == StatusColour::Green, "status: the next decision clears that note");
     }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_rules_smoke: PASS\n" : "sdr_to_hdr_rules_smoke: %d FAIL\n", g_failures);

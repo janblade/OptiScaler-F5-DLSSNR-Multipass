@@ -17,6 +17,7 @@ struct CreateRequest
     bool flipModel = false;
     bool frameGen = false;             // this is a frame generation library's own inner chain (_skipFGSwapChainCreation)
     bool composition = false;
+    bool coreWindow = false;
     bool multiNode = false;
     HWND hwnd = nullptr;               // for the display the window is on (null: unknown)
     IDXGIFactory* factory = nullptr;   // for finding that display's output
@@ -38,6 +39,20 @@ struct Plan
 // untouched, nothing is logged. Otherwise exactly one log line (ReasonText), and when the plan is proxied `format` is
 // changed to the real HDR format.
 Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format);
+
+// While a proxied chain is being created, creation hooks nested inside that call (another layer of OptiScaler's own hooks
+// seeing the HDR format the outer one asked for) pass through: the outer decision is the only one.
+class ScopedProxiedCreate
+{
+  public:
+    explicit ScopedProxiedCreate(bool on);
+    ~ScopedProxiedCreate();
+    ScopedProxiedCreate(const ScopedProxiedCreate&) = delete;
+    ScopedProxiedCreate& operator=(const ScopedProxiedCreate&) = delete;
+
+  private:
+    bool _on;
+};
 
 // The create with the HDR format failed: puts the game's format back (the caller retries once) and logs it.
 void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure);

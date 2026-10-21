@@ -87,6 +87,11 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     // implement IDXGISwapChain4
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
 
+    // HDR output: a creation hook that found this wrapper already made for the chain it just created (a nested hook
+    // wrapped it first) hands over its plan here, so the chain it made HDR gets its proxies. Safe to call with a plan
+    // that is not proxied (nothing happens).
+    void AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags);
+
   private:
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
@@ -106,16 +111,33 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
 
     HWND _handle = nullptr;
 
-    // HDR output (output/SdrToHdr_*): null until the chain is, or was, proxied. While it is active the game's GetBuffer
-    // returns the proxies and the real chain is HDR.
-    std::unique_ptr<SdrToHdr::ProxyChain> _proxy;
+    // HDR output (output/SdrToHdr_*): null until the chain is first proxied, then set once and never reset or replaced
+    // (GetBuffer / GetDesc read it on any thread). While it is Active the game's GetBuffer returns the proxies and the real
+    // chain is HDR; when HDR output ends it stays, inactive.
+    std::unique_ptr<SdrToHdr::ProxyChain> _proxyOwner;
+    std::atomic<SdrToHdr::ProxyChain*> _proxyPtr { nullptr };
+    IUnknown* _creationQueue = nullptr; // identity of the queue the chain was made with (not owned)
     DXGI_COLOR_SPACE_TYPE _gameColourSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; // what the game last asked for
     SdrToHdr::DisplayInfo _display;
     bool _displayKnown = false;
     bool _hdrColourSpaceLogged = false;
-    bool _passFailureLogged = false;
 
-    bool Proxied() const { return _proxy != nullptr && _proxy->Active(); }
+    void StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags);
+    SdrToHdr::ProxyChain* Proxy() const { return _proxyPtr.load(std::memory_order_acquire); }
+    SdrToHdr::ProxyChain* EnsureProxy()
+    {
+        if (auto* existing = Proxy())
+            return existing;
+
+        _proxyOwner = std::make_unique<SdrToHdr::ProxyChain>();
+        _proxyPtr.store(_proxyOwner.get(), std::memory_order_release);
+        return _proxyOwner.get();
+    }
+    bool Proxied() const
+    {
+        auto* proxy = Proxy();
+        return proxy != nullptr && proxy->Active();
+    }
     ID3D12Device* QueueDevice() const;
     HRESULT ResizeHdr(bool v1, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags,
                       const UINT* pCreationNodeMask, IUnknown* const* ppPresentQueue, bool& handled);
@@ -141,7 +163,7 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
                     State::Instance().hdrOutputActive = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
 
                     // HDR output also wants the SDR white level and the peak: only read while it is on
-                    if (Config::Instance()->HdrOutputEnabled.value_or_default() || _proxy != nullptr)
+                    if (Config::Instance()->HdrOutputEnabled.value_or_default() || Proxy() != nullptr)
                     {
                         _display = SdrToHdr::QueryDisplay(output.Get());
                         _displayKnown = true;

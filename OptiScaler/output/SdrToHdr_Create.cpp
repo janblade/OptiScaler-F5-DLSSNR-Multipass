@@ -7,6 +7,7 @@
 
 #include <misc/IdentifyGpu.h>
 #include <native/VkPresentBridge.h>
+#include <framegen/dlssg/DlssgTelemetry.h>
 
 #include <mutex>
 
@@ -14,6 +15,7 @@ namespace SdrToHdr
 {
 namespace
 {
+thread_local int t_proxiedCreateDepth = 0;
 std::mutex g_statusLock;
 StatusSnapshot g_status;
 
@@ -98,7 +100,14 @@ void FillEnvironment(Inputs& inputs)
     inputs.frameGen = inputs.frameGen || State::Instance().currentFG != nullptr;
     inputs.dxvk = inputs.dxvk || VkPresentBridge::DxvkThroughVulkan() || VkPresentBridge::DxvkGame() ||
                   IdentifyGpu::getPrimaryGpu().usesDxvk;
-    inputs.streamlineDlssg = inputs.streamlineDlssg || State::Instance().activeFgOutput == FGOutput::DLSSG;
+    // OptiScaler's own DLSS-G output, or the game's own Streamline DLSS-G switched on: its last slDLSSGSetOptions, seen by
+    // the Streamline hooks (DlssgTelemetry, filled only for the game's own), left it on. Not "sl.dlss_g.dll is loaded":
+    // games ship and load it with DLSS-G off (NBA 2K27). Known only once the game sends options, so a game that turns
+    // DLSS-G on after its chain is made is caught at its next resize.
+    const auto& dlssg = DlssgTelemetry::Get();
+    inputs.streamlineDlssg = inputs.streamlineDlssg || State::Instance().activeFgOutput == FGOutput::DLSSG ||
+                             (dlssg.optionsSeen.load(std::memory_order_acquire) &&
+                              dlssg.active.load(std::memory_order_relaxed));
 }
 
 Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
@@ -110,12 +119,17 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     if (!Config::Instance()->HdrOutputEnabled.value_or_default())
         return plan;
 
+    // Inside the creation of a chain an outer hook already decided to make HDR: pass through
+    if (t_proxiedCreateDepth > 0)
+        return plan;
+
     Inputs in;
     in.enabled = true;
     in.gameFormat = format;
     in.flipModel = request.flipModel;
     in.frameGen = request.frameGen;
     in.composition = request.composition;
+    in.coreWindow = request.coreWindow;
     in.multiNode = request.multiNode;
     in.d3d11 = !IsD3D12Queue(request.device);
     FillEnvironment(in);
@@ -147,7 +161,7 @@ void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure)
 {
     LOG_WARN("HDR output: the swap chain could not be made as HDR ({:X}), making it as the game asked", (UINT) failure);
     plan.proxied = false;
-    plan.reason = Reason::UnsupportedFormat;
+    plan.reason = Reason::StartFailed;
     RecordStatus(plan.reason, false, plan.hdr10, true, plan.display.maxLuminance);
     format = plan.gameFormat;
 }
@@ -157,7 +171,12 @@ void NoteFrameGenChain()
     if (!Config::Instance()->HdrOutputEnabled.value_or_default())
         return;
 
-    LOG_INFO("{}", ReasonText(Reason::FrameGen));
+    // The inner chain a frame generation library makes through the factory already logged and recorded it
+    const auto before = Status();
+
+    if (!(before.decided && before.enabledAtDecision && before.reason == Reason::FrameGen))
+        LOG_INFO("{}", ReasonText(Reason::FrameGen));
+
     RecordStatus(Reason::FrameGen, false, Config::Instance()->UseHDR10.value_or_default(), true, 0.0f);
 }
 
@@ -165,5 +184,20 @@ void NoteStandDown(Reason reason)
 {
     if (Config::Instance()->HdrOutputEnabled.value_or_default())
         LOG_INFO("{}", ReasonText(reason));
+}
+} // namespace SdrToHdr
+
+namespace SdrToHdr
+{
+ScopedProxiedCreate::ScopedProxiedCreate(bool on) : _on(on)
+{
+    if (_on)
+        ++t_proxiedCreateDepth;
+}
+
+ScopedProxiedCreate::~ScopedProxiedCreate()
+{
+    if (_on)
+        --t_proxiedCreateDepth;
 }
 } // namespace SdrToHdr

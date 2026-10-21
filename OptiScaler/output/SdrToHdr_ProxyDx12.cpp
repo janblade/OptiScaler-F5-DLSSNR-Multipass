@@ -137,18 +137,6 @@ bool ShouldWarnSrgbViewOnTypedProxy(const ID3D12Resource* resource, DXGI_FORMAT 
     return false;
 }
 
-bool ProxyChain::Active() const
-{
-    std::lock_guard<std::recursive_mutex> lock(_lock);
-    return !_proxies.empty() && _pass.Ready();
-}
-
-DXGI_FORMAT ProxyChain::GameFormat() const
-{
-    std::lock_guard<std::recursive_mutex> lock(_lock);
-    return _gameFormat;
-}
-
 bool ProxyChain::OwnsResource(const ID3D12Resource* resource, bool& relaxedCasting)
 {
     std::lock_guard<std::recursive_mutex> lock(_lock);
@@ -167,6 +155,8 @@ bool ProxyChain::OwnsResource(const ID3D12Resource* resource, bool& relaxedCasti
 
 void ProxyChain::ReleaseLocked()
 {
+    _active = false;
+
     if (_identity != nullptr)
     {
         Unregister(this);
@@ -191,12 +181,19 @@ void ProxyChain::Release()
     std::lock_guard<std::recursive_mutex> lock(_lock);
     ReleaseLocked();
     _gameFormat = DXGI_FORMAT_UNKNOWN;
+    _reportFormat = DXGI_FORMAT_UNKNOWN;
 }
 
 const char* ProxyChain::BuildLocked(ID3D12Device* device, IDXGISwapChain3* real, DXGI_FORMAT gameFormat)
 {
     ReleaseLocked();
     _gameFormat = gameFormat;
+
+    if (Hooks().failBuild)
+    {
+        Hooks().failBuild = false;
+        return "the HDR proxy build failed (injected)";
+    }
 
     if (device == nullptr || real == nullptr)
         return "the HDR proxy was given no device or swap chain";
@@ -307,6 +304,8 @@ const char* ProxyChain::BuildLocked(ID3D12Device* device, IDXGISwapChain3* real,
     if (_identity != nullptr)
         Register(_identity, this);
 
+    _reportFormat = gameFormat;
+    _active = true;
     return nullptr;
 }
 
@@ -320,7 +319,12 @@ const char* ProxyChain::Start(ID3D12Device* device, IDXGISwapChain3* real, DXGI_
     if (FAILED(SetColourSpace(real, HdrColourSpace(hdr10))))
         return "the swap chain does not take the HDR colour space";
 
-    return BuildLocked(device, real, gameFormat);
+    const char* why = BuildLocked(device, real, gameFormat);
+
+    if (why != nullptr)
+        _reportFormat = DXGI_FORMAT_UNKNOWN;
+
+    return why;
 }
 
 HRESULT ProxyChain::Revert(IDXGISwapChain3* real, DXGI_FORMAT gameFormat, UINT flags,
@@ -328,9 +332,13 @@ HRESULT ProxyChain::Revert(IDXGISwapChain3* real, DXGI_FORMAT gameFormat, UINT f
 {
     std::lock_guard<std::recursive_mutex> lock(_lock);
     ReleaseLocked();
+    _reportFormat = DXGI_FORMAT_UNKNOWN;
 
     if (real == nullptr)
         return E_POINTER;
+
+    if (Hooks().failRevert)
+        return E_FAIL;
 
     // Count, size and buffer flags stay as they are; only the format goes back
     const HRESULT hr = real->ResizeBuffers(0, 0, 0, gameFormat, flags);
@@ -360,45 +368,115 @@ bool ProxyChain::HeldByGame()
     return HeldLocked();
 }
 
+// Puts the real chain back to the game's format with the arguments of the game's own call (ResizeBuffers1 keeps its node
+// masks and queues). `realResized`: the real resize went through, so the size and count it asked for are the chain's;
+// otherwise the chain still has its old ones and only the format goes back.
+HRESULT ProxyChain::RevertRealLocked(IDXGISwapChain3* real, const ResizeRequest& request, bool realResized)
+{
+    if (Hooks().failRevert)
+        return E_FAIL;
+
+    // The real resize failed: the chain keeps its old size and count, only the format goes back. Plain ResizeBuffers: the
+    // game's node mask / queue arrays are sized for the count it asked for, not the one the chain still has (and a
+    // proxied chain has one node and its creation queue only, see Reason::MultiNode / OtherPresentQueue)
+    if (!realResized)
+    {
+        const HRESULT hr = real->ResizeBuffers(0, 0, 0, request.resolvedFormat, request.flags);
+
+        if (SUCCEEDED(hr))
+            real->SetColorSpace1(request.gameColourSpace);
+
+        return hr;
+    }
+
+    const HRESULT hr = request.useV1 ? real->ResizeBuffers1(request.count, request.width, request.height,
+                                                             request.resolvedFormat, request.flags, request.nodeMask,
+                                                             request.queues)
+                                     : real->ResizeBuffers(request.count, request.width, request.height,
+                                                           request.resolvedFormat, request.flags);
+
+    if (SUCCEEDED(hr))
+        real->SetColorSpace1(request.gameColourSpace);
+
+    return hr;
+}
+
 ResizeResult ProxyChain::Resize(ID3D12Device* device, IDXGISwapChain3* real, const ResizeRequest& request)
 {
-    std::lock_guard<std::recursive_mutex> lock(_lock);
     ResizeResult result;
-    const bool wasProxied = !_proxies.empty() && _pass.Ready();
 
-    if (real == nullptr)
+    // A resize inside a resize (a window message the game answers with its own ResizeBuffers) is refused, as DXGI refuses
+    // a resize it is already doing
+    if (_inResize.exchange(true))
     {
-        result.hr = E_POINTER;
-        result.proxied = wasProxied;
+        result.hr = DXGI_ERROR_INVALID_CALL;
+        result.refused = true;
+        result.proxied = Active();
+        result.note = "a resize is already running";
         return result;
     }
 
-    if (wasProxied)
-    {
-        // DXGI refuses a resize while the game holds a back buffer; the proxies are the game's back buffers
-        _pass.WaitForIdle();
+    bool wasProxied = false;
 
-        if (HeldLocked())
+    {
+        std::lock_guard<std::recursive_mutex> lock(_lock);
+        wasProxied = !_proxies.empty() && _pass.Ready();
+
+        if (real == nullptr)
         {
-            result.hr = DXGI_ERROR_INVALID_CALL;
-            result.proxied = true;
-            result.refused = true;
-            result.note = "the game still holds a back buffer";
+            _inResize = false;
+            result.hr = E_POINTER;
+            result.proxied = wasProxied;
             return result;
         }
-    }
 
-    ReleaseLocked();
+        if (wasProxied)
+        {
+            // DXGI refuses a resize while the game holds a back buffer; the proxies are the game's back buffers
+            _pass.WaitForIdle();
+
+            if (HeldLocked())
+            {
+                _inResize = false;
+                result.hr = DXGI_ERROR_INVALID_CALL;
+                result.proxied = true;
+                result.refused = true;
+                result.note = "the game still holds a back buffer";
+                return result;
+            }
+        }
+
+        // From here until the end the game is told the format it will have after, and GetBuffer says INVALID_CALL
+        if (wasProxied || request.wantProxy)
+            _reportFormat = request.resolvedFormat;
+
+        ReleaseLocked();
+    }
 
     const DXGI_FORMAT realFormat = request.wantProxy ? RealFormat(request.hdr10)
                                    : wasProxied     ? request.resolvedFormat
                                                     : request.rawFormat;
 
-    HRESULT hr = request.useV1 ? real->ResizeBuffers1(request.count, request.width, request.height, realFormat,
-                                                      request.flags, request.nodeMask, request.queues)
-                               : real->ResizeBuffers(request.count, request.width, request.height, realFormat,
-                                                     request.flags);
+    // The real DXGI call, lock NOT held: it can send the window a message the game answers with GetBuffer / GetDesc
+    if (Hooks().duringRealResize != nullptr)
+        Hooks().duringRealResize(Hooks().context);
+
+    const HRESULT hr = request.useV1 ? real->ResizeBuffers1(request.count, request.width, request.height, realFormat,
+                                                             request.flags, request.nodeMask, request.queues)
+                                     : real->ResizeBuffers(request.count, request.width, request.height, realFormat,
+                                                           request.flags);
     result.hr = hr;
+
+    std::lock_guard<std::recursive_mutex> lock(_lock);
+
+    const auto finish = [&]()
+    {
+        if (!result.proxied)
+            _reportFormat = DXGI_FORMAT_UNKNOWN;
+
+        _inResize = false;
+        return result;
+    };
 
     if (FAILED(hr))
     {
@@ -407,18 +485,29 @@ ResizeResult ProxyChain::Resize(ID3D12Device* device, IDXGISwapChain3* real, con
         {
             const char* why = BuildLocked(device, real, request.resolvedFormat);
 
-            if (why != nullptr)
-                result.note = why;
-            else
+            if (why == nullptr)
+            {
                 result.proxied = true;
+            }
+            else
+            {
+                // The real chain is still HDR and there is no proxy: put it back to the game's format
+                result.note = why;
+                const HRESULT revert = RevertRealLocked(real, request, false);
+
+                if (SUCCEEDED(revert))
+                    result.reverted = true;
+                else
+                    result.stuckHdr = true; // honest: it stays HDR, nothing converts it
+            }
         }
 
-        return result;
+        return finish();
     }
 
     if (request.wantProxy)
     {
-        HRESULT spaceResult = SetColourSpace(real, HdrColourSpace(request.hdr10));
+        const HRESULT spaceResult = SetColourSpace(real, HdrColourSpace(request.hdr10));
         const char* why = FAILED(spaceResult) ? "the swap chain does not take the HDR colour space" : nullptr;
 
         if (why == nullptr)
@@ -428,33 +517,42 @@ ResizeResult ProxyChain::Resize(ID3D12Device* device, IDXGISwapChain3* real, con
         {
             // Never leave the game with an HDR chain and no pass: back to its own format, unproxied
             ReleaseLocked();
-            result.hr = real->ResizeBuffers(0, 0, 0, request.resolvedFormat, request.flags);
-
-            if (SUCCEEDED(result.hr))
-                real->SetColorSpace1(request.gameColourSpace);
-
+            const HRESULT revert = RevertRealLocked(real, request, true);
+            result.hr = revert;
             result.proxied = false;
-            result.reverted = true;
             result.note = why;
-            return result;
+
+            if (SUCCEEDED(revert))
+                result.reverted = true;
+            else
+                result.stuckHdr = true;
+
+            return finish();
         }
 
         result.proxied = true;
-        return result;
+        return finish();
     }
 
     if (wasProxied)
         real->SetColorSpace1(request.gameColourSpace);
 
-    return result;
+    return finish();
 }
 
 HRESULT ProxyChain::GetBuffer(UINT index, REFIID riid, void** surface)
 {
-    std::lock_guard<std::recursive_mutex> lock(_lock);
-
     if (surface == nullptr)
         return E_POINTER;
+
+    // Inside a resize the game has no back buffers (DXGI says the same of its own)
+    if (_inResize.load(std::memory_order_acquire))
+    {
+        *surface = nullptr;
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(_lock);
 
     if (index >= _proxies.size())
     {

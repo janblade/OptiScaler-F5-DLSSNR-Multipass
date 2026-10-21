@@ -785,6 +785,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
         hdrRequest.hwnd = localDesc.OutputWindow;
         hdrRequest.factory = realFactory;
         SdrToHdr::Plan hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.BufferDesc.Format);
+        SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
 
         // !_skipFGSwapChainCreation for preventing early enablement flags
         if (!_skipFGSwapChainCreation)
@@ -874,6 +875,9 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
             }
             else
             {
+                if (hdrPlan.proxied)
+                    wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
+
                 wrapped->Release();
             }
         }
@@ -1223,6 +1227,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
         hdrRequest.hwnd = hWnd;
         hdrRequest.factory = realFactory;
         SdrToHdr::Plan hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.Format);
+        SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
 
         // !_skipFGSwapChainCreation for preventing early enablement flags
         if (!_skipFGSwapChainCreation)
@@ -1300,6 +1305,9 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
             }
             else
             {
+                if (hdrPlan.proxied)
+                    wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
+
                 wrapped->Release();
             }
         }
@@ -1385,10 +1393,10 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
     }
 
     {
-        // HDR output: a CoreWindow chain has no window handle to find its display by, so it is made as the game asked
-        // and the first ResizeBuffers decides
+        // HDR output: CoreWindow (UWP) swap chains are not supported; this logs the stand-down and the chain is not touched
         SdrToHdr::CreateRequest hdrRequest;
         hdrRequest.device = pDevice;
+        hdrRequest.coreWindow = true;
         hdrRequest.format = localDesc.Format;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;

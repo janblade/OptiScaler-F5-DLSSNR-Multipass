@@ -27,6 +27,9 @@ enum class Reason
     Composition,      // a composition swap chain (UWP / XAML), presented through the compositor
     D3D11NotYet,      // a D3D11 swap chain: the D3D11 pass is not written yet
     DisplayUnknown,   // the display could not be read yet: decided again at the next resize
+    CoreWindow,       // a CoreWindow (UWP) swap chain
+    OtherPresentQueue, // ResizeBuffers1 presents on a queue other than the one the chain was made with
+    StartFailed,      // the proxy or the pass could not be made: the chain is shown as the game made it
     Active,
 };
 
@@ -41,6 +44,8 @@ struct Inputs
     bool streamlineDlssg = false;
     bool multiNode = false;
     bool composition = false;
+    bool coreWindow = false;
+    bool presentQueueDiffers = false;
     bool d3d11 = false;
     bool displayKnown = true;                      // false: the output the window is on could not be found
 };
@@ -103,8 +108,14 @@ inline Decision Decide(const Inputs& in)
     if (in.composition)
         return { false, Reason::Composition };
 
+    if (in.coreWindow)
+        return { false, Reason::CoreWindow };
+
     if (in.multiNode)
         return { false, Reason::MultiNode };
+
+    if (in.presentQueueDiffers)
+        return { false, Reason::OtherPresentQueue };
 
     if (in.d3d11)
         return { false, Reason::D3D11NotYet };
@@ -143,6 +154,12 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: standing aside, multi-GPU swap chains are not supported";
     case Reason::Composition:
         return "HDR output: standing aside, composition swap chains are not supported";
+    case Reason::CoreWindow:
+        return "HDR output: standing aside, CoreWindow (UWP) swap chains are not supported";
+    case Reason::OtherPresentQueue:
+        return "HDR output: standing aside, the swap chain presents on a different queue than it was made with";
+    case Reason::StartFailed:
+        return "HDR output: could not start, the game's picture is shown as it is";
     case Reason::D3D11NotYet:
         return "HDR output: standing aside, Direct3D 11 games are not supported yet";
     case Reason::DisplayUnknown:
@@ -177,6 +194,29 @@ inline float ResolvePeakNits(float configured, float displayMaxLuminance)
 }
 
 inline float ClampGameNits(float nits) { return std::clamp(nits, 80.0f, 1000.0f); }
+
+// What DXGI answers for CheckColorSpaceSupport on an 8-bit flip swap chain (a DXGI_COLOR_SPACE_TYPE, as an int to keep
+// this header free of the Windows types): the G22 / G24 RGB spaces and PQ, but not scRGB (SetColorSpace1(scRGB) on an
+// 8-bit chain is E_INVALIDARG). Read from real DXGI on WARP and on a hardware adapter with Windows HDR on alike, and
+// tests/sdr_to_hdr_swapchain_dx12_gpu.cpp compares it with the real answer. The wrapper answers the game with this while
+// it holds a proxy, whose real chain is FP16 and would answer scRGB only.
+inline bool EightBitChainTakesColourSpace(int space)
+{
+    switch (space)
+    {
+    case 0:  // RGB_FULL_G22_NONE_P709
+    case 2:  // RGB_STUDIO_G22_NONE_P709
+    case 3:  // RGB_STUDIO_G22_NONE_P2020
+    case 12: // RGB_FULL_G2084_NONE_P2020
+    case 14: // RGB_STUDIO_G2084_NONE_P2020
+    case 17: // RGB_FULL_G22_NONE_P2020
+    case 20: // RGB_STUDIO_G24_NONE_P709
+    case 21: // RGB_STUDIO_G24_NONE_P2020
+        return true;
+    default:
+        return false;
+    }
+}
 
 // The real chain's format for scRGB or HDR10 (its colour space is set where the chain is made, from dxgitype.h).
 inline DXGI_FORMAT RealFormat(bool hdr10)

@@ -25,6 +25,29 @@ int main() {
         require(High(0,2)==.950f && Low(0,2)==.861f);
         require(High(1,2)==.925f && Low(1,2)==.838f);
         require(High(2,2)==.955f && Low(2,2)==.861f);
+        require(MainOnlyRuntime(310, 8) && !MainOnlyRuntime(310, 9));
+        require(!MainOnlyRuntime(310, 10) && !MainOnlyRuntime(311, 0) && !MainOnlyRuntime(0, 0));
+        const float mainHigh[] { .8f, .75f, .95f }, mainLow[] { .661f, .787f, .784f };
+        const float smallHigh[] { .950f, .925f, .955f }, smallLow[] { .861f, .838f, .861f };
+        for (unsigned requested : { 0u, 1u, 2u, 3u })
+            for (unsigned style = 0; style < 3; ++style)
+            {
+                const bool useSmallModel = requested != 1u;
+                require(EffectiveNrPreset(requested, false) == (useSmallModel ? 2u : 1u));
+                require(High(style, requested) == (useSmallModel ? smallHigh[style] : mainHigh[style]));
+                require(Low(style, requested) == (useSmallModel ? smallLow[style] : mainLow[style]));
+                // 310.8 ignores every requested preset and always runs Main.
+                require(EffectiveNrPreset(requested, true) == 1u);
+                require(High(style, requested, true) == mainHigh[style]);
+                require(Low(style, requested, true) == mainLow[style]);
+                for (float scale : { .5f, .65f, 1.0f })
+                {
+                    require(EffectiveBand(High(style, 0), scale, .75f, .6f) ==
+                            EffectiveBand(High(style, 2), scale, .75f, .6f));
+                    require(EffectiveBand(Low(style, 0), scale, .75f, .6f) ==
+                            EffectiveBand(Low(style, 2), scale, .75f, .6f));
+                }
+            }
         require(EffectiveBand(.8f,.5f,1,1)==.8f);
         require(EffectiveBand(.8f,1,1,1)==1 && EffectiveBand(.8f,.5f,.75f,0)==1);
         require(std::abs(EffectiveBand(.8f,.5f,.5f,.5f)-.95f)<1e-6f);
@@ -44,6 +67,20 @@ int main() {
             [](unsigned) -> DlssNr::InterPass::ScheduleGains { return { High(1),Low(1) }; });
         require(mainNatural.expectedMask == 3u); // .787 - .75*.75 > .15 before either next pass
         require(mainNatural.Block(2,3).low == Low(1)); // final low covers only the tail
+        const auto defaultNatural =
+            DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
+                                                [](unsigned) -> DlssNr::InterPass::ScheduleGains {
+                                                    return { High(1, 0), Low(1, 0) };
+                                                });
+        require(defaultNatural.expectedMask == 0u); // 310.9 Default runs Small, not Main
+        require(std::abs(defaultNatural.Block(0, 3).high - .925f * .925f * .925f) < 1e-6f);
+        require(std::abs(defaultNatural.Block(0, 3).low - .838f) < 1e-6f);
+        const auto oldDefaultNatural =
+            DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
+                                                [](unsigned) -> DlssNr::InterPass::ScheduleGains {
+                                                    return { High(1, 0, true), Low(1, 0, true) };
+                                                });
+        require(oldDefaultNatural.expectedMask == mainNatural.expectedMask);
         require(WorkingExtent(3840,.65f)==2496 && WorkingExtent(2160,.65f)==1404);
         require(WorkingExtent(3840,.59f)==2266 && WorkingExtent(2160,.59f)==1274);
         require(WorkingExtent(1919,1.0f)==1919 && WorkingExtent(1079,1.0f)==1079);
@@ -159,6 +196,7 @@ int main() {
             require(ShapingMode(cfg)==0);
         }
         require(cfg.DlssNrInterPassReconstruction.value==0 && cfg.DlssNrProxyDownscaleFilter.value==11);
-        std::cout<<"Superior policy PASS: fixed settings, A/K, all styles, depth reuse/normal PSO guards, native fallback and legacy preservation\n";
+        std::cout << "Superior policy PASS: Main/Small/Default/legacy presets on 310.8 and 310.9, mixed gain blocks "
+                     "and schedules, fixed settings, A/K, guides and PSO guards\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -14,15 +14,19 @@ constexpr uint32_t LowGroupHeight = 16u;
 inline bool Enabled(uint32_t transfer) { return transfer == Transfer; }
 template <class C> inline bool Enabled(const C& cfg) { return Enabled(cfg.DlssNrTransfer.value_or_default()); }
 inline int Preset(int preset) { return preset == 11 ? 11 : 1; } // K or A; no default/latest ambiguity.
-inline float High(unsigned style, unsigned nrPreset = 1u)
+// 310.8 has only Main. On 310.9, only A (1) selects Main; Default (0), B (2)
+// and the legacy saved value 3 select Small. This is independent of SR's A/K.
+inline bool MainOnlyRuntime(unsigned major, unsigned minor) { return major == 310u && minor < 9u; }
+inline unsigned EffectiveNrPreset(unsigned requested, bool mainOnly) { return mainOnly || requested == 1u ? 1u : 2u; }
+inline float High(unsigned style, unsigned nrPreset = 1u, bool mainOnly = false)
 {
     constexpr float main[] { .8f, .75f, .95f }, smallModel[] { .950f, .925f, .955f };
-    return (nrPreset == 2u ? smallModel : main)[std::min(style, 2u)];
+    return (EffectiveNrPreset(nrPreset, mainOnly) == 2u ? smallModel : main)[std::min(style, 2u)];
 }
-inline float Low(unsigned style, unsigned nrPreset = 1u)
+inline float Low(unsigned style, unsigned nrPreset = 1u, bool mainOnly = false)
 {
     constexpr float main[] { .661f, .787f, .784f }, smallModel[] { .861f, .838f, .861f };
-    return (nrPreset == 2u ? smallModel : main)[std::min(style, 2u)];
+    return (EffectiveNrPreset(nrPreset, mainOnly) == 2u ? smallModel : main)[std::min(style, 2u)];
 }
 
 inline float EffectiveBand(float p50, float scale, float structure, float intensity)

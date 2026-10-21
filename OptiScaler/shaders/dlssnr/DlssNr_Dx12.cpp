@@ -245,6 +245,7 @@ struct NrState
     // model itself on any GPU and never reads the capability block, so no NVIDIA NGX core is needed.
     bool isPort = false;
     void* feature = nullptr;
+    bool superiorMainOnlyGains = false; // actual selected NR runtime, cached at feature creation
     bool featurePendingSubmission = false;
     unsigned long long featureCreateEpoch = 0;
 
@@ -3462,6 +3463,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             return;
         }
 
+        version_t nrVersion {};
+        if (Util::GetFileVersion(snippet->wstring(), &nrVersion))
+            g_nr.superiorMainOnlyGains = DlssNr::SuperiorScaling::MainOnlyRuntime(nrVersion.major, nrVersion.minor);
+        else
+        {
+            g_nr.superiorMainOnlyGains = false;
+            LOG_WARN(
+                "Superior Scaling: NR runtime version unavailable; using 310.9 preset semantics for frequency gains.");
+        }
+
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
         const auto tuning = PassTuning(cfg, 0);
         // Not at the same moment as a game's vkCreateDevice (native/DriverInitGate.h)
@@ -4758,8 +4769,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     auto* superiorGeneration = superior ? superiorState.current.get() : nullptr;
-    const auto superiorSchedule = superior ? DlssNr::SuperiorScaling::Schedule(cfg, effectivePasses, workScale)
-                                           : DlssNr::InterPass::GainSchedule {};
+    const auto superiorSchedule =
+        superior ? DlssNr::SuperiorScaling::Schedule(cfg, effectivePasses, workScale, g_nr.superiorMainOnlyGains)
+                 : DlssNr::InterPass::GainSchedule {};
     unsigned superiorCovered = 0, superiorCompleted = 0;
     bool superiorBoundaryFailed = false;
     uint32_t superiorMask = 0, superiorClampSlots[4] { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
@@ -5578,7 +5590,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             auto& g = *superiorGeneration;
             auto* residual = SuperiorRun::Stabilize(g, *this, cmdList, ordinaryProxy, ordinaryAnswer, motionIn, guides,
                                                     frame, superiorReset, g_nr.heldActive);
-            const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted, workScale);
+            const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted, workScale,
+                                                                   g_nr.superiorMainOnlyGains);
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
                             ? SuperiorRun::FinalLow(g, *this, cmdList, ordinaryProxy, residual)
                             : nullptr;
@@ -5590,9 +5603,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             composed = residual && lowReady && pso &&
                        DispatchPass(cmdList, resolveParams, ordinaryProxy, residual, resolveOriginal, motionIn,
                                     exposureTex, resolveTarget, nullptr, low, pso);
-            SuperiorRun::Say(
-                composed ? "Area, cached inter-pass and temporal enlargement; janblade input/exposure/composition."
-                         : "Superior reconstruction failed; keeping the game frame.");
+            SuperiorRun::Say(composed ? "" : "Superior reconstruction failed; keeping the game frame.");
         }
         else
             composed = DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal, motionIn,

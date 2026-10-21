@@ -3405,7 +3405,6 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                    "NR pass remain configurable. At 100% it runs ordinary NR without enlargement or private DLSS.");
         if (DlssNr::SuperiorScaling::Enabled(*config))
         {
-            ImGui::TextDisabled("Downsample: Area (Superior Scaling)");
             static const char* presets[] = { "A - higher performance", "K - slower, more stable NR in motion" };
             int preset =
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;

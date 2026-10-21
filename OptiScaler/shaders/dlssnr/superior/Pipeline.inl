@@ -70,7 +70,8 @@ void Say(const char* text)
     if (s.status == text)
         return;
     s.status = text;
-    LOG_INFO("Superior Scaling: {}", text);
+    if (*text)
+        LOG_INFO("Superior Scaling: {}", text);
 }
 
 void Record(ID3D12GraphicsCommandList* cmd)
@@ -229,7 +230,7 @@ Constants Shaping(const Config& cfg, unsigned first, unsigned completed, float s
     c.ResidualBlend = .015f;
     c.ResidualScale = 3.0f;
     c.ResidualConfidenceSensitivity = 1.0f;
-    const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, first, completed, scale);
+    const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, first, completed, scale, g_nr.superiorMainOnlyGains);
     c.MvScaleX = gains.high;
     c.MvScaleY = gains.low;
     c.GuideWidth = 1u;

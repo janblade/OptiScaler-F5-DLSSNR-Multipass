@@ -17,6 +17,11 @@ The private DLSS feature still forces HDR + Auto Exposure and uses unit exposure
 
 The UI adds **DLSS to temporally stabilize NR**: A (higher performance) and K (slower, more stable in motion).
 NR model A/B is independent. Model resolution and pass settings stay configurable.
+Frequency gains follow the NR runtime's effective model: on 310.9, A uses Main and Default/B (including legacy saved 3)
+use Small. On 310.8, all presets use Main because that runtime has no Small model. The selected runtime's version is read
+once at feature creation, not per frame. If version metadata is absent, the 310.9 mapping is used with a warning in the log.
+Passes 2/3 use their explicit preset when set, including Default; otherwise they inherit pass 1. Passes 4+ inherit pass 1.
+The same mapping feeds both inter-pass scheduling/shaping and final block shaping. Informational Area/success banners are hidden.
 At 100%, janblade's original multipass boundaries remain in use and enlargement/private DLSS are inactive; native guide units are still corrected from their actual valid/reference dimensions.
 Below 100%, depth and MV are matched to the working grid with independent regions/offsets; the private DLSS path reuses current depth.
 After frames skipped by the edit cache, private DLSS resets its history on the next refresh.

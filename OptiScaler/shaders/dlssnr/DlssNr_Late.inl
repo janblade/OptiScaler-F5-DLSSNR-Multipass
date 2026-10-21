@@ -23,7 +23,7 @@ std::string status = "Waiting for a finished picture.";
 bool reset = true;
 // Native input's own history reset (ApplyNativeInput, ApplyVirtualUpscalerInput), apart from `reset` above: the swap chain
 // path cancels, and so sets `reset`, on every present while Finished Picture is off, which is how Optical F5Low's
-// "NR + upscaler & frame generation" mode runs. Shared, it reset NR's history on every frame there: NR's edits flickered.
+// "NR + frame generation" mode runs. Shared, it reset NR's history on every frame there: NR's edits flickered.
 bool nativeReset = true;
 
 // Native input's HDR10 scratch pair (no slot to keep it in): NR's linear scRGB picture and the PQ result in the picture's
@@ -179,6 +179,7 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
             Say("Could not prepare the finished-picture option.");
             return nullptr;
         }
+        slot.commands->SetName(L"DLSS-NR finished picture"); // named for the D3D12 device-removed report
     }
     return next;
 }
@@ -643,7 +644,7 @@ DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FOR
 }
 
 // The body of ApplyNativeInput and ApplyVirtualUpscalerInput. `fromVirtualUpscaler` skips the Finished Picture setting,
-// which is about NR Only mode, not the picture (NR + upscaler & frame generation keeps it off, for the game's own upscaler
+// which is about NR Only mode, not the picture (NR + frame generation keeps it off, for the game's own upscaler
 // calls). Neither refuses while frame generation has replaced a D3D11 or Vulkan game's swap chain: both then run from that
 // swap chain's present on the paired D3D12 queue, whose picture is the one presented. (The first NR Only read the game's
 // D3D12 swap chain at present, which under that interop is frame generation's, and so refused it.)

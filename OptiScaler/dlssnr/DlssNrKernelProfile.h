@@ -28,7 +28,7 @@ namespace DlssNrKernelProfile
 {
 constexpr const char* kGroups[] = { "pre_block", "post_block", "swin_1h_32", "swin_2h_64", "swin_4h_128", "swin_8h_256",
                                     "split_swin_16h", "vit_1d", "cg2r_post_process", "cg2r_copy", "dec_input_upsample",
-                                    "cb_clear", "other" };
+                                    "cb_clear", "vit_copy", "other" };
 constexpr unsigned kGroupCount = (unsigned) (sizeof(kGroups) / sizeof(kGroups[0]));
 
 struct Info
@@ -46,7 +46,7 @@ inline Info Classify(const char* name)
 
     struct Rule { const char* part; unsigned char group; };
     // pre/post block names also contain swin_1h_32, and split_swin names contain swin, so the order matters
-    static const Rule rules[] = { { "pre_block", 0 },   { "post_block", 1 },         { "split_swin", 6 },
+    static const Rule rules[] = { { "nr_vit_copy", 12 }, { "pre_block", 0 },    { "post_block", 1 },        { "split_swin", 6 },
                                   { "cc_vit_1d", 7 },   { "cg2r_post_process", 8 }, { "cg2r_copy", 9 },
                                   { "dec_input_upsample", 10 }, { "cc_cb_clear", 11 }, { "swin_1h_32", 2 },
                                   { "swin_2h_64", 3 },  { "swin_4h_128", 4 },      { "swin_8h_256", 5 } };

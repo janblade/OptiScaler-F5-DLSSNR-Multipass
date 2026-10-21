@@ -129,9 +129,15 @@ class Selector
   public:
     Pick Update(const std::vector<Candidate>& frame, uint32_t pictureWidth, uint32_t pictureHeight)
     {
-        // Very little activity: not a rendered frame (a second present, an emulator presenting between frames).
+        // Very little activity: not a rendered frame (a second present, an emulator presenting between frames). The pick
+        // stays, but a run of them counts like frames where nothing qualifies: a 2D menu or map that draws one fullscreen
+        // pass into the scene's buffer every frame would otherwise keep the last pick for good, and that buffer's stale
+        // content would go on as depth (Mad Max). A real frame in between clears the count.
         if (frame.size() == 1 && frame[0].drawcalls <= _rules.quietDrawcalls)
+        {
+            HoldOrDrop();
             return _pick;
+        }
 
         ++_frame;
 
@@ -183,15 +189,7 @@ class Selector
 
         if (chosen == nullptr)
         {
-            // Nothing qualifies this frame: a pick that was there stays for a while, so a buffer that drops out for a frame
-            // or two (a menu, a cut) does not make the answer flicker.
-            if (_pick.valid && _misses < _rules.holdFrames)
-                ++_misses;
-            else
-            {
-                _pick = Pick {};
-                _misses = 0;
-            }
+            HoldOrDrop();
         }
         else
         {
@@ -216,6 +214,19 @@ class Selector
     Rules& Settings() { return _rules; }
 
   private:
+    // Nothing qualifies this frame: a pick that was there stays for a while, so a buffer that drops out for a frame or two
+    // (a menu, a cut) does not make the answer flicker.
+    void HoldOrDrop()
+    {
+        if (_pick.valid && _misses < _rules.holdFrames)
+            ++_misses;
+        else
+        {
+            _pick = Pick {};
+            _misses = 0;
+        }
+    }
+
     Rules _rules;
     Pick _pick;
     uint64_t _frame = 0;

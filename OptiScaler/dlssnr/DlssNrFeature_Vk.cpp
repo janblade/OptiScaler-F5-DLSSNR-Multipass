@@ -22,6 +22,7 @@
 #include <shaders/dlssnr/DlssNr_ExposureMeter.h>
 #include <shaders/dlssnr/DlssNr_ExposureCalibrate_Run.h>
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/DlssNrVitReuse.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 #include <dlssnr/DlssNr_VkExtensions.h>
 #include <dlssnr/DlssNrDetailReuseHost.h>
@@ -161,9 +162,11 @@ struct VkState
     OwnedImage lutScratch;
     bool lutScratchFailed = false;
 
-    // Experimental input style (DlssNrInputStyle): the model's picture restyled, standing in for the model input and the
-    // resolve's proxy. Made on first use at the model picture's size; freed with the other sized images.
+    // Experimental input styles (DlssNr_InputStyles.h): the model's picture restyled, standing in for the model input and
+    // the resolve's proxy; styledB is the second image they alternate with when more than one is on. Made on first use at
+    // the model picture's size; freed with the other sized images.
     OwnedImage styled;
+    OwnedImage styledB;
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -1270,6 +1273,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         DestroyImage(g_vk.lutScratch); // recreated at the new size when a LutFile still wants it
         g_vk.lutScratchFailed = false;
         DestroyImage(g_vk.styled); // recreated at the model picture's size when an input style still wants it
+        DestroyImage(g_vk.styledB);
 
         const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
 
@@ -2165,78 +2169,107 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         mvY *= (float) workHeight / height;
     }
 
-    // Experimental input style (DlssNrInputStyle), as on D3D12: restyle the model's picture once it is final (after the
-    // shrink and the edge packing). It then stands in for the model input and the resolve's proxy (ordinaryProxy below,
-    // and through the edge unpacking), so Composed hands back only what the model painted on top of it. Skipped above
-    // 100% model resolution, where the resolve compares against the full proxy instead.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h), as on D3D12: restyle the model's
+    // picture once it is final (after the shrink and the edge packing), each style that is on in turn, each on the one
+    // before's result, alternating between two images. The last result stands in for the model input and the resolve's
+    // proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back only what the model painted on
+    // top of it. Skipped above 100% model resolution, where the resolve compares against the full proxy instead.
     bool inputRestyled = false;
     {
-        const uint32_t style = cfg.DlssNrInputStyle.value_or_default();
-        const float strength = std::min(cfg.DlssNrInputStyleStrength.value_or_default(), style == 2u ? 3.0f : 1.0f);
-        const bool facesOnly = cfg.DlssNrInputStyleFacesOnly.value_or_default();
-        const bool wanted = style >= 1u && style <= 3u && strength > 0.0f;
-        const char* skip = wanted && workScale > 1.0f ? "model resolution above 100%" : nullptr;
-        bool restyled = false;
+        const DlssNrInput::Styles styles = cfg.DlssNrInputStyles();
+        DlssNrInput::Pass passes[2];
+        const int passCount = DlssNrInput::Passes(styles, passes);
 
-        if (wanted && skip == nullptr)
+        const char* skip = passCount == 0 ? nullptr : workScale > 1.0f ? "model resolution above 100%" : nullptr;
+        int ran = 0;
+
+        if (passCount > 0 && skip == nullptr)
         {
-            if (g_vk.styled.Valid() && (g_vk.styled.width != modelInput->width ||
-                                        g_vk.styled.height != modelInput->height ||
-                                        g_vk.styled.format != modelInput->format))
+            OwnedImage* targets[2] = { &g_vk.styled, &g_vk.styledB };
+            const int targetCount = passCount > 1 ? 2 : 1;
+            bool waited = false;
+
+            for (int t = 0; t < targetCount; ++t)
             {
-                // Earlier frames may still read it (a switch of Compress screen edges changes the model picture's size)
-                vkDeviceWaitIdle(device);
-                DestroyImage(g_vk.styled);
+                OwnedImage& target = *targets[t];
+
+                if (target.Valid() && (target.width != modelInput->width || target.height != modelInput->height ||
+                                       target.format != modelInput->format))
+                {
+                    // Earlier frames may still read it (a switch of Compress screen edges changes the model picture's
+                    // size); one wait covers both images
+                    if (!waited)
+                        vkDeviceWaitIdle(device);
+
+                    waited = true;
+                    DestroyImage(target);
+                }
+
+                if (!target.Valid())
+                    CreateImage(target, modelInput->width, modelInput->height, modelInput->format, true);
             }
 
-            if (!g_vk.styled.Valid())
-                CreateImage(g_vk.styled, modelInput->width, modelInput->height, modelInput->format, true);
+            OwnedImage* source = modelInput;
 
-            if (g_vk.styled.Valid())
+            for (int k = 0; k < passCount; ++k)
             {
-                DlssNrConstants paint = encode;
-                paint.Mode = StyleMode(style);
-                paint.Width = modelInput->width;
-                paint.Height = modelInput->height;
-                paint.TransferStrength = strength;
-                paint.SkinProtection = facesOnly ? 1u : 0u; // the style passes read it as "faces only"
+                OwnedImage& target = *targets[k % 2];
 
-                Transition(cmdBuffer, *modelInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                Transition(cmdBuffer, g_vk.styled, VK_IMAGE_LAYOUT_GENERAL);
-
-                if (g_vk.pass->Dispatch(cmdBuffer, paint, modelInput->width, modelInput->height, modelInput->view,
-                                        VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, g_vk.styled.view, VK_NULL_HANDLE,
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+                if (!target.Valid())
                 {
-                    modelInput = &g_vk.styled;
-                    restyled = true;
-                    inputRestyled = true;
+                    skip = "its image could not be created";
+                    break;
                 }
-                else
+
+                DlssNrConstants paint = encode;
+                paint.Mode = StyleMode(passes[k].style);
+                paint.Width = source->width;
+                paint.Height = source->height;
+                paint.TransferStrength = passes[k].strength;
+                paint.SkinProtection = styles.facesOnly ? 1u : 0u; // the style passes read it as "faces only"
+
+                Transition(cmdBuffer, *source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                Transition(cmdBuffer, target, VK_IMAGE_LAYOUT_GENERAL);
+
+                // A failed dispatch: the model gets the picture up to the last style that ran
+                if (!g_vk.pass->Dispatch(cmdBuffer, paint, source->width, source->height, source->view, VK_NULL_HANDLE,
+                                         VK_NULL_HANDLE, VK_NULL_HANDLE, target.view, VK_NULL_HANDLE,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
                 {
                     skip = "its dispatch failed";
+                    break;
                 }
+
+                source = &target;
+                ++ran;
             }
-            else
+
+            if (ran > 0)
             {
-                skip = "its image could not be created";
+                modelInput = source;
+                inputRestyled = true;
             }
         }
 
         // Said when it changes, so a log shows each A/B toggle.
-        static int said = -1;
-        const int state = restyled ? (int) style + 10 + (facesOnly ? 10 : 0) : (skip != nullptr ? 2 : 0);
+        static std::string said = "-";
+        std::string state;
+
+        for (int k = 0; k < ran; ++k)
+            state += std::format("{}{} {:.2f}", k == 0 ? "" : ", ", StyleName(passes[k].style), passes[k].strength);
+
+        if (skip != nullptr)
+            state += std::format("{}skipped ({})", ran > 0 ? "; then " : "", skip);
 
         if (state != said)
         {
             said = state;
 
-            if (restyled)
-                LOG_INFO("DLSS-NR Vulkan input style: {} on (strength {:.2f}, {}x{}{}{})", StyleName(style), strength,
-                         modelInput->width, modelInput->height, facesOnly ? ", faces only" : "",
-                         spatial ? ", edge-compressed picture" : "");
+            if (ran > 0)
+                LOG_INFO("DLSS-NR Vulkan input style: {} ({}x{}{}{})", state, modelInput->width, modelInput->height,
+                         styles.facesOnly ? ", faces only" : "", spatial ? ", edge-compressed picture" : "");
             else if (skip != nullptr)
-                LOG_INFO("DLSS-NR Vulkan input style: skipped ({})", skip);
+                LOG_INFO("DLSS-NR Vulkan input style: {}", state);
             else
                 LOG_INFO("DLSS-NR Vulkan input style: off");
         }
@@ -2312,13 +2345,18 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
         const auto tuning = Profiles::PassTuning(cfg, pass);
         void* const passFeature = pass == 0 ? g_vk.feature : g_vk.laterFeatures[pass];
-        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp), so the kernel set shows. Reuse
-        // bottleneck is forced off on Vulkan (every = 1 on both kernel sets, whatever the ini says): with the ViT run skipped, its kept result was
-        // overwritten between frames there (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel
-        // was kept), by something outside the model's own launches. D3D12 keeps it. No command list: the kernel
-        // profiler is D3D12's.
-        DlssNrNative::BeginEvaluate(passFeature, passReset, 1u, 1u, (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull),
-                                    nullptr, false);
+        // The evaluate bracket (DlssNrVitReuse.h, the hooks in DlssNrNative_Vk.cpp). Reuse bottleneck runs in copy mode
+        // on both kernel sets here: with the ViT run skipped, its kept result was overwritten between frames on Vulkan
+        // (RDR2: dark rooms flashed, at 1 pass too, also when the run's last kernel was kept) by something outside the
+        // model's own launches, so the decoder gets our own copy, restored right before it reads it. While detail reuse
+        // runs the bottleneck is computed every time (as on D3D12). No command list: the kernel profiler is D3D12's.
+        const bool vitEveryFrame = reusePlan.active;
+        DlssNrNative::VkEvaluateDevice(g_vk.device, g_vk.physicalDevice);
+        DlssNrNative::BeginEvaluate(passFeature, passReset,
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
+                                    vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
+                                    (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull), nullptr, false,
+                                    DlssNrVitReuse::kCopyPlain | DlssNrVitReuse::kCopyFp8);
         evaluated = g_vk.evaluate(
             (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
             &input->ngx, modelDepth, spatial ? modelMotion : reusePlan.motion, &answer->ngx, modelWidth, modelHeight,
@@ -2330,8 +2368,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, mvX, mvY);
         if (DlssNrNative::EndEvaluate(nullptr))
-            LOG_WARN("DLSS-NR Vulkan: the model's kernel launches were not in the expected order; Reuse bottleneck "
-                     "is off for this session");
+            LOG_WARN("DLSS-NR Vulkan: Reuse bottleneck is {}", DlssNrNative::VitStatus());
         if (evaluated != 1)
             break;
         if (pass + 1 < runPasses)
@@ -2718,6 +2755,7 @@ void ReleaseNrObjects()
     DestroyImage(g_vk.lutScratch);
     g_vk.lutScratchFailed = false;
     DestroyImage(g_vk.styled);
+    DestroyImage(g_vk.styledB);
     g_vk.autoExposureAdapter.Invalidate();
     DestroyMeterReadback();
 
@@ -2773,6 +2811,7 @@ void ShutdownVk(bool deviceAlive)
         g_vk.lutScratch = OwnedImage {};
         g_vk.lutScratchFailed = false;
         g_vk.styled = OwnedImage {};
+        g_vk.styledB = OwnedImage {};
         g_vk.autoExposureAdapter.Invalidate();
         CalibrationVkShutdown(false);
         DetailReuseVk::Release(false);
@@ -2878,8 +2917,10 @@ void ShutdownVkForDevice(VkDevice device, const char* why)
         return;
 
     LOG_INFO("DLSS-NR Vulkan: {}; releasing the model and NGX first", why);
+    const VkDevice destroyed = g_vk.device;
     ShutdownVk(true);
-    // The model's kernels go with the device.
+    // Reuse bottleneck's own copy buffers and kernel are ours to destroy while the device is idle; the model's kernels go with the device.
+    DlssNrNative::VkDeviceDestroying(destroyed);
     DlssNrNative::VkDeviceLost();
 }
 

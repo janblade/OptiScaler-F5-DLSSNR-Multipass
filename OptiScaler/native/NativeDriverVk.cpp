@@ -107,7 +107,7 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
         if (!producing)
             return;
 
-        // "NR + upscaler & frame generation" presents through OptiScaler's frame generation, which is D3D12's: on a
+        // "NR + frame generation" presents through OptiScaler's frame generation, which is D3D12's: on a
         // Vulkan swapchain made without the bridge the mode stands aside until the game makes a new one (its present is
         // told the swapchain is out of date, hooks/Vulkan_Hooks.cpp).
         g_frameGenerationMode = Config::Instance()->DlssNrNativeUpscaler.value_or_default();

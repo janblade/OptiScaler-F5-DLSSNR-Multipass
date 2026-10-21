@@ -115,6 +115,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
         }
 
         _producer = std::move(fresh);
+        ApplyMotionProfile();
         LOG_INFO("{}: optical flow and trust mask ready{} (in {:.1f} ms, on the present thread)", _tag, _readyNote,
                  Util::MillisecondsNow() - initStart);
     }
@@ -296,8 +297,50 @@ void NativeDriver::DrawStatus()
     }
 }
 
+void NativeDriver::ApplyMotionProfile()
+{
+    if (!_producer)
+        return;
+
+    auto config = Config::Instance();
+    const auto profile = config->DlssNrNativeMotionProfile.value_or_default();
+    const std::string custom = config->DlssNrNativeMotionProfileCustom.value_or_default();
+    native::motion::ApplyProfile(profile, custom, _producer->Flow()->Tuning(), _producer->Trust()->Tuning());
+    LOG_INFO("{}: motion profile {}", _tag, native::motion::ProfileIniText(profile));
+}
+
 void NativeDriver::DrawFlowTuning()
 {
+    using native::motion::Profile;
+    auto config = Config::Instance();
+
+    // The profile can be picked before a mode runs: it is applied when the motion estimate starts. One not offered yet
+    // (an ini naming it) runs as Default, and the combo says so.
+    const Profile current = config->DlssNrNativeMotionProfile.value_or_default();
+    const Profile shown = native::motion::ProfileOffered(current) ? current : Profile::Default;
+    ImGui::SetNextItemWidth(220.0f);
+
+    if (ImGui::BeginCombo("Motion profile##motionprofile", native::motion::ProfileMenuName(shown)))
+    {
+        for (const Profile profile : native::motion::kAllProfiles)
+        {
+            if (!native::motion::ProfileOffered(profile))
+                continue;
+
+            if (ImGui::Selectable(native::motion::ProfileMenuName(profile), profile == shown) && profile != current)
+            {
+                config->DlssNrNativeMotionProfile = profile;
+                ApplyMotionProfile();
+            }
+        }
+
+        ImGui::EndCombo();
+    }
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Settings of the motion estimate for a kind of game. Default suits most games. "
+                                "Moving a control under Flow tuning saves your values as Custom, kept for this game.");
+
     // Always shown and open on Optical F5Low's page; the settings live in the running motion estimate, so there is
     // nothing to tune until a mode runs.
     if (!ImGui::TreeNodeEx("Flow tuning (to compare, applies at once)##flowtuning", ImGuiTreeNodeFlags_DefaultOpen))
@@ -328,16 +371,21 @@ void NativeDriver::DrawFlowTuning()
         ImGui::TreePop();
     }
     auto& tune = _producer->Flow()->Tuning();
+    auto& guides = _producer->Trust()->Tuning();
+    // What the controls below start from, to tell when one of them moved
+    const std::string before = native::motion::WriteKnobs(tune, guides);
+
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
+    // AlwaysClamp: a typed value stays in the knob's range, so Custom reads back what ran
+    constexpr ImGuiSliderFlags clampTyped = ImGuiSliderFlags_AlwaysClamp;
+    ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4, "%d", clampTyped);
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3);
+    ImGui::SliderInt("Search radius##flowsearch", &tune.radius, 1, 3, "%d", clampTyped);
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9);
+    ImGui::SliderInt("Coarse cells as candidates##flowcells", &tune.coarseCells, 1, 9, "%d", clampTyped);
     ImGui::Checkbox("Last frame's flow as a candidate##flowhistory", &tune.useHistory);
     ImGui::Checkbox("Match within a surface (uses depth)##flowdepth", &tune.depthMatching);
 
-    auto& guides = _producer->Trust()->Tuning();
     ImGui::Checkbox("Sharp motion at outlines (uses depth)##flowguidesurface", &guides.guideSurface);
 
     if (ImGui::IsItemHovered())
@@ -359,16 +407,18 @@ void NativeDriver::DrawFlowTuning()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "Gives flat areas (walls, sky) the whole picture's motion. Off: they get none.");
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderInt("Frames unchanged before it counts as still (0 = off)##flowstill", &tune.stillFrames, 0, 60);
+    ImGui::SliderInt("Frames unchanged before it counts as still (0 = off)##flowstill", &tune.stillFrames, 0, 60, "%d",
+                     clampTyped);
 
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", "After this many unchanged frames, an area (a HUD panel) stays still while the "
                                 "picture pans. Higher: waits longer. 0: off.");
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderFloat("Still: largest change allowed##flowstilleps", &tune.stillEpsilon, 0.0005f, 0.05f, "%.4f",
-                       ImGuiSliderFlags_Logarithmic);
+                       ImGuiSliderFlags_Logarithmic | clampTyped);
     ImGui::SetNextItemWidth(160.0f);
-    ImGui::SliderFloat("Still: what the camera must win by##flowstillmargin", &tune.stillMargin, 0.0f, 0.2f, "%.3f");
+    ImGui::SliderFloat("Still: what the camera must win by##flowstillmargin", &tune.stillMargin, 0.0f, 0.2f, "%.3f",
+                       clampTyped);
     ImGui::Checkbox("Cheaper sub-pixel refinement##flowinverse", &tune.inverseRefinement);
 
     if (ImGui::IsItemHovered())
@@ -406,7 +456,20 @@ void NativeDriver::DrawFlowTuning()
     ImGui::SameLine();
 
     if (ImGui::Button("Defaults##flowdefaults"))
-        tune = OpticalFlowDx12::Settings {};
+        native::motion::ApplyProfile(Profile::Default, {}, tune, guides);
+
+    // A control moved: the values are the Custom profile now (saved with the ini), or Default again when they are its
+    // values
+    if (const std::string after = native::motion::WriteKnobs(tune, guides); after != before)
+    {
+        OpticalFlowDx12::Settings flowDefaults;
+        TrustMaskDx12::Settings trustDefaults;
+        const bool isDefault = after == native::motion::WriteKnobs(flowDefaults, trustDefaults);
+        config->DlssNrNativeMotionProfile = isDefault ? Profile::Default : Profile::Custom;
+
+        if (!isDefault)
+            config->DlssNrNativeMotionProfileCustom = after;
+    }
 
     ImGui::TreePop();
 }

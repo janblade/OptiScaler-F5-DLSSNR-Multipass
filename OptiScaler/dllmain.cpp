@@ -31,6 +31,7 @@
 #include <hooks/Dxgi_Hooks.h>
 #include <hooks/D3D11_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
+#include <hooks/FG_Hooks.h>
 #include <hooks/Vulkan_Hooks.h>
 #include <hooks/Ntdll_Hooks.h>
 #include <hooks/Kernel_Hooks.h>
@@ -1327,9 +1328,6 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::Kcd2DlssgHdr10)
         stringQuirks.push_back("KCD2 native HDR10 for DLSSG");
 
-    if (quirks & GameQuirk::XeFGBridgeResizeAsCreated)
-        stringQuirks.push_back("XeFG bridge resizes as created");
-
     if (quirks & GameQuirk::REFrameworkCompat)
         stringQuirks.push_back("REFramework compatibility (XeFG)");
 
@@ -1870,7 +1868,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
         PrepareLogger();
-        InstallCrashHandler();
+
+        // Off by default: a crash then leaves no file behind, and the game's own crash handling is untouched
+        if (Config::Instance()->CrashDump.value_or_default())
+            InstallCrashHandler();
 
         spdlog::warn("{0} loaded", VER_PRODUCT_NAME);
         spdlog::warn("---------------------------------");
@@ -2261,6 +2262,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // unhookCrypt32();
         // unhookAdvapi32();
         // DetachHooks();
+
+        FGHooks::ReleaseRestyleHook();
 
         if (skModule != nullptr)
             NtdllProxy::FreeLibrary_Ldr(skModule);

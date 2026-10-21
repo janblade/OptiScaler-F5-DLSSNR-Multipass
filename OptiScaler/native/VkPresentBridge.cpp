@@ -151,7 +151,7 @@ bool FrameGenerationChosen()
     return state.activeFgInput == FGInput::Upscaler && state.activeFgOutput != FGOutput::NoFG;
 }
 
-// OptiFG's Upscaler input is fed by Optical F5Low's virtual upscaler ("NR + upscaler & frame generation"), or by the
+// OptiFG's Upscaler input is fed by Optical F5Low's virtual upscaler ("NR + frame generation"), or by the
 // game's own upscaler call through a Vulkan-on-D3D12 backend ("FG only (game's upscaler)",
 // upscalers/IFeature_VkwDx12.cpp): without one of the two there is nothing for it to read.
 bool ModeOn()
@@ -188,7 +188,7 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
 
     if (!ModeOn())
     {
-        why = "frame generation is chosen, but neither \"NR + upscaler & frame generation\" nor \"FG only\" is on: "
+        why = "frame generation is chosen, but neither \"NR + frame generation\" nor \"FG only\" is on: "
               "the game presents as it is";
         return false;
     }
@@ -1072,7 +1072,7 @@ bool WantsNewSwapchain(VkSwapchainKHR swapchain)
         return false;
 
     g_newSwapchainAsked = true;
-    LOG_INFO("Vulkan bridge: \"NR + upscaler & frame generation\" was switched on after the game made its swapchain: "
+    LOG_INFO("Vulkan bridge: \"NR + frame generation\" was switched on after the game made its swapchain: "
              "the game is told its swapchain is out of date, so it makes a new one for the bridge");
     return true;
 }

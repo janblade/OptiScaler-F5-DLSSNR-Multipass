@@ -3395,12 +3395,15 @@ void Vulkan_wDx12::hk_vkCmdCuLaunchKernelNVX(VkCommandBuffer commandBuffer, cons
     LOG_DEBUG("cmdBuffer: {:X}", (size_t) cmdBuffer);
 #endif
 
-    // Reuse bottleneck drops the ViT run's launches of DLSS-NR's own evaluations (and records a barrier at the gap,
-    // into the buffer the launch goes to); every other launch goes out as before.
-    if (pLaunchInfo != nullptr && !DlssNrNative::VkLaunch(cmdBuffer, (uint64_t) pLaunchInfo->function))
+    // Reuse bottleneck drops the ViT run's launches of DLSS-NR's own evaluations (and records a barrier at the gap and
+    // its copies, into the buffer the launch goes to); every other launch goes out as before.
+    if (pLaunchInfo != nullptr && !DlssNrNative::VkLaunch(cmdBuffer, pLaunchInfo))
         return;
 
     o_vkCmdCuLaunchKernelNVX(cmdBuffer, pLaunchInfo);
+
+    if (pLaunchInfo != nullptr)
+        DlssNrNative::VkLaunched(cmdBuffer);
 }
 
 void Vulkan_wDx12::hk_vkCmdDrawIndirectCountAMD(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,

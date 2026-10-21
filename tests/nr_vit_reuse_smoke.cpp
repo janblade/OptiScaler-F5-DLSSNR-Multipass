@@ -52,6 +52,39 @@ static bool Rebuilt(const Result& r) // the plain set: the ViT range dropped exc
     return r.dropped == std::vector<bool> { false, true, true, true, true, false, false };
 }
 
+// Copy mode (plain set, D3D12): the launches dropped and the copy asked for after each Drop, with `sig` on the run's first launch.
+struct CopyResult
+{
+    std::vector<bool> dropped;
+    std::vector<Copy> copies;
+    bool wellFormed = true;
+};
+
+static CopyResult EvalCopy(Filter& f, const void* feature, bool reset, unsigned everyPlain, long long slot = -1, uint64_t sig = 7,
+                           KernelSet set = KernelSet::Plain, const Seq& seq = kEval, unsigned copySets = kCopyPlain)
+{
+    CopyResult r;
+    f.Begin(feature, reset, 2, slot, everyPlain, copySets);
+    for (Role role : seq)
+    {
+        r.dropped.push_back(f.Drop(role, set, role == Role::Start ? sig : 0));
+        f.TakeGap();
+        r.copies.push_back(f.TakeCopy());
+    }
+    r.wellFormed = f.End();
+    return r;
+}
+
+static bool CopyAt(const CopyResult& r, Copy copy, size_t at) // exactly one copy asked for, after launch `at`
+{
+    for (size_t i = 0; i < r.copies.size(); ++i)
+        if (r.copies[i] != (i == at ? copy : Copy::None))
+            return false;
+    return true;
+}
+
+static bool NoCopy(const CopyResult& r) { return CopyAt(r, Copy::None, 0); }
+
 static bool Kept(const Result& r)
 {
     for (bool d : r.dropped)
@@ -409,6 +442,306 @@ int main()
         std::thread([&] { other = f.Evaluating() || f.Drop(Role::Start); }).join();
         CHECK(!other);
         f.End();
+    }
+
+    { // copy mode, plain set: a computed run is kept and asks for a save after its last kernel; a skipped run drops its last kernel
+      // too and asks for a restore in its place
+        Filter f;
+        const std::vector<bool> all = { false, false, false, false, false, false, false };
+        const std::vector<bool> run = { false, true, true, true, true, true, false };
+        auto c = EvalCopy(f, &a, false, 2);
+        CHECK(c.dropped == all && CopyAt(c, Copy::Save, 5) && c.wellFormed);
+        c = EvalCopy(f, &a, false, 2);
+        CHECK(c.dropped == run && CopyAt(c, Copy::Restore, 5) && c.wellFormed);
+        c = EvalCopy(f, &a, false, 2);
+        CHECK(c.dropped == all && CopyAt(c, Copy::Save, 5));
+        CHECK(f.Restored() == 1 && f.Reused() == 1 && f.Computed() == 2);
+    }
+
+    { // copy mode: a different first launch (moved or resized network) is computed again, never restored
+        Filter f;
+        EvalCopy(f, &a, false, 2, -1, 7);
+        auto c = EvalCopy(f, &a, false, 2, -1, 8);
+        CHECK(!c.dropped[1] && CopyAt(c, Copy::Save, 5));
+        c = EvalCopy(f, &a, false, 2, -1, 8);
+        CHECK(c.dropped[1] && c.dropped[5] && CopyAt(c, Copy::Restore, 5));
+    }
+
+    { // copy mode: a reset computes and saves again; each feature (pass) has its own saved copy
+        Filter f;
+        EvalCopy(f, &a, false, 2);
+        auto c = EvalCopy(f, &a, true, 2);
+        CHECK(!c.dropped[1] && CopyAt(c, Copy::Save, 5));
+        c = EvalCopy(f, &b, false, 2);
+        CHECK(!c.dropped[1] && CopyAt(c, Copy::Save, 5)); // b never saved
+        CHECK(CopyAt(EvalCopy(f, &a, false, 2), Copy::Restore, 5));
+        CHECK(CopyAt(EvalCopy(f, &b, false, 2), Copy::Restore, 5));
+    }
+
+    { // copy mode costs nothing when the plain set's Reuse is off, and never touches the fp8 set
+        Filter f;
+        for (int i = 0; i < 3; ++i)
+        {
+            auto c = EvalCopy(f, &a, false, 1);
+            CHECK(NoCopy(c) && !c.dropped[1]);
+        }
+        Filter g;
+        auto c = EvalCopy(g, &a, false, 2, -1, 7, KernelSet::Fp8);
+        CHECK(NoCopy(c) && !c.dropped[1]);
+        g.Begin(&a, false, 2, -1, 2, true); // fp8 rate 2: the whole run dropped, no restore (its 2-D output keeps its memory)
+        std::vector<bool> d;
+        std::vector<Copy> copies;
+        for (Role role : kEval)
+        {
+            d.push_back(g.Drop(role, KernelSet::Fp8, 7));
+            g.TakeGap();
+            copies.push_back(g.TakeCopy());
+        }
+        CHECK(g.End());
+        CHECK((d == std::vector<bool> { false, true, true, true, true, true, false }));
+        CHECK(std::all_of(copies.begin(), copies.end(), [](Copy x) { return x == Copy::None; }));
+    }
+
+    { // without copy mode the plain set still keeps the run's last kernel (the 310.8 planner-patched DLLs, and Vulkan)
+        Filter f;
+        Eval(f, &a, false, 2, kEval, -1, KernelSet::Plain, 2);
+        CHECK(Rebuilt(Eval(f, &a, false, 2, kEval, -1, KernelSet::Plain, 2)));
+    }
+
+    { // copy mode, Split: where the copy goes in one launch call, and which launch names the 2-D output
+        auto roleOf = [](const int& l) {
+            const Role r = l == 1 ? Role::Start : l == 2 ? Role::Inner : l == 3 ? Role::End : Role::None;
+            return std::pair { r, r == Role::None ? KernelSet::Unknown : KernelSet::Plain };
+        };
+        auto sigOf = [](const int&) { return uint64_t(7); };
+        struct Out
+        {
+            bool any;
+            std::vector<int> kept;
+            std::ptrdiff_t gap, copyAt, copyFrom;
+            Copy copy;
+        };
+        auto run = [&](const std::vector<std::vector<int>>& calls) {
+            Filter f;
+            std::vector<std::vector<Out>> rounds;
+            for (int round = 0; round < 2; ++round)
+            {
+                f.Begin(&a, false, 2, -1, 2, true);
+                std::vector<Out> outs;
+                for (const auto& call : calls)
+                {
+                    Out o { false, {}, -1, -1, -1, Copy::None };
+                    o.any = f.Split(call.data(), call.size(), roleOf, sigOf, o.kept, o.gap, o.copy, o.copyAt, o.copyFrom);
+                    outs.push_back(o);
+                }
+                CHECK(f.End());
+                rounds.push_back(outs);
+            }
+            return rounds;
+        };
+        using V = std::vector<int>;
+
+        auto r = run({ { 0, 1, 2, 3, 0 } });
+        const Out& saved = r[0][0];
+        CHECK(saved.any && saved.kept == V({ 0, 1, 2, 3, 0 }) && saved.gap == -1 && saved.copy == Copy::Save && saved.copyAt == 4 &&
+              saved.copyFrom == 3);
+        const Out& restored = r[1][0];
+        CHECK(restored.any && restored.kept == V({ 0, 0 }) && restored.gap == 1 && restored.copy == Copy::Restore &&
+              restored.copyAt == 1 && restored.copyFrom == 3);
+
+        // the last kernel alone in its call: the copy is asked for in that call only
+        r = run({ { 0, 1, 2 }, { 3 }, { 0 } });
+        CHECK(!r[0][0].any && r[0][1].any && r[0][1].copy == Copy::Save && r[0][1].copyAt == 1 && r[0][1].copyFrom == 0 && !r[0][2].any);
+        CHECK(r[1][0].any && r[1][0].kept == V({ 0 }) && r[1][0].copy == Copy::None);
+        CHECK(r[1][1].any && r[1][1].kept.empty() && r[1][1].gap == 0 && r[1][1].copy == Copy::Restore && r[1][1].copyAt == 0 &&
+              r[1][1].copyFrom == 0);
+        CHECK(!r[1][2].any && r[1][2].kept == V({ 0 }));
+    }
+
+    { // a copy the caller could not record: the feature goes off with the reason, and nothing is reused afterwards
+        Filter f;
+        EvalCopy(f, &a, false, 2);
+        f.Disable("no buffer for the copy");
+        CHECK(f.Disabled() && f.Status().find("no buffer for the copy") != std::string::npos);
+        auto c = EvalCopy(f, &a, false, 2);
+        CHECK(!c.dropped[1] && !c.dropped[5]);
+    }
+
+    { // copy mode once the feature is off (Disable or a launch-order anomaly): no more saves, nothing dropped
+        Filter f;
+        EvalCopy(f, &a, false, 2);
+        f.Disable("test");
+        for (int i = 0; i < 3; ++i)
+        {
+            auto c = EvalCopy(f, &a, false, 2);
+            CHECK(NoCopy(c) && !c.dropped[1] && !c.dropped[5]);
+        }
+        Filter g;
+        EvalCopy(g, &a, false, 2, -1, 7, KernelSet::Plain, { Role::Start, Role::Inner }); // never closed: off
+        CHECK(g.Disabled());
+        CHECK(NoCopy(EvalCopy(g, &a, false, 2)));
+    }
+
+    { // copy mode: a second ViT run in one evaluation turns the feature off (one saved copy per feature)
+        Filter f;
+        auto c = EvalCopy(f, &a, false, 2, -1, 7, KernelSet::Plain,
+                          { Role::Start, Role::Inner, Role::End, Role::Start, Role::Inner, Role::End });
+        CHECK(!c.wellFormed && f.Disabled());
+        CHECK(CopyAt(c, Copy::Save, 2)); // the first run's save; the second run is not in copy mode
+        Filter g; // without copy mode two runs stay allowed, as before
+        auto r = Eval(g, &a, false, 2, { Role::Start, Role::End, Role::Start, Role::End }, -1, KernelSet::Plain, 2);
+        CHECK(r.wellFormed && !g.Disabled());
+    }
+
+    { // copy mode anchored to the frame: passes save on even frames and restore on odd ones; destroyed modules start over
+        Filter f;
+        int p[2];
+        for (int frame = 0; frame < 6; ++frame)
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                auto c = EvalCopy(f, &p[pass], false, 2, frame);
+                CHECK(CopyAt(c, frame % 2 ? Copy::Restore : Copy::Save, 5));
+            }
+        f.Clear();
+        CHECK(CopyAt(EvalCopy(f, &p[0], false, 2, 7), Copy::Save, 5)); // odd frame, but nothing saved any more: computed
+        CHECK(CopyAt(EvalCopy(f, &p[0], false, 2, 9), Copy::Restore, 5));
+    }
+
+    { // copy mode for the fp8 set too (the Vulkan bridge): saved after a computed run, restored in place of a skipped one
+        Filter f;
+        const unsigned both = kCopyPlain | kCopyFp8;
+        auto c = EvalCopy(f, &a, false, 2, -1, 7, KernelSet::Fp8, kEval, both);
+        CHECK(!c.dropped[1] && !c.dropped[5] && CopyAt(c, Copy::Save, 5));
+        c = EvalCopy(f, &a, false, 2, -1, 7, KernelSet::Fp8, kEval, both);
+        CHECK((c.dropped == std::vector<bool> { false, true, true, true, true, true, false }) && CopyAt(c, Copy::Restore, 5));
+        Filter g; // fp8 only: the plain set keeps its last kernel, as without copy mode
+        Eval(g, &a, false, 2, kEval, -1, KernelSet::Plain, 2);
+        auto p2 = EvalCopy(g, &a, false, 2, -1, 7, KernelSet::Plain, kEval, kCopyFp8);
+        CHECK(NoCopy(p2) && p2.dropped[1] && !p2.dropped[5]);
+        Filter h; // the fp8 rate drives an fp8 run in copy mode
+        h.Begin(&a, false, 1, -1, 2, both);
+        for (Role role : kEval)
+        {
+            h.Drop(role, KernelSet::Fp8, 7);
+            h.TakeGap();
+            CHECK(h.TakeCopy() == Copy::None);
+        }
+        CHECK(h.End());
+    }
+
+    { // One (Vulkan, one launch per call) in copy mode: the same launches, barriers and copies as Split over the same evaluations,
+      // both kernel sets; a save comes with the run's last launch (after it), a restore replaces it
+        for (KernelSet set : { KernelSet::Plain, KernelSet::Fp8 })
+        {
+            Filter single, chain;
+            const auto roleOf = [set](const int& l) {
+                const Role r = l == 1 ? Role::Start : l == 2 ? Role::Inner : l == 3 ? Role::End : Role::None;
+                return std::pair { r, r == Role::None ? KernelSet::Unknown : set };
+            };
+            const std::vector<int> eval = { 0, 1, 2, 2, 3, 0 };
+            for (int round = 0; round < 4; ++round)
+            {
+                single.Begin(&a, false, 2, -1, 2, kCopyPlain | kCopyFp8);
+                std::vector<int> sent;
+                std::vector<std::string> marks;
+                for (int l : eval)
+                {
+                    const auto rs = roleOf(l);
+                    const Filter::Single one = single.One(rs.first, rs.second, 7);
+                    if (one.barrier)
+                        marks.push_back("b" + std::to_string(sent.size()));
+                    if (one.copy == Copy::Restore)
+                        marks.push_back("r" + std::to_string(sent.size()));
+                    if (one.launch)
+                        sent.push_back(l);
+                    if (one.copy == Copy::Save)
+                        marks.push_back("s" + std::to_string(sent.size()));
+                }
+                CHECK(single.End());
+
+                chain.Begin(&a, false, 2, -1, 2, kCopyPlain | kCopyFp8);
+                std::vector<int> kept;
+                std::ptrdiff_t gap = -1, copyAt = -1, copyFrom = -1;
+                Copy copy = Copy::None;
+                chain.Split(eval.data(), eval.size(), roleOf, [](const int&) { return uint64_t(7); }, kept, gap, copy, copyAt,
+                            copyFrom);
+                CHECK(chain.End());
+                std::vector<std::string> chainMarks;
+                if (gap >= 0)
+                    chainMarks.push_back("b" + std::to_string(gap));
+                if (copy == Copy::Restore)
+                    chainMarks.push_back("r" + std::to_string(copyAt));
+                if (copy == Copy::Save)
+                    chainMarks.push_back("s" + std::to_string(copyAt));
+                CHECK(sent == kept && marks == chainMarks);
+                if (round % 2 == 0)
+                    CHECK((marks == std::vector<std::string> { "s5" })); // computed: all six go out, the save after the last ViT launch
+                else
+                    CHECK((sent == std::vector<int> { 0, 0 } && marks == std::vector<std::string> { "b1", "r1" }));
+            }
+        }
+    }
+
+    { // One without copy mode for the set: no copy, the old decisions
+        Filter f;
+        f.Begin(&a, false, 2, -1, 2, 0);
+        for (Role role : kEval)
+            CHECK(f.One(role, KernelSet::Plain).copy == Copy::None);
+        CHECK(f.End() && !f.Disabled());
+    }
+
+    { // CheckOutput: the 2-D output's size from the last launch's parameters, checked against its thread count
+        struct P
+        {
+            uint64_t src, dst;
+            uint32_t rows, cols;
+        };
+        uint64_t dst = 0, bytes = 0;
+        const P plain { 1, 0x1b4ea65000, 20, 32 };
+        CHECK(!CheckOutput(&plain, sizeof plain, 1280ull * 256, KernelSet::Plain, dst, bytes) && dst == 0x1b4ea65000 && bytes == 1310720);
+        CHECK(!CheckOutput(&plain, sizeof plain, 640ull * 256, KernelSet::Fp8, dst, bytes) && bytes == 655360); // fp8: 1 byte each
+        const P small { 1, 0x1000, 16, 28 };
+        CHECK(!CheckOutput(&small, sizeof small, 896ull * 256, KernelSet::Plain, dst, bytes) && bytes == 16 * 28 * 2048);
+        CHECK(CheckOutput(&plain, sizeof plain, 640ull * 256, KernelSet::Plain, dst, bytes)); // geometry does not match the size
+        CHECK(CheckOutput(&plain, sizeof plain - 4, 1280ull * 256, KernelSet::Plain, dst, bytes)); // another layout
+        CHECK(CheckOutput(nullptr, sizeof plain, 1280ull * 256, KernelSet::Plain, dst, bytes));
+        const P odd { 1, 0x1b4ea65008, 20, 32 };
+        CHECK(CheckOutput(&odd, sizeof odd, 1280ull * 256, KernelSet::Plain, dst, bytes)); // not 16-byte aligned
+        const P huge { 1, 0x1000, 4096, 4096 };
+        CHECK(CheckOutput(&huge, sizeof huge, 4096ull * 4096 * 512, KernelSet::Plain, dst, bytes)); // token cap
+        const P none { 1, 0, 20, 32 };
+        CHECK(CheckOutput(&none, sizeof none, 1280ull * 256, KernelSet::Plain, dst, bytes));
+    }
+
+    { // ExtraParams: the model's extra list, and what it refuses
+        unsigned char buf[24] = {};
+        size_t size = sizeof buf;
+        const void* ok[] = { (const void*) 1, buf, (const void*) 2, &size, nullptr };
+        const void* params = nullptr;
+        size_t got = 0;
+        CHECK(ExtraParams(ok, 1, params, got) && params == buf && got == 24);
+        CHECK(ExtraParams(ok, 5, params, got) && params == buf && got == 24);
+        const void* noSize[] = { (const void*) 1, buf, nullptr };
+        CHECK(!ExtraParams(noSize, 1, params, got));
+        const void* unknown[] = { (const void*) 3, buf, nullptr };
+        CHECK(!ExtraParams(unknown, 1, params, got));
+        const void* cut[] = { (const void*) 1, buf, (const void*) 2 }; // count 3 cuts the pair
+        CHECK(!ExtraParams(cut, 3, params, got));
+        CHECK(!ExtraParams(nullptr, 1, params, got));
+    }
+
+    { // our own copy launch between the run's last launch and the next one (Vulkan records it inline): another kernel there changes
+      // nothing -- no barrier, no copy, no anomaly
+        for (int round = 0; round < 2; ++round) // computed (save), then reused (restore)
+        {
+            static Filter f;
+            f.Begin(&a, false, 2, -1, 2, kCopyPlain | kCopyFp8);
+            for (Role role : { Role::Start, Role::Inner, Role::End })
+                f.One(role, KernelSet::Fp8, 7);
+            const Filter::Single ours = f.One(Role::None, KernelSet::Unknown);
+            CHECK(ours.launch && !ours.barrier && ours.copy == Copy::None);
+            CHECK(f.End() && !f.Disabled());
+        }
     }
 
     { // Kernels: which kernel handles are the ViT run's, from their names at creation (Vulkan)

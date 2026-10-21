@@ -83,6 +83,7 @@ bool NativeProducer::Init(ID3D12Device* device)
         return false;
     }
 
+    _list->SetName(L"Optical F5Low producer");
     _list->Close();
     _list->SetName(L"F5Low native input producer");
 

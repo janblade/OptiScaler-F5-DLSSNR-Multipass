@@ -62,7 +62,8 @@ class NativeDriver
     // ImGui: one line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
     void DrawStatus();
 
-    // ImGui: the optical flow's tuning, with NativeDebugView on and a producer made. Applies at once.
+    // ImGui: the motion profile and the optical flow's tuning (shown once a producer is made). Applies at once; moving a
+    // tuning control saves the values as the Custom profile.
     void DrawFlowTuning();
 
     // ImGui: which one of the trust mask's checks to look at (the mask picture shows it).
@@ -81,6 +82,8 @@ class NativeDriver
     bool TrustRecent() const { return _trustFrame != 0 && _frame - _trustFrame < 30; }
 
   private:
+    // Sets the producer's flow and trust settings from [DlssNr] NativeMotionProfile (and its Custom list)
+    void ApplyMotionProfile();
     void ReleaseVirtualUpscaler();
     void PauseVirtualUpscaler();
     void LogDiagnostics();

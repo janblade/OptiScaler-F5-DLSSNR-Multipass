@@ -144,16 +144,16 @@ struct FgResizeArgs
     UINT flags;
 };
 
-// What the game's resize becomes for the FG swapchain. With the XeFGBridgeResizeAsCreated quirk, the same changes as
-// when the bridge created it (DxgiFactory_Hooks' PrepareDx12InteropDesc): an SRGB format as its UNORM one, and fewer
-// than 2 buffers as the count it has. Under XeFG the flags are the swapchain's own, since FGHooks::hkResizeBuffers
-// keeps them anyway, so a resize that only differs there is skipped too. Without the quirk, the game's values as-is.
+// What the game's resize becomes for the FG swapchain, which the bridge created as a flip one (DxgiFactory_Hooks'
+// PrepareDx12InteropDesc): an SRGB format as its UNORM one, fewer than 2 buffers as the count it has, and the flags it
+// was created with (creation drops some, such as GDI_COMPATIBLE, and a flip swapchain's tearing and waitable-object
+// flags can't change in a resize). A flip swapchain rejects an SRGB format or 1 buffer (E_INVALIDARG); it then kept
+// its old size while the bridge copied the new-size picture into it, and the GPU hung (MGS V and Mad Max resize with an
+// SRGB format, MGS V with 1 buffer). A resize that only differs in flags is skipped. Formats the creation path refuses
+// outright are not changed here.
 FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI_FORMAT format, UINT flags)
 {
     FgResizeArgs args { bufferCount, format, flags };
-
-    if (!State::Instance().gameQuirks[GameQuirk::XeFGBridgeResizeAsCreated])
-        return args;
 
     if (args.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
         args.format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -164,16 +164,40 @@ FgResizeArgs ResizeArgsForFg(IDXGISwapChain* fgSwapChain, UINT bufferCount, DXGI
         args.bufferCount = 0;
 
     DXGI_SWAP_CHAIN_DESC desc {};
-    if (State::Instance().activeFgOutput == FGOutput::XeFG && fgSwapChain != nullptr &&
-        SUCCEEDED(fgSwapChain->GetDesc(&desc)))
-    {
+    if (fgSwapChain != nullptr && SUCCEEDED(fgSwapChain->GetDesc(&desc)))
         args.flags = desc.Flags;
+
+    if (args.bufferCount != bufferCount || args.format != format || args.flags != flags)
+    {
+        LOG_INFO("FG swapchain resizes as created: count {} -> {}, format {} -> {}, flags {:X} -> {:X}", bufferCount,
+                 args.bufferCount, (UINT) format, (UINT) args.format, flags, args.flags);
     }
 
-    LOG_INFO("XeFG bridge resize as created: count {} -> {}, format {} -> {}, flags {:X} -> {:X}", bufferCount,
-             args.bufferCount, (UINT) format, (UINT) args.format, flags, args.flags);
-
     return args;
+}
+
+// The menu overlay's teardown in a bridge resize. A real size change can't hold the present barrier for the whole call:
+// frame generation's own resize waits for its present thread, which takes the shared side (XeFG's presents only,
+// wrapped_swapchain's LocalPresent). That thread draws the overlay, and tearing the overlay down under it freed
+// ImGui's viewport data while it was in use (Mad Max, XeFG); so the barrier is held for the teardown only. Frame
+// generation is switched off before, outside the barrier: the teardown would otherwise do it while holding it, and
+// switching XeFG off can wait for that same present thread. The caller keeps a ScopedResize for the whole resize, so
+// the present leaves the overlay alone until it is done.
+void TearDownOverlayForResize(HWND handle, bool barrierHeld)
+{
+    auto fg = State::Instance().currentFG;
+    if (fg != nullptr && fg->FrameGenerationContext() != nullptr && fg->IsActive())
+    {
+        State::Instance().fgChanged = true;
+        fg->UpdateTarget();
+        fg->Deactivate();
+    }
+
+    std::unique_lock<std::shared_mutex> overlayLock(Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock);
+    if (!barrierHeld && State::Instance().activeFgOutput == FGOutput::XeFG)
+        overlayLock.lock();
+
+    MenuOverlayDx::CleanupRenderTarget(true, handle);
 }
 } // namespace
 
@@ -487,9 +511,18 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     auto result = _fgSwapChain->Present(SyncInterval, Flags);
 
     if (SUCCEEDED(result))
+    {
         _AdvanceFakeBackBufferIndex();
+    }
     else
+    {
         LOG_ERROR("fg Present failed: {:X}", (UINT) result);
+
+        // The reason (and the D3D12 DRED report, when on) is the bridge's D3D12 device's; the outer present only asks
+        // the game's D3D11 one
+        if ((result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET) && _dx12Device != nullptr)
+            Util::GetDeviceRemovedReason(_dx12Device);
+    }
 
     return result;
 }
@@ -501,7 +534,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetBuffer(UINT Buffer, REFIID riid, void*
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetFullscreenState(BOOL Fullscreen, IDXGIOutput* pTarget)
 {
-    LOG_DEBUG("Dx11wDx12SC SetFullscreenState: {}, target: {:X}, caller: {}", Fullscreen, (size_t) pTarget,
+    DXGI_OUTPUT_DESC targetDesc {};
+    const bool targetDescribed = pTarget != nullptr && SUCCEEDED(pTarget->GetDesc(&targetDesc));
+
+    LOG_DEBUG("Dx11wDx12SC SetFullscreenState: {}, target: {:X} ({}), caller: {}", Fullscreen, (size_t) pTarget,
+              targetDescribed ? wstring_to_string(targetDesc.DeviceName) : std::string("-"),
               Util::WhoIsTheCaller(_ReturnAddress()));
 
     State::Instance().realExclusiveFullscreen = Fullscreen;
@@ -607,7 +644,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         LOG_WARN("continuing ResizeBuffers after FG/present queue wait failure");
     }
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    Dx11wDx12Sync::ScopedResize resizing {};
+    TearDownOverlayForResize(_handle, presentResizeLock.owns_lock());
+
     _ReleaseInteropBackBuffers();
 
     HRESULT realResult = _real != nullptr ? _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags)
@@ -672,9 +711,25 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeTarget(const DXGI_MODE_DESC* pNewTa
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetContainingOutput(IDXGIOutput** ppOutput)
 {
-    return _fgSwapChain != nullptr
-               ? _fgSwapChain->GetContainingOutput(ppOutput)
-               : (_real != nullptr ? _real->GetContainingOutput(ppOutput) : DXGI_ERROR_DEVICE_REMOVED);
+    const HRESULT result =
+        _fgSwapChain != nullptr
+            ? _fgSwapChain->GetContainingOutput(ppOutput)
+            : (_real != nullptr ? _real->GetContainingOutput(ppOutput) : DXGI_ERROR_DEVICE_REMOVED);
+
+    // Which display the game is told it is on (its resolution list follows it): the output, and where the window is.
+    DXGI_OUTPUT_DESC desc {};
+    RECT window {};
+    const bool described = SUCCEEDED(result) && ppOutput != nullptr && *ppOutput != nullptr &&
+                           SUCCEEDED((*ppOutput)->GetDesc(&desc));
+    GetWindowRect(_handle, &window);
+
+    LOG_DEBUG("GetContainingOutput {:X}: {} ({},{} {}x{}), window ({},{} {}x{})", (UINT) result,
+              described ? wstring_to_string(desc.DeviceName) : std::string("-"), desc.DesktopCoordinates.left,
+              desc.DesktopCoordinates.top, desc.DesktopCoordinates.right - desc.DesktopCoordinates.left,
+              desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top, window.left, window.top,
+              window.right - window.left, window.bottom - window.top);
+
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetFrameStatistics(DXGI_FRAME_STATISTICS* pStats)
@@ -865,7 +920,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         LOG_WARN("continuing ResizeBuffers1 after FG/present queue wait failure");
     }
 
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    Dx11wDx12Sync::ScopedResize resizing {};
+    TearDownOverlayForResize(_handle, presentResizeLock.owns_lock());
+
     _ReleaseInteropBackBuffers();
 
     HRESULT realResult =
@@ -998,6 +1055,7 @@ bool Dx11wDx12SC::_InitInteropObjects()
             return false;
         }
 
+        _copyCommandLists[i]->SetName(L"D3D11 bridge copy");
         _copyCommandLists[i]->Close();
     }
 
@@ -1124,6 +1182,7 @@ bool Dx11wDx12SC::_EnsureNativeInputCopyRing()
             return false;
         }
 
+        _nrCopyCommandLists[i]->SetName(L"D3D11 bridge native input copy");
         _nrCopyCommandLists[i]->Close();
     }
 

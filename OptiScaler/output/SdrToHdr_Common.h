@@ -21,7 +21,9 @@ enum class Reason
     DisplayNotHdr,    // Windows HDR is off for the display the window is on
     BitBlt,           // not flip model, and not upgradeable (made before HDR output was on, or not at creation): needs a restart
     ExclusiveBitBlt,  // an older (bitblt) swap chain in exclusive full screen: cannot be made flip model
-    FrameGen,         // OptiScaler frame generation owns the swap chain
+    FrameGen,         // OptiScaler frame generation is on and this swap chain is not the frame generation library's own
+    FgExclusive,      // the frame generation library's chain is really in exclusive full screen: it is not made HDR
+    DlssgOutput,      // OptiScaler's DLSS-G (Streamline) output owns the swap chain
     Dxvk,             // a dxvk / Vulkan present path
     StreamlineDlssg,  // the chain is Streamline's DLSS-G proxy
     UnsupportedFormat, // not one of the four 8-bit formats
@@ -39,6 +41,15 @@ enum class Reason
     Active,
 };
 
+// Which OptiScaler frame generation output is selected (State::activeFgOutput, reduced to what HDR output cares about).
+enum class FgBackend
+{
+    None,
+    XeFG,
+    FsrFG,
+    Dlssg, // OptiScaler's own DLSS-G output (Streamline)
+};
+
 struct Inputs
 {
     bool enabled = false;                          // [HDR] Enabled
@@ -47,7 +58,18 @@ struct Inputs
     bool windowed = true;                          // not exclusive full screen
     bool canUpgradeBitBlt = false;                 // at creation only: a bitblt chain can still be made flip model
     bool displayHdr = false;                       // Windows HDR is on for the output the window is on
-    bool frameGen = false;
+    bool frameGen = false;                         // OptiScaler frame generation is on (any backend)
+    // ... and which one. FgBackend::Dlssg (OptiScaler's own DLSS-G output) and streamlineDlssg (the game's own) are separate on
+    // purpose: both stand aside, with their own text
+    FgBackend fgBackend = FgBackend::None;
+    // This chain is the frame generation library's own: XeFG and FSR FG make their real swap chain through our factory hooks
+    // (inside DxgiFactoryHooks::ScopedSkipFGSCCreation) and hand the game their own chain on top of it. The library draws and
+    // presents through ours, so HDR output can convert there: frame generation only ever sees the game's SDR format. Only
+    // meaningful with frameGen.
+    bool fgLibraryChain = false;
+    // At creation only: the library's exclusive full screen request is made a windowed chain (and kept borderless, see
+    // FGHooks::KeepBorderless). False for a chain that exists: one that is really exclusive stands aside.
+    bool fgWindowable = false;
     bool dxvk = false;
     bool streamlineDlssg = false;
     bool multiNode = false;
@@ -110,9 +132,15 @@ inline Decision Decide(const Inputs& in)
     // full screen it cannot be, and a chain that already exists cannot change its model.
     bool upgrade = false;
     bool exclusiveBitBlt = false;
+    const bool libraryChain = in.frameGen && in.fgLibraryChain;
 
     if (!in.flipModel)
     {
+        // (the library's chains are flip model; one that is not does not take the bitblt upgrade, which does not mix with
+        // keeping the window borderless for frame generation)
+        if (libraryChain)
+            return { false, Reason::BitBlt };
+
         if (!in.windowed)
             exclusiveBitBlt = true; // named last, below: the display, frame generation and the rest are the real blockers first
         else if (!in.canUpgradeBitBlt)
@@ -121,8 +149,21 @@ inline Decision Decide(const Inputs& in)
             upgrade = true;
     }
 
+    // Frame generation: only the library's own chain of XeFG and FSR FG is converted. Anything else it is on for (DLSS-G
+    // output, another swap chain of the game, a library chain we cannot name) is left alone.
     if (in.frameGen)
-        return { false, Reason::FrameGen };
+    {
+        if (in.fgBackend == FgBackend::Dlssg)
+            return { false, Reason::DlssgOutput };
+
+        if (!in.fgLibraryChain || (in.fgBackend != FgBackend::XeFG && in.fgBackend != FgBackend::FsrFG))
+            return { false, Reason::FrameGen };
+    }
+
+    // The library's chain in exclusive full screen: made windowed at creation, but one that already is exclusive is not made
+    // FP16 / 10-bit (it would have to be resized while exclusive, which its library does not expect)
+    if (libraryChain && !in.windowed && !in.fgWindowable)
+        return { false, Reason::FgExclusive };
 
     if (in.dxvk)
         return { false, Reason::Dxvk };
@@ -178,6 +219,23 @@ inline Decision KeepUpgradedProxy(const Decision& decision, bool upgradedAndProx
     }
 }
 
+// The note over the active line for a chain that is kept converting through a resize that would have ended HDR output
+// (KeepUpgradedProxy); Reason::Off when there is nothing to say
+inline Reason KeptNote(Reason decided)
+{
+    switch (decided)
+    {
+    case Reason::DisplayNotHdr:
+    case Reason::DisplayUnknown:
+        return Reason::DisplayLeftHdrKept;
+    case Reason::StreamlineDlssg:
+    case Reason::DlssgOutput:
+        return Reason::DlssgKeptUpgraded;
+    default:
+        return Reason::Off;
+    }
+}
+
 // One player-readable line for the log, and for the menu's status line.
 inline const char* ReasonText(Reason reason)
 {
@@ -196,7 +254,14 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: standing aside, the game uses exclusive full screen with an older swap chain type; switch the "
                "game to borderless or windowed";
     case Reason::FrameGen:
-        return "HDR output: standing aside, not available with frame generation yet";
+        return "HDR output: standing aside, not available for this swap chain while frame generation is on (works with XeFG "
+               "and FSR FG)";
+    case Reason::FgExclusive:
+        return "HDR output: standing aside, the frame generation swap chain is in exclusive full screen; switch the game to "
+               "borderless or windowed";
+    case Reason::DlssgOutput:
+        return "HDR output: standing aside, not available with DLSS-G (OptiScaler's DLSS-G output, or a game that uses DLSS-G "
+               "itself); use XeFG or FSR FG";
     case Reason::Dxvk:
         return "HDR output: standing aside, not available with dxvk (Vulkan) games yet";
     case Reason::StreamlineDlssg:

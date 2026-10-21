@@ -129,8 +129,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
               localDesc.BufferCount, localDesc.Flags, (SIZE_T) localDesc.OutputWindow, localDesc.Windowed,
               _skipFGSwapChainCreation);
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (!localDesc.Windowed)
         {
@@ -363,11 +362,13 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
         hdrRequest.originalFlags = pDesc->Flags;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-        hdrRequest.frameGen = _skipFGSwapChainCreation;
         hdrRequest.hwnd = localDesc.OutputWindow;
         hdrRequest.factory = realFactory;
         SdrToHdr::Plan hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.BufferDesc.Format);
         SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
+        // The frame generation library asked for exclusive full screen: its HDR chain is made windowed
+        const BOOL hdrGameWindowed = localDesc.Windowed;
+        SdrToHdr::ApplyWindowed(hdrPlan, localDesc.Windowed);
         // An older (bitblt) chain is made flip model for HDR (the wrapper keeps telling the game what it asked for)
         SdrToHdr::ApplySwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
 
@@ -388,6 +389,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
             {
                 SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.BufferDesc.Format, result);
+                localDesc.Windowed = hdrGameWindowed;
                 result = realFactory->CreateSwapChain(pDevice, &localDesc, ppSwapChain);
             }
         }
@@ -448,8 +450,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
             }
             else
             {
-                if (hdrPlan.proxied)
-                    wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
+                // (also a plan that stood aside: it marks the library chain)
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
 
                 wrapped->Release();
             }
@@ -550,8 +552,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
     if (pFullscreenDesc != nullptr)
         memcpy(&localFullscreenDesc, pFullscreenDesc, sizeof(DXGI_SWAP_CHAIN_FULLSCREEN_DESC));
 
-    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
-        Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (State::Instance().activeFgOutput == FGOutput::XeFG && FGHooks::BorderlessForced())
     {
         if (pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed)
         {
@@ -799,7 +800,6 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
         hdrRequest.originalFlags = pDesc->Flags;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-        hdrRequest.frameGen = _skipFGSwapChainCreation;
         hdrRequest.hwnd = hWnd;
         hdrRequest.factory = realFactory;
         SdrToHdr::Plan hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.Format);
@@ -818,17 +818,19 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
 
         {
             ScopedSkipParentWrapping skipParentWrapping {};
-            result = realFactory->CreateSwapChainForHwnd(pDevice, hWnd, &localDesc,
-                                                         pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
-                                                         pRestrictToOutput, ppSwapChain);
+            result = realFactory->CreateSwapChainForHwnd(
+                pDevice, hWnd, &localDesc,
+                SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
+                pRestrictToOutput, ppSwapChain);
 
             if (FAILED(result) && hdrPlan.proxied)
             {
                 SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.Format, result);
-                result = realFactory->CreateSwapChainForHwnd(pDevice, hWnd, &localDesc,
-                                                             pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
-                                                             pRestrictToOutput, ppSwapChain);
+                result = realFactory->CreateSwapChainForHwnd(
+                    pDevice, hWnd, &localDesc,
+                    SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
+                    pRestrictToOutput, ppSwapChain);
             }
         }
 
@@ -885,8 +887,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
             }
             else
             {
-                if (hdrPlan.proxied)
-                    wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
+                // (also a plan that stood aside: it marks the library chain)
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
 
                 wrapped->Release();
             }

@@ -27,6 +27,7 @@
 #include <misc/IdentifyGpu.h>
 #include <misc/REFrameworkCompat.h>
 #include <hooks/Xell_Hooks.h>
+#include <hooks/FG_Hooks.h>
 
 #include <magic_enum.hpp>
 
@@ -761,8 +762,10 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     // HDR output decided to make this chain HDR (the real chain already is): the game gets proxies in its own format
     if (plan != nullptr)
     {
+        _fgLibraryChain = plan->fgLibraryChain;
         NoteUpgrade(*plan);
         StartHdrPlan(*plan, flags);
+        NoteLibraryWindowed(*plan);
     }
 
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
@@ -833,6 +836,22 @@ void WrappedIDXGISwapChain4::NoteUpgrade(const SdrToHdr::Plan& plan)
     _gameSwapEffect = plan.gameSwapEffect;
     _gameBufferCount = plan.gameBufferCount;
 
+    DisableAltEnter();
+}
+
+void WrappedIDXGISwapChain4::NoteLibraryWindowed(const SdrToHdr::Plan& plan)
+{
+    // Only a chain that is proxied now (the start can fail and put the chain back)
+    if (!plan.proxied || !plan.exclusiveToWindowed || _libraryWindowed || !Proxied())
+        return;
+
+    _libraryWindowed = true;
+    DisableAltEnter();
+    FGHooks::KeepBorderless(_handle, this);
+}
+
+void WrappedIDXGISwapChain4::DisableAltEnter()
+{
     // DXGI's Alt+Enter on this window would put the real flip chain into exclusive full screen behind everyone's back, and
     // Present then fails for good (Batman: Arkham Knight). Same call, same reason as hooks/DxgiFactory_Hooks.cpp's for the Vulkan
     // bridge's swap chain.
@@ -919,11 +938,14 @@ void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
 
 void WrappedIDXGISwapChain4::AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags)
 {
+    _fgLibraryChain = _fgLibraryChain || plan.fgLibraryChain;
+
     if (plan.proxied && !Proxied())
     {
         NoteUpgrade(plan);
         LOG_INFO("HDR output: this swap chain was already wrapped by a nested hook, giving it the plan");
         StartHdrPlan(plan, flags);
+        NoteLibraryWindowed(plan);
     }
 }
 
@@ -1088,6 +1110,10 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
         // (in _real->Release() below). Tearing them down here would pull XeFG out from under its queued presents.
         const bool bridgeOwns = VkPresentBridge::DxvkThroughVulkan();
 
+        // HDR output no longer keeps the window borderless for this chain
+        if (_libraryWindowed)
+            FGHooks::ReleaseBorderless(this);
+
         if (!bridgeOwns)
             MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
@@ -1224,8 +1250,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
     LOG_DEBUG("Fullscreen: {}, pTarget: {:X}, Caller: {}", Fullscreen, (size_t) pTarget,
               Util::WhoIsTheCaller(_ReturnAddress()));
 
-    // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen). It deliberately
-    // skips the FG mutex and the realExclusiveFullscreen bookkeeping below: upgraded chains are not used with frame generation.
+    // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen). It
+    // deliberately skips the FG mutex and the realExclusiveFullscreen bookkeeping below: the emulation only changes the
+    // window, never the swap chain, so there is nothing for the mutex to protect from the frame generation present, and
+    // the chain stays what it is. (The frame generation library's chain is not here: the game's calls reach the
+    // game-facing chain, whose hook answers them.)
     if (_upgraded)
         return EmulateFullscreen(Fullscreen, pTarget);
 
@@ -2106,6 +2135,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     in.windowed = current.Windowed != FALSE; // (a chain that exists cannot be upgraded: canUpgradeBitBlt stays false)
     in.composition = _composition;
     in.coreWindow = _uwp && !_composition;
+    in.fgLibraryChain = _fgLibraryChain;
 
     const UINT count = BufferCount != 0 ? BufferCount : current.BufferCount;
 
@@ -2205,13 +2235,19 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
                                            : decision.reason,
                            result.proxied, hdr10, in.enabled || kept, _display.maxLuminance);
 
+    // The library's HDR chain stood down (HDR output off, Windows HDR off, a start that failed): the window is no
+    // longer kept borderless for it
+    if (_libraryWindowed && !result.proxied)
+    {
+        _libraryWindowed = false;
+        FGHooks::ReleaseBorderless(this);
+    }
+
     // A resize kept the proxy of a chain that was made flip model: what it was kept through is said over the active line
     if (kept && result.proxied)
     {
-        if (decided.reason == SdrToHdr::Reason::DisplayNotHdr || decided.reason == SdrToHdr::Reason::DisplayUnknown)
-            SdrToHdr::RecordNote(SdrToHdr::Reason::DisplayLeftHdrKept);
-        else if (decided.reason == SdrToHdr::Reason::StreamlineDlssg)
-            SdrToHdr::RecordNote(SdrToHdr::Reason::DlssgKeptUpgraded);
+        if (const auto note = SdrToHdr::KeptNote(decided.reason); note != SdrToHdr::Reason::Off)
+            SdrToHdr::RecordNote(note);
     }
 
     if (result.stuckHdr)

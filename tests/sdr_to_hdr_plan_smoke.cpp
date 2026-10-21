@@ -6,6 +6,7 @@
 #include "../OptiScaler/output/SdrToHdr_Create.h"
 
 #include <cstdio>
+#include <thread>
 
 using namespace SdrToHdr;
 
@@ -138,6 +139,81 @@ int main()
         Plan fs;
         MakeUpgradePlan(fullscreen, false, fs);
         Check(!fs.upgraded, "exclusive full screen: never an upgraded chain");
+    }
+
+    // The library scope: nested, per thread, and nothing outside it
+    {
+        Check(!InFgLibraryCreate(), "no library scope: not the library's chain");
+        {
+            ScopedFgLibraryCreate outer;
+            Check(InFgLibraryCreate(), "inside the scope: the library's chain");
+            {
+                ScopedFgLibraryCreate inner;
+                Check(InFgLibraryCreate(), "nested scope: still the library's chain");
+            }
+            Check(InFgLibraryCreate(), "the inner scope ended, the outer one is still there");
+            bool otherThread = true;
+            std::thread([&] { otherThread = InFgLibraryCreate(); }).join();
+            Check(!otherThread, "another thread does not see the scope (a library creating on its own thread stands aside)");
+        }
+        Check(!InFgLibraryCreate(), "after the scope: not the library's chain");
+    }
+
+    // FGXeFGForceBorderless: switched off on purpose means the library's exclusive request is not made windowed
+    {
+        Check(FgWindowable(false, false) && FgWindowable(true, true) && !FgWindowable(true, false),
+              "FgWindowable: unset or true is windowable, explicitly false is not");
+        Check(BorderlessForced(true, false) && BorderlessForced(false, true) && BorderlessForced(true, true) &&
+                  !BorderlessForced(false, false),
+              "BorderlessForced: the player's option or HDR output's");
+    }
+
+    // HDR output's own borderless state: owned by the chain that set it, the player's option untouched
+    {
+        HdrBorderlessKeeper keeper;
+        int a = 0, b = 0;
+        Check(!keeper.Active() && !keeper.Release(&a), "keeper: nothing kept, nothing released");
+        keeper.Keep(&a);
+        Check(keeper.Active() && !keeper.Release(&b) && keeper.Active(), "keeper: another chain cannot release it");
+        keeper.Keep(&b); // the library made its new chain before the old one went
+        Check(!keeper.Release(&a) && keeper.Active(), "keeper: the old chain going does not drop the new one's state");
+        Check(keeper.Release(&b) && !keeper.Active() && !keeper.Release(&b), "keeper: the new chain's release clears it, once");
+        Check(!keeper.Release(nullptr), "keeper: a null owner releases nothing");
+    }
+
+    // Classification: OptiScaler's frame generation output as HDR output sees it
+    {
+        Check(FgBackendOf(FGOutput::XeFG) == FgBackend::XeFG && FgBackendOf(FGOutput::FSRFG) == FgBackend::FsrFG &&
+                  FgBackendOf(FGOutput::DLSSG) == FgBackend::Dlssg && FgBackendOf(FGOutput::NoFG) == FgBackend::None,
+              "FgBackendOf: every output");
+        Check(FgBackendOf((FGOutput) 99) == FgBackend::None, "FgBackendOf: an unknown output is none");
+        Check(FgAnswersFullscreenForGame(FGOutput::XeFG) && FgAnswersFullscreenForGame(FGOutput::FSRFG) &&
+                  !FgAnswersFullscreenForGame(FGOutput::DLSSG) && !FgAnswersFullscreenForGame(FGOutput::NoFG),
+              "the game is told full screen for XeFG and FSR FG chains kept borderless");
+    }
+
+    // The frame generation library's exclusive full screen request: an HDR chain is made windowed, the fullscreen desc is not passed
+    {
+        Plan plan;
+        BOOL windowed = FALSE;
+        ApplyWindowed(plan, windowed);
+        Check(windowed == FALSE && KeepFullscreenDesc(plan, true) && !KeepFullscreenDesc(plan, false),
+              "no exclusiveToWindowed: the desc is left as it was");
+        plan.exclusiveToWindowed = true;
+        ApplyWindowed(plan, windowed);
+        Check(windowed == TRUE && !KeepFullscreenDesc(plan, true),
+              "exclusiveToWindowed: Windowed becomes TRUE and the fullscreen desc is not passed on");
+
+        Check(ExclusiveToWindowed(true, false) && !ExclusiveToWindowed(true, true) && !ExclusiveToWindowed(false, false),
+              "ExclusiveToWindowed: only the library's chain asked for exclusive full screen");
+
+        // the create with the HDR format failed: the retry passes the game's fullscreen desc again
+        plan.proxied = true;
+        plan.upgraded = true;
+        plan.editDesc = true;
+        ClearForRetry(plan);
+        Check(!plan.exclusiveToWindowed && !plan.proxied && !plan.upgraded && !plan.editDesc && KeepFullscreenDesc(plan, true),
+              "ClearForRetry: the plan stands down and the retry passes the fullscreen desc");
     }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_plan_smoke: PASS\n" : "sdr_to_hdr_plan_smoke: %d FAIL\n", g_failures);

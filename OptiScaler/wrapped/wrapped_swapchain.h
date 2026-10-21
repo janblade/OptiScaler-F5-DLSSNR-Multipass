@@ -134,6 +134,18 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     std::atomic<bool> _presentParamsLogged { false };
     void NoteUpgrade(const SdrToHdr::Plan& plan);
 
+    // This is the frame generation library's own real chain (SdrToHdr::Plan::fgLibraryChain), also when HDR output
+    // stood aside at creation: XeFG and FSR FG make it through our factory hooks and draw / present through it. Decided
+    // again at every resize.
+    bool _fgLibraryChain = false;
+    // The library asked for exclusive full screen and its HDR chain was made windowed (Plan::exclusiveToWindowed). The
+    // window is kept borderless by FGHooks::KeepBorderless (the game-facing chain's own mechanism); here DXGI's
+    // Alt+Enter is switched off, so it cannot put this real flip chain into exclusive full screen behind everyone's
+    // back
+    bool _libraryWindowed = false;
+    void NoteLibraryWindowed(const SdrToHdr::Plan& plan);
+    void DisableAltEnter();
+
     // Exclusive full screen is never entered by an upgraded chain (it would be invalid until a resize, which a bitblt-era game
     // never does): the game's SetFullscreenState(TRUE) is answered with a borderless window (SdrToHdr_Fullscreen.h), and DXGI's
     // own Alt+Enter is switched off for the window. Alt+Enter itself is therefore not handled for such a game; its own menu is.

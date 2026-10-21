@@ -5,6 +5,9 @@
 #include "SdrToHdr_ProxyBase.h"
 #include "SdrToHdr_Status.h"
 
+#include "../framegen/FGBorderless.h"
+#include "../framegen/FGOutput.h"
+
 #include <dxgi.h>
 
 namespace SdrToHdr
@@ -27,7 +30,6 @@ struct CreateRequest
     DXGI_SWAP_EFFECT originalSwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     UINT originalBufferCount = 2;
     UINT originalFlags = 0;
-    bool frameGen = false;             // this is a frame generation library's own inner chain (_skipFGSwapChainCreation)
     bool composition = false;
     bool coreWindow = false;
     bool multiNode = false;
@@ -44,6 +46,13 @@ struct Plan
     DXGI_FORMAT realFormat = DXGI_FORMAT_UNKNOWN; // what the chain is made as when proxied
     bool hdr10 = false;
     DisplayInfo display;
+    // The frame generation library's own chain (made inside a ScopedFgLibraryCreate): the wrapper keeps asking for it
+    // at every resize, also when the plan stood aside at creation
+    bool fgLibraryChain = false;
+    // ... and the library asked for exclusive full screen: an HDR chain is made windowed instead (a real exclusive HDR
+    // chain was refused by DXGI, or never came back from the library's destroy) and the window is kept borderless
+    // (FGHooks::KeepBorderless)
+    bool exclusiveToWindowed = false;
     bool displayKnown = false;
 
     // An older (bitblt) chain made flip model for HDR output: the edit for the site to apply to its desc, and what the game
@@ -96,6 +105,38 @@ inline void MakeUpgradePlan(const CreateRequest& request, bool decisionUpgrade, 
     }
 }
 
+// The frame generation library's chain, asked for as exclusive full screen: made windowed when it is made HDR
+inline bool ExclusiveToWindowed(bool fgLibraryChain, bool windowedRequest)
+{
+    return fgLibraryChain && !windowedRequest;
+}
+
+// OptiScaler's frame generation output as HDR output sees it (None for no output and for one it does not know)
+inline FgBackend FgBackendOf(FGOutput output)
+{
+    switch (output)
+    {
+    case FGOutput::XeFG:
+        return FgBackend::XeFG;
+    case FGOutput::FSRFG:
+        return FgBackend::FsrFG;
+    case FGOutput::DLSSG:
+        return FgBackend::Dlssg;
+    default:
+        return FgBackend::None;
+    }
+}
+
+// For a site that has just got a plan: the library's exclusive full screen request becomes a windowed chain
+inline void ApplyWindowed(const Plan& plan, BOOL& windowed)
+{
+    if (plan.exclusiveToWindowed)
+        windowed = TRUE;
+}
+
+// ... and for the HWND variants: whether the fullscreen desc is passed on (it is not when the chain is made windowed)
+inline bool KeepFullscreenDesc(const Plan& plan, bool hasDesc) { return hasDesc && !plan.exclusiveToWindowed; }
+
 // For a site that has just got a plan: applies the swap chain edit of an upgrade to its desc fields; nothing otherwise.
 inline void ApplySwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags)
 {
@@ -137,11 +178,56 @@ class ScopedProxiedCreate
     bool _on;
 };
 
+// What a plan no longer holds once the create with the HDR format failed (the caller retries once as the game asked, so
+// the fullscreen desc is passed again)
+inline void ClearForRetry(Plan& plan)
+{
+    plan.upgraded = false;
+    plan.editDesc = false;
+    plan.exclusiveToWindowed = false;
+    plan.proxied = false;
+}
+
 // The create with the HDR format failed: puts the game's format back (the caller retries once) and logs it.
 void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure);
 
-// For the sites that never proxy (Streamline's DLSS-G twins): logs the stand-down when HDR output is on.
+// The frame generation library is making its real swap chain (XeFG, FSR FG: through our factory hooks, inside
+// DxgiFactoryHooks::ScopedSkipFGSCCreation). This, and only this, marks a chain as the library's own: a game quirk that
+// skips frame generation for the game's first chain does not. Per thread: the library creates it synchronously on the
+// calling thread.
+// A library that makes its chain on another thread is not seen here: that chain is then a plain one for these rules and
+// stands aside (the frame generation rule), which is safe. XeFG and FSR FG create it synchronously on the calling
+// thread.
+inline thread_local int g_fgLibraryCreateDepth = 0;
+
+class ScopedFgLibraryCreate
+{
+  public:
+    ScopedFgLibraryCreate() { ++g_fgLibraryCreateDepth; }
+    ~ScopedFgLibraryCreate() { --g_fgLibraryCreateDepth; }
+    ScopedFgLibraryCreate(const ScopedFgLibraryCreate&) = delete;
+    ScopedFgLibraryCreate& operator=(const ScopedFgLibraryCreate&) = delete;
+};
+
+inline bool InFgLibraryCreate() { return g_fgLibraryCreateDepth > 0; }
+
+// The Vulkan bridge is making its Direct3D 12 swap chain for a Vulkan game: HDR output is not available there
+class ScopedVulkanBridgeCreate
+{
+  public:
+    ScopedVulkanBridgeCreate();
+    ~ScopedVulkanBridgeCreate();
+    ScopedVulkanBridgeCreate(const ScopedVulkanBridgeCreate&) = delete;
+    ScopedVulkanBridgeCreate& operator=(const ScopedVulkanBridgeCreate&) = delete;
+};
+
+// For the sites that never proxy: logs the stand-down when HDR output is on (and records it for OptiScaler's own DLSS-G
+// output).
 void NoteStandDown(Reason reason);
+
+// The Streamline twin sites (DLSS-G's own factory): OptiScaler's DLSS-G output, a chain of XeFG / FSR FG's library that
+// got there, or the game's own Streamline DLSS-G
+void NoteTwinStandDown();
 
 // The last decision made for the game's swap chain, for the menu (thread safe).
 StatusSnapshot Status();
@@ -161,11 +247,12 @@ void RecordStatus(Reason reason, bool active, bool hdr10, bool enabled, float di
 // show the game's SDR picture as scRGB. The next ResizeBuffers decides again and leaves it.
 void CheckLateStandDown(ProxyChainBase& proxy, bool upgraded);
 
-// A frame generation swap chain was made for the game (it returns before any wrapper exists): HDR output stands aside.
-// Logs and records it when HDR output is on.
-void NoteFrameGenChain();
+// The game-facing chain of a frame generation output was made (it returns before any wrapper exists). XeFG and FSR FG:
+// nothing to say, the library's own real chain behind it is what HDR output decided on. OptiScaler's DLSS-G output:
+// logs and records that HDR output stands aside.
+void NoteGameFacingFrameGenChain();
 
-// What the environment says about frame generation, dxvk and Streamline DLSS-G right now (Decide inputs shared by the
-// creation sites and every resize).
+// What the environment says about frame generation (and which output), dxvk (the Vulkan bridge too) and the game's own
+// Streamline DLSS-G right now: Decide inputs shared by the creation sites and every resize.
 void FillEnvironment(Inputs& inputs);
 } // namespace SdrToHdr

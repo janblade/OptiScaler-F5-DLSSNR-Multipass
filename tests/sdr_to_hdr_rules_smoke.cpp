@@ -105,6 +105,14 @@ int main()
     Check(Is(in, Reason::Composition), "composition swap chain is Composition");
 
     in = Good();
+    in.coreWindow = true;
+    Check(Is(in, Reason::CoreWindow), "CoreWindow (UWP) swap chain is CoreWindow");
+
+    in = Good();
+    in.presentQueueDiffers = true;
+    Check(Is(in, Reason::OtherPresentQueue), "a ResizeBuffers1 present queue other than the creation one is OtherPresentQueue");
+
+    in = Good();
     in.d3d11 = true;
     Check(Is(in, Reason::D3D11NotYet), "Direct3D 11 is D3D11NotYet");
 
@@ -139,7 +147,8 @@ int main()
     const Reason all[] = { Reason::Off,         Reason::GameHdrFormat,   Reason::DisplayNotHdr,
                            Reason::BitBlt,      Reason::FrameGen,        Reason::Dxvk,
                            Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
-                           Reason::D3D11NotYet, Reason::DisplayUnknown, Reason::Active };
+                           Reason::D3D11NotYet, Reason::DisplayUnknown, Reason::CoreWindow,
+                           Reason::OtherPresentQueue, Reason::StartFailed, Reason::Active };
     bool texts = true;
 
     for (size_t i = 0; i < std::size(all); ++i)
@@ -219,11 +228,24 @@ int main()
         Check(StatusLine(snap, offSettings).colour == StatusColour::None, "status: off and the chain was off: no line");
         Check(StatusLine(snap, on).text == AppliesLaterText(), "status: turned on, the chain was made with it off: applies later");
 
+        // A Vulkan game never decides a chain: its own line, not "applies later" forever (Review Pass B2)
+        {
+            StatusSettings vulkan = on;
+            vulkan.nonDxgiApi = true;
+            const StatusSnapshot never; // nothing decided: the game made no DXGI chain
+            const auto vk = StatusLine(never, vulkan);
+            Check(vk.colour == StatusColour::Amber && vk.text.find("Vulkan") != std::string::npos,
+                  "status: turned on in a Vulkan game: not available for Vulkan (amber)");
+            vulkan.enabled = false;
+            Check(StatusLine(never, vulkan).colour == StatusColour::None, "status: off in a Vulkan game: no line");
+        }
+
         snap.enabledAtDecision = true;
 
         for (Reason reason : { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
                                Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
-                               Reason::D3D11NotYet, Reason::DisplayUnknown })
+                               Reason::D3D11NotYet, Reason::DisplayUnknown, Reason::CoreWindow,
+                               Reason::OtherPresentQueue, Reason::StartFailed })
         {
             snap.reason = reason;
             line = StatusLine(snap, on);

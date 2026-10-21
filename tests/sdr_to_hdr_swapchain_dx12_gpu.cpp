@@ -506,6 +506,121 @@ int main(int argc, char** argv)
         result = chain.Resize(g.device.Get(), real.Get(), request);
         Check(SUCCEEDED(result.hr) && result.proxied, "and the next resize makes the proxy again");
 
+        // ---- inside the real DXGI resize (Review Pass A1 / A6): a window message the game answers on any thread ----
+        {
+            struct During
+            {
+                SdrToHdr::ProxyChain* chain;
+                ID3D12Device* device;
+                IDXGISwapChain3* real;
+                SdrToHdr::ResizeRequest request;
+                bool ran = false, inResize = false, engaged = false, formatIsGame = false, getBufferRefused = false;
+                bool nestedRefused = false, otherThreadDone = false;
+            } during { &chain, g.device.Get(), real.Get(), request };
+
+            SdrToHdr::ProxyChain::Hooks().context = &during;
+            SdrToHdr::ProxyChain::Hooks().duringRealResize = [](void* context)
+            {
+                auto& d = *static_cast<During*>(context);
+                d.ran = true;
+                d.inResize = d.chain->InResize();
+                d.engaged = d.chain->Engaged();
+                d.formatIsGame = d.chain->ReportedFormat() == kGame;
+                ID3D12Resource* buffer = reinterpret_cast<ID3D12Resource*>(1);
+                d.getBufferRefused = d.chain->GetBuffer(0, IID_PPV_ARGS(&buffer)) == DXGI_ERROR_INVALID_CALL &&
+                                     buffer == nullptr;
+                const auto nested = d.chain->Resize(d.device, d.real, d.request);
+                d.nestedRefused = nested.refused && nested.hr == DXGI_ERROR_INVALID_CALL;
+
+                // Another thread taking the chain's lock (OwnsResource, as the RTV hook does) must not wait for the
+                // resize: the lock is not held across the real DXGI call
+                HANDLE thread = CreateThread(
+                    nullptr, 0,
+                    [](void* p) -> DWORD
+                    {
+                        bool relaxed = false;
+                        static_cast<During*>(p)->chain->OwnsResource(nullptr, relaxed);
+                        static_cast<During*>(p)->otherThreadDone = true;
+                        return 0;
+                    },
+                    &d, 0, nullptr);
+                WaitForSingleObject(thread, 2000);
+                CloseHandle(thread);
+            };
+
+            request.width = 72;
+            request.height = 36;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            SdrToHdr::ProxyChain::Hooks() = {};
+            Check(during.ran && SUCCEEDED(result.hr) && result.proxied, "a resize with a callback inside the real call");
+            Check(during.inResize && during.engaged && during.formatIsGame,
+                  "inside it: in resize, still engaged, the game's format reported (not FP16)");
+            Check(during.getBufferRefused, "inside it: GetBuffer is INVALID_CALL, not the real HDR buffer");
+            Check(during.nestedRefused, "inside it: a nested resize is refused with INVALID_CALL");
+            Check(during.otherThreadDone, "inside it: another thread takes the chain's lock without waiting");
+            Check(!chain.InResize() && chain.Active() && Frame(g, chain, real.Get(), 0.5f),
+                  "after it: out of the resize, active, a frame converts");
+        }
+
+        // ---- failures (Review Pass A3): the real resize fails, then the proxy rebuild fails too ----
+        {
+            const auto saved = request;
+            request.count = 17; // more than DXGI takes: the real resize fails, the chain keeps its buffers
+            SdrToHdr::ProxyChain::Hooks().failBuild = true;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            real->GetDesc(&realDesc);
+            Check(FAILED(result.hr) && result.reverted && !result.proxied && !result.stuckHdr && !chain.Active() &&
+                      !chain.Engaged() && realDesc.BufferDesc.Format == kGame,
+                  "real resize and rebuild both fail: the chain is put back to the game's format, unproxied");
+            request = saved;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            Check(SUCCEEDED(result.hr) && result.proxied, "the next resize makes the proxy again");
+
+            // ... and the revert fails as well: said honestly, nothing claims SDR
+            request.count = 17;
+            SdrToHdr::ProxyChain::Hooks().failBuild = true;
+            SdrToHdr::ProxyChain::Hooks().failRevert = true;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            SdrToHdr::ProxyChain::Hooks() = {};
+            real->GetDesc(&realDesc);
+            Check(result.stuckHdr && !result.reverted && !result.proxied &&
+                      realDesc.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
+                  "and the revert fails too: reported as stuck HDR (the real chain is still FP16)");
+            request = saved;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            Check(SUCCEEDED(result.hr) && result.proxied && Frame(g, chain, real.Get(), 0.5f),
+                  "the next resize recovers: proxied, a frame converts");
+        }
+
+        // ---- what DXGI answers an 8-bit flip chain (Review Pass A5): the wrapper answers the game with this table ----
+        {
+            HWND other = MakeWindow();
+            auto eight = MakeChain(g, other, kGame, 2, 64, 32);
+            bool same = eight != nullptr;
+            bool scrgbRefused = false;
+
+            for (int space = 0; eight != nullptr && space <= 24; ++space)
+            {
+                UINT support = 0;
+                const bool dxgi = SUCCEEDED(eight->CheckColorSpaceSupport((DXGI_COLOR_SPACE_TYPE) space, &support)) &&
+                                  (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0;
+
+                if (dxgi != SdrToHdr::EightBitChainTakesColourSpace((DXGI_COLOR_SPACE_TYPE) space))
+                {
+                    std::printf("      colour space %d: DXGI says %d, the table says %d\n", space, dxgi ? 1 : 0, dxgi ? 0 : 1);
+                    same = false;
+                }
+            }
+
+            if (eight != nullptr)
+                scrgbRefused = eight->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709) == E_INVALIDARG;
+
+            Check(same, "CheckColorSpaceSupport of an 8-bit flip chain matches EightBitChainTakesColourSpace (0..24)");
+            Check(scrgbRefused, "SetColorSpace1(scRGB) on an 8-bit chain is E_INVALIDARG, as the wrapper answers");
+            eight.Reset();
+            DestroyWindow(other);
+        }
+
         // full screen
         ShowWindow(window, SW_SHOWNOACTIVATE);
         const HRESULT full = real->SetFullscreenState(TRUE, nullptr);

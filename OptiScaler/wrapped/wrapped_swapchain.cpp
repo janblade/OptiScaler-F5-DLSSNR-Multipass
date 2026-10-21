@@ -840,9 +840,15 @@ void WrappedIDXGISwapChain4::NoteUpgrade(const SdrToHdr::Plan& plan)
 
     if (_real != nullptr && _handle != nullptr && SUCCEEDED(_real->GetParent(IID_PPV_ARGS(&factory))) && factory != nullptr)
     {
-        factory->MakeWindowAssociation(_handle, DXGI_MWA_NO_ALT_ENTER);
-        LOG_INFO("HDR output: Alt+Enter is switched off for this game's swap chain (it was changed for HDR; exclusive full screen "
-                 "is kept borderless)");
+        const HRESULT association = factory->MakeWindowAssociation(_handle, DXGI_MWA_NO_ALT_ENTER);
+
+        if (SUCCEEDED(association))
+            LOG_INFO("HDR output: Alt+Enter is switched off for this game's swap chain (it was changed for HDR; exclusive full "
+                     "screen is kept borderless)");
+        else
+            LOG_WARN("HDR output: could not switch Alt+Enter off for this game's swap chain ({:X}); the safety net takes the chain "
+                     "out of exclusive full screen if it ends up there",
+                     (UINT) association);
     }
 }
 
@@ -855,22 +861,39 @@ HRESULT WrappedIDXGISwapChain4::EmulateFullscreen(BOOL fullscreen, IDXGIOutput* 
 
         const Util::MonitorInfo info = target != nullptr ? Util::GetMonitorInfoForOutput(target) : Util::GetMonitorInfoForWindow(_handle);
 
+        // An empty monitor rectangle (the monitor query failed) or a window that is gone: nothing is changed
         if (!_borderless.Enter(_handle, info.monitorRect))
-            return DXGI_ERROR_INVALID_CALL;
+        {
+            if (!_borderlessRefusedLogged.exchange(true))
+                LOG_WARN("HDR output: borderless full screen refused for this game's swap chain (monitor rectangle empty or window "
+                         "gone)");
 
-        _borderlessTarget.Reset();
+            return DXGI_ERROR_INVALID_CALL;
+        }
+
+        ComPtr<IDXGIOutput> output;
 
         if (target != nullptr)
-            _borderlessTarget = target;
+            output = target;
         else
-            GetContainingOutput(&_borderlessTarget);
+            GetContainingOutput(&output);
+
+        {
+            std::lock_guard<std::mutex> lock(_borderlessMutex);
+            _borderlessTarget = output;
+        }
 
         LOG_INFO("HDR output: exclusive full screen kept borderless for this game's swap chain");
         return S_OK;
     }
 
     _borderless.Leave(_handle);
-    _borderlessTarget.Reset();
+
+    {
+        std::lock_guard<std::mutex> lock(_borderlessMutex);
+        _borderlessTarget.Reset();
+    }
+
     return S_OK;
 }
 
@@ -887,8 +910,10 @@ void WrappedIDXGISwapChain4::RecoverFromExclusive(HRESULT presentResult)
     {
         _real->SetFullscreenState(FALSE, nullptr);
 
+        // Recovery runs on every such event; only the first is logged
         if (!_exclusiveRecoveryLogged.exchange(true))
-            LOG_WARN("HDR output: this game's swap chain was in exclusive full screen; took it out again");
+            LOG_WARN("HDR output: this game's swap chain was in exclusive full screen; took it out again (every later time too, "
+                     "logged this once)");
     }
 }
 
@@ -1082,6 +1107,10 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
                 State::Instance().currentFGSwapchain = nullptr;
         }
 
+        // Emulated full screen: the window gets its style and placement back before the chain goes
+        if (_borderless.Active())
+            _borderless.Leave(_handle);
+
         // HDR output: the proxies and the pass go before the chain they convert into
         if (auto* proxy = Proxy())
             proxy->Release();
@@ -1195,7 +1224,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
     LOG_DEBUG("Fullscreen: {}, pTarget: {:X}, Caller: {}", Fullscreen, (size_t) pTarget,
               Util::WhoIsTheCaller(_ReturnAddress()));
 
-    // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen)
+    // A chain made flip model for HDR output never reaches the real SetFullscreenState (see EmulateFullscreen). It deliberately
+    // skips the FG mutex and the realExclusiveFullscreen bookkeeping below: upgraded chains are not used with frame generation.
     if (_upgraded)
         return EmulateFullscreen(Fullscreen, pTarget);
 
@@ -1258,6 +1288,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetFullscreenState(BOOL* pFull
 
         if (ppTarget != nullptr)
         {
+            // AddRef under the lock, so a Leave on another thread cannot free the output in between
+            std::lock_guard<std::mutex> lock(_borderlessMutex);
             *ppTarget = _borderlessTarget.Get();
 
             if (*ppTarget != nullptr)
@@ -1492,6 +1524,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeTarget(const DXGI_MODE_DESC* pNewTargetParameters)
 {
+    // Emulated full screen keeps the popup over the monitor: a smaller mode would shrink it to a corner. (A ResizeTarget made
+    // before SetFullscreenState(TRUE) goes through; Enter then covers the monitor anyway.)
+    if (_borderless.Active())
+        return S_OK;
+
     return _real->ResizeTarget(pNewTargetParameters);
 }
 

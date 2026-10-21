@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -136,9 +137,14 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     // Exclusive full screen is never entered by an upgraded chain (it would be invalid until a resize, which a bitblt-era game
     // never does): the game's SetFullscreenState(TRUE) is answered with a borderless window (SdrToHdr_Fullscreen.h), and DXGI's
     // own Alt+Enter is switched off for the window. Alt+Enter itself is therefore not handled for such a game; its own menu is.
+    // The window itself is changed by the thread that calls SetFullscreenState (BorderlessFullscreen guards the transition and
+    // answers Active from an atomic); the output the game is told about is read from other threads, so it has its own small mutex
+    // (not _localMutex: Present holds that).
     SdrToHdr::BorderlessFullscreen _borderless;
+    std::mutex _borderlessMutex;
     ComPtr<IDXGIOutput> _borderlessTarget;
     std::atomic<bool> _exclusiveRecoveryLogged { false };
+    std::atomic<bool> _borderlessRefusedLogged { false };
     HRESULT EmulateFullscreen(BOOL fullscreen, IDXGIOutput* target);
     void RecoverFromExclusive(HRESULT presentResult);
 

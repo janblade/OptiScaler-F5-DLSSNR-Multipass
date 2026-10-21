@@ -15,6 +15,7 @@ struct CreateRequest
     IUnknown* device = nullptr;        // the queue (D3D12) or the device (D3D11) the game passed
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool flipModel = false;
+    UINT sampleCount = 1;              // the desc's SampleDesc.Count
     bool frameGen = false;             // this is a frame generation library's own inner chain (_skipFGSwapChainCreation)
     bool composition = false;
     bool coreWindow = false;

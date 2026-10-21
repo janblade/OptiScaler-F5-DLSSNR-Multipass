@@ -518,6 +518,21 @@
     <ClInclude Include="output\SdrToHdr_Status.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyBase.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Pass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyDx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx11Present.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\MsaaPictureDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1476,6 +1491,18 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="output\SdrToHdr_Create.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyBase.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyDx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx11Present.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\MsaaPictureDx11.cpp">

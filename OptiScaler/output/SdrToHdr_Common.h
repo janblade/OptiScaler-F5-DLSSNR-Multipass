@@ -25,7 +25,7 @@ enum class Reason
     UnsupportedFormat, // not one of the four 8-bit formats
     MultiNode,        // a multi-GPU swap chain
     Composition,      // a composition swap chain (UWP / XAML), presented through the compositor
-    D3D11NotYet,      // a D3D11 swap chain: the D3D11 pass is not written yet
+    Multisampled,     // a multisampled swap chain (Direct3D 11 bitblt with MSAA): HDR output needs one sample
     DisplayUnknown,   // the display could not be read yet: decided again at the next resize
     CoreWindow,       // a CoreWindow (UWP) swap chain
     OtherPresentQueue, // ResizeBuffers1 presents on a queue other than the one the chain was made with
@@ -46,7 +46,7 @@ struct Inputs
     bool composition = false;
     bool coreWindow = false;
     bool presentQueueDiffers = false;
-    bool d3d11 = false;
+    bool multisampled = false;                     // SampleDesc.Count > 1
     bool displayKnown = true;                      // false: the output the window is on could not be found
 };
 
@@ -93,6 +93,10 @@ inline Decision Decide(const Inputs& in)
     if (!IsSupportedGameFormat(in.gameFormat))
         return { false, Reason::UnsupportedFormat };
 
+    // (a multisampled chain is always bitblt: it says the more useful thing)
+    if (in.multisampled)
+        return { false, Reason::Multisampled };
+
     if (!in.flipModel)
         return { false, Reason::BitBlt };
 
@@ -116,9 +120,6 @@ inline Decision Decide(const Inputs& in)
 
     if (in.presentQueueDiffers)
         return { false, Reason::OtherPresentQueue };
-
-    if (in.d3d11)
-        return { false, Reason::D3D11NotYet };
 
     if (!in.displayKnown)
         return { false, Reason::DisplayUnknown };
@@ -160,8 +161,8 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: standing aside, the swap chain presents on a different queue than it was made with";
     case Reason::StartFailed:
         return "HDR output: could not start, the game's picture is shown as it is";
-    case Reason::D3D11NotYet:
-        return "HDR output: standing aside, Direct3D 11 games are not supported yet";
+    case Reason::Multisampled:
+        return "HDR output: standing aside, multisampled swap chains are not supported";
     case Reason::DisplayUnknown:
         return "HDR output: not decided yet, the display is checked again at the next resize";
     case Reason::Active:

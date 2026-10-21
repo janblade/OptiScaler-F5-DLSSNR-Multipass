@@ -19,25 +19,22 @@ thread_local int t_proxiedCreateDepth = 0;
 std::mutex g_statusLock;
 StatusSnapshot g_status;
 
-bool IsD3D12Queue(IUnknown* device)
-{
-    if (device == nullptr)
-        return false;
-
-    ID3D12CommandQueue* queue = nullptr;
-
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&queue))) || queue == nullptr)
-        return false;
-
-    queue->Release();
-    return true;
-}
-
 // The display the window is on: its output, found through the monitor
 bool DisplayForWindow(IDXGIFactory* factory, HWND window, DisplayInfo& info)
 {
-    if (factory == nullptr || window == nullptr)
+    if (window == nullptr)
         return false;
+
+    // D3D11CreateDeviceAndSwapChain has no factory yet (the runtime makes one inside it): look on a plain one
+    Microsoft::WRL::ComPtr<IDXGIFactory1> ownFactory;
+
+    if (factory == nullptr)
+    {
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&ownFactory))) || ownFactory == nullptr)
+            return false;
+
+        factory = ownFactory.Get();
+    }
 
     const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
 
@@ -131,7 +128,7 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     in.composition = request.composition;
     in.coreWindow = request.coreWindow;
     in.multiNode = request.multiNode;
-    in.d3d11 = !IsD3D12Queue(request.device);
+    in.multisampled = request.sampleCount > 1;
     FillEnvironment(in);
 
     plan.displayKnown = DisplayForWindow(request.factory, request.hwnd, plan.display);

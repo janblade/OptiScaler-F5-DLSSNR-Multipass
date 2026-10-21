@@ -48,7 +48,7 @@ int main()
     off.gameFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
     off.flipModel = false;
     off.displayHdr = false;
-    off.frameGen = off.dxvk = off.streamlineDlssg = off.multiNode = off.composition = off.d3d11 = true;
+    off.frameGen = off.dxvk = off.streamlineDlssg = off.multiNode = off.composition = off.multisampled = true;
     off.displayKnown = false;
     Check(Is(off, Reason::Off), "Enabled=false: Off, although every other reason would also hold");
 
@@ -113,8 +113,15 @@ int main()
     Check(Is(in, Reason::OtherPresentQueue), "a ResizeBuffers1 present queue other than the creation one is OtherPresentQueue");
 
     in = Good();
-    in.d3d11 = true;
-    Check(Is(in, Reason::D3D11NotYet), "Direct3D 11 is D3D11NotYet");
+    in.multisampled = true;
+    Check(Is(in, Reason::Multisampled), "a multisampled swap chain is Multisampled");
+    in.flipModel = false;
+    Check(Is(in, Reason::Multisampled), "Multisampled says so before BitBlt (a multisampled chain is always bitblt)");
+
+    // A plain Direct3D 11 flip chain is Active: nothing in Inputs says Direct3D 11 any more
+    in = Good();
+    in.gameFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+    Check(Is(in, Reason::Active), "a Direct3D 11 flip chain, 8-bit, on an HDR display is Active");
 
     in = Good();
     in.displayKnown = false;
@@ -139,15 +146,15 @@ int main()
     in.displayHdr = false;
     Check(Is(in, Reason::Dxvk), "dxvk outranks the display");
     in = Good();
-    in.d3d11 = true;
+    in.multisampled = true;
     in.displayKnown = false;
-    Check(Is(in, Reason::D3D11NotYet), "D3D11 outranks an unknown display");
+    Check(Is(in, Reason::Multisampled), "Multisampled outranks an unknown display");
 
     // Every reason has its own one-line text, starting the same way
     const Reason all[] = { Reason::Off,         Reason::GameHdrFormat,   Reason::DisplayNotHdr,
                            Reason::BitBlt,      Reason::FrameGen,        Reason::Dxvk,
                            Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
-                           Reason::D3D11NotYet, Reason::DisplayUnknown, Reason::CoreWindow,
+                           Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
                            Reason::OtherPresentQueue, Reason::StartFailed, Reason::Active };
     bool texts = true;
 
@@ -244,7 +251,7 @@ int main()
 
         for (Reason reason : { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
                                Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
-                               Reason::D3D11NotYet, Reason::DisplayUnknown, Reason::CoreWindow,
+                               Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
                                Reason::OtherPresentQueue, Reason::StartFailed })
         {
             snap.reason = reason;

@@ -2,6 +2,8 @@
 
 // Direct3D 12 only (no OptiScaler headers but native/F5LowShaderBytecode.h), so tests/sdr_to_hdr_dx12_gpu.cpp builds it
 // alone.
+#include "SdrToHdr_Pass.h"
+
 #include <d3d12.h>
 #include <dxgiformat.h>
 
@@ -9,20 +11,6 @@
 
 namespace SdrToHdr
 {
-// The pass's constants, the layout of b0 in output/SdrToHdr_Hlsl.h (8 dwords, passed as root constants).
-struct PassConstants
-{
-    uint32_t mode = 0;    // 0 = scRGB, 1 = PQ
-    uint32_t convert = 1; // 1 = this conversion; 0 = the Windows baseline (piecewise sRGB at sdrWhiteNits)
-    uint32_t decode = 0;  // 0 = gamma 2.2, 1 = sRGB curve (convert = 1)
-    float gameNits = 203.0f;
-    float peakNits = 1000.0f; // a clamp; the caller resolves 0 (SdrToHdr::ResolvePeakNits)
-    float sdrWhiteNits = 80.0f;
-    uint32_t srcLinear = 0; // 1: the proxy is a typed _SRGB resource, read through an _SRGB view (see SdrToHdr_Hlsl.h)
-    float pad = 0.0f;
-};
-static_assert(sizeof(PassConstants) == 32, "b0 is 8 dwords");
-
 // One full-screen draw per frame: the proxy back buffer the game drew in (R8G8B8A8 or B8G8R8A8, read raw through a UNORM
 // view) -> the real back buffer (R16G16B16A16_FLOAT for scRGB, R10G10B10A2_UNORM for HDR10).
 //

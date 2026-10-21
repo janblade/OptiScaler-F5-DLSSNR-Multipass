@@ -535,9 +535,18 @@ struct NrState
     // failure into a crash. It stays off and says why.
     bool failed = false;
     const char* reason = "";
+
+    // The game's last output format, to say once that it swaps RGBA8 and BGRA8 (the surfaces and model are kept)
+    DXGI_FORMAT lastGameFormat = DXGI_FORMAT_UNKNOWN;
+    bool saidFormatSwap = false;
 };
 
 NrState g_nr;
+
+// DlssNr_SurfaceFormats.h takes no Windows headers and spells these formats as numbers
+static_assert(DXGI_FORMAT_R8G8B8A8_TYPELESS == 27 && DXGI_FORMAT_R8G8B8A8_UNORM == 28 &&
+              DXGI_FORMAT_R8G8B8A8_UNORM_SRGB == 29 && DXGI_FORMAT_B8G8R8A8_UNORM == 87 &&
+              DXGI_FORMAT_B8G8R8A8_TYPELESS == 90 && DXGI_FORMAT_B8G8R8A8_UNORM_SRGB == 91);
 
 // Automatic's own base white point (PreExposure / its metered exposure, never the followed game's), from the CPU
 // readbacks a few frames behind the shader's live value. 0 when there is no reading yet.
@@ -1012,10 +1021,11 @@ void ForgetCalibration()
     g_nr.calibWhy = "measuring...";
 }
 
-// modelFormat is the model surfaces' format: the game's, or RGBA16F while Compress screen edges packs the picture.
-// colourFormat is the game's colour format, which colorCopy, hdrCopy, colorSmall, activeColor, lutScratch and outputNative
-// are made in (hdrCopy may be RGBA16F instead, and is checked again at its creation). Both are checked: with compression
-// on the model format does not move when the game's does (DlssNr_SurfaceFormats.h).
+// modelFormat is the model surfaces' format: the game's (canonical), or RGBA16F while Compress screen edges packs the
+// picture. colourFormat is the game's colour format made canonical (DlssNr_SurfaceFormats.h: BGRA8 -> RGBA8), which
+// colorCopy, colorSmall and outputNative are made in. hdrCopy, activeColor and lutScratch go with a real change too,
+// and check the exact game format themselves at their creation, so an RGBA8/BGRA8 swap re-makes only those. Both are
+// checked: with compression on the model format does not move when the game's does (DlssNr_SurfaceFormats.h).
 void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT colourFormat)
 {
     const DXGI_FORMAT haveModel = g_nr.output != nullptr ? g_nr.output->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
@@ -2953,6 +2963,24 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
+    // Our surfaces' colour format: the game's, with BGRA8 made RGBA8 (DlssNr_SurfaceFormats.h). A game that swaps the
+    // two keeps one set of surfaces, one model feature and its history. Only the surfaces copied straight to or from
+    // `target` use desc.Format and check it themselves (activeColor, lutScratch, heldColor, hdrCopy without a UAV).
+    const auto colourFormat = (DXGI_FORMAT) DlssNr::CanonicalColourFormat((int) desc.Format);
+    {
+        auto& lastGameFormat = g_nr.lastGameFormat;
+
+        if (!g_nr.saidFormatSwap && lastGameFormat != DXGI_FORMAT_UNKNOWN && lastGameFormat != desc.Format &&
+            DlssNr::SameColourFamily((int) lastGameFormat, (int) desc.Format))
+        {
+            g_nr.saidFormatSwap = true;
+            LOG_INFO("DLSS-NR: the game's output changes between format {} and {} (RGBA8/BGRA8); the model and its "
+                     "history are kept",
+                     (int) lastGameFormat, (int) desc.Format);
+        }
+
+        lastGameFormat = desc.Format;
+    }
     const auto active = frame.BeforeUpscale
         ? DlssNr::PreSrColorExtent(desc, frame.RenderSubrectWidth, frame.RenderSubrectHeight)
         : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { (unsigned int) desc.Width, desc.Height } };
@@ -3124,7 +3152,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // size. Everything about the model below (its features, its surfaces, the guides it is handed) follows the packed
     // size; the encode, the resolve and the frame stay at the ordinary ones.
     const uint64_t spatialSignature = EdgeCompression::SignatureOf(
-        desc.Format, depth != nullptr ? guideDesc.Format : DXGI_FORMAT_UNKNOWN,
+        colourFormat, depth != nullptr ? guideDesc.Format : DXGI_FORMAT_UNKNOWN,
         depth != nullptr ? (unsigned int) guideDesc.Width : 0u, depth != nullptr ? guideDesc.Height : 0u,
         motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
 
@@ -3146,7 +3174,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const unsigned int modelWidth = spatial ? EdgeCompression::Layout().modelW : workWidth;
     const unsigned int modelHeight = spatial ? EdgeCompression::Layout().modelH : workHeight;
-    const DXGI_FORMAT modelFormat = spatial ? EdgeCompression::kFormat : desc.Format;
+    const DXGI_FORMAT modelFormat = spatial ? EdgeCompression::kFormat : colourFormat;
 
     // The Replace curves take the model's answer as the picture and never read the proxy, so the unpack's loss at the
     // edges would land on screen with nothing to cancel it. The unpack then adds it back, measured against the picture the
@@ -3154,7 +3182,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool replaceCorrection =
         spatial && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
 
-    ReleaseSurfacesIfFormatChanged(modelFormat, desc.Format);
+    ReleaseSurfacesIfFormatChanged(modelFormat, colourFormat);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
                                    g_nr.workWidth != modelWidth || g_nr.workHeight != modelHeight;
@@ -3213,12 +3241,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // The kept copy holds the frame the pass works on, which the resolve reads back as its original when the colour
     // takes a UAV. While the Colour encoding override converts (gamma 2.2, PQ) that frame is no longer in the game's
-    // encoding -- PQ decoded to linear runs past 1.0 -- so it needs a float copy. Without a UAV the copy is the resolve's
-    // target instead, copied back over the colour, so it has to keep the colour's format (and the resolve reads the
-    // game's own texture, OriginalIsGameColour).
-    const DXGI_FORMAT keepFormat = targetSupportsUav && DlssNrColourEncoding::ShaderConverts(frame.InputEncoding)
+    // encoding -- PQ decoded to linear runs past 1.0 -- so it needs a float copy. Without a UAV the copy is the
+    // resolve's target instead, copied back over the colour, so it has to keep the colour's exact format (and the
+    // resolve reads the game's own texture, OriginalIsGameColour).
+    const DXGI_FORMAT keepFormat = !targetSupportsUav ? desc.Format
+                                   : DlssNrColourEncoding::ShaderConverts(frame.InputEncoding)
                                        ? DXGI_FORMAT_R16G16B16A16_FLOAT
-                                       : desc.Format;
+                                       : colourFormat;
 
     if (g_nr.hdrCopy != nullptr && g_nr.hdrCopy->GetDesc().Format != keepFormat)
         ParkNrResource(g_nr.hdrCopy);
@@ -3226,13 +3255,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_nr.output == nullptr)
     {
         g_nr.output = CreateScratch(device, modelFormat, modelWidth, modelHeight);
-        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
+        g_nr.colorCopy = CreateScratch(device, colourFormat, width, height);
         g_nr.workWidth = modelWidth;
         g_nr.workHeight = modelHeight;
     }
 
     if (g_nr.hdrCopy == nullptr)
         g_nr.hdrCopy = CreateScratch(device, keepFormat, width, height);
+
+    // The crop is a CopyTextureRegion from the game's colour: exact format
+    if (g_nr.activeColor != nullptr && g_nr.activeColor->GetDesc().Format != desc.Format)
+        ParkNrResource(g_nr.activeColor);
 
     if (cropColor && g_nr.activeColor == nullptr)
         g_nr.activeColor = CreateScratch(device, desc.Format, width, height);
@@ -3313,14 +3346,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatial && !replaceCorrection)
         ParkNrResource(g_nr.colorSmall);
     else if (reduced && g_nr.colorSmall == nullptr)
-        g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.colorSmall = CreateScratch(device, colourFormat, workWidth, workHeight);
 
     // The up/down-leg target is native (the answer is brought back to frame size before the
     // resolve) -- shared by both the supersampling down-leg (> 1) and the reduced up-leg (< 1),
     // mutually exclusive per frame.
     // Packed and supersampling, the pair is averaged into Compress screen edges' own native pair instead.
     if (workScale != 1.0f && !(spatial && workScale > 1.0f) && g_nr.outputNative == nullptr)
-        g_nr.outputNative = CreateScratch(device, desc.Format, width, height);
+        g_nr.outputNative = CreateScratch(device, colourFormat, width, height);
 
     if (g_nr.meter == nullptr)
     {
@@ -4034,6 +4067,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (!lutPath.empty())
         {
+            // Copied back onto `target` (CopyTextureRegion): exact format
+            if (g_nr.lutScratch != nullptr && g_nr.lutScratch->GetDesc().Format != desc.Format)
+            {
+                ParkNrResource(g_nr.lutScratch);
+                g_nr.lutScratchFailed = false;
+            }
+
             if (g_nr.lutScratch == nullptr && !g_nr.lutScratchFailed)
             {
                 g_nr.lutScratch = CreateScratch(device, desc.Format, width, height);
@@ -4761,7 +4801,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     reuseFrame.device = device;
     reuseFrame.cfg = &cfg;
     reuseFrame.info = &reuseInfo;
-    reuseFrame.answerFormat = desc.Format;
+    reuseFrame.answerFormat = colourFormat;
     reuseFrame.workWidth = workWidth;
     reuseFrame.workHeight = workHeight;
     reuseFrame.motionWidth = motionWidth;

@@ -3796,6 +3796,19 @@ static void RenderDebugPage(Config* config, float menuResScale)
         HelpMarker("Where the dividing line sits.");
     }
 
+    if (DlssNr::SuperiorScaling::Enabled(*config))
+    {
+        const char* labels[] = { "Off", "Native proxy", "Model output", "Difference (amplified)",
+                                 "NR input", "Stabilized residual", "First inter-pass input" };
+        const uint32_t views[] = { 0, 1, 2, 3, 4, 6, 7 }; // v59 has no pre-DLAA carrier copy
+        int selected = 0;
+        for (int i = 0; i < IM_ARRAYSIZE(views); ++i)
+            if (config->DlssNrDebugView.value_or_default() == views[i]) selected = i;
+        if (ImGui::Combo("Debug view", &selected, labels, IM_ARRAYSIZE(labels)))
+            config->DlssNrDebugView = views[selected];
+    }
+    else
+    {
     static const char* debugNames[] = { "Off", "Proxy (what the model sees)", "Model output (raw)",
                                         "Difference (amplified)" };
     int debugView = (int) config->DlssNrDebugView.value_or_default();
@@ -3803,6 +3816,7 @@ static void RenderDebugPage(Config* config, float menuResScale)
         config->DlssNrDebugView = (uint32_t) debugView;
 
     HelpMarker("Shows the model input, its raw output, or the difference x20 (grey = no change).");
+    }
 
     ImGui::PopItemWidth();
 }

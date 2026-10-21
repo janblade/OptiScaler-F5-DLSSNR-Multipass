@@ -423,13 +423,13 @@ These can be changed from the in-game menu with real-time results.
 
 ![menu scale](images/ui_scale.png)
 
-### HDR Output (SDR games, Dx12)
+### HDR Output (SDR games, Dx11 and Dx12)
 
 Shows a game that renders SDR correctly on an HDR display. The swap chain is made HDR (scRGB, or HDR10) and one pass converts the game's picture at the end: it decodes gamma 2.2 (or the sRGB curve), puts SDR white at the chosen brightness (203 nits by default) and encodes the result. The game never sees the HDR format. It gives SDR content the right brightness and gamma in an HDR signal; it does not add highlights the game never drew.
 
 Off by default. Turn it on from the in-game menu (Image page, "HDR output") or with `Enabled=true`. It applies at the next start or resolution / window change, and Windows HDR must be on for the display.
 
-It stands aside, and logs why, when the game already outputs HDR (a 16-bit float or 10-bit swap chain), Windows HDR is off, the swap chain is not flip model, frame generation or Streamline DLSS-G owns the swap chain, the game runs on dxvk (Vulkan), or the game uses Direct3D 11 (not supported yet).
+It stands aside, and logs why, when the game already outputs HDR (a 16-bit float or 10-bit swap chain), Windows HDR is off, the swap chain is not flip model (a Direct3D 11 game that asks for the older bitblt swap effect, or a multisampled swap chain), frame generation or Streamline DLSS-G owns the swap chain, or the game runs on dxvk (Vulkan). It works for Direct3D 11 and Direct3D 12 games; not Vulkan, and not with frame generation yet.
 
 ```ini
 [HDR]

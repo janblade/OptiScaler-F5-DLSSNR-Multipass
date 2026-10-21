@@ -535,9 +535,18 @@ struct NrState
     // failure into a crash. It stays off and says why.
     bool failed = false;
     const char* reason = "";
+
+    // The game's last output format, to say once that it swaps RGBA8 and BGRA8 (the surfaces and model are kept)
+    DXGI_FORMAT lastGameFormat = DXGI_FORMAT_UNKNOWN;
+    bool saidFormatSwap = false;
 };
 
 NrState g_nr;
+
+// DlssNr_SurfaceFormats.h takes no Windows headers and spells these formats as numbers
+static_assert(DXGI_FORMAT_R8G8B8A8_TYPELESS == 27 && DXGI_FORMAT_R8G8B8A8_UNORM == 28 &&
+              DXGI_FORMAT_R8G8B8A8_UNORM_SRGB == 29 && DXGI_FORMAT_B8G8R8A8_UNORM == 87 &&
+              DXGI_FORMAT_B8G8R8A8_TYPELESS == 90 && DXGI_FORMAT_B8G8R8A8_UNORM_SRGB == 91);
 
 // Automatic's own base white point (PreExposure / its metered exposure, never the followed game's), from the CPU
 // readbacks a few frames behind the shader's live value. 0 when there is no reading yet.
@@ -1012,53 +1021,6 @@ void ForgetCalibration()
     g_nr.calibWhy = "measuring...";
 }
 
-// Which output the game hands us, and how often per present. A game that swaps its colour format (Watch Dogs: Legion,
-// RGBA8 <-> BGRA8) either alternates two output textures, one evaluate per present, or evaluates twice per present on
-// one handle (two views, one history): the rebuild line and the first two-in-one-present line tell which.
-struct TargetWatch
-{
-    UINT64 present = UINT64_MAX;
-    unsigned int inPresent = 0;
-    ID3D12Resource* last = nullptr;
-    DXGI_FORMAT lastFormat = DXGI_FORMAT_UNKNOWN;
-    unsigned long long changes = 0;
-    bool reportedTwo = false;
-} g_targetWatch;
-
-void WatchTarget(ID3D12Resource* target, const D3D12_RESOURCE_DESC& desc)
-{
-    auto& w = g_targetWatch;
-    const UINT64 present = State::Instance().frameCount;
-
-    if (present != w.present)
-    {
-        w.present = present;
-        w.inPresent = 0;
-    }
-
-    ++w.inPresent;
-
-    if (w.inPresent == 2 && !w.reportedTwo)
-    {
-        w.reportedTwo = true;
-        LOG_INFO("DLSS-NR: two evaluates in one present ({}): output {} format {} {}x{}, then {} format {}", present,
-                 (void*) w.last, (int) w.lastFormat, desc.Width, desc.Height, (void*) target, (int) desc.Format);
-    }
-
-    if (target != w.last)
-    {
-        if (w.last != nullptr && ++w.changes <= 20)
-            LOG_INFO("DLSS-NR: the game's output moved {} format {} -> {} format {} {}x{} (present {}, evaluate {} "
-                     "in it, change {})",
-                     (void*) w.last, (int) w.lastFormat, (void*) target, (int) desc.Format, desc.Width, desc.Height,
-                     present, w.inPresent, w.changes);
-
-        w.last = target;
-    }
-
-    w.lastFormat = desc.Format;
-}
-
 // modelFormat is the model surfaces' format: the game's (canonical), or RGBA16F while Compress screen edges packs the
 // picture. colourFormat is the game's colour format made canonical (DlssNr_SurfaceFormats.h: BGRA8 -> RGBA8), which
 // colorCopy, colorSmall and outputNative are made in. hdrCopy, activeColor and lutScratch go with a real change too,
@@ -1073,9 +1035,8 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT colourF
         return;
 
     LOG_INFO("DLSS-NR rebuilding surfaces: model format {} -> {}, colour format {} -> {} (inject point or Compress "
-             "screen edges changed; output {}, present {}, evaluate {} in it)",
-             (int) haveModel, (int) modelFormat, (int) haveColour, (int) colourFormat, (void*) g_targetWatch.last,
-             g_targetWatch.present, g_targetWatch.inPresent);
+             "screen edges changed)",
+             (int) haveModel, (int) modelFormat, (int) haveColour, (int) colourFormat);
 
     ForgetCalibration();
 
@@ -3002,20 +2963,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
-    WatchTarget(target, desc);
-
     // Our surfaces' colour format: the game's, with BGRA8 made RGBA8 (DlssNr_SurfaceFormats.h). A game that swaps the
     // two keeps one set of surfaces, one model feature and its history. Only the surfaces copied straight to or from
     // `target` use desc.Format and check it themselves (activeColor, lutScratch, heldColor, hdrCopy without a UAV).
     const auto colourFormat = (DXGI_FORMAT) DlssNr::CanonicalColourFormat((int) desc.Format);
     {
-        static DXGI_FORMAT lastGameFormat = DXGI_FORMAT_UNKNOWN;
-        static bool saidSwap = false;
+        auto& lastGameFormat = g_nr.lastGameFormat;
 
-        if (!saidSwap && lastGameFormat != DXGI_FORMAT_UNKNOWN && lastGameFormat != desc.Format &&
+        if (!g_nr.saidFormatSwap && lastGameFormat != DXGI_FORMAT_UNKNOWN && lastGameFormat != desc.Format &&
             DlssNr::SameColourFamily((int) lastGameFormat, (int) desc.Format))
         {
-            saidSwap = true;
+            g_nr.saidFormatSwap = true;
             LOG_INFO("DLSS-NR: the game's output changes between format {} and {} (RGBA8/BGRA8); the model and its "
                      "history are kept",
                      (int) lastGameFormat, (int) desc.Format);

@@ -44,6 +44,14 @@ int main()
             }
         // Declaration controls vector units even when the available subrect is clipped.
         const auto native = Sp::Build(settings, 3840, 2160, 1.f, false);
+        require(Ss::NeedsTemporal(3840, 2160, 3840, 2160, true, native.modelW, native.modelH));
+        require(!Ss::NeedsTemporal(3840, 2160, 3840, 2160, false, native.modelW, native.modelH));
+        require(!Ss::NeedsTemporal(3840, 2160, 3840, 2160, true, 3840, 2160));
+        require(Ss::NeedsTemporal(3840, 2160, 3840, 2160, true, 3840, 1936)); // one compressed axis
+        require(Ss::NeedsTemporal(3840, 2160, 2496, 1404, false, 2496, 1404));
+        require(Ss::NeedsTemporal(3840, 2160, 2496, 1404, true, 2240, 1264));
+        require(!Ss::NeedsTemporal(3840, 2160, 5760, 3240, true, 5184, 2928)); // supersampling is unchanged
+        require(!Ss::NeedsTemporal(0, 2160, 3840, 2160, true, 3456, 1952));
         const DlssNr::GuideRegions clipped { { 20, 7, 1234, 700 }, { 3, 5, 1888, 1060 } };
         const auto c = Sp::MakeGuideConstants(native, clipped, { 1920, 1080 }, 1920, -1080);
         require(c.motionScale[0] == 3840 && c.motionScale[1] == -2160);

@@ -322,14 +322,13 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
 // creation gets a submission-only frame, exactly like NR feature creation above it.
 bool Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* device, DXGI_FORMAT format,
            unsigned width, unsigned height, unsigned workWidth, unsigned workHeight, const DlssNrFrameInfo& frame,
-           bool haveDepth, ID3D12CommandQueue* queue)
+           bool temporal, bool haveDepth, ID3D12CommandQueue* queue)
 {
     auto& state = GetState();
     state.lifetime.Collect();
-    const bool temporal = workWidth < width || workHeight < height;
     if (temporal && !haveDepth)
     {
-        Say("Temporal enlargement needs current depth and motion guides.");
+        Say("Temporal stabilization needs current depth and motion guides.");
         return false;
     }
     const int preset =

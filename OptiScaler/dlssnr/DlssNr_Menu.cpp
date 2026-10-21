@@ -3402,7 +3402,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         }
         HelpMarker("How NR is reconstructed below 100% model resolution. Superior Scaling uses its own Area "
                    "downsample, frequency shaping and temporal DLSS stabilization. Model resolution and each "
-                   "NR pass remain configurable. At 100% it runs ordinary NR without enlargement or private DLSS.");
+                   "NR pass remain configurable. At 100%, private DLSS and guided reconstruction also run when "
+                   "Compress screen edges reduces the model's input.");
         if (DlssNr::SuperiorScaling::Enabled(*config))
         {
             static const char* presets[] = { "A - higher performance", "K - slower, more stable NR in motion" };
@@ -3414,8 +3415,6 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "This A/K choice is independent of the NR main/small model and the game's DLSS preset.");
             if (nr.vulkan)
                 ImGui::TextWrapped("Superior Scaling requires DirectX 12 or a supported DirectX 12 bridge.");
-            else if (!reduced)
-                ImGui::TextDisabled("Temporal stabilization is inactive at 100% or above.");
             const auto status = DlssNr::SuperiorScaling::Status();
             if (!status.empty())
                 ImGui::TextWrapped("%s", status.c_str());

@@ -1,0 +1,36 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "driver": "616.56",
+  "native": [
+    3840,
+    2160
+  ],
+  "layout": "Balanced: center 80%, work 90%, both axes; packed 3456x1952",
+  "gain_settings": "NR B Small, Standard, Structure=Intensity=1; identical packed-resolution gains in both variants",
+  "baseline": "606638eff3eebce82712f54622ac173f82e811a6",
+  "method": "8 ABBA/BAAB blocks, separate 8-quartet warm-up/block, 40 measured quartets/block, 4 GPU repetitions/timestamp; resident resources; 640 samples/variant",
+  "formats": "FP16 proxy/answer/decoded residual, FP16 low/output, FP32 original frame",
+  "scope": "Synthetic final Low64 + composition only: raw-answer baseline versus signed-residual guided native resolve. Candidate residual prepared outside timing; excludes private DLSS inference, carrier encode/decode, guide preparation, NR/inter-passes, colour pack/unpack and full game.",
+  "results": [
+    {
+      "stage": "native_temporal_hdr0",
+      "percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.32896,
+      "candidate_median_ms": 0.306432,
+      "paired_median_delta_ms": -0.022272000000000014,
+      "base_stdev_ms": 0.03907601960613638,
+      "candidate_stdev_ms": 0.0326534894485731
+    },
+    {
+      "stage": "native_temporal_sdr",
+      "percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.32384,
+      "candidate_median_ms": 0.337664,
+      "paired_median_delta_ms": 0.013056000000000012,
+      "base_stdev_ms": 0.05945910369086313,
+      "candidate_stdev_ms": 0.10083149795200441
+    }
+  ]
+}

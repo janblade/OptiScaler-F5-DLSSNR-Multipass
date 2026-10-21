@@ -26,8 +26,10 @@ int main()
             for (bool half : { false, true })
                 for (unsigned curve = 0; curve < 8; ++curve)
                     for (unsigned scenario = 0; scenario < 8; ++scenario)
-                        for (bool rawAnswer : { false, true })
+                        for (unsigned path = 0; path < 3; ++path)
                         {
+                            const bool rawAnswer = path == 1u;
+                            const bool nativeGrid = path != 0u;
                             HostConstants h {};
                             h.Mode = 1;
                             h.Width = dims.first;
@@ -59,7 +61,7 @@ int main()
                             h.SkinDetail = 0.3f;
                             h.SkinColour = 0.4f;
                             h.EnvironmentDetail = h.EnvironmentColour = 1;
-                            h.ModelWorkScale = rawAnswer ? 1.f : .65f;
+                            h.ModelWorkScale = nativeGrid ? 1.f : .65f;
                             h.GuideHeight = rawAnswer ? 1u : 0u;
                             h.Transfer = 1;
                             h.GuideWidth = 1;
@@ -68,8 +70,8 @@ int main()
                             DlssNrConstants bytes {};
                             static_assert(sizeof(bytes) == sizeof(h));
                             std::memcpy(&bytes, &h, sizeof(h));
-                            const UINT sw = rawAnswer ? dims.first : std::max(1u, dims.first * 65u / 100u),
-                                       sh = rawAnswer ? dims.second : std::max(1u, dims.second * 65u / 100u);
+                            const UINT sw = nativeGrid ? dims.first : std::max(1u, dims.first * 65u / 100u),
+                                       sh = nativeGrid ? dims.second : std::max(1u, dims.second * 65u / 100u);
                             auto compare = [&](ID3D12PipelineState* a, ID3D12PipelineState* b, const char* name)
                             {
                                 const auto x = r.run(a, dims.first, dims.second, dims.first, dims.second, bytes, 0,

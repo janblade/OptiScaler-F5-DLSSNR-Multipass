@@ -3660,8 +3660,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (superior)
     {
         ResTrack_Dx12::HookLateNrQueue(device);
+        const bool temporal = DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, spatial,
+                                                                     modelWidth, modelHeight);
         if (!SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height, workWidth, workHeight, frame,
-                                depth && guides.depth.valid(),
+                                temporal, depth && guides.depth.valid(),
                                 timingQueue ? timingQueue
                                             : (ID3D12CommandQueue*) State::Instance().currentCommandQueue))
         {
@@ -5612,7 +5614,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             resolveParams.MvScaleX = gains.high;
             resolveParams.MvScaleY = gains.low;
             resolveParams.GuideWidth = low ? 1u : 0u;
-            resolveParams.GuideHeight = g.temporal ? 0u : 1u; // raw NR answer, no private DLSS at native scale
+            resolveParams.GuideHeight = g.temporal ? 0u : 1u; // raw NR answer when temporal stabilization is inactive
             auto* pso = SuperiorResolvePipeline(resolveParams.Passthrough != 0, !g.temporal);
             const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
             composed = residual && lowReady && pso &&

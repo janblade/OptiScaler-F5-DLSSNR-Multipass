@@ -4,7 +4,8 @@ param(
     [switch]$GpuTiming,
     [switch]$GpuHost,
     [switch]$GpuSpatial,
-    [switch]$GpuSpatialTiming
+    [switch]$GpuSpatialTiming,
+    [switch]$GpuNativeTemporalTiming
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -26,7 +27,7 @@ try {
     if ($GpuQuality) { $names += $quality }
     if ($GpuTiming) { $names += 'superior_tall_low_timing' }
     if ($GpuSpatial) { $names += @('nr_spatial_dx12_gpu', 'spatial_raw_low_quality') }
-    if ($GpuSpatialTiming) {
+    if ($GpuSpatialTiming -or $GpuNativeTemporalTiming) {
         python tools/prepare_superior_host_tests.py --timing-baseline
         if ($LASTEXITCODE -ne 0) { throw 'Spatial timing baseline missing (fetch full history)' }
         $names += 'spatial_timing'
@@ -58,6 +59,10 @@ try {
     if ($GpuSpatialTiming) {
         & "$out/spatial_timing.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Spatial GPU timing failed' }
+    }
+    if ($GpuNativeTemporalTiming) {
+        & "$out/spatial_timing.exe" --native-temporal
+        if ($LASTEXITCODE -ne 0) { throw 'Native temporal stage timing failed' }
     }
     $candidate = 'OptiScaler/shaders/dlssnr/superior/precompile'
     if ($GpuQuality -or $GpuTiming) {

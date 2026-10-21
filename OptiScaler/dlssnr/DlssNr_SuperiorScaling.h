@@ -48,6 +48,14 @@ inline float ResolutionScale(unsigned nativeW, unsigned nativeH, unsigned modelW
         return 1.0f;
     return float(std::sqrt((double(modelW) * modelH) / (double(nativeW) * nativeH)));
 }
+inline bool NeedsTemporal(unsigned nativeW, unsigned nativeH, unsigned ordinaryW, unsigned ordinaryH, bool compressed,
+                          unsigned modelW, unsigned modelH)
+{
+    if (!nativeW || !nativeH || !ordinaryW || !ordinaryH || !modelW || !modelH)
+        return false;
+    return ordinaryW < nativeW || ordinaryH < nativeH ||
+           (compressed && ordinaryW == nativeW && ordinaryH == nativeH && (modelW < nativeW || modelH < nativeH));
+}
 inline float MotionScale(float gameScale, unsigned motionExtent, unsigned referenceExtent)
 {
     return referenceExtent ? gameScale * (float(motionExtent) / float(referenceExtent)) : gameScale;

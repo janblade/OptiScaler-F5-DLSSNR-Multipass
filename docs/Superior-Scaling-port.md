@@ -22,7 +22,7 @@ use Small. On 310.8, all presets use Main because that runtime has no Small mode
 once at feature creation, not per frame. If version metadata is absent, the 310.9 mapping is used with a warning in the log.
 Passes 2/3 use their explicit preset when set, including Default; otherwise they inherit pass 1. Passes 4+ inherit pass 1.
 The same mapping feeds both inter-pass scheduling/shaping and final block shaping. Informational Area/success banners are hidden.
-At 100% without compression, janblade's original multipass boundaries remain in use. Private DLSS is inactive at 100% or above; native guide units are corrected from their actual valid/reference dimensions.
+At 100% without compression, janblade's original multipass boundaries remain in use. At 100% with active edge compression that actually reduces NR, private DLSS and guided reconstruction also run. Above 100% their previous behavior is retained. Native guide units are corrected from their actual valid/reference dimensions.
 Below 100%, depth and MV are matched to the working grid with independent regions/offsets; the private DLSS path reuses current depth.
 After frames skipped by the edit cache, private DLSS resets its history on the next refresh.
 Edge compression keeps its packed NR guides and unpacks before temporal enlargement. Its inter-pass correction operates on the packed model grid.
@@ -57,16 +57,21 @@ Frequency gains use **one scale for the whole image**, as requested:
 `sqrt((modelWidth/nativeWidth) * (modelHeight/nativeHeight))`, using the actual final packed model dimensions after both
 resolution controls and rounding. Center and edges share the same gains. This scale feeds lookahead scheduling, every
 inter-pass block and final tail shaping, including when the resolution slider says 100% but compression shrinks NR.
-At native/supersampled ordinary resolution, a raw-answer PSO applies the gain split without private DLSS or an additional
-guided enlargement. Its raw low field uses the cooperative 8x16 Low64 cache, with exactly the reference N-P arithmetic.
+At 100% with active compression, NR's answer is unpacked to the ordinary native grid, then private DLSS stabilizes its
+residual and the guided pass filters/shapes it on that same native grid. There is no enlargement in that last step.
+It does not replace the original Compress pack/unpack filters. NR keeps packed guides; private DLSS receives independent,
+current depth and motion at its ordinary working size. The private feature is recreated/reset when this path is toggled.
+If compression is disabled, invalid or does not reduce NR, native 100% retains ordinary NR without private DLSS.
+A raw-answer PSO remains for above-native ordinary grids where compression reduces the actual NR pixel count below native.
+Its raw low field uses the cooperative 8x16 Low64 cache, with exactly the reference N-P arithmetic.
 Separate raw/temporal PSOs remove dynamic branches; the existing temporal SDR/HDR bytecode remains identical to 24a2d7bf.
 
 Validation on RTX 4090 / driver 616.56: 48 CPU metadata/size/gain cases; D3D12 pack/unpack with native, pre/post-SR,
 independent/clipped/offset depth and MV, low/high-resolution vectors and exact P59/P65 grids; Vulkan spatial smoke;
-1536 host-composition comparisons / 3,982,848 words; 216 raw cached-low comparisons / 59,616 words. GPU comparisons passed
+2304 host-composition comparisons / 5,974,272 words (including native signed-residual guided resolve); 216 raw cached-low comparisons / 59,616 words. GPU comparisons passed
 bit-exact where applicable. Proprietary NR/DLSS inference and full-game temporal behavior still require game validation.
 
-### Cost of the spatial correction
+### Cost of the spatial correction before native temporal stabilization
 
 RTX 4090 / 616.56, synthetic 3840x2160, Balanced compression, NR Small/Standard gain settings.
 Resident GPU timestamps, 8 alternating ABBA/BAAB blocks, separate warm-up, 640 samples per variant.
@@ -81,11 +86,29 @@ Final-stage inputs use FP16 proxy/answer/residual and output; the original frame
 | final_hdr0 | 65% | 0.297344 | 0.297472 | +0.000192 |
 | final_hdr0 | 100% | 0.256256 | 0.328192 | +0.072064 |
 
+Historical comparison up to 606638ef; it does not measure the subsequently enabled private DLSS/guided native path.
 At 100% with compression, the previous final pass omitted frequency shaping; the corrected path does real additional
 Low64 work. This is a correctness cost, not an optimization gain. At reduced scales the temporal resolve shader is
 byte-identical to the baseline; the gain coefficients change. Raw samples and standard deviations are in
 [CSV](validation/superior-spatial-timing.csv) and [JSON](validation/superior-spatial-timing.json).
 These component timings exclude NR/DLSS inference, changes in inter-pass count, colour pack/unpack and the complete game.
+
+### Native temporal final-stage cost
+
+RTX 4090 / 616.56, synthetic 3840x2160, 100% NR slider with Balanced compression, Small/Standard,
+Structure=Intensity=1. The same timestamp method and FP16 production texture formats as above compare
+606638ef's raw-answer Low64/composition against signed-residual Low64/guided composition at native size.
+
+| Profile | Raw baseline ms | Guided native ms | Paired delta ms | Baseline / candidate stddev ms |
+| --- | ---: | ---: | ---: | ---: |
+| SDR | 0.323840 | 0.337664 | +0.013056 | 0.059459 / 0.100831 |
+| HDR 0 | 0.328960 | 0.306432 | -0.022272 | 0.039076 / 0.032653 |
+
+These small, noisy differences describe only the final stage and do not establish a total performance gain.
+**Private DLSS inference, carrier encode/decode and guide preparation are excluded**; enabling them adds work
+whose complete cost must be measured in game. The candidate uses a prepared decoded residual outside the timing window.
+[Raw samples](validation/superior-native-temporal-timing.csv) and
+[statistics/metadata](validation/superior-native-temporal-timing.json) retain all samples, including outliers.
 
 ## Install
 
@@ -152,6 +175,7 @@ From Windows with MSVC x64 tools and Python:
 ./tools/test_superior_port.ps1
 ./tools/test_superior_port.ps1 -GpuHost -GpuSpatial
 ./tools/test_superior_port.ps1 -GpuSpatialTiming
+./tools/test_superior_port.ps1 -GpuNativeTemporalTiming
 ./tools/test_superior_port.ps1 -GpuQuality -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ./tools/test_superior_port.ps1 -GpuTiming -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ```

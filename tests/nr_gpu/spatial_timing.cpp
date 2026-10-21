@@ -46,10 +46,11 @@ void measure(LowFixture& f, std::ofstream& out, const char* stage, int scale, co
     std::cout << stage << " P" << scale << " complete\n" << std::flush;
 }
 
-int main()
+int main(int argc, char** argv)
 {
     try
     {
+        const bool nativeTemporal = argc == 2 && std::string(argv[1]) == "--native-temporal";
         namespace Sp = DlssNr::Spatial;
         namespace Ss = DlssNr::SuperiorScaling;
         Runner r(true, 64);
@@ -60,70 +61,75 @@ int main()
         auto copyShader = r.pipeline(current, "DlssNr");
         auto guides = r.pipeline("OptiScaler/shaders/dlssnr/precompile", "dlssnr_spatial_guides");
         auto legacy = r.pipeline("OptiScaler/shaders/dlssnr/precompile", "DlssNr");
-        std::ofstream out("artifacts/validation/spatial-timing.csv");
+        std::ofstream out(nativeTemporal ? "artifacts/validation/native-temporal-timing.csv"
+                                         : "artifacts/validation/spatial-timing.csv");
         if (!out)
             throw std::runtime_error("CSV open failed");
         out << "stage,scale,variant,block,quartet,position,gpu_ms\n" << std::setprecision(9);
         Sp::Settings settings;
         settings.enabled = true;
-        for (int scale : { 65, 100 })
-        {
-            LowFixture f(r, 100);
-            const auto layout = Sp::Build(settings, 3840, 2160, scale / 100.f, false);
-            auto desc = f.work->GetDesc();
-            desc.Width = layout.modelW;
-            desc.Height = layout.modelH;
-            desc.Format = DXGI_FORMAT_R32_FLOAT;
-            auto depth = r.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            desc.Format = DXGI_FORMAT_R32G32_FLOAT;
-            auto motion = r.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            // Smooth motion in render-pixel units; only the reference-to-frame scale changes.
-            auto cpu = r.heap->GetCPUDescriptorHandleForHeapStart();
-            D3D12_UNORDERED_ACCESS_VIEW_DESC u {};
-            u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-            // Reuse the synthetic source for read-only depth/MV; a smooth float field exercises both curve branches.
-            for (unsigned i = 0; i < 6; ++i)
+        if (!nativeTemporal)
+            for (int scale : { 65, 100 })
             {
-                auto* input = f.inputs[i == 1 ? 0 : 2].Get();
-                r.device->CreateShaderResourceView(input, nullptr, { cpu.ptr + SIZE_T(i) * r.stride });
-            }
-            u.Format = DXGI_FORMAT_R32_FLOAT;
-            r.device->CreateUnorderedAccessView(depth.Get(), nullptr, &u, { cpu.ptr + 6 * r.stride });
-            u.Format = DXGI_FORMAT_R32G32_FLOAT;
-            r.device->CreateUnorderedAccessView(motion.Get(), nullptr, &u, { cpu.ptr + 7 * r.stride });
-            const DlssNr::GuideRegions regions { { 0, 0, 1920, 1080 }, { 0, 0, 1920, 1080 } };
-            const auto old = Sp::MakeConstants(layout, 101, regions, 1.f, -1.f);
-            const auto fixed = Sp::MakeGuideConstants(layout, regions, { 1920, 1080 }, 1.f, -1.f);
-            const auto constants = [&](const auto& c)
-            {
-                auto cb = r.buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-                void* p;
-                check(cb->Map(0, nullptr, &p));
-                std::memcpy(p, &c, 256);
-                cb->Unmap(0, nullptr);
-                return cb;
-            };
-            auto cbA = constants(old), cbB = constants(fixed);
-            const auto draw = [&](ID3D12Resource* cb)
-            {
-                r.list->SetComputeRootDescriptorTable(0, r.heap->GetGPUDescriptorHandleForHeapStart());
-                r.list->SetComputeRootConstantBufferView(1, cb->GetGPUVirtualAddress());
-                r.list->SetPipelineState(guides.Get());
-                r.list->Dispatch((layout.modelW + 7) / 8, (layout.modelH + 7) / 8, 1);
-                for (auto* resource : { depth.Get(), motion.Get() })
+                LowFixture f(r, 100);
+                const auto layout = Sp::Build(settings, 3840, 2160, scale / 100.f, false);
+                auto desc = f.work->GetDesc();
+                desc.Width = layout.modelW;
+                desc.Height = layout.modelH;
+                desc.Format = DXGI_FORMAT_R32_FLOAT;
+                auto depth = r.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                desc.Format = DXGI_FORMAT_R32G32_FLOAT;
+                auto motion = r.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                // Smooth motion in render-pixel units; only the reference-to-frame scale changes.
+                auto cpu = r.heap->GetCPUDescriptorHandleForHeapStart();
+                D3D12_UNORDERED_ACCESS_VIEW_DESC u {};
+                u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                // Reuse the synthetic source for read-only depth/MV; a smooth float field exercises both curve
+                // branches.
+                for (unsigned i = 0; i < 6; ++i)
                 {
-                    D3D12_RESOURCE_BARRIER b {};
-                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                    b.UAV.pResource = resource;
-                    r.list->ResourceBarrier(1, &b);
+                    auto* input = f.inputs[i == 1 ? 0 : 2].Get();
+                    r.device->CreateShaderResourceView(input, nullptr, { cpu.ptr + SIZE_T(i) * r.stride });
                 }
-            };
-            measure(
-                f, out, "guide_pack", scale, [&] { draw(cbA.Get()); }, [&] { draw(cbB.Get()); });
-        }
+                u.Format = DXGI_FORMAT_R32_FLOAT;
+                r.device->CreateUnorderedAccessView(depth.Get(), nullptr, &u, { cpu.ptr + 6 * r.stride });
+                u.Format = DXGI_FORMAT_R32G32_FLOAT;
+                r.device->CreateUnorderedAccessView(motion.Get(), nullptr, &u, { cpu.ptr + 7 * r.stride });
+                const DlssNr::GuideRegions regions { { 0, 0, 1920, 1080 }, { 0, 0, 1920, 1080 } };
+                const auto old = Sp::MakeConstants(layout, 101, regions, 1.f, -1.f);
+                const auto fixed = Sp::MakeGuideConstants(layout, regions, { 1920, 1080 }, 1.f, -1.f);
+                const auto constants = [&](const auto& c)
+                {
+                    auto cb = r.buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+                    void* p;
+                    check(cb->Map(0, nullptr, &p));
+                    std::memcpy(p, &c, 256);
+                    cb->Unmap(0, nullptr);
+                    return cb;
+                };
+                auto cbA = constants(old), cbB = constants(fixed);
+                const auto draw = [&](ID3D12Resource* cb)
+                {
+                    r.list->SetComputeRootDescriptorTable(0, r.heap->GetGPUDescriptorHandleForHeapStart());
+                    r.list->SetComputeRootConstantBufferView(1, cb->GetGPUVirtualAddress());
+                    r.list->SetPipelineState(guides.Get());
+                    r.list->Dispatch((layout.modelW + 7) / 8, (layout.modelH + 7) / 8, 1);
+                    for (auto* resource : { depth.Get(), motion.Get() })
+                    {
+                        D3D12_RESOURCE_BARRIER b {};
+                        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                        b.UAV.pResource = resource;
+                        r.list->ResourceBarrier(1, &b);
+                    }
+                };
+                measure(
+                    f, out, "guide_pack", scale, [&] { draw(cbA.Get()); }, [&] { draw(cbB.Get()); });
+            }
         for (int hdr : { -1, 0 })
             for (int scale : { 65, 100 })
             {
+                if (nativeTemporal && scale != 100)
+                    continue;
                 ResolveFixture f(r, scale, carrier.Get(), hdr);
                 // Packed/unpacked NR inputs are RGBA16F in production. Prepare
                 // matching resident textures outside all measured windows.
@@ -141,11 +147,13 @@ int main()
                 r.barrier(halfAnswer.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 r.finish();
                 const auto layout = Sp::Build(settings, 3840, 2160, scale / 100.f, false);
-                auto before = scale == 100 ? legacy
-                                           : r.pipeline("artifacts/validation/pre-spatial",
-                                                        hdr < 0 ? "host_resolve_sdr" : "host_resolve_hdr");
-                auto after =
-                    r.pipeline(current, scale == 100 ? (hdr < 0 ? "host_resolve_raw_sdr" : "host_resolve_raw_hdr")
+                auto before = nativeTemporal
+                                  ? r.pipeline(current, hdr < 0 ? "host_resolve_raw_sdr" : "host_resolve_raw_hdr")
+                              : scale == 100 ? legacy
+                                             : r.pipeline("artifacts/validation/pre-spatial",
+                                                          hdr < 0 ? "host_resolve_sdr" : "host_resolve_hdr");
+                auto after = r.pipeline(current, scale == 100 && !nativeTemporal
+                                                     ? (hdr < 0 ? "host_resolve_raw_sdr" : "host_resolve_raw_hdr")
                                                      : (hdr < 0 ? "host_resolve_sdr" : "host_resolve_hdr"));
                 HostConstants h {};
                 h.Mode = 1;
@@ -168,15 +176,22 @@ int main()
                     std::memcpy(&bytes, &host, 256);
                     return f.cb(bytes);
                 };
+                if (nativeTemporal)
+                {
+                    const float baselineScale = Ss::ResolutionScale(3840, 2160, layout.modelW, layout.modelH);
+                    h.MvScaleX = Ss::EffectiveBand(.950f, baselineScale, 1, 1);
+                    h.MvScaleY = Ss::EffectiveBand(.861f, baselineScale, 1, 1);
+                    h.GuideHeight = 1u;
+                }
                 auto cbA = cb(h);
                 const float finalScale = Ss::ResolutionScale(3840, 2160, layout.modelW, layout.modelH);
                 h.MvScaleX = Ss::EffectiveBand(.950f, finalScale, 1, 1);
                 h.MvScaleY = Ss::EffectiveBand(.861f, finalScale, 1, 1);
-                h.GuideHeight = scale == 100 ? 1u : 0u;
+                h.GuideHeight = scale == 100 && !nativeTemporal ? 1u : 0u;
                 auto cbB = cb(h);
                 DlssNrConstants l {};
                 l.Mode = 18;
-                l.Transfer = scale == 100 ? 0u : 1u;
+                l.Transfer = scale == 100 && !nativeTemporal ? 0u : 1u;
                 l.Width = (f.images.ww + 7) / 8;
                 l.Height = (f.images.wh + 7) / 8;
                 l.DirectResolveFlags = 65536;
@@ -184,8 +199,29 @@ int main()
                 auto* answer=scale==100?halfAnswer.Get():f.edit.Get();
                 f.table(48,halfProxy.Get(),answer,f.images.low.Get());
                 f.table(56,halfProxy.Get(),answer,f.images.native.Get());
+                if (nativeTemporal)
+                {
+                    f.table(0, halfProxy.Get(), f.edit.Get(), f.images.low.Get());
+                    f.table(8, halfProxy.Get(), f.edit.Get(), f.images.native.Get());
+                }
                 const auto draw = [&](bool changed)
                 {
+                    if (nativeTemporal)
+                    {
+                        f.dispatch(changed ? low.Get() : rawLow.Get(), f.lowCb.Get(), changed ? 0u : 48u, l.Width,
+                                   l.Height, 16);
+                        r.barrier(f.images.low.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        f.dispatch(changed ? after.Get() : before.Get(), changed ? cbB.Get() : cbA.Get(),
+                                   changed ? 8u : 56u, 3840, 2160);
+                        r.barrier(f.images.low.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        D3D12_RESOURCE_BARRIER b {};
+                        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                        b.UAV.pResource = f.images.native.Get();
+                        r.list->ResourceBarrier(1, &b);
+                        return;
+                    }
                     if (scale != 100 || changed)
                     {
                         f.dispatch(scale == 100 ? rawLow.Get() : low.Get(), f.lowCb.Get(), 48, l.Width, l.Height, 16);
@@ -202,8 +238,10 @@ int main()
                     r.list->ResourceBarrier(1, &b);
                 };
                 measure(
-                    f.images, out, hdr < 0 ? "final_sdr" : "final_hdr0", scale, [&] { draw(false); },
-                    [&] { draw(true); });
+                    f.images, out,
+                    nativeTemporal ? (hdr < 0 ? "native_temporal_sdr" : "native_temporal_hdr0")
+                                   : (hdr < 0 ? "final_sdr" : "final_hdr0"),
+                    scale, [&] { draw(false); }, [&] { draw(true); });
             }
     }
     catch (const std::exception& e)

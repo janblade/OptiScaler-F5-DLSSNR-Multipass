@@ -134,11 +134,13 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     std::atomic<bool> _presentParamsLogged { false };
     void NoteUpgrade(const SdrToHdr::Plan& plan);
 
-    // The frame generation library's own real chain (SdrToHdr::Plan::fgInner): XeFG and FSR FG make it through our factory hooks
-    // and draw / present through it; HDR output converts here. Decided again at every resize with that in mind.
+    // The frame generation library's own real chain (SdrToHdr::Plan::fgInner): XeFG and FSR FG make it through our
+    // factory hooks and draw / present through it; HDR output converts here. Decided again at every resize with that in
+    // mind.
     bool _fgInner = false;
-    // The library asked for exclusive full screen and its HDR chain was made windowed (Plan::exclusiveToWindowed): like an upgraded
-    // chain it never enters exclusive full screen, the library's SetFullscreenState(TRUE) is answered with a borderless window
+    // The library asked for exclusive full screen and its HDR chain was made windowed (Plan::exclusiveToWindowed): like
+    // an upgraded chain it never enters exclusive full screen, the library's SetFullscreenState(TRUE) is answered with
+    // a borderless window
     bool _fsEmulated = false;
     void NoteFullscreenEmulation(const SdrToHdr::Plan& plan);
     void DisableAltEnter();

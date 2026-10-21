@@ -140,7 +140,8 @@ int main()
         Check(!fs.upgraded, "exclusive full screen: never an upgraded chain");
     }
 
-    // The frame generation library's exclusive full screen request: an HDR chain is made windowed, the fullscreen desc is not passed
+    // The frame generation library's exclusive full screen request: an HDR chain is made windowed, the fullscreen desc
+    // is not passed
     {
         Plan plan;
         BOOL windowed = FALSE;

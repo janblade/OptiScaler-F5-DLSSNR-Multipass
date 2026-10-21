@@ -162,9 +162,8 @@ void FillEnvironment(Inputs& inputs)
     // DLSS-G on after its chain is made is caught at its next resize.
     const auto& dlssg = DlssgTelemetry::Get();
     // (OptiScaler's own DLSS-G output is the frame generation backend FgBackend::Dlssg, not this)
-    inputs.streamlineDlssg = inputs.streamlineDlssg ||
-                             (dlssg.optionsSeen.load(std::memory_order_acquire) &&
-                              dlssg.active.load(std::memory_order_relaxed));
+    inputs.streamlineDlssg = inputs.streamlineDlssg || (dlssg.optionsSeen.load(std::memory_order_acquire) &&
+                                                        dlssg.active.load(std::memory_order_relaxed));
 }
 
 Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
@@ -217,7 +216,8 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     RecordUpgraded(plan.upgraded);
 
     if (plan.exclusiveToWindowed)
-        LOG_INFO("HDR output: the frame generation library asked for exclusive full screen; its HDR swap chain is made windowed "
+        LOG_INFO("HDR output: the frame generation library asked for exclusive full screen; its HDR swap chain is made "
+                 "windowed "
                  "and kept borderless");
 
     if (plan.editDesc)
@@ -262,8 +262,8 @@ void NoteStandDown(Reason reason)
     if (!Config::Instance()->HdrOutputEnabled.value_or_default())
         return;
 
-    // The chain of OptiScaler's own DLSS-G output is the one stand-down that is recorded here (the Streamline twin sites make
-    // no plan); logged once
+    // The chain of OptiScaler's own DLSS-G output is the one stand-down that is recorded here (the Streamline twin
+    // sites make no plan); logged once
     if (reason == Reason::DlssgOutput)
     {
         const auto before = Status();

@@ -16,27 +16,29 @@ namespace SdrToHdr
 // Why the proxy and the pass are on or off for one swap chain. Active is the only one that turns them on.
 enum class Reason
 {
-    Off,              // [HDR] Enabled is false: nothing else is looked at
-    GameHdrFormat,    // the game made an FP16 or 10-bit chain: it outputs HDR itself
-    DisplayNotHdr,    // Windows HDR is off for the display the window is on
-    BitBlt,           // not flip model, and not upgradeable (made before HDR output was on, or not at creation): needs a restart
-    ExclusiveBitBlt,  // an older (bitblt) swap chain in exclusive full screen: cannot be made flip model
-    FrameGen,         // OptiScaler frame generation is on and this swap chain is not the frame generation library's own
-    DlssgOutput,      // OptiScaler's DLSS-G (Streamline) output owns the swap chain
-    Dxvk,             // a dxvk / Vulkan present path
-    StreamlineDlssg,  // the chain is Streamline's DLSS-G proxy
+    Off,           // [HDR] Enabled is false: nothing else is looked at
+    GameHdrFormat, // the game made an FP16 or 10-bit chain: it outputs HDR itself
+    DisplayNotHdr, // Windows HDR is off for the display the window is on
+    BitBlt, // not flip model, and not upgradeable (made before HDR output was on, or not at creation): needs a restart
+    ExclusiveBitBlt, // an older (bitblt) swap chain in exclusive full screen: cannot be made flip model
+    FrameGen,        // OptiScaler frame generation is on and this swap chain is not the frame generation library's own
+    DlssgOutput,     // OptiScaler's DLSS-G (Streamline) output owns the swap chain
+    Dxvk,            // a dxvk / Vulkan present path
+    StreamlineDlssg, // the chain is Streamline's DLSS-G proxy
     UnsupportedFormat, // not one of the four 8-bit formats
-    MultiNode,        // a multi-GPU swap chain
-    Composition,      // a composition swap chain (UWP / XAML), presented through the compositor
-    Multisampled,     // a multisampled swap chain (Direct3D 11 bitblt with MSAA): HDR output needs one sample
-    DisplayUnknown,   // the display could not be read yet: decided again at the next resize
-    CoreWindow,       // a CoreWindow (UWP) swap chain
+    MultiNode,         // a multi-GPU swap chain
+    Composition,       // a composition swap chain (UWP / XAML), presented through the compositor
+    Multisampled,      // a multisampled swap chain (Direct3D 11 bitblt with MSAA): HDR output needs one sample
+    DisplayUnknown,    // the display could not be read yet: decided again at the next resize
+    CoreWindow,        // a CoreWindow (UWP) swap chain
     OtherPresentQueue, // ResizeBuffers1 presents on a queue other than the one the chain was made with
-    StartFailed,      // the proxy or the pass could not be made: the chain is shown as the game made it
-    StuckHdr,         // the proxy could not be made and the chain could not be put back: it stays HDR (known limit: for good)
-    DlssgStartedLater, // (a note, never a Decide result) the game turned on its own DLSS-G after the chain was proxied
-    DisplayLeftHdrKept, // (a note) Windows HDR went off for the display, on a chain that was made flip model for HDR output
-    DlssgKeptUpgraded, // (a note) the same, on a chain that was made flip model for HDR output: it stays on until the next start
+    StartFailed,       // the proxy or the pass could not be made: the chain is shown as the game made it
+    StuckHdr, // the proxy could not be made and the chain could not be put back: it stays HDR (known limit: for good)
+    DlssgStartedLater,  // (a note, never a Decide result) the game turned on its own DLSS-G after the chain was proxied
+    DisplayLeftHdrKept, // (a note) Windows HDR went off for the display, on a chain that was made flip model for HDR
+                        // output
+    DlssgKeptUpgraded,  // (a note) the same, on a chain that was made flip model for HDR output: it stays on until the
+                        // next start
     Active,
 };
 
@@ -59,9 +61,10 @@ struct Inputs
     bool displayHdr = false;                       // Windows HDR is on for the output the window is on
     bool frameGen = false;                         // OptiScaler frame generation is on (any backend)
     FgBackend fgBackend = FgBackend::None;         // ... and which one
-    // This chain is the frame generation library's own: XeFG and FSR FG make their real swap chain through our factory hooks
-    // (DxgiFactoryHooks while _skipFGSwapChainCreation is set) and hand the game their own chain on top of it. The library
-    // draws and presents through ours, so HDR output can convert there: frame generation only ever sees the game's SDR format.
+    // This chain is the frame generation library's own: XeFG and FSR FG make their real swap chain through our factory
+    // hooks (DxgiFactoryHooks while _skipFGSwapChainCreation is set) and hand the game their own chain on top of it.
+    // The library draws and presents through ours, so HDR output can convert there: frame generation only ever sees the
+    // game's SDR format.
     bool fgInnerChain = false;
     bool dxvk = false;
     bool streamlineDlssg = false;
@@ -136,8 +139,8 @@ inline Decision Decide(const Inputs& in)
             upgrade = true;
     }
 
-    // Frame generation: only the library's own chain of XeFG and FSR FG is converted. Anything else it is on for (DLSS-G
-    // output, another swap chain of the game, a library chain we cannot name) is left alone.
+    // Frame generation: only the library's own chain of XeFG and FSR FG is converted. Anything else it is on for
+    // (DLSS-G output, another swap chain of the game, a library chain we cannot name) is left alone.
     if (in.frameGen)
     {
         if (in.fgBackend == FgBackend::Dlssg)
@@ -219,7 +222,8 @@ inline const char* ReasonText(Reason reason)
         return "HDR output: standing aside, the game uses exclusive full screen with an older swap chain type; switch the "
                "game to borderless or windowed";
     case Reason::FrameGen:
-        return "HDR output: standing aside, this swap chain is not the frame generation library's own (only XeFG and FSR FG "
+        return "HDR output: standing aside, this swap chain is not the frame generation library's own (only XeFG and "
+               "FSR FG "
                "swap chains are converted)";
     case Reason::DlssgOutput:
         return "HDR output: standing aside, not available with DLSS-G frame generation output (use XeFG or FSR FG)";

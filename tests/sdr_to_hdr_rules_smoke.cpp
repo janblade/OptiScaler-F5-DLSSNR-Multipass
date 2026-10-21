@@ -151,12 +151,27 @@ int main()
     Check(Is(in, Reason::Multisampled), "Multisampled outranks an unknown display");
 
     // Every reason has its own one-line text, starting the same way
-    const Reason all[] = { Reason::Off,         Reason::GameHdrFormat,   Reason::DisplayNotHdr,
-                           Reason::BitBlt,      Reason::FrameGen,        Reason::Dxvk,
-                           Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
-                           Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
-                           Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::DlssgStartedLater,
-                           Reason::ExclusiveBitBlt, Reason::DlssgKeptUpgraded, Reason::DisplayLeftHdrKept, Reason::DlssgOutput,
+    const Reason all[] = { Reason::Off,
+                           Reason::GameHdrFormat,
+                           Reason::DisplayNotHdr,
+                           Reason::BitBlt,
+                           Reason::FrameGen,
+                           Reason::Dxvk,
+                           Reason::StreamlineDlssg,
+                           Reason::UnsupportedFormat,
+                           Reason::MultiNode,
+                           Reason::Composition,
+                           Reason::Multisampled,
+                           Reason::DisplayUnknown,
+                           Reason::CoreWindow,
+                           Reason::OtherPresentQueue,
+                           Reason::StartFailed,
+                           Reason::StuckHdr,
+                           Reason::DlssgStartedLater,
+                           Reason::ExclusiveBitBlt,
+                           Reason::DlssgKeptUpgraded,
+                           Reason::DisplayLeftHdrKept,
+                           Reason::DlssgOutput,
                            Reason::Active };
     bool texts = true;
 
@@ -251,11 +266,11 @@ int main()
 
         snap.enabledAtDecision = true;
 
-        for (Reason reason : { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
-                               Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
-                               Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
-                               Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::ExclusiveBitBlt,
-                               Reason::DlssgOutput })
+        for (Reason reason :
+             { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
+               Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
+               Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow, Reason::OtherPresentQueue,
+               Reason::StartFailed, Reason::StuckHdr, Reason::ExclusiveBitBlt, Reason::DlssgOutput })
         {
             snap.reason = reason;
             line = StatusLine(snap, on);
@@ -477,7 +492,8 @@ int main()
         unnamed.fgInnerChain = true;
         Check(Is(unnamed, Reason::FrameGen), "a library chain with no named backend: FrameGen");
 
-        // the rest of the rules still apply to the library's chain: display, game HDR format, dxvk, the game's own DLSS-G
+        // the rest of the rules still apply to the library's chain: display, game HDR format, dxvk, the game's own
+        // DLSS-G
         Inputs lib = Good();
         lib.frameGen = true;
         lib.fgBackend = FgBackend::XeFG;

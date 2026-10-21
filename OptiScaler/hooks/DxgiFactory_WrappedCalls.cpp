@@ -822,17 +822,19 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
 
         {
             ScopedSkipParentWrapping skipParentWrapping {};
-            result = realFactory->CreateSwapChainForHwnd(pDevice, hWnd, &localDesc,
-                                                         SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
-                                                         pRestrictToOutput, ppSwapChain);
+            result = realFactory->CreateSwapChainForHwnd(
+                pDevice, hWnd, &localDesc,
+                SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
+                pRestrictToOutput, ppSwapChain);
 
             if (FAILED(result) && hdrPlan.proxied)
             {
                 SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.Format, result);
-                result = realFactory->CreateSwapChainForHwnd(pDevice, hWnd, &localDesc,
-                                                             SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
-                                                             pRestrictToOutput, ppSwapChain);
+                result = realFactory->CreateSwapChainForHwnd(
+                    pDevice, hWnd, &localDesc,
+                    SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
+                    pRestrictToOutput, ppSwapChain);
             }
         }
 

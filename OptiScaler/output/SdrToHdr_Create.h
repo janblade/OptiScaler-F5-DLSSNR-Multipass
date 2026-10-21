@@ -27,7 +27,7 @@ struct CreateRequest
     DXGI_SWAP_EFFECT originalSwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     UINT originalBufferCount = 2;
     UINT originalFlags = 0;
-    bool frameGen = false;             // this is a frame generation library's own real chain (_skipFGSwapChainCreation)
+    bool frameGen = false; // this is a frame generation library's own real chain (_skipFGSwapChainCreation)
     bool composition = false;
     bool coreWindow = false;
     bool multiNode = false;
@@ -44,11 +44,12 @@ struct Plan
     DXGI_FORMAT realFormat = DXGI_FORMAT_UNKNOWN; // what the chain is made as when proxied
     bool hdr10 = false;
     DisplayInfo display;
-    // The frame generation library's own chain (CreateRequest::frameGen): the wrapper keeps asking for it at every resize
+    // The frame generation library's own chain (CreateRequest::frameGen): the wrapper keeps asking for it at every
+    // resize
     bool fgInner = false;
-    // ... and the library asked for exclusive full screen: an HDR chain is made windowed instead (a real exclusive HDR chain was
-    // refused by DXGI, or never came back from the library's destroy), and the wrapper keeps the window borderless when the
-    // library calls SetFullscreenState(TRUE)
+    // ... and the library asked for exclusive full screen: an HDR chain is made windowed instead (a real exclusive HDR
+    // chain was refused by DXGI, or never came back from the library's destroy), and the wrapper keeps the window
+    // borderless when the library calls SetFullscreenState(TRUE)
     bool exclusiveToWindowed = false;
     bool displayKnown = false;
 

@@ -1267,17 +1267,19 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
         {
             ScopedSkipParentWrapping skipParentWrapping {};
-            result = o_CreateSwapChainForHwnd(realFactory, pDevice, hWnd, &localDesc,
-                                              SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
-                                              pRestrictToOutput, ppSwapChain);
+            result = o_CreateSwapChainForHwnd(
+                realFactory, pDevice, hWnd, &localDesc,
+                SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
+                pRestrictToOutput, ppSwapChain);
 
             if (FAILED(result) && hdrPlan.proxied)
             {
                 SdrToHdr::RestoreSwapDesc(hdrPlan, localDesc.SwapEffect, localDesc.BufferCount, localDesc.Flags);
                 SdrToHdr::Unproxy(hdrPlan, localDesc.Format, result);
-                result = o_CreateSwapChainForHwnd(realFactory, pDevice, hWnd, &localDesc,
-                                                  SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
-                                                  pRestrictToOutput, ppSwapChain);
+                result = o_CreateSwapChainForHwnd(
+                    realFactory, pDevice, hWnd, &localDesc,
+                    SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
+                    pRestrictToOutput, ppSwapChain);
             }
         }
 
@@ -1755,8 +1757,9 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChain(IDXGIFactory* realFactory, IUnkno
     // Create the DXGI SwapChain and wrap it
     if (_skipFGSwapChainCreation || FGSCResult != S_OK)
     {
-        SdrToHdr::NoteStandDown(State::Instance().activeFgOutput == FGOutput::DLSSG ? SdrToHdr::Reason::DlssgOutput
-                                                                                     : SdrToHdr::Reason::StreamlineDlssg);
+        SdrToHdr::NoteStandDown(State::Instance().activeFgOutput == FGOutput::DLSSG
+                                    ? SdrToHdr::Reason::DlssgOutput
+                                    : SdrToHdr::Reason::StreamlineDlssg);
 
         // !_skipFGSwapChainCreation for preventing early enablement flags
         if (!_skipFGSwapChainCreation)
@@ -2074,8 +2077,9 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForHwnd(IDXGIFactory2* realFactory
     // Create the DXGI SwapChain and wrap it
     if (_skipFGSwapChainCreation || FGSCResult != S_OK)
     {
-        SdrToHdr::NoteStandDown(State::Instance().activeFgOutput == FGOutput::DLSSG ? SdrToHdr::Reason::DlssgOutput
-                                                                                     : SdrToHdr::Reason::StreamlineDlssg);
+        SdrToHdr::NoteStandDown(State::Instance().activeFgOutput == FGOutput::DLSSG
+                                    ? SdrToHdr::Reason::DlssgOutput
+                                    : SdrToHdr::Reason::StreamlineDlssg);
 
         // !_skipFGSwapChainCreation for preventing early enablement flags
         if (!_skipFGSwapChainCreation)
@@ -2224,7 +2228,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForCoreWindow(IDXGIFactory2* realF
     }
 
     SdrToHdr::NoteStandDown(State::Instance().activeFgOutput == FGOutput::DLSSG ? SdrToHdr::Reason::DlssgOutput
-                                                                                     : SdrToHdr::Reason::StreamlineDlssg);
+                                                                                : SdrToHdr::Reason::StreamlineDlssg);
 
     HRESULT result = E_FAIL;
     {

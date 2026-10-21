@@ -1478,8 +1478,8 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
-        // (HDR output converts the library's own real chain, behind `This`: `This` hands out the game's SDR buffers, which
-        // are the proxies of that chain when HDR output is on, so this reads the picture before the pass)
+        // (HDR output converts the library's own real chain, behind `This`: `This` hands out the game's SDR buffers,
+        // which are the proxies of that chain when HDR output is on, so this reads the picture before the pass)
         DlssNr::ApplyToFinishedPicture(This, gameQueue);
         fg->Present();
     }

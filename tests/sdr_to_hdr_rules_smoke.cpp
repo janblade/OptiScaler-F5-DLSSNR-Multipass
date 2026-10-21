@@ -156,7 +156,7 @@ int main()
                            Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                            Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
                            Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::DlssgStartedLater,
-                           Reason::Active };
+                           Reason::ExclusiveBitBlt, Reason::Active };
     bool texts = true;
 
     for (size_t i = 0; i < std::size(all); ++i)
@@ -253,7 +253,7 @@ int main()
         for (Reason reason : { Reason::GameHdrFormat, Reason::DisplayNotHdr, Reason::BitBlt, Reason::FrameGen, Reason::Dxvk,
                                Reason::StreamlineDlssg, Reason::UnsupportedFormat, Reason::MultiNode, Reason::Composition,
                                Reason::Multisampled, Reason::DisplayUnknown, Reason::CoreWindow,
-                               Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr })
+                               Reason::OtherPresentQueue, Reason::StartFailed, Reason::StuckHdr, Reason::ExclusiveBitBlt })
         {
             snap.reason = reason;
             line = StatusLine(snap, on);
@@ -276,6 +276,75 @@ int main()
               "status: active, then the game turned on DLSS-G: amber, stops at the next resolution / window change");
         snap.endsAtResize = false;
         Check(StatusLine(snap, on).colour == StatusColour::Green, "status: the next decision clears that note");
+    }
+
+    // ---- older (bitblt) swap chains made flip model (S2b) ----
+    {
+        Inputs bitblt = Good();
+        bitblt.flipModel = false;
+
+        // an existing chain (a resize): cannot change its model
+        Check(Is(bitblt, Reason::BitBlt), "bitblt, windowed, not at creation: BitBlt (it cannot be upgraded any more)");
+
+        // at creation: windowed or borderless, one sample, everything else passing -> Active, upgraded
+        bitblt.canUpgradeBitBlt = true;
+        Decision d = Decide(bitblt);
+        Check(d.use && d.upgrade && d.reason == Reason::Active, "bitblt, windowed, single sample, at creation: Active, upgraded");
+
+        Inputs flip = Good();
+        flip.canUpgradeBitBlt = true;
+        d = Decide(flip);
+        Check(d.use && !d.upgrade, "a flip chain at creation is Active and not upgraded");
+
+        Inputs exclusive = bitblt;
+        exclusive.windowed = false;
+        Check(Is(exclusive, Reason::ExclusiveBitBlt), "bitblt in exclusive full screen: ExclusiveBitBlt");
+        exclusive.canUpgradeBitBlt = false;
+        Check(Is(exclusive, Reason::ExclusiveBitBlt), "... also for a chain that exists");
+        exclusive.flipModel = true;
+        Check(Is(exclusive, Reason::Active), "a flip chain in exclusive full screen is Active (flip allows it)");
+
+        Inputs msaa = bitblt;
+        msaa.multisampled = true;
+        Check(Is(msaa, Reason::Multisampled), "bitblt with MSAA: Multisampled, not upgraded");
+
+        Inputs others = bitblt;
+        others.displayHdr = false;
+        d = Decide(others);
+        Check(!d.use && !d.upgrade && d.reason == Reason::DisplayNotHdr, "bitblt on a display without HDR: DisplayNotHdr, nothing is upgraded");
+        others = bitblt;
+        others.frameGen = true;
+        Check(Is(others, Reason::FrameGen), "bitblt with frame generation: FrameGen, nothing is upgraded");
+
+        Inputs off = bitblt;
+        off.enabled = false;
+        d = Decide(off);
+        Check(!d.use && !d.upgrade && d.reason == Reason::Off, "off: nothing is upgraded");
+
+        Check(std::strstr(ReasonText(Reason::ExclusiveBitBlt), "borderless or windowed") != nullptr,
+              "the exclusive full screen text says what to do");
+        Check(ReasonText(Reason::BitBlt) != ReasonText(Reason::ExclusiveBitBlt) &&
+                  std::strstr(ReasonText(Reason::BitBlt), "restart") != nullptr,
+              "BitBlt now means 'made before HDR output was on': restart");
+
+        // the desc edit
+        auto edit = UpgradeSwapDesc(DXGI_SWAP_EFFECT_DISCARD, 1, 0);
+        Check(edit.swapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD && edit.bufferCount == 2 && edit.flags == 0,
+              "edit: DISCARD, 1 buffer -> FLIP_DISCARD, 2");
+        edit = UpgradeSwapDesc(DXGI_SWAP_EFFECT_SEQUENTIAL, 1, 0);
+        Check(edit.swapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL && edit.bufferCount == 2, "edit: SEQUENTIAL, 1 buffer -> FLIP_SEQUENTIAL, 2");
+        edit = UpgradeSwapDesc(DXGI_SWAP_EFFECT_DISCARD, 3, 0);
+        Check(edit.bufferCount == 3, "edit: three buffers stay three");
+        edit = UpgradeSwapDesc(DXGI_SWAP_EFFECT_DISCARD, 1,
+                               DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE | DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH |
+                                   DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+        Check((edit.flags & DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE) == 0 && (edit.flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH) != 0 &&
+                  (edit.flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0,
+              "edit: the GDI-compatible flag (flip cannot have it) is dropped, mode switch and tearing flags are untouched");
+        edit = UpgradeSwapDesc(DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, 1, 0);
+        Check(edit.swapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, "edit: a flip effect stays as it is");
+        Check(UpgradedResizeCount(0) == 0 && UpgradedResizeCount(1) == 2 && UpgradedResizeCount(2) == 2 && UpgradedResizeCount(4) == 4,
+              "resize count: 0 keeps, 1 becomes 2, others stay");
     }
 
     std::printf(g_failures == 0 ? "sdr_to_hdr_rules_smoke: PASS\n" : "sdr_to_hdr_rules_smoke: %d FAIL\n", g_failures);

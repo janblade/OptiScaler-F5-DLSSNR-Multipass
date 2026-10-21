@@ -142,6 +142,8 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     in.enabled = true;
     in.gameFormat = format;
     in.flipModel = request.flipModel;
+    in.windowed = request.windowed;
+    in.canUpgradeBitBlt = true; // a chain being created
     in.frameGen = request.frameGen;
     in.composition = request.composition;
     in.coreWindow = request.coreWindow;
@@ -166,14 +168,48 @@ Plan PrepareCreate(const CreateRequest& request, DXGI_FORMAT& format)
     plan.realFormat = RealFormat(plan.hdr10);
     format = plan.realFormat;
 
+    if (decision.upgrade)
+    {
+        const SwapDescEdit edit = UpgradeSwapDesc(request.swapEffect, request.bufferCount, request.flags);
+        plan.upgraded = true;
+        plan.gameSwapEffect = request.swapEffect;
+        plan.gameBufferCount = request.bufferCount;
+        plan.gameFlags = request.flags;
+        plan.swapEffect = edit.swapEffect;
+        plan.bufferCount = edit.bufferCount;
+        plan.flags = edit.flags;
+        LOG_INFO("HDR output: the game asked for an older swap chain type; made it flip model for HDR");
+    }
+
     LOG_INFO("HDR output: the swap chain is made as {} ({}), the game keeps back buffers of its own format ({})",
              plan.hdr10 ? "R10G10B10A2 / PQ" : "R16G16B16A16_FLOAT / scRGB", plan.hdr10 ? "HDR10" : "scRGB",
              (UINT) plan.gameFormat);
     return plan;
 }
 
+void ApplySwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags)
+{
+    if (!plan.upgraded)
+        return;
+
+    swapEffect = plan.swapEffect;
+    bufferCount = plan.bufferCount;
+    flags = plan.flags;
+}
+
+void RestoreSwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags)
+{
+    if (!plan.upgraded)
+        return;
+
+    swapEffect = plan.gameSwapEffect;
+    bufferCount = plan.gameBufferCount;
+    flags = plan.gameFlags;
+}
+
 void Unproxy(Plan& plan, DXGI_FORMAT& format, HRESULT failure)
 {
+    plan.upgraded = false; // (the site restored the desc first, RestoreSwapDesc)
     LOG_WARN("HDR output: the swap chain could not be made as HDR ({:X}), making it as the game asked", (UINT) failure);
     plan.proxied = false;
     plan.reason = Reason::StartFailed;

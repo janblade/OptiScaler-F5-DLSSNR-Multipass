@@ -6,6 +6,7 @@
 // pass at present converts the proxy into the real buffer (output/SdrToHdr_Dx12.h). This file decides whether that
 // happens for a swap chain, and holds the few numbers both sides agree on. The log text of each reason is also the menu's
 // status line, so it is written for the player.
+#include <dxgi.h>
 #include <dxgiformat.h>
 
 #include <algorithm>
@@ -18,7 +19,8 @@ enum class Reason
     Off,              // [HDR] Enabled is false: nothing else is looked at
     GameHdrFormat,    // the game made an FP16 or 10-bit chain: it outputs HDR itself
     DisplayNotHdr,    // Windows HDR is off for the display the window is on
-    BitBlt,           // not flip model: HDR needs flip
+    BitBlt,           // not flip model, and not upgradeable (made before HDR output was on, or not at creation): needs a restart
+    ExclusiveBitBlt,  // an older (bitblt) swap chain in exclusive full screen: cannot be made flip model
     FrameGen,         // OptiScaler frame generation owns the swap chain
     Dxvk,             // a dxvk / Vulkan present path
     StreamlineDlssg,  // the chain is Streamline's DLSS-G proxy
@@ -40,6 +42,8 @@ struct Inputs
     bool enabled = false;                          // [HDR] Enabled
     DXGI_FORMAT gameFormat = DXGI_FORMAT_UNKNOWN;  // what the game asked for (create, or resize with UNKNOWN resolved)
     bool flipModel = false;                        // the swap effect, after OptiScaler's own changes to it
+    bool windowed = true;                          // not exclusive full screen
+    bool canUpgradeBitBlt = false;                 // at creation only: a bitblt chain can still be made flip model
     bool displayHdr = false;                       // Windows HDR is on for the output the window is on
     bool frameGen = false;
     bool dxvk = false;
@@ -56,6 +60,7 @@ struct Decision
 {
     bool use = false; // proxy and pass on
     Reason reason = Reason::Off;
+    bool upgrade = false; // ... on a bitblt chain that is made flip model first (Inputs::canUpgradeBitBlt)
 };
 
 // The four formats the proxy can stand in for. The _SRGB ones are views of the same bits: the pass reads the encoded
@@ -99,8 +104,20 @@ inline Decision Decide(const Inputs& in)
     if (in.multisampled)
         return { false, Reason::Multisampled };
 
+    // An older (bitblt) chain: made flip model at creation when it is windowed (or borderless) and single-sample. In exclusive
+    // full screen it cannot be, and a chain that already exists cannot change its model.
+    bool upgrade = false;
+
     if (!in.flipModel)
-        return { false, Reason::BitBlt };
+    {
+        if (!in.windowed)
+            return { false, Reason::ExclusiveBitBlt };
+
+        if (!in.canUpgradeBitBlt)
+            return { false, Reason::BitBlt };
+
+        upgrade = true;
+    }
 
     if (in.frameGen)
         return { false, Reason::FrameGen };
@@ -129,7 +146,7 @@ inline Decision Decide(const Inputs& in)
     if (!in.displayHdr)
         return { false, Reason::DisplayNotHdr };
 
-    return { true, Reason::Active };
+    return { true, Reason::Active, upgrade };
 }
 
 // One player-readable line for the log, and for the menu's status line.
@@ -144,7 +161,11 @@ inline const char* ReasonText(Reason reason)
     case Reason::DisplayNotHdr:
         return "HDR output: standing aside, Windows HDR is off for this display";
     case Reason::BitBlt:
-        return "HDR output: standing aside, this swap chain type cannot show HDR";
+        return "HDR output: standing aside, this swap chain was made as an older type before HDR output was on; restart "
+               "the game";
+    case Reason::ExclusiveBitBlt:
+        return "HDR output: standing aside, the game uses exclusive full screen with an older swap chain type; switch the "
+               "game to borderless or windowed";
     case Reason::FrameGen:
         return "HDR output: standing aside, not available with frame generation yet";
     case Reason::Dxvk:
@@ -201,6 +222,30 @@ inline float ResolvePeakNits(float configured, float displayMaxLuminance)
 }
 
 inline float ClampGameNits(float nits) { return std::clamp(nits, 80.0f, 1000.0f); }
+
+// The edit that makes an older (bitblt) swap chain flip model: DISCARD -> FLIP_DISCARD, SEQUENTIAL -> FLIP_SEQUENTIAL, at least
+// two buffers (flip needs them), and without the GDI-compatible flag (flip cannot have it). V-Sync, tearing flags and the sync
+// interval are not touched.
+struct SwapDescEdit
+{
+    DXGI_SWAP_EFFECT swapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    UINT bufferCount = 2;
+    UINT flags = 0;
+};
+
+inline SwapDescEdit UpgradeSwapDesc(DXGI_SWAP_EFFECT swapEffect, UINT bufferCount, UINT flags)
+{
+    SwapDescEdit edit;
+    edit.swapEffect = swapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL ? DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+                      : swapEffect == DXGI_SWAP_EFFECT_DISCARD  ? DXGI_SWAP_EFFECT_FLIP_DISCARD
+                                                                : swapEffect;
+    edit.bufferCount = bufferCount < 2 ? 2 : bufferCount;
+    edit.flags = flags & ~(UINT) DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+    return edit;
+}
+
+// A game's ResizeBuffers count on a chain that was made flip model for it: 0 keeps the count, anything else is at least 2
+inline UINT UpgradedResizeCount(UINT requested) { return requested == 0 ? 0 : (requested < 2 ? 2 : requested); }
 
 // What DXGI answers for CheckColorSpaceSupport on an 8-bit flip swap chain (a DXGI_COLOR_SPACE_TYPE, as an int to keep
 // this header free of the Windows types): the G22 / G24 RGB spaces and PQ, but not scRGB (SetColorSpace1(scRGB) on an

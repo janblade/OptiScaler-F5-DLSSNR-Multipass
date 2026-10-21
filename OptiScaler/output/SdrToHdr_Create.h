@@ -16,6 +16,10 @@ struct CreateRequest
     IUnknown* device = nullptr;        // the queue (D3D12) or the device (D3D11) the game passed
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool flipModel = false;
+    bool windowed = true;              // not exclusive full screen
+    DXGI_SWAP_EFFECT swapEffect = DXGI_SWAP_EFFECT_DISCARD; // as the game asked, after the sites' own edits
+    UINT bufferCount = 2;
+    UINT flags = 0;
     UINT sampleCount = 1;              // the desc's SampleDesc.Count
     bool frameGen = false;             // this is a frame generation library's own inner chain (_skipFGSwapChainCreation)
     bool composition = false;
@@ -35,7 +39,23 @@ struct Plan
     bool hdr10 = false;
     DisplayInfo display;
     bool displayKnown = false;
+
+    // An older (bitblt) chain made flip model for HDR output: the edit for the site to apply to its desc, and what the game
+    // asked for, which the wrapper keeps reporting
+    bool upgraded = false;
+    DXGI_SWAP_EFFECT swapEffect = DXGI_SWAP_EFFECT_DISCARD; // the new desc
+    UINT bufferCount = 0;
+    UINT flags = 0;
+    DXGI_SWAP_EFFECT gameSwapEffect = DXGI_SWAP_EFFECT_DISCARD; // the game's
+    UINT gameBufferCount = 0;
+    UINT gameFlags = 0;
 };
+
+// The desc edit a site puts back when the create with the HDR desc failed (before Unproxy); nothing when not upgraded.
+void RestoreSwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags);
+
+// For a site that has just got a plan: applies the swap chain edit of an upgrade to its desc fields; nothing when not upgraded.
+void ApplySwapDesc(const Plan& plan, DXGI_SWAP_EFFECT& swapEffect, UINT& bufferCount, UINT& flags);
 
 // Decides for a swap chain about to be created. With [HDR] Enabled off it returns at once: the plan is unproxied, `format` is
 // untouched, nothing is logged. Otherwise exactly one log line (ReasonText), and when the plan is proxied `format` is

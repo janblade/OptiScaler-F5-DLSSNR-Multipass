@@ -658,6 +658,21 @@ ComPtr<IDXGISwapChain3> MakeChain(Gpu& g, HWND window, DXGI_FORMAT format, UINT 
     return chain;
 }
 
+ComPtr<IDXGISwapChain1> MakeChainEffect(Gpu& g, HWND window, DXGI_SWAP_EFFECT effect)
+{
+    DXGI_SWAP_CHAIN_DESC1 desc {};
+    desc.Width = 64;
+    desc.Height = 32;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = effect;
+    ComPtr<IDXGISwapChain1> chain;
+    g.factory->CreateSwapChainForHwnd(g.device.Get(), window, &desc, nullptr, nullptr, &chain);
+    return chain;
+}
+
 // Draws a flat grey into `texture` through a null-description render target view: what a game does with a UNORM chain
 void Paint(Gpu& g, ID3D11Texture2D* texture, float value)
 {
@@ -1069,8 +1084,153 @@ void Chains(Gpu& g, bool warp)
 }
 } // namespace
 
+// ---- an older (bitblt) request made flip model (S2b): the same desc edit PrepareCreate makes, then proxy and convert ----
+void Upgraded(Gpu& g, DXGI_SWAP_EFFECT asked, const char* label)
+{
+    HWND window = MakeWindow();
+
+    {
+        // what the game asked for
+        const UINT gameCount = 1;
+        const auto edit = SdrToHdr::UpgradeSwapDesc(asked, gameCount, 0);
+
+        DXGI_SWAP_CHAIN_DESC1 desc {};
+        desc.Width = 64;
+        desc.Height = 32;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; // the real HDR format
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = edit.bufferCount;
+        desc.SwapEffect = edit.swapEffect;
+        desc.Flags = edit.flags;
+        ComPtr<IDXGISwapChain1> chain1;
+        ComPtr<IDXGISwapChain3> real;
+        const HRESULT created = g.factory->CreateSwapChainForHwnd(g.device.Get(), window, &desc, nullptr, nullptr, &chain1);
+        char what[200];
+        std::snprintf(what, sizeof(what), "%s, 1 buffer: the upgraded FP16 chain is made (%08lX)", label, (unsigned long) created);
+        Check(SUCCEEDED(created), what);
+
+        if (FAILED(created))
+        {
+            DestroyWindow(window);
+            return;
+        }
+
+        chain1.As(&real);
+        DXGI_SWAP_CHAIN_DESC realDesc {};
+        real->GetDesc(&realDesc);
+        std::snprintf(what, sizeof(what), "%s: the real chain is flip model with two buffers (what the wrapper hides from the game)", label);
+        Check(realDesc.SwapEffect == edit.swapEffect && realDesc.BufferCount == 2, what);
+
+        SdrToHdr::ProxyChainDx11 chain;
+        const char* started = chain.Start(g.device.Get(), real.Get(), kGame, false);
+        std::snprintf(what, sizeof(what), "%s: Start on the upgraded chain", label);
+        Check(started == nullptr, what);
+
+        if (started == nullptr)
+        {
+            // one proxy texture and GetBuffer(0) whatever the buffer count: the game's bitblt GetBuffer(0) semantics hold
+            ComPtr<ID3D11Texture2D> proxy, second;
+            Check(SUCCEEDED(chain.GetBuffer(0, IID_PPV_ARGS(&proxy))) && chain.GetBuffer(1, IID_PPV_ARGS(&second)) == DXGI_ERROR_INVALID_CALL,
+                  "the proxy is one texture, GetBuffer(0) only, with two real buffers");
+            proxy.Reset();
+            bool all = true;
+
+            for (int i = 0; i < 4; ++i)
+                all = Frame(g, chain, real.Get(), 0.3f + 0.1f * (float) i) && all;
+
+            Check(all, "four frames over the two real buffers convert");
+
+            // the game's resize with a count of 1 (the wrapper raises it to 2): works and stays proxied; the raw 1 would fail
+            SdrToHdr::ResizeRequest request;
+            request.rawFormat = request.resolvedFormat = kGame;
+            request.wantProxy = true;
+            request.width = 96;
+            request.height = 48;
+            request.count = SdrToHdr::UpgradedResizeCount(1);
+            auto result = chain.Resize(g.device.Get(), real.Get(), request);
+            Check(SUCCEEDED(result.hr) && result.proxied && request.count == 2, "resize with the game's count of 1 (raised to 2): works, stays proxied");
+            Check(Frame(g, chain, real.Get(), 0.5f), "a frame after that resize converts");
+            request.count = 0; // keep
+            request.width = request.height = 0;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            Check(SUCCEEDED(result.hr) && result.proxied, "resize with a kept count (0) works");
+
+            // unproxied: the real chain stays flip model, still two buffers
+            request.wantProxy = false;
+            request.rawFormat = DXGI_FORMAT_UNKNOWN;
+            result = chain.Resize(g.device.Get(), real.Get(), request);
+            real->GetDesc(&realDesc);
+            Check(SUCCEEDED(result.hr) && !result.proxied && realDesc.SwapEffect == edit.swapEffect && realDesc.BufferCount == 2,
+                  "unproxied at a resize: the real chain is still flip model with two buffers");
+            chain.Release();
+        }
+
+        // the facts the wrapper's choices rest on, read from DXGI (a flip chain, FP16)
+        real.Reset();
+        chain1.Reset();
+    }
+
+    DestroyWindow(window);
+}
+
+// What a flip chain does with what a bitblt game passes to Present / Present1 / ResizeBuffers, and with full screen
+void FlipFacts(Gpu& g)
+{
+    HWND window = MakeWindow();
+
+    for (DXGI_SWAP_EFFECT effect : { DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL })
+    {
+        const bool discard = effect == DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        auto chain = MakeChainEffect(g, window, effect);
+
+        if (chain == nullptr)
+        {
+            Check(false, "a flip chain for the Present facts is made");
+            continue;
+        }
+
+        Check(SUCCEEDED(chain->Present(0, 0)) && SUCCEEDED(chain->Present(1, 0)) &&
+                  SUCCEEDED(chain->Present(0, DXGI_PRESENT_DO_NOT_SEQUENCE)) && SUCCEEDED(chain->Present(0, DXGI_PRESENT_RESTART)) &&
+                  SUCCEEDED(chain->Present(0, DXGI_PRESENT_TEST)),
+              discard ? "fact: FLIP_DISCARD takes Present with sync 0 and 1, DO_NOT_SEQUENCE, RESTART and TEST"
+                      : "fact: FLIP_SEQUENTIAL takes Present with sync 0 and 1, DO_NOT_SEQUENCE, RESTART and TEST");
+
+        RECT dirty { 1, 1, 10, 10 };
+        DXGI_PRESENT_PARAMETERS withDirty {};
+        withDirty.DirtyRectsCount = 1;
+        withDirty.pDirtyRects = &dirty;
+        const HRESULT dirtyResult = chain->Present1(0, 0, &withDirty);
+        Check(discard ? dirtyResult == DXGI_ERROR_INVALID_CALL : SUCCEEDED(dirtyResult),
+              discard ? "fact: FLIP_DISCARD REFUSES Present1 dirty rectangles (INVALID_CALL), a bitblt chain took them"
+                      : "fact: FLIP_SEQUENTIAL takes Present1 dirty rectangles");
+
+        RECT scroll { 0, 0, 32, 32 };
+        POINT offset { 2, 2 };
+        DXGI_PRESENT_PARAMETERS withScroll {};
+        withScroll.pScrollRect = &scroll;
+        withScroll.pScrollOffset = &offset;
+        Check(chain->Present1(0, 0, &withScroll) == DXGI_ERROR_INVALID_CALL, "fact: a flip chain REFUSES a Present1 scroll rectangle");
+
+        DXGI_PRESENT_PARAMETERS none {};
+        Check(SUCCEEDED(chain->Present1(0, 0, &none)),
+              "fact: Present1 with empty parameters works (a null pointer is not allowed: the wrapper then calls Present)");
+
+        {
+            const HRESULT one = chain->ResizeBuffers(1, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+            Check(one == E_INVALIDARG,
+                  "fact: a flip chain REFUSES ResizeBuffers with one buffer (E_INVALIDARG; why the wrapper raises the game's count of 1)");
+        }
+
+        Check(SUCCEEDED(chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0)), "fact: ResizeBuffers with a kept count (0) works");
+    }
+
+    DestroyWindow(window);
+}
+
 int main(int argc, char** argv)
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0); // (a crash must not swallow the lines before it)
     const bool warp = argc > 1 && std::strcmp(argv[1], "warp") == 0;
     Gpu g;
 
@@ -1103,6 +1263,9 @@ int main(int argc, char** argv)
     }
 
     Chains(g, warp);
+    Upgraded(g, DXGI_SWAP_EFFECT_DISCARD, "bitblt DISCARD");
+    Upgraded(g, DXGI_SWAP_EFFECT_SEQUENTIAL, "bitblt SEQUENTIAL");
+    FlipFacts(g);
 
     g.context->ClearState();
     g.context->Flush();

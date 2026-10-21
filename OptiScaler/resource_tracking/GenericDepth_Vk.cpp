@@ -700,7 +700,7 @@ void OnPresent(VkDevice device, uint32_t width, uint32_t height)
     g_core.SetSnapshotsWanted(Config::Instance()->DlssNrNativeMotion.value_or_default());
     g_core.BeginPresent(width, height);
     const bool stoodDown = g_core.EndPresent(width, height,
-                                             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+                                             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default(), Config::Instance()->DlssNrNativeDepthWidth.value_or_default(), Config::Instance()->DlssNrNativeDepthHeight.value_or_default());
 
     std::lock_guard lock(g_copyMutex);
     ++g_presents;

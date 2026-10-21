@@ -52,7 +52,7 @@ void NativeDriver::LogDiagnostics()
              _diagNative, _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
 }
 
-NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview)
+NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView)
 {
     RunResult out;
 
@@ -129,10 +129,29 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     else if (!useVirtualUpscaler)
         ReleaseVirtualUpscaler();
 
+    auto& flowTuning=_producer->Flow()->Tuning();
+    flowTuning.referenceMode=false;
+    flowTuning.reuseCandidateCost=true;
+    flowTuning.refinementAcceptance=true;
+    flowTuning.evidenceFilter=true;
+    flowTuning.trace=false; // Public views use existing outputs; no trace buffers needed.
+    _producer->Trust()->Tuning().debugView=0; // Diagnostics cannot replace the consumer validation mask.
+    flowTuning.evidenceDiagnostics=false; // The confidence view reads existing signals; no legacy evidence pass.
+
+    auto& depthDebug=_producer->Flow()->DebugTuning();
+    depthDebug.depthLinearize=Config::Instance()->DlssNrNativeDepthLinearize.value_or_default();
+    depthDebug.depthMultiplier=Config::Instance()->DlssNrNativeDepthMultiplier.value_or_default();
+    depthDebug.depthFarPlane=Config::Instance()->DlssNrNativeDepthFarPlane.value_or_default();
     NativeProducer::Options options;
+    auto* depthConfig=Config::Instance();
+    options.depthTransform[0]=depthConfig->DlssNrNativeDepthScaleX.value_or_default();
+    options.depthTransform[1]=depthConfig->DlssNrNativeDepthScaleY.value_or_default();
+    options.depthTransform[2]=depthConfig->DlssNrNativeDepthOffsetX.value_or_default();
+    options.depthTransform[3]=depthConfig->DlssNrNativeDepthOffsetY.value_or_default();
     options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
     options.flowPreview = flowPreview;
     options.previewMaxSpeed = kPreviewMaxSpeed;
+    options.previewView = flowPreviewView;
 
     const auto apply = [this, &source, useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, const NativeFrame& frame)
     {
@@ -291,6 +310,23 @@ void NativeDriver::DrawFlowTuning()
         return;
     }
 
+    if(ImGui::TreeNode("Depth selection and alignment##nativeDepthCalibration")){
+        auto* c=Config::Instance();
+        int dimensions[2]={int(c->DlssNrNativeDepthWidth.value_or_default()),int(c->DlssNrNativeDepthHeight.value_or_default())};
+        if(ImGui::InputInt2("Source size (0 = automatic)##depthSource",dimensions)){c->DlssNrNativeDepthWidth=uint32_t((std::max)(0,dimensions[0]));c->DlssNrNativeDepthHeight=uint32_t((std::max)(0,dimensions[1]));}
+        float scale[2]={c->DlssNrNativeDepthScaleX.value_or_default(),c->DlssNrNativeDepthScaleY.value_or_default()};
+        if(ImGui::DragFloat2("Depth XY scale##depthScale",scale,.001f,.01f,10.f,"%.4f")){c->DlssNrNativeDepthScaleX=scale[0];c->DlssNrNativeDepthScaleY=scale[1];}
+        float offset[2]={c->DlssNrNativeDepthOffsetX.value_or_default(),c->DlssNrNativeDepthOffsetY.value_or_default()};
+        if(ImGui::DragFloat2("Depth XY pixel offset##depthOffset",offset,1.f,-10000.f,10000.f,"%.1f")){c->DlssNrNativeDepthOffsetX=offset[0];c->DlssNrNativeDepthOffsetY=offset[1];}
+        bool linear=c->DlssNrNativeDepthLinearize.value_or_default();
+        if(ImGui::Checkbox("Linearized depth preview##depthLinear",&linear))c->DlssNrNativeDepthLinearize=linear;
+        float multiplier=c->DlssNrNativeDepthMultiplier.value_or_default(),farPlane=c->DlssNrNativeDepthFarPlane.value_or_default();
+        if(ImGui::DragFloat("Depth preview multiplier##depthMultiply",&multiplier,.1f,0.f,1000000.f,"%.3f"))c->DlssNrNativeDepthMultiplier=multiplier;
+        if(ImGui::DragFloat("Linearization far plane##depthFar",&farPlane,1.f,1.001f,1000000.f,"%.3f"))c->DlssNrNativeDepthFarPlane=farPlane;
+        ImGui::TextWrapped("Preview linearization/multiplier affect only this visualization. DLSS/NR receives aligned raw depth.");
+        ImGui::TextWrapped("Vectors/NR use aligned raw depth with point sampling. Normals/depth preview uses the DisplayDepth linear sampler on the original source. Same scale/pixel-offset convention as ReShade. Choose the scene buffer, not a shadow map. Identity alignment adds no pass.");
+        ImGui::TreePop();
+    }
     auto& tune = _producer->Flow()->Tuning();
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);

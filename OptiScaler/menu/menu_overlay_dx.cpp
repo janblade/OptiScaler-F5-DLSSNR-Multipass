@@ -9,10 +9,13 @@
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
+#include <native/NativeDriverVk.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
 #include <imgui/imgui_impl_win32.h>
+#include <wrl/client.h>
+#include <vector>
 
 // menu
 static int const NUM_BACK_BUFFERS = 8;
@@ -35,6 +38,57 @@ static ID3D12GraphicsCommandList* g_pd3dCommandList = nullptr;
 static ID3D12CommandAllocator* g_commandAllocators[NUM_BACK_BUFFERS] = {};
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
+
+struct MenuTextureView
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu {};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu {};
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc {};
+};
+static std::vector<MenuTextureView> g_frameTextures[NUM_BACK_BUFFERS];
+static ID3D12Fence* g_menuFence = nullptr;
+static HANDLE g_menuFenceEvent = nullptr;
+static UINT64 g_menuFenceValue = 0;
+static UINT64 g_menuFrameValues[NUM_BACK_BUFFERS] = {};
+static UINT64 g_menuFrameNumber = 0;
+static int g_activeMenuSlot = -1;
+
+static bool WaitForMenu(UINT64 value)
+{
+    if (value == 0) return true;
+    if (!g_menuFence || !g_menuFenceEvent) return false;
+    const UINT64 done = g_menuFence->GetCompletedValue();
+    if (done == UINT64_MAX) return false;
+    if (done >= value) return true;
+    if (FAILED(g_menuFence->SetEventOnCompletion(value, g_menuFenceEvent))) return false;
+    if (WaitForSingleObject(g_menuFenceEvent, 1000) != WAIT_OBJECT_0) return false;
+    const UINT64 after = g_menuFence->GetCompletedValue();
+    return after != UINT64_MAX && after >= value;
+}
+
+static void ReleaseFrameTextures(UINT slot)
+{
+    for (const auto& view : g_frameTextures[slot])
+        g_pd3dSrvDescHeapAlloc.Free(view.cpu, view.gpu);
+    g_frameTextures[slot].clear();
+}
+
+// All return paths release the CPU lease, including failed Reset/Close and hidden menus.
+struct DebugFrameScope
+{
+    explicit DebugFrameScope(ID3D12CommandQueue* queue)
+    {
+        NativeMotionDx12::BeginDebugFrame(queue,g_menuFence);
+        NativeMotionDx11::BeginDx12DebugFrame(queue,g_menuFence);
+        NativeMotionVk::BeginDx12DebugFrame(queue,g_menuFence);
+    }
+    ~DebugFrameScope()
+    {
+        NativeMotionDx12::EndDebugFrame();NativeMotionDx11::EndDx12DebugFrame();
+        NativeMotionVk::EndDx12DebugFrame();g_activeMenuSlot = -1;
+    }
+};
 
 // current command queue for dx12 swapchain
 static IUnknown* currentSCCommandQueue = nullptr;
@@ -139,6 +193,16 @@ static void CleanupRenderTargetDx12(bool clearQueue)
     if (!_isInited || !_dx12Device || State::Instance().isShuttingDown)
         return;
 
+    // Resize/shutdown must not destroy resources that a submitted overlay still uses.
+    if (!WaitForMenu(g_menuFenceValue))
+    {
+        if (g_pd3dDeviceParam && SUCCEEDED(g_pd3dDeviceParam->GetDeviceRemovedReason()))
+        {
+            LOG_WARN("The overlay GPU fence is pending; retaining its resources");
+            return;
+        }
+    }
+
     for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
     {
         SAFE_RELEASE(g_mainRenderTargetResource[i]);
@@ -148,6 +212,8 @@ static void CleanupRenderTargetDx12(bool clearQueue)
 
     if (clearQueue)
     {
+        for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
+            ReleaseFrameTextures(i);
         if (MenuOverlayBase::IsInited() && g_pd3dDeviceParam != nullptr && g_pd3dSrvDescHeap != nullptr &&
             ImGui::GetIO().BackendRendererUserData)
         {
@@ -164,6 +230,12 @@ static void CleanupRenderTargetDx12(bool clearQueue)
         }
 
         SAFE_RELEASE(g_pd3dCommandList);
+        SAFE_RELEASE(g_menuFence);
+        if (g_menuFenceEvent) CloseHandle(g_menuFenceEvent);
+        g_menuFenceEvent = nullptr;
+        g_menuFenceValue = g_menuFrameNumber = 0;
+        std::fill(std::begin(g_menuFrameValues), std::end(g_menuFrameValues), 0);
+        g_activeMenuSlot = -1;
 
         if (g_pd3dCommandQueue != nullptr)
             g_pd3dCommandQueue = nullptr;
@@ -204,6 +276,7 @@ static void CleanupRenderTargetDx11(bool shutDown)
     if (!shutDown)
         LOG_FUNC();
 
+    NativeMotionDx11::ReleaseDebugViews();
     SAFE_RELEASE(g_pd3dRenderTarget);
 
     if (g_pd3dDevice != nullptr)
@@ -265,6 +338,7 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
 
         if (ImGui::GetCurrentContext() && g_pd3dRenderTarget)
         {
+            NativeMotionDx11::BeginDebugFrame(g_pd3dDevice);
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
 
@@ -275,6 +349,7 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
                 g_pd3dDeviceContext->OMSetRenderTargets(1, &g_pd3dRenderTarget, NULL);
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             }
+            NativeMotionDx11::EndDebugFrame();
         }
     }
 }
@@ -416,6 +491,17 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             return;
         }
 
+        result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_menuFence));
+        g_menuFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (FAILED(result) || g_menuFenceEvent == nullptr)
+        {
+            LOG_ERROR("Creating the overlay completion fence failed");
+            CleanupRenderTargetDx12(true);
+            pSwapChain->Release();
+            return;
+        }
+        g_pd3dCommandList->SetName(L"OptiScaler menu and F5Low debug");
+
         DXGI_SWAP_CHAIN_DESC scDesc;
         pSwapChain->GetDesc(&scDesc);
 
@@ -454,14 +540,37 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         {
             _showRenderImGuiDebugOnce = true;
 
+            const UINT frameSlot = (UINT) (g_menuFrameNumber % NUM_BACK_BUFFERS);
+            if (!WaitForMenu(g_menuFrameValues[frameSlot]))
+            {
+                // Keep allocator, SRVs and strong texture references until the GPU is done.
+                pSwapChain->Release();
+                return;
+            }
+            ReleaseFrameTextures(frameSlot);
+            g_activeMenuSlot = (int) frameSlot;
+            DebugFrameScope debugFrame((ID3D12CommandQueue*) currentSCCommandQueue);
+
             ImGui_ImplDX12_NewFrame();
 
             if (MenuOverlayBase::RenderMenu())
             {
                 ImGui::Render();
 
+                const ImDrawData* drawData = ImGui::GetDrawData();
+                if (!drawData || drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f)
+                {
+                    pSwapChain->Release();
+                    return;
+                }
+
                 UINT backBufferIdx = pSwapChain->GetCurrentBackBufferIndex();
-                ID3D12CommandAllocator* commandAllocator = g_commandAllocators[backBufferIdx];
+                if (backBufferIdx >= NUM_BACK_BUFFERS || !g_mainRenderTargetResource[backBufferIdx])
+                {
+                    pSwapChain->Release();
+                    return;
+                }
+                ID3D12CommandAllocator* commandAllocator = g_commandAllocators[frameSlot];
 
                 auto result = commandAllocator->Reset();
                 if (result != S_OK)
@@ -511,7 +620,27 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 }
 
                 ID3D12CommandList* ppCommandLists[] = { g_pd3dCommandList };
-                ((ID3D12CommandQueue*) currentSCCommandQueue)->ExecuteCommandLists(1, ppCommandLists);
+                auto* queue = (ID3D12CommandQueue*) currentSCCommandQueue;
+                queue->ExecuteCommandLists(1, ppCommandLists);
+                const UINT64 completion = g_menuFenceValue + 1;
+                const HRESULT signalHr = queue->Signal(g_menuFence, completion);
+                if (FAILED(signalHr))
+                {
+                    LOG_ERROR("Signalling the overlay fence failed: {:X}", (unsigned) signalHr);
+                    // Quarantine this slot; device removal is handled by the present hook.
+                    g_menuFrameValues[frameSlot] = completion;
+                    g_menuFenceValue = completion;
+                    NativeMotionDx12::EndDebugFrame(g_menuFence, completion);
+                    NativeMotionDx11::EndDx12DebugFrame(g_menuFence, completion);
+                    NativeMotionVk::EndDx12DebugFrame(g_menuFence, completion);
+                    pSwapChain->Release();
+                    return;
+                }
+                g_menuFenceValue = g_menuFrameValues[frameSlot] = completion;
+                ++g_menuFrameNumber;
+                NativeMotionDx12::EndDebugFrame(g_menuFence, completion);
+                NativeMotionDx11::EndDx12DebugFrame(g_menuFence, completion);
+                NativeMotionVk::EndDx12DebugFrame(g_menuFence, completion);
             }
         }
         else
@@ -544,6 +673,31 @@ void MenuOverlayDx::FreeSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTO
 {
     if (g_pd3dSrvDescHeap != nullptr)
         g_pd3dSrvDescHeapAlloc.Free(cpu, gpu);
+}
+
+bool MenuOverlayDx::FrameTextureView(ID3D12Resource* texture, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc,
+                                     D3D12_GPU_DESCRIPTOR_HANDLE& gpu)
+{
+    if (g_activeMenuSlot < 0 || !texture || !g_pd3dDeviceParam || !g_pd3dSrvDescHeap)
+        return false;
+    auto& views = g_frameTextures[g_activeMenuSlot];
+    for (const auto& view : views)
+    {
+        if (view.texture.Get() == texture && view.desc.Format == desc.Format &&
+            view.desc.Shader4ComponentMapping == desc.Shader4ComponentMapping)
+        {
+            gpu = view.gpu;
+            return true;
+        }
+    }
+    MenuTextureView view;
+    if (!AllocSrv(&view.cpu, &view.gpu)) return false;
+    view.texture = texture;
+    view.desc = desc;
+    g_pd3dDeviceParam->CreateShaderResourceView(texture, &desc, view.cpu);
+    gpu = view.gpu;
+    views.push_back(std::move(view));
+    return true;
 }
 
 void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)

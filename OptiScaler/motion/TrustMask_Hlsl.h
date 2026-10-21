@@ -44,7 +44,7 @@ RWTexture2D<float>  OutFloat : register(u0);
 RWTexture2D<float4> OutFlow : register(u0);
 RWByteAddressBuffer Counter : register(u1);
 
-static const float kSky = 5e5; // a proxy depth this large is the sky (or nothing drawn)
+static const float kSky = 5e19; // a proxy depth this large is the sky (or nothing drawn)
 
 // A proxy for how far a surface is, from the raw depth: larger is farther. Reversed-Z puts near at 1 and a normal depth buffer
 // puts it at 0; either way the distance goes as one over the nearness for anything well past the near plane, and the checks
@@ -59,7 +59,7 @@ void DepthProxy(uint3 id : SV_DispatchThreadID)
     int2 at = min(int2(uv * float2(depthSize)), int2(depthSize) - 1);
 
     // The nearest surface over all the copies: each holds only what its list had drawn, and the split differs per frame.
-    float nearness = 1e-6;
+    float nearness = 1e-20;
 
     [unroll] for (int k = 0; k < 8; ++k)
         if (uint(k) < depthCount)
@@ -68,7 +68,7 @@ void DepthProxy(uint3 id : SV_DispatchThreadID)
             nearness = max(nearness, reversed != 0 ? d : 1.0 - d);
         }
 
-    OutFloat[id.xy] = min(1.0 / nearness, 1e6);
+    OutFloat[id.xy] = min(1.0 / nearness, 1e20);
 }
 
 [numthreads(1, 1, 1)]
@@ -77,25 +77,18 @@ void ClearCounter()
     Counter.Store(0, 0);
 }
 
-groupshared uint gDistrusted;
-
-[numthreads(8, 8, 1)]
-void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+// One pixel's native history decision, shared mechanically with the ReShade port.
+// 0 trusts history, 1 rejects it. Texture structure is intentionally not an input.
+float TrustPixel(int2 p)
 {
-    if (gi == 0)
-        gDistrusted = 0;
-    GroupMemoryBarrierWithGroupSync();
-
-    bool inside = id.x < size.x && id.y < size.y;
     float mask = 1.0;
 
     // The flow found a hard cut on this very frame: what the previous frame holds is another scene, so every pixel stays
     // distrusted (the history is not remembered into it either: the mask is one everywhere, as on a first frame).
     const bool cut = sceneCutEnabled != 0 && CutFlag.Load(int3(0, 0, 0)) != 0;
 
-    if (inside && hasHistory != 0 && !cut)
+    if (hasHistory != 0 && !cut)
     {
-        int2 p = int2(id.xy);
         float2 flow = Flow.Load(int3(p, 0)).xy;       // to the previous frame, in picture pixels
         float2 q = float2(p) + flow / fullPerFlow;    // where this pixel was, in flow pixels
         float2 uv = (q + 0.5) / float2(size);
@@ -175,18 +168,26 @@ void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
         else if (debugView == 5) mask = badOutside;
     }
 
-    if (inside)
-        OutFloat[id.xy] = mask;
-
-    if (inside && hasHistory != 0 && mask >= 0.9)
-        InterlockedAdd(gDistrusted, 1);
-
-    GroupMemoryBarrierWithGroupSync();
-
-    if (gi == 0 && gDistrusted != 0)
-        Counter.InterlockedAdd(0, gDistrusted);
+    return mask;
 }
 
+groupshared uint gDistrusted;
+
+[numthreads(8, 8, 1)]
+void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0) gDistrusted = 0;
+    GroupMemoryBarrierWithGroupSync();
+    bool inside = id.x < size.x && id.y < size.y;
+    float mask = inside ? TrustPixel(int2(id.xy)) : 1.0;
+    if (inside) OutFloat[id.xy] = mask;
+    if (inside && hasHistory != 0 && mask >= 0.9) InterlockedAdd(gDistrusted, 1);
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0 && gDistrusted != 0) Counter.InterlockedAdd(0, gDistrusted);
+}
+
+)HLSL"
+R"HLSL(
 // The depth for the consumers at the picture's size (size): the nearest surface over the copies, always reversed-Z (near
 // is 1.0) whatever convention the copies have. A flip of the depth finder's pick then never reaches the consumers: the
 // virtual upscaler rebuilt its backend for each one (and restarted frame generation with it). 1 - d is exact for the
@@ -357,14 +358,14 @@ void GuideMotion(uint3 id : SV_DispatchThreadID)
 
     // This pixel's distance, as the depth proxy has it (larger is farther). The guide depth is always reversed-Z.
     const float raw = GuideRawDepth.Load(int3(id.xy, 0));
-    const float here = min(1.0 / max(raw, 1e-6), 1e6);
+    const float here = min(1.0 / max(raw, 1e-20), 1e20);
 
     const float2 f = uv * float2(flowWidth, flowHeight) - 0.5;
     const int2 f0 = int2(floor(f));
     const float2 t = f - float2(f0);
 
     float2 motion[4];
-    float bilinear[4], apart[4];
+    float bilinear[4], apart[4], depths[4];
     float closest = 1e30;
 
     [unroll] for (int k = 0; k < 4; ++k)
@@ -372,12 +373,21 @@ void GuideMotion(uint3 id : SV_DispatchThreadID)
         const int2 o = int2(k & 1, k >> 1);
         const int2 q = clamp(f0 + o, 0, flowHi);
         const float z = GuideProxy.Load(int3(q, 0));
-        const float rel = abs(z - here) / max(min(z, here), 1e-6);
+        depths[k]=z;
 
         motion[k] = Flow.Load(int3(q, 0)).xy;
         bilinear[k] = (o.x != 0 ? t.x : 1.0 - t.x) * (o.y != 0 ? t.y : 1.0 - t.y);
-        apart[k] = rel * rel;
-        closest = min(closest, apart[k]);
+    }
+    // All four source depths equal: every original exponential is exactly
+    // exp(0)=1, even when this pixel is on a different surface. Preserve the
+    // original bilinear floor and arithmetic; omit only redundant depth math.
+    bool flat=depths[0]>0.0 && depths[0]<1e30 &&
+        depths[0]==depths[1] && depths[0]==depths[2] && depths[0]==depths[3];
+    if(!flat) {
+        [unroll]for(int k=0;k<4;++k) {
+            float rel=abs(depths[k]-here)/max(min(depths[k],here),1e-6);
+            apart[k]=rel*rel;closest=min(closest,apart[k]);
+        }
     }
 
     float2 sum = 0.0;
@@ -387,11 +397,37 @@ void GuideMotion(uint3 id : SV_DispatchThreadID)
     {
         // The small floor keeps a texel the pixel sits exactly beside (bilinear weight 0) in the running when it is the
         // only one on the pixel's surface.
-        const float w = (bilinear[k2] + 1e-3) * exp(-(apart[k2] - closest) / 0.01);
+        const float w = (bilinear[k2] + 1e-3) * (flat?1.0:exp(-(apart[k2] - closest) / 0.01));
         sum += w * motion[k2];
         total += w;
     }
 
+    // Very small nonzero hardware depth must remain distinguishable from the
+    // clear plane. At a subpixel clear-depth hole all four proxy texels can
+    // instead belong to nearby geometry. Squaring that enormous ratio can
+    // overflow, or all exponentials can underflow: neither permits sum/0.
+    // Preserve every ordinary weight and sample. Only the otherwise undefined
+    // result uses the nearest relative-depth texel(s), with the same floor.
+    if (!(total > 0.0))
+    {
+        closest = 3.402823e38;
+        [unroll] for (int retry = 0; retry < 4; ++retry)
+        {
+            apart[retry] = abs(depths[retry] - here) / max(min(depths[retry], here), 1e-6);
+            closest = min(closest, apart[retry]);
+        }
+        sum = 0.0; total = 0.0;
+        [unroll] for (int nearest = 0; nearest < 4; ++nearest)
+        {
+            float w = apart[nearest] == closest ? bilinear[nearest] + 1e-3 : 0.0;
+            sum += w * motion[nearest]; total += w;
+        }
+        if (!(total > 0.0))
+        {
+            OutFlow[id.xy] = 0.0;
+            return;
+        }
+    }
     OutFlow[id.xy] = float4(sum / total, 0.0, 0.0);
 }
 

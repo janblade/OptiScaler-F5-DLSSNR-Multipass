@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "SysUtils.h"
 #include "State.h"
@@ -645,6 +645,16 @@ class Config
     // game's depth" under the menu's Advanced section. See resource_tracking/GenericDepth_Dx12.h and
     // GenericDepth_Dx11.h.
     CustomOptional<bool> DlssNrNativeDepthFinder { false };
+    // Manual scene-depth dimensions bypass only the aspect test; calibration stays raw and point sampled.
+    CustomOptional<uint32_t> DlssNrNativeDepthWidth { 0 };
+    CustomOptional<uint32_t> DlssNrNativeDepthHeight { 0 };
+    CustomOptional<float> DlssNrNativeDepthScaleX { 1.f };
+    CustomOptional<float> DlssNrNativeDepthScaleY { 1.f };
+    CustomOptional<float> DlssNrNativeDepthOffsetX { 0.f };
+    CustomOptional<float> DlssNrNativeDepthOffsetY { 0.f };
+    CustomOptional<bool> DlssNrNativeDepthLinearize { true };
+    CustomOptional<float> DlssNrNativeDepthMultiplier { 1.f };
+    CustomOptional<float> DlssNrNativeDepthFarPlane { 1000.f };
     // NativeDepthVkCopyUsage: Vulkan only. With NativeDepthFinder on, depth images the game makes for rendering are made
     // copyable (TRANSFER_SRC added to their usage), or the finder could not copy the scene's depth: a Vulkan game seldom
     // asks for that itself. Can cost a little depth compression on some GPUs. Off: Vulkan depth reads as not readable,

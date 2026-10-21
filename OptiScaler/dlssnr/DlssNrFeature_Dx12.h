@@ -334,4 +334,7 @@ void RequestCacheDump(unsigned int frames);
 bool CaptureInProgress();
 
 void Shutdown();
+// NGX's caller has drained its device. Retire the matching D3D12 NR model before
+// the NGX core, API interposers or their callbacks are unloaded. Other devices stay live.
+void ShutdownForDevice(ID3D12Device* device);
 } // namespace DlssNr

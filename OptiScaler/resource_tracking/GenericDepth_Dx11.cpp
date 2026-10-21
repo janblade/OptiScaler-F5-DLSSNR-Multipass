@@ -537,7 +537,7 @@ void Install(ID3D11Device* device)
     g_installed = true;
     LOG_INFO("Depth finder (D3D11): observing the game's depth buffers (immediate context only), after {} frames of "
              "warm-up; it stands down if the game makes an upscaler call",
-             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default(), Config::Instance()->DlssNrNativeDepthWidth.value_or_default(), Config::Instance()->DlssNrNativeDepthHeight.value_or_default());
 }
 
 void OnPresent(IDXGISwapChain* swapChain)
@@ -577,7 +577,7 @@ void OnPresent(IDXGISwapChain* swapChain)
     g_core.BeginPresent(desc.BufferDesc.Width, desc.BufferDesc.Height);
     const bool stoodDown =
         g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height,
-                          Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+                          Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default(), Config::Instance()->DlssNrNativeDepthWidth.value_or_default(), Config::Instance()->DlssNrNativeDepthHeight.value_or_default());
 
     // Self-diagnosis: a pick that never gets a copy despite wanting one is otherwise invisible until someone asks why the trust
     // mask never runs.

@@ -183,6 +183,18 @@ int main()
         CHECK(std::strlen(MismatchWarning(Resolve(kAuto, true, false))) == 0);
     }
 
+    {
+        HistoryState history;
+        CHECK(!history.Update(2, 0, false)); // first frame already starts reset
+        CHECK(!history.Update(2, 0, false)); // identical / Auto -> forced sRGB
+        CHECK(history.Update(3, 3, false)); // sRGB -> gamma 2.2
+        CHECK(!history.Update(3, 3, false));
+        CHECK(history.Update(2, 0, false)); // gamma -> sRGB
+        CHECK(history.Update(4, 4, true));  // SDR -> PQ
+        CHECK(history.Update(4, 0, true));  // another stage now decodes PQ
+        CHECK(!history.Update(4, 0, true));
+        CHECK(history.Update(4, 0, false));
+    }
     if (fails)
     {
         printf("%d check(s) failed\n", fails);

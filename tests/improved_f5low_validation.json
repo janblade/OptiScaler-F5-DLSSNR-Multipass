@@ -1,0 +1,159 @@
+{
+  "base_commit": "aeb439482c13dd7364ee2bef16fa41b902be6f98",
+  "architecture": "x64",
+  "performance": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "gpu_ms": {
+        "original": 1.02371,
+        "before": 2.038494,
+        "optimized": 1.116885
+      },
+      "passes_ms": {
+        "original": {
+          "down": 0.01187,
+          "global": 0.039718,
+          "luma": 0.011371,
+          "match": 0.848866,
+          "median": 0.016218,
+          "scenecut": 0.018334,
+          "smooth": 0.077457
+        },
+        "before": {
+          "down": 0.011695,
+          "fit": 0.960811,
+          "fusion": 0.05411,
+          "global": 0.039846,
+          "luma": 0.011315,
+          "match": 0.847228,
+          "median": 0.01597,
+          "scenecut": 0.019004,
+          "smooth": 0.07878
+        },
+        "optimized": {
+          "down": 0.011699,
+          "fit": 0.049335,
+          "fusion": 0.05335,
+          "global": 0.039744,
+          "luma": 0.011204,
+          "match": 0.838955,
+          "median": 0.015923,
+          "scenecut": 0.018914,
+          "smooth": 0.077743
+        }
+      },
+      "reduction_vs_current_percent": 45.21028759466547,
+      "overhead_vs_original_ms": 0.09317500000000001
+    },
+    {
+      "width": 2560,
+      "height": 1440,
+      "gpu_ms": {
+        "original": 1.716762,
+        "before": 2.794995,
+        "optimized": 1.871219
+      },
+      "passes_ms": {
+        "original": {
+          "down": 0.013833,
+          "global": 0.040841,
+          "luma": 0.017532,
+          "match": 1.451021,
+          "median": 0.027034,
+          "scenecut": 0.031057,
+          "smooth": 0.135364
+        },
+        "before": {
+          "down": 0.013794,
+          "fit": 0.981406,
+          "fusion": 0.087194,
+          "global": 0.041178,
+          "luma": 0.017591,
+          "match": 1.459004,
+          "median": 0.026957,
+          "scenecut": 0.030972,
+          "smooth": 0.135689
+        },
+        "optimized": {
+          "down": 0.013905,
+          "fit": 0.050807,
+          "fusion": 0.086921,
+          "global": 0.041408,
+          "luma": 0.017677,
+          "match": 1.466662,
+          "median": 0.027166,
+          "scenecut": 0.031223,
+          "smooth": 0.135313
+        }
+      },
+      "reduction_vs_current_percent": 33.05107880336101,
+      "overhead_vs_original_ms": 0.15445700000000007
+    },
+    {
+      "width": 3413,
+      "height": 1920,
+      "gpu_ms": {
+        "original": 2.896986,
+        "before": 3.994082,
+        "optimized": 3.064397
+      },
+      "passes_ms": {
+        "original": {
+          "down": 0.019473,
+          "global": 0.040725,
+          "luma": 0.029227,
+          "match": 2.483307,
+          "median": 0.045619,
+          "scenecut": 0.045193,
+          "smooth": 0.231748
+        },
+        "before": {
+          "down": 0.019294,
+          "fit": 0.962995,
+          "fusion": 0.143492,
+          "global": 0.040358,
+          "luma": 0.029214,
+          "match": 2.475938,
+          "median": 0.045227,
+          "scenecut": 0.04489,
+          "smooth": 0.23331
+        },
+        "optimized": {
+          "down": 0.019358,
+          "fit": 0.049664,
+          "fusion": 0.143236,
+          "global": 0.040375,
+          "luma": 0.029227,
+          "match": 2.462345,
+          "median": 0.045244,
+          "scenecut": 0.045035,
+          "smooth": 0.230123
+        }
+      },
+      "reduction_vs_current_percent": 23.276562674476885,
+      "overhead_vs_original_ms": 0.16741099999999998
+    }
+  ],
+  "nr_matched_frame_ab": {
+    "Feeder / D3D11": {
+      "on_rgb_delta": 6.513662832754629,
+      "off_rgb_delta": 0.0,
+      "matched_pairs_per_state": 8
+    },
+    "Feeder / Vulkan": {
+      "on_rgb_delta": 4.71898998119213,
+      "off_rgb_delta": 0.0,
+      "matched_pairs_per_state": 8
+    },
+    "Native F5Low + NR / D3D11": {
+      "on_rgb_delta": 3.0926309317129634,
+      "off_rgb_delta": 0.0,
+      "matched_pairs_per_state": 8
+    }
+  },
+  "quality_printed_results_identical": 143,
+  "d3d12_debug_layer_available": false,
+  "byte_identical_gpu_snapshots": 42,
+  "gpu_snapshot_sha256": "ca627dc264be2f322dfff81269612eff76a16b2fcccee569afa79a701285cbf1"
+}

@@ -20,8 +20,11 @@
 //
 // Convention: for each pixel of the current frame the flow is the offset, in full-resolution pixels, to where the same
 // content was in the previous frame (the usual game motion-vector direction, "from here to where it came from"). The flow
-// texture is half the colour's resolution (R16G16B16A16_FLOAT, x and y in .xy, the match's confidence 0..1 in .z); a
-// consumer samples it bilinearly.
+// texture is half the colour's resolution (R16G16B16A16_FLOAT, x and y in .xy, two-axis local texture confidence 0..1 in
+// .z). Confidence is the original depth-weighted Lucas-Kanade structure score. It is not a correspondence-error or
+// history-rejection score. .w separately carries support for the selected motion,
+// including a validated weak-texture solve or camera/region proposal; it is not
+// a calibrated probability or a history mask. A consumer samples the field bilinearly.
 //
 // Dispatch() records onto a command list the caller owns and changes the descriptor heaps bound on it, so it belongs on a
 // list of our own (the finished-picture seam), not on a game's list.
@@ -56,7 +59,7 @@ class OpticalFlowDx12
     // Compiles the shaders and makes the pipelines. False with a reason in Error().
     bool Init(ID3D12Device* device);
 
-    // Records the flow from the previous Dispatch's frame to this one. `color` must be in a shader-readable state
+    // Records current-to-previous flow between this frame and the previous Dispatch. `color` must be shader-readable
     // (NON_PIXEL_SHADER_RESOURCE) and stays so. After it returns, Flow() is readable and FlowValid() says whether it
     // holds a flow (false on the first frame, after Reset() and after a size change). depth (optional, any size,
     // readable as depthFormat, NON_PIXEL_SHADER_RESOURCE) shows the match where one surface ends and another begins, so
@@ -70,6 +73,9 @@ class OpticalFlowDx12
     void Reset()
     {
         _havePrevious = false;
+        _flowValid = false;
+        _usedDepth = false;
+        _sceneCutRan = false;
         _globalReady = false;
         _sceneCut.Reset();
         _ageValid = false;
@@ -77,16 +83,48 @@ class OpticalFlowDx12
 
     // A picture of the flow for a menu: hue is the direction, brightness the speed up to maxSpeed pixels, black is still.
     // R8G8B8A8_UNORM at the flow's size, left in the PIXEL_SHADER_RESOURCE state. Call after Dispatch() when FlowValid().
-    bool Visualise(ID3D12GraphicsCommandList* list, float maxSpeed);
-    ID3D12Resource* Preview() const { return _preview.resource; }
+    // 0 full-resolution consumer guide, 1 local structure, 2 after matching, 3 after median,
+    // 4 photometric error, 5 confidence channels (texture / photo / history), 6 raw depth, 7 arrows, 8 depth boundaries,
+    // 9 filtered flow before full guide, 10 filtering correction; 11..16 optional LK/candidate trace.
+    bool Visualise(ID3D12GraphicsCommandList* list, float maxSpeed, int view = 0,
+                   ID3D12Resource* color = nullptr, DXGI_FORMAT colorFormat = DXGI_FORMAT_UNKNOWN,
+                   ID3D12Resource* depth = nullptr, DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN,
+                   bool depthReversed = true, ID3D12Resource* guide = nullptr, ID3D12Resource* historyDistrust = nullptr,
+                   const float* debugDepthTransform = nullptr);
+    ID3D12Resource* Preview() const { return _depthPreviewActive?_depthPreview.resource:_preview.resource; }
+    struct DebugSettings
+    {
+        bool depthLinearize=true;
+        float depthMultiplier=1.f, depthFarPlane=1000.f;
+        float spacing = 32.0f; // full-resolution pixels
+        float gain = 2.5f;
+        float minimumMotion = 0.4f;
+        float thickness = 1.25f;
+        float opacity = 1.0f;
+        float gridOpacity = 0.18f;
+        bool background = true;
+    };
+    DebugSettings& DebugTuning() { return _debugSettings; }
 
     // The half-resolution luma (R32_FLOAT, NON_PIXEL_SHADER_RESOURCE) of the frame last passed to Dispatch() and of the one
     // before it; the trust mask compares them. The previous one is only meaningful when FlowValid().
     ID3D12Resource* LumaOfLastFrame() const { return _pyramid[1 - _current][0].resource; }
     ID3D12Resource* LumaOfFrameBefore() const { return _pyramid[_current][0].resource; }
+    ID3D12Resource* LumaLevel(int level) const { return level>=0 && level<kLevels ? _pyramid[1-_current][level].resource : nullptr; }
 
     // The flow, in the NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE state between Dispatches.
-    ID3D12Resource* Flow() const { return _flow.resource; }
+    ID3D12Resource* Flow() const
+    {
+        return _flow.resource;
+    }
+    ID3D12Resource* CameraMotionModel() const { return _cameraFlow.resource; }
+    ID3D12Resource* RawFlow() const { return _flow.resource; }
+    ID3D12Resource* MatchedFlow() const { return _levelFlow[1-_current][0].resource; }
+    ID3D12Resource* MedianFlow() const { return _flowMedian.resource; }
+    ID3D12Resource* CandidateTrace() const { return _trace[0].resource; }
+    ID3D12Resource* RefinementTrace() const { return _trace[1].resource; }
+    ID3D12Resource* EventTrace() const { return _trace[2].resource; }
+    ID3D12Resource* LevelFlow(int level) const { return level>=0 && level<kLevels ? _levelFlow[1-_current][level].resource : nullptr; }
     bool FlowValid() const { return _flowValid; }
     bool UsedDepth() const { return _usedDepth; } // the last Dispatch matched with depth
 
@@ -103,13 +141,21 @@ class OpticalFlowDx12
     // Penalty added per pixel of distance from that answer, which keeps flat areas from picking noise.
     struct Settings
     {
+        bool cameraPrior = true; // internal A/B control; no new user-facing checkbox
+        bool referenceMode = false; // test harness only; production never selects the reference variant
+        bool reuseCandidateCost = true; // measured duplicate-cost elimination; referenceMode disables it
+        bool refinementAcceptance = true; // matching-objective acceptance of LK
+        bool evidenceFilter = true; // selected-vector evidence, distinct from .z structure
+        bool trace = false; // optional candidate/LK trace; adds GPU writes and one fractional cost
+        int traceLevel = 0; // a single pyramid level at a time (0 = finest)
+        bool evidenceDiagnostics = false; // write vector evidence in .w; never a history mask
         int radius = 1;
         int coarseRadius = 4;
         float lambda = 0.03f;
         bool useHistory = true;         // last frame's flow as a candidate
         int coarseCells = 9;            // how many of the coarser level's nearest cells are candidates (1..9: the 3x3)
         int smoothRadius = 4;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
-        float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
+        float confidenceKnee = 0.004f;  // how much depth-weighted two-axis picture structure gives confidence
         bool depthMatching = true;      // with depth: the block match counts the window's samples on this pixel's surface
         bool globalCandidate = true;    // the last frame's whole-picture motion is a candidate everywhere
         bool inverseRefinement = false; // the sub-pixel steps use the current frame's gradients (found once, cheaper)
@@ -206,7 +252,8 @@ class OpticalFlowDx12
         float stillMargin;    // Match: what the camera must win by where the age is at least stillFrames
         uint32_t lookWeights; // Match, finest level, no depth: the brightness weights (see Settings)
         float lookRange, lookDistance;
-        uint32_t padding[4];
+        uint32_t motionFlags;
+        float photoTolerance, evidenceNoise, reservedMotion;
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -221,7 +268,7 @@ class OpticalFlowDx12
               DXGI_FORMAT format3 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src4 = nullptr,
               DXGI_FORMAT format4 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src5 = nullptr,
               DXGI_FORMAT format5 = DXGI_FORMAT_UNKNOWN, ID3D12Resource* src6 = nullptr,
-              DXGI_FORMAT format6 = DXGI_FORMAT_UNKNOWN);
+              DXGI_FORMAT format6 = DXGI_FORMAT_UNKNOWN, DXGI_FORMAT auxUavFormat = DXGI_FORMAT_R8_UINT);
 
     // The finest match pass also reads the last frame's ages and writes this frame's; Pass binds these two for it (and
     // an unused view for every other pass).
@@ -236,20 +283,39 @@ class OpticalFlowDx12
     ID3D12PipelineState* _lumaPq = nullptr;
     ID3D12PipelineState* _down = nullptr;
     ID3D12PipelineState* _match = nullptr;
+    ID3D12PipelineState* _matchVariants[8] {};
+    ID3D12PipelineState* _traceVariants[8] {};
+    Tex _trace[3];
+    bool _passTrace = false;
+    bool _traceValid = false;
+    ID3D12PipelineState* _medianEvidence = nullptr;
+    ID3D12PipelineState* _smoothEvidence = nullptr;
+    ID3D12PipelineState* _smoothDiagnostics = nullptr;
     ID3D12PipelineState* _median = nullptr;
     ID3D12PipelineState* _smooth = nullptr;
     ID3D12PipelineState* _visualise = nullptr;
     ID3D12PipelineState* _global = nullptr;
+    ID3D12PipelineState* _cameraModel = nullptr;
+
+
     ID3D12DescriptorHeap* _heap = nullptr;
     UINT _descriptorSize = 0;
     UINT _heapCursor = 0;
+    bool _debugEvents = false; // opt-in DRED markers; no marker calls in normal frames
 
     Tex _pyramid[2][kLevels]; // luma, 1/2 .. 1/64 of the colour; one set is the current frame, the other the previous
     Tex _levelFlow[2][kLevels]; // this frame's flow at each level, and the last frame's (a candidate for this one)
     Tex _flowMedian; // the median's result, which the smoothing reads
+    Tex _cameraFlow;
     Tex _globalFlow; // 1x1: the whole picture's motion in full-resolution pixels, z = 1 when there was enough to say
     Tex _flow;
+
+
+
+    DebugSettings _debugSettings;
     Tex _preview;
+    Tex _depthPreview; // Full picture resolution, matching DisplayDepth pixels.
+    bool _depthPreviewActive=false;
     Tex _age[2]; // R8_UINT, half resolution: the still age (see Settings::stillFrames), this frame's and the last one's
     bool _ageValid = false; // the last frame's ages are there (not after a Reset or a size change)
     int _current = 0;

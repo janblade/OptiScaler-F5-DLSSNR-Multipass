@@ -34,6 +34,24 @@ enum class Encoding : uint32_t
 constexpr uint32_t kAuto = 0;
 constexpr uint32_t kSettingCount = 5; // Auto + the four encodings, the menu's combo length
 
+// A model history contains the previous frame in its interpreted colour domain.
+// Track resolved values, so Auto -> forced sRGB does not reset an unchanged domain.
+struct HistoryState
+{
+    bool valid = false;
+    uint32_t encoding = 0, conversion = 0;
+    bool linear = false;
+    bool Update(uint32_t nextEncoding, uint32_t nextConversion, bool nextLinear)
+    {
+        const bool changed = valid && (encoding != nextEncoding || conversion != nextConversion || linear != nextLinear);
+        valid = true;
+        encoding = nextEncoding;
+        conversion = nextConversion;
+        linear = nextLinear;
+        return changed;
+    }
+};
+
 struct Choice
 {
     Encoding encoding = Encoding::Srgb;

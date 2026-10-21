@@ -5,6 +5,8 @@
 #include <Util.h>
 #include <Config.h>
 #include <SysUtils.h>
+#include <native/NativeDriverVk.h>
+#include <vector>
 
 #include <imgui/imgui_impl_vulkan.h>
 #include <imgui/imgui_impl_win32.h>
@@ -89,7 +91,10 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         LOG_DEBUG("_vulkanObjectsCreated, releasing objects");
 
         if (VulkanBackendIsUp())
+        {
+            NativeMotionVk::ReleaseDebugViews();
             ImGui_ImplVulkan_Shutdown(false);
+        }
 
         MenuOverlayVk::DestroyVulkanObjects(false);
 
@@ -175,12 +180,12 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     {
         VkDescriptorPoolSize sampler_pool_size = {};
         sampler_pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sampler_pool_size.descriptorCount = 8; // required by ImGui 1.92
+        sampler_pool_size.descriptorCount = 64; // fonts plus fenced per-image F5Low views
 
         VkDescriptorPoolCreateInfo desc_pool_info = {};
         desc_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         desc_pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        desc_pool_info.maxSets = 8;
+        desc_pool_info.maxSets = 64;
         desc_pool_info.poolSizeCount = 1;
         desc_pool_info.pPoolSizes = &sampler_pool_size;
 
@@ -481,6 +486,8 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
     if (result != VK_SUCCESS && !shutdown)
         LOG_WARN("vkDeviceWaitIdle error: {0:X}", (UINT) result);
 
+    NativeMotionVk::ReleaseDebugViews();
+
     if (shutdown)
     {
         if (_vkRenderPass)
@@ -566,6 +573,18 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         if (State::Instance().delayMenuRenderBy > 0)
             State::Instance().delayMenuRenderBy--;
 
+        const uint32_t debugIndex=pPresentInfo->pImageIndices[0];
+        if(debugIndex>=_scImageCount)return false;
+        // Diagnostic descriptors, upload commands and textures are reused only after
+        // this swapchain image's previous menu submission has finished, BEFORE UI draws.
+        if(Config::Instance()->DlssNrNativeDebugView.value_or_default())
+        {
+            const auto waited=vkWaitForFences(_ImVulkan_Info.Device,1,&_ImVulkan_Frames[debugIndex].Fence,VK_TRUE,1000000000ull);
+            if(waited!=VK_SUCCESS)return true;
+        }
+        NativeMotionVk::BeginDebugFrame(_ImVulkan_Info.Device,_ImVulkan_Info.PhysicalDevice,
+                                        _ImVulkan_Info.QueueFamily,debugIndex);
+
         if (MenuOverlayBase::RenderMenu())
         {
             if (State::Instance().delayMenuRenderBy == 0)
@@ -583,6 +602,8 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                     info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                     vkBeginCommandBuffer(fd->CommandBuffer, &info);
                 }
+
+                NativeMotionVk::RecordDebugTransfers(fd->CommandBuffer);
 
                 {
                     VkRenderPassBeginInfo info = {};
@@ -608,15 +629,30 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
                 // Submit queue and semaphores
                 LOG_DEBUG("waitSemaphoreCount: {0}", pPresentInfo->waitSemaphoreCount);
-                VkPipelineStageFlags waitStages[8] = { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT };
+                std::vector<VkSemaphore> waits;
+                if(pPresentInfo->waitSemaphoreCount)waits.assign(pPresentInfo->pWaitSemaphores,
+                    pPresentInfo->pWaitSemaphores+pPresentInfo->waitSemaphoreCount);
+                std::vector<VkPipelineStageFlags> waitStages(waits.size(),VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+                std::vector<uint64_t> waitValues(waits.size(),0);
+                const auto debugWait=NativeMotionVk::DebugWaitSemaphore();
+                if(debugWait)
+                {
+                    waits.push_back(debugWait);waitStages.push_back(VK_PIPELINE_STAGE_TRANSFER_BIT);
+                    waitValues.push_back(NativeMotionVk::DebugWaitValue());
+                }
+                uint64_t signalValue=0;
+                VkTimelineSemaphoreSubmitInfo timeline{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+                timeline.waitSemaphoreValueCount=(uint32_t)waitValues.size();timeline.pWaitSemaphoreValues=waitValues.data();
+                timeline.signalSemaphoreValueCount=1;timeline.pSignalSemaphoreValues=&signalValue;
 
                 VkSubmitInfo submit_info = {};
                 submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                 submit_info.commandBufferCount = 1;
                 submit_info.pCommandBuffers = &fd->CommandBuffer;
-                submit_info.pWaitDstStageMask = waitStages;
-                submit_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
-                submit_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
+                submit_info.pNext=debugWait?&timeline:nullptr;
+                submit_info.pWaitDstStageMask = waitStages.data();
+                submit_info.waitSemaphoreCount = (uint32_t)waits.size();
+                submit_info.pWaitSemaphores = waits.data();
                 submit_info.signalSemaphoreCount = 1;
                 submit_info.pSignalSemaphores = &_ImVulkan_Semaphores[semaphoreIndex];
 
@@ -658,7 +694,10 @@ void MenuOverlayVk::HandOverToBridge()
         vkDeviceWaitIdle(_ImVulkan_Info.Device);
 
     if (VulkanBackendIsUp())
+    {
+        NativeMotionVk::ReleaseDebugViews();
         ImGui_ImplVulkan_Shutdown(false); // the font texture is made again by the D3D12 backend
+    }
 
     // Render pass and descriptor pool included: the next Vulkan menu (if the bridge ever ends) makes its own
     DestroyVulkanObjects(true);
@@ -687,7 +726,10 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
         if (MenuOverlayBase::IsInited())
         {
             if (VulkanBackendIsUp())
+            {
+                NativeMotionVk::ReleaseDebugViews();
                 ImGui_ImplVulkan_Shutdown(false);
+            }
 
             LOG_DEBUG("MenuOverlayBase::Shutdown();");
             MenuOverlayBase::Shutdown();

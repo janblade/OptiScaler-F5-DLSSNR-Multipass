@@ -52,6 +52,7 @@ struct Rules
     // within this range of the picture's. ReShade's range stops at 1.85 (a buffer down to 0.54x of the picture); that was
     // widened to 4 after Witcher 3, whose scene depth is 1280x720 under a 2560x1440 picture (2.0) and whose shadow maps are
     // square, which the shape test already removes.
+    uint32_t selectedWidth=0, selectedHeight=0; // explicit dimensions, zero/zero keeps automatic shape filtering
     float aspectDelta = 0.1f;
     float minRatio = 0.5f;
     float maxRatio = 4.0f;
@@ -91,6 +92,9 @@ inline bool Eligible(const Candidate& c, uint32_t pictureWidth, uint32_t picture
     // Unused, or only a fullscreen pass or two.
     if (c.drawcalls == 0 || (c.vertices <= 3 && c.drawcallsIndirect == 0))
         return false;
+
+    if(rules.selectedWidth || rules.selectedHeight)
+        return (!rules.selectedWidth || c.width==rules.selectedWidth) && (!rules.selectedHeight || c.height==rules.selectedHeight);
 
     return SimilarAspect((float) c.width, (float) c.height, (float) pictureWidth, (float) pictureHeight, rules);
 }

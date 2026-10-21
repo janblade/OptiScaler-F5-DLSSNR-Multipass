@@ -171,6 +171,8 @@ const char* Dx11Pass::Run(ID3D11DeviceContext* context, ID3D11Texture2D* proxy, 
     ComPtr<ID3D11ShaderResourceView> gameSrv;
     ComPtr<ID3D11Buffer> gameConstants;
     ComPtr<ID3D11RasterizerState> gameRasterizer;
+    ComPtr<ID3D11Predicate> gamePredicate;
+    BOOL gamePredicateValue = FALSE;
     ComPtr<ID3D11BlendState> gameBlend;
     FLOAT gameBlendFactor[4] {};
     UINT gameSampleMask = 0xffffffff;
@@ -199,6 +201,7 @@ const char* Dx11Pass::Run(ID3D11DeviceContext* context, ID3D11Texture2D* proxy, 
     context->PSGetShaderResources(0, 1, &gameSrv);
     context->PSGetConstantBuffers(0, 1, &gameConstants);
     context->RSGetState(&gameRasterizer);
+    context->GetPredication(&gamePredicate, &gamePredicateValue);
     context->OMGetBlendState(&gameBlend, gameBlendFactor, &gameSampleMask);
     context->OMGetDepthStencilState(&gameDepthState, &gameStencilRef);
 
@@ -226,6 +229,13 @@ const char* Dx11Pass::Run(ID3D11DeviceContext* context, ID3D11Texture2D* proxy, 
 
     // The depth view is left out (a game's depth buffer may not match the back buffer, and a mismatch drops the draw); no
     // stage but the vertex shader and the pixel shader runs.
+    // The game's own outputs come off first. At present it usually still has a view of the proxy bound as its render target
+    // (or a pixel shader UAV on it): binding the proxy as a read view while that is bound makes Direct3D 11 force the read
+    // view to NULL ("still bound on output") and the pass would read black. OMSetRenderTargets(0, ...) drops the targets and
+    // the pixel shader UAVs; the real buffer's target view and then the read view go on after.
+    context->OMSetRenderTargets(0, nullptr, nullptr);
+    context->SetPredication(nullptr, FALSE); // (a game's predicate would skip the draw)
+
     context->IASetInputLayout(nullptr);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(_vs.Get(), nullptr, 0);
@@ -233,17 +243,19 @@ const char* Dx11Pass::Run(ID3D11DeviceContext* context, ID3D11Texture2D* proxy, 
     context->DSSetShader(nullptr, nullptr, 0);
     context->GSSetShader(nullptr, nullptr, 0);
     context->PSSetShader(_ps.Get(), nullptr, 0);
-    context->PSSetShaderResources(0, 1, &read);
     context->PSSetConstantBuffers(0, 1, &constantBuffer);
     context->RSSetState(_rasterizer.Get());
     context->RSSetViewports(1, &viewport);
     context->OMSetBlendState(_blend.Get(), blendFactor, 0xffffffff);
     context->OMSetDepthStencilState(_depth.Get(), 0);
     context->OMSetRenderTargets(1, &target, nullptr);
+    context->PSSetShaderResources(0, 1, &read); // (after the outputs: the proxy is no longer bound as one)
     context->Draw(3, 0);
 
     // Back as the game had them. The render targets and the UAVs share slots: the targets are the leading slots, the UAVs start
     // at the first one bound (a game that binds both has them apart, or the runtime would not have taken them).
+    context->SetPredication(gamePredicate.Get(), gamePredicateValue);
+    // (the read view of the proxy comes off before the game's targets, which may be views of the proxy, go back on)
     context->PSSetShaderResources(0, 1, gameSrv.GetAddressOf());
     context->PSSetConstantBuffers(0, 1, gameConstants.GetAddressOf());
     context->OMSetDepthStencilState(gameDepthState.Get(), gameStencilRef);

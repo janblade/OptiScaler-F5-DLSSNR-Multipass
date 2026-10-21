@@ -560,6 +560,15 @@ void StateKept(Gpu& g, SdrToHdr::Dx11Pass& pass)
     const FLOAT cleared[4] = { 0.2f, 0.4f, 0.6f, 1.0f };
     ctx->ClearRenderTargetView(gameRtv.Get(), cleared);
 
+    // a predicate that would skip every draw while it is set: the pass must not be skipped, and the game's is put back
+    D3D11_QUERY_DESC predicateDesc {};
+    predicateDesc.Query = D3D11_QUERY_OCCLUSION_PREDICATE;
+    ComPtr<ID3D11Predicate> gamePredicate;
+    device->CreatePredicate(&predicateDesc, &gamePredicate);
+    ctx->Begin(gamePredicate.Get());
+    ctx->End(gamePredicate.Get());
+    ctx->SetPredication(gamePredicate.Get(), TRUE); // (draws only if the occlusion predicate is TRUE: it is FALSE)
+
     // The pass on its own textures
     Check(pass.Init(device) == nullptr, "Init");
     auto proxy = Texture(g, kGame, kWidth, kHeight, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
@@ -602,6 +611,15 @@ void StateKept(Gpu& g, SdrToHdr::Dx11Pass& pass)
     ComPtr<ID3D11InputLayout> gotLayout;
     ctx->IAGetInputLayout(&gotLayout);
 
+    ComPtr<ID3D11Predicate> gotPredicate;
+    BOOL gotPredicateValue = FALSE;
+    ctx->GetPredication(&gotPredicate, &gotPredicateValue);
+    Check(gotPredicate.Get() == gamePredicate.Get() && gotPredicateValue == TRUE, "state: the game's predication is put back");
+    ctx->SetPredication(nullptr, FALSE);
+    {
+        double worst = 0.0;
+        Check(Compare(Read(g, real.Get(), 8), Cases(0, 0).k, Picture(), worst), "the pass was not skipped by the game's predicate");
+    }
     Check(gotRtvs[0].Get() == gameRtv.Get() && gotDsv.Get() == gameDsv.Get(), "state: render target 0 and the depth view are the game's");
     Check(gotVs.Get() == gameVs.Get() && gotPs.Get() == gamePs.Get(), "state: vertex and pixel shaders are the game's");
     Check(gotSrv.Get() == gameSrv.Get(), "state: pixel shader read view 0 is the game's");
@@ -623,6 +641,70 @@ void StateKept(Gpu& g, SdrToHdr::Dx11Pass& pass)
 
     ctx->ClearState();
     pass.ReleaseViews();
+}
+
+// ---- the game still has the proxy bound as an output at present (Review Pass A1) ----
+void ProxyStillBound(Gpu& g, SdrToHdr::Dx11Pass& pass)
+{
+    ID3D11Device* device = g.device.Get();
+    ID3D11DeviceContext* ctx = g.context.Get();
+    const auto picture = Picture();
+    Check(pass.Init(device) == nullptr, "Init");
+
+    for (int how = 0; how < 2; ++how)
+    {
+        auto proxy = Texture(g, kGame, kWidth, kHeight,
+                             D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+        auto real = Texture(g, DXGI_FORMAT_R16G16B16A16_FLOAT, kWidth, kHeight, D3D11_BIND_RENDER_TARGET);
+        Fill(g, proxy.Get(), false, picture);
+        ComPtr<ID3D11RenderTargetView> rtv;
+        ComPtr<ID3D11UnorderedAccessView> uav;
+        device->CreateRenderTargetView(proxy.Get(), nullptr, &rtv);
+        device->CreateUnorderedAccessView(proxy.Get(), nullptr, &uav);
+
+        if (how == 0)
+        {
+            ID3D11RenderTargetView* bound = rtv.Get();
+            ctx->OMSetRenderTargets(1, &bound, nullptr);
+        }
+        else
+        {
+            ID3D11UnorderedAccessView* bound = uav.Get();
+            ctx->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 1, &bound, nullptr);
+        }
+
+        const char* ran = pass.Run(ctx, proxy.Get(), real.Get(), Cases(0, 0).k);
+        double worst = 0.0;
+        const bool ok = ran == nullptr && Compare(Read(g, real.Get(), 8), Cases(0, 0).k, picture, worst);
+        char what[200];
+        std::snprintf(what, sizeof(what), "the game's %s of the proxy still bound: the pass reads the picture, not black (max error %.5f)",
+                      how == 0 ? "render target view" : "UAV", worst);
+        Check(ok, what);
+
+        // and the game's binding is back
+        ID3D11RenderTargetView* gotRtv = nullptr;
+        ID3D11UnorderedAccessView* gotUav = nullptr;
+
+        if (how == 0)
+        {
+            ctx->OMGetRenderTargets(1, &gotRtv, nullptr);
+            Check(gotRtv == rtv.Get(), "and the game's render target view is bound again");
+        }
+        else
+        {
+            ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 1, &gotUav);
+            Check(gotUav == uav.Get(), "and the game's UAV is bound again");
+        }
+
+        if (gotRtv != nullptr)
+            gotRtv->Release();
+
+        if (gotUav != nullptr)
+            gotUav->Release();
+
+        ctx->ClearState();
+        pass.ReleaseViews();
+    }
 }
 
 // ---- a real windowed flip chain ----
@@ -1278,6 +1360,7 @@ int main(int argc, char** argv)
         Maths(g, pass, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "R8G8B8A8_UNORM_SRGB typed proxy (srcLinear)", warp);
         ConvertToggle(g, pass);
         StateKept(g, pass);
+        ProxyStillBound(g, pass);
 
         pass.Release();
         Check(!pass.Ready(), "not ready after Release");

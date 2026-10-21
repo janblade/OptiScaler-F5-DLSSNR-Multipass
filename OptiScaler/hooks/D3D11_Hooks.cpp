@@ -416,24 +416,38 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         }
     }
 
-    // HDR output: Direct3D 11 swap chains are not supported yet (no device exists here, so it is read as D3D11); logged
-    // when HDR output is on, the chain is not touched
+    // HDR output (output/SdrToHdr_*): on the desc after the edits above. The device does not exist yet, and there is no factory
+    // either: the display is found on a plain one by the window.
+    SdrToHdr::Plan hdrPlan;
+
     if (pSwapChainDesc != nullptr)
     {
         SdrToHdr::CreateRequest hdrRequest;
         hdrRequest.format = localDesc.BufferDesc.Format;
+        hdrRequest.sampleCount = localDesc.SampleDesc.Count;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         hdrRequest.hwnd = localDesc.OutputWindow;
-        DXGI_FORMAT hdrFormat = localDesc.BufferDesc.Format;
-        SdrToHdr::PrepareCreate(hdrRequest, hdrFormat);
+        hdrPlan = SdrToHdr::PrepareCreate(hdrRequest, localDesc.BufferDesc.Format);
     }
 
     _skipDx11Create = true;
 
+    // (nested creation hooks pass through while the chain being made is the HDR one)
+    SdrToHdr::ScopedProxiedCreate hdrScope(hdrPlan.proxied);
+
     auto result = o_D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,
                                                   SDKVersion, pSwapChainDesc != nullptr ? &localDesc : nullptr,
                                                   ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+
+    if (FAILED(result) && hdrPlan.proxied)
+    {
+        SdrToHdr::Unproxy(hdrPlan, localDesc.BufferDesc.Format, result);
+        result = o_D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels,
+                                                 SDKVersion, &localDesc, ppSwapChain, ppDevice, pFeatureLevel,
+                                                 ppImmediateContext);
+    }
+
     _skipDx11Create = false;
 
     if (result == S_OK && *ppDevice != nullptr && State::Instance().currentD3D12Device == nullptr)
@@ -465,11 +479,20 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         if (State::Instance().currentWrappedSwapchain == *ppSwapChain)
         {
             LOG_DEBUG("Same as current wrapped swapchain, skipping wrapping");
+
+            // A nested hook wrapped it first, without the plan: give it the plan
+            WrappedIDXGISwapChain4* wrapped = nullptr;
+
+            if (hdrPlan.proxied && (*ppSwapChain)->QueryInterface(IID_PPV_ARGS(&wrapped)) == S_OK)
+            {
+                wrapped->AdoptHdrPlan(hdrPlan, localDesc.Flags);
+                wrapped->Release();
+            }
         }
         else
         {
             *ppSwapChain = new WrappedIDXGISwapChain4(realSC, realDevice, pSwapChainDesc->OutputWindow,
-                                                      pSwapChainDesc->Flags, false);
+                                                      pSwapChainDesc->Flags, false, false, &hdrPlan);
 
             State::Instance().currentSwapchain = *ppSwapChain;
             State::Instance().currentWrappedSwapchain = *ppSwapChain;

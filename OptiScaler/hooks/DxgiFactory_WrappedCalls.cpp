@@ -352,6 +352,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
         SdrToHdr::CreateRequest hdrRequest;
         hdrRequest.device = pDevice;
         hdrRequest.format = localDesc.BufferDesc.Format;
+        hdrRequest.sampleCount = localDesc.SampleDesc.Count;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         hdrRequest.frameGen = _skipFGSwapChainCreation;
@@ -776,6 +777,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
         SdrToHdr::CreateRequest hdrRequest;
         hdrRequest.device = pDevice;
         hdrRequest.format = localDesc.Format;
+        hdrRequest.sampleCount = localDesc.SampleDesc.Count;
         hdrRequest.flipModel = localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
                                localDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         hdrRequest.frameGen = _skipFGSwapChainCreation;

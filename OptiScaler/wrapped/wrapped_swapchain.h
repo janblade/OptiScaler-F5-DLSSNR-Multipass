@@ -8,6 +8,8 @@
 #include "d3d12.h"
 
 #include <output/SdrToHdr_Create.h>
+#include <output/SdrToHdr_ProxyBase.h>
+#include <output/SdrToHdr_ProxyDx11.h>
 #include <output/SdrToHdr_ProxyDx12.h>
 
 #include <atomic>
@@ -114,8 +116,8 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     // HDR output (output/SdrToHdr_*): null until the chain is first proxied, then set once and never reset or replaced
     // (GetBuffer / GetDesc read it on any thread). While it is Active the game's GetBuffer returns the proxies and the real
     // chain is HDR; when HDR output ends it stays, inactive.
-    std::unique_ptr<SdrToHdr::ProxyChain> _proxyOwner;
-    std::atomic<SdrToHdr::ProxyChain*> _proxyPtr { nullptr };
+    std::unique_ptr<SdrToHdr::ProxyChainBase> _proxyOwner; // a Direct3D 12 or a Direct3D 11 chain, by the game's device
+    std::atomic<SdrToHdr::ProxyChainBase*> _proxyPtr { nullptr };
     IUnknown* _creationQueue = nullptr; // identity of the queue the chain was made with (not owned)
     DXGI_COLOR_SPACE_TYPE _gameColourSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; // what the game last asked for
     SdrToHdr::DisplayInfo _display;
@@ -123,13 +125,17 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     bool _hdrColourSpaceLogged = false;
 
     void StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags);
-    SdrToHdr::ProxyChain* Proxy() const { return _proxyPtr.load(std::memory_order_acquire); }
-    SdrToHdr::ProxyChain* EnsureProxy()
+    SdrToHdr::ProxyChainBase* Proxy() const { return _proxyPtr.load(std::memory_order_acquire); }
+    SdrToHdr::ProxyChainBase* EnsureProxy(bool d3d11)
     {
         if (auto* existing = Proxy())
             return existing;
 
-        _proxyOwner = std::make_unique<SdrToHdr::ProxyChain>();
+        if (d3d11)
+            _proxyOwner = std::make_unique<SdrToHdr::ProxyChainDx11>();
+        else
+            _proxyOwner = std::make_unique<SdrToHdr::ProxyChain>();
+
         _proxyPtr.store(_proxyOwner.get(), std::memory_order_release);
         return _proxyOwner.get();
     }
@@ -138,7 +144,9 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
         auto* proxy = Proxy();
         return proxy != nullptr && proxy->Active();
     }
-    ID3D12Device* QueueDevice() const;
+    // The game's device: the Direct3D 12 device behind the queue the chain was made with, or the Direct3D 11 device (d3d11).
+    // Null when it is neither.
+    IUnknown* ApiDevice(bool& d3d11) const;
     HRESULT ResizeHdr(bool v1, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags,
                       const UINT* pCreationNodeMask, IUnknown* const* ppPresentQueue, bool& handled);
 

@@ -14,6 +14,7 @@
 #include <with_dx12/with_dx12.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <output/SdrToHdr_Dx11Present.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeLowLatency.h>
 #include <native/VkPresentBridge.h>
@@ -281,7 +282,7 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
 // `proxy` and `display` are HDR output's (output/SdrToHdr_*): null for a chain it is not on
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP,
-                            SdrToHdr::ProxyChain* proxy = nullptr, const SdrToHdr::DisplayInfo* display = nullptr)
+                            SdrToHdr::ProxyChainBase* proxy = nullptr, const SdrToHdr::DisplayInfo* display = nullptr)
 {
     if (State::Instance().isShuttingDown)
     {
@@ -571,7 +572,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
         // HDR output: the game drew into its proxy back buffer. Turn it into the real HDR one, after the finished picture
         // (which reads the proxy) and before the menu (which draws on the real buffer).
-        if (proxy != nullptr && cq != nullptr && proxy->Active())
+        if (proxy != nullptr && (cq != nullptr || isD3D11) && proxy->Active())
         {
             Microsoft::WRL::ComPtr<IDXGISwapChain3> chain3;
 
@@ -585,11 +586,24 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                                                        display != nullptr ? display->maxLuminance : 0.0f);
                 k.sdrWhiteNits = display != nullptr ? display->sdrWhiteNits : 80.0f;
 
-                const char* why = proxy->Present(cq, chain3.Get(), k);
-
-                if (why != nullptr && proxy->NoteFailureLogged())
+                if (isD3D11)
                 {
-                    LOG_ERROR("HDR output: {}; the real back buffer keeps the last picture", why);
+                    // Direct3D 11: the pass runs inside MenuOverlayDx::Present, right after the motion step that reads the
+                    // proxy and before the menu draws (SdrToHdr_Dx11Present.h); armed here, run there or just below
+                    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+                    device->GetImmediateContext(&context);
+
+                    if (context != nullptr)
+                        SdrToHdr::ArmDx11Pass(proxy, chain3.Get(), context.Get(), k);
+                }
+                else
+                {
+                    const char* why = proxy->Present(cq, chain3.Get(), k);
+
+                    if (why != nullptr && proxy->NoteFailureLogged())
+                    {
+                        LOG_ERROR("HDR output: {}; the real back buffer keeps the last picture", why);
+                    }
                 }
             }
         }
@@ -597,6 +611,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         // Draw overlay, not while the D3D11 bridge resizes (it tears the overlay down on the game's thread)
         if (Dx11wDx12Sync::ResizeInProgress().load() == 0)
             MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
+
+        // Direct3D 11 HDR output: the menu overlay runs the armed pass after its motion step; when it did not get that far
+        // the pass runs now (nothing was drawn on the real buffer yet)
+        SdrToHdr::RunPendingDx11Pass();
 
 #ifdef LOW_LATENCY_INPUTS
         if (State::Instance().activeFgOutput == FGOutput::FSRFG)
@@ -732,10 +750,11 @@ void WrappedIDXGISwapChain4::StartHdrPlan(const SdrToHdr::Plan& plan, UINT flags
     {
         _display = plan.display;
         _displayKnown = plan.displayKnown;
-        auto* proxy = EnsureProxy();
 
-        const char* why = "the swap chain has no IDXGISwapChain3 or no D3D12 device";
-        auto* device = QueueDevice();
+        const char* why = "the swap chain has no IDXGISwapChain3 or no Direct3D device";
+        bool d3d11 = false;
+        auto* device = ApiDevice(d3d11);
+        auto* proxy = EnsureProxy(d3d11);
 
         if (_real3 != nullptr && device != nullptr)
         {
@@ -778,21 +797,37 @@ void WrappedIDXGISwapChain4::AdoptHdrPlan(const SdrToHdr::Plan& plan, UINT flags
     }
 }
 
-ID3D12Device* WrappedIDXGISwapChain4::QueueDevice() const
+IUnknown* WrappedIDXGISwapChain4::ApiDevice(bool& d3d11) const
 {
-    ID3D12CommandQueue* queue = nullptr;
+    d3d11 = false;
 
-    if (_device == nullptr || FAILED(_device->QueryInterface(IID_PPV_ARGS(&queue))) || queue == nullptr)
+    if (_device == nullptr)
         return nullptr;
 
-    ID3D12Device* device = nullptr;
-    queue->GetDevice(IID_PPV_ARGS(&device));
-    queue->Release();
+    ID3D12CommandQueue* queue = nullptr;
 
-    if (device != nullptr)
-        device->Release(); // the queue keeps it alive
+    if (SUCCEEDED(_device->QueryInterface(IID_PPV_ARGS(&queue))) && queue != nullptr)
+    {
+        ID3D12Device* device = nullptr;
+        queue->GetDevice(IID_PPV_ARGS(&device));
+        queue->Release();
 
-    return device;
+        if (device != nullptr)
+            device->Release(); // the queue keeps it alive
+
+        return device;
+    }
+
+    ID3D11Device* device11 = nullptr;
+
+    if (SUCCEEDED(_device->QueryInterface(IID_PPV_ARGS(&device11))) && device11 != nullptr)
+    {
+        device11->Release(); // _device keeps it alive
+        d3d11 = true;
+        return device11;
+    }
+
+    return nullptr;
 }
 
 WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() {}
@@ -1792,7 +1827,8 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     if (Format != DXGI_FORMAT_UNKNOWN)
         gameFormat = Format;
 
-    auto* device = QueueDevice();
+    bool d3d11 = false;
+    auto* device = ApiDevice(d3d11);
 
     SdrToHdr::Inputs in;
     in.enabled = Config::Instance()->HdrOutputEnabled.value_or_default();
@@ -1801,7 +1837,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
                                          current.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
     in.displayKnown = _displayKnown;
     in.displayHdr = _display.hdrOn;
-    in.d3d11 = device == nullptr;
+    in.multisampled = current.SampleDesc.Count > 1;
     in.composition = _composition;
     in.coreWindow = _uwp && !_composition;
 
@@ -1827,6 +1863,14 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     if (in.enabled || wasProxied)
         LOG_INFO("{}", SdrToHdr::ReasonText(decision.reason));
 
+    // Neither a Direct3D 12 queue nor a Direct3D 11 device: nothing to make proxies on
+    if (decision.use && device == nullptr)
+    {
+        SdrToHdr::RecordStatus(SdrToHdr::Reason::StartFailed, false, Config::Instance()->UseHDR10.value_or_default(),
+                               in.enabled, _display.maxLuminance);
+        return S_OK;
+    }
+
     if (!decision.use && !wasProxied)
     {
         SdrToHdr::RecordStatus(decision.reason, false, Config::Instance()->UseHDR10.value_or_default(), in.enabled,
@@ -1835,7 +1879,7 @@ HRESULT WrappedIDXGISwapChain4::ResizeHdr(bool v1, UINT BufferCount, UINT Width,
     }
 
     handled = true;
-    proxy = EnsureProxy();
+    proxy = EnsureProxy(d3d11);
 
     const bool hdr10 = Config::Instance()->UseHDR10.value_or_default();
 

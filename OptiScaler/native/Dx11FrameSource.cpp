@@ -5,6 +5,7 @@
 #include <Util.h>
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
+#include <output/SdrToHdr_ProxyBase.h>
 #include <with_dx12/with_dx12.h>
 
 namespace native
@@ -112,7 +113,8 @@ AcquireStatus Dx11FrameSource::Acquire(FrameInput& input)
     if (!EnsureDevices(_device11))
         return AcquireStatus::Unavailable;
 
-    if (FAILED(_swapChain->GetBuffer(0, IID_PPV_ARGS(&_backBuffer))))
+    // The game's picture: its proxy back buffer while HDR output converts the chain, else the chain's own
+    if (FAILED(SdrToHdr::GameBuffer(_swapChain, 0, IID_PPV_ARGS(&_backBuffer))))
     {
         _error = "could not get the swap chain's buffer";
         return AcquireStatus::Unavailable;

@@ -23,6 +23,7 @@
 #include "detours/detours.h"
 
 #include <mutex>
+#include <iterator>
 
 namespace
 {
@@ -37,6 +38,71 @@ thread_local const sl::Preferences* gamePluginPreferences = nullptr;
 // ERROR_INVALID_OPERATION (0x10DD), which Streamline's own exception handler then treats as fatal.
 // This mutex serializes every Begin...Commit sequence in this file against every other one.
 std::mutex g_detoursTransactionMutex;
+
+
+// Steam + NVIDIA DRS OTA plugins can be unloaded and replaced between hook invocations.
+// DetourDetach must NEVER write the saved prologue into a different DLL that reused
+// the old base address. Save the ORIGINAL export address before DetourAttach: the
+// o_* pointer after attach is a Detours trampoline and does not identify its DLL.
+struct StreamlineHookOwner
+{
+    const void* exportAddress = nullptr;
+    std::wstring dllPath;
+
+    void capture(HMODULE module, const void* originalExport)
+    {
+        clear();
+        if (!module || !originalExport)
+            return;
+
+        wchar_t path[32768] {};
+        const auto length = GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
+        if (length == 0 || length >= std::size(path))
+            return;
+
+        exportAddress = originalExport;
+        dllPath.assign(path, length);
+    }
+
+    // Pin the CURRENT occupant of this address until DetourTransactionCommit.
+    // Unlike UNCHANGED_REFCOUNT, this prevents it being unloaded while we detach.
+    // The caller must FreeLibrary(pinnedModule) after the Detours transaction.
+    bool pinOriginalModule(HMODULE& pinnedModule) const
+    {
+        pinnedModule = nullptr;
+        if (!exportAddress || dllPath.empty())
+            return false;
+
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                reinterpret_cast<LPCWSTR>(exportAddress), &pinnedModule))
+            return false;
+
+        wchar_t currentPath[32768] {};
+        const auto length = GetModuleFileNameW(pinnedModule, currentPath, static_cast<DWORD>(std::size(currentPath)));
+        if (length == 0 || length >= std::size(currentPath) ||
+            CompareStringOrdinal(dllPath.c_str(), -1, currentPath, -1, TRUE) != CSTR_EQUAL)
+        {
+            FreeLibrary(pinnedModule);
+            pinnedModule = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    void clear()
+    {
+        exportAddress = nullptr;
+        dllPath.clear();
+    }
+};
+
+StreamlineHookOwner g_dlssOwner;
+StreamlineHookOwner g_dlssgOwner;
+StreamlineHookOwner g_localDlssgOwner;
+StreamlineHookOwner g_reflexOwner;
+StreamlineHookOwner g_pclOwner;
+StreamlineHookOwner g_commonOwner;
+StreamlineHookOwner g_interposerOwner;
 struct GamePluginLoadScope
 {
     const sl::Preferences* previous;
@@ -2007,6 +2073,25 @@ void StreamlineHooks::unhookInterposer()
     LOG_FUNC();
 
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    HMODULE pinnedModule = nullptr;
+    if ((o_slInit || o_slInit_sl1) && !g_interposerOwner.pinOriginalModule(pinnedModule))
+    {
+        LOG_WARN("Skipping stale sl.interposer DetourDetach: original DLL is gone/replaced");
+        o_slInit = nullptr;
+        o_slInit_sl1 = nullptr;
+        o_slSetTag = nullptr;
+        o_slSetTagForFrame = nullptr;
+        o_slEvaluateFeature = nullptr;
+        o_slSetConstants = nullptr;
+        o_slSetTag_sl1 = nullptr;
+        o_slSetConstants_interposer_sl1 = nullptr;
+        o_slEvaluateFeature_sl1 = nullptr;
+        o_logCallback = nullptr;
+        o_logCallback_sl1 = nullptr;
+        g_interposerOwner.clear();
+        return;
+    }
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2043,12 +2128,15 @@ void StreamlineHooks::unhookInterposer()
     //     DetourDetach(&(PVOID&) o_logCallback_sl1, streamlineLogCallback);
 
     auto detourResult = DetourTransactionCommit();
+    if (pinnedModule)
+        FreeLibrary(pinnedModule);
     if (detourResult != NO_ERROR)
     {
         LOG_ERROR("DetourTransactionCommit error: {:X}", detourResult);
     }
     else
     {
+        g_interposerOwner.clear();
         o_slInit = nullptr;
         o_slInit_sl1 = nullptr;
         o_slSetTag = nullptr;
@@ -2148,6 +2236,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
+                g_interposerOwner.capture(slInterposer, reinterpret_cast<const void*>(o_slInit));
                 DetourAttach(&(PVOID&) o_slInit, hkslInit);
 
                 if (o_slEvaluateFeature != nullptr)
@@ -2197,6 +2286,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 if (detourResult != NO_ERROR)
                 {
                     LOG_ERROR("Failed to hook sl.interposer v2: {:X}", detourResult);
+                    g_interposerOwner.clear();
                     o_slSetTag = nullptr;
                     o_slSetTagForFrame = nullptr;
                     o_slInit = nullptr;
@@ -2235,6 +2325,11 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
+                const void* sl1Export = o_slInit_sl1 ? reinterpret_cast<const void*>(o_slInit_sl1)
+                    : o_slSetTag_sl1 ? reinterpret_cast<const void*>(o_slSetTag_sl1)
+                    : o_slSetConstants_interposer_sl1 ? reinterpret_cast<const void*>(o_slSetConstants_interposer_sl1)
+                    : reinterpret_cast<const void*>(o_slEvaluateFeature_sl1);
+                g_interposerOwner.capture(slInterposer, sl1Export);
                 if (o_slInit_sl1)
                     DetourAttach(&(PVOID&) o_slInit_sl1, hkslInit_sl1);
 
@@ -2254,6 +2349,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 if (detourResult != NO_ERROR)
                 {
                     LOG_ERROR("Failed to hook sl.interposer v1: {:X}", detourResult);
+                    g_interposerOwner.clear();
                     o_slInit_sl1 = nullptr;
                     o_slSetTag_sl1 = nullptr;
                     o_slSetConstants_interposer_sl1 = nullptr;
@@ -2273,6 +2369,16 @@ void StreamlineHooks::unhookDlss()
     LOG_FUNC();
 
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    // An OTA DLL may have been unmapped and replaced at the same address.
+    HMODULE pinnedModule = nullptr;
+    if (o_dlss_slGetPluginFunction && !g_dlssOwner.pinOriginalModule(pinnedModule))
+    {
+        LOG_WARN("Skipping stale DLSS DetourDetach: original Streamline DLL is gone/replaced");
+        o_dlss_slGetPluginFunction = nullptr;
+        g_dlssOwner.clear();
+        return;
+    }
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2280,12 +2386,15 @@ void StreamlineHooks::unhookDlss()
         DetourDetach(&(PVOID&) o_dlss_slGetPluginFunction, hkdlss_slGetPluginFunction);
 
     auto detourResult = DetourTransactionCommit();
+    if (pinnedModule)
+        FreeLibrary(pinnedModule);
     if (detourResult != NO_ERROR)
     {
         LOG_ERROR("Failed to unhook DLSS: {:X}", detourResult);
     }
     else
     {
+        g_dlssOwner.clear();
         o_dlss_slGetPluginFunction = nullptr;
     }
 }
@@ -2315,12 +2424,14 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
+        g_dlssOwner.capture(slDlss, reinterpret_cast<const void*>(o_dlss_slGetPluginFunction));
         DetourAttach(&(PVOID&) o_dlss_slGetPluginFunction, hkdlss_slGetPluginFunction);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
             LOG_ERROR("Failed to hook DLSS: {:X}", detourResult);
+            g_dlssOwner.clear();
             o_dlss_slGetPluginFunction = nullptr;
         }
     }
@@ -2333,6 +2444,16 @@ void StreamlineHooks::unhookDlssg()
     LOG_FUNC();
 
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    // An OTA DLL may have been unmapped and replaced at the same address.
+    HMODULE pinnedModule = nullptr;
+    if (o_dlssg_slGetPluginFunction && !g_dlssgOwner.pinOriginalModule(pinnedModule))
+    {
+        LOG_WARN("Skipping stale DLSSG DetourDetach: original Streamline DLL is gone/replaced");
+        o_dlssg_slGetPluginFunction = nullptr;
+        g_dlssgOwner.clear();
+        return;
+    }
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2340,9 +2461,15 @@ void StreamlineHooks::unhookDlssg()
         DetourDetach(&(PVOID&) o_dlssg_slGetPluginFunction, hkdlssg_slGetPluginFunction);
 
     auto detourResult = DetourTransactionCommit();
+    if (pinnedModule)
+        FreeLibrary(pinnedModule);
     if (detourResult != NO_ERROR)
     {
         LOG_ERROR("Failed to unhook DLSSG: {:X}", detourResult);
+    }
+    else
+    {
+        g_dlssgOwner.clear();
         o_dlssg_slGetPluginFunction = nullptr;
     }
 }
@@ -2375,12 +2502,14 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
+        g_dlssgOwner.capture(slDlssg, reinterpret_cast<const void*>(o_dlssg_slGetPluginFunction));
         DetourAttach(&(PVOID&) o_dlssg_slGetPluginFunction, hkdlssg_slGetPluginFunction);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
             LOG_ERROR("Failed to hook DLSSG: {:X}", detourResult);
+            g_dlssgOwner.clear();
             o_dlssg_slGetPluginFunction = nullptr;
         }
     }
@@ -2393,16 +2522,33 @@ void StreamlineHooks::unhookLocalDlssg()
     LOG_FUNC();
 
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    HMODULE pinnedModule = nullptr;
+    if (o_local_dlssg_slGetPluginFunction && !g_localDlssgOwner.pinOriginalModule(pinnedModule))
+    {
+        LOG_WARN("Skipping stale local DLSSG DetourDetach: original DLL is gone/replaced");
+        o_local_dlssg_slGetPluginFunction = nullptr;
+        g_localDlssgOwner.clear();
+        return;
+    }
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_local_dlssg_slGetPluginFunction)
     {
         DetourDetach(&(PVOID&) o_local_dlssg_slGetPluginFunction, hklocal_dlssg_slGetPluginFunction);
-        o_local_dlssg_slGetPluginFunction = nullptr;
     }
 
-    DetourTransactionCommit();
+    const auto result = DetourTransactionCommit();
+    if (pinnedModule)
+        FreeLibrary(pinnedModule);
+    if (result == NO_ERROR)
+    {
+        o_local_dlssg_slGetPluginFunction = nullptr;
+        g_localDlssgOwner.clear();
+    }
+    else
+        LOG_ERROR("Failed to unhook local DLSSG: {:X}", result);
 }
 
 void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
@@ -2430,9 +2576,16 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
+        g_localDlssgOwner.capture(slDlssg, reinterpret_cast<const void*>(o_local_dlssg_slGetPluginFunction));
         DetourAttach(&(PVOID&) o_local_dlssg_slGetPluginFunction, hklocal_dlssg_slGetPluginFunction);
 
-        DetourTransactionCommit();
+        const auto result = DetourTransactionCommit();
+        if (result != NO_ERROR)
+        {
+            LOG_ERROR("Failed to hook local DLSSG: {:X}", result);
+            g_localDlssgOwner.clear();
+            o_local_dlssg_slGetPluginFunction = nullptr;
+        }
     }
 }
 
@@ -2443,6 +2596,16 @@ void StreamlineHooks::unhookReflex()
     LOG_FUNC();
 
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    // An OTA DLL may have been unmapped and replaced at the same address.
+    HMODULE pinnedModule = nullptr;
+    if (o_reflex_slGetPluginFunction && !g_reflexOwner.pinOriginalModule(pinnedModule))
+    {
+        LOG_WARN("Skipping stale Reflex DetourDetach: original Streamline DLL is gone/replaced");
+        o_reflex_slGetPluginFunction = nullptr;
+        g_reflexOwner.clear();
+        return;
+    }
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2450,12 +2613,15 @@ void StreamlineHooks::unhookReflex()
         DetourDetach(&(PVOID&) o_reflex_slGetPluginFunction, hkreflex_slGetPluginFunction);
 
     auto detourResult = DetourTransactionCommit();
+    if (pinnedModule)
+        FreeLibrary(pinnedModule);
     if (detourResult != NO_ERROR)
     {
         LOG_ERROR("Failed to unhook Reflex: {:X}", detourResult);
     }
     else
     {
+        g_reflexOwner.clear();
         o_reflex_slGetPluginFunction = nullptr;
     }
 }
@@ -2485,12 +2651,14 @@ void StreamlineHooks::hookReflex(HMODULE slReflex)
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
+        g_reflexOwner.capture(slReflex, reinterpret_cast<const void*>(o_reflex_slGetPluginFunction));
         DetourAttach(&(PVOID&) o_reflex_slGetPluginFunction, hkreflex_slGetPluginFunction);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
             LOG_ERROR("Failed to hook Reflex: {:X}", detourResult);
+            g_reflexOwner.clear();
             o_reflex_slGetPluginFunction = nullptr;
         }
     }
@@ -2503,6 +2671,16 @@ void StreamlineHooks::unhookPcl()
     LOG_FUNC();
 
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    // An OTA DLL may have been unmapped and replaced at the same address.
+    HMODULE pinnedModule = nullptr;
+    if (o_pcl_slGetPluginFunction && !g_pclOwner.pinOriginalModule(pinnedModule))
+    {
+        LOG_WARN("Skipping stale PCL DetourDetach: original Streamline DLL is gone/replaced");
+        o_pcl_slGetPluginFunction = nullptr;
+        g_pclOwner.clear();
+        return;
+    }
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2510,12 +2688,15 @@ void StreamlineHooks::unhookPcl()
         DetourDetach(&(PVOID&) o_pcl_slGetPluginFunction, hkpcl_slGetPluginFunction);
 
     auto detourResult = DetourTransactionCommit();
+    if (pinnedModule)
+        FreeLibrary(pinnedModule);
     if (detourResult != NO_ERROR)
     {
         LOG_ERROR("Failed to unhook PCL: {:X}", detourResult);
     }
     else
     {
+        g_pclOwner.clear();
         o_pcl_slGetPluginFunction = nullptr;
     }
 }
@@ -2545,12 +2726,14 @@ void StreamlineHooks::hookPcl(HMODULE slPcl)
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
+        g_pclOwner.capture(slPcl, reinterpret_cast<const void*>(o_pcl_slGetPluginFunction));
         DetourAttach(&(PVOID&) o_pcl_slGetPluginFunction, hkpcl_slGetPluginFunction);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
             LOG_ERROR("Failed to hook PCL: {:X}", detourResult);
+            g_pclOwner.clear();
             o_pcl_slGetPluginFunction = nullptr;
         }
     }
@@ -2563,6 +2746,18 @@ void StreamlineHooks::unhookCommon()
     LOG_FUNC();
 
     std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
+    // An OTA DLL may have been unmapped and replaced at the same address.
+    HMODULE pinnedModule = nullptr;
+    if (o_common_slGetPluginFunction && !g_commonOwner.pinOriginalModule(pinnedModule))
+    {
+        LOG_WARN("Skipping stale Common DetourDetach: original Streamline DLL is gone/replaced");
+        o_common_slGetPluginFunction = nullptr;
+        g_commonOwner.clear();
+        systemCaps = nullptr;
+        systemCapsSl15 = nullptr;
+        return;
+    }
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2570,12 +2765,15 @@ void StreamlineHooks::unhookCommon()
         DetourDetach(&(PVOID&) o_common_slGetPluginFunction, hkcommon_slGetPluginFunction);
 
     auto detourResult = DetourTransactionCommit();
+    if (pinnedModule)
+        FreeLibrary(pinnedModule);
     if (detourResult != NO_ERROR)
     {
         LOG_ERROR("Failed to unhook Common: {:X}", detourResult);
     }
     else
     {
+        g_commonOwner.clear();
         systemCaps = nullptr;
         systemCapsSl15 = nullptr;
         o_common_slGetPluginFunction = nullptr;
@@ -2607,12 +2805,14 @@ void StreamlineHooks::hookCommon(HMODULE slCommon)
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
+        g_commonOwner.capture(slCommon, reinterpret_cast<const void*>(o_common_slGetPluginFunction));
         DetourAttach(&(PVOID&) o_common_slGetPluginFunction, hkcommon_slGetPluginFunction);
 
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
             LOG_ERROR("Failed to hook Common: {:X}", detourResult);
+            g_commonOwner.clear();
             o_common_slGetPluginFunction = nullptr;
         }
     }

@@ -26,7 +26,6 @@
 #include "inputs/FG/FSR3_Dx12_FG.h"
 
 #include <fsr4/FSR4ModelSelection.h>
-#include <framegen/dlssg/AmpereMfgLoader.h>
 
 #include <hooks/Dxgi_Hooks.h>
 #include <hooks/D3D11_Hooks.h>
@@ -50,6 +49,7 @@
 #include <magic_enum.hpp>
 #include <version_check.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/XeModuleInfo.h>
 #include <sha1/sha1.hpp>
 
 static std::vector<HMODULE> _asiHandles;
@@ -211,6 +211,18 @@ static void RunAgilityUpgrade(HMODULE dx12Module)
     }
 }
 
+// " (v1.2.3.4)" from a plugin's version resource, for support logs (an unlocker built for one XeFG/DLSS-G version,
+// say); empty when it has none
+static std::wstring PluginVersion(const std::filesystem::path& plugin)
+{
+    version_t version {};
+
+    if (!Util::GetFileVersion(plugin.wstring(), &version))
+        return {};
+
+    return std::format(L" (v{}.{}.{}.{})", version.major, version.minor, version.patch, version.reserved);
+}
+
 void LoadAsiPlugins()
 {
     std::filesystem::path pluginPath(Config::Instance()->PluginPath.value_or(L"plugins"));
@@ -244,7 +256,7 @@ void LoadAsiPlugins()
 
             if (hMod != nullptr)
             {
-                LOG_INFO(L"Loaded: {}", entry.path().wstring());
+                LOG_INFO(L"Loaded: {}{}", entry.path().wstring(), PluginVersion(entry.path()));
                 _asiHandles.push_back(hMod);
 
                 auto init = (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
@@ -278,7 +290,7 @@ void LoadAsiPlugins()
                     }
                 }
             }
-            else
+            else if (fileName.rfind(L"-loadlate") == std::wstring::npos) // late ones load below
             {
                 DWORD err = GetLastError();
                 LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
@@ -302,7 +314,7 @@ void LoadAsiPlugins()
 
                                 if (hMod != nullptr)
                                 {
-                                    LOG_INFO(L"Loaded late: {}", entry.path().wstring());
+                                    LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(), PluginVersion(entry.path()));
                                     _asiHandles.push_back(hMod);
 
                                     auto init =
@@ -1764,6 +1776,9 @@ void CheckMemoryForProxies()
 
     XellHooks::Hook();
 
+    // Which XeFG / XeLL files are in use, to the log (and later the menu)
+    XeModuleInfo::Describe();
+
     NVNGXProxy::InitNVNGX();
 }
 
@@ -1792,10 +1807,6 @@ DWORD WINAPI getGpuInfo(LPVOID hModuleVoid)
     // If DX12 already loaded then grab the full GPU info right away
     if (hModuleVoid)
         IdentifyGpu::updateD3d12Capabilities();
-
-    // This existing worker runs after DLL_PROCESS_ATTACH has returned. GPU
-    // enumeration and loading another graphics proxy must not run in DllMain.
-    AmpereMfgLoader::TrySetup();
 
     return 0;
 }
@@ -1906,8 +1917,31 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
         // Initial state of FG
-        State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default() ||
-                                                    Config::Instance()->FGDLSSGAmpereMfgUnlock.value_or_default();
+        State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default();
+
+        // The built-in MFG unlocks were removed in 0.1.33. The RTX 20/30 one also turned External on (and saved it),
+        // which now leaves such a player with no frame generation at all: say how to get OptiScaler's back.
+        if (Config::Instance()->RemovedAmpereMfgUnlockSet && State::Instance().externalFrameGeneration)
+        {
+            spdlog::warn("[DLSSG] AmpereMfgUnlock is set, but the built-in RTX 20/30 MFG unlock was removed in 0.1.33 "
+                         "and the key is ignored. [FrameGen] External=true was most likely set by it: untick External "
+                         "frame generation (or set External=false), Save Settings and restart to use OptiScaler's "
+                         "frame generation.");
+
+            ImGuiToast notification({ ImGuiToastType::Warning, 30000,
+                                      "The built-in RTX 20/30 MFG unlock was removed in 0.1.33.\n"
+                                      "External frame generation is still on from it, so OptiScaler's FG is off.\n"
+                                      "Untick External frame generation, Save Settings and restart." });
+            notification.setTitle("RTX 20/30 MFG unlock removed");
+            ImGui::InsertNotification(notification);
+        }
+        else if (Config::Instance()->RemovedAdaMfgUnlockSet || Config::Instance()->RemovedAmpereMfgUnlockSet)
+        {
+            spdlog::warn("[DLSSG] AdaMfgUnlock/AmpereMfgUnlock is set, but the built-in MFG unlock was removed in "
+                         "0.1.33 and these keys are ignored. On RTX 40, use an external MFG unlocker with [FrameGen] "
+                         "External=true. Save Settings drops the old keys.");
+        }
+
         if (State::Instance().externalFrameGeneration)
         {
             // Only runtime overrides: preserve the user's OptiFG configuration for the next

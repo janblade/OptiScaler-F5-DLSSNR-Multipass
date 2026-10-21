@@ -20,11 +20,11 @@
 //
 // WHAT THIS DOES NOT DO
 //
-// It does not decide anything. It watches, and it reports what it found, and that is deliberate: the
-// last two times a number was inferred here it went straight into the interface as a suggestion and
-// was wrong -- 8 where 240 was right, and confidently offered on a black screen. So this ships as an
-// instrument. Whether a found value is worth consuming is a question for after the readout has been
-// looked at in real games, not a question this answers.
+// It does not decide anything by itself. It watches, and it reports what it found, and that was deliberate:
+// the last two times a number was inferred here it went straight into the interface as a suggestion and
+// was wrong -- 8 where 240 was right, and confidently offered on a black screen. Since story 5 of plan
+// 2026-10-14-exposure-scan-all-apis, Auto consumes a found value, but only once the matcher has judged it
+// against our own meter over minutes of play (DlssNr_ExposureMatch.h, DlssNr_ExposureAutoScan.h).
 //
 // A found buffer also carries no contract. NVIDIA's exposure texture is defined by the SDK as "the
 // final exposure scale"; a buffer we discovered ourselves might hold a multiplier, a divisor, or a
@@ -60,7 +60,10 @@ struct Candidate
 // Called from the resource tracker every time the game creates an unordered access view. Cheap and
 // silent for everything that does not match; the shape being looked for is rare enough that the
 // filter rejects almost every call on its first comparison.
-void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc);
+//
+// `caller` (both entry points): the hook's return address. Resources made by OptiScaler or by upscaler / frame
+// generation middleware are not the game's and are skipped (DlssNr_ExposureScanSource.h).
+void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc, void* caller);
 
 // Called from the device's resource creation hooks, which is the detection point that actually
 // works. The unordered access view hook above only exists inside the frame generation HUD fix and is
@@ -68,7 +71,7 @@ void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d
 // which is why the first version of this found nothing anywhere. Creation is also the better place:
 // the description is right there, it happens before anything else, and it catches a resource whose
 // view is made through a descriptor copy rather than through CreateUnorderedAccessView.
-void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource);
+void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource, void* caller);
 
 // How many resources have been looked at. The number that distinguishes "this game has no exposure
 // buffer" from "the hook is not running", which are the same empty list and very different problems.
@@ -80,9 +83,31 @@ unsigned int Examined();
 // right buffer or merely a moving one.
 float BestValue(int* outIndex = nullptr, float* outLowest = nullptr, float* outHighest = nullptr);
 
+// Which API a candidate was found on. D3D12 here; D3D11 in DlssNr_ExposureScan_Dx11.h, Vulkan in
+// DlssNr_ExposureScan_Vk.h. All share one list, readout and recording (DlssNr_ExposureScanCore.h).
+enum class Api
+{
+    D3D12,
+    D3D11,
+    Vulkan
+};
+
 // Called once per frame from the Neural Rendering pass, on its command list. Copies one value out of
 // each candidate and reads back the copies taken a few frames ago.
-void Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
+//
+// `frame` is what is known about this frame's brightness, for the recording (DlssNr_ExposureScanRecord.h) and to mark
+// the candidate that is the game's own exposure texture.
+struct FrameExposure
+{
+    const void* handed = nullptr; // the ExposureTexture on the upscaler call, if any: an ID3D12Resource*, or a VkImage
+    Api handedApi = Api::D3D12;
+    float meter = 0.0f;           // Automatic's raw reading, 0 when Automatic is not running
+    float game = 0.0f;            // the game's exposure as last read, 0 when none
+    float pre = 1.0f;             // DLSS.Pre.Exposure
+};
+
+// Returns whether copies were recorded on cmdList this frame (for the GPU timer around it).
+bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameExposure& frame);
 
 // What the scan has to say right now, in one line, for an indicator that can be read while playing.
 enum class Verdict
@@ -103,6 +128,21 @@ const char* Headline();
 std::vector<Candidate> Report();
 const char* Status();
 bool Scanning();
+
+// Whether the scan holds a D3D12 candidate it copies, i.e. whether Tick will likely record copies this frame (to time
+// them).
+bool Holding();
+
+// Auto (WhitePointSource auto, plan 2026-10-14-exposure-scan-all-apis story 5): the scan runs by itself in D3D12 games,
+// judges its candidates with the matcher and lets go of what it does not need (DlssNr_ExposureAuto.h,
+// DlssNr_ExposureAutoScan.cpp). Where it stands, in one line for the menu and the log ("searching", "found ...", "the
+// game hands its exposure over", ...); empty when the white point source is not Auto.
+std::string AutoStatus();
+
+// While Auto has found the game's exposure: this frame's exposure multiplier in Automatic's units -- the game's value
+// for the movement, Automatic's level as measured while the scan searched -- and the pre-exposure of the frame it goes
+// with (the one Automatic's own reading of that frame used). False otherwise.
+bool FoundExposure(float* multiplier, float* preExposure);
 
 // ---------------------------------------------------------------------------------------------
 // Multi-point anchoring. See dlssnr/design/multi-point-anchoring.md.
@@ -142,7 +182,9 @@ float AnchoredWhitePoint(float scanNow, bool inverted, float trim);
 void LoadAnchors(const std::string& serialized);
 std::string SerializeAnchors();
 
-// Release the scan's references to captured resources (call at feature teardown -- see the .cpp).
+// Release the scan's references to captured D3D12 resources (call at feature teardown -- see the .cpp). D3D11 and Vulkan
+// candidates stay: D3D11 has no placed heaps to pull from under a held reference, and Vulkan's are dropped when the
+// game destroys them.
 void ReleaseTrackedResources();
 
 void Shutdown();

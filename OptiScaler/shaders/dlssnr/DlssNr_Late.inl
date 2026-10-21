@@ -285,6 +285,7 @@ void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
     g_nrCreates.Reset(cmd);
     if (g_gpuTime) g_gpuTime->ResetRecording(cmd);
     if (g_ngxTime) g_ngxTime->ResetRecording(cmd);
+    if (g_scanTime) g_scanTime->ResetRecording(cmd);
     // Reuse's coverage readbacks: a recording thrown away frees its slot, since no fence will ever be signalled for it.
     DetailReuse::ResetRecording(cmd);
     SceneCut::ResetRecording(cmd); // the scene-cut flag's readbacks, the same way
@@ -349,6 +350,7 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
         }
     if (g_gpuTime) g_gpuTime->Submitted(queue, count, lists);
     if (g_ngxTime) g_ngxTime->Submitted(queue, count, lists);
+    if (g_scanTime) g_scanTime->Submitted(queue, count, lists);
     // Reuse's coverage readbacks: a copy is safe to read once the list it was recorded on has been executed.
     DetailReuse::Submitted(queue, count, lists);
     SceneCut::Submitted(queue, count, lists); // the scene-cut flag's readbacks, the same way
@@ -434,7 +436,9 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     Late::ComPtr<ID3D12Resource> color;
     Late::ComPtr<ID3D12Device> currentDevice;
     if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
-        FAILED(sc->GetBuffer(sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))) ||
+        // The game's picture: its proxy back buffer while HDR output converts the chain (SDR, before the pass), else the
+        // chain's own
+        FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))) ||
         FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != Late::device)
         return;
     const auto desc = color->GetDesc();

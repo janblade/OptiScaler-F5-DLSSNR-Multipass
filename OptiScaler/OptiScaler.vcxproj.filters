@@ -497,6 +497,45 @@
     <ClInclude Include="native\DepthSnapshotDx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Display.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Hlsl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Create.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Status.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyBase.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Pass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_ProxyDx11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Dx11Present.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="output\SdrToHdr_Fullscreen.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\MsaaPictureDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -654,6 +693,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="framegen\xefg\XeFG_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\xefg\XeFG_DynamicCap.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\xefg\XeFG_DynamicCount.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\xefg\XeFG_DynamicTarget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hooks\Ntdll_Hooks.h">
@@ -935,6 +983,9 @@
     <ClInclude Include="misc\IdentifyGpu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\XeModuleInfo.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="misc\REFrameworkCompat.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -950,28 +1001,10 @@
     <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\dlssg\DlssgTelemetry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="framegen\dlssg\Kcd2Hdr.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\dlssg\MfgUnlock.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\dlssg\MfgUnlockProvider.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\dlssg\MfgUnlockPlugin.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\dlssg\MfgUnlockPtx.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\dlssg\MfgUnlockMethod.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\dlssg\MfgUnlockFlip.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\dlssg\AmpereMfgLoader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader.h">
@@ -1451,6 +1484,33 @@
     <ClCompile Include="native\DepthResolveDx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Display.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyDx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Create.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyBase.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_ProxyDx11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Dx11Present.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="output\SdrToHdr_Fullscreen.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="native\MsaaPictureDx11.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1676,6 +1736,9 @@
     <ClCompile Include="misc\IdentifyGpu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="misc\XeModuleInfo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="misc\REFrameworkCompat.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1683,12 +1746,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\dlssg\Kcd2Hdr.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="framegen\dlssg\MfgUnlock.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="framegen\dlssg\AmpereMfgLoader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="OptiTypes.cpp">

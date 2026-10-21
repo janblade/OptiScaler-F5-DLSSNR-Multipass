@@ -40,7 +40,8 @@ WorkingScale=1.0
 Select DLSS quality in the game. Pre-SR NR working scale is relative to the active input size.
 Start with one pass and check the logged model/frame dimensions before trying two.
 `RunBeforeSR=false` selects post-SR NR. Native Vulkan **does not yet implement deferred DLSS residual
-composition, residual FG or async-latest NR**. Exposure scanning remains D3D12-only.
+composition, residual FG or async-latest NR**. The exposure scan finds candidates on Vulkan too, but only a D3D12
+game's are used for the picture (Auto's search, Scanned exposure).
 
 ## Adopted fixes and options
 
@@ -63,6 +64,9 @@ composition, residual FG or async-latest NR**. Exposure scanning remains D3D12-o
 - Native D3D11 explains the required D3D12 bridge rather than waiting indefinitely.
 
 ### Built-in Ada MFG unlock: experimental, off by default
+
+> Removed in 0.1.33; this section is kept as history. Use an external unlocker with `[FrameGen] External=true`
+> ([RTX40-MFG.md](RTX40-MFG.md)).
 
 Adapted from the reviewed fork's `MfgUnlock.cpp/.h`, with unique-signature checks, bounds validation
 and narrower hardware/ownership guards. This is an **alternative** to the external unlocker.

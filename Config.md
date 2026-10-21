@@ -423,4 +423,32 @@ These can be changed from the in-game menu with real-time results.
 
 ![menu scale](images/ui_scale.png)
 
+### HDR Output (SDR games, Dx11 and Dx12)
 
+Shows a game that renders SDR correctly on an HDR display. The swap chain is made HDR (scRGB, or HDR10) and one pass converts the game's picture at the end: it decodes gamma 2.2 (or the sRGB curve), puts SDR white at the chosen brightness (203 nits by default) and encodes the result. The game never sees the HDR format. It gives SDR content the right brightness and gamma in an HDR signal; it does not add highlights the game never drew.
+
+Off by default. Turn it on from the in-game menu (Image page, "HDR output") or with `Enabled=true`. It applies at the next start (or at a resolution / window change, in most games), and Windows HDR must be on for the display.
+
+It stands aside, and logs why, when the game already outputs HDR (a 16-bit float or 10-bit swap chain), Windows HDR is off, the game uses exclusive full screen with an older (bitblt) swap chain type (switch it to borderless or windowed), the swap chain is multisampled, the game runs on dxvk (Vulkan), it is a CoreWindow or composition swap chain, it is a multi-GPU swap chain, it presents on a different queue than it was made with, or frame generation is in exclusive full screen (or you switched frame generation's borderless option, `ForceBorderless`, off on purpose). Older swap chain types are made flip model automatically while HDR output is on (windowed or borderless; V-Sync and tearing are not touched), and the game keeps being told what it asked for. A game whose swap chain was made flip model for HDR stays borderless instead of entering exclusive full screen (a flip chain in exclusive full screen stops presenting until it is resized, which older games do not do): its own full screen switch gives a borderless window, and Alt+Enter is switched off for it. Such a game's swap chain cannot be changed back, so turning HDR output off (or Windows HDR going off) takes effect at the next start of the game; the menu says "turns off at the next start". It works for Direct3D 11 and Direct3D 12 games; not Vulkan.
+
+It works with XeFG and FSR frame generation, including Direct3D 11 games that use OptiScaler's frame generation: every frame, generated ones included, goes through the same conversion before it is shown. If frame generation asks for exclusive full screen, the HDR swap chain is made windowed and the game window is kept as a borderless window over the monitor (the game still sees full screen; its own full screen switch gives a borderless window, and Alt+Enter is switched off for the HDR swap chain). Not available with DLSS-G (OptiScaler's DLSS-G output, or a game that uses DLSS-G itself). The menu says so. The frame generation `ForceBorderless` option also decides what a game using FSR frame generation is told about full screen (full screen, while the window is borderless).
+
+```ini
+[HDR]
+; Opt in
+Enabled=auto
+; true: the conversion; false: how Windows shows the game (for comparing). Not saved
+Convert=auto
+; HDR10 (PQ) instead of scRGB
+UseHDR10=auto
+; Highest brightness written in nits, 0 = the display's maximum (1000 when it reports none)
+PeakNits=auto
+; Brightness of SDR white, 80 to 1000 nits
+GameNits=auto
+; 0 = gamma 2.2, 1 = sRGB curve
+Decode=auto
+; Virtual key that flips Convert while playing (Input page of the menu), unbound by default
+CompareKey=auto
+```
+
+The old `ForceHDR=true` is read as `Enabled=true`; `SkipColorSpace` is gone.

@@ -6,10 +6,12 @@
 #include <Logger.h>
 #include <Config.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeDriverDx12.h>
 #include <native/NativeDriverDx11.h>
 #include <native/NativeDriverVk.h>
+#include <output/SdrToHdr_Dx11Present.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -18,7 +20,8 @@
 #include <vector>
 
 // menu
-static int const NUM_BACK_BUFFERS = 8;
+// DXGI allows up to 16 buffers; XeFG with many generated frames (6X) has more than 8
+static int const NUM_BACK_BUFFERS = 16;
 static int const SRV_HEAP_SIZE = 64;
 static bool _dx11Device = false;
 static bool _dx12Device = false;
@@ -146,6 +149,8 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
         LOG_ERROR("pSwapChain->GetDesc: {0:X}", (unsigned long) hr);
         return;
     }
+
+    LOG_INFO("Swapchain has {} buffers, the menu has {}", sd.BufferCount, (int) NUM_BACK_BUFFERS);
 
     for (UINT i = 0; i < sd.BufferCount; ++i)
     {
@@ -316,6 +321,10 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
 
     // The motion step reads the finished picture before the menu is drawn onto it (does nothing unless it is on).
     NativeMotionDx11::OnPresent(pSwapChain, g_pd3dDevice);
+
+    // HDR output (Direct3D 11): the game's picture, with that step's result in it, becomes the real HDR buffer before the menu
+    // is drawn on it
+    SdrToHdr::RunPendingDx11Pass();
 
     ImGuiIO& io = ImGui::GetIO();
     (void) io;
@@ -725,7 +734,10 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     // Dx11wDx12SC the D3D11 finder's frame is closed by NativeMotionDx11::OnFGPresent instead: frame generation's present
     // still reaches here, and a second close in the same frame sees no draws and resets every candidate's warm-up.
     if (State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
+    {
         GenericDepthDx11::OnPresent(pSwapChain);
+        DlssNr::ExposureScanDx11::OnPresent(pSwapChain);
+    }
 
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {
@@ -737,6 +749,7 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         {
             NativeMotionDx11::OnPresent(pSwapChain, device);
             device->Release();
+            SdrToHdr::RunPendingDx11Pass();
         }
 
         MenuOverlayBase::Present();

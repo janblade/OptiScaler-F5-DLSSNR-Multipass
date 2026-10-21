@@ -1915,8 +1915,16 @@ static void RenderExposureSection(Config* config, float menuResScale)
 
         // Auto first, naming what it is now; the other entries are the values 0-3
         const uint32_t configuredSource = config->DlssNrWhitePointSource.value_or_default();
-        const std::string autoSource =
-            std::string("Auto (") + sourceNames[DlssNr::WhitePointSourceEffective(*config)] + ")";
+        // While the exposure scan's match moves the picture (story 5), Auto names that one. Asked of the pass, not the
+        // scan: the scan can hold a match the picture is not using (SDR, a finished picture, a white point override).
+        const bool autoFound = configuredSource == DlssNrExposureDefault::kSourceAuto &&
+                               DlssNr::WhitePointSourceEffective(*config) == DlssNrExposureDefault::kSourceAutomatic &&
+                               (vk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus())
+                                   .foundInForce;
+        const std::string autoSource = std::string("Auto (") +
+                                       (autoFound ? "Game's exposure, found in the game"
+                                                  : sourceNames[DlssNr::WhitePointSourceEffective(*config)]) +
+                                       ")";
         const char* sourceItems[] = { autoSource.c_str(), sourceNames[0], sourceNames[1], sourceNames[2],
                                       sourceNames[3] };
         int sourceItem = configuredSource == DlssNrExposureDefault::kSourceAuto
@@ -1936,11 +1944,22 @@ static void RenderExposureSection(Config* config, float menuResScale)
         const int source = (int) DlssNr::WhitePointSourceEffective(*config);
 
         HelpMarker("Where NR's brightness reference comes from.\n"
-                   "Auto: the game's exposure when the game gives one, else Automatic exposure.\n"
+                   "Auto: the game's exposure when the game gives one. Else, in D3D12 games, OptiScaler looks for\n"
+                   "the game's own exposure among its GPU buffers while you play; once found, the game's value moves\n"
+                   "the brightness at Automatic exposure's level. Until then, or if none is found, Automatic exposure.\n"
                    "Manual: Paper white.\n"
                    "Game exposure: the game's own value.\n"
                    "Scanned exposure: read from game buffers; needs calibration.\n"
                    "Automatic exposure: OptiScaler measures the frame itself.");
+
+        // Auto's exposure search, while Auto is chosen: searching, found, not needed, ...
+        if (configuredSource == DlssNrExposureDefault::kSourceAuto)
+        {
+            const std::string search = DlssNr::ExposureScan::AutoStatus();
+
+            if (!search.empty())
+                ImGui::TextDisabled("Exposure search: %s", search.c_str());
+        }
 
         // Availability, in colour, for the option currently chosen. Two lines at most, whichever source.
         if (ImGui::TreeNode("Exposure readout##autoexposure"))
@@ -2000,7 +2019,7 @@ static void RenderExposureSection(Config* config, float menuResScale)
             }
             else if (source == 2 && vk)
             {
-                // The scan watches D3D12 resource creation only; the Vulkan path resolves source 2 to Paper white.
+                // The scan finds Vulkan candidates too, but the Vulkan path resolves source 2 to Paper white.
                 ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
                                    "Scanned exposure is DirectX 12 only. Using Paper white.");
             }

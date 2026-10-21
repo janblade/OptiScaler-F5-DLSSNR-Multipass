@@ -10,7 +10,9 @@
 #include <native/VkPresentBridge.h>
 
 #include <Config.h>
+#include <State.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 
 #include <imgui/imgui.h>
@@ -95,6 +97,13 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D11Device* device)
     if (VkPresentBridge::DxvkThroughVulkan())
         return;
 
+    // Under Dx11wDx12SC the frame is OnFGPresent's. Frame generation's own presents still reach the overlay, which
+    // calls here: a second run in the same frame fed NR and frame generation twice per frame (GTA V, 2026-10-21: half
+    // the frame rate, the native step's inputs alternating between two pictures, a scene cut every few frames,
+    // blinking).
+    if (State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12)
+        return;
+
     RunFrame(swapChain, device, true);
 }
 
@@ -103,6 +112,7 @@ ID3D12Resource* OnFGPresent(IDXGISwapChain* real, ID3D11Device* device)
     // The one call site that closes the D3D11 depth finder's frame on this path; MenuOverlayDx::Present, which frame
     // generation's present still reaches, skips its own close under Dx11wDx12SC so this frame is not closed twice.
     GenericDepthDx11::OnPresent(real);
+    DlssNr::ExposureScanDx11::OnPresent(real);
     // The bridge copies the D3D12 result into frame generation's back buffer itself: no copy back to D3D11
     return RunFrame(real, device, false);
 }

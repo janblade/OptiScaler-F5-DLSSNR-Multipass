@@ -70,42 +70,9 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             FGEnabled.set_from_config(readBool("FrameGen", "Enabled"));
             ExternalFrameGeneration.set_from_config(readBool("FrameGen", "External"));
-            FGDLSSGAdaMfgUnlock.set_from_config(readBool("DLSSG", "AdaMfgUnlock"));
-            FGDLSSGAdaBlackwellKernels.set_from_config(readBool("DLSSG", "AdaBlackwellKernels"));
-
-            if (auto adaFix = readString("DLSSG", "AdaTemporalFix"); adaFix.has_value())
-            {
-                if (lstrcmpiA(adaFix.value().c_str(), "retarget") == 0)
-                    FGDLSSGAdaTemporalFix.set_from_config("Retarget");
-                else if (lstrcmpiA(adaFix.value().c_str(), "ptx") == 0)
-                    FGDLSSGAdaTemporalFix.set_from_config("Ptx");
-                else
-                    FGDLSSGAdaTemporalFix.set_from_config("Auto");
-            }
-
-            FGDLSSGAdaFlipMeteringPatch.set_from_config(readBool("DLSSG", "AdaFlipMeteringPatch"));
-            FGDLSSGAmpereMfgUnlock.set_from_config(readBool("DLSSG", "AmpereMfgUnlock"));
-            FGDLSSGAmpereMfgMaxFrames.set_from_config(readInt("DLSSG", "AmpereMfgMaxFrames"));
-            if (FGDLSSGAmpereMfgMaxFrames.has_value() &&
-                (FGDLSSGAmpereMfgMaxFrames.value() < 0 || FGDLSSGAmpereMfgMaxFrames.value() > 3))
-                FGDLSSGAmpereMfgMaxFrames.reset();
-
-            if (auto ampereKernel = readString("DLSSG", "AmpereMfgKernelImage"); ampereKernel.has_value())
-            {
-                if (lstrcmpiA(ampereKernel.value().c_str(), "ptx") == 0)
-                    FGDLSSGAmpereMfgKernelImage.set_from_config("PTX");
-                else if (lstrcmpiA(ampereKernel.value().c_str(), "cubin") == 0)
-                    FGDLSSGAmpereMfgKernelImage.set_from_config("Cubin");
-                else
-                    FGDLSSGAmpereMfgKernelImage.set_from_config("Auto");
-            }
-            FGDLSSGAmpereMfgHardwareBilinear.set_from_config(readBool("DLSSG", "AmpereMfgHardwareBilinear"));
-
-            if (FGDLSSGAmpereMfgUnlock.value_or_default())
-            {
-                ExternalFrameGeneration.set_from_config(true);
-                FGDLSSGAdaMfgUnlock.set_from_config(false);
-            }
+            // The built-in MFG unlocks were removed in 0.1.33: their keys are only read to say so once at startup
+            RemovedAdaMfgUnlockSet = readBool("DLSSG", "AdaMfgUnlock").value_or(false);
+            RemovedAmpereMfgUnlockSet = readBool("DLSSG", "AmpereMfgUnlock").value_or(false);
             FGDebugView.set_from_config(readBool("FrameGen", "DebugView"));
 
             if (auto FGInputString = readString("FrameGen", "FGInput"); FGInputString.has_value())
@@ -256,6 +223,18 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGXeFGInterpolationCount.set_from_config(readInt("XeFG", "InterpolationCount"));
             if (FGXeFGInterpolationCount.has_value() && FGXeFGInterpolationCount.value() < 1)
                 FGXeFGInterpolationCount.reset();
+
+            FGXeFGDynamicMFG.set_from_config(readBool("XeFG", "DynamicMFG"));
+            FGXeFGFramerateTargetDMFG.set_from_config(readFloat("XeFG", "FramerateTargetDMFG"));
+            if (FGXeFGFramerateTargetDMFG.has_value() && FGXeFGFramerateTargetDMFG.value() < 10.0f)
+                FGXeFGFramerateTargetDMFG.reset();
+
+            FGXeFGRoundingDMFG.set_from_config(readInt("XeFG", "RoundingDMFG"));
+            if (FGXeFGRoundingDMFG.has_value() && (FGXeFGRoundingDMFG.value() < 0 || FGXeFGRoundingDMFG.value() > 2))
+                FGXeFGRoundingDMFG.reset();
+
+            FGXeFGDynamicAllow1X.set_from_config(readBool("XeFG", "DynamicAllow1X"));
+            FGXeFGTargetAsCapDMFG.set_from_config(readBool("XeFG", "TargetAsCapDMFG"));
 
             FGXeFGIgnoreInitChecks.set_from_config(readBool("XeFG", "IgnoreInitChecks"));
             FGXeFGUIComposition.set_from_config(readBool("XeFG", "UIComposition"));
@@ -559,6 +538,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrProxyProbe.set_from_config(readBool("DlssNr", "ProxyProbe"));
             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
+            DlssNrRecordExposureScan.set_from_config(readBool("DlssNr", "RecordExposureScan"));
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
             DlssNrGameExposureScale.set_from_config(readUInt("DlssNr", "GameExposureScale"));
             if (DlssNrGameExposureScale.has_value() && DlssNrGameExposureScale.value() > 2)
@@ -1138,9 +1118,41 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // HDR
         {
-            ForceHDR.set_from_config(readBool("HDR", "ForceHDR"));
+            HdrOutputEnabled.set_from_config(readBool("HDR", "Enabled"));
+
+            if (readBool("HDR", "ForceHDR").value_or(false))
+            {
+                if (!HdrOutputEnabled.has_value())
+                {
+                    HdrOutputEnabled.set_from_config(true);
+                    LOG_INFO("[HDR] ForceHDR is now 'HDR output' (Enabled=true)");
+                }
+                else
+                {
+                    LOG_INFO("[HDR] ForceHDR ignored, Enabled={} is set", HdrOutputEnabled.value());
+                }
+            }
+
+            HdrOutputConvert.set_from_config(readBool("HDR", "Convert"));
+            HdrCompareKey.set_from_config(readInt("HDR", "CompareKey"));
             UseHDR10.set_from_config(readBool("HDR", "UseHDR10"));
-            SkipColorSpace.set_from_config(readBool("HDR", "SkipColorSpace"));
+            HdrOutputPeakNits.set_from_config(readFloat("HDR", "PeakNits"));
+            HdrOutputGameNits.set_from_config(readFloat("HDR", "GameNits"));
+            HdrOutputDecode.set_from_config(readInt("HDR", "Decode"));
+
+            // NaN / Inf would pass through the clamps and the pass would draw them: back to the default
+            if (HdrOutputPeakNits.has_value() &&
+                (!std::isfinite(HdrOutputPeakNits.value()) || HdrOutputPeakNits.value() < 0.0f))
+                HdrOutputPeakNits.reset();
+
+            if (HdrOutputGameNits.has_value() && !std::isfinite(HdrOutputGameNits.value()))
+                HdrOutputGameNits.reset();
+
+            if (HdrOutputGameNits.has_value())
+                HdrOutputGameNits = std::clamp(HdrOutputGameNits.value(), 80.0f, 1000.0f);
+
+            if (HdrOutputDecode.has_value() && (HdrOutputDecode.value() < 0 || HdrOutputDecode.value() > 1))
+                HdrOutputDecode.reset();
         }
 
         // V-Sync
@@ -1257,21 +1269,14 @@ bool Config::SaveIni()
 
     // Frame Generation
     {
-        bool ampereUnlock = Instance()->FGDLSSGAmpereMfgUnlock.value_for_config_or(false);
-        bool adaUnlock = Instance()->FGDLSSGAdaMfgUnlock.value_for_config_or(false);
-        if (ampereUnlock && adaUnlock)
-            adaUnlock = false;
-
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
-        ini.SetValue("FrameGen", "External", GetBoolValue(Instance()->ExternalFrameGeneration.value_for_config_or(false) || ampereUnlock).c_str());
-        ini.SetValue("DLSSG", "AdaMfgUnlock", GetBoolValue(adaUnlock).c_str());
-        ini.SetValue("DLSSG", "AdaBlackwellKernels", GetBoolValue(Instance()->FGDLSSGAdaBlackwellKernels.value_for_config()).c_str());
-        ini.SetValue("DLSSG", "AdaTemporalFix", Instance()->FGDLSSGAdaTemporalFix.value_for_config_or("auto").c_str());
-        ini.SetValue("DLSSG", "AdaFlipMeteringPatch", GetBoolValue(Instance()->FGDLSSGAdaFlipMeteringPatch.value_for_config()).c_str());
-        ini.SetValue("DLSSG", "AmpereMfgUnlock", GetBoolValue(ampereUnlock).c_str());
-        ini.SetValue("DLSSG", "AmpereMfgMaxFrames", GetIntValue(Instance()->FGDLSSGAmpereMfgMaxFrames.value_for_config()).c_str());
-        ini.SetValue("DLSSG", "AmpereMfgKernelImage", Instance()->FGDLSSGAmpereMfgKernelImage.value_for_config_or("auto").c_str());
-        ini.SetValue("DLSSG", "AmpereMfgHardwareBilinear", GetBoolValue(Instance()->FGDLSSGAmpereMfgHardwareBilinear.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "External", GetBoolValue(Instance()->ExternalFrameGeneration.value_for_config_or(false)).c_str());
+
+        // The built-in MFG unlocks were removed in 0.1.33; drop their keys so the startup note stops after a save
+        for (const char* key : { "AdaMfgUnlock", "AdaBlackwellKernels", "AdaTemporalFix", "AdaFlipMeteringPatch",
+                                 "AmpereMfgUnlock", "AmpereMfgMaxFrames", "AmpereMfgKernelImage",
+                                 "AmpereMfgHardwareBilinear" })
+            ini.Delete("DLSSG", key);
         ini.SetValue("FrameGen", "DebugView", GetBoolValue(Instance()->FGDebugView.value_for_config()).c_str());
         std::string FGInputString = "auto";
         if (auto FGInputHeld = Instance()->FGInput.value_for_config(); FGInputHeld.has_value())
@@ -1390,6 +1395,14 @@ bool Config::SaveIni()
     {
         ini.SetValue("XeFG", "InterpolationCount",
                      GetIntValue(Instance()->FGXeFGInterpolationCount.value_for_config()).c_str());
+        ini.SetValue("XeFG", "DynamicMFG", GetBoolValue(Instance()->FGXeFGDynamicMFG.value_for_config()).c_str());
+        ini.SetValue("XeFG", "FramerateTargetDMFG",
+                     GetFloatValue(Instance()->FGXeFGFramerateTargetDMFG.value_for_config()).c_str());
+        ini.SetValue("XeFG", "RoundingDMFG", GetIntValue(Instance()->FGXeFGRoundingDMFG.value_for_config()).c_str());
+        ini.SetValue("XeFG", "DynamicAllow1X",
+                     GetBoolValue(Instance()->FGXeFGDynamicAllow1X.value_for_config()).c_str());
+        ini.SetValue("XeFG", "TargetAsCapDMFG",
+                     GetBoolValue(Instance()->FGXeFGTargetAsCapDMFG.value_for_config()).c_str());
         ini.SetValue("XeFG", "IgnoreInitChecks",
                      GetBoolValue(Instance()->FGXeFGIgnoreInitChecks.value_for_config()).c_str());
         ini.SetValue("XeFG", "UIComposition", GetBoolValue(Instance()->FGXeFGUIComposition.value_for_config()).c_str());
@@ -1729,8 +1742,11 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "PassFeedback", GetFloatValue(Instance()->DlssNrPassFeedback.value_for_config()).c_str());
     ini.SetValue("DlssNr", "UseProxy", GetBoolValue(Instance()->DlssNrUseProxy.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ProxyProbe", GetBoolValue(Instance()->DlssNrProxyProbe.value_for_config()).c_str());
-    // ScanExposure is a developer override with no menu control; persist it so a set ini keeps it.
+    // ScanExposure and RecordExposureScan are developer overrides with no menu control; persist them so a set ini keeps
+    // them.
     ini.SetValue("DlssNr", "ScanExposure", GetBoolValue(Instance()->DlssNrScanExposure.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RecordExposureScan",
+                 GetBoolValue(Instance()->DlssNrRecordExposureScan.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointScale",
                  GetFloatValue(Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Preset", GetIntValue(Instance()->DlssNrPreset.value_for_config()).c_str());
@@ -2185,6 +2201,21 @@ bool Config::SaveIni()
         ini.SetValue("Inputs", "EnableFsr3Inputs",
                      GetBoolValue(Instance()->EnableFsr3Inputs.value_for_config()).c_str());
         ini.SetValue("Inputs", "EnableFfxInputs", GetBoolValue(Instance()->EnableFfxInputs.value_for_config()).c_str());
+    }
+
+    // HDR (Convert is the live A/B toggle and is not written; ForceHDR is read into Enabled and not written back)
+    {
+        ini.SetValue("HDR", "Enabled", GetBoolValue(Instance()->HdrOutputEnabled.value_for_config()).c_str());
+        ini.SetValue("HDR", "UseHDR10", GetBoolValue(Instance()->UseHDR10.value_for_config()).c_str());
+        ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->HdrOutputPeakNits.value_for_config()).c_str());
+        ini.SetValue("HDR", "GameNits", GetFloatValue(Instance()->HdrOutputGameNits.value_for_config()).c_str());
+        ini.SetValue("HDR", "Decode", GetIntValue(Instance()->HdrOutputDecode.value_for_config()).c_str());
+        {
+            auto compare = Instance()->HdrCompareKey.value_for_config();
+            ini.SetValue("HDR", "CompareKey", GetIntValue(compare, compare > 0).c_str());
+        }
+        ini.Delete("HDR", "ForceHDR", true);
+        ini.Delete("HDR", "SkipColorSpace", true);
     }
 
     // V-Sync

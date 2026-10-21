@@ -1926,7 +1926,7 @@ static HRESULT hkCreateCommittedResource(ID3D12Device* device, const D3D12_HEAP_
     // Where the exposure scan sees the game's resources. Silent and cheap for everything that does
     // not match, and it does nothing at all unless Neural Rendering is running.
     if (SUCCEEDED(created) && ppvResource != nullptr)
-        DlssNr::ExposureScan::NoteResource(pDesc, (ID3D12Resource*) *ppvResource);
+        DlssNr::ExposureScan::NoteResource(pDesc, (ID3D12Resource*) *ppvResource, _ReturnAddress());
 
     return created;
 }
@@ -1961,7 +1961,7 @@ static HRESULT hkCreatePlacedResource(ID3D12Device* device, ID3D12Heap* pHeap, U
                                                    pOptimizedClearValue, riid, ppvResource);
 
     if (SUCCEEDED(created) && ppvResource != nullptr)
-        DlssNr::ExposureScan::NoteResource(pDesc, (ID3D12Resource*) *ppvResource);
+        DlssNr::ExposureScan::NoteResource(pDesc, (ID3D12Resource*) *ppvResource, _ReturnAddress());
 
     return created;
 }

@@ -3,6 +3,7 @@
 #include <dxgi1_6.h>
 
 #include "Hook_Utils.h"
+#include <framegen/FGBorderless.h>
 
 class FGHooks
 {
@@ -83,6 +84,22 @@ class FGHooks
     inline static std::atomic<UINT> _restyleMessage = 0;
 
     static void RestyleWindowLater(const WindowRestyle& restyle);
+    inline static HdrBorderlessKeeper _hdrKeeper;
+
+  public:
+    // FGXeFGForceBorderless, or HDR output keeping the window borderless for its windowed library chain
+    // (KeepBorderless): the game is answered with full screen, the window is a borderless popup over the monitor, and
+    // no exclusive switch is made.
+    static bool BorderlessForced();
+
+    // HDR output made the frame generation library's chain (`owner`) windowed where the game asked for exclusive full
+    // screen: from here the game-facing chain is answered as for FGXeFGForceBorderless, whichever frame generation
+    // output it is. The window is restyled from its own message loop. The player's option is not changed.
+    // ReleaseBorderless undoes it, for the same owner, when that chain stands down or is released.
+    static void KeepBorderless(HWND hwnd, const void* owner);
+    static void ReleaseBorderless(const void* owner);
+
+  private:
     static void ApplyRestyle(const WindowRestyle& restyle);
     static LRESULT CALLBACK RestyleMessageHook(int code, WPARAM wParam, LPARAM lParam);
 

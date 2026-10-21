@@ -48,6 +48,8 @@ class XeFGProxy
 {
   private:
     inline static HMODULE _dll = nullptr;
+    // A libxess_fg.dll that was already loaded (the game's own) when OptiScaler loaded its copy
+    inline static HMODULE _memModule = nullptr;
     inline static std::wstring _dllPath;
 
     inline static xefg_swapchain_version_t _xefgVersion {};
@@ -118,6 +120,7 @@ class XeFGProxy
 
   public:
     static HMODULE Module() { return _dll; }
+    static HMODULE MemModule() { return _memModule; }
     static std::wstring Module_Path() { return _dllPath; }
 
     static bool InitXeFG()
@@ -142,6 +145,7 @@ class XeFGProxy
 
             if (mainModule != nullptr)
             {
+                _memModule = memModule;
                 break;
             }
         }

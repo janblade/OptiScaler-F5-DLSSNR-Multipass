@@ -58,6 +58,7 @@ struct AutoState
     unsigned int adoptions = 0;    // likely candidates taken, ever (rank 2 and up)
     unsigned int adoptionsSeen = 0;
     unsigned int search = 0; // the search the history belongs to (Lifecycle::SearchNumber)
+    unsigned int notD3D12 = 0; // NR frames in a row the game's presents were not D3D12 (kNotD3D12Frames)
 
     // One row per recording row (DlssNrExposureScanRecord::Due) with a meter reading: the meter, and each slot's value.
     // A slot's column belongs to the owner of generation owner[slot], from row first[slot] on.
@@ -139,6 +140,12 @@ bool GameRendersD3D12()
 
     return state.api == API::DX12 || state.api == API::NotSelected;
 }
+
+// NR frames in a row that GameRendersD3D12 must say no before Auto stands down (NotHere lets go of every candidate, and
+// a D3D12 game makes most of them at load). `swapchainApi` is whatever presented last: a D3D12 game that also presents
+// a D3D11 swapchain (a launcher, an intro video, D3D11On12) reads D3D11 on those presents, and alternating presents
+// keep resetting the count. ~2 s at 60 fps.
+constexpr unsigned int kNotD3D12Frames = 120;
 
 void ClearHistoryLocked()
 {
@@ -424,7 +431,8 @@ void FrameLocked(const FrameExposure& frame)
     f.handed = offer.Confirmed();
     f.handedPending = offer.Pending();
     f.preExposure = g_auto.pre.Moving();
-    f.supported = GameRendersD3D12();
+    g_auto.notD3D12 = GameRendersD3D12() ? 0 : std::min(g_auto.notD3D12 + 1, kNotD3D12Frames);
+    f.supported = g_auto.notD3D12 < kNotD3D12Frames;
     f.verdict = CollectMatchLocked();
     f.matchAlive = MatchAliveLocked();
     f.newCandidates = g_auto.adoptions != g_auto.adoptionsSeen;
@@ -452,7 +460,7 @@ void FrameLocked(const FrameExposure& frame)
             LOG_INFO("DLSS-NR exposure scan (Auto): {}; candidates the game makes from here start a new search after "
                      "{:.0f} s",
                      PhaseName(g_auto.said), g_auto.life.RetrySeconds());
-        else if (g_auto.said == Phase::Done && f.preExposure)
+        else if (g_auto.said == Phase::Done && f.preExposure && !f.handed)
             LOG_INFO("DLSS-NR exposure scan (Auto): not needed: the game's pre-exposure moves with the light");
         else
             LOG_INFO("DLSS-NR exposure scan (Auto): {}", PhaseName(g_auto.said));
@@ -487,14 +495,16 @@ std::string AutoStatus()
     if (!AutoScan::On())
         return {};
 
-    // Before NR's first frame in a game that is not D3D12, say so rather than "watching"
-    if (!GameRendersD3D12())
-        return PhaseName(DlssNrExposureAuto::Phase::NotHere);
-
     std::lock_guard<std::mutex> lock(Core::Mutex());
 
-    // Done for a pre-exposure that moves: nothing was handed over, and Automatic stays in force (as the log says)
-    if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Done && g_auto.pre.Moving())
+    // Before NR's first frame in a game that is not D3D12, say so rather than "watching"; from then on the lifecycle
+    // decides (kNotD3D12Frames)
+    if (g_auto.frames == 0 && !GameRendersD3D12())
+        return PhaseName(DlssNrExposureAuto::Phase::NotHere);
+
+    // Done for a pre-exposure that moves and no texture handed over: Automatic stays in force (as the log says)
+    if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Done && g_auto.pre.Moving() &&
+        !DlssNr::GameExposureOffer().Confirmed())
         return "not needed: the game's pre-exposure moves with the light, Automatic";
 
     std::string line = PhaseName(g_auto.life.Now());

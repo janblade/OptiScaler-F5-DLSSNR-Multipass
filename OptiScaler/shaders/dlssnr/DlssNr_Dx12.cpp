@@ -2266,6 +2266,8 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 
 DlssNr_Dx12::~DlssNr_Dx12()
 {
+    if (_superiorRawLow)
+        _superiorRawLow->Release();
     for (auto* pipeline : _superiorResolve)
         if (pipeline)
             pipeline->Release();
@@ -3185,7 +3187,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
 
     bool spatialReset = false;
-    bool spatial = EdgeCompression::Begin(cfg, width, height, workScale, proxyBackend, spatialSignature, spatialReset);
+    bool spatial =
+        EdgeCompression::Begin(cfg, width, height, workScale, !superior, proxyBackend, spatialSignature, spatialReset);
 
     if (spatialReset)
         g_nr.reset = true;
@@ -4512,7 +4515,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         using DlssNr::Spatial::MakeConstants;
         const auto& spatialLayout = EdgeCompression::Layout();
-        auto guideConstants = MakeConstants(spatialLayout, 101, guides, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
+        const DlssNr::GuideExtent motionReference =
+            frame.MotionVectorsLowResolution
+                ? DlssNr::GuideExtent { frame.RenderSubrectWidth, frame.RenderSubrectHeight }
+                : DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
+        auto guideConstants =
+            DlssNr::Spatial::MakeGuideConstants(spatialLayout, guides, motionReference, frame.MvScaleX, frame.MvScaleY);
 
         if (!guides.depth.valid())
         {
@@ -4769,9 +4777,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     auto* superiorGeneration = superior ? superiorState.current.get() : nullptr;
-    const auto superiorSchedule =
-        superior ? DlssNr::SuperiorScaling::Schedule(cfg, effectivePasses, workScale, g_nr.superiorMainOnlyGains)
-                 : DlssNr::InterPass::GainSchedule {};
+    const float superiorGainScale =
+        superior ? DlssNr::SuperiorScaling::ResolutionScale(width, height, modelWidth, modelHeight) : workScale;
+    const auto superiorSchedule = superior ? DlssNr::SuperiorScaling::Schedule(cfg, effectivePasses, superiorGainScale,
+                                                                               g_nr.superiorMainOnlyGains)
+                                           : DlssNr::InterPass::GainSchedule {};
     unsigned superiorCovered = 0, superiorCompleted = 0;
     bool superiorBoundaryFailed = false;
     uint32_t superiorMask = 0, superiorClampSlots[4] { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
@@ -5076,12 +5086,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         finalAnswer = passOutput;
         MakeModelReadable(finalAnswer);
         superiorCompleted = pass + 1u;
-        if (superiorGeneration && superiorGeneration->temporal && pass + 1u < effectivePasses)
+        if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScale < 1.0f)) &&
+            pass + 1u < effectivePasses)
         {
             const bool due = superiorSchedule.Due(pass, superiorCovered);
-            const bool ran = due && SuperiorRun::InterPass(*superiorGeneration, *this, cmdList, cfg,
-                                                           spatial ? modelInput : g_nr.colorCopy, modelInput,
-                                                           finalAnswer, superiorCovered, superiorCompleted, workScale);
+            const bool ran = due && SuperiorRun::InterPass(
+                                        *superiorGeneration, *this, cmdList, cfg, spatial ? modelInput : g_nr.colorCopy,
+                                        modelInput, finalAnswer, superiorCovered, superiorCompleted, superiorGainScale);
             if (ran)
             {
                 superiorCovered = superiorCompleted;
@@ -5585,23 +5596,27 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // the output takes a UAV, so resolveTarget is the output there)
         if (cached)
             EditCache::ApplyCached(cacheFrame, resolveTarget);
-        else if (superiorGeneration && superiorGeneration->temporal)
+        else if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScale < 1.0f)))
         {
             auto& g = *superiorGeneration;
-            auto* residual = SuperiorRun::Stabilize(g, *this, cmdList, ordinaryProxy, ordinaryAnswer, motionIn, guides,
-                                                    frame, superiorReset, g_nr.heldActive);
-            const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted, workScale,
-                                                                   g_nr.superiorMainOnlyGains);
+            auto* shapingProxy = g.temporal ? ordinaryProxy : resolveProxy;
+            auto* residual = g.temporal
+                                 ? SuperiorRun::Stabilize(g, *this, cmdList, ordinaryProxy, ordinaryAnswer, motionIn,
+                                                          guides, frame, superiorReset, g_nr.heldActive)
+                                 : resolveAnswer;
+            const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
+                                                                   superiorGainScale, g_nr.superiorMainOnlyGains);
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
-                            ? SuperiorRun::FinalLow(g, *this, cmdList, ordinaryProxy, residual)
+                            ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, g.temporal)
                             : nullptr;
             resolveParams.MvScaleX = gains.high;
             resolveParams.MvScaleY = gains.low;
             resolveParams.GuideWidth = low ? 1u : 0u;
-            auto* pso = SuperiorResolvePipeline(resolveParams.Passthrough != 0);
+            resolveParams.GuideHeight = g.temporal ? 0u : 1u; // raw NR answer, no private DLSS at native scale
+            auto* pso = SuperiorResolvePipeline(resolveParams.Passthrough != 0, !g.temporal);
             const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
             composed = residual && lowReady && pso &&
-                       DispatchPass(cmdList, resolveParams, ordinaryProxy, residual, resolveOriginal, motionIn,
+                       DispatchPass(cmdList, resolveParams, shapingProxy, residual, resolveOriginal, motionIn,
                                     exposureTex, resolveTarget, nullptr, low, pso);
             SuperiorRun::Say(composed ? "" : "Superior reconstruction failed; keeping the game frame.");
         }

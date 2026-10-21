@@ -1,18 +1,19 @@
 // Compress screen edges, D3D12 (menu: NR Input, "Compress screen edges"; ini [DlssNr] Spatial*).
 //
-// NR works on a smaller picture: the middle of the frame stays 1:1 and the edges are squeezed into the rest of the space
-// (DlssNr_Spatial.h has the layout, precompile/dlssnr_spatial.hlsl the three passes). A frame goes
+// NR works on a smaller picture: the middle of the frame stays 1:1 and the edges are squeezed into the rest of the
+// space (DlssNr_Spatial.h has the layout, precompile/dlssnr_spatial.hlsl the three passes). A frame goes
 //   encode -> pack the colour (100) and the depth + motion (101) -> the model at the packed size ->
 //   unpack the packed model input and the model's answer to the ordinary grid (102) -> the resolve.
-// The ordinary grid is the one NR works on without compression (the model resolution, 16-pixel grid), so the resolve,
-// the enlargement and the supersample down-leg see the same kind of pair they always did, only softer at the edges:
-// both halves go through the same resampling, so what the resolve carries over to the frame is the model's change.
+// The ordinary grid is the one NR works on without compression (16-pixel grid, or Superior's exact raster), so the
+// resolve, the enlargement and the supersample down-leg see the same kind of pair they always did, only softer at the
+// edges: both halves go through the same resampling, so what the resolve carries over to the frame is the model's
+// change.
 //
 // Motion is packed by its end points (Pack(p + v) - Pack(p)), so the packed vectors are exact in packed pixels and the
 // model gets a scale of 1. The packed textures are RGBA16F, also the model's own input and output surfaces: the answer
-// is a resample of a resample, not something the swap chain's format should quantise. (So against no compression an 8 or
-// 10-bit game's model works on RGBA16F; what is bit-identical is the 1:1 middle between the Replace correction, mode 103,
-// and the plain unpack, mode 102.)
+// is a resample of a resample, not something the swap chain's format should quantise. (So against no compression an 8
+// or 10-bit game's model works on RGBA16F; what is bit-identical is the 1:1 middle between the Replace correction, mode
+// 103, and the plain unpack, mode 102.)
 //
 // Anything that goes wrong turns compression off (Status::TurnedOff*), not NR: the next frame runs the ordinary path,
 // and a change of layout (or Retry) tries again. Reuse detail between frames does not run while this does.
@@ -81,11 +82,12 @@ uint64_t SignatureOf(DXGI_FORMAT colour, DXGI_FORMAT depthFormat, unsigned int d
 
 // Decides this frame. Returns whether the picture is packed. resetHistory is set when the packed picture is a different
 // one from last frame's.
-bool Begin(const Config& cfg, unsigned int width, unsigned int height, float scale, bool proxyBackend,
-           uint64_t signature, bool& resetHistory)
+bool Begin(const Config& cfg, unsigned int width, unsigned int height, float scale, bool gridOrdinary,
+           bool proxyBackend, uint64_t signature, bool& resetHistory)
 {
     const Sp::Settings settings = Sp::ReadSettings(cfg);
-    const Sp::Tracker::Frame frame = tracker.Begin(settings, width, height, scale, true, proxyBackend, signature);
+    const Sp::Tracker::Frame frame =
+        tracker.Begin(settings, width, height, scale, gridOrdinary, proxyBackend, signature);
     const Sp::Layout& next = tracker.layout();
 
     if (frame.resetHistory)

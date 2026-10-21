@@ -2,7 +2,9 @@ param(
     [string]$ReferenceShaderDirectory,
     [switch]$GpuQuality,
     [switch]$GpuTiming,
-    [switch]$GpuHost
+    [switch]$GpuHost,
+    [switch]$GpuSpatial,
+    [switch]$GpuSpatialTiming
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -16,20 +18,26 @@ try {
     $vc = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
     $out = 'artifacts/validation'
     New-Item -ItemType Directory -Force $out | Out-Null
-    $cpu = @('superior_policy', 'interpass_policy', 'nr_guides_smoke', 'nr_surface_formats_smoke')
+    $cpu = @('superior_policy', 'spatial_policy', 'interpass_policy', 'nr_guides_smoke', 'nr_surface_formats_smoke')
     $quality = @('superior_carrier', 'superior_prepare_quality', 'superior_input_quality',
                  'superior_exposure_quality', 'superior_softknee_quality', 'superior_tall_low_quality',
                  'interpass_low_cache_quality')
     $names = @($cpu)
     if ($GpuQuality) { $names += $quality }
     if ($GpuTiming) { $names += 'superior_tall_low_timing' }
+    if ($GpuSpatial) { $names += @('nr_spatial_dx12_gpu', 'spatial_raw_low_quality') }
+    if ($GpuSpatialTiming) {
+        python tools/prepare_superior_host_tests.py --timing-baseline
+        if ($LASTEXITCODE -ne 0) { throw 'Spatial timing baseline missing (fetch full history)' }
+        $names += 'spatial_timing'
+    }
     if ($GpuHost) {
         python tools/prepare_superior_host_tests.py
         if ($LASTEXITCODE -ne 0) { throw 'Host shader reference compilation failed' }
         $names += 'superior_host_quality'
     }
     foreach ($name in $names) {
-        $src = if ($name -like 'nr_*_smoke') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
+        $src = if ($name -like 'nr_*_smoke' -or $name -eq 'nr_spatial_dx12_gpu') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
         cmd /c "`"$vc`" && cl /nologo /std:c++17 /EHsc /O2 `"$src`" /Fe:$out/$name.exe /Fo:$out/$name.obj /link d3d12.lib dxgi.lib"
         if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $name" }
     }
@@ -37,9 +45,19 @@ try {
         & "$out/$name.exe"
         if ($LASTEXITCODE -ne 0) { throw "Test failed: $name" }
     }
+    if ($GpuSpatial) {
+        & "$out/nr_spatial_dx12_gpu.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Spatial GPU validation failed' }
+        & "$out/spatial_raw_low_quality.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Spatial raw low GPU comparison failed' }
+    }
     if ($GpuHost) {
         & "$out/superior_host_quality.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Host composition comparison failed' }
+    }
+    if ($GpuSpatialTiming) {
+        & "$out/spatial_timing.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Spatial GPU timing failed' }
     }
     $candidate = 'OptiScaler/shaders/dlssnr/superior/precompile'
     if ($GpuQuality -or $GpuTiming) {

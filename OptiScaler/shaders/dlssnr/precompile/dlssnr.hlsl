@@ -86,6 +86,11 @@ cbuffer Params : register(b0)
 #if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
 #define gMode 1u
 #define gTransfer 11u
+#if defined(DLSSNR_SUPERIOR_HOST_RAW)
+#define gGuideHeight 1u
+#else
+#define gGuideHeight 0u
+#endif
 #endif
 
 // Bringing an impossible colour back into a possible one.
@@ -1670,7 +1675,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
     float4 modelSample = gModel.SampleLevel(gLinear, cmpUv, 0);
 #if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
-    modelSample.rgb += proxySample.rgb; // existing raw-model/difference debug views
+    if (gGuideHeight == 0u)
+        modelSample.rgb += proxySample.rgb; // decoded signed DLSS residual, otherwise an ordinary NR answer
 #endif
 
     // Nothing was encoded on the way in, so nothing is decoded here either.

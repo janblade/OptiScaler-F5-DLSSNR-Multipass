@@ -22,7 +22,7 @@ use Small. On 310.8, all presets use Main because that runtime has no Small mode
 once at feature creation, not per frame. If version metadata is absent, the 310.9 mapping is used with a warning in the log.
 Passes 2/3 use their explicit preset when set, including Default; otherwise they inherit pass 1. Passes 4+ inherit pass 1.
 The same mapping feeds both inter-pass scheduling/shaping and final block shaping. Informational Area/success banners are hidden.
-At 100%, janblade's original multipass boundaries remain in use and enlargement/private DLSS are inactive; native guide units are still corrected from their actual valid/reference dimensions.
+At 100% without compression, janblade's original multipass boundaries remain in use. Private DLSS is inactive at 100% or above; native guide units are corrected from their actual valid/reference dimensions.
 Below 100%, depth and MV are matched to the working grid with independent regions/offsets; the private DLSS path reuses current depth.
 After frames skipped by the edit cache, private DLSS resets its history on the next refresh.
 Edge compression keeps its packed NR guides and unpacks before temporal enlargement. Its inter-pass correction operates on the packed model grid.
@@ -41,6 +41,51 @@ Gains use the v59 resolution correction and Structure * Intensity. High/medium m
 An inter-pass runs before the next pass only if the absolute high/low gap would both increase and exceed 0.15.
 Final shaping uses only the tail after the last successful inter-pass. Carrier K=1, fixed linear 0.5 encoding, guided radius 1, range sigma .015, spatial sigma 3, strength 1.
 No K/headroom analysis is introduced. Native Vulkan is outside the original v59 implementation; DirectX 12 and supported D3D12 bridges are required.
+
+## Compress screen edges
+
+Depth and MV use independent active rectangles and offsets. Before the nonlinear endpoint transform, game MV units are
+converted into the current NR colour frame's pixels using its native extent divided by the declared render/output MV
+reference (selected by MVLowRes). Missing reference dimensions fall back to the valid motion region, never its allocation
+or the depth dimensions. This applies on D3D12 and Vulkan, before/after SR, at 100% and reduced NR resolution.
+Packed motion is already in packed pixels; NR receives scale 1. Depth stays point sampled on the matching warped grid.
+
+Superior keeps its exact ordinary raster through pack/unpack; only the actual packed NR raster is aligned to 16 pixels.
+For example, at 3840x2160 / 65%, the ordinary image is 2496x1404 throughout, rather than mixing in a 1408-row unpack.
+
+Frequency gains use **one scale for the whole image**, as requested:
+`sqrt((modelWidth/nativeWidth) * (modelHeight/nativeHeight))`, using the actual final packed model dimensions after both
+resolution controls and rounding. Center and edges share the same gains. This scale feeds lookahead scheduling, every
+inter-pass block and final tail shaping, including when the resolution slider says 100% but compression shrinks NR.
+At native/supersampled ordinary resolution, a raw-answer PSO applies the gain split without private DLSS or an additional
+guided enlargement. Its raw low field uses the cooperative 8x16 Low64 cache, with exactly the reference N-P arithmetic.
+Separate raw/temporal PSOs remove dynamic branches; the existing temporal SDR/HDR bytecode remains identical to 24a2d7bf.
+
+Validation on RTX 4090 / driver 616.56: 48 CPU metadata/size/gain cases; D3D12 pack/unpack with native, pre/post-SR,
+independent/clipped/offset depth and MV, low/high-resolution vectors and exact P59/P65 grids; Vulkan spatial smoke;
+1536 host-composition comparisons / 3,982,848 words; 216 raw cached-low comparisons / 59,616 words. GPU comparisons passed
+bit-exact where applicable. Proprietary NR/DLSS inference and full-game temporal behavior still require game validation.
+
+### Cost of the spatial correction
+
+RTX 4090 / 616.56, synthetic 3840x2160, Balanced compression, NR Small/Standard gain settings.
+Resident GPU timestamps, 8 alternating ABBA/BAAB blocks, separate warm-up, 640 samples per variant.
+Final-stage inputs use FP16 proxy/answer/residual and output; the original frame is FP32.
+
+| Stage | NR slider | Before ms | After ms | Paired delta ms |
+| --- | ---: | ---: | ---: | ---: |
+| guide_pack | 65% | 0.098048 | 0.098048 | +0.000000 |
+| guide_pack | 100% | 0.142080 | 0.142336 | -0.000128 |
+| final_sdr | 65% | 0.306944 | 0.309632 | +0.000640 |
+| final_sdr | 100% | 0.247552 | 0.322816 | +0.075392 |
+| final_hdr0 | 65% | 0.297344 | 0.297472 | +0.000192 |
+| final_hdr0 | 100% | 0.256256 | 0.328192 | +0.072064 |
+
+At 100% with compression, the previous final pass omitted frequency shaping; the corrected path does real additional
+Low64 work. This is a correctness cost, not an optimization gain. At reduced scales the temporal resolve shader is
+byte-identical to the baseline; the gain coefficients change. Raw samples and standard deviations are in
+[CSV](validation/superior-spatial-timing.csv) and [JSON](validation/superior-spatial-timing.json).
+These component timings exclude NR/DLSS inference, changes in inter-pass count, colour pack/unpack and the complete game.
 
 ## Install
 
@@ -105,7 +150,8 @@ From Windows with MSVC x64 tools and Python:
 
 ```powershell
 ./tools/test_superior_port.ps1
-./tools/test_superior_port.ps1 -GpuHost
+./tools/test_superior_port.ps1 -GpuHost -GpuSpatial
+./tools/test_superior_port.ps1 -GpuSpatialTiming
 ./tools/test_superior_port.ps1 -GpuQuality -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ./tools/test_superior_port.ps1 -GpuTiming -ReferenceShaderDirectory <v59-checkout>/OptiScaler/shaders/dlssnr/precompile
 ```

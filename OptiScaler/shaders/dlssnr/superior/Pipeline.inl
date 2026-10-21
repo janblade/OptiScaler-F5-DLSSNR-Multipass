@@ -388,17 +388,18 @@ bool MatchGuides(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* 
 }
 
 ID3D12Resource* FinalLow(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy,
-                         ID3D12Resource* residual)
+                         ID3D12Resource* residual, bool signedResidual)
 {
-    if (!Ensure(g.finalLow, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, (g.workWidth + 7u) / 8u,
-                (g.workHeight + 7u) / 8u))
+    const auto desc = proxy->GetDesc();
+    const unsigned lowW = (unsigned(desc.Width) + 7u) / 8u, lowH = (desc.Height + 7u) / 8u;
+    if (!Ensure(g.finalLow, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, lowW, lowH))
         return nullptr;
     Constants c {};
     c.Mode = 18u;
-    c.Transfer = 1u;
+    c.Transfer = signedResidual ? 1u : 0u;
     c.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
-    c.Width = (g.workWidth + 7u) / 8u;
-    c.Height = (g.workHeight + 7u) / 8u;
+    c.Width = lowW;
+    c.Height = lowH;
     return Dispatch(shader, cmd, c, proxy, residual, nullptr, nullptr, nullptr, nullptr, g.finalLow) ? g.finalLow.Get()
                                                                                                      : nullptr;
 }

@@ -42,6 +42,9 @@ ID3D12PipelineState* DlssNr_Dx12::SuperiorPipeline(const DlssNr::Superior::DlssN
                        : D3D12_RESOURCE_DESC {};
     const bool inputEncode = DlssNr::SuperiorScaling::InputEncode(constants, d.Width, d.Height);
     const bool lowResidual = DlssNr::SuperiorScaling::LowResidual(constants, d.Width, d.Height);
+    if (constants.Mode == 18u && constants.Transfer == 0u && constants.DirectResolveFlags == 65536u && d.Width &&
+        d.Height && constants.Width == (d.Width + 7u) / 8u && constants.Height == (d.Height + 7u) / 8u)
+        return SuperiorRawLowPipeline();
     const bool areaDownsample = DlssNr::SuperiorScaling::AreaDownsample(constants, d.Width, d.Height);
     const auto exposureStage = DlssNr::SuperiorScaling::ExposureStage(constants, d.Width, d.Height);
     // Fixed input/exposure, Area, final low and radius-one stages; other uses retain the general fallback.
@@ -181,7 +184,9 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
                                    ? InConstants.Width
                                    : (InConstants.Width + _numThreadsX - 1) / _numThreadsX;
     // Final-low PSO uses 8x16, the generic fallback 8x8; dispatch for the selected PSO.
-    const UINT threadsY = pipeline == _superiorPipeline[8] ? DlssNr::SuperiorScaling::LowGroupHeight : _numThreadsY;
+    const UINT threadsY = pipeline == _superiorPipeline[8] || pipeline == _superiorRawLow
+                              ? DlssNr::SuperiorScaling::LowGroupHeight
+                              : _numThreadsY;
     const UINT dispatchHeight = InConstants.Mode == DlssNr::Superior::DlssNrMode_Meter
                                     ? InConstants.Height
                                     : (InConstants.Height + threadsY - 1) / threadsY;
@@ -194,18 +199,35 @@ namespace DlssNr::Superior::HostBytecode
 {
 #include "precompile/host_resolve_hdr_Shader.h"
 #include "precompile/host_resolve_sdr_Shader.h"
+#include "precompile/host_resolve_raw_hdr_Shader.h"
+#include "precompile/host_resolve_raw_sdr_Shader.h"
+#include "precompile/host_low_raw_Shader.h"
 } // namespace DlssNr::Superior::HostBytecode
 
-ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(bool sdr)
+ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(bool sdr, bool rawAnswer)
 {
     using namespace DlssNr::Superior::HostBytecode;
-    const auto index = sdr ? 1u : 0u;
+    const auto index = (sdr ? 1u : 0u) + (rawAnswer ? 2u : 0u);
     auto*& pso = _superiorResolve[index];
     if (!_superiorResolveAttempted[index])
     {
         _superiorResolveAttempted[index] = true;
-        CreateComputePipeline(_device, &pso, sdr ? host_resolve_sdr_cso : host_resolve_hdr_cso,
-                              sdr ? sizeof(host_resolve_sdr_cso) : sizeof(host_resolve_hdr_cso), nullptr);
+        const void* blobs[] { host_resolve_hdr_cso, host_resolve_sdr_cso, host_resolve_raw_hdr_cso,
+                              host_resolve_raw_sdr_cso };
+        const size_t sizes[] { sizeof(host_resolve_hdr_cso), sizeof(host_resolve_sdr_cso),
+                               sizeof(host_resolve_raw_hdr_cso), sizeof(host_resolve_raw_sdr_cso) };
+        CreateComputePipeline(_device, &pso, blobs[index], sizes[index], nullptr);
     }
     return pso;
+}
+
+ID3D12PipelineState* DlssNr_Dx12::SuperiorRawLowPipeline()
+{
+    using namespace DlssNr::Superior::HostBytecode;
+    if (!_superiorRawLowAttempted)
+    {
+        _superiorRawLowAttempted = true;
+        CreateComputePipeline(_device, &_superiorRawLow, host_low_raw_cso, sizeof(host_low_raw_cso), nullptr);
+    }
+    return _superiorRawLow;
 }

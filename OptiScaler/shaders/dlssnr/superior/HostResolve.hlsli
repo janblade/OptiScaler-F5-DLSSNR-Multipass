@@ -1,9 +1,20 @@
 // v59's radius-one estimator, folded into janblade's existing final composition.
-// t0: working proxy, t1: decoded signed DLSS residual, t5: Low64 field.
+// t0: working proxy, t1: decoded signed DLSS residual (or raw NR with GuideHeight=1), t5: Low64 field.
 // No exposure, colour encoding or tone-mapping logic belongs in this include.
 Texture2D<float4> gSuperiorLow : register(t5);
+float3 SuperiorShapeEdit(float3 edit, float2 uvq)
+{
+    return gGuideWidth != 0u
+        ? gMvScaleX * edit + (gMvScaleY - gMvScaleX) * gSuperiorLow.SampleLevel(gLinear, uvq, 0).rgb
+        : edit;
+}
 float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
 {
+    // Native colour with edge compression: shape the unpacked raw NR answer
+    // without introducing private DLSS or a second guided enlargement at 1:1.
+    if (gGuideHeight != 0u)
+        return SuperiorShapeEdit(gModel.SampleLevel(gLinear, uvq, 0).rgb -
+                                  gSource.SampleLevel(gLinear, uvq, 0).rgb, uvq);
     uint srcW, srcH;
     gSource.GetDimensions(srcW, srcH);
     const float3 fallback = gModel.SampleLevel(gLinear, saturate(uvq), 0).rgb;
@@ -45,7 +56,5 @@ float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
         }
     }
     float3 edit = weightSum > 1e-8 ? weighted / weightSum : fallback;
-    if (gGuideWidth != 0u)
-        edit = gMvScaleX * edit + (gMvScaleY - gMvScaleX) * gSuperiorLow.SampleLevel(gLinear, uvq, 0).rgb;
-    return edit;
+    return SuperiorShapeEdit(edit, uvq);
 }

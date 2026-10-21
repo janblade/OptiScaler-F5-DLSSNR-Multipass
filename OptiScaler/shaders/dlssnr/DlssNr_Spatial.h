@@ -399,9 +399,10 @@ static_assert(sizeof(Constants) == 256);
 static_assert(offsetof(Constants, warp) == 16);
 
 // Modes: 100 packs the encoded colour, 101 packs depth (point-sampled) and motion (by its end points), 102 unpacks the
-// packed model input and the model's answer back to the ordinary grid, and 103 does that and adds what the round trip took
-// from the model input (a third input: the picture the model would be shown without compression), for the Replace curves.
-// mvX / mvY take the game's motion units to native pixels (the guide scale NR already applies to its vectors).
+// packed model input and the model's answer back to the ordinary grid, and 103 does that and adds what the round trip
+// took from the model input (a third input: the picture the model would be shown without compression), for the Replace
+// curves. mvX / mvY must already convert the game's motion units to this frame's native pixels. Use MakeGuideConstants
+// below when starting with the game's DLSS MV scale.
 inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideRegions& regions, float mvX, float mvY) {
     Constants c{};
     c.mode = mode;
@@ -419,6 +420,19 @@ inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideR
     c.motionScale[0] = mvX;
     c.motionScale[1] = mvY;
     return c;
+}
+
+inline Constants MakeGuideConstants(const Layout& layout, const GuideRegions& regions, GuideExtent motionReference,
+                                    float gameMvX, float gameMvY)
+{
+    // DLSS's scale describes pixels of its render/output reference, not necessarily
+    // the colour frame NR edits. Convert into that frame before warping endpoints.
+    // Neither the allocation nor depth's rectangle determines these units.
+    const auto referenceW = motionReference.width ? motionReference.width : regions.motion.width;
+    const auto referenceH = motionReference.height ? motionReference.height : regions.motion.height;
+    const float x = referenceW ? gameMvX * (float(layout.nativeW) / float(referenceW)) : gameMvX;
+    const float y = referenceH ? gameMvY * (float(layout.nativeH) / float(referenceH)) : gameMvY;
+    return MakeConstants(layout, 101, regions, x, y);
 }
 
 } // namespace DlssNr::Spatial

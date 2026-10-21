@@ -92,8 +92,10 @@ struct Runner
         ComPtr<ID3D12PipelineState> p; check(device->CreateComputePipelineState(&d,IID_PPV_ARGS(&p))); return p;
     }
     std::vector<uint32_t> run(ID3D12PipelineState* pso, UINT nw, UINT nh, UINT ww, UINT wh,
-                              const DlssNrConstants& constants, int fixture, bool half, UINT groupWidth=8, UINT sourceW=0, UINT sourceH=0, double* gpuMs=nullptr, int pattern=0,
-                              const std::vector<uint32_t>* lowWords=nullptr, UINT lowW=0, UINT lowH=0)
+                              const DlssNrConstants& constants, int fixture, bool half, UINT groupWidth = 8,
+                              UINT sourceW = 0, UINT sourceH = 0, double* gpuMs = nullptr, int pattern = 0,
+                              const std::vector<uint32_t>* lowWords = nullptr, UINT lowW = 0, UINT lowH = 0,
+                              UINT groupHeight = 8)
     {
         begin(); std::vector<ComPtr<ID3D12Resource>> keep;
         std::mt19937 rng(1414 + fixture);
@@ -213,7 +215,7 @@ struct Runner
             list->EndQuery(queries.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0);
         }
         for (int repeat=0;repeat<(gpuMs?8:1);++repeat) {
-            list->Dispatch((ww+groupWidth-1)/groupWidth,(wh+7)/8,1);
+            list->Dispatch((ww + groupWidth - 1) / groupWidth, (wh + groupHeight - 1) / groupHeight, 1);
             if (gpuMs) {
                 D3D12_RESOURCE_BARRIER b{}; b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;
                 b.UAV.pResource=target.Get(); list->ResourceBarrier(1,&b);

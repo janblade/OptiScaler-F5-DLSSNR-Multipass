@@ -40,6 +40,14 @@ inline unsigned WorkingExtent(unsigned native, float scale)
 {
     return std::max(1u, static_cast<unsigned>(native * scale + .5f));
 }
+// Isotropic gain tables use the linear scale of the final NR pixel count,
+// including both axes of edge compression and actual model-grid rounding.
+inline float ResolutionScale(unsigned nativeW, unsigned nativeH, unsigned modelW, unsigned modelH)
+{
+    if (!nativeW || !nativeH || !modelW || !modelH)
+        return 1.0f;
+    return float(std::sqrt((double(modelW) * modelH) / (double(nativeW) * nativeH)));
+}
 inline float MotionScale(float gameScale, unsigned motionExtent, unsigned referenceExtent)
 {
     return referenceExtent ? gameScale * (float(motionExtent) / float(referenceExtent)) : gameScale;

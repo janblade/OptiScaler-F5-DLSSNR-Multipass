@@ -733,6 +733,26 @@ bool Util::CheckForRealObject(std::string functionName, IUnknown* pObject, IUnkn
     return false;
 }
 
+IUnknown* Util::RealObjectIdentity(IUnknown* pObject)
+{
+    if (pObject == nullptr)
+        return nullptr;
+
+    if (streamlineRiid.Data1 == 0 &&
+        IIDFromString(L"{ADEC44E2-61F0-45C3-AD9F-1B37379284FF}", &streamlineRiid) != S_OK)
+        return pObject;
+
+    IUnknown* real = nullptr;
+
+    if (pObject->QueryInterface(streamlineRiid, (void**) &real) == S_OK && real != nullptr)
+    {
+        real->Release();
+        return real;
+    }
+
+    return pObject;
+}
+
 void Util::GetDeviceRemovedReason(ID3D11Device* pDevice)
 {
     auto reason = pDevice->GetDeviceRemovedReason();

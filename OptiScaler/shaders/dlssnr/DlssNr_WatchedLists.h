@@ -19,16 +19,20 @@ inline constexpr size_t kCount = 64;
 
 inline std::atomic<const void*> g_lists[kCount] {};
 inline std::atomic<bool> g_full = false;
+// Lists an owner could not fit in the table but keeps track of itself (Superior Scaling, superior/Pipeline.inl). Unlike
+// g_full this clears again once the owner has heard the last of them (reset or destroyed).
+inline std::atomic<unsigned> g_overflow = 0;
 
-inline void Add(const void* list)
+// Add without the permanent overflow: false when the table is full, and the caller keeps the list itself.
+inline bool TryAdd(const void* list)
 {
     if (list == nullptr)
-        return;
+        return true;
 
     for (auto& entry : g_lists)
     {
         if (entry.load() == list)
-            return;
+            return true;
     }
 
     for (auto& entry : g_lists)
@@ -36,16 +40,22 @@ inline void Add(const void* list)
         const void* expected = nullptr;
 
         if (entry.compare_exchange_strong(expected, list))
-            return;
+            return true;
     }
 
-    g_full = true;
+    return false;
+}
+
+inline void Add(const void* list)
+{
+    if (!TryAdd(list))
+        g_full = true;
 }
 
 // Any of `lists` watched (or the table overflowed): the hook must take the lock.
 inline bool Any(unsigned count, const void* const* lists)
 {
-    if (g_full.load())
+    if (g_full.load() || g_overflow.load() != 0)
         return true;
 
     if (lists == nullptr)

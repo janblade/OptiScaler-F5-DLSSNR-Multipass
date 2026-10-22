@@ -1,46 +1,82 @@
-param([string]$Python = "python")
+# Rebuilds every Superior Scaling shader blob (OptiScaler/shaders/dlssnr/superior/precompile/*_Shader.cso + .h) with the
+# repository's own dxc (OptiScaler/shaders/shader_tools/dxc.exe). PowerShell only, no Python.
+#
+#   Frozen v59 port baseline  superior/precompile/dlssnr.hlsl  -> DlssNr, dlssnr_interpass_*, dlssnr_superior_*
+#                             superior/RawLow.hlsl (includes the frozen file) -> host_low_raw
+#   Live NR shader            precompile/dlssnr.hlsl + superior/HostResolve.hlsli -> host_resolve_*, host_normal_*,
+#                             host_cached_*;  superior/WarpCache.hlsl (WarpMap.hlsli + precompile/dlssnr_spatial_warp.hlsli)
+#                             -> host_warp_cache
+#
+# Any change to precompile/dlssnr.hlsl, dlssnr_spatial_warp.hlsli or the superior/*.hlsl* sources must be followed by
+# this script, and the result committed: CI (.github/workflows/superior_checks.yml) runs it and fails on any difference.
+# The default janblade/Vulkan blobs in precompile/ are never written here.
+#
+# -Check: build into a temporary copy and compare instead of writing (exit 1 on any difference).
+param([switch]$Check)
 $ErrorActionPreference = "Stop"
-Push-Location (Join-Path $PSScriptRoot "../OptiScaler/shaders/dlssnr/superior/precompile")
+$root = Split-Path $PSScriptRoot -Parent
+$shaders = Join-Path $root "OptiScaler/shaders/dlssnr"
+$dxc = Join-Path $root "OptiScaler/shaders/shader_tools/dxc.exe"
+$out = Join-Path $shaders "superior/precompile"
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ("superior-blobs-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force $scratch | Out-Null
+$built = New-Object System.Collections.Generic.List[string]
+
+# Byte-for-byte what shader_tools/create_header.py writes, with trailing spaces trimmed and CRLF lines.
+function Write-Header([string]$cso, [string]$header, [string]$name) {
+    $bytes = [IO.File]::ReadAllBytes($cso)
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.Append("#pragma once`n`ninline static const unsigned char $name[] = {`n    ")
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        [void]$sb.Append(('0x{0:x2}' -f $bytes[$i]))
+        if ($i -lt $bytes.Length - 1) { [void]$sb.Append(', ') }
+        if ((($i + 1) % 12) -eq 0) { [void]$sb.Append("`n    ") }
+    }
+    [void]$sb.Append("`n};`n")
+    $lines = $sb.ToString().TrimEnd("`n").Split("`n") | ForEach-Object { $_.TrimEnd() }
+    [IO.File]::WriteAllLines($header, [string[]]$lines, [Text.UTF8Encoding]::new($false))
+}
+
+# Compile one blob into the scratch directory, then make its header; $asm keeps the disassembly for the LDS checks.
+function Build([string]$source, [string]$entry, [string[]]$defines, [string]$stem, [switch]$asm) {
+    $cso = Join-Path $scratch "${stem}_Shader.cso"
+    $dxcArgs = @('-T', 'cs_6_0', '-E', $entry, '-O3', '-Qstrip_debug', '-Qstrip_reflect') + $defines + @((Split-Path $source -Leaf), '-Fo', $cso)
+    if ($asm) { $dxcArgs += @('-Fc', (Join-Path $scratch "${stem}.asm")) }
+    Push-Location (Split-Path $source -Parent)
+    try { & $dxc @dxcArgs | Out-Null } finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) { throw "DXC failed: $stem" }
+    Write-Header $cso (Join-Path $scratch "${stem}_Shader.h") "${stem}_cso"
+    $built.Add($stem)
+}
+function Lds([string]$stem) { @(Select-String (Join-Path $scratch "${stem}.asm") -Pattern 'addrspace\(3\) global') }
+function Geometry([string]$stem, [string]$threads) {
+    [bool](Select-String -LiteralPath (Join-Path $scratch "${stem}.asm") -SimpleMatch -Pattern "; NumThreads=$threads")
+}
+
 try {
-    foreach ($pitch in @(0,-1,-2,-4,-5)) {
+    $frozen = Join-Path $out "dlssnr.hlsl"
+    foreach ($pitch in @(0, -1, -2, -4, -5)) {
         $stem = switch ($pitch) {
             0 { "DlssNr" }
             -1 { "dlssnr_interpass_fast" }
             -2 { "dlssnr_interpass_low36" }
             -4 { "dlssnr_interpass_cross5" }
             -5 { "dlssnr_interpass_low36_cached" }
-            default { "dlssnr_interpass_rgb$pitch" }
         }
-        $defines = @()
-        if ($pitch -eq -1) {
-            $defines = @("-D","DLSSNR_INTERPASS_FAST=1")
-        } elseif ($pitch -eq -2) {
-            $defines = @("-D","DLSSNR_INTERPASS_LOW36=1")
-        } elseif ($pitch -eq -5) {
-            $defines = @("-D","DLSSNR_INTERPASS_LOW36=1","-D","DLSSNR_LOW36_CACHE=1")
-        } elseif ($pitch -eq -4) {
-            $defines = @("-D","DLSSNR_INTERPASS_CROSS5=1")
-        } elseif ($pitch) {
-            $defines = @("-D","DLSSNR_TILED_FUSED=1","-D","DLSSNR_TILED_PITCH=$pitch",
-                         "-D","DLSSNR_INTERPASS_WEIGHTS=1",
-                         "-D","DLSSNR_INTERPASS_MODE28=1")
+        $defines = switch ($pitch) {
+            0 { @() }
+            -1 { @("-D", "DLSSNR_INTERPASS_FAST=1") }
+            -2 { @("-D", "DLSSNR_INTERPASS_LOW36=1") }
+            -4 { @("-D", "DLSSNR_INTERPASS_CROSS5=1") }
+            -5 { @("-D", "DLSSNR_INTERPASS_LOW36=1", "-D", "DLSSNR_LOW36_CACHE=1") }
         }
-        & ../../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect @defines dlssnr.hlsl -Fo "${stem}_Shader.cso" -Fc "${stem}.asm"
-        if ($LASTEXITCODE -ne 0) { throw "DXC failed: $stem" }
-        & $Python ../../../shader_tools/create_header.py "${stem}_Shader.cso" "${stem}_Shader.h" "${stem}_cso"
-        if ($LASTEXITCODE -ne 0) { throw "Header failed: $stem" }
-        $header = Join-Path (Get-Location) "${stem}_Shader.h"
-        [IO.File]::WriteAllLines($header, @([IO.File]::ReadAllLines($header) | ForEach-Object { $_.TrimEnd() }), [Text.UTF8Encoding]::new($false))
-        $lds = @(Select-String "${stem}.asm" -Pattern 'addrspace\(3\) global')
+        Build $frozen "CSMain" $defines $stem -asm
+        $lds = Lds $stem
         if ($pitch -eq -5) {
             if ($lds.Count -ne 1 -or $lds[0].Line -notmatch "\[3468 x float\]") { throw "Unexpected Low36 LDS" }
         } elseif ($pitch -lt 0) {
             if ($lds.Count -ne 0) { throw "Fast PSO unexpectedly allocates LDS" }
-        } elseif ($pitch) {
-            $floats = $pitch * $pitch * 3
-            if ($lds.Count -ne 1 -or $lds[0].Line -notmatch "\[$floats x float\]") { throw "Unexpected LDS: $stem" }
         } # Standard shader keeps its existing exposure-meter LDS, without inter-pass cache.
-        Write-Host "$stem SHA256=$((Get-FileHash ${stem}_Shader.cso).Hash)"
     }
     foreach ($variant in @("carrier", "resolve", "cross5", "normal", "sdr", "hdr2", "hdr4", "encode", "low", "area", "meter", "exposure", "hdr0")) {
         $stem = "dlssnr_superior_$variant"
@@ -57,43 +93,25 @@ try {
         if ($variant -eq "area") { $defines += @("-D", "DLSSNR_SUPERIOR_AREA=1") }
         if ($variant -eq "meter") { $defines += @("-D", "DLSSNR_SUPERIOR_METER=1") }
         if ($variant -eq "exposure") { $defines += @("-D", "DLSSNR_SUPERIOR_EXPOSURE=1") }
-        & ../../../shader_tools/dxc.exe -T cs_6_0 -E $entry -O3 -Qstrip_debug -Qstrip_reflect @defines dlssnr.hlsl -Fo "${stem}_Shader.cso" -Fc "${stem}.asm"
-        if ($LASTEXITCODE -ne 0) { throw "DXC failed: $stem" }
-        & $Python ../../../shader_tools/create_header.py "${stem}_Shader.cso" "${stem}_Shader.h" "${stem}_cso"
-        if ($LASTEXITCODE -ne 0) { throw "Header failed: $stem" }
-        $header = Join-Path (Get-Location) "${stem}_Shader.h"
-        [IO.File]::WriteAllLines($header, @([IO.File]::ReadAllLines($header) | ForEach-Object { $_.TrimEnd() }), [Text.UTF8Encoding]::new($false))
-        if (($variant -in @("carrier", "resolve", "encode", "area") -or $normal) -and (Select-String "${stem}.asm" -Pattern 'addrspace\(3\) global')) { throw "Superior $variant unexpectedly uses LDS" }
+        Build $frozen $entry $defines $stem -asm
+        if (($variant -in @("carrier", "resolve", "encode", "area") -or $normal) -and (Lds $stem).Count) { throw "Superior $variant unexpectedly uses LDS" }
         if ($variant -eq "low") {
-            if (-not (Select-String -LiteralPath "${stem}.asm" -SimpleMatch -Pattern "; NumThreads=(8,16,1)")) { throw "Unexpected low group geometry" }
-            $lds = @(Select-String "${stem}.asm" -Pattern 'addrspace\(3\) global')
+            if (-not (Geometry $stem "(8,16,1)")) { throw "Unexpected low group geometry" }
+            $lds = Lds $stem
             if ($lds.Count -ne 1 -or $lds[0].Line -notmatch '\[7344 x float\]') { throw "Unexpected Superior low cache LDS" }
         }
         if ($variant -in @("meter", "exposure")) {
-            if (-not (Select-String -LiteralPath "${stem}.asm" -SimpleMatch -Pattern "; NumThreads=(8,8,1)")) { throw "Unexpected exposure group geometry: $stem" }
-            $lds = @(Select-String "${stem}.asm" -Pattern 'addrspace\(3\) global')
+            if (-not (Geometry $stem "(8,8,1)")) { throw "Unexpected exposure group geometry: $stem" }
+            $lds = Lds $stem
             if ($lds.Count -ne 1 -or $lds[0].Line -notmatch '\[256 x float\]') { throw "Unexpected exposure LDS: $stem" }
         }
-        Write-Host "$stem SHA256=$((Get-FileHash ${stem}_Shader.cso).Hash)"
     }
+    Build (Join-Path $shaders "superior/RawLow.hlsl") "RawLowMain" @() "host_low_raw"
 
-} finally { Pop-Location }
-
-Push-Location (Join-Path $PSScriptRoot "../OptiScaler/shaders/dlssnr/superior")
-try {
-    & ../../shader_tools/dxc.exe -T cs_6_0 -E RawLowMain -O3 -Qstrip_debug -Qstrip_reflect RawLow.hlsl -Fo precompile/host_low_raw_Shader.cso
-    if ($LASTEXITCODE -ne 0) { throw 'Raw low DXC failed' }
-    & $Python ../../shader_tools/create_header.py precompile/host_low_raw_Shader.cso precompile/host_low_raw_Shader.h host_low_raw_cso
-    if ($LASTEXITCODE -ne 0) { throw 'Raw low header failed' }
-    $header = Join-Path (Get-Location) 'precompile/host_low_raw_Shader.h'
-    [IO.File]::WriteAllLines($header, @([IO.File]::ReadAllLines($header) | ForEach-Object { $_.TrimEnd() }), [Text.UTF8Encoding]::new($false))
-} finally { Pop-Location }
-
-# The host resolve preserves janblade's exposure and composition and substitutes only
-# the residual estimator. Default janblade/Vulkan blobs are not overwritten.
-Push-Location (Join-Path $PSScriptRoot "../OptiScaler/shaders/dlssnr/precompile")
-try {
-    $hostVariants = @("hdr", "sdr", "raw_hdr", "raw_sdr", "packed_hdr", "packed_sdr")
+    # The host resolve preserves janblade's exposure and composition and substitutes only the residual estimator.
+    # raw: the non-temporal resolve; its SDR and HDR builds are identical bytecode, so there is one blob for both.
+    $live = Join-Path $shaders "precompile/dlssnr.hlsl"
+    $hostVariants = @("hdr", "sdr", "raw", "packed_hdr", "packed_sdr")
     $hostVariants += @("normal_sdr", "normal_hdr0", "normal_hdr2", "normal_hdr4", "normal_hdr6",
                        "normal_packed_sdr", "normal_packed_hdr0", "normal_packed_hdr2", "normal_packed_hdr4", "normal_packed_hdr6")
     $hostVariants += @('cached_packed_sdr', 'cached_packed_hdr0', 'cached_packed_hdr2', 'cached_packed_hdr4', 'cached_packed_hdr6')
@@ -102,7 +120,7 @@ try {
         $stem = if ($specialized) { "host_$variant" } else { "host_resolve_$variant" }
         $defines = @("-D", "DLSSNR_SUPERIOR_HOST_RESOLVE=1")
         if ($variant.EndsWith("sdr")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_SDR=1") }
-        if ($variant.StartsWith("raw_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_RAW=1") }
+        if ($variant -eq "raw") { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_RAW=1") }
         if ($variant.Contains("packed_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_PACKED=1") }
         if ($specialized) {
             $pass = if ($variant.EndsWith('sdr')) { 1 } else { 0 }
@@ -111,23 +129,34 @@ try {
                           '-D', "DLSSNR_SUPERIOR_HOST_MAPPING=$mapping")
         }
         if ($variant.StartsWith('cached_')) { $defines += @('-D', 'DLSSNR_SUPERIOR_HOST_CACHED=1') }
-        $dest = "../superior/precompile/${stem}_Shader"
-        & ../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect @defines dlssnr.hlsl -Fo "$dest.cso"
-        if ($LASTEXITCODE -ne 0) { throw "Host resolve DXC failed: $variant" }
-        & $Python ../../shader_tools/create_header.py "$dest.cso" "$dest.h" "${stem}_cso"
-        if ($LASTEXITCODE -ne 0) { throw "Host resolve header failed: $variant" }
-        [IO.File]::WriteAllLines((Join-Path (Get-Location) "$dest.h"),
-            @([IO.File]::ReadAllLines((Join-Path (Get-Location) "$dest.h")) | ForEach-Object { $_.TrimEnd() }),
-            [Text.UTF8Encoding]::new($false))
+        Build $live "CSMain" $defines $stem
     }
-} finally { Pop-Location }
+    Build (Join-Path $shaders "superior/WarpCache.hlsl") "CSMain" @() "host_warp_cache"
 
-Push-Location (Join-Path $PSScriptRoot '../OptiScaler/shaders/dlssnr/superior')
-try {
-    & ../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect WarpCache.hlsl -Fo precompile/host_warp_cache_Shader.cso
-    if ($LASTEXITCODE -ne 0) { throw 'Warp cache DXC failed' }
-    & $Python ../../shader_tools/create_header.py precompile/host_warp_cache_Shader.cso precompile/host_warp_cache_Shader.h host_warp_cache_cso
-    if ($LASTEXITCODE -ne 0) { throw 'Warp cache header failed' }
-    $header = Join-Path (Get-Location) 'precompile/host_warp_cache_Shader.h'
-    [IO.File]::WriteAllLines($header, @([IO.File]::ReadAllLines($header) | ForEach-Object { $_.TrimEnd() }), [Text.UTF8Encoding]::new($false))
-} finally { Pop-Location }
+    # Every shipped blob must come from this script, and nothing else may sit beside them.
+    $shipped = @(Get-ChildItem $out -Filter "*_Shader.cso" | ForEach-Object { $_.Name -replace '_Shader\.cso$', '' })
+    $orphans = @($shipped | Where-Object { $built -notcontains $_ })
+    $different = New-Object System.Collections.Generic.List[string]
+    foreach ($stem in $built) {
+        foreach ($ext in @("_Shader.cso", "_Shader.h")) {
+            $new = Join-Path $scratch "$stem$ext"
+            $old = Join-Path $out "$stem$ext"
+            if ($Check) {
+                $same = (Test-Path $old) -and
+                    ($ext -eq "_Shader.cso" -and (Get-FileHash $new).Hash -eq (Get-FileHash $old).Hash -or
+                     $ext -eq "_Shader.h" -and ([IO.File]::ReadAllText($new).Replace("`r`n", "`n") -eq [IO.File]::ReadAllText($old).Replace("`r`n", "`n")))
+                if (-not $same) { $different.Add("$stem$ext") }
+            } else {
+                Copy-Item $new $old -Force
+            }
+        }
+        Write-Host "$stem SHA256=$((Get-FileHash (Join-Path $scratch "${stem}_Shader.cso")).Hash)"
+    }
+    Write-Host "$($built.Count) blobs built with $dxc"
+    if ($orphans.Count) { Write-Host "Not built by this script: $($orphans -join ', ')" }
+    if ($Check -and $different.Count) { Write-Host "Differs from the committed blob: $($different -join ', ')" }
+    if ($Check -and ($orphans.Count -or $different.Count)) { exit 1 }
+    if ($Check) { Write-Host "All $($built.Count) blobs and headers match byte for byte" }
+} finally {
+    Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+}

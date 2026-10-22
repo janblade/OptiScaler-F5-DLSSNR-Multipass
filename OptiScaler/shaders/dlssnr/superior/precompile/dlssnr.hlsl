@@ -1,3 +1,18 @@
+// FROZEN PORT BASELINE -- do not edit for NR features.
+//
+// This is a second, frozen copy of the NR shader: mattjaas' Superior Scaling v59 (914d8d1f), kept so the Superior
+// passes keep v59's exact bytecode. It does NOT receive the composition, exposure, colour-encoding or any other change
+// made to the live shader (OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl); fixes there do not reach it.
+//
+// Compiled by tools/compile_nr_interpass.ps1 into DlssNr_Shader, dlssnr_interpass_* and dlssnr_superior_* (and,
+// through superior/RawLow.hlsl, host_low_raw). Only Superior Scaling uses them. DlssNr_Shader.cso (this file with no
+// defines) is the fallback PSO for every Superior pass without a specialised PSO (superior/Shader.inl,
+// DispatchSuperiorPass): the unit exposure (mode 7), the clamp between NR passes (mode 8) and the guide matching for
+// the private DLSS (mode 10) always use it; the Area downsample (2), final low field (18) and inter-pass passes (34, 36)
+// fall back to it only if their own PSO cannot be created. The final composition is not here: it is the live shader
+// with superior/HostResolve.hlsli (host_resolve_* / host_normal_* / host_cached_*).
+//
+// Its hash is pinned by docs/superior-v59-shaders.json (tests/test_nr_superior_scaling.py).
 
 #if defined(VK_MODE)
 [[vk::binding(0, 0)]]

@@ -37,18 +37,61 @@ The fixed Area/inter-pass/carrier/low shaders retain v59 bytecode and their lazy
 | B small | Natural | 0.925 | 0.838 |
 | B small | Cinematic | 0.955 | 0.861 |
 
-New, uncalibrated NR preset/style identifiers use high/medium **0.950** and low **0.850**. Existing styles 0..2 and
-preset identifiers Default/A/B/legacy Small 0..3 keep their current tables and runtime mapping. Either an unknown style
-or an unknown preset selects the fallback for that pass, including inherited settings and passes 2..30. Gain selection
-preserves identifiers before the host's current model-validation clamps; this does not add unsupported models/styles to
-NR or the menu. The fallback feeds both inter-pass scheduling and final shaping, with the same resolution/slider scaling,
-high products and low means. A future change to the NR runtime's meaning of an existing ID (such as Default) still needs
-an explicit model-mapping update; the fallback detects new IDs, not undocumented changes behind an old ID.
+Gain selection clamps the preset and style exactly like the NR model does (PassPreset: min(preset, 3); PassStyle:
+min(style, 2)), so a hand-edited ini value above the range gets the calibrated gains of the model that actually runs.
+The uncalibrated pair, high/medium **0.950** and low **0.850**, remains in the table functions for identifiers outside
+the calibrated range, which only a future NR model/style range could reach (it would also need its PassPreset/PassStyle
+clamp raised). A future change to the NR runtime's meaning of an existing ID (such as Default) still needs an explicit
+model-mapping update.
 
 Gains use the v59 resolution correction and Structure * Intensity. High/medium multiply within a block; low is the block's arithmetic mean.
 An inter-pass runs before the next pass only if the absolute high/low gap would both increase and exceed 0.15.
 Final shaping uses only the tail after the last successful inter-pass. Carrier K=1, fixed linear 0.5 encoding, guided radius 1, range sigma .015, spatial sigma 3, strength 1.
 No K/headroom analysis is introduced. Native Vulkan is outside the original v59 implementation; DirectX 12 and supported D3D12 bridges are required.
+
+### When Superior cannot run
+
+Superior never leaves NR off. Native Vulkan with Superior selected runs Matched residual. On D3D12, if the temporal
+path cannot run -- no depth/motion guides, NVIDIA DLSS SR through NGX unavailable (non-NVIDIA GPU, the vendor-neutral
+NR port, missing nvngx_dlss), its surfaces cannot be created, or the private DLSS creation is never submitted within
+240 frames -- Superior gives up for the session with one warning in the log, skips that one frame, and the ordinary path
+runs with **Matched residual** from the next frame. The menu says why; selecting Superior again retries. When NGX itself
+was unavailable (or on Vulkan) the Superior entry is greyed out. If the requested private DLSS preset (A or K) cannot be
+created by the installed runtime, it is created once more with the runtime's default preset (logged once).
+
+Every non-Superior resolve while Superior is selected (100% without compression, supersampling, or after giving up)
+explicitly runs Matched residual. The private DLSS's first evaluate waits for a later submission epoch, exactly like the
+NR feature. Its NGX handles are dropped (never released or evaluated) when the game shuts NGX down, and rebuilt under
+the next runtime. With Auto model resolution the exact raster only moves when the ordinary 16-pixel cell moves, so
+dynamic resolution does not rebuild NR and the private DLSS every frame. Superior's own dispatches use a separate
+descriptor ring, created the first time Superior runs; users who never select it allocate nothing extra.
+
+### Frozen v59 shader baseline
+
+`OptiScaler/shaders/dlssnr/superior/precompile/dlssnr.hlsl` is a **second, frozen copy of the NR shader** (v59,
+`914d8d1f`, plus a documentation header). It keeps the Superior passes on v59's exact bytecode and does **not** receive
+composition, exposure, colour-encoding or other changes made to the live `precompile/dlssnr.hlsl`. It builds
+`DlssNr_Shader` (no defines), the `dlssnr_interpass_*` and `dlssnr_superior_*` blobs and, through `RawLow.hlsl`,
+`host_low_raw`. Its 328 KB `DlssNr_Shader.cso` is the fallback PSO for every Superior pass without a specialised PSO
+(`superior/Shader.inl`, `DispatchSuperiorPass`): the unit exposure (mode 7), the clamp between NR passes (mode 8)
+and the private DLSS guide matching (mode 10) always run on it; the Area downsample (2), final low field (18) and the
+inter-pass passes (34, 36) use it only if their own PSO cannot be created. The final composition is **not** frozen: it
+is the live shader compiled with `superior/HostResolve.hlsli` (`host_resolve_*`, `host_normal_*`,
+`host_cached_*`), so composition and exposure fixes do reach Superior's final image.
+
+### Carrier encoding limits
+
+The private DLSS stabilises the signed residual E = NR - proxy, carried as `clamp(0.5 + E, -1, 2)` in an RGBA16F
+texture (modes 37/39) and decoded as `DLSS(carrier) - 0.5` (mode 38). This is unchanged from v59; the limits, not
+measured in game:
+
+- Range: |E| above 1.5 is clipped by the encode. Around the 0.5 bias FP16 has a step of 2^-11 (about 4.9e-4) for
+  carrier values in [0.5, 1) and 2^-10 above 1, so residuals are quantised to about 2.4e-4 (4.9e-4 above E = 0.5)
+  before DLSS sees them; smaller detail survives only through DLSS's own accumulation.
+- Negative carrier: E below -0.5 gives a carrier below zero. The private feature is created with IsHDR; if the DLSS
+  runtime clamps negative input colour, those residuals come back as -0.5 at most (darkening limited to 0.5 in the
+  encoded domain). Whether a given runtime clamps is not verified.
+- The decode sanitises non-finite DLSS output to the bias (no change).
 
 ### Calibrating new models and styles
 
@@ -120,7 +163,7 @@ original resamplers. Above-100% behavior is unchanged.
 If compression is disabled, invalid or does not reduce NR, native 100% retains ordinary NR without private DLSS.
 A raw-answer PSO remains for above-native ordinary grids where compression reduces the actual NR pixel count below native.
 Its raw low field uses the cooperative 8x16 Low64 cache, with exactly the reference N-P arithmetic.
-Separate raw/temporal/packed PSOs avoid a per-pixel mode branch. The four existing host PSOs remain byte-identical to 389e8d96; the ordinary temporal SDR/HDR bytecode also remains identical to 24a2d7bf.
+Separate raw/temporal/packed PSOs avoid a per-pixel mode branch. At the port these host PSOs were byte-identical to 389e8d96 and 24a2d7bf. In this repository the host estimator also sanitises non-finite taps, which changes their bytecode but no finite result (bit-exact GPU comparison against the previous blobs, see validation/README.md); the raw SDR and HDR builds were identical and are one blob, host_resolve_raw.
 
 Validation on RTX 4090 / driver 616.56: 48 CPU metadata/size/gain cases; D3D12 pack/unpack with native, pre/post-SR,
 independent/clipped/offset depth and MV, low/high-resolution vectors and exact P59/P65 grids; Vulkan spatial smoke;
@@ -238,11 +281,13 @@ These small, noisy differences describe only the final stage and do not establis
 whose complete cost must be measured in game. The candidate uses a prepared decoded residual outside the timing window.
 Raw samples: see [validation/README.md](validation/README.md).
 
-## Install
+## Building
 
-Use janblade's package and matching NR runtime, plus the DLSS SR runtime required for private temporal stabilization.
-Replace the OptiScaler DLL with the build from this branch. Shaders are embedded; no loose HLSL/CSO files are needed.
-The Actions artifact also contains the matching `a/` runtime files.
+Shaders are embedded in the DLL; no loose HLSL/CSO files are needed. After any change to `precompile/dlssnr.hlsl`,
+`precompile/dlssnr_spatial_warp.hlsli` or `superior/*.hlsl*`, rebuild the Superior blobs with
+`tools/compile_nr_interpass.ps1` (PowerShell and the repository's dxc only) and commit them. CI
+(`.github/workflows/superior_checks.yml`) rebuilds them with `-Check` and fails on any difference, and builds and
+runs the CPU policy tests. The private temporal stabilisation needs NVIDIA's DLSS SR runtime (`nvngx_dlss.dll`).
 
 ## Validation
 
@@ -300,7 +345,8 @@ This does **not** prove equal total in-game performance or complete temporal ima
 The subsequent four-candidate optimization study, production changes, rejected experiments and exact reproduction
 commands are documented in [Superior-four-optimizations.md](Superior-four-optimizations.md).
 
-From Windows with MSVC x64 tools and Python:
+From Windows with MSVC x64 tools (Python only for the modes that need the port's history; see
+[validation/README.md](validation/README.md)):
 
 ```powershell
 ./tools/test_superior_port.ps1
@@ -320,11 +366,3 @@ A/K SR, A/B/mixed NR, HDR/SDR, motion/disocclusion, resolution and preset switch
 Record GPU milliseconds, medians and spread, not only FPS. Compare captured output and moving footage.
 No full-game result or native Vulkan implementation is claimed by the headless tests.
 The corrected complete path has not been timed against v59; equal total performance is not established.
-
-## Repository and PR route
-
-`mattjaas/OptiScaler-F5-Superior-Scaling` is an independent repository retaining janblade's full history and an upstream remote.
-GitHub allows only one personal fork in a fork network, so a matching `codex/superior-scaling-port` branch in
-`mattjaas/OptiScaler-DLSSNR-PreSR-Multipass_Autoexposure` supplies the PR route to janblade.
-The original repository's other branches remain unchanged. The matching task branch is used for
-the upstream PR requested by the author.

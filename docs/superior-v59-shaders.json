@@ -1,9 +1,10 @@
 {
   "reference": "914d8d1f50f2d52b11f9bacd7b6bf8fd7966d9e2",
+  "note": "dlssnr.hlsl is v59 (02599da1...) plus a documentation header only; every blob built from it is unchanged",
   "shaders": {
     "DlssNr_Shader.cso": "a6a4a026497f3218519491108c3aea025d4ab9d0626cff94ad268d744058cd46",
     "DlssNr_Shader.h": "5f1378c7c7dc34fa2c98817f8ec75ab107d9bafeb9388d6bc3b6bc908c5fe121",
-    "dlssnr.hlsl": "02599da12728cfe3534e4f1ca84dc48dcf4db991cdcd6198f2a577d1bc780455",
+    "dlssnr.hlsl": "185ee5705495e4de665a062a33f898ec73416cade5b3c39ec1c8831fd18cb6eb",
     "dlssnr_interpass_cross5_Shader.cso": "8710b883e95bb5151a79fbe6596b4661be59bdb36745ad6b527063e81b6c543c",
     "dlssnr_interpass_cross5_Shader.h": "9af68fbe2a8b2435e987b34056ea1cc45a16ccf3ac04902c48cdf855de0e8d41",
     "dlssnr_interpass_fast_Shader.cso": "28d28d84c96b6531bc79997a3b2d29e8c6fe0f74edbe76ae951cd05f3aded7c9",

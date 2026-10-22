@@ -271,14 +271,15 @@ bool CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandLis
     return result == NVSDK_NGX_Result_Success && g.feature;
 }
 
-Constants Shaping(const Config& cfg, unsigned first, unsigned completed, float scale)
+Constants Shaping(const Config& cfg, unsigned first, unsigned completed,
+                  DlssNr::SuperiorScaling::FrequencyScales scales)
 {
     Constants c {};
     c.ResidualHistoryValid = 1u;
     c.ResidualBlend = .015f;
     c.ResidualScale = 3.0f;
     c.ResidualConfidenceSensitivity = 1.0f;
-    const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, first, completed, scale, g_nr.superiorMainOnlyGains);
+    const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, first, completed, scales, g_nr.superiorMainOnlyGains);
     c.MvScaleX = gains.high;
     c.MvScaleY = gains.low;
     c.GuideWidth = 1u;
@@ -288,11 +289,11 @@ Constants Shaping(const Config& cfg, unsigned first, unsigned completed, float s
 
 bool InterPass(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, const Config& cfg,
                ID3D12Resource* nativeProxy, ID3D12Resource* originalBase, ID3D12Resource* answer, unsigned covered,
-               unsigned completed, float scale)
+               unsigned completed, DlssNr::SuperiorScaling::FrequencyScales scales)
 {
     const auto desc = originalBase->GetDesc();
     const unsigned workW = unsigned(desc.Width), workH = desc.Height;
-    auto c = Shaping(cfg, covered, completed, scale);
+    auto c = Shaping(cfg, covered, completed, scales);
     c.DirectResolveFlags |= 16u | 64u;
     if (c.MvScaleX == c.MvScaleY)
     {

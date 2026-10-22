@@ -65,10 +65,15 @@ Superior's ordinary raster remains exact, while the actual packed NR raster is a
 rendering at or below 100% bypasses the ordinary raster after packing. Legacy enlargement, above-native processing and
 on-demand exposure calibration still use the original unpacker with the exact ordinary size.
 
-Frequency gains use **one scale for the whole image**, as requested:
-`sqrt((modelWidth/nativeWidth) * (modelHeight/nativeHeight))`, using the actual final packed model dimensions after both
-resolution controls and rounding. Center and edges share the same gains. This scale feeds lookahead scheduling, every
-inter-pass block and final tail shaping, including when the resolution slider says 100% but compression shrinks NR.
+Frequency gains remain global across the image, with **separate resolution scales for high/medium and low**:
+high/medium use `sqrt((ordinaryWidth/nativeWidth) * (ordinaryHeight/nativeHeight))`, from Model resolution before edge
+compression; low uses `sqrt((modelWidth/nativeWidth) * (modelHeight/nativeHeight))`, from the actual final packed NR
+dimensions. Both include raster rounding. Compress screen edges therefore modifies only low's resolution correction;
+at Model resolution 100%, high/medium remain neutral 1 while low still accounts for compression. Center and edges share
+the same gains. This split feeds lookahead scheduling, every inter-pass block and final tail shaping. Without compression,
+both scales are identical and the previous gains are preserved. Model tables, Structure * Intensity and the high product /
+low mean rules are unchanged. Historical GPU measurements below and in the four-optimization report predate this policy
+change; this coefficient/schedule change has no newly claimed performance result and changes no shader bytecode.
 At or below 100% with active compression, the sequence is:
 
 | Stage, 3840x2160 output | 65% + Balanced | 100% + Balanced |

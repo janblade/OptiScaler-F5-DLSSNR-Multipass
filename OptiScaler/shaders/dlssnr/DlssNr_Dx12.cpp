@@ -4793,9 +4793,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     auto* superiorGeneration = superior ? superiorState.current.get() : nullptr;
-    const float superiorGainScale =
-        superior ? DlssNr::SuperiorScaling::ResolutionScale(width, height, modelWidth, modelHeight) : workScale;
-    const auto superiorSchedule = superior ? DlssNr::SuperiorScaling::Schedule(cfg, effectivePasses, superiorGainScale,
+    const auto superiorGainScales = superior ? DlssNr::SuperiorScaling::MakeFrequencyScales(
+                                                   width, height, workWidth, workHeight, modelWidth, modelHeight)
+                                             : DlssNr::SuperiorScaling::FrequencyScales { workScale, workScale };
+    const auto superiorSchedule = superior ? DlssNr::SuperiorScaling::Schedule(cfg, effectivePasses, superiorGainScales,
                                                                                g_nr.superiorMainOnlyGains)
                                            : DlssNr::InterPass::GainSchedule {};
     unsigned superiorCovered = 0, superiorCompleted = 0;
@@ -5104,13 +5105,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         finalAnswer = passOutput;
         MakeModelReadable(finalAnswer);
         superiorCompleted = pass + 1u;
-        if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScale < 1.0f)) &&
+        if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScales.low < 1.0f)) &&
             pass + 1u < effectivePasses)
         {
             const bool due = superiorSchedule.Due(pass, superiorCovered);
-            const bool ran = due && SuperiorRun::InterPass(
-                                        *superiorGeneration, *this, cmdList, cfg, spatial ? modelInput : g_nr.colorCopy,
-                                        modelInput, finalAnswer, superiorCovered, superiorCompleted, superiorGainScale);
+            const bool ran =
+                due &&
+                SuperiorRun::InterPass(*superiorGeneration, *this, cmdList, cfg, spatial ? modelInput : g_nr.colorCopy,
+                                       modelInput, finalAnswer, superiorCovered, superiorCompleted, superiorGainScales);
             if (ran)
             {
                 superiorCovered = superiorCompleted;
@@ -5616,7 +5618,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // the output takes a UAV, so resolveTarget is the output there)
         if (cached)
             EditCache::ApplyCached(cacheFrame, resolveTarget);
-        else if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScale < 1.0f)))
+        else if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScales.low < 1.0f)))
         {
             auto& g = *superiorGeneration;
             auto* shapingProxy = g.packed ? modelInput : g.temporal ? ordinaryProxy : resolveProxy;
@@ -5627,7 +5629,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                                  g.packed ? EdgeCompression::motion : nullptr)
                                         : resolveAnswer;
             const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
-                                                                   superiorGainScale, g_nr.superiorMainOnlyGains);
+                                                                   superiorGainScales, g_nr.superiorMainOnlyGains);
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
                             ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, g.temporal)
                             : nullptr;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include "DlssNr_GuidedShaping.h"
+#include "DlssNr_InterPassSchedule.h"
 
 namespace DlssNr::SuperiorScaling
 {
@@ -80,13 +81,29 @@ inline unsigned WorkingExtent(unsigned native, float scale)
 {
     return std::max(1u, static_cast<unsigned>(native * scale + .5f));
 }
-// Isotropic gain tables use the linear scale of the final NR pixel count,
-// including both axes of edge compression and actual model-grid rounding.
+// Isotropic gain tables use one global linear scale, including actual raster rounding.
 inline float ResolutionScale(unsigned nativeW, unsigned nativeH, unsigned modelW, unsigned modelH)
 {
     if (!nativeW || !nativeH || !modelW || !modelH)
         return 1.0f;
     return float(std::sqrt((double(modelW) * modelH) / (double(nativeW) * nativeH)));
+}
+struct FrequencyScales
+{
+    float high = 1.0f, low = 1.0f;
+};
+// Compress screen edges changes only low's scale. High/mid retain the ordinary Model resolution raster.
+inline FrequencyScales MakeFrequencyScales(unsigned nativeW, unsigned nativeH, unsigned ordinaryW, unsigned ordinaryH,
+                                           unsigned modelW, unsigned modelH)
+{
+    return { ResolutionScale(nativeW, nativeH, ordinaryW, ordinaryH),
+             ResolutionScale(nativeW, nativeH, modelW, modelH) };
+}
+inline InterPass::ScheduleGains BandGains(unsigned style, unsigned preset, bool mainOnly, FrequencyScales scales,
+                                          float structure, float intensity)
+{
+    return { EffectiveBand(High(style, preset, mainOnly), scales.high, structure, intensity),
+             EffectiveBand(Low(style, preset, mainOnly), scales.low, structure, intensity) };
 }
 inline bool NeedsTemporal(unsigned nativeW, unsigned nativeH, unsigned ordinaryW, unsigned ordinaryH, bool compressed,
                           unsigned modelW, unsigned modelH)

@@ -77,8 +77,64 @@ int main()
         const auto equivalent = Ss::ResolutionScale(3840, 2160, both.modelW, both.modelH);
         require(std::abs(equivalent - std::sqrt((both.modelW / 3840.f) * (both.modelH / 2160.f))) < 1e-6f);
         require(Ss::EffectiveBand(.8f, equivalent, 1, 1) < Ss::EffectiveBand(.8f, .65f, 1, 1));
-        std::cout << "Spatial metadata and final-resolution gain policy PASS: " << checks
-                  << " cases, native/pre/post-SR, clipped/offset guides, exact Superior grid and both packed axes\n";
+        unsigned bandChecks = 0;
+        for (const auto size : { DlssNr::GuideExtent { 3840, 2160 }, { 1919, 1079 } })
+            for (float scale : { .5f, .65f, 1.f, 1.5f })
+                for (int preset = 0; preset < 4; ++preset)
+                {
+                    auto settingsForBands = asymmetric;
+                    if (preset < 3)
+                        Sp::ApplyNamedLayout(settingsForBands, preset);
+                    const auto l = Sp::Build(settingsForBands, size.width, size.height, scale, false);
+                    const auto scales =
+                        Ss::MakeFrequencyScales(size.width, size.height, l.ordinaryW, l.ordinaryH, l.modelW, l.modelH);
+                    const auto plain = Ss::MakeFrequencyScales(size.width, size.height, l.ordinaryW, l.ordinaryH,
+                                                               l.ordinaryW, l.ordinaryH);
+                    require(scales.high == plain.high && scales.low < scales.high);
+                    require(scales.low == Ss::ResolutionScale(size.width, size.height, l.modelW, l.modelH));
+                    for (unsigned style : { 0u, 1u, 2u, 99u })
+                        for (unsigned model : { 0u, 1u, 2u, 3u, 99u })
+                            for (bool mainOnly : { false, true })
+                                for (float structure : { 0.f, .75f, 1.f })
+                                    for (float intensity : { 0.f, .5f, 1.f })
+                                    {
+                                        const auto g =
+                                            Ss::BandGains(style, model, mainOnly, scales, structure, intensity);
+                                        const auto uncompressed =
+                                            Ss::BandGains(style, model, mainOnly, plain, structure, intensity);
+                                        require(g.high == uncompressed.high);
+                                        require(g.low == Ss::EffectiveBand(Ss::Low(style, model, mainOnly), scales.low,
+                                                                           structure, intensity));
+                                        require(uncompressed.high == Ss::EffectiveBand(Ss::High(style, model, mainOnly),
+                                                                                       plain.high, structure,
+                                                                                       intensity));
+                                        require(uncompressed.low == Ss::EffectiveBand(Ss::Low(style, model, mainOnly),
+                                                                                      plain.high, structure,
+                                                                                      intensity));
+                                        if (scale == 1.f || structure == 0.f || intensity == 0.f)
+                                            require(g.high == 1.f);
+                                        ++bandChecks;
+                                    }
+                    // Mixed models/styles: the scheduler, interpass block and final tail use the same split scales.
+                    const auto plan = DlssNr::InterPass::MakeGainSchedule(
+                        6, true, true, false,
+                        [&](unsigned p) { return Ss::BandGains(p % 3, p % 2 + 1, false, scales, .75f, .5f); });
+                    for (unsigned first = 0; first < 6; ++first)
+                        for (unsigned end = first + 1; end <= 6; ++end)
+                        {
+                            double high = 1, low = 0;
+                            for (unsigned p = first; p < end; ++p)
+                            {
+                                high *= Ss::EffectiveBand(Ss::High(p % 3, p % 2 + 1), plain.high, .75f, .5f);
+                                low += Ss::EffectiveBand(Ss::Low(p % 3, p % 2 + 1), scales.low, .75f, .5f);
+                            }
+                            const auto block = plan.Block(first, end);
+                            require(block.high == float(high) && block.low == float(low / (end - first)));
+                        }
+                }
+        std::cout << "Spatial metadata and final-resolution gain policy PASS: " << checks << " cases; " << bandChecks
+                  << " split high/low gain cases, mixed blocks and final tails; "
+                  << "native/pre/post-SR, clipped/offset guides, exact Superior grid and both packed axes\n";
     }
     catch (const std::exception& e)
     {

@@ -49,6 +49,26 @@ const Item kItems[] = {
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Smooth", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Visualise", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Global", "" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "CameraModel", "" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "1" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "2" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "3" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "4" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "5" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "6" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "7" },
+
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "64" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "65" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "66" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "67" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "68" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "69" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "70" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "71" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Median", "4" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Smooth", "4" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Smooth", "32" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "1" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "2" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "3" },
@@ -75,7 +95,8 @@ const Item kItems[] = {
 
 bool Compile(const Item& item, std::vector<unsigned char>& out)
 {
-    const D3D_SHADER_MACRO macros[] = { { "LUMA_MODE", item.lumaMode }, { nullptr, nullptr } };
+    const bool featureVariant=strcmp(item.entry,"Match")==0 || strcmp(item.entry,"Median")==0 || strcmp(item.entry,"Smooth")==0;
+    const D3D_SHADER_MACRO macros[] = { { featureVariant?"F5LOW_FEATURES":"LUMA_MODE", item.lumaMode }, { nullptr, nullptr } };
     ID3DBlob* code = nullptr;
     ID3DBlob* messages = nullptr;
 

@@ -1,0 +1,307 @@
+{
+  "reference": "Original 1.31: aeb439482c13dd7364ee2bef16fa41b902be6f98; tested upstream integration: 2a5be38dc778913b4229efbeb750e2a2c6474242",
+  "gpu": "NVIDIA RTX 3080",
+  "dimensions": [
+    3413,
+    1920
+  ],
+  "refinement": "normal LK",
+  "nativeScope": "estimator + Trust/disocclusion + full-resolution guide; no NR/FG/debug/readback/IPC/input acquisition",
+  "shaderScope": "per-frame paired motion + Feeder GPU intervals; transport/NR/FG/debug disabled; not Host64 total latency",
+  "native": [
+    {
+      "scene": 0,
+      "medianOfRunMediansMs": {
+        "original": 3.531264,
+        "before": 3.081728,
+        "candidate": 3.05664
+      }
+    },
+    {
+      "scene": 5,
+      "medianOfRunMediansMs": {
+        "original": 3.503616,
+        "before": 2.219008,
+        "candidate": 2.2016
+      }
+    }
+  ],
+  "nativeSpread": [
+    {
+      "scene": 0,
+      "variant": "original",
+      "minRunMedianMs": 3.52768,
+      "maxRunMedianMs": 3.534848
+    },
+    {
+      "scene": 0,
+      "variant": "before",
+      "minRunMedianMs": 3.038208,
+      "maxRunMedianMs": 3.103744
+    },
+    {
+      "scene": 0,
+      "variant": "candidate",
+      "minRunMedianMs": 3.055616,
+      "maxRunMedianMs": 3.058688
+    },
+    {
+      "scene": 5,
+      "variant": "original",
+      "minRunMedianMs": 3.50208,
+      "maxRunMedianMs": 3.504128
+    },
+    {
+      "scene": 5,
+      "variant": "before",
+      "minRunMedianMs": 2.219008,
+      "maxRunMedianMs": 2.220032
+    },
+    {
+      "scene": 5,
+      "variant": "candidate",
+      "minRunMedianMs": 2.199552,
+      "maxRunMedianMs": 2.2016
+    }
+  ],
+  "shader": [
+    {
+      "route": "dx11",
+      "variants": {
+        "before": {
+          "runs": 4,
+          "medianOfRunMedianMs": 3.709152,
+          "minRunMedianMs": 3.5885920000000002,
+          "maxRunMedianMs": 3.8296479999999997
+        },
+        "candidate": {
+          "runs": 4,
+          "medianOfRunMedianMs": 3.6041279999999998,
+          "minRunMedianMs": 3.600384,
+          "maxRunMedianMs": 3.6623200000000002
+        }
+      },
+      "candidateMinusBeforeMs": -0.10502400000000023,
+      "pairedRunDeltasMs": [
+        0.07121600000000017,
+        0.014351999999999698,
+        -0.2218880000000003,
+        -0.2292639999999997
+      ],
+      "medianPairedDeltaMs": -0.1037680000000003
+    },
+    {
+      "route": "vulkan",
+      "variants": {
+        "before": {
+          "runs": 4,
+          "medianOfRunMedianMs": 4.943872000000001,
+          "minRunMedianMs": 4.764672,
+          "maxRunMedianMs": 4.94592
+        },
+        "candidate": {
+          "runs": 4,
+          "medianOfRunMedianMs": 5.044224,
+          "minRunMedianMs": 5.040127999999999,
+          "maxRunMedianMs": 5.045248
+        }
+      },
+      "candidateMinusBeforeMs": 0.10035199999999911,
+      "pairedRunDeltasMs": [
+        0.09932799999999986,
+        0.10137599999999924,
+        0.09932799999999986,
+        0.27545599999999926
+      ],
+      "medianPairedDeltaMs": 0.10035199999999955
+    },
+    {
+      "route": "host64",
+      "variants": {
+        "before": {
+          "runs": 4,
+          "medianOfRunMedianMs": 3.8118399999999997,
+          "minRunMedianMs": 3.8102240000000003,
+          "maxRunMedianMs": 3.813376
+        },
+        "candidate": {
+          "runs": 4,
+          "medianOfRunMedianMs": 3.828064,
+          "minRunMedianMs": 3.8274239999999997,
+          "maxRunMedianMs": 3.829392
+        }
+      },
+      "candidateMinusBeforeMs": 0.016224000000000238,
+      "pairedRunDeltasMs": [
+        0.017487999999999726,
+        0.017040000000000166,
+        0.014047999999999838,
+        0.017088000000000214
+      ],
+      "medianPairedDeltaMs": 0.01706400000000019
+    }
+  ],
+  "nrComposition": [
+    {
+      "route": "dx11",
+      "native": false,
+      "ApplyModel": true,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.5150365434644857
+    },
+    {
+      "route": "dx11",
+      "native": false,
+      "ApplyModel": false,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.0
+    },
+    {
+      "route": "dx11",
+      "native": true,
+      "ApplyModel": true,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.5827590414080549
+    },
+    {
+      "route": "dx11",
+      "native": true,
+      "ApplyModel": false,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.0
+    },
+    {
+      "route": "vulkan",
+      "native": false,
+      "ApplyModel": true,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.5415999228592456
+    },
+    {
+      "route": "vulkan",
+      "native": false,
+      "ApplyModel": false,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.0
+    },
+    {
+      "route": "vulkan",
+      "native": true,
+      "ApplyModel": true,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.5950331783958659
+    },
+    {
+      "route": "vulkan",
+      "native": true,
+      "ApplyModel": false,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.0
+    },
+    {
+      "route": "host64",
+      "native": false,
+      "ApplyModel": true,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.5233035921615548
+    },
+    {
+      "route": "host64",
+      "native": false,
+      "ApplyModel": false,
+      "exit": 0,
+      "NRcomposed": true,
+      "capturedPairs": 8,
+      "differentByteFraction": 0.0
+    }
+  ],
+  "routeControls": [
+    {
+      "route": "dx11",
+      "inverseRefinement": false,
+      "normalDepth": false,
+      "mirrored": false,
+      "producerFlags": 7,
+      "exit": 0,
+      "rightsizeComparedBuffers": 936,
+      "rightsizeDifferentBuffers": []
+    },
+    {
+      "route": "vulkan",
+      "inverseRefinement": false,
+      "normalDepth": false,
+      "mirrored": false,
+      "producerFlags": 7,
+      "exit": 0,
+      "rightsizeComparedBuffers": 1379,
+      "rightsizeDifferentBuffers": []
+    },
+    {
+      "route": "host64",
+      "inverseRefinement": false,
+      "normalDepth": false,
+      "mirrored": false,
+      "producerFlags": 7,
+      "exit": 0,
+      "rightsizeComparedBuffers": 936,
+      "rightsizeDifferentBuffers": []
+    },
+    {
+      "route": "dx11",
+      "inverseRefinement": true,
+      "normalDepth": true,
+      "mirrored": true,
+      "producerFlags": 7,
+      "exit": 0,
+      "rightsizeComparedBuffers": 936,
+      "rightsizeDifferentBuffers": []
+    },
+    {
+      "route": "vulkan",
+      "inverseRefinement": true,
+      "normalDepth": true,
+      "mirrored": true,
+      "producerFlags": 7,
+      "exit": 0,
+      "rightsizeComparedBuffers": 1379,
+      "rightsizeDifferentBuffers": []
+    },
+    {
+      "route": "host64",
+      "inverseRefinement": true,
+      "normalDepth": true,
+      "mirrored": true,
+      "producerFlags": 7,
+      "exit": 0,
+      "rightsizeComparedBuffers": 936,
+      "rightsizeDifferentBuffers": []
+    }
+  ],
+  "knownLimits": [
+    "0.7-ms saving/1.7-ms Kernel HQ gap not demonstrated",
+    "Vulkan menu-open FPS issue unresolved",
+    "temporal variation increases in representative recovered-motion cases",
+    "worst sky/grain EPE delta exceeds +0.01 px",
+    "in-game final scene review needed",
+    "no DLSS-G certification on RTX 3080",
+    "no DX12-game F5Low testing requested"
+  ]
+}

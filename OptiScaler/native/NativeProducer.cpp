@@ -25,13 +25,27 @@ NativeProducer::~NativeProducer()
         CloseHandle(_event);
 }
 
-void NativeProducer::WaitFor(UINT64 value)
+bool NativeProducer::WaitFor(UINT64 value)
 {
-    if (_fence == nullptr || value == 0 || _fence->GetCompletedValue() >= value)
-        return;
+    if (_fence == nullptr || value == 0)
+        return true;
 
-    _fence->SetEventOnCompletion(value, _event);
-    WaitForSingleObject(_event, 1000);
+    const auto completed = _fence->GetCompletedValue();
+    if (completed == UINT64_MAX) return false; // device removal is not successful completion
+    if (completed >= value) return true;
+
+    if (FAILED(_fence->SetEventOnCompletion(value, _event))) return false;
+    if (WaitForSingleObject(_event, 1000) != WAIT_OBJECT_0) return false;
+    const auto after = _fence->GetCompletedValue();
+    return after != UINT64_MAX && after >= value;
+}
+
+bool NativeProducer::Drain()
+{
+    if (!WaitFor(_signalled)) return false;
+    for (auto& slot : _inputLeases)
+        for (auto& resource : slot) resource.Reset();
+    return true;
 }
 
 bool NativeProducer::Init(ID3D12Device* device)
@@ -71,6 +85,7 @@ bool NativeProducer::Init(ID3D12Device* device)
 
     _list->SetName(L"Optical F5Low producer");
     _list->Close();
+    _list->SetName(L"F5Low native input producer");
 
     if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_fence))))
     {
@@ -99,21 +114,28 @@ bool NativeProducer::Init(ID3D12Device* device)
         }
 
     _event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (_event == nullptr)
+    {
+        _error = "creating the fence event";
+        return false;
+    }
     _device = device;
     return true;
 }
 
 void NativeProducer::Reset()
 {
+    _previewReady = false;
     if (_flow)
         _flow->Reset();
     if (_trust)
         _trust->Reset();
 }
 
-NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const FrameInput& input, const Options& options,
+NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const FrameInput& sourceInput, const Options& options,
                                            const ApplyFn& apply, FrameOutput& output)
 {
+    FrameInput input=sourceInput;
     Result result;
     output = FrameOutput {};
 
@@ -129,18 +151,39 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     // The previous work may still be reading the textures a new size replaces.
     if (input.width != _width || input.height != _height)
     {
-        WaitFor(_signalled);
+        if (!WaitFor(_signalled))
+        {
+            result.stoppedAt = "waiting for resize fence";
+            result.stoppedHr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            result.deviceRemoved = _device->GetDeviceRemovedReason();
+            return result;
+        }
         _width = input.width;
         _height = input.height;
         Reset();
     }
+
+    bool calibrationChanged=false;
+    for(unsigned i=0;i<4;++i)if(_depthTransform[i]!=options.depthTransform[i])calibrationChanged=true;
+    if(calibrationChanged){for(unsigned i=0;i<4;++i)_depthTransform[i]=options.depthTransform[i];Reset();}
 
     // The adapter knows this frame does not continue the last one (a loading screen, a resolution change).
     if (input.cutHint)
         Reset();
 
     const UINT slot = (UINT) (_frame % kRing);
-    WaitFor(_values[slot]);
+    if (!WaitFor(_values[slot]))
+    {
+        // A timed out allocator is still owned by the GPU. Resetting it corrupts submitted work.
+        result.stoppedAt = "waiting for allocator fence";
+        result.stoppedHr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+        result.deviceRemoved = _device->GetDeviceRemovedReason();
+        return result;
+    }
+
+    _inputLeases[slot][0] = input.picture;
+    for (int i = 0; i < FrameInput::kMaxDepthCopies; ++i)
+        _inputLeases[slot][i + 1] = i < input.depthCount ? input.depth[i] : nullptr;
 
     // The flow's own cut flag of the frames the GPU has finished since (usually the last one): a cut found there resets
     // the consumer's history now, a couple of frames before the trust mask's count could say so. Until the consumer has
@@ -194,6 +237,13 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     if (needsBarrier)
         list->ResourceBarrier(1, &barrier);
 
+    const bool alignDepth=options.depthTransform[0]!=1.f || options.depthTransform[1]!=1.f || options.depthTransform[2]!=0.f || options.depthTransform[3]!=0.f;
+    if(alignDepth && input.depthCount==1 && input.depth[0] && input.depthView!=DXGI_FORMAT_UNKNOWN){
+        auto* aligned=_depthCalibration.Run(_device,list,input.depth[0],input.depthView,input.width,input.height,slot,options.depthTransform);
+        if(aligned){input.depth[0]=aligned;input.depthView=DXGI_FORMAT_R32_FLOAT;input.depthWidth=input.width;input.depthHeight=input.height;}
+        else { input.depthCount=0;_error="Depth alignment could not start; using motion without depth"; }
+    }
+
     // The flow's match sees where surfaces end through the depth, when it is one copy of the whole scene (several
     // copies each hold part of it, and one alone would show edges that are not there).
     const bool flowDepth = input.depthCount == 1 && input.depth[0] != nullptr && input.depthView != DXGI_FORMAT_UNKNOWN;
@@ -241,8 +291,6 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     {
         result.flowValid = true;
 
-        if (options.flowPreview)
-            _previewReady = _flow->Visualise(list, options.previewMaxSpeed) || _previewReady;
 
         // The trust mask uses the scene's depth as the adapter copied it this frame; without any it runs on flow and luma.
         TrustMaskDx12::Inputs in;
@@ -294,6 +342,17 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         }
     }
 
+    // Build the exact consumer guide for its diagnostic too, even with NR disabled.
+    const bool wantsGuidePreview=options.flowPreview && (options.previewView==0 || options.previewView==7);
+    const bool guidesBuilt=nativeReady && ((options.apply && apply) || wantsGuidePreview) &&
+        _trust->BuildGuides(list,nativeInputs,input.width,input.height);
+    if(result.flowValid && options.flowPreview)
+        _previewReady=_flow->Visualise(list,options.previewMaxSpeed,options.previewView,
+            input.picture,input.pictureFormat,
+            options.previewView==6?(sourceInput.depthCount>0?sourceInput.depth[0]:nullptr):(input.depthCount>0?input.depth[0]:nullptr),
+            options.previewView==6?sourceInput.depthView:input.depthView,input.depthReversed,
+            guidesBuilt?_trust->GuideMotion():nullptr,_trust->Mask(),options.previewView==6?options.depthTransform:nullptr);
+
     // Back to the state the adapter expects the picture in, then the consumer on it with the guides, on this same list.
     if (needsBarrier)
     {
@@ -303,7 +362,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     if (nativeReady && options.apply && apply)
     {
-        if (_trust->BuildGuides(list, nativeInputs, input.width, input.height))
+        if (guidesBuilt)
         {
             NativeFrame frame;
             frame.color = input.picture;
@@ -326,6 +385,18 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     if (SUCCEEDED(closeHr))
     {
+        if (_previewReadFence != nullptr)
+        {
+            const HRESULT readHr = queue->Wait(_previewReadFence.Get(), _previewReadValue);
+            if (FAILED(readHr))
+            {
+                result.stoppedAt = "waiting for diagnostic reader";
+                result.stoppedHr = readHr;
+                result.deviceRemoved = _device->GetDeviceRemovedReason();
+                return result;
+            }
+            _previewReadFence.Reset();
+        }
         if (input.ready.fence != nullptr)
             queue->Wait(input.ready.fence, input.ready.value);
 

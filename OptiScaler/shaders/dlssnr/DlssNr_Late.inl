@@ -282,6 +282,7 @@ void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
 
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     DlssNrWatchedLists::Remove(1, &list);
+    g_nrCreates.Reset(cmd);
     if (g_gpuTime) g_gpuTime->ResetRecording(cmd);
     if (g_ngxTime) g_ngxTime->ResetRecording(cmd);
     if (g_scanTime) g_scanTime->ResetRecording(cmd);
@@ -332,6 +333,21 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
 
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     DlssNrWatchedLists::Remove(count, watched);
+    ++g_nrSubmittedEpoch;
+    // Already AFTER the real ExecuteCommandLists. Fence only creation recordings,
+    // not every frame: normal NR evaluation keeps its existing timing fences.
+    for (UINT i = 0; i < count; ++i)
+        if (g_nrCreates.Contains(lists[i]))
+        {
+            NrCreateCompletion completion;
+            Microsoft::WRL::ComPtr<ID3D12Device> device;
+            completion.error = queue->GetDevice(IID_PPV_ARGS(&device));
+            if (SUCCEEDED(completion.error))
+                completion.error = device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                      IID_PPV_ARGS(&completion.fence));
+            if (SUCCEEDED(completion.error)) completion.error = queue->Signal(completion.fence.Get(), 1);
+            g_nrCreates.Submitted(lists[i], std::move(completion));
+        }
     if (g_gpuTime) g_gpuTime->Submitted(queue, count, lists);
     if (g_ngxTime) g_ngxTime->Submitted(queue, count, lists);
     if (g_scanTime) g_scanTime->Submitted(queue, count, lists);

@@ -23,6 +23,8 @@ void OnPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Devic
 // Once per game frame under frame generation, from FGHooks::FGPresent before frame generation presents and before it takes
 // its lock: the picture is the game's own, `queue` the game's. Frame generation's Upscaler input is fed from here.
 void OnFGPresent(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device);
+// Same retry contract as DLSS-NR's finished-picture drain, called before both DXGI resize APIs.
+bool WaitForPendingFrame();
 
 // ImGui: one status line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
 // Call inside the menu, on the Optical F5Low page (dlssnr/DlssNr_Menu.cpp), while NativeMotion
@@ -35,5 +37,12 @@ bool NrOnlyRunning();
 // ImGui: with NativeDebugView, the flow tuning sliders and flow/trust picture previews. The keys themselves are set by
 // the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();
+
+// The menu owns this nonblocking CPU lease from before UI drawing through queue submission.
+// GPU fences order producer writes and menu reads even with frame generation on another queue.
+void BeginDebugFrame(ID3D12CommandQueue* queue, ID3D12Fence* menuFence = nullptr);
+void EndDebugFrame(ID3D12Fence* fence = nullptr, UINT64 value = 0);
+bool ExpandedPreviewVisible();
+void DrawExpandedPreview();
 
 } // namespace NativeMotionDx12

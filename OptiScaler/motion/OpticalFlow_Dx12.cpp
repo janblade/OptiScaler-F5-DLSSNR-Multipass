@@ -9,8 +9,8 @@
 namespace
 {
 
-constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs and two UAVs
-constexpr uint32_t kPassesPerFrame = 1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1;
+constexpr uint32_t kDescriptorsPerPass = 13; // eight SRVs, flow/age UAVs and three optional trace UAVs
+constexpr uint32_t kPassesPerFrame = 1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
@@ -37,9 +37,13 @@ OpticalFlowDx12::~OpticalFlowDx12()
     ReleaseTextures();
 
     for (ID3D12PipelineState** pso : { &_luma, &_lumaSdr, &_lumaScRgb, &_lumaPq, &_down, &_match, &_median, &_smooth,
-                                       &_visualise, &_global })
+                                       &_visualise, &_global, &_cameraModel })
         if (*pso != nullptr)
             (*pso)->Release();
+
+    for(unsigned i=1;i<8;++i)if(_matchVariants[i])_matchVariants[i]->Release();
+    for(auto* p:_traceVariants)if(p)p->Release();
+    for(auto* p:{_medianEvidence,_smoothEvidence,_smoothDiagnostics})if(p)p->Release();
 
     if (_rootSignature != nullptr)
         _rootSignature->Release();
@@ -56,6 +60,8 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
     }
 
     _device = device;
+    wchar_t dred[2] {};
+    _debugEvents = GetEnvironmentVariableW(L"F5LOW_DRED", dred, 2) == 1 && dred[0] == L'1';
 
     // One table (eight SRVs, two UAVs) and the root constants.
     D3D12_DESCRIPTOR_RANGE ranges[2] {};
@@ -64,7 +70,7 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 2;
+    ranges[1].NumDescriptors = 5;
     ranges[1].BaseShaderRegister = 0;
     ranges[1].OffsetInDescriptorsFromTableStart = 8;
 
@@ -124,7 +130,7 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
 
     for (const Entry& entry : { Entry { "Luma", &_luma }, Entry { "Down", &_down }, Entry { "Match", &_match },
                                 Entry { "Median", &_median }, Entry { "Smooth", &_smooth },
-                                Entry { "Visualise", &_visualise }, Entry { "Global", &_global } })
+                                Entry { "Global", &_global }, Entry { "CameraModel", &_cameraModel } })
     {
         const auto* code = Compile(entry.name, &_error);
 
@@ -193,7 +199,21 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
         return false;
     }
 
+    _cachedViews.assign(heap.NumDescriptors, CachedView {});
     _descriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    // All bytecode is generated offline. Selecting an experiment never compiles
+    // HLSL on a present thread, and feature zero uses the upstream-sized shader.
+    auto variant=[&](const char* entry,const char* key,ID3D12PipelineState** target){
+        const auto* code=Compile(entry,&_error,"OpticalFlow",key);
+        if(!code)return false;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};d.pRootSignature=_rootSignature;
+        d.CS={code->GetBufferPointer(),code->GetBufferSize()};
+        return SUCCEEDED(device->CreateComputePipelineState(&d,IID_PPV_ARGS(target)));
+    };
+    for(unsigned i=1;i<8;++i){const auto key=std::to_string(i);if(!variant("Match",key.c_str(),&_matchVariants[i]))return false;}
+    if(!variant("Median","4",&_medianEvidence)||!variant("Smooth","4",&_smoothEvidence)||
+       !variant("Smooth","32",&_smoothDiagnostics))return false;
+
     return true;
 }
 
@@ -219,6 +239,7 @@ bool OpticalFlowDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, D
                                                 IID_PPV_ARGS(&tex.resource))))
         return false;
 
+    _ownedResources.insert(tex.resource);
     tex.resource->SetName(name);
     tex.width = width;
     tex.height = height;
@@ -227,6 +248,10 @@ bool OpticalFlowDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, D
 
 void OpticalFlowDx12::ReleaseTextures()
 {
+    std::fill(_cachedViews.begin(), _cachedViews.end(), CachedView {});
+    _ownedResources.clear();
+    for(auto& tex:_trace){if(tex.resource)tex.resource->Release();tex=Tex{};}
+    _traceValid=false;
     auto release = [](Tex& tex)
     {
         if (tex.resource != nullptr)
@@ -244,8 +269,11 @@ void OpticalFlowDx12::ReleaseTextures()
 
     release(_flowMedian);
     release(_globalFlow);
+    release(_cameraFlow);
     release(_flow);
     release(_preview);
+    release(_depthPreview);
+    _depthPreviewActive=false;
 
     for (Tex& age : _age)
         release(age);
@@ -291,9 +319,8 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
 
     return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
            CreateTexture(_globalFlow, 1, 1, kFlowFormat, L"OpticalFlow_Global") &&
-           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
-           CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM,
-                         L"OpticalFlow_Preview");
+           CreateTexture(_cameraFlow, 4, 1, kFlowFormat, L"OpticalFlow_CurrentCameraModel") &&
+           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow");
 }
 
 void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state)
@@ -315,10 +342,19 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
                            DXGI_FORMAT format0, ID3D12Resource* src1, DXGI_FORMAT format1, ID3D12Resource* src2,
                            DXGI_FORMAT format2, Tex& dst, DXGI_FORMAT dstFormat, const Constants& constants,
                            ID3D12Resource* src3, DXGI_FORMAT format3, ID3D12Resource* src4, DXGI_FORMAT format4,
-                           ID3D12Resource* src5, DXGI_FORMAT format5, ID3D12Resource* src6, DXGI_FORMAT format6)
+                           ID3D12Resource* src5, DXGI_FORMAT format5, ID3D12Resource* src6, DXGI_FORMAT format6,
+                           DXGI_FORMAT auxUavFormat)
 {
     Transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    if (_debugEvents)
+    {
+        const char* label = pso == _visualise ? "F5Low Visualise" : pso == _match ? "F5Low Match" :
+                        pso == _smooth ? "F5Low Smooth" : pso == _median ? "F5Low Median" :
+                        pso == _cameraModel ? "F5Low CameraModel" : pso == _global ? "F5Low Global" : pso == _down ? "F5Low Down" : "F5Low Luma";
+        // DRED records the label beside its dispatch breadcrumbs when explicitly enabled.
+        list->BeginEvent(1, label, (UINT) std::strlen(label) + 1);
+    }
     StampBegin(list);
 
     const UINT first = _heapCursor;
@@ -346,6 +382,18 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
                                      src6 != nullptr ? format6 : format0,
                                      _passAgeIn != nullptr ? kAgeFormat : format0 };
 
+    // A hit skips only the CPU descriptor creation, never a shader read,
+    // transition, dispatch, or fence. The descriptor ring remains unchanged.
+    auto needsView = [&](UINT slot, ID3D12Resource* resource, DXGI_FORMAT format, bool unordered)
+    {
+        auto& cached = _cachedViews[slot];
+        const bool owned = resource == nullptr || _ownedResources.count(resource) != 0;
+        if (owned && cached.valid && cached.resource == resource &&
+            cached.format == format && cached.unordered == unordered)
+            return false;
+        cached = {resource, format, unordered, owned};
+        return true;
+    };
     for (int i = 0; i < 8; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
@@ -353,34 +401,64 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = 1;
-        _device->CreateShaderResourceView(sources[i], &srv, cpu);
+        if (needsView(first + i, sources[i], formats[i], false))
+            _device->CreateShaderResourceView(sources[i], &srv, cpu);
         cpu.ptr += _descriptorSize;
     }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav {};
     uav.Format = dstFormat;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
+    if (needsView(first + 8, dst.resource, dstFormat, true))
+        _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
     cpu.ptr += _descriptorSize;
 
     // The second UAV is the still age the finest match writes; every other pass gets a view of nothing.
     D3D12_UNORDERED_ACCESS_VIEW_DESC ageUav {};
-    ageUav.Format = kAgeFormat;
+    ageUav.Format = auxUavFormat;
     ageUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
+    if (needsView(first + 9, _passAgeOut, auxUavFormat, true))
+        _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
+    if (_passTrace) {
+        UINT slot = first + 10;
+        for (auto& tex:_trace) {
+            cpu.ptr += _descriptorSize;
+            D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+            view.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;view.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
+            if (needsView(slot++, tex.resource, view.Format, true))
+                _device->CreateUnorderedAccessView(tex.resource,nullptr,&view,cpu);
+        }
+    }
 
     ID3D12DescriptorHeap* heaps[] = { _heap };
     list->SetDescriptorHeaps(1, heaps);
     list->SetComputeRootSignature(_rootSignature);
-    list->SetPipelineState(pso);
+    const uint32_t features=(_settings.referenceMode?0u:
+        (_settings.reuseCandidateCost?1u:0u)|(_settings.refinementAcceptance?2u:0u)|
+        (_settings.evidenceFilter?4u:0u))|(_settings.evidenceDiagnostics?32u:0u);
+    ID3D12PipelineState* selected=pso;
+    if(pso==_match){
+        const unsigned key=(features&7u)|((features&32u)?4u:0u);
+        selected=_passTrace?_traceVariants[key]:(key?_matchVariants[key]:_match);
+    }
+    if(pso==_median && (features&(4u|32u)))selected=_medianEvidence;
+    if(pso==_smooth)selected=(features&4u)?_smoothEvidence:(features&32u)?_smoothDiagnostics:_smooth;
+    list->SetPipelineState(selected);
     list->SetComputeRootDescriptorTable(0, gpu);
-    list->SetComputeRoot32BitConstants(1, sizeof(Constants) / 4, &constants, 0);
-    list->Dispatch((dst.width + 7) / 8, (dst.height + 7) / 8, 1);
+    Constants actual=constants;
+    actual.motionFlags=features;
+    // Display-only depth calibration uses these otherwise matching-only slots.
+    // Never overwrite the visualizer's multiplier / linearization far plane.
+    if(pso!=_visualise){actual.photoTolerance=1e-6f;actual.evidenceNoise=1.0f/255.0f;}
+    list->SetComputeRoot32BitConstants(1, sizeof(Constants) / 4, &actual, 0);
+    const uint32_t groupSize=pso==_smooth?16u:8u;
+    list->Dispatch((dst.width + groupSize-1) / groupSize, (dst.height + groupSize-1) / groupSize, 1);
 
     // Anything that reads it next reads it as a texture.
     Transition(list, dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     StampEnd(list, pso);
+    if (_debugEvents) list->EndEvent();
 }
 
 // The test's timing: a timestamp before the first pass of a frame, then one after each (the barrier at the end of a
@@ -406,7 +484,10 @@ void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineSt
                                : pso == _match                                                        ? "match"
                                : pso == _median                                                       ? "median"
                                : pso == _smooth                                                       ? "smooth"
+                               : pso == _cameraModel                                                  ? "camera_model"
                                : pso == _global                                                       ? "global"
+
+
                                                                                                       : "other";
 }
 
@@ -416,12 +497,36 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     if (_device == nullptr || _match == nullptr || list == nullptr || color == nullptr)
         return false;
 
+    // Keep each frame in its own existing ring bank. Otherwise an optional
+    // camera/debug pass shifts every subsequent slot, defeating immutable-view
+    // reuse. The eight-frame lifetime and descriptor capacity are unchanged.
+    // Round forward from the last actual allocation, including any diagnostic
+    // calls after Dispatch. Never jump backward into that frame's descriptors.
+    const UINT frameSpan = kDescriptorsPerPass * kPassesPerFrame;
+    _heapCursor = ((_heapCursor + frameSpan - 1) / frameSpan * frameSpan) %
+                  (frameSpan * kFramesInFlight);
+
     const D3D12_RESOURCE_DESC colorDesc = color->GetDesc();
 
     if (!EnsureSize((uint32_t) colorDesc.Width, colorDesc.Height))
     {
         _error = "creating the textures";
         return false;
+    }
+
+    _traceValid=false;
+    if (_settings.trace) {
+        for (auto& tex:_trace) if (!tex.resource && !CreateTexture(tex,(uint32_t(colorDesc.Width)+1)/2,
+                (colorDesc.Height+1)/2,DXGI_FORMAT_R32G32B32A32_FLOAT,L"OpticalFlow_OptionalTrace")) return false;
+        const unsigned key=(_settings.referenceMode?0u:(_settings.reuseCandidateCost?1u:0u)|
+            (_settings.refinementAcceptance?2u:0u)|(_settings.evidenceFilter?4u:0u))|(_settings.evidenceDiagnostics?4u:0u);
+        if (!_traceVariants[key]) {
+            const auto mode=std::to_string(64u+key);const auto* code=Compile("Match",&_error,"OpticalFlow",mode.c_str());
+            if(!code)return false;
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};desc.pRootSignature=_rootSignature;
+            desc.CS={code->GetBufferPointer(),code->GetBufferSize()};
+            if(FAILED(_device->CreateComputePipelineState(&desc,IID_PPV_ARGS(&_traceVariants[key]))))return false;
+        }
     }
 
     // Build the current frame's pyramid.
@@ -528,12 +633,16 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
                 Transition(list, _age[_current], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
 
+            _passTrace=_settings.trace && level==std::clamp(_settings.traceLevel,0,kLevels-1);
+            if(_passTrace)for(auto& tex:_trace)Transition(list,tex,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Pass(list, _match, current[level].resource, kLumaFormat, previous[level].resource, kLumaFormat,
                  coarsest ? nullptr : levelNow[level + 1].resource, kFlowFormat, levelNow[level], kFlowFormat,
                  constants, (history && _settings.useHistory) ? levelBefore[level].resource : nullptr, kFlowFormat,
                  depthMatching ? depth : nullptr, depthFormat, _globalReady ? _globalFlow.resource : nullptr,
                  kFlowFormat, _sceneCutRan ? _sceneCut.Flag() : nullptr, kStateFormat);
 
+            if(_passTrace){for(auto& tex:_trace)Transition(list,tex,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);_traceValid=true;}
+            _passTrace=false;
             if (keepAge)
             {
                 Transition(list, _age[_current], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -549,12 +658,42 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         Pass(list, _median, levelNow[0].resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
              DXGI_FORMAT_UNKNOWN, _flowMedian, kFlowFormat, constants);
 
+        const bool currentCameraReady=_settings.cameraPrior && _settings.globalCandidate;
+        if(currentCameraReady) {
+            Constants model {};
+            model.sizeX=4;model.sizeY=1;
+            model.auxX=_flowMedian.width;model.auxY=_flowMedian.height;
+            model.scale=1.0f; // Median already converted XY to full-resolution pixels.
+            model.hasGlobal=_globalReady?1u:0u;
+            model.depthMatching=depthMatching?1u:0u;
+            model.depthX=depthMatching?uint32_t(depthDesc.Width):1u;
+            model.depthY=depthMatching?depthDesc.Height:1u;
+            model.reversed=depthReversed?1u:0u;
+            Pass(list,_cameraModel,_flowMedian.resource,kFlowFormat,nullptr,DXGI_FORMAT_UNKNOWN,
+                 nullptr,DXGI_FORMAT_UNKNOWN,_cameraFlow,kFlowFormat,model,nullptr,DXGI_FORMAT_UNKNOWN,
+                 depthMatching?depth:nullptr,depthFormat,_globalReady?_globalFlow.resource:nullptr,kFlowFormat);
+        }
         constants = Constants {};
         constants.sizeX = _flow.width;
         constants.sizeY = _flow.height;
         constants.radius = std::clamp(_settings.smoothRadius, 0, 4); // the shader's tile holds at most four pixels around a group
-        Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, nullptr,
-             DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
+        constants.depthMatching = depthMatching ? 1u : 0u;
+        constants.depthX = depthMatching ? (uint32_t)depthDesc.Width : 1u;
+        constants.depthY = depthMatching ? depthDesc.Height : 1u;
+        constants.reversed = depthReversed ? 1u : 0u;
+        constants.hasGlobal=currentCameraReady?2u:0u;
+        constants.lookWeights=_settings.lookWeights?1u:0u;
+        constants.lookRange=(std::max)(_settings.lookRange,1e-4f);
+        constants.lookDistance=(std::max)(_settings.lookDistance,0.5f);
+        constants.stillFrames=uint32_t(std::clamp(_settings.stillFrames,0,255));
+        constants.stillMargin=_settings.stillMargin;
+        constants.hasAge=wroteAge?1u:0u;
+        constants.hasHistory=(history && _settings.useHistory)?1u:0u;
+        _passAgeIn=wroteAge?_age[_current].resource:nullptr;
+        Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, previous[0].resource,
+             kLumaFormat, _flow, kFlowFormat, constants, (history && _settings.useHistory)?levelBefore[0].resource:nullptr, kFlowFormat,
+             depthMatching ? depth : nullptr, depthFormat,currentCameraReady?_cameraFlow.resource:nullptr,kFlowFormat);
+        _passAgeIn=nullptr;
 
         if (_settings.globalCandidate)
         {
@@ -590,23 +729,92 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     return true;
 }
 
-bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, float maxSpeed)
+bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, float maxSpeed, int view,
+                               ID3D12Resource* color, DXGI_FORMAT colorFormat,
+                                ID3D12Resource* depth, DXGI_FORMAT depthFormat, bool depthReversed,
+                                ID3D12Resource* guide, ID3D12Resource* historyDistrust, const float* debugDepthTransform)
 {
-    if (!_flowValid || _preview.resource == nullptr || list == nullptr)
+    if (!_flowValid || list == nullptr)
         return false;
 
+    // Diagnostics must not create a pipeline or allocate their image while disabled. This also
+    // avoids compiling a newly selected visualizer during the game's initial swapchain setup.
+    if (_visualise == nullptr)
+    {
+        const auto* code = Compile("Visualise", &_error);
+        if (!code) return false;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pso {};
+        pso.pRootSignature = _rootSignature;
+        pso.CS = { code->GetBufferPointer(), code->GetBufferSize() };
+        if (FAILED(_device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&_visualise))))
+        {
+            _error = "creating the diagnostic visualizer pipeline";
+            return false;
+        }
+    }
+    Tex& preview=view==6?_depthPreview:_preview;
+    if (preview.resource == nullptr &&
+        !CreateTexture(preview,view==6?_width:_flow.width,view==6?_height:_flow.height,
+                       DXGI_FORMAT_R8G8B8A8_UNORM,L"OpticalFlow_Preview"))
+        return false;
+    _depthPreviewActive=view==6;
+
     // The flow rests in the combined read state; the pass wants the non-pixel one it was written to.
-    Transition(list, _flow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Tex& shownFlow = view == 2 ? _levelFlow[1-_current][0] : view == 3 ? _flowMedian : _flow;
+    Transition(list, shownFlow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     Constants constants {};
-    constants.sizeX = _preview.width;
-    constants.sizeY = _preview.height;
+    constants.sizeX = preview.width;
+    constants.sizeY = preview.height;
     constants.scale = maxSpeed;
-    Pass(list, _visualise, _flow.resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN,
-         _preview, DXGI_FORMAT_R8G8B8A8_UNORM, constants);
+    constants.radius = std::clamp(view, 0, 18);
+    constants.inverseRefinement=_debugSettings.depthLinearize?1u:0u;
+    constants.photoTolerance=_debugSettings.depthMultiplier;
+    constants.evidenceNoise=(std::max)(_debugSettings.depthFarPlane,1.001f);
+    constants.auxX = _width;
+    constants.auxY = _height;
+    constants.knee = std::clamp(_debugSettings.spacing, 16.0f, 128.0f);
+    constants.lambda = std::clamp(_debugSettings.gain, 0.25f, 8.0f);
+    constants.zeroMargin = std::clamp(_debugSettings.minimumMotion, 0.05f, 4.0f);
+    constants.lookRange = std::clamp(_debugSettings.thickness, 0.5f, 3.0f);
+    constants.lookDistance = std::clamp(_debugSettings.gridOpacity, 0.0f, 0.5f);
+    constants.whiteNits = std::clamp(_debugSettings.opacity, 0.0f, 1.0f);
+    if(view==6){
+        constants.zeroMargin=debugDepthTransform?(std::max)(debugDepthTransform[0],.01f):1.f;
+        constants.lookRange=debugDepthTransform?(std::max)(debugDepthTransform[1],.01f):1.f;
+        constants.lookDistance=debugDepthTransform?-debugDepthTransform[2]/float(_width):0.f;
+        constants.whiteNits=debugDepthTransform?debugDepthTransform[3]/float(_height):0.f;
+    }
+    const bool background = (view == 7 || view == 18) && _debugSettings.background && color && colorFormat != DXGI_FORMAT_UNKNOWN;
+    constants.hasPrediction = background ? 1 : 0;
+    constants.depthMatching=depth && depthFormat!=DXGI_FORMAT_UNKNOWN ? 1u:0u;
+    if(constants.depthMatching){auto d=depth->GetDesc();constants.depthX=(uint32_t)d.Width;constants.depthY=d.Height;}
+    constants.reversed=depthReversed?1u:0u;
+    const bool maskView=view==5 || view==17 || view==18;
+    ID3D12Resource* debugGuide=maskView ? historyDistrust : guide;
+    const DXGI_FORMAT debugGuideFormat=maskView ? DXGI_FORMAT_R8_UNORM : kFlowFormat;
+    constants.hasHistory=debugGuide?1u:0u;
+    constants.hasGlobal=((!_settings.referenceMode && _settings.evidenceFilter) || _settings.evidenceDiagnostics)?1u:0u;
+    const bool showCameraSupport=(view==18 || view==5) && _settings.cameraPrior && _settings.globalCandidate;
+    if(showCameraSupport)constants.hasGlobal=2u;
+    constants.stillFrames=uint32_t(std::clamp(_settings.stillFrames,0,255));
+    constants.hasAge=view==12 && _ageValid?1u:0u;
+    if(view==12 && _ageValid)_passAgeIn=_age[1-_current].resource;
+    const bool showTrace=view>=11 && view<=16 && view!=12 && _traceValid;
+    if(showTrace) {
+        constants.coarseCells=uint32_t(std::clamp(_settings.traceLevel,0,kLevels-1));
+        constants.hasAge=1;
+    }
+    Pass(list, _visualise, shownFlow.resource, kFlowFormat, showTrace?_trace[0].resource:background ? color : nullptr,
+         showTrace?DXGI_FORMAT_R32G32B32A32_FLOAT:background ? colorFormat : DXGI_FORMAT_UNKNOWN,
+         showTrace?_trace[1].resource:_pyramid[1-_current][0].resource,showTrace?DXGI_FORMAT_R32G32B32A32_FLOAT:kLumaFormat,preview,DXGI_FORMAT_R8G8B8A8_UNORM,constants,
+         showTrace?_trace[2].resource:depth,showTrace?DXGI_FORMAT_R32G32B32A32_FLOAT:depthFormat,_pyramid[_current][0].resource,kLumaFormat,
+         debugGuide,debugGuide?debugGuideFormat:DXGI_FORMAT_UNKNOWN,
+         showCameraSupport?_cameraFlow.resource:_levelFlow[1-_current][0].resource,kFlowFormat);
 
-    Transition(list, _flow,
+    _passAgeIn=nullptr;
+    Transition(list, shownFlow,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Transition(list, _preview, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Transition(list, preview, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return true;
 }

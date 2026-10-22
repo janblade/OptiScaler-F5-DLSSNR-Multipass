@@ -24,6 +24,7 @@
 
 #include <dxgi1_6.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/GpuCrashDiagnostics.h>
 
 #include "Hook_Utils.h"
 
@@ -1450,6 +1451,7 @@ VALIDATE_HOOK(hkD3D12CreateDevice, D3d12Proxy::PFN_D3D12CreateDevice)
 static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid,
                                    void** ppDevice)
 {
+    GpuCrashDiagnostics::Enable();
     LOG_DEBUG("Adapter: {:X}, Level: {:X}, Caller: {}", (size_t) pAdapter, (UINT) MinimumFeatureLevel,
               Util::WhoIsTheCaller(_ReturnAddress()));
 
@@ -1613,6 +1615,7 @@ VALIDATE_HOOK(hkCreateDevice, PFN_CreateDevice)
 static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel,
                               REFIID riid, void** ppDevice)
 {
+    GpuCrashDiagnostics::Enable();
     LOG_DEBUG("Adapter: {:X}, Level: {:X}, Caller: {}", (size_t) pAdapter, (UINT) MinimumFeatureLevel,
               Util::WhoIsTheCaller(_ReturnAddress()));
 

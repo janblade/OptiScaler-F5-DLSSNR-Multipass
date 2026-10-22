@@ -57,7 +57,7 @@ class NativeDriver
 
     // One frame: Acquire on `source` (its SetPresent is done), the producer, Return. `flowPreview` asks the producer
     // for the flow picture the menu shows.
-    RunResult RunFrame(IFrameSource& source, bool flowPreview);
+    RunResult RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView = 0);
 
     // ImGui: one line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
     void DrawStatus();

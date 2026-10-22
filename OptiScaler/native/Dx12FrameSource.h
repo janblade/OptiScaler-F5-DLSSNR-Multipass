@@ -23,7 +23,7 @@ class Dx12FrameSource : public IFrameSource
     Api GetApi() const override { return Api::D3D12; }
     AcquireStatus Acquire(FrameInput& input) override;
     void Return(const FrameInput& input, const FrameOutput& output) override;
-    void OnResize() override {}
+    void OnResize() override { Release(); }
 
   private:
     void Release();

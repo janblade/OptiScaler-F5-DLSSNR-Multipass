@@ -131,7 +131,7 @@ class DepthFinderCore
     uint64_t BeginPresent(uint32_t pictureWidth, uint32_t pictureHeight);
     // Part two: counts the present, stands down or wakes, and (after warm-up) picks. True when it stood down this frame (the
     // adapter then drops its copies).
-    bool EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, uint32_t warmupFrames);
+    bool EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, uint32_t warmupFrames, uint32_t selectedWidth=0, uint32_t selectedHeight=0);
 
     // The pick as of the last present.
     GenericDepthSelect::Pick CurrentPick() const;

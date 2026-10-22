@@ -7,6 +7,7 @@
 #include "NVNGX_Parameter.h"
 #include "proxies/NVNGX_Proxy.h"
 #include "dlssnr/DlssNr.h"
+#include "dlssnr/DlssNr_ProxyLifetime.h"
 #include "dlssnr/DlssNr_ExposureScan.h"
 #include <upscalers/dlss/DLSSFeature_Dx12.h>
 #include <shaders/output_scaling/OS_Dx12.h>
@@ -158,6 +159,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
                                                         NVSDK_NGX_Version InSDKVersion,
                                                         const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
+    if (DlssNr::RetainDeviceProxyModule(InDevice))
+        LOG_INFO("NGX: retained the ReShade D3D12 proxy module for cached device interfaces");
+
     LOG_FUNC();
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
@@ -391,6 +395,9 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
     shutdown = true;
     State::Instance().nvngxDx12Inited = false;
 
+    // NR owns a separate model on this device. Its release must run while the
+    // NGX core and the caller's API hooks/callbacks are still alive, not at DLL detach.
+    DlssNr::ShutdownForDevice(requestedDevice != nullptr ? requestedDevice : D3D12Device);
     D3D12Device = nullptr;
 
     State::Instance().currentFeature = nullptr;
@@ -910,6 +917,11 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* 
 
         if (auto* deviceContext = entry.feature.get())
         {
+            // Feeder releases its last feature while the private queue is drained,
+            // but can deliberately skip NGX Shutdown during Vulkan device teardown.
+            // Retire NR here too, before the core/interposers and their callbacks go.
+            if (Dx12Contexts.size() == 1)
+                DlssNr::ShutdownForDevice(deviceContext->GetDevice());
             // Clear global reference if it matches
             if (deviceContext == State::Instance().currentFeature)
                 State::Instance().currentFeature = nullptr;

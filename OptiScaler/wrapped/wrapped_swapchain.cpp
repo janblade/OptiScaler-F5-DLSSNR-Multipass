@@ -1360,6 +1360,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
     if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
 
+    if (!NativeMotionDx12::WaitForPendingFrame())
+        return DXGI_ERROR_WAS_STILL_DRAWING;
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
     LOG_DEBUG("");
@@ -1845,6 +1847,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     if (auto* proxy = Proxy(); proxy != nullptr && proxy->InResizeOnThisThread())
         return DXGI_ERROR_INVALID_CALL;
 
+    if (!NativeMotionDx12::WaitForPendingFrame())
+        return DXGI_ERROR_WAS_STILL_DRAWING;
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_WAS_STILL_DRAWING;
     LOG_DEBUG("");

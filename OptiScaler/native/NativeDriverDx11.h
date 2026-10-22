@@ -37,5 +37,12 @@ bool NrOnlyRunning();
 // ImGui: with NativeDebugView, the flow tuning sliders, the frame count and the trust mask's state. The keys themselves
 // are set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();
+void BeginDebugFrame(ID3D11Device* device);
+void EndDebugFrame();
+void ReleaseDebugViews();
+void BeginDx12DebugFrame(ID3D12CommandQueue* queue,ID3D12Fence* menuFence = nullptr);
+void EndDx12DebugFrame(ID3D12Fence* fence = nullptr, UINT64 value = 0);
+bool ExpandedPreviewVisible();
+void DrawExpandedPreview();
 
 } // namespace NativeMotionDx11

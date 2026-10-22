@@ -1123,7 +1123,7 @@ void Install(ID3D12Device* device)
              "makes an upscaler call",
              g_overlayOn.load() ? " (the overlay's copy is recorded into the game's command list)"
                                 : " (nothing is changed)",
-             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default(), Config::Instance()->DlssNrNativeDepthWidth.value_or_default(), Config::Instance()->DlssNrNativeDepthHeight.value_or_default());
 }
 
 void OnPresent(IDXGISwapChain* swapChain)
@@ -1189,7 +1189,7 @@ void OnPresent(IDXGISwapChain* swapChain)
 
     // Part two in the core: counts the present, stands down or wakes, and picks once the warm-up is over.
     const bool stoodDown =
-        g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height, Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+        g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height, Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default(), Config::Instance()->DlssNrNativeDepthWidth.value_or_default(), Config::Instance()->DlssNrNativeDepthHeight.value_or_default());
 
     {
         std::lock_guard lock(g_mutex);

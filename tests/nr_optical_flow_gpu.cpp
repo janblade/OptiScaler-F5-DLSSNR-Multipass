@@ -577,6 +577,13 @@ int main(int argc, char** argv)
             tuning.globalCandidate = false;
         else if (arg == "score")
             score = true;
+        else if (key == "f5flags")
+        {
+            const unsigned features=(unsigned)value;
+            tuning.reuseCandidateCost=(features&1)!=0;
+            tuning.refinementAcceptance=(features&2)!=0;
+            tuning.evidenceFilter=(features&4)!=0;
+        }
         else if (key == "radius")
             tuning.radius = (int) value;
         else if (key == "coarse")

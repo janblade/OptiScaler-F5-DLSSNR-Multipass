@@ -402,7 +402,7 @@ uint64_t DepthFinderCore::BeginPresent(uint32_t pictureWidth, uint32_t pictureHe
     return _presents;
 }
 
-bool DepthFinderCore::EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, uint32_t warmupFrames)
+bool DepthFinderCore::EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, uint32_t warmupFrames, uint32_t selectedWidth, uint32_t selectedHeight)
 {
     {
         std::lock_guard lock(_mutex);
@@ -450,6 +450,8 @@ bool DepthFinderCore::EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, 
         _armed = true;
     }
 
+    auto& rules=_selector.Settings();
+    if(rules.selectedWidth!=selectedWidth || rules.selectedHeight!=selectedHeight){_selector.Reset();rules.selectedWidth=selectedWidth;rules.selectedHeight=selectedHeight;}
     const auto pick = _selector.Update(_frameCandidates, pictureWidth, pictureHeight);
 
     const bool pickChanged = (pick.valid ? pick.id : 0) != _lastLoggedPick;

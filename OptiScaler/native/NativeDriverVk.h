@@ -41,8 +41,16 @@ void DrawStatus();
 // NR is running on the finished picture (the menu header's "Optical F5Low: NR on the finished picture").
 bool NrOnlyRunning();
 
-// ImGui: with NativeDebugView, the flow tuning, the frame count and the trust mask's state. No pictures: they are D3D12
-// textures and the Vulkan menu cannot show them.
+// NativeDebugView: local arrows, optical flow, geometry diagnostics and trust pictures.
 void DrawAdvancedUi();
+void BeginDebugFrame(VkDevice device,VkPhysicalDevice physical,uint32_t family,uint32_t slot);
+void RecordDebugTransfers(VkCommandBuffer commands);
+VkSemaphore DebugWaitSemaphore();
+uint64_t DebugWaitValue();
+void ReleaseDebugViews();
+void BeginDx12DebugFrame(ID3D12CommandQueue* queue,ID3D12Fence* menuFence = nullptr);
+void EndDx12DebugFrame(ID3D12Fence* fence = nullptr, UINT64 value = 0);
+bool ExpandedPreviewVisible();
+void DrawExpandedPreview();
 
 } // namespace NativeMotionVk

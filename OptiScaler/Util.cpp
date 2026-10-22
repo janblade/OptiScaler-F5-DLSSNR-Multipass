@@ -3,6 +3,7 @@
 #include "Util.h"
 #include "misc/PathUnder.h"
 #include "Config.h"
+#include <misc/GpuCrashDiagnostics.h>
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -928,6 +929,7 @@ static void LogDredReport(ID3D12Device* device)
 void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
 {
     auto reason = pDevice->GetDeviceRemovedReason();
+    if (FAILED(reason)) GpuCrashDiagnostics::Dump(pDevice);
 
     switch (reason)
     {

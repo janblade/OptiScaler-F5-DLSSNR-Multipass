@@ -549,6 +549,15 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrAutoExposureMeterLowPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterLowPercent"));
             DlssNrAutoExposureMeterHighPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterHighPercent"));
             DlssNrNativeDepthFinder.set_from_config(readBool("DlssNr", "NativeDepthFinder"));
+            DlssNrNativeDepthWidth.set_from_config(readUInt("DlssNr", "NativeDepthWidth"));
+            DlssNrNativeDepthHeight.set_from_config(readUInt("DlssNr", "NativeDepthHeight"));
+            DlssNrNativeDepthScaleX.set_from_config(readFloat("DlssNr", "NativeDepthScaleX"));
+            DlssNrNativeDepthScaleY.set_from_config(readFloat("DlssNr", "NativeDepthScaleY"));
+            DlssNrNativeDepthOffsetX.set_from_config(readFloat("DlssNr", "NativeDepthOffsetX"));
+            DlssNrNativeDepthOffsetY.set_from_config(readFloat("DlssNr", "NativeDepthOffsetY"));
+            DlssNrNativeDepthLinearize.set_from_config(readBool("DlssNr", "NativeDepthLinearize"));
+            DlssNrNativeDepthMultiplier.set_from_config(readFloat("DlssNr", "NativeDepthMultiplier"));
+            DlssNrNativeDepthFarPlane.set_from_config(readFloat("DlssNr", "NativeDepthFarPlane"));
             DlssNrNativeDepthVkCopyUsage.set_from_config(readBool("DlssNr", "NativeDepthVkCopyUsage"));
             DlssNrNativeDepthResolveInList.set_from_config(readBool("DlssNr", "NativeDepthResolveInList"));
             DlssNrNativeDxvkVulkan.set_from_config(readBool("DlssNr", "NativeDxvkVulkan"));
@@ -1677,6 +1686,15 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrAutoExposureMeterHighPercent.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthFinder",
                  GetBoolValue(Instance()->DlssNrNativeDepthFinder.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthWidth", GetIntValue(Instance()->DlssNrNativeDepthWidth.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthHeight", GetIntValue(Instance()->DlssNrNativeDepthHeight.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthScaleX", GetFloatValue(Instance()->DlssNrNativeDepthScaleX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthScaleY", GetFloatValue(Instance()->DlssNrNativeDepthScaleY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthOffsetX", GetFloatValue(Instance()->DlssNrNativeDepthOffsetX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthOffsetY", GetFloatValue(Instance()->DlssNrNativeDepthOffsetY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthLinearize", GetBoolValue(Instance()->DlssNrNativeDepthLinearize.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthMultiplier", GetFloatValue(Instance()->DlssNrNativeDepthMultiplier.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthFarPlane", GetFloatValue(Instance()->DlssNrNativeDepthFarPlane.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthVkCopyUsage",
                  GetBoolValue(Instance()->DlssNrNativeDepthVkCopyUsage.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthResolveInList",

@@ -25,8 +25,7 @@
 #include "inputs/FSR3_Dx12.h"
 #include "inputs/FG/FSR3_Dx12_FG.h"
 
-#include <fsr4/FSR4ModelSelection.h>
-
+#include <hooks/Amdxc64_Hooks.h>
 #include <hooks/Dxgi_Hooks.h>
 #include <hooks/D3D11_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
@@ -1790,7 +1789,7 @@ DWORD WINAPI getGpuInfo(LPVOID hModuleVoid)
     if (primaryGpu.vendorId == VendorId::AMD)
         Amdxc64Hooks::Init();
 
-    else if (Config::Instance()->Fsr4ForceModel.value_or_default() == FSR4Support::INT8)
+    else if (IsFsr4Int8(Config::Instance()->Fsr4GpuSupport.value_or_default()))
     {
         // We need spoofing hooks for FFX but want to avoid spoofing for the rest of the game
         if (!Config::Instance()->DxgiSpoofing.value_or_default())
@@ -1919,27 +1918,28 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // Initial state of FG
         State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default();
 
-        // The built-in MFG unlocks were removed in 0.1.33. The RTX 20/30 one also turned External on (and saved it),
-        // which now leaves such a player with no frame generation at all: say how to get OptiScaler's back.
+        // The old [DLSSG] unlock keys were replaced by [MFGUnlock]. The old RTX 20/30 one also turned External on (and
+        // saved it), which leaves such a player with no frame generation at all: say how to get OptiScaler's back.
         if (Config::Instance()->RemovedAmpereMfgUnlockSet && State::Instance().externalFrameGeneration)
         {
-            spdlog::warn("[DLSSG] AmpereMfgUnlock is set, but the built-in RTX 20/30 MFG unlock was removed in 0.1.33 "
-                         "and the key is ignored. [FrameGen] External=true was most likely set by it: untick External "
-                         "frame generation (or set External=false), Save Settings and restart to use OptiScaler's "
-                         "frame generation.");
+            spdlog::warn("[DLSSG] AmpereMfgUnlock is set, but that key was replaced by [MFGUnlock] RTX2030 and is "
+                         "ignored. [FrameGen] External=true was most likely set by it: untick External frame generation "
+                         "(or set External=false), set [MFGUnlock] RTX2030=detect, Save Settings and restart to use "
+                         "OptiScaler's frame generation.");
 
             ImGuiToast notification({ ImGuiToastType::Warning, 30000,
-                                      "The built-in RTX 20/30 MFG unlock was removed in 0.1.33.\n"
+                                      "[DLSSG] AmpereMfgUnlock was replaced by [MFGUnlock] RTX2030.\n"
                                       "External frame generation is still on from it, so OptiScaler's FG is off.\n"
-                                      "Untick External frame generation, Save Settings and restart." });
-            notification.setTitle("RTX 20/30 MFG unlock removed");
+                                      "Untick External frame generation, set RTX2030=detect, Save Settings and "
+                                      "restart." });
+            notification.setTitle("RTX 20/30 MFG unlock moved");
             ImGui::InsertNotification(notification);
         }
         else if (Config::Instance()->RemovedAdaMfgUnlockSet || Config::Instance()->RemovedAmpereMfgUnlockSet)
         {
-            spdlog::warn("[DLSSG] AdaMfgUnlock/AmpereMfgUnlock is set, but the built-in MFG unlock was removed in "
-                         "0.1.33 and these keys are ignored. On RTX 40, use an external MFG unlocker with [FrameGen] "
-                         "External=true. Save Settings drops the old keys.");
+            spdlog::warn("[DLSSG] AdaMfgUnlock/AmpereMfgUnlock is set, but these keys were replaced by [MFGUnlock] "
+                         "RTX40 / RTX2030 (off by default; detect or true turns them on) and are ignored. Save "
+                         "Settings drops the old keys.");
         }
 
         if (State::Instance().externalFrameGeneration)
@@ -2137,38 +2137,21 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
 
         // FSR4 Watermark, overrides environment variable only if set in config
+        // The driver only checks whether the variable exists so disabling has to remove it
         if (Config::Instance()->Fsr4EnableWatermark.has_value())
         {
-            if (Config::Instance()->Fsr4EnableWatermark.value())
-            {
-                _wputenv_s(L"MLSR-WATERMARK", L"1");
-                SetEnvironmentVariableW(L"MLSR-WATERMARK", L"1");
+            Util::SetFlagEnvVar(L"MLSR-WATERMARK", Config::Instance()->Fsr4EnableWatermark.value());
 
-                if (!Config::Instance()->FpsOverlayPosition.has_value())
-                    Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
-            }
-            else
-            {
-                _wputenv_s(L"MLSR-WATERMARK", L"0");
-                SetEnvironmentVariableW(L"MLSR-WATERMARK", L"0");
-            }
+            if (Config::Instance()->Fsr4EnableWatermark.value() && !Config::Instance()->FpsOverlayPosition.has_value())
+                Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
         }
 
         if (Config::Instance()->FSRFGEnableWatermark.has_value())
         {
-            if (Config::Instance()->FSRFGEnableWatermark.value())
-            {
-                _wputenv_s(L"MLFI-WATERMARK", L"1");
-                SetEnvironmentVariableW(L"MLFI-WATERMARK", L"1");
+            Util::SetFlagEnvVar(L"MLFI-WATERMARK", Config::Instance()->FSRFGEnableWatermark.value());
 
-                if (!Config::Instance()->FpsOverlayPosition.has_value())
-                    Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
-            }
-            else
-            {
-                _wputenv_s(L"MLFI-WATERMARK", L"0");
-                SetEnvironmentVariableW(L"MLFI-WATERMARK", L"0");
-            }
+            if (Config::Instance()->FSRFGEnableWatermark.value() && !Config::Instance()->FpsOverlayPosition.has_value())
+                Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
         }
 
         // Asi plugins

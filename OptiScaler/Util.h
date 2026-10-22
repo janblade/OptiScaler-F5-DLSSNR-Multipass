@@ -48,6 +48,7 @@ std::optional<std::filesystem::path> FindFilePath(const std::filesystem::path& s
                                                   const std::filesystem::path& fileName);
 std::string WhoIsTheCaller(void* returnAddress);
 HMODULE GetCallerModule(void* returnAddress);
+std::filesystem::path ModulePath(HMODULE module);
 MonitorInfo GetMonitorInfoForWindow(HWND hwnd);
 MonitorInfo GetMonitorInfoForOutput(IDXGIOutput* pOutput);
 int GetActiveRefreshRate(HWND hwnd);
@@ -61,6 +62,8 @@ std::map<Luid, std::filesystem::path> GetDriverStore();
 
 // Wall clock in ns (100 ns resolution), for the low latency layer's timing
 uint64_t GetTimestamp();
+
+void SetFlagEnvVar(const wchar_t* name, bool enabled);
 
 template <typename T> void DelayedDestroy(std::unique_ptr<T> ptr)
 {

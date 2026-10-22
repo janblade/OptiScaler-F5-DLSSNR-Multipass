@@ -21,8 +21,12 @@
 #include <proxies/XeSS_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/FfxApi_Proxy.h>
+#include <upscalers/ffx/FFXFeature.h>
+#include <fsr4/FSR4Models.h>
+#include <fsr4/FSR4Presets.h>
 #include <proxies/Streamline_Proxy.h>
 
+#include <framegen/mfgunlock/Status.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 
 #include <nvapi/fakenvapi.h>
@@ -3146,10 +3150,67 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     ImGui::SameLine();
                     if (state.currentFsr4Preset.has_value())
                         ImGui::TextDisabled("(Active: %d)", state.currentFsr4Preset.value());
-                    else if (FSR4ModelSelection::IsInt8FsrHooked())
+                    else if (FSR4Presets::IsAnyModuleHooked())
                         ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "(Potential FSR3 fallback)");
                     else
                         ImGui::TextDisabled("(Failed to hook)");
+
+                    // FSR 4 models of the module running the selected upscaler, only listed when the GPU can run more
+                    // than one of them
+                    HMODULE modelModule = nullptr;
+                    const auto ffxIndex = config->FfxUpscalerIndex.value_or_default();
+                    // The version list is shared with Vulkan and DX11, only the DX12 ones come from the driver provider
+                    const bool dx12Upscaler = (state.api == API::DX12 && currentBackend == Upscaler::FFX) ||
+                                              currentBackend == Upscaler::FFX_on12;
+
+                    if (dx12Upscaler && ffxIndex >= 0 && ffxIndex < state.ffxUpscalerVersionIds.size())
+                        modelModule = FfxApiProxy::UpscalerModule(state.ffxUpscalerVersionIds[ffxIndex]);
+
+                    if (auto models = FSR4Models::SelectableModels(modelModule); !models.empty())
+                    {
+                        auto& selectedModel = config->Fsr4Model;
+                        auto selectedName =
+                            selectedModel.has_value() ? FSR4Models::Name(selectedModel.value()) : "Auto";
+                        bool modelChanged = false;
+
+                        ImGui::SetNextItemWidth(150.0f * menuResScale);
+                        if (ImGui::BeginCombo("FSR4 Model", selectedName))
+                        {
+                            if (ImGui::Selectable("Auto", !selectedModel.has_value()) && selectedModel.has_value())
+                            {
+                                selectedModel.reset();
+                                modelChanged = true;
+                            }
+
+                            for (auto model : models)
+                            {
+                                bool isSelected = selectedModel.has_value() && selectedModel.value() == model;
+
+                                if (ImGui::Selectable(FSR4Models::Name(model), isSelected) && !isSelected)
+                                {
+                                    selectedModel = model;
+                                    modelChanged = true;
+                                }
+                            }
+
+                            ImGui::EndCombo();
+                        }
+
+                        if (modelChanged)
+                        {
+                            state.newBackend = currentBackend;
+                            MARK_ALL_BACKENDS_CHANGED();
+                        }
+
+                        ShowHelpMarker("FSR 4 network to run.\n"
+                                       "Auto lets FFX pick the best one the GPU supports.");
+
+                        ImGui::SameLine();
+                        if (auto activeModel = FSR4Models::ActiveModel(modelModule))
+                            ImGui::TextDisabled("(Active: %s)", FSR4Models::Name(*activeModel));
+                        else
+                            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "(Potential FSR3 fallback)");
+                    }
                 }
 
                 if (majorFsrVersion >= 3)
@@ -3193,10 +3254,12 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                         {
                             LOG_DEBUG("FSR4 Watermark set to {}", fsr4wm);
                             config->Fsr4EnableWatermark = fsr4wm;
-                        }
+                            Util::SetFlagEnvVar(L"MLSR-WATERMARK", fsr4wm);
 
-                        ShowHelpMarker("After changing this option, please Save Settings.\n"
-                                       "It will be applied on next launch.");
+                            // The driver reads the variable on context creation
+                            state.newBackend = currentBackend;
+                            MARK_ALL_BACKENDS_CHANGED();
+                        }
                     }
                 }
 
@@ -3526,6 +3589,21 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                    "\nDoes not install an unlocker or enable FG in unsupported games.");
     if (external != state.externalFrameGeneration)
         ImGui::TextWrapped("Save Settings and restart to change frame-generation ownership.");
+
+    ImGui::SeparatorText("Built-in MFG unlock");
+    const std::array unlockModes = { config->MfgUnlockXeFG.value_or_default(),
+                                     config->MfgUnlockRTX40.value_or_default(),
+                                     config->MfgUnlockRTX2030.value_or_default() };
+    for (size_t index = 0; index < unlockModes.size(); ++index)
+    {
+        const auto family = static_cast<MfgUnlock::Family>(index);
+        const auto status = MfgUnlock::StatusRegistry::Get(family);
+        const std::string text = unlockModes[index] == MfgUnlockMode::Off      ? "off"
+                                 : status.state == MfgUnlock::FamilyState::Off ? "waiting for a provider"
+                                                                               : MfgUnlock::FormatStatus(status);
+        const auto name = MfgUnlock::kFamilyNames[index];
+        ImGui::Text("%.*s: %s", static_cast<int>(name.size()), name.data(), text.c_str());
+    }
 
     auto& menuResScale = ctx.menuResScale;
     auto& primaryGpu = *ctx.primaryGpu;
@@ -4379,10 +4457,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 {
                     LOG_DEBUG("FSRFGEnableWatermark set FGWatermark: {}", fgwm);
                     config->FSRFGEnableWatermark = fgwm;
-                }
+                    Util::SetFlagEnvVar(L"MLFI-WATERMARK", fgwm);
 
-                ShowHelpMarker("After changing this option, please Save Settings\n"
-                               "It will be applied on next launch.");
+                    // The driver reads the variable on context creation
+                    if (config->IsFGEnabled())
+                        state.fgChanged = true;
+                }
             }
 
             ImGui::Spacing();
@@ -5473,10 +5553,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     {
                         LOG_DEBUG("FSRFGEnableWatermark set FGWatermark: {}", fgwm);
                         config->FSRFGEnableWatermark = fgwm;
-                    }
+                        Util::SetFlagEnvVar(L"MLFI-WATERMARK", fgwm);
 
-                    ShowHelpMarker("After changing this option, please Save Settings\n"
-                                   "It will be applied on next launch.");
+                        // The driver reads the variable on context creation
+                        if (config->IsFGEnabled())
+                            state.fgChanged = true;
+                    }
                 }
             }
 

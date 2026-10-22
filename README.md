@@ -52,3 +52,8 @@ For frame generation, see the [setup notes](docs/DLSS-FRAME-GENERATION.md). For 
 Built on [OptiScaler](https://github.com/optiscaler/OptiScaler) and [Dagherbou's Neural Rendering fork](https://github.com/Dagherbou/OptiScaler_DLSSNR), with colour processing from [RenoDX](https://github.com/clshortfuse/renodx).
 
 [Full credits](docs/CREDITS.md) · [Licence](LICENSE) · [OptiScaler documentation](https://github.com/optiscaler/OptiScaler/wiki)
+
+## Support
+
+This fork is made in my spare time. If it's useful to you and you'd like to say thanks,
+you can [buy me a coffee](https://buymeacoffee.com/janblade). Bug reports and logs help just as much.

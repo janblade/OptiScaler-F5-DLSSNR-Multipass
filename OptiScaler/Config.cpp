@@ -70,7 +70,21 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             FGEnabled.set_from_config(readBool("FrameGen", "Enabled"));
             ExternalFrameGeneration.set_from_config(readBool("FrameGen", "External"));
-            // The built-in MFG unlocks were removed in 0.1.33: their keys are only read to say so once at startup
+            const auto readMfgUnlockMode = [this](const char* key)
+            {
+                const std::string value = ini.GetValue("MFGUnlock", key, "auto");
+                _log.push_back(std::format("MFGUnlock.{}: {}", key, value));
+
+                bool valid = true;
+                const auto mode = MfgUnlock::ParseMode(value, valid);
+                if (!valid)
+                    LOG_WARN("[MFGUnlock] {} has invalid value '{}'; using the default (off)", key, value);
+                return mode;
+            };
+            MfgUnlockXeFG.set_from_config(readMfgUnlockMode("XeFG"));
+            MfgUnlockRTX40.set_from_config(readMfgUnlockMode("RTX40"));
+            MfgUnlockRTX2030.set_from_config(readMfgUnlockMode("RTX2030"));
+            // The old [DLSSG] unlock keys were replaced by [MFGUnlock]: they are only read to say so once at startup
             RemovedAdaMfgUnlockSet = readBool("DLSSG", "AdaMfgUnlock").value_or(false);
             RemovedAmpereMfgUnlockSet = readBool("DLSSG", "AmpereMfgUnlock").value_or(false);
             FGDebugView.set_from_config(readBool("FrameGen", "DebugView"));
@@ -220,6 +234,11 @@ bool Config::Reload(std::filesystem::path iniPath)
         }
 
         {
+            FGXeFGMaxInterpolations.set_from_config(readInt("XeFG", "MaxInterpolations"));
+            if (FGXeFGMaxInterpolations.has_value() &&
+                (FGXeFGMaxInterpolations.value() < 1 || FGXeFGMaxInterpolations.value() > 5))
+                FGXeFGMaxInterpolations.reset();
+
             FGXeFGInterpolationCount.set_from_config(readInt("XeFG", "InterpolationCount"));
             if (FGXeFGInterpolationCount.has_value() && FGXeFGInterpolationCount.value() < 1)
                 FGXeFGInterpolationCount.reset();
@@ -325,10 +344,15 @@ bool Config::Reload(std::filesystem::path iniPath)
             FsrUseMaskForTransparency.set_from_config(readBool("FSR", "UseReactiveMaskForTransparency"));
             DlssReactiveMaskBias.set_from_config(readFloat("FSR", "DlssReactiveMaskBias"));
 
-            if (auto v = readEnum<FSR4Support>("FSR", "Fsr4ForceModel"))
-                Fsr4ForceModel.set_from_config(*v);
+            if (auto v = readEnum<FSR4Support>("FSR", "Fsr4GpuSupport"))
+                Fsr4GpuSupport.set_from_config(*v);
             else
-                Fsr4ForceModel.reset();
+                Fsr4GpuSupport.reset();
+
+            if (auto v = readEnum<FSR4Model>("FSR", "Fsr4Model"))
+                Fsr4Model.set_from_config(*v);
+            else
+                Fsr4Model.reset();
 
             Fsr4EnableWatermark.set_from_config(readBool("FSR", "Fsr4EnableWatermark"));
             Fsr4DoNotLoadAmdxc64.set_from_config(readBool("FSR", "Fsr4DoNotLoadAmdxc64"));
@@ -1179,6 +1203,13 @@ bool Config::Reload(std::filesystem::path iniPath)
         // Reading old configs for compatibility reasons
         {
             _DONTUSE_Fsr4ForceEnableInt8.set_from_config(readBool("FSR", "Fsr4ForceEnableInt8"));
+
+            // Named Fsr4ForceModel in older nightlies
+            if (!Fsr4GpuSupport.has_value())
+            {
+                if (auto v = readEnum<FSR4Support>("FSR", "Fsr4ForceModel"))
+                    Fsr4GpuSupport.set_from_config(*v);
+            }
         }
 
         return true;
@@ -1263,8 +1294,11 @@ bool Config::SaveIni()
     {
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
         ini.SetValue("FrameGen", "External", GetBoolValue(Instance()->ExternalFrameGeneration.value_for_config_or(false)).c_str());
+        ini.SetValue("MFGUnlock", "XeFG", MfgUnlock::ModeText(Instance()->MfgUnlockXeFG.value_for_config()));
+        ini.SetValue("MFGUnlock", "RTX40", MfgUnlock::ModeText(Instance()->MfgUnlockRTX40.value_for_config()));
+        ini.SetValue("MFGUnlock", "RTX2030", MfgUnlock::ModeText(Instance()->MfgUnlockRTX2030.value_for_config()));
 
-        // The built-in MFG unlocks were removed in 0.1.33; drop their keys so the startup note stops after a save
+        // The old [DLSSG] unlock keys were replaced by [MFGUnlock]; drop them so the startup note stops after a save
         for (const char* key : { "AdaMfgUnlock", "AdaBlackwellKernels", "AdaTemporalFix", "AdaFlipMeteringPatch",
                                  "AmpereMfgUnlock", "AmpereMfgMaxFrames", "AmpereMfgKernelImage",
                                  "AmpereMfgHardwareBilinear" })
@@ -1385,6 +1419,8 @@ bool Config::SaveIni()
 
     // XeFG output
     {
+        ini.SetValue("XeFG", "MaxInterpolations",
+                     GetIntValue(Instance()->FGXeFGMaxInterpolations.value_for_config()).c_str());
         ini.SetValue("XeFG", "InterpolationCount",
                      GetIntValue(Instance()->FGXeFGInterpolationCount.value_for_config()).c_str());
         ini.SetValue("XeFG", "DynamicMFG", GetBoolValue(Instance()->FGXeFGDynamicMFG.value_for_config()).c_str());
@@ -1537,8 +1573,9 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FsrUseMaskForTransparency.value_for_config()).c_str());
         ini.SetValue("FSR", "DlssReactiveMaskBias",
                      GetFloatValue(Instance()->DlssReactiveMaskBias.value_for_config()).c_str());
-        ini.SetValue("FSR", "Fsr4ForceModel", GetIntValue(Instance()->Fsr4ForceModel.value_for_config()).c_str());
+        ini.SetValue("FSR", "Fsr4GpuSupport", GetIntValue(Instance()->Fsr4GpuSupport.value_for_config()).c_str());
         ini.SetValue("FSR", "Fsr4Preset", GetIntValue(Instance()->Fsr4Preset.value_for_config()).c_str());
+        ini.SetValue("FSR", "Fsr4Model", GetIntValue(Instance()->Fsr4Model.value_for_config()).c_str());
         ini.SetValue("FSR", "Fsr4EnableWatermark",
                      GetBoolValue(Instance()->Fsr4EnableWatermark.value_for_config()).c_str());
         ini.SetValue("FSR", "Fsr4DoNotLoadAmdxc64",
@@ -2256,6 +2293,7 @@ bool Config::SaveIni()
     // Old configs, just delete them
     {
         ini.Delete("FSR", "Fsr4ForceEnableInt8");
+        ini.Delete("FSR", "Fsr4ForceModel");
         ini.Delete("Nukems", "MakeDepthCopy", true);
     }
 

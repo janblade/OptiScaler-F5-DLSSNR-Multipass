@@ -5,6 +5,7 @@
 #include "native/NativeLowLatencyRule.h"
 #include "motion/MotionProfiles.h"
 #include "shaders/dlssnr/DlssNr_InputStyles.h"
+#include "framegen/mfgunlock/Mode.h"
 
 #include <optional>
 #include <filesystem>
@@ -1090,8 +1091,10 @@ class Config
     CustomOptional<float> FsrMinDisOccAcc { -0.333f };
 
     // FSR4
-    CustomOptional<FSR4Support> Fsr4ForceModel { FSR4Support::None };
+    // Overrides the FSR 4 support detected for the GPU
+    CustomOptional<FSR4Support> Fsr4GpuSupport { FSR4Support::None };
     CustomOptional<uint32_t, NoDefault> Fsr4Preset;
+    CustomOptional<FSR4Model, NoDefault> Fsr4Model;
     CustomOptional<bool> Fsr4EnableWatermark { false };
     CustomOptional<bool> Fsr4DoNotLoadAmdxc64 { false };
 
@@ -1145,8 +1148,11 @@ class Config
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
     CustomOptional<bool> ExternalFrameGeneration { false };
-    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: the built-in MFG unlocks were removed in 0.1.32,
-    // and startup says so once. Read only, never saved.
+    CustomOptional<MfgUnlockMode> MfgUnlockXeFG { MfgUnlockMode::Off };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX40 { MfgUnlockMode::Off };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX2030 { MfgUnlockMode::Off };
+    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: those keys were replaced by [MFGUnlock] RTX40 /
+    // RTX2030, and startup says so once. Read only, never saved.
     bool RemovedAdaMfgUnlockSet = false;
     bool RemovedAmpereMfgUnlockSet = false;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
@@ -1234,6 +1240,7 @@ class Config
 
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
+    CustomOptional<int> FGXeFGMaxInterpolations { 5 };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
     CustomOptional<bool> FGXeFGDynamicMFG { false };          // Count picked per frame, up to the InterpolationCount
     CustomOptional<float> FGXeFGFramerateTargetDMFG { 0.0f }; // 0: the FPS limit, else just under the refresh rate

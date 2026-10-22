@@ -31,6 +31,10 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
 
     std::unique_ptr<DI_Dx12> _depthInvert;
 
+    int _nativeMaxInterpolations = 1;
+    void ApplyMaxInterpolations(uint32_t reported);
+    void LogAcceptedInterpolations();
+
     // Dynamic MFG: the count follows a target frame rate, up to the Frame Gen setting
     XeFG_DynamicCount _dynamicCount;
     XeFG_DynamicCap _dynamicCap; // "Use target as cap": holds the target, no rounding band, no 1X

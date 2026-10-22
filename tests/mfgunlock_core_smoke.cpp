@@ -929,6 +929,9 @@ int main()
         Check(!report.Complete(), "sl.dlss_g stands aside on a six-byte register store of an unknown value");
         report = slCase({ 0x0f, 0x94, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // sete [rbx+f]
         Check(!report.Complete(), "sl.dlss_g stands aside on a setcc to the state");
+        report = slCase({ 0xc5, 0xf8, 0x77, 0x44, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // vzeroupper / store
+        Check(!report.Complete() && report.failure.find("outside every unwind function") != std::string::npos,
+              "sl.dlss_g stands aside on a store the function walk cannot decode its way to");
         report = slCase({ 0x33, 0xc0, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00, 0x40, 0x88, 0xbb, 0xf8, 0x44, 0x00, 0x00 },
                         holder); // xor eax,eax / mov [rbx+f], al / mov [rbx+f], dil
         Check(report.Complete() && report.initialisers == 1 && report.patches.size() == 2,

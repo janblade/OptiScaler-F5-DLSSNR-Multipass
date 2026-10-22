@@ -69,33 +69,45 @@ inline uint32_t ReadU32(const std::byte* bytes)
     return value;
 }
 
-// Decodes linearly from the start of the unwind function holding rva; true only when rva is an instruction start.
-// Data embedded in the function can desynchronise the walk, which rejects the candidate (fail closed).
-inline bool IsInstructionStart(const ImageView& image, uint32_t rva)
+enum class Walk
+{
+    Start,    // the linear walk lands on rva
+    NotStart, // the walk decoded cleanly past rva: rva is inside another instruction
+    Unknown   // no unwind function, or the walk could not decode its way to rva (VEX, data, desync)
+};
+
+// Decodes linearly from the start of the unwind function holding rva.
+inline Walk WalkToInstruction(const ImageView& image, uint32_t rva)
 {
     FunctionRange function {};
     if (!image.FindFunctionRange(rva, function) || rva < function.begin || rva >= function.end)
-        return false;
+        return Walk::Unknown;
     for (uint32_t cursor = function.begin; cursor < function.end;)
     {
         if (cursor == rva)
-            return true;
+            return Walk::Start;
         if (cursor > rva)
-            return false;
+            return Walk::NotStart;
         const uint32_t room = function.end - cursor;
         const size_t take = room < 15 ? room : 15;
         const auto* bytes = image.DataAtRva(cursor, take);
         if (bytes == nullptr)
-            return false;
+            return Walk::Unknown;
         uint8_t copy[16] {};
         std::memcpy(copy, bytes, take);
         hde64s decoded {};
         hde64_disasm(copy, &decoded);
         if ((decoded.flags & F_ERROR) != 0 || decoded.len == 0 || decoded.len > take)
-            return false;
+            return Walk::Unknown;
         cursor += decoded.len;
     }
-    return false;
+    return Walk::Unknown;
+}
+
+// True only when rva is provably an instruction start (fail closed for the fallback's own store).
+inline bool IsInstructionStart(const ImageView& image, uint32_t rva)
+{
+    return WalkToInstruction(image, rva) == Walk::Start;
 }
 
 inline std::string Hex(uint32_t value)
@@ -170,13 +182,14 @@ inline bool FindByteStore(const ImageView& image, uint32_t dispRva, uint32_t fie
         if (start + decoded.len - immediate - sizeof(uint32_t) != dispRva || !WritesByte(decoded))
             continue;
 
-        FunctionRange function {};
-        const bool inFunction = image.FindFunctionRange(start, function);
-        if (inFunction && !IsInstructionStart(image, start))
+        // Only a clean walk past `start` rules a candidate out. When the walk cannot reach it the store may be real,
+        // so it is reported as not provably an instruction, which stands the family aside.
+        const Walk walk = WalkToInstruction(image, start);
+        if (walk == Walk::NotStart)
             continue;
         store.rva = start;
         store.decoded = decoded;
-        store.knownInstruction = inFunction;
+        store.knownInstruction = walk == Walk::Start;
         return true;
     }
     return false;

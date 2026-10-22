@@ -3502,8 +3502,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         else
         {
             g_nr.superiorMainOnlyGains = false;
-            LOG_WARN(
-                "Superior Scaling: NR runtime version unavailable; using 310.9 preset semantics for frequency gains.");
+            // Only Superior reads it; nothing in the log for users who never select it.
+            if (superior)
+                LOG_WARN("Superior Scaling: NR runtime version unavailable; using 310.9 preset semantics for "
+                         "frequency gains.");
         }
 
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);

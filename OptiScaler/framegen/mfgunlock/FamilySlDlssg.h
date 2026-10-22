@@ -8,8 +8,9 @@
 //  - software pacing: the plugin has a fallback for a missing flip-metering DLL that logs "FG1 DLL has been detected"
 //    and writes one byte of its context. That (offset, value) pair is read from the fallback itself and every other
 //    byte store to the offset is pinned to the same value, so hardware flip metering cannot freeze more than 2x. The
-//    member initialisation (a cleared register stored once) keeps the starting value; any other store that cannot be
-//    pinned in place stands the family aside.
+//    member initialisation (a cleared register stored once) is left as it is, although it writes 0 (hardware flip
+//    metering): that rests on the construction pattern, not on a proven order with the pinned stores. Any other store
+//    that cannot be pinned in place stands the family aside.
 // Adapted from KleberMotta/OptiScaler-DLSS5-MFG-RTX40 (MIT, from the RenoDX MFG Unlock addon). See
 // Licenses/MFGUnlock_LICENSE.txt.
 namespace MfgUnlock::FamilyRtx40::Streamline
@@ -27,7 +28,9 @@ struct Report
     uint8_t compiledCeiling = 0;
     uint32_t flipField = 0;
     uint8_t flipValue = 0;
-    unsigned initialisers = 0; // zero-initialising register stores to the state, left as they are (see LocateFlip)
+    // Zero-initialising register stores to the state, left unpinned: they write 0 (hardware flip metering) and are
+    // accepted by the construction pattern only, not a proven order with the pinned stores (see LocateFlip).
+    unsigned initialisers = 0;
     std::string failure;
 
     bool Complete() const
@@ -409,7 +412,10 @@ inline void LocateFlip(const ImageView& image, Report& report)
             std::vector<std::byte> replacement;
             if (!PinByteStore(image, store, wantValue, replacement) && IsZeroInitialiser(image, store))
             {
-                // The member initialisation: the state's starting value, not one of the runtime writes pinned here.
+                // Accepted residual: the member initialisation writes 0, which is hardware flip metering (the
+                // opposite of the pinned state when that is 1). It is kept on the basis of the object-construction
+                // pattern only; nothing here proves that a pinned store runs after construction and before the
+                // state is read. Reported as "initialisers" in the status.
                 ++report.initialisers;
                 continue;
             }

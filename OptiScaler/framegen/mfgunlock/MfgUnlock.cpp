@@ -711,8 +711,11 @@ void LocateRtx40(const MfgUnlock::ImageView& image, bool streamlinePlugin, Rtx40
         if (slReport.Complete())
             operations = MfgUnlock::FamilyRtx40::Streamline::BuildOperations(slReport, image);
         layouts = "sl.dlss_g compiled ceiling=" + std::to_string(slReport.compiledCeiling) +
-                  " flip field=" + std::to_string(slReport.flipField) +
-                  " initialisers=" + std::to_string(slReport.initialisers);
+                  " flip field=" + std::to_string(slReport.flipField);
+        if (slReport.initialisers != 0)
+            layouts += " initialisers=" + std::to_string(slReport.initialisers) +
+                       " (left unpinned: the constructor stores 0 = hardware flip metering; accepted by the "
+                       "construction pattern, not a proven order with the pinned stores)";
         return;
     }
 

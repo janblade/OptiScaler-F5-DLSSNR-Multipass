@@ -23,8 +23,8 @@ inline std::optional<MfgUnlockMode> ParseMode(std::string_view text, bool& valid
             return false;
         for (size_t index = 0; index < text.size(); ++index)
         {
-            const char c = text[index] >= 'A' && text[index] <= 'Z' ? static_cast<char>(text[index] - 'A' + 'a')
-                                                                     : text[index];
+            const char c =
+                text[index] >= 'A' && text[index] <= 'Z' ? static_cast<char>(text[index] - 'A' + 'a') : text[index];
             if (c != word[index])
                 return false;
         }

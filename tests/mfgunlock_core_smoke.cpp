@@ -721,6 +721,78 @@ int main()
     }
 
     {
+        // RTX 30 retarget of an LZ4-compressed Ada PTX (0x40-byte image header with the payload sizes).
+        const auto writeCompressedContainer = [](SyntheticImage& target, size_t base, const std::vector<uint8_t>& stream,
+                                                 uint64_t uncompressed)
+        {
+            const auto put = [&](size_t offset, const void* data, size_t size)
+            { std::memcpy(target.bytes + offset, data, size); };
+            std::memset(target.bytes + base, 0, 0x200);
+            const uint8_t magic[] = { 0x50, 0xed, 0x55, 0xba, 0x01, 0x00, 0x10, 0x00 };
+            const uint64_t payload = (stream.size() + 7) & ~size_t { 7 };
+            const uint64_t fatSize = 0x40 + payload;
+            put(base, magic, sizeof(magic));
+            put(base + 8, &fatSize, sizeof(fatSize));
+            const uint16_t kind = 1;
+            const uint32_t header = 0x40;
+            const uint32_t compressed = static_cast<uint32_t>(stream.size());
+            const uint32_t arch = 89;
+            put(base + 16, &kind, sizeof(kind));
+            put(base + 16 + 4, &header, sizeof(header));
+            put(base + 16 + 8, &payload, sizeof(payload));
+            put(base + 16 + 16, &compressed, sizeof(compressed));
+            put(base + 16 + 28, &arch, sizeof(arch));
+            put(base + 16 + 0x38, &uncompressed, sizeof(uncompressed));
+            put(base + 16 + 0x40, stream.data(), stream.size());
+        };
+        constexpr size_t base = 0x3400;
+        constexpr size_t body = base + 16 + 0x40;
+
+        SyntheticImage literalImage;
+        const MfgUnlock::ImageView literalView(literalImage.bytes, SyntheticImage::kSize);
+        // One literal run of 17 bytes: token 0xF0, length extension 2.
+        const std::string text = ".target sm_89\nabc";
+        std::vector<uint8_t> literal = { 0xF0, 0x02 };
+        literal.insert(literal.end(), text.begin(), text.end());
+        writeCompressedContainer(literalImage, base, literal, text.size());
+        const auto retarget =
+            MfgUnlock::FamilyRtx40::Fatbin::Locate(literalView, MfgUnlock::FamilyRtx40::Fatbin::Target::Ampere);
+        MfgUnlock::AppliedPatchSet retargetSet;
+        const bool applied = retarget.Complete() && retarget.containers == 1 &&
+                             retargetSet.Apply(MfgUnlock::FamilyRtx40::Fatbin::BuildOperations(retarget, literalView))
+                                 .applied;
+        std::vector<uint8_t> decoded;
+        const bool decodes = MfgUnlock::PtxTuring::detail::Lz4Decompress(
+            reinterpret_cast<const uint8_t*>(literalImage.bytes + body), literal.size(), decoded, text.size());
+        Check(applied && decodes && std::string(decoded.begin(), decoded.end()) == ".target sm_86\nabc",
+              "retargets a compressed PTX whose .target sits in one literal run");
+        retargetSet.Restore();
+
+        // The same bytes as literals, then a match copying them: the edit would change two directives.
+        SyntheticImage copiedImage;
+        const MfgUnlock::ImageView copiedView(copiedImage.bytes, SyntheticImage::kSize);
+        const std::string directive = ".target sm_89\n";
+        std::vector<uint8_t> copied = { 0xEA };
+        copied.insert(copied.end(), directive.begin(), directive.end());
+        copied.push_back(0x0E);
+        copied.push_back(0x00);
+        writeCompressedContainer(copiedImage, base, copied, directive.size() * 2);
+        Check(!MfgUnlock::FamilyRtx40::Fatbin::Locate(copiedView, MfgUnlock::FamilyRtx40::Fatbin::Target::Ampere)
+                   .Complete(),
+              "rejects a compressed PTX whose .target bytes are copied again by a later match");
+
+        // A stream that does not decode is rejected too.
+        std::vector<uint8_t> broken = literal;
+        broken[1] = 0x09; // literal run longer than the stream
+        SyntheticImage brokenImage;
+        const MfgUnlock::ImageView brokenView(brokenImage.bytes, SyntheticImage::kSize);
+        writeCompressedContainer(brokenImage, base, broken, text.size());
+        Check(!MfgUnlock::FamilyRtx40::Fatbin::Locate(brokenView, MfgUnlock::FamilyRtx40::Fatbin::Target::Ampere)
+                   .Complete(),
+              "rejects a compressed PTX that does not decode");
+    }
+
+    {
         bool valid = false;
         const bool autoIsDefault = !MfgUnlock::ParseMode("auto", valid).has_value() && valid &&
                                    !MfgUnlock::ParseMode("AUTO", valid).has_value() && valid &&

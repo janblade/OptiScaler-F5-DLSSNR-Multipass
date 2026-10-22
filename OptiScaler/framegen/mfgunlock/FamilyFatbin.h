@@ -2,6 +2,7 @@
 
 #include "FamilyRtx40.h"
 #include "Image.h"
+#include "PtxTuring.h"
 
 #include <cstdint>
 #include <cstring>
@@ -15,7 +16,8 @@
 // per container the Blackwell PTX is relabelled sm_89 (its image header and its ".target" line, same length) and the
 // images that really were sm_89 are relabelled to an architecture that does not exist, so the driver JITs the
 // Blackwell kernel when it asks for Ada. Only bytes inside the existing containers change; nothing changes length.
-// A container missing either image, or whose PTX is not stored as plain text, is left alone.
+// A container missing either image, or whose ".target" bytes do not decode as one literal run of the (LZ4) PTX
+// payload, is left alone.
 namespace MfgUnlock::FamilyRtx40::Fatbin
 {
 inline constexpr uint32_t kArchAda = 89;
@@ -98,6 +100,76 @@ inline bool EndsDirective(uint8_t next)
     return next == ' ' || next == '\t' || next == '\r' || next == '\n' || next == ',';
 }
 
+// Where an image header says its payload is compressed (compressed size at +16, uncompressed at +0x38, in the 0x40-byte
+// header form).
+inline constexpr size_t kImageCompressed = 16;
+inline constexpr size_t kImageUncompressed = 0x38;
+inline constexpr size_t kImageHeaderWithSizes = 0x40;
+
+struct Payload
+{
+    uint32_t compressed = 0;
+    uint64_t uncompressed = 0;
+};
+
+inline Payload ReadPayloadSizes(const std::byte* header, uint64_t headerSize)
+{
+    Payload sizes;
+    if (headerSize >= kImageHeaderWithSizes)
+    {
+        std::memcpy(&sizes.compressed, header + kImageCompressed, sizeof(sizes.compressed));
+        std::memcpy(&sizes.uncompressed, header + kImageUncompressed, sizeof(sizes.uncompressed));
+    }
+    return sizes;
+}
+
+// A ".target" edit writes text bytes straight into the payload. For an LZ4 payload that is only right when those bytes
+// are one literal run that nothing later copies: the payload is decoded as it is and with the edit, and the edit is
+// accepted only when the decoded texts differ in exactly the one directive, from -> to. A plain payload is the text.
+inline bool EditKeepsText(const std::byte* payload, uint64_t payloadSize, const Payload& sizes, size_t at,
+                          std::string_view from, std::string_view to)
+{
+    if (sizes.compressed == 0 || sizes.uncompressed == 0)
+        return true;
+    if (sizes.compressed > payloadSize || sizes.uncompressed > (64ull << 20) || from.size() != to.size() ||
+        at + from.size() > sizes.compressed)
+        return false;
+
+    const auto* source = reinterpret_cast<const uint8_t*>(payload);
+    std::vector<uint8_t> before;
+    if (!PtxTuring::detail::Lz4Decompress(source, sizes.compressed, before, static_cast<size_t>(sizes.uncompressed)))
+        return false;
+    std::vector<uint8_t> edited(source, source + sizes.compressed);
+    std::memcpy(edited.data() + at, to.data(), to.size());
+    std::vector<uint8_t> after;
+    if (!PtxTuring::detail::Lz4Decompress(edited.data(), edited.size(), after, before.size()))
+        return false;
+
+    size_t first = before.size();
+    size_t last = 0;
+    for (size_t index = 0; index < before.size(); ++index)
+    {
+        if (before[index] != after[index])
+        {
+            first = std::min(first, index);
+            last = index;
+        }
+    }
+    if (first == before.size())
+        return false;
+    // The differing bytes have to sit inside one copy of `from` that became `to`.
+    const size_t lowest = first + 1 >= from.size() ? first + 1 - from.size() : 0;
+    for (size_t start = lowest; start <= first; ++start)
+    {
+        if (last >= start + from.size() || start + from.size() > before.size())
+            continue;
+        if (std::memcmp(before.data() + start, from.data(), from.size()) == 0 &&
+            std::memcmp(after.data() + start, to.data(), to.size()) == 0)
+            return true;
+    }
+    return false;
+}
+
 // Appends the patches of one container; returns false when the container does not qualify.
 inline bool Collect(Report& report, const ImageView& image, uint32_t containerRva, uint64_t fatSize)
 {
@@ -108,6 +180,7 @@ inline bool Collect(Report& report, const ImageView& image, uint32_t containerRv
     uint32_t blackwellRva = 0;
     uint64_t blackwellHeader = 0;
     uint64_t blackwellPayload = 0;
+    Payload blackwellSizes;
     unsigned blackwellCount = 0;
     std::vector<uint32_t> adaImages;
 
@@ -136,6 +209,10 @@ inline bool Collect(Report& report, const ImageView& image, uint32_t containerRv
             blackwellRva = static_cast<uint32_t>(cursor);
             blackwellHeader = imageHeader;
             blackwellPayload = payload;
+            const auto* fullHeader = image.DataAtRva(static_cast<uint32_t>(cursor), static_cast<size_t>(imageHeader));
+            if (fullHeader == nullptr)
+                return false;
+            blackwellSizes = ReadPayloadSizes(fullHeader, imageHeader);
             ++blackwellCount;
         }
         else if (arch == kArchAda)
@@ -157,7 +234,8 @@ inline bool Collect(Report& report, const ImageView& image, uint32_t containerRv
     const std::string_view text(chars, static_cast<size_t>(blackwellPayload));
     const size_t at = text.find(kTargetFrom);
     if (at == std::string_view::npos || at + kTargetFrom.size() >= text.size() ||
-        !EndsDirective(static_cast<uint8_t>(text[at + kTargetFrom.size()])))
+        !EndsDirective(static_cast<uint8_t>(text[at + kTargetFrom.size()])) ||
+        !EditKeepsText(body, blackwellPayload, blackwellSizes, at, kTargetFrom, kTargetTo))
         return false;
 
     const std::string tag = "container@" + std::to_string(containerRva);
@@ -185,6 +263,7 @@ inline bool CollectAmpere(Report& report, const ImageView& image, uint32_t conta
         uint32_t arch = 0;
         uint64_t header = 0;
         uint64_t payload = 0;
+        Payload sizes;
     };
     std::vector<Entry> entries;
 
@@ -210,6 +289,10 @@ inline bool CollectAmpere(Report& report, const ImageView& image, uint32_t conta
         // An architecture other than Ada or Blackwell (a ready-made sm_86 image, say) is not understood here.
         if (entry.arch != kArchAda && entry.arch != kArchBlackwell)
             return false;
+        const auto* fullHeader = image.DataAtRva(entry.rva, static_cast<size_t>(imageHeader));
+        if (fullHeader == nullptr)
+            return false;
+        entry.sizes = ReadPayloadSizes(fullHeader, imageHeader);
         entries.push_back(entry);
         cursor += imageHeader + entry.payload;
     }
@@ -244,7 +327,8 @@ inline bool CollectAmpere(Report& report, const ImageView& image, uint32_t conta
     if (body == nullptr)
         return false;
 
-    // The text sits in the compressed stream's first literal run; a second hit would be a different directive.
+    // The text sits in the compressed stream's first literal run (checked by decoding below); a second hit would be a
+    // different directive.
     const std::string_view text(reinterpret_cast<const char*>(body), static_cast<size_t>(source->payload));
     constexpr std::string_view anyTarget = ".target sm_";
     size_t hits = 0;
@@ -255,7 +339,8 @@ inline bool CollectAmpere(Report& report, const ImageView& image, uint32_t conta
         at = scan;
     }
     if (hits != 1 || text.compare(at, from.size(), from) != 0 || at + from.size() >= text.size() ||
-        !EndsDirective(static_cast<uint8_t>(text[at + from.size()])))
+        !EndsDirective(static_cast<uint8_t>(text[at + from.size()])) ||
+        !EditKeepsText(body, source->payload, source->sizes, at, from, to))
         return false;
 
     const std::string tag = "container@" + std::to_string(containerRva);

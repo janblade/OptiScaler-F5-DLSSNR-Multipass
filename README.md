@@ -6,14 +6,6 @@ This is an experimental community version of OptiScaler. Results and game suppor
 
 **[Download the latest version](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/releases/latest)** · [Setup guide](INSTALL-DLSSNR.md) · [What's new](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/releases) · [Discord](https://discord.gg/xzkNNwxbZu)
 
-## Superior Scaling edition
-
-This repository adds **NR Output > Enlargement > Superior Scaling** to janblade's 0.1.33 code.
-It keeps the v59 Superior shaders and offers private DLSS SR A/K stabilization, separate from the NR model.
-Resolution and NR pass settings remain configurable. See the [port and validation notes](docs/Superior-Scaling-port.md).
-Builds are available as artifacts of [Build Superior Scaling port](https://github.com/mattjaas/OptiScaler-F5-Superior-Scaling/actions/workflows/build_nr_detail_quality_experiments.yml).
-The release link above points to janblade's original edition, which does not contain this port.
-
 ## What you can change
 
 - Adjust the strength, lighting, detail and colour of the effect.
@@ -22,6 +14,7 @@ The release link above points to janblade's original edition, which does not con
 - Apply NR to the finished picture to help with green noise. Works with frame generation on or off in native DirectX 12 games, including HDR.
 - Apply it more than once, with different settings each time. Extra passes cost more performance.
 - Lower the model resolution to reduce the performance cost.
+- Use Superior Scaling (Upscale Mode) to enlarge reduced-resolution NR with a private DLSS that steadies it over time (DirectX 12, NVIDIA DLSS).
 
 ## What you need
 

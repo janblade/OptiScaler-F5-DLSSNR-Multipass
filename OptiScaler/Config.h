@@ -1144,13 +1144,14 @@ class Config
     CustomOptional<bool> LoadCustomAmdxc64OnRdna2 { false };
     CustomOptional<bool> LoadAsiPlugins { false };
     CustomOptional<int> LateAsiPluginsDelay { 30 };
+    CustomOptional<std::wstring, NoDefault> DisabledAsi; // comma separated file names, see plugins/PluginRegistry.h
 
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
     CustomOptional<bool> ExternalFrameGeneration { false };
-    CustomOptional<MfgUnlockMode> MfgUnlockXeFG { MfgUnlockMode::Off };
-    CustomOptional<MfgUnlockMode> MfgUnlockRTX40 { MfgUnlockMode::Off };
-    CustomOptional<MfgUnlockMode> MfgUnlockRTX2030 { MfgUnlockMode::Off };
+    CustomOptional<MfgUnlockMode> MfgUnlockXeFG { MfgUnlock::kDefaultMode };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX40 { MfgUnlock::kDefaultMode };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX2030 { MfgUnlock::kDefaultMode };
     // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: those keys were replaced by [MFGUnlock] RTX40 /
     // RTX2030, and startup says so once. Read only, never saved.
     bool RemovedAdaMfgUnlockSet = false;

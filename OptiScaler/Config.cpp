@@ -1130,6 +1130,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             LoadCustomAmdxc64OnRdna2.set_from_config(readBool("Plugins", "LoadCustomAmdxc64OnRdna2"));
             LoadAsiPlugins.set_from_config(readBool("Plugins", "LoadAsiPlugins"));
             LateAsiPluginsDelay.set_from_config(readInt("Plugins", "LateAsiPluginsDelay"));
+            DisabledAsi.set_from_config(readWString("Plugins", "DisabledAsi"));
         }
 
         // HDR
@@ -2187,6 +2188,8 @@ bool Config::SaveIni()
         ini.SetValue("Plugins", "LoadAsiPlugins", GetBoolValue(Instance()->LoadAsiPlugins.value_for_config()).c_str());
         ini.SetValue("Plugins", "LateAsiPluginsDelay",
                      GetIntValue(Instance()->LateAsiPluginsDelay.value_for_config()).c_str());
+        ini.SetValue("Plugins", "DisabledAsi",
+                     wstring_to_string(Instance()->DisabledAsi.value_for_config_or(L"auto")).c_str());
     }
 
     // fakenvapi

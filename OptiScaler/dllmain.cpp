@@ -50,8 +50,10 @@
 #include <misc/IdentifyGpu.h>
 #include <misc/XeModuleInfo.h>
 #include <sha1/sha1.hpp>
+#include <plugins/PluginRegistry.h>
 
 static std::vector<HMODULE> _asiHandles;
+static std::mutex _asiHandlesMutex; // the late-load thread adds handles while startup or shutdown may touch the list
 static std::vector<std::filesystem::directory_entry> _lateLoadingEntries;
 static bool _passThruMode = false;
 
@@ -210,159 +212,203 @@ static void RunAgilityUpgrade(HMODULE dx12Module)
     }
 }
 
-// " (v1.2.3.4)" from a plugin's version resource, for support logs (an unlocker built for one XeFG/DLSS-G version,
-// say); empty when it has none
-static std::wstring PluginVersion(const std::filesystem::path& plugin)
+// "1.2.3.4" from a plugin's version resource; empty when it has none. Opens the file, so it is never asked for a
+// plugin that is disabled or skipped.
+static std::wstring PluginVersionNumber(const std::filesystem::path& plugin)
 {
     version_t version {};
 
     if (!Util::GetFileVersion(plugin.wstring(), &version))
         return {};
 
-    return std::format(L" (v{}.{}.{}.{})", version.major, version.minor, version.patch, version.reserved);
+    return std::format(L"{}.{}.{}.{}", version.major, version.minor, version.patch, version.reserved);
 }
 
-void LoadAsiPlugins()
+// " (v1.2.3.4)" for support logs (an unlocker built for one XeFG/DLSS-G version, say); empty when it has none
+static std::wstring PluginVersion(const std::filesystem::path& plugin)
+{
+    const std::wstring version = PluginVersionNumber(plugin);
+    return version.empty() ? std::wstring() : std::format(L" (v{})", version);
+}
+
+// Runs a freshly loaded plugin's entry points; OptiPatcher-style plugins report that they patched the game, and then
+// the spoofing that would have hidden the GPU is turned off.
+static void InitializeAsiModule(HMODULE hMod)
+{
+    {
+        std::lock_guard lock(_asiHandlesMutex);
+        _asiHandles.push_back(hMod);
+    }
+
+    auto init = (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
+    auto patchResult = (PFN_PatchResult) KernelBaseProxy::GetProcAddress_()(hMod, "PatchResult");
+
+    if (init != nullptr)
+        init();
+
+    if (patchResult != nullptr)
+    {
+        auto pr = patchResult();
+
+        if (pr)
+        {
+            LOG_INFO("Game patching is successful");
+            State::Instance().isOptiPatcherSucceed = true;
+
+            LOG_INFO("Disabling spoofing");
+
+            if (!Config::Instance()->DxgiSpoofing.has_value())
+                Config::Instance()->DxgiSpoofing.set_volatile_value(false);
+
+            if (!Config::Instance()->VulkanSpoofing.has_value() ||
+                !Config::Instance()->VulkanSpoofing.value_for_config())
+            {
+                Config::Instance()->VulkanSpoofing.set_volatile_value(false);
+            }
+
+            if (!Config::Instance()->VulkanExtensionSpoofing.has_value())
+                Config::Instance()->VulkanExtensionSpoofing.set_volatile_value(false);
+        }
+    }
+}
+
+// Loads (or, with load off, only lists) the *.asi files of the plugins folder and records what happened to each in
+// Plugins::Registry, which the Plugins page reads. Files named in [Plugins] DisabledAsi are never opened.
+void LoadAsiPlugins(bool load)
 {
     std::filesystem::path pluginPath(Config::Instance()->PluginPath.value_or(L"plugins"));
-    auto folderPath = pluginPath.wstring();
+    auto& registry = Plugins::Registry::Global();
 
-    LOG_DEBUG(L"Checking {} for *.asi", folderPath);
+    LOG_DEBUG(L"Checking {} for *.asi", pluginPath.wstring());
 
-    if (!std::filesystem::exists(pluginPath))
+    std::error_code ec;
+    if (!std::filesystem::exists(pluginPath, ec))
         return;
 
-    for (const auto& entry : std::filesystem::directory_iterator(folderPath))
+    const auto disabled = Plugins::ParseDisabledList(Config::Instance()->DisabledAsi.value_or(L""));
+
+    try
     {
-        if (!entry.is_regular_file())
-            continue;
-
-        std::wstring ext = entry.path().extension().wstring();
-        std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return std::towlower(c); });
-
-        if (ext == L".asi")
+        for (const auto& entry : std::filesystem::directory_iterator(pluginPath, ec))
         {
-            std::wstring fileName = entry.path().filename().wstring();
+            if (!entry.is_regular_file(ec))
+                continue;
+
+            std::wstring ext = entry.path().extension().wstring();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return std::towlower(c); });
+
+            if (ext != L".asi")
+                continue;
+
+            const std::wstring originalName = entry.path().filename().wstring();
+            std::wstring fileName = originalName;
             std::transform(fileName.begin(), fileName.end(), fileName.begin(),
                            [](wchar_t c) { return std::towlower(c); });
 
-            HMODULE hMod = nullptr;
+            const bool late = fileName.rfind(L"-loadlate") != std::wstring::npos;
 
-            if (fileName.rfind(L"-loadlate") != std::wstring::npos)
+            Plugins::Entry row;
+            row.name = originalName;
+            row.kind = Plugins::Kind::Asi;
+            row.path = entry.path().wstring();
+
+            if (!load)
+            {
+                row.state = Plugins::State::Skipped;
+                registry.Upsert(std::move(row));
+                continue;
+            }
+
+            if (Plugins::IsDisabled(disabled, originalName))
+            {
+                LOG_INFO(L"Not loading {}: listed in [Plugins] DisabledAsi", entry.path().wstring());
+                row.state = Plugins::State::Disabled;
+                registry.Upsert(std::move(row));
+                continue;
+            }
+
+            if (late)
+            {
+                row.state = Plugins::State::Waiting;
+                registry.Upsert(std::move(row));
                 _lateLoadingEntries.push_back(entry);
-            else
-                hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
+                continue;
+            }
+
+            HMODULE hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
+            const DWORD err = GetLastError(); // before anything else can change it
+            row.version = PluginVersionNumber(entry.path());
 
             if (hMod != nullptr)
             {
-                LOG_INFO(L"Loaded: {}{}", entry.path().wstring(), PluginVersion(entry.path()));
-                _asiHandles.push_back(hMod);
-
-                auto init = (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
-                auto patchResult = (PFN_PatchResult) KernelBaseProxy::GetProcAddress_()(hMod, "PatchResult");
-
-                if (init != nullptr)
-                    init();
-
-                if (patchResult != nullptr)
-                {
-                    auto pr = patchResult();
-
-                    if (pr)
-                    {
-                        LOG_INFO("Game patching is successful");
-                        State::Instance().isOptiPatcherSucceed = true;
-
-                        LOG_INFO("Disabling spoofing");
-
-                        if (!Config::Instance()->DxgiSpoofing.has_value())
-                            Config::Instance()->DxgiSpoofing.set_volatile_value(false);
-
-                        if (!Config::Instance()->VulkanSpoofing.has_value() ||
-                            !Config::Instance()->VulkanSpoofing.value_for_config())
-                        {
-                            Config::Instance()->VulkanSpoofing.set_volatile_value(false);
-                        }
-
-                        if (!Config::Instance()->VulkanExtensionSpoofing.has_value())
-                            Config::Instance()->VulkanExtensionSpoofing.set_volatile_value(false);
-                    }
-                }
+                row.state = Plugins::State::Loaded;
+                LOG_INFO(L"Loaded: {}{}", entry.path().wstring(),
+                         row.version.empty() ? std::wstring() : std::format(L" (v{})", row.version));
+                registry.Upsert(std::move(row));
+                InitializeAsiModule(hMod);
             }
-            else if (fileName.rfind(L"-loadlate") == std::wstring::npos) // late ones load below
+            else
             {
-                DWORD err = GetLastError();
                 LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
-            }
-
-            if (_lateLoadingEntries.size() > 0)
-            {
-                std::thread(
-                    []()
-                    {
-                        try
-                        {
-
-                            auto delay = Config::Instance()->LateAsiPluginsDelay.value_or_default();
-                            LOG_INFO("Waiting {} seconds before loading late-load plugins...", delay);
-                            std::this_thread::sleep_for(std::chrono::seconds(delay));
-
-                            for (const auto& entry : _lateLoadingEntries)
-                            {
-                                HMODULE hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
-
-                                if (hMod != nullptr)
-                                {
-                                    LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(), PluginVersion(entry.path()));
-                                    _asiHandles.push_back(hMod);
-
-                                    auto init =
-                                        (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
-
-                                    auto patchResult =
-                                        (PFN_PatchResult) KernelBaseProxy::GetProcAddress_()(hMod, "PatchResult");
-
-                                    if (init != nullptr)
-                                        init();
-
-                                    if (patchResult != nullptr)
-                                    {
-                                        auto pr = patchResult();
-                                        if (pr)
-                                        {
-                                            LOG_INFO("Game patching is successful");
-                                            State::Instance().isOptiPatcherSucceed = true;
-                                            LOG_INFO("Disabling spoofing");
-
-                                            if (!Config::Instance()->DxgiSpoofing.has_value())
-                                                Config::Instance()->DxgiSpoofing.set_volatile_value(false);
-
-                                            if (!Config::Instance()->VulkanSpoofing.has_value() ||
-                                                !Config::Instance()->VulkanSpoofing.value_for_config())
-                                            {
-                                                Config::Instance()->VulkanSpoofing.set_volatile_value(false);
-                                            }
-
-                                            if (!Config::Instance()->VulkanExtensionSpoofing.has_value())
-                                                Config::Instance()->VulkanExtensionSpoofing.set_volatile_value(false);
-                                        }
-                                    }
-                                }
-                                else
-                                {
-                                    DWORD err = GetLastError();
-                                    LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
-                                }
-                            }
-                        }
-                        catch (...)
-                        {
-                            LOG_ERROR("Exception occurred while loading late-load plugins");
-                        }
-                    })
-                    .detach();
+                row.state = Plugins::State::Failed;
+                row.error = err;
+                registry.Upsert(std::move(row));
             }
         }
+    }
+    catch (const std::filesystem::filesystem_error& e)
+    {
+        LOG_ERROR("Could not list the plugins folder: {}", e.what());
+    }
+
+    LOG_INFO(L"{}", Plugins::FormatSummary(registry.Snapshot()));
+
+    // One thread for all late-load files, started after the folder was read
+    if (!_lateLoadingEntries.empty())
+    {
+        std::thread(
+            []()
+            {
+                try
+                {
+                    auto delay = Config::Instance()->LateAsiPluginsDelay.value_or_default();
+                    LOG_INFO("Waiting {} seconds before loading late-load plugins...", delay);
+                    std::this_thread::sleep_for(std::chrono::seconds(delay));
+
+                    if (State::Instance().isShuttingDown)
+                        return;
+
+                    auto& registry = Plugins::Registry::Global();
+
+                    for (const auto& entry : _lateLoadingEntries)
+                    {
+                        const std::wstring name = entry.path().filename().wstring();
+                        HMODULE hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
+                        const DWORD err = GetLastError();
+
+                        if (hMod != nullptr)
+                        {
+                            const std::wstring version = PluginVersionNumber(entry.path());
+                            LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(),
+                                     version.empty() ? std::wstring() : std::format(L" (v{})", version));
+                            registry.SetState(Plugins::Kind::Asi, name, Plugins::State::LoadedLate, 0, version);
+                            InitializeAsiModule(hMod);
+                        }
+                        else
+                        {
+                            LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
+                            registry.SetState(Plugins::Kind::Asi, name, Plugins::State::Failed, err);
+                        }
+                    }
+
+                    LOG_INFO(L"{}", Plugins::FormatSummary(registry.Snapshot()));
+                }
+                catch (...)
+                {
+                    LOG_ERROR("Exception occurred while loading late-load plugins");
+                }
+            })
+            .detach();
     }
 }
 
@@ -2154,12 +2200,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
         }
 
-        // Asi plugins
-        if (Config::Instance()->LoadAsiPlugins.value_or_default())
+        // What the Plugins page lists: the built-in MFG unlock and the loaders, then the asi files below
         {
-            spdlog::info("");
-            LoadAsiPlugins();
+            auto& registry = Plugins::Registry::Global();
+            Plugins::RegisterBuiltinMfg(registry, { Config::Instance()->MfgUnlockXeFG.value_or_default(),
+                                                    Config::Instance()->MfgUnlockRTX40.value_or_default(),
+                                                    Config::Instance()->MfgUnlockRTX2030.value_or_default() });
+            Plugins::RegisterLoaders(registry, Config::Instance()->LoadSpecialK.value_or_default(),
+                                     Config::Instance()->LoadReShade.value_or_default(),
+                                     Config::Instance()->LoadCustomAmdxc64OnRdna2.value_or_default());
         }
+
+        // Asi plugins: with the switch off the folder is still read, so the page can show what would load
+        const bool loadAsi = Config::Instance()->LoadAsiPlugins.value_or_default();
+        if (loadAsi)
+            spdlog::info("");
+        LoadAsiPlugins(loadAsi);
 
         if (!Config::Instance()->DxgiSpoofing.has_value() && !State::Instance().nvngxReplacement.has_value())
         {
@@ -2288,8 +2344,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         if (reshadeModule != nullptr)
             NtdllProxy::FreeLibrary_Ldr(reshadeModule);
 
-        if (_asiHandles.size() > 0)
         {
+            std::lock_guard lock(_asiHandlesMutex);
             for (size_t i = 0; i < _asiHandles.size(); i++)
                 NtdllProxy::FreeLibrary_Ldr(_asiHandles[i]);
         }

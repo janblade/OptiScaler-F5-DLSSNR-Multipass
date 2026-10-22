@@ -1008,21 +1008,22 @@ bool MfgUnlock::PrepareXeFG()
     if (mode == MfgUnlockMode::Off)
     {
         std::lock_guard lock(xeFgMutex);
-        if (xeFgPatchSet.IsActive())
+        // Nothing patched: no status, no log, so an unused unlock changes nothing.
+        if (!xeFgPatchSet.IsActive())
+            return true;
+
+        const auto restored = xeFgPatchSet.Restore();
+        if (!restored.applied)
         {
-            const auto restored = xeFgPatchSet.Restore();
-            if (!restored.applied)
-            {
-                PublishStatus(MakeStatus(MfgUnlock::FamilyState::StoodAside, activeXeFgModule, nullptr,
-                                         "unlock disabled but the provider patches could not be restored"),
-                              true);
-                xeFgPatchRecoveryFailed = true;
-                return false;
-            }
-            activeXeFgModule = nullptr;
-            activeXeLlModule = nullptr;
-            xeFgPatchRecoveryFailed = false;
+            PublishStatus(MakeStatus(MfgUnlock::FamilyState::StoodAside, activeXeFgModule, nullptr,
+                                     "unlock disabled but the provider patches could not be restored"),
+                          true);
+            xeFgPatchRecoveryFailed = true;
+            return false;
         }
+        activeXeFgModule = nullptr;
+        activeXeLlModule = nullptr;
+        xeFgPatchRecoveryFailed = false;
         MfgUnlock::FamilyStatus status;
         status.state = MfgUnlock::FamilyState::Off;
         PublishStatus(std::move(status));

@@ -113,17 +113,19 @@ bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
 
 void XeFG_Dx12::ApplyMaxInterpolations(uint32_t reported)
 {
-    const int reportedMax = reported < 1 ? 1 : static_cast<int>(reported);
-    const bool unlockActive = MfgUnlock::IsXeFGActive();
-    _nativeMaxInterpolations =
-        unlockActive ? std::min(reportedMax, MfgUnlock::kXeFGOriginalDefaultMaxInterpolations) : reportedMax;
-    _maxInterpolationCount = _nativeMaxInterpolations;
-
-    if (unlockActive)
+    // Without the unlock the reported value is used as is, as before the unlock existed.
+    if (!MfgUnlock::IsXeFGActive())
     {
-        const int configured = std::clamp(Config::Instance()->FGXeFGMaxInterpolations.value_or_default(), 1, 5);
-        _maxInterpolationCount = std::max(_nativeMaxInterpolations, configured);
+        _nativeMaxInterpolations = static_cast<int>(reported);
+        _maxInterpolationCount = _nativeMaxInterpolations;
+        LOG_INFO("Max supported interpolations: {}", reported);
+        return;
     }
+
+    const int reportedMax = reported < 1 ? 1 : static_cast<int>(reported);
+    _nativeMaxInterpolations = std::min(reportedMax, MfgUnlock::kXeFGOriginalDefaultMaxInterpolations);
+    const int configured = std::clamp(Config::Instance()->FGXeFGMaxInterpolations.value_or_default(), 1, 5);
+    _maxInterpolationCount = std::max(_nativeMaxInterpolations, configured);
 
     if (_maxInterpolationCount > _nativeMaxInterpolations)
         LOG_INFO("Max supported interpolations: {} (XeFG native maximum {}, raised by MaxInterpolations)",
@@ -134,7 +136,7 @@ void XeFG_Dx12::ApplyMaxInterpolations(uint32_t reported)
 
 void XeFG_Dx12::LogAcceptedInterpolations()
 {
-    if (XeFGProxy::D3D12GetInitializationParameters() == nullptr)
+    if (!MfgUnlock::IsXeFGActive() || XeFGProxy::D3D12GetInitializationParameters() == nullptr)
         return;
 
     xefg_swapchain_d3d12_init_params_t used {};
@@ -422,7 +424,7 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
     result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, realQueue, factory12,
                                                      &params);
 
-    if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS &&
+    if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS && MfgUnlock::IsXeFGActive() &&
         params.maxInterpolatedFrames > static_cast<uint32_t>(_nativeMaxInterpolations))
     {
         LOG_WARN("XeFG refused {} interpolated frames ({}), retrying with its own maximum {}",
@@ -589,7 +591,7 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
         result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, desc, pFullscreenDesc, realQueue,
                                                          factory12, &params);
 
-        if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS &&
+        if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS && MfgUnlock::IsXeFGActive() &&
             params.maxInterpolatedFrames > static_cast<uint32_t>(_nativeMaxInterpolations))
         {
             LOG_WARN("XeFG refused {} interpolated frames ({}), retrying with its own maximum {}",

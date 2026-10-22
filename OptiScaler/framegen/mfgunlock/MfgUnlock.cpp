@@ -365,13 +365,22 @@ enum class Rtx40Tier
     Turing
 };
 
-// RTX 20/30 wins on Ampere and Turing cards; RTX 40 covers Ada (or any NVIDIA GPU when forced). Forcing RTX 20/30
-// on another card uses the Ampere kernels.
+// RTX 50 (Blackwell) and newer generate multiple frames natively; nothing is patched there in any mode.
+bool IsBlackwellOrNewer()
+{
+    const auto gpu = IdentifyGpu::getPrimaryGpu();
+    return gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_GB200;
+}
+
+// RTX 20/30 wins on Ampere and Turing cards; RTX 40 covers Ada (or any older NVIDIA GPU when forced). Forcing RTX
+// 20/30 on another card uses the Ampere kernels.
 Rtx40Tier ChooseRtx40Tier(MfgUnlockMode mode40, MfgUnlockMode mode2030)
 {
     const auto gpu = IdentifyGpu::getPrimaryGpu();
     const bool nvidia = gpu.vendorId == VendorId::Nvidia;
     const auto arch = gpu.nvidiaArchInfo.architecture_id;
+    if (IsBlackwellOrNewer())
+        return Rtx40Tier::None;
     if (mode2030 != MfgUnlockMode::Off && nvidia)
     {
         if (arch == NV_GPU_ARCHITECTURE_GA100)
@@ -639,8 +648,9 @@ bool TryApplyRtx40(HMODULE module)
         const bool only2030 = mode == MfgUnlockMode::Off;
         const bool nvidia = IsNvidiaGpu();
         PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::NotNeeded, module, nullptr,
-                                     !nvidia ? "primary GPU is not NVIDIA"
-                                     : only2030 ? "primary GPU is not an RTX 20/30 (Turing/Ampere)"
+                                     !nvidia                ? "primary GPU is not NVIDIA"
+                                     : IsBlackwellOrNewer() ? "primary GPU is an RTX 50 or newer (MFG is native)"
+                                     : only2030             ? "primary GPU is not an RTX 20/30 (Turing/Ampere)"
                                                 : "primary GPU is not an RTX 40 (Ada)"),
                      false, family);
         return false;

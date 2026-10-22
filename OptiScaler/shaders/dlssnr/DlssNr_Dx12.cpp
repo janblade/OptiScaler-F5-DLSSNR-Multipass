@@ -2268,6 +2268,11 @@ DlssNr_Dx12::~DlssNr_Dx12()
 {
     if (_superiorRawLow)
         _superiorRawLow->Release();
+    if (_superiorWarpCache)
+        _superiorWarpCache->Release();
+    for (auto* pipeline : _superiorNormalResolve)
+        if (pipeline)
+            pipeline->Release();
     for (auto* pipeline : _superiorResolve)
         if (pipeline)
             pipeline->Release();
@@ -5630,11 +5635,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             resolveParams.MvScaleY = gains.low;
             resolveParams.GuideWidth = low ? 1u : 0u;
             resolveParams.GuideHeight = g.temporal ? 0u : 1u; // raw NR answer when temporal stabilization is inactive
-            auto* pso = SuperiorResolvePipeline(resolveParams.Passthrough != 0, !g.temporal, g.packed);
+            auto* pso = SuperiorResolvePipeline(resolveParams, !g.temporal, g.packed, g.warpCache.Get() != nullptr);
             const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
             composed = residual && lowReady && pso &&
                        DispatchPass(cmdList, resolveParams, shapingProxy, residual, resolveOriginal,
-                                    g.packed ? g.warp.Get() : motionIn, exposureTex, resolveTarget, nullptr, low, pso);
+                                    g.packed ? (g.warpCache.Get() ? g.warpCache.Get() : g.warp.Get()) : motionIn,
+                                    exposureTex, resolveTarget, nullptr, low, pso);
             SuperiorRun::Say(composed ? "" : "Superior reconstruction failed; keeping the game frame.");
         }
         else

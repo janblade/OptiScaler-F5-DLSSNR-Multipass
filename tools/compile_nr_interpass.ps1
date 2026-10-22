@@ -93,12 +93,24 @@ try {
 # the residual estimator. Default janblade/Vulkan blobs are not overwritten.
 Push-Location (Join-Path $PSScriptRoot "../OptiScaler/shaders/dlssnr/precompile")
 try {
-    foreach ($variant in @("hdr", "sdr", "raw_hdr", "raw_sdr", "packed_hdr", "packed_sdr")) {
-        $stem = "host_resolve_$variant"
+    $hostVariants = @("hdr", "sdr", "raw_hdr", "raw_sdr", "packed_hdr", "packed_sdr")
+    $hostVariants += @("normal_sdr", "normal_hdr0", "normal_hdr2", "normal_hdr4", "normal_hdr6",
+                       "normal_packed_sdr", "normal_packed_hdr0", "normal_packed_hdr2", "normal_packed_hdr4", "normal_packed_hdr6")
+    $hostVariants += @('cached_packed_sdr', 'cached_packed_hdr0', 'cached_packed_hdr2', 'cached_packed_hdr4', 'cached_packed_hdr6')
+    foreach ($variant in $hostVariants) {
+        $specialized = $variant.StartsWith('normal_') -or $variant.StartsWith('cached_')
+        $stem = if ($specialized) { "host_$variant" } else { "host_resolve_$variant" }
         $defines = @("-D", "DLSSNR_SUPERIOR_HOST_RESOLVE=1")
         if ($variant.EndsWith("sdr")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_SDR=1") }
         if ($variant.StartsWith("raw_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_RAW=1") }
-        if ($variant.StartsWith("packed_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_PACKED=1") }
+        if ($variant.Contains("packed_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_PACKED=1") }
+        if ($specialized) {
+            $pass = if ($variant.EndsWith('sdr')) { 1 } else { 0 }
+            $mapping = if ($pass) { 0 } else { [int]$variant.Substring($variant.Length - 1) }
+            $defines += @('-D', 'DLSSNR_SUPERIOR_HOST_NORMAL=1', '-D', "DLSSNR_SUPERIOR_HOST_PASSTHROUGH=$pass",
+                          '-D', "DLSSNR_SUPERIOR_HOST_MAPPING=$mapping")
+        }
+        if ($variant.StartsWith('cached_')) { $defines += @('-D', 'DLSSNR_SUPERIOR_HOST_CACHED=1') }
         $dest = "../superior/precompile/${stem}_Shader"
         & ../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect @defines dlssnr.hlsl -Fo "$dest.cso"
         if ($LASTEXITCODE -ne 0) { throw "Host resolve DXC failed: $variant" }
@@ -108,4 +120,14 @@ try {
             @([IO.File]::ReadAllLines((Join-Path (Get-Location) "$dest.h")) | ForEach-Object { $_.TrimEnd() }),
             [Text.UTF8Encoding]::new($false))
     }
+} finally { Pop-Location }
+
+Push-Location (Join-Path $PSScriptRoot '../OptiScaler/shaders/dlssnr/superior')
+try {
+    & ../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect WarpCache.hlsl -Fo precompile/host_warp_cache_Shader.cso
+    if ($LASTEXITCODE -ne 0) { throw 'Warp cache DXC failed' }
+    & $Python ../../shader_tools/create_header.py precompile/host_warp_cache_Shader.cso precompile/host_warp_cache_Shader.h host_warp_cache_cso
+    if ($LASTEXITCODE -ne 0) { throw 'Warp cache header failed' }
+    $header = Join-Path (Get-Location) 'precompile/host_warp_cache_Shader.h'
+    [IO.File]::WriteAllLines($header, @([IO.File]::ReadAllLines($header) | ForEach-Object { $_.TrimEnd() }), [Text.UTF8Encoding]::new($false))
 } finally { Pop-Location }

@@ -93,6 +93,16 @@ cbuffer Params : register(b0)
 #endif
 #endif
 
+// Selected only for normal temporal Superior output with the matching colour mapping.
+// Generic PSOs retain diagnostics, comparison, raw answers and every other mapping.
+#if defined(DLSSNR_SUPERIOR_HOST_NORMAL)
+#define gPassthrough DLSSNR_SUPERIOR_HOST_PASSTHROUGH
+#define gReversibleMode DLSSNR_SUPERIOR_HOST_MAPPING
+#define gDebugView 0u
+#define gCompareMode 0u
+#define gApplyModel 1u
+#endif
+
 // Bringing an impossible colour back into a possible one.
 //
 // A colour with a negative component is not a colour any display can show, and the composition can
@@ -845,6 +855,9 @@ groupshared uint gMeterHistSum[64];
 void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
     const uint lane = groupThreadId.y * 8u + groupThreadId.x;
+#if defined(DLSSNR_SUPERIOR_HOST_CACHED)
+    gSuperiorPixel = id.xy;
+#endif
 
     // Automatic exposure, stage 1: one thread group per 64x64 meter tile, so the dispatch is
     // gWidth x gHeight groups rather than gWidth x gHeight threads. Every source pixel is read exactly

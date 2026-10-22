@@ -3,21 +3,18 @@
 // No exposure, colour encoding or tone-mapping logic belongs in this include.
 Texture2D<float4> gSuperiorLow : register(t5);
 #if defined(DLSSNR_SUPERIOR_HOST_PACKED)
-// Immutable warp metadata; t3 has no motion/exposure role in the D3D12 host resolve.
-#define gNativeWorkSize gMotion.Load(int3(0, 0, 0))
-#define gBandCenter gMotion.Load(int3(4, 0, 0))
-#define gSideNeg gMotion.Load(int3(5, 0, 0))
-#define gSidePos gMotion.Load(int3(6, 0, 0))
-#define gSideWorkNeg gMotion.Load(int3(7, 0, 0))
-#define gSideWorkPos gMotion.Load(int3(8, 0, 0))
-#define gSideEdgeSlope gMotion.Load(int3(9, 0, 0))
-#define gWorkScale gMotion.Load(int3(10, 0, 0))
-#include "../precompile/dlssnr_spatial_warp.hlsli"
+#include "WarpMap.hlsli"
+#if defined(DLSSNR_SUPERIOR_HOST_CACHED)
+static uint2 gSuperiorPixel;
+#endif
 float2 SuperiorPackedUv(float2 uv)
 {
-    // Fix evaluation order near integer packed coordinates, where a one-ULP shift can change the 3x3 tap set.
-    precise float2 packedPixel = PwPack(uv * float2(gWidth, gHeight));
-    return packedPixel / gNativeWorkSize.zw;
+#if defined(DLSSNR_SUPERIOR_HOST_CACHED)
+    return float2(gMotion.Load(int3(gSuperiorPixel.x, 1, 0)).x,
+                  gMotion.Load(int3(gSuperiorPixel.y, 2, 0)).x);
+#else
+    return SuperiorArithmeticPackedUv(uv);
+#endif
 }
 #endif
 float3 SuperiorShapeEdit(float3 edit, float2 uvq)

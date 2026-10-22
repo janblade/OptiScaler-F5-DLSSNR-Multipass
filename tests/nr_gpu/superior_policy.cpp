@@ -31,6 +31,23 @@ int main() {
         require(Enabled(cfg) && InterPassMode(cfg)==8 && DownscaleFilter(cfg)==0);
         require(Radius(cfg)==1 && RangeSigma(cfg)==.015f && SpatialSigma(cfg)==3 && GuideStrength(cfg)==1);
         require(ShapingMode(cfg)==2);
+        for (bool packed : { false, true })
+            for (unsigned mapping = 0; mapping < 12; ++mapping)
+                for (unsigned pass : { 0u, 1u })
+                {
+                    const int normal = NormalResolveVariant(false, packed, pass, mapping, 0, 0, 1);
+                    const bool supported =
+                        pass ? mapping == 0 : mapping == 0 || mapping == 2 || mapping == 4 || mapping == 6;
+                    require((normal >= 0) == supported);
+                    if (supported)
+                    {
+                        require(normal == (pass ? 0 : int(mapping / 2 + 1)) + (packed ? 5 : 0));
+                        require(NormalResolveVariant(true, packed, pass, mapping, 0, 0, 1) == -1);
+                        require(NormalResolveVariant(false, packed, pass, mapping, 1, 0, 1) == -1);
+                        require(NormalResolveVariant(false, packed, pass, mapping, 0, 1, 1) == -1);
+                        require(NormalResolveVariant(false, packed, pass, mapping, 0, 0, 0) == -1);
+                    }
+                }
         require(High(0)==.8f && Low(0)==.661f && High(1)==.75f && Low(1)==.787f);
         require(High(2) == .95f && Low(2) == .784f && High(99) == .950f && Low(99) == .850f);
         require(High(0,2)==.950f && Low(0,2)==.861f);

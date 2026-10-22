@@ -70,7 +70,12 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 
     ID3D12PipelineState* _superiorResolve[6] {};
     bool _superiorResolveAttempted[6] {};
-    ID3D12PipelineState* SuperiorResolvePipeline(bool sdr, bool rawAnswer, bool packed);
+    ID3D12PipelineState* _superiorNormalResolve[15] {};
+    bool _superiorNormalResolveAttempted[15] {};
+    ID3D12PipelineState* _superiorWarpCache = nullptr;
+    bool _superiorWarpCacheAttempted = false;
+    ID3D12PipelineState* SuperiorResolvePipeline(const DlssNrConstants& params, bool rawAnswer, bool packed,
+                                                 bool cachedWarp);
     ID3D12PipelineState* _superiorRawLow = nullptr;
     bool _superiorRawLowAttempted = false;
     ID3D12PipelineState* SuperiorRawLowPipeline();
@@ -155,6 +160,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     void ReleaseLutTexture();
 
   public:
+    bool BuildSuperiorWarpCache(ID3D12GraphicsCommandList* cmd, unsigned width, unsigned height,
+                                ID3D12Resource* metadata, ID3D12Resource* output);
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
     ~DlssNr_Dx12();
 

@@ -204,11 +204,60 @@ namespace DlssNr::Superior::HostBytecode
 #include "precompile/host_low_raw_Shader.h"
 #include "precompile/host_resolve_packed_hdr_Shader.h"
 #include "precompile/host_resolve_packed_sdr_Shader.h"
+#include "precompile/host_normal_sdr_Shader.h"
+#include "precompile/host_normal_hdr0_Shader.h"
+#include "precompile/host_normal_hdr2_Shader.h"
+#include "precompile/host_normal_hdr4_Shader.h"
+#include "precompile/host_normal_hdr6_Shader.h"
+#include "precompile/host_normal_packed_sdr_Shader.h"
+#include "precompile/host_normal_packed_hdr0_Shader.h"
+#include "precompile/host_normal_packed_hdr2_Shader.h"
+#include "precompile/host_normal_packed_hdr4_Shader.h"
+#include "precompile/host_normal_packed_hdr6_Shader.h"
+#include "precompile/host_cached_packed_sdr_Shader.h"
+#include "precompile/host_cached_packed_hdr0_Shader.h"
+#include "precompile/host_cached_packed_hdr2_Shader.h"
+#include "precompile/host_cached_packed_hdr4_Shader.h"
+#include "precompile/host_cached_packed_hdr6_Shader.h"
+#include "precompile/host_warp_cache_Shader.h"
 } // namespace DlssNr::Superior::HostBytecode
 
-ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(bool sdr, bool rawAnswer, bool packed)
+ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(const DlssNrConstants& params, bool rawAnswer, bool packed,
+                                                          bool cachedWarp)
 {
     using namespace DlssNr::Superior::HostBytecode;
+    int normal =
+        DlssNr::SuperiorScaling::NormalResolveVariant(rawAnswer, packed, params.Passthrough, params.ReversibleMode,
+                                                      params.DebugView, params.CompareMode, params.ApplyModel);
+    if (normal >= 5 && cachedWarp)
+        normal += 5;
+    if (normal >= 0)
+    {
+        auto*& pso = _superiorNormalResolve[normal];
+        if (!_superiorNormalResolveAttempted[normal])
+        {
+            _superiorNormalResolveAttempted[normal] = true;
+            const void* blobs[] {
+                host_normal_sdr_cso,         host_normal_hdr0_cso,        host_normal_hdr2_cso,
+                host_normal_hdr4_cso,        host_normal_hdr6_cso,        host_normal_packed_sdr_cso,
+                host_normal_packed_hdr0_cso, host_normal_packed_hdr2_cso, host_normal_packed_hdr4_cso,
+                host_normal_packed_hdr6_cso, host_cached_packed_sdr_cso,  host_cached_packed_hdr0_cso,
+                host_cached_packed_hdr2_cso, host_cached_packed_hdr4_cso, host_cached_packed_hdr6_cso
+            };
+            const size_t sizes[] { sizeof(host_normal_sdr_cso),         sizeof(host_normal_hdr0_cso),
+                                   sizeof(host_normal_hdr2_cso),        sizeof(host_normal_hdr4_cso),
+                                   sizeof(host_normal_hdr6_cso),        sizeof(host_normal_packed_sdr_cso),
+                                   sizeof(host_normal_packed_hdr0_cso), sizeof(host_normal_packed_hdr2_cso),
+                                   sizeof(host_normal_packed_hdr4_cso), sizeof(host_normal_packed_hdr6_cso),
+                                   sizeof(host_cached_packed_sdr_cso),  sizeof(host_cached_packed_hdr0_cso),
+                                   sizeof(host_cached_packed_hdr2_cso), sizeof(host_cached_packed_hdr4_cso),
+                                   sizeof(host_cached_packed_hdr6_cso) };
+            CreateComputePipeline(_device, &pso, blobs[normal], sizes[normal], nullptr);
+        }
+        if (pso)
+            return pso;
+    }
+    const bool sdr = params.Passthrough != 0;
     const auto index = (sdr ? 1u : 0u) + (packed ? 4u : rawAnswer ? 2u : 0u);
     auto*& pso = _superiorResolve[index];
     if (!_superiorResolveAttempted[index])
@@ -222,6 +271,38 @@ ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(bool sdr, bool rawAnsw
         CreateComputePipeline(_device, &pso, blobs[index], sizes[index], nullptr);
     }
     return pso;
+}
+
+bool DlssNr_Dx12::BuildSuperiorWarpCache(ID3D12GraphicsCommandList* cmd, unsigned width, unsigned height,
+                                         ID3D12Resource* metadata, ID3D12Resource* output)
+{
+    using namespace DlssNr::Superior::HostBytecode;
+    if (!_superiorWarpCacheAttempted)
+    {
+        _superiorWarpCacheAttempted = true;
+        CreateComputePipeline(_device, &_superiorWarpCache, host_warp_cache_cso, sizeof(host_warp_cache_cso), nullptr);
+    }
+    if (!_superiorWarpCache || !metadata || !output || !cmd || !_init)
+        return false;
+    DlssNrConstants params {};
+    params.Width = width;
+    params.Height = height;
+    const uint32_t slot = _heapIndex;
+    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+    auto& heap = _frameHeaps[slot];
+    for (uint32_t i = 0; i < kSrvCount; ++i)
+        CreateShaderResourceView(_device, metadata, heap.GetSrvCPU(i));
+    for (uint32_t i = 0; i < kUavCount; ++i)
+        CreateUnorderedAccessView(_device, output, heap.GetUavCPU(i), 0);
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], params, heap.GetCbvCPU(0)))
+        return false;
+    ID3D12DescriptorHeap* heaps[] = { heap.GetHeapCSU() };
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetComputeRootSignature(_rootSignature);
+    cmd->SetPipelineState(_superiorWarpCache);
+    cmd->SetComputeRootDescriptorTable(0, heap.GetTableGPUStart());
+    cmd->Dispatch((std::max(11u, std::max(width, height)) + 7u) / 8u, 1, 1);
+    return true;
 }
 
 ID3D12PipelineState* DlssNr_Dx12::SuperiorRawLowPipeline()

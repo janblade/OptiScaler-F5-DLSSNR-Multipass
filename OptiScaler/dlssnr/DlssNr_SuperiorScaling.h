@@ -14,6 +14,20 @@ constexpr uint32_t LowGroupHeight = 16u;
 inline bool Enabled(uint32_t transfer) { return transfer == Transfer; }
 template <class C> inline bool Enabled(const C& cfg) { return Enabled(cfg.DlssNrTransfer.value_or_default()); }
 inline int Preset(int preset) { return preset == 11 ? 11 : 1; } // K or A; no default/latest ambiguity.
+// -1 keeps the generic PSO. Specialization changes no user setting or colour calculation.
+inline int NormalResolveVariant(bool rawAnswer, bool packed, unsigned passthrough, unsigned mapping, unsigned debugView,
+                                unsigned compareMode, unsigned applyModel)
+{
+    if (rawAnswer || debugView || compareMode || !applyModel)
+        return -1;
+    const int variant = passthrough     ? (mapping == 0u ? 0 : -1)
+                        : mapping == 0u ? 1
+                        : mapping == 2u ? 2
+                        : mapping == 4u ? 3
+                        : mapping == 6u ? 4
+                                        : -1;
+    return variant < 0 ? -1 : variant + (packed ? 5 : 0);
+}
 // 310.8 has only Main. On 310.9, only A (1) selects Main; Default (0), B (2)
 // and the legacy saved value 3 select Small. This is independent of SR's A/K.
 inline bool MainOnlyRuntime(unsigned major, unsigned minor) { return major == 310u && minor < 9u; }

@@ -16,7 +16,7 @@ struct Runner
     UINT stride;
     UINT64 serial = 0;
     HANDLE event;
-    Runner(bool hardware, UINT descriptors = 8)
+    Runner(bool hardware, UINT descriptors = 8, UINT uavs = 2)
     {
         ComPtr<IDXGIFactory4> factory; check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
         ComPtr<IDXGIAdapter1> adapter;
@@ -33,7 +33,8 @@ struct Runner
         event = CreateEvent(nullptr, FALSE, FALSE, nullptr); if (!event) throw std::runtime_error("CreateEvent");
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
         ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; ranges[0].NumDescriptors = 6;
-        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; ranges[1].NumDescriptors = 2;
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        ranges[1].NumDescriptors = uavs;
         ranges[1].OffsetInDescriptorsFromTableStart = 6;
         D3D12_ROOT_PARAMETER params[2]{};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;

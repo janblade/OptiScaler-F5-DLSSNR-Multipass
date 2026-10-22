@@ -32,7 +32,7 @@ struct Generation
     bool inverted = false, beforeSr = false, reset = true;
     bool temporal = false, packed = false, submitted = false, failed = false;
     DlssNr::Spatial::Layout layout {};
-    Texture warp;
+    Texture warp, warpCache;
     ComPtr<ID3D12Resource> warpUpload;
     int preset = 1;
     ID3D12GraphicsCommandList* creation = nullptr; // normalized identity only
@@ -182,7 +182,7 @@ Constants GuideConstants(unsigned w, unsigned h, const DlssNr::GuideRegions& reg
 
 // Immutable 11-float4 warp metadata uses the resolve's otherwise unused D3D12 motion SRV (t3).
 // The generation owns its upload until all recorded command lists have retired. No per-frame copy/dispatch.
-bool CreateWarp(Generation& g, ID3D12GraphicsCommandList* cmd)
+bool CreateWarp(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd)
 {
     if (!g.packed)
         return true;
@@ -215,6 +215,13 @@ bool CreateWarp(Generation& g, ID3D12GraphicsCommandList* cmd)
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     g.warp.To(cmd, Srv);
+    // Optional acceleration. Failure leaves the immutable metadata and arithmetic PSOs usable.
+    if (Ensure(g.warpCache, g.device.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, std::max(11u, std::max(g.width, g.height)),
+               3) &&
+        shader.BuildSuperiorWarpCache(cmd, g.width, g.height, g.warp.Get(), g.warpCache.Get()))
+        g.warpCache.To(cmd, Srv);
+    else
+        g.warpCache.resource.Reset();
     return true;
 }
 
@@ -224,7 +231,7 @@ bool CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandLis
     const auto w = g.workWidth, h = g.workHeight;
     if (!Ensure(g.carrier, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, w, h) ||
         !Ensure(g.temporalOutput, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, w, h) ||
-        !Ensure(g.temporalMotion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, w, h) || !CreateWarp(g, cmd) ||
+        !Ensure(g.temporalMotion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, w, h) || !CreateWarp(g, shader, cmd) ||
         !Ensure(g.unit, g.device.Get(), DXGI_FORMAT_R32_FLOAT, 1, 1))
         return false;
     Constants unit {};

@@ -20,12 +20,15 @@ struct PackedStages
     Stage before, after;
     ComPtr<ID3D12Resource> packCb, unpackCb, packedGuidesCb;
     ComPtr<ID3D12PipelineState> spatial, guides, standard, carrier, low, resolve, packedResolve;
-    PackedStages(Runner& runner, int scale, int hdr) : r(runner), images(r, 100, true)
+    PackedStages(Runner& runner, int scale, int hdr, const DlssNr::Spatial::Settings* overrideSettings = nullptr)
+        : r(runner), images(r, 100, true)
     {
         namespace Sp = DlssNr::Spatial;
         namespace Ss = DlssNr::SuperiorScaling;
         Sp::Settings settings;
         settings.enabled = true;
+        if (overrideSettings)
+            settings = *overrideSettings;
         layout = Sp::Build(settings, 3840, 2160, scale / 100.f, false);
         warp = UploadWarp(r, layout);
         const std::string dir = "OptiScaler/shaders/dlssnr/";

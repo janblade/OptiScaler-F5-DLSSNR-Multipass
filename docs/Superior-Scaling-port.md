@@ -279,6 +279,9 @@ This does **not** prove equal total in-game performance or complete temporal ima
 
 ### Reproduce and complete game validation
 
+The subsequent four-candidate optimization study, production changes, rejected experiments and exact reproduction
+commands are documented in [Superior-four-optimizations.md](Superior-four-optimizations.md).
+
 From Windows with MSVC x64 tools and Python:
 
 ```powershell

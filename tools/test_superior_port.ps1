@@ -7,7 +7,9 @@ param(
     [switch]$GpuSpatialTiming,
     [switch]$GpuNativeTemporalTiming,
     [switch]$GpuPackedTiming,
-    [switch]$GpuHostOptTiming
+    [switch]$GpuHostOptTiming,
+    [switch]$GpuCandidates,
+    [switch]$GpuCandidateTiming
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -45,6 +47,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Host shader reference compilation failed' }
         $names += @('superior_host_quality', 'packed_host_quality')
     }
+    if ($GpuCandidates -or $GpuCandidateTiming) {
+        python tools/prepare_superior_candidates.py
+        if ($LASTEXITCODE -ne 0) { throw 'Candidate shader compilation failed' }
+        $names += @('four_candidates_quality', 'fused_pack_experiment')
+        if ($GpuCandidateTiming) { $names += 'four_candidates_timing' }
+    }
     foreach ($name in $names) {
         $src = if ($name -like 'nr_*_smoke' -or $name -eq 'nr_spatial_dx12_gpu') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
         cmd /c "`"$vc`" && cl /nologo /std:c++17 /EHsc /O2 `"$src`" /Fe:$out/$name.exe /Fo:$out/$name.obj /link d3d12.lib dxgi.lib"
@@ -53,6 +61,22 @@ try {
     foreach ($name in $cpu) {
         & "$out/$name.exe"
         if ($LASTEXITCODE -ne 0) { throw "Test failed: $name" }
+    }
+    if ($GpuCandidates -or $GpuCandidateTiming) {
+        & "$out/four_candidates_quality.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Candidate bit-exact comparison failed' }
+        if ($GpuCandidateTiming) {
+            foreach ($family in @('fixed', 'cached_fixed', 'lds', 'final')) {
+                & "$out/four_candidates_timing.exe" $family
+                if ($LASTEXITCODE -ne 0) { throw "Candidate timing/4K quality failed: $family" }
+            }
+            & "$out/fused_pack_experiment.exe" timing
+        } else {
+            & "$out/fused_pack_experiment.exe"
+        }
+        # Fusion is an intentionally retained rejected experiment, never a production path.
+        if ($LASTEXITCODE -ne 2) { throw 'Fused experiment result changed: review the recorded rejection' }
+        $global:LASTEXITCODE = 0
     }
     if ($GpuSpatial) {
         & "$out/nr_spatial_dx12_gpu.exe"

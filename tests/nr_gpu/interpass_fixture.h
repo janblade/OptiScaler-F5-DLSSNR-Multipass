@@ -87,7 +87,10 @@ struct Runner
     ComPtr<ID3D12PipelineState> pipeline(const std::string& dir, const std::string& name)
     {
         std::ifstream f(dir + "/" + name + "_Shader.cso",std::ios::binary);
-        if (!f) throw std::runtime_error("Missing shader: " + name);
+        if (!f) throw std::runtime_error("Missing shader " + dir + "/" + name + "_Shader.cso. A v59 baseline directory "
+            "comes from -ReferenceShaderDirectory (original v59 precompile, not in this repository); "
+            "artifacts/validation/* from tools/prepare_superior_*.py (needs the PR #230 history). "
+            "See tools/test_superior_port.ps1.");
         std::vector<char> code((std::istreambuf_iterator<char>(f)),{});
         D3D12_COMPUTE_PIPELINE_STATE_DESC d{}; d.pRootSignature = root.Get(); d.CS = {code.data(),code.size()};
         ComPtr<ID3D12PipelineState> p; check(device->CreateComputePipelineState(&d,IID_PPV_ARGS(&p))); return p;

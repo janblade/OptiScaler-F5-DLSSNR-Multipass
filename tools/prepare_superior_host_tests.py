@@ -1,4 +1,14 @@
-"""Compile legacy and independently extracted v59-estimator reference shaders."""
+"""Compile legacy and independently extracted v59-estimator reference shaders.
+
+Optional GPU validation helper for tools/test_superior_port.ps1. The baselines come from the Superior port's own
+history (commits 24a2d7bf, 67318a5d), which exists only in a clone that has the PR #230 head
+(git fetch origin pull/230/head). Without it the script prints why and exits 3, which the PowerShell runner reports
+as a skipped mode. Exit 0 = prepared, any other code = failure.
+
+--upstream-parity additionally compiles janblade's composition from 2a5be38d (0.1.33, the port's base) for the
+"unmodified janblade resolve" comparison; by default that comparison uses the live source on both sides, so it does
+not break whenever the live shader changes after the port.
+"""
 from pathlib import Path
 import subprocess
 import sys
@@ -6,27 +16,46 @@ import sys
 root = Path(__file__).resolve().parents[1]
 host = root / 'OptiScaler/shaders/dlssnr/precompile'
 out = root / 'artifacts/validation/host-shaders'
+SKIPPED = 3
+args = sys.argv[1:]
+upstream_parity = '--upstream-parity' in args
+args = [a for a in args if a != '--upstream-parity']
+
+
+def need(commit, purpose):
+    present = subprocess.run(['git', 'cat-file', '-e', commit + '^{commit}'], cwd=root,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if not present:
+        print(f'{purpose} needs the Superior port commit {commit}, which is not in this clone '
+              f'(git fetch origin pull/230/head); skipped')
+        raise SystemExit(SKIPPED)
+
+
+def show(commit, path):
+    return subprocess.check_output(['git', 'show', commit + ':' + path], cwd=root)
+
+
 out.mkdir(parents=True, exist_ok=True)
-if sys.argv[1:] == ['--timing-baseline']:
+if args == ['--timing-baseline']:
+    need('24a2d7bf', 'The spatial timing baseline')
     baseline = root / 'artifacts/validation/pre-spatial'
     baseline.mkdir(parents=True, exist_ok=True)
     for variant in ('hdr', 'sdr'):
         name = 'host_resolve_' + variant + '_Shader.cso'
-        data = subprocess.check_output(['git', 'show', '24a2d7bf:OptiScaler/shaders/dlssnr/superior/precompile/' + name], cwd=root)
-        (baseline / name).write_bytes(data)
+        (baseline / name).write_bytes(show('24a2d7bf', 'OptiScaler/shaders/dlssnr/superior/precompile/' + name))
     raise SystemExit(0)
 # Retain the exact shipped pre-optimization PSOs for timing and direct quality checks.
+need('67318a5d', 'The host optimization baseline and host references')
 baseline = root / 'artifacts/validation/pre-host-opt'
 baseline.mkdir(parents=True, exist_ok=True)
 for variant in ('hdr', 'sdr', 'raw_hdr', 'raw_sdr', 'packed_hdr', 'packed_sdr'):
     name = 'host_resolve_' + variant + '_Shader.cso'
-    data = subprocess.check_output(['git', 'show', '67318a5d:OptiScaler/shaders/dlssnr/superior/precompile/' + name], cwd=root)
-    (baseline / name).write_bytes(data)
-if sys.argv[1:] == ['--host-opt-baseline']:
+    (baseline / name).write_bytes(show('67318a5d', 'OptiScaler/shaders/dlssnr/superior/precompile/' + name))
+if args == ['--host-opt-baseline']:
     raise SystemExit(0)
 dxc = root / 'OptiScaler/shaders/shader_tools/dxc.exe'
 # Freeze the pre-optimization host source as well as the independent estimator.
-source = subprocess.check_output(['git', 'show', '67318a5d:OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl'], cwd=root).decode('utf-8')
+source = show('67318a5d', 'OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl').decode('utf-8')
 frozen = (host / '../superior/precompile/dlssnr.hlsl').read_text(encoding='utf-8')
 begin = frozen.index('float3 P100GuidedResidualAt(')
 end = frozen.index('\n\n#if !defined(VK_MODE)', begin)
@@ -54,19 +83,23 @@ reference = packed_reference + '\nTexture2D<float4> gSuperiorLow : register(t5);
 reference_source = source.replace('#include "../superior/HostResolve.hlsli"', reference)
 (out / 'reference.hlsl').write_text(reference_source, encoding='utf-8')
 
+
 def compile_shader(path, name, defines=()):
     subprocess.run([str(dxc), '-T', 'cs_6_0', '-E', 'CSMain', '-O3', '-Qstrip_debug', '-Qstrip_reflect',
                     '-I', str(host), *[arg for d in defines for arg in ('-D', d)], str(path),
                     '-Fo', str(out / (name + '_Shader.cso'))], check=True)
 
+
 compile_shader(host / 'dlssnr.hlsl', 'legacy_recompiled')
-upstream = subprocess.check_output(['git', 'show', '2a5be38d:OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl'], cwd=root)
-(out / 'upstream.hlsl').write_bytes(upstream)
-compile_shader(out / 'upstream.hlsl', 'upstream_recompiled')
-# The production legacy bytecode is preserved, independently of compilation flags
-# used for the new Superior-only PSOs.
-original_blob = subprocess.check_output(['git', 'show', '2a5be38d:OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.cso'], cwd=root)
-assert original_blob == (host / 'DlssNr_Shader.cso').read_bytes()
+if upstream_parity:
+    # The default composition must be unchanged by the Superior #ifdefs: janblade's source at the port's base.
+    need('2a5be38d', 'The upstream composition parity check')
+    (out / 'upstream.hlsl').write_bytes(show('2a5be38d', 'OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl'))
+    compile_shader(out / 'upstream.hlsl', 'upstream_recompiled')
+else:
+    compile_shader(host / 'dlssnr.hlsl', 'upstream_recompiled')
+# No assertion against a shipped default blob: precompile/DlssNr_Shader.cso is janblade's and changes with every
+# default-shader change; it is not part of Superior's validation.
 for variant in ('hdr', 'sdr', 'raw_hdr', 'raw_sdr', 'packed_hdr', 'packed_sdr'):
     defines = ['DLSSNR_SUPERIOR_HOST_RESOLVE=1', 'DLSSNR_SUPERIOR_RESOLVE=1', 'DLSSNR_SUPERIOR_NORMAL=1']
     if variant.endswith('sdr'):

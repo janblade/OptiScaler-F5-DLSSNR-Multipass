@@ -1,10 +1,20 @@
-"""Reproducible, non-production experiments against the shipped 0fa378f4 host."""
+"""Reproducible, non-production experiments against the shipped 0fa378f4 host.
+
+Optional (tools/test_superior_port.ps1 -GpuCandidates). 0fa378f4 is a commit of the Superior port's own history; it
+exists only in a clone with the PR #230 head (git fetch origin pull/230/head). Without it this prints why and exits 3,
+which the runner reports as a skipped mode.
+"""
 from pathlib import Path
 import subprocess
 
 root = Path(__file__).resolve().parents[1]
 host = root / 'OptiScaler/shaders/dlssnr/precompile'
 out = root / 'artifacts/validation/four-candidates'
+if subprocess.run(['git', 'cat-file', '-e', '0fa378f4^{commit}'], cwd=root,
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+    print('The four-candidate experiments need the Superior port commit 0fa378f4, which is not in this clone '
+          '(git fetch origin pull/230/head); skipped')
+    raise SystemExit(3)
 out.mkdir(parents=True, exist_ok=True)
 dxc = root / 'OptiScaler/shaders/shader_tools/dxc.exe'
 def shipped(path):

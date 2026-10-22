@@ -5661,10 +5661,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
                             ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, g.temporal)
                             : nullptr;
-            resolveParams.MvScaleX = gains.high;
-            resolveParams.MvScaleY = gains.low;
-            resolveParams.GuideWidth = low ? 1u : 0u;
-            resolveParams.GuideHeight = g.temporal ? 0u : 1u; // raw NR answer when temporal stabilization is inactive
+            DlssNr::Superior::Fields::SetBandGains(resolveParams, gains.high, gains.low);
+            // A raw NR answer when temporal stabilization is inactive, else the decoded signed DLSS residual.
+            DlssNr::Superior::Fields::SetResolveFlags(resolveParams, low != nullptr, !g.temporal);
             auto* pso = SuperiorResolvePipeline(resolveParams, !g.temporal, g.packed, g.warpCache.Get() != nullptr);
             const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
             composed = residual && lowReady && pso &&

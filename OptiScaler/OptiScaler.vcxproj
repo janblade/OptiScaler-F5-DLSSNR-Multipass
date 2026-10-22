@@ -319,6 +319,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_SuperiorGains.h" />
     <ClInclude Include="dlssnr\DlssNr_SuperiorScaling.h" />
     <ClInclude Include="shaders\dlssnr\superior\Constants.h" />
+    <ClInclude Include="shaders\dlssnr\superior\Fields.h" />
     <ClInclude Include="shaders\dlssnr\superior\Pipeline.inl" />
     <ClInclude Include="shaders\dlssnr\superior\HostResolve.hlsli" />
     <ClInclude Include="shaders\dlssnr\superior\Shader.inl" />

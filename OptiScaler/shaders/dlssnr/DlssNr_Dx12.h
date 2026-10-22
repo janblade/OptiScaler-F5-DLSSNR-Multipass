@@ -18,7 +18,7 @@
 //   Resolve  proxy + model answer + untouched copy -> the frame, edited
 
 #include "DlssNr_Common.h"
-#include "superior/Constants.h"
+#include "superior/Fields.h"
 #include "DlssNr_DetailReuseConstants.h"
 #include "DlssNr_EditCacheConstants.h"
 #include "DlssNr_LutConstants.h"

@@ -6,6 +6,7 @@ namespace
 namespace SuperiorRun
 {
 using Constants = DlssNr::Superior::DlssNrConstants;
+namespace Fields = DlssNr::Superior::Fields;
 using Microsoft::WRL::ComPtr;
 constexpr auto Uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 constexpr auto Srv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -239,14 +240,8 @@ Constants GuideConstants(unsigned w, unsigned h, const DlssNr::GuideRegions& reg
     c.Mode = 10u;
     c.Width = w;
     c.Height = h;
-    c.GuideWidth = regions.depth.width;
-    c.GuideHeight = regions.depth.height;
-    c.DebugView = regions.depth.x;
-    c.CompareMode = regions.depth.y;
-    c.TransferStrength = float(regions.motion.width);
-    c.ColourStrength = float(regions.motion.height);
-    c.CompareSwap = regions.motion.x;
-    c.Transfer = regions.motion.y;
+    Fields::SetDepthRegion(c, regions.depth.x, regions.depth.y, regions.depth.width, regions.depth.height);
+    Fields::SetMotionRegion(c, regions.motion.x, regions.motion.y, regions.motion.width, regions.motion.height);
     c.MvScaleX = c.MvScaleY = 1.0f;
     if (pixelUnits)
     {
@@ -388,9 +383,8 @@ Constants Shaping(const Config& cfg, unsigned first, unsigned completed,
     c.ResidualScale = 3.0f;
     c.ResidualConfidenceSensitivity = 1.0f;
     const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, first, completed, scales, g_nr.superiorMainOnlyGains);
-    c.MvScaleX = gains.high;
-    c.MvScaleY = gains.low;
-    c.GuideWidth = 1u;
+    Fields::SetBandGains(c, gains.high, gains.low);
+    Fields::SetInterPassLowField(c, true);
     c.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
     return c;
 }
@@ -403,13 +397,13 @@ bool InterPass(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cm
     const unsigned workW = unsigned(desc.Width), workH = desc.Height;
     auto c = Shaping(cfg, covered, completed, scales);
     c.DirectResolveFlags |= 16u | 64u;
-    if (c.MvScaleX == c.MvScaleY)
+    if (Fields::HighGain(c) == Fields::LowGain(c))
     {
-        c.GuideWidth = 0u;
+        Fields::SetInterPassLowField(c, false);
         c.DirectResolveFlags |= 32u;
     }
     ID3D12Resource* low = nullptr;
-    if (c.GuideWidth)
+    if (Fields::InterPassLowField(c))
     {
         if (!Ensure(g.interLow, g.device.Get(), desc.Format, (workW + 7u) / 8u, (workH + 7u) / 8u))
             return false;
@@ -446,9 +440,7 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
             return nullptr;
         // Packed vectors already contain PwPack(p+v)-PwPack(p), in packed pixels. Never scale/warp twice.
         motion = packedMotion;
-        encode.TransferStrength = float(g.workWidth);
-        encode.ColourStrength = float(g.workHeight);
-        encode.CompareSwap = encode.Transfer = 0;
+        Fields::SetMotionRegion(encode, 0, 0, g.workWidth, g.workHeight);
         encode.MvScaleX = encode.MvScaleY = hold ? 0.f : 1.f;
         // Fused carrier pass preserves the exact finite packed vector, sanitizes non-finite pairs,
         // and writes zero motion while held. No extra resample or guide dispatch is needed.

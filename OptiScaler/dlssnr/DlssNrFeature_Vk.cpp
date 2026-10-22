@@ -763,14 +763,6 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 {
     applied = false;
     auto& cfg = *Config::Instance();
-    if (DlssNr::SuperiorScaling::Enabled(cfg))
-    {
-        static bool warned = false;
-        if (!warned) LOG_WARN("Superior Scaling requires D3D12 or a D3D12 bridge; native Vulkan keeps the clean frame.");
-        warned = true;
-        return;
-    }
-
 
     if (cfg.DlssNrDeferredDlss.value_or_default() && !rayReconstruction)
     {
@@ -1632,6 +1624,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     encode.ModelWorkScale = (reduced && workScale < 1.0f) ? workScale : 1.0f;
     encode.MaxRatio = std::clamp(cfg.DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
     encode.Transfer = cfg.DlssNrTransfer.value_or_default();
+    // Superior Scaling is D3D12-only (its private DLSS and PSOs). Native Vulkan runs Matched residual instead, said once.
+    if (DlssNr::SuperiorScaling::Enabled(encode.Transfer))
+    {
+        static std::once_flag warned;
+        std::call_once(warned, []
+                       { LOG_WARN("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Vulkan uses Matched residual"); });
+        encode.Transfer = DlssNr::SuperiorScaling::FallbackTransfer;
+    }
     // Tone-mapped frames keep the Paper white scale; a linear HDR frame is shown at its base white point, or at the
     // white point in force when no exposure is known yet.
     encode.DebugScale = !linearHdr                ? cfg.DlssNrWhitePointScale.value_or_default()
@@ -2223,8 +2223,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             EdgeCompressionVk::pass->Dispatch(cmdBuffer, MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f),
                                               colourReads, EdgeCompressionVk::color.view, VK_NULL_HANDLE) &&
             EdgeCompressionVk::pass->Dispatch(cmdBuffer, MakeConstants(spatialLayout, 101, guides, gameMvX, gameMvY),
-                                              guideReads, EdgeCompressionVk::depth.view,
-                                              EdgeCompressionVk::motion.view);
+                                              guideReads, EdgeCompressionVk::depth.view, EdgeCompressionVk::motion.view);
 
         if (!packed)
         {

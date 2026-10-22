@@ -10,11 +10,13 @@ namespace DlssNr::SuperiorScaling
 {
 std::string Status();
 constexpr uint32_t Transfer = 11u;
+// Where Superior cannot run (native Vulkan, no NGX DLSS SR, no depth), the ordinary path runs Matched residual.
+constexpr uint32_t FallbackTransfer = 1u;
 constexpr uint32_t ShaderFlag = 65536u;
 constexpr uint32_t LowGroupHeight = 16u;
 inline bool Enabled(uint32_t transfer) { return transfer == Transfer; }
 template <class C> inline bool Enabled(const C& cfg) { return Enabled(cfg.DlssNrTransfer.value_or_default()); }
-inline int Preset(int preset) { return preset == 11 ? 11 : 1; } // K or A; no default/latest ambiguity.
+inline unsigned Preset(unsigned preset) { return preset == 11u ? 11u : 1u; } // K or A; no default/latest ambiguity.
 // -1 keeps the generic PSO. Specialization changes no user setting or colour calculation.
 inline int NormalResolveVariant(bool rawAnswer, bool packed, unsigned passthrough, unsigned mapping, unsigned debugView,
                                 unsigned compareMode, unsigned applyModel)

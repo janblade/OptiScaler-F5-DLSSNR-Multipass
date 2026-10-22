@@ -155,7 +155,8 @@ int main() {
                 1274.f / 1440.f); // missing declared reference uses valid source, not allocation/depth
         require(MotionScale(1920, 2496, 0, 1920) == 2496);
         require(MotionScale(1,1274,0)==1); // unspecified game reference
-        for(int i=-5;i<30;++i)require(Preset(i)==(i==11?11:1));
+        for(unsigned i=0;i<30;++i)require(Preset(i)==(i==11u?11u:1u));
+        require(Preset(UINT32_MAX)==1u);
         // Native-scale fallback is tested by the host integration contract.
         DlssNrConstants input{};input.Mode=0;input.Width=1920;input.Height=1080;input.DirectResolveFlags=ShaderFlag;
         for(uint32_t pass : {0u,1u})for(uint32_t mode=0;mode<5;++mode) {

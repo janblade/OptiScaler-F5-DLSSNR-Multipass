@@ -3414,7 +3414,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             int preset =
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
             if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
-                config->DlssNrSuperiorScalingPreset = preset == 1 ? 11 : 1;
+                config->DlssNrSuperiorScalingPreset = preset == 1 ? 11u : 1u;
             HelpMarker("Private DLSS SR in DLAA mode, applied to NR's residual at its working resolution. "
                        "This A/K choice is independent of the NR main/small model and the game's DLSS preset.");
             if (nr.vulkan)

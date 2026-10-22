@@ -34,7 +34,7 @@ struct Generation
     DlssNr::Spatial::Layout layout {};
     Texture warp, warpCache;
     ComPtr<ID3D12Resource> warpUpload;
-    int preset = 1;
+    unsigned preset = 1;
     ID3D12GraphicsCommandList* creation = nullptr; // normalized identity only
     NVSDK_NGX_Parameter* parameters = nullptr;
     NVSDK_NGX_Handle* feature = nullptr;
@@ -394,7 +394,7 @@ bool Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* de
         Say("Temporal stabilization needs current depth and motion guides.");
         return false;
     }
-    const int preset =
+    const unsigned preset =
         DlssNr::SuperiorScaling::Preset(Config::Instance()->DlssNrSuperiorScalingPreset.value_or_default());
     auto* previous = state.current.get();
     if (previous && (previous->device.Get() != device || previous->width != width || previous->height != height ||

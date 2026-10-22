@@ -185,6 +185,26 @@ class Registry
         return _entries;
     }
 
+    // What the asi loader did this session as a whole, for the page's top line.
+    struct Session
+    {
+        bool asiEnabled = false; // [Plugins] LoadAsiPlugins at startup
+        std::wstring folder;
+        bool folderFound = false;
+    };
+
+    void SetSession(Session session)
+    {
+        std::lock_guard lock(_mutex);
+        _session = std::move(session);
+    }
+
+    Session GetSession() const
+    {
+        std::lock_guard lock(_mutex);
+        return _session;
+    }
+
     static Registry& Global()
     {
         static Registry registry;
@@ -194,7 +214,13 @@ class Registry
   private:
     mutable std::mutex _mutex;
     std::vector<Entry> _entries;
+    Session _session;
 };
+
+// Shared by RegisterLoaders and the sites that load the optional loaders, so the names cannot drift apart.
+inline constexpr const wchar_t* kLoaderSpecialK = L"Special K";
+inline constexpr const wchar_t* kLoaderReShade = L"ReShade";
+inline constexpr const wchar_t* kLoaderAmdxc64 = L"Custom amdxc64 on RDNA2";
 
 inline std::wstring Widen(std::string_view text) { return std::wstring(text.begin(), text.end()); }
 
@@ -218,9 +244,9 @@ inline void RegisterBuiltinMfg(Registry& registry, const std::array<MfgUnlockMod
 inline void RegisterLoaders(Registry& registry, bool specialK, bool reShade, bool amdxc64Rdna2)
 {
     const std::array<std::pair<const wchar_t*, bool>, 3> loaders = { {
-        { L"Special K", specialK },
-        { L"ReShade", reShade },
-        { L"Custom amdxc64 on RDNA2", amdxc64Rdna2 },
+        { kLoaderSpecialK, specialK },
+        { kLoaderReShade, reShade },
+        { kLoaderAmdxc64, amdxc64Rdna2 },
     } };
 
     for (const auto& [name, on] : loaders)

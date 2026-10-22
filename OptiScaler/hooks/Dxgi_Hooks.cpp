@@ -10,6 +10,7 @@
 
 #include <DllNames.h>
 #include <misc/IdentifyGpu.h>
+#include <plugins/PluginRegistry.h>
 #include <with_dx12/with_dx12.h>
 
 #include "Hook_Utils.h"
@@ -49,6 +50,8 @@ static void CheckLumaAndReShade(IDXGIFactory* factory)
         auto rsFileExist = std::filesystem::exists(rsFile);
         if (!rsFileExist)
         {
+            Plugins::Registry::Global().SetState(Plugins::Kind::Loader, Plugins::kLoaderReShade, Plugins::State::Failed,
+                                                 ERROR_FILE_NOT_FOUND);
             Config::Instance()->LoadReShade.set_volatile_value(false);
             return;
         }
@@ -79,7 +82,12 @@ static void CheckLumaAndReShade(IDXGIFactory* factory)
 
         State::EnableServeOriginal(201);
         reshadeModule = NtdllProxy::LoadLibraryExW_Ldr(rsFile.c_str(), NULL, 0);
+        const DWORD reshadeError = GetLastError();
         State::DisableServeOriginal(201);
+
+        Plugins::Registry::Global().SetState(Plugins::Kind::Loader, Plugins::kLoaderReShade,
+                                             reshadeModule != nullptr ? Plugins::State::Loaded : Plugins::State::Failed,
+                                             reshadeModule != nullptr ? 0 : reshadeError);
 
         LOG_INFO("Loading {}, result: {:X}", rsFile.filename().string(), (size_t) reshadeModule);
     }

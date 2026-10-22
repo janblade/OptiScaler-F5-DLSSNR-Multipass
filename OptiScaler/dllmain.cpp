@@ -275,7 +275,10 @@ void LoadAsiPlugins(bool load)
     LOG_DEBUG(L"Checking {} for *.asi", pluginPath.wstring());
 
     std::error_code ec;
-    if (!std::filesystem::exists(pluginPath, ec))
+    const bool folderFound = std::filesystem::exists(pluginPath, ec);
+    registry.SetSession({ .asiEnabled = load, .folder = pluginPath.wstring(), .folderFound = folderFound });
+
+    if (!folderFound)
         return;
 
     const auto disabled = Plugins::ParseDisabledList(Config::Instance()->DisabledAsi.value_or(L""));
@@ -305,6 +308,10 @@ void LoadAsiPlugins(bool load)
             row.kind = Plugins::Kind::Asi;
             row.path = entry.path().wstring();
 
+            // What the page starts from: ticked unless the file is listed, whether or not the switch let it load
+            const bool listed = Plugins::IsDisabled(disabled, originalName);
+            row.startedWith = row.desired = listed ? 0 : 1;
+
             if (!load)
             {
                 row.state = Plugins::State::Skipped;
@@ -312,7 +319,7 @@ void LoadAsiPlugins(bool load)
                 continue;
             }
 
-            if (Plugins::IsDisabled(disabled, originalName))
+            if (listed)
             {
                 LOG_INFO(L"Not loading {}: listed in [Plugins] DisabledAsi", entry.path().wstring());
                 row.state = Plugins::State::Disabled;
@@ -1186,7 +1193,11 @@ static void CheckWorkingMode()
 
         State::EnableServeOriginal(200);
         skModule = NtdllProxy::LoadLibraryExW_Ldr(skFile.c_str(), NULL, 0);
+        const DWORD skError = GetLastError();
         State::DisableServeOriginal(200);
+        Plugins::Registry::Global().SetState(Plugins::Kind::Loader, Plugins::kLoaderSpecialK,
+                                             skModule != nullptr ? Plugins::State::Loaded : Plugins::State::Failed,
+                                             skModule != nullptr ? 0 : skError);
 
         LOG_INFO("Loading SpecialK64.dll, result: {0:X}", (UINT64) skModule);
     }
@@ -1205,7 +1216,11 @@ static void CheckWorkingMode()
 
         State::EnableServeOriginal(201);
         reshadeModule = NtdllProxy::LoadLibraryExW_Ldr(rsFile.c_str(), NULL, 0);
+        const DWORD reshadeError = GetLastError();
         State::DisableServeOriginal(201);
+        Plugins::Registry::Global().SetState(Plugins::Kind::Loader, Plugins::kLoaderReShade,
+                                             reshadeModule != nullptr ? Plugins::State::Loaded : Plugins::State::Failed,
+                                             reshadeModule != nullptr ? 0 : reshadeError);
 
         LOG_INFO("Loading {}, result: {:X}", rsFile.filename().string(), (size_t) reshadeModule);
     }
@@ -2159,7 +2174,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("");
         CheckQuirks(possibleNvidia);
 
-        // Check for working mode and attach hooks
+        // What the Plugins page lists: the built-in MFG unlock and the loaders, then the asi files below
+        {
+            auto& registry = Plugins::Registry::Global();
+            Plugins::RegisterBuiltinMfg(registry, { Config::Instance()->MfgUnlockXeFG.value_or_default(),
+                                                    Config::Instance()->MfgUnlockRTX40.value_or_default(),
+                                                    Config::Instance()->MfgUnlockRTX2030.value_or_default() });
+            Plugins::RegisterLoaders(registry, Config::Instance()->LoadSpecialK.value_or_default(),
+                                     Config::Instance()->LoadReShade.value_or_default(),
+                                     Config::Instance()->LoadCustomAmdxc64OnRdna2.value_or_default());
+        }
+
         spdlog::info("");
         CheckWorkingMode();
         CheckMemoryForProxies();
@@ -2193,18 +2218,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
         }
 
-        // What the Plugins page lists: the built-in MFG unlock and the loaders, then the asi files below
-        {
-            auto& registry = Plugins::Registry::Global();
-            Plugins::RegisterBuiltinMfg(registry, { Config::Instance()->MfgUnlockXeFG.value_or_default(),
-                                                    Config::Instance()->MfgUnlockRTX40.value_or_default(),
-                                                    Config::Instance()->MfgUnlockRTX2030.value_or_default() });
-            Plugins::RegisterLoaders(registry, Config::Instance()->LoadSpecialK.value_or_default(),
-                                     Config::Instance()->LoadReShade.value_or_default(),
-                                     Config::Instance()->LoadCustomAmdxc64OnRdna2.value_or_default());
-        }
-
-        // Asi plugins: with the switch off the folder is still read, so the page can show what would load
         const bool loadAsi = Config::Instance()->LoadAsiPlugins.value_or_default();
         if (loadAsi)
             spdlog::info("");

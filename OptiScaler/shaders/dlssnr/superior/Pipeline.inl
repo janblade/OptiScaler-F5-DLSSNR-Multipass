@@ -504,6 +504,14 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         GiveUp("temporal stabilization needs the game's depth and motion guides", false);
         return Began::Unavailable;
     }
+    // WarpMap.hlsli maps uv * (gWidth, gHeight) -- the frame size the resolve and warp cache are dispatched at -- through
+    // PwPack, which expects pixels of the layout's native size (gNativeWorkSize.xy). The packed layout is built from this
+    // same frame, so they are equal; refuse a layout that is not rather than warp with the wrong scale.
+    if (layout && (layout->nativeW != width || layout->nativeH != height))
+    {
+        GiveUp("its packed layout does not match the frame size", false);
+        return Began::Unavailable;
+    }
     const unsigned preset =
         DlssNr::SuperiorScaling::Preset(Config::Instance()->DlssNrSuperiorScalingPreset.value_or_default());
     if (auto* previous = state.current.get())

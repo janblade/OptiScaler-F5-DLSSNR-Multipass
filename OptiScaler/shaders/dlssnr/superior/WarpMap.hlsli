@@ -11,6 +11,8 @@
 float2 SuperiorArithmeticPackedUv(float2 uv)
 {
     // Keep the original evaluation order: one ULP can change the guided estimator's tap set.
+    // gWidth/gHeight is the frame size the resolve / warp cache runs at; PwPack wants pixels of gNativeWorkSize.xy.
+    // The host refuses a packed layout whose native size differs (superior/Pipeline.inl, Begin), so they are equal.
     precise float2 packedPixel = PwPack(uv * float2(gWidth, gHeight));
     return packedPixel / gNativeWorkSize.zw;
 }

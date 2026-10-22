@@ -18,7 +18,8 @@ enum class Page : unsigned char
     OverlayLook,
     Input,
     Misc,
-    NrF5Low, // first under Neural Rendering: NR for a game that makes no upscaler call
+    Plugins, // after Misc, before the Neural Rendering group (enum order is not the nav order; see menu_common.cpp)
+    NrF5Low,// first under Neural Rendering: NR for a game that makes no upscaler call
     NrStatus,
     NrOptions,
     NrInput,
@@ -42,6 +43,7 @@ inline constexpr PageInfo kPages[] = {
     { "overlay", "Overlay & Look" },
     { "input", "Input" },
     { "misc", "Misc" },
+    { "plugins", "Plugins" },
     { "nr.f5low", "Optical F5Low" },
     { "nr.status", "Status & Presets" },
     { "nr.options", "NR Options" },

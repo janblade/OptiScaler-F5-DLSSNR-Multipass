@@ -38,7 +38,15 @@ int main()
               "NR pages are exactly the nr.* names ('" + name + "')");
     }
 
-    Check(kPageCount == 14, "7 categories plus 7 Neural Rendering sub-pages");
+    Check(kPageCount == 15, "8 categories plus 7 Neural Rendering sub-pages");
+    Check(std::string(Name(Page::Plugins)) == "plugins" && std::string(Label(Page::Plugins)) == "Plugins",
+          "the Plugins page has its name and label");
+    Check(static_cast<int>(Page::Plugins) == static_cast<int>(Page::Misc) + 1 &&
+              static_cast<int>(Page::Plugins) + 1 == static_cast<int>(Page::NrF5Low),
+          "Plugins sits between Misc and the Neural Rendering group");
+    Check(!IsNeuralRendering(Page::Plugins), "Plugins is not a Neural Rendering page");
+    Check(PageFromName("plugins") == Page::Plugins && PageFromName("misc") == Page::Misc,
+          "saved page names still open the same pages");
     Check(std::string(Name(Page::NrF5Low)) == "nr.f5low", "the Optical F5Low page has its ini name");
     Check(static_cast<int>(Page::NrF5Low) + 1 == static_cast<int>(Page::NrStatus),
           "Optical F5Low comes first in the Neural Rendering group, right before Status & Presets");

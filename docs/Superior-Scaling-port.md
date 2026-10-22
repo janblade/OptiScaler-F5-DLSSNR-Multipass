@@ -50,6 +50,17 @@ An inter-pass runs before the next pass only if the absolute high/low gap would 
 Final shaping uses only the tail after the last successful inter-pass. Carrier K=1, fixed linear 0.5 encoding, guided radius 1, range sigma .015, spatial sigma 3, strength 1.
 No K/headroom analysis is introduced. Native Vulkan is outside the original v59 implementation; DirectX 12 and supported D3D12 bridges are required.
 
+### Calibrating new models and styles
+
+The [full-frame Low Frequency calibration guide](DLSS_NR_Low_Frequency_Full_Frame_Calibration.md)
+describes matched RAW P50/P100 captures, true NR100 residual references, production guided/Low64
+reconstruction and a joint two-band least-squares fit over every RGB pixel. Accumulate and solve
+in FP64; use its Low coefficient as the calibration baseline across representative scenes.
+The fitted High/Medium coefficient is only an intermediate regression parameter. No automatic
+criterion has been found that reliably reproduces the preferred visual High/Medium result;
+those defaults are tuned by eye in-game, including motion, and the final pair must be validated
+together. These are offline calibration steps, with no per-frame fitting in the runtime.
+
 ## Compress screen edges
 
 Depth and MV use independent active rectangles and offsets. Before the nonlinear endpoint transform, game MV units are
@@ -83,6 +94,12 @@ At or below 100% with active compression, the sequence is:
 | Private DLSS residual stabilization (DLAA A/K) | 2240x1264 | 3456x1952 |
 | Low64 frequency field | Packed grid / 8, rounded up | Packed grid / 8, rounded up |
 | Guided unwarp + native composition, one dispatch | 3840x2160 | 3840x2160 |
+
+Guided residual reconstruction covers the **entire output frame**, including the uncompressed
+center at Model resolution 100%. The experimental native-center bypass and its transition were
+reverted after in-game motion blur was reported. This restores the runtime tree at `1ff8c811`
+exactly; the earlier low-only compression correction remains. Any future center bypass needs
+separate temporal validation, not just static image or kernel timing checks.
 
 **The colour packer and the packed NR guide shaders are unchanged, including their compiled bytecode.** There is no
 intermediate bilinear unpack of proxy/answer in normal Superior rendering. The original full-resolution encoded colour
@@ -313,4 +330,5 @@ The corrected complete path has not been timed against v59; equal total performa
 `mattjaas/OptiScaler-F5-Superior-Scaling` is an independent repository retaining janblade's full history and an upstream remote.
 GitHub allows only one personal fork in a fork network, so a matching `codex/superior-scaling-port` branch in
 `mattjaas/OptiScaler-DLSSNR-PreSR-Multipass_Autoexposure` supplies the PR route to janblade.
-The original repository's existing branches remain unchanged. No upstream PR is opened automatically.
+The original repository's other branches remain unchanged. The matching task branch is used for
+the upstream PR requested by the author.

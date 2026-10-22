@@ -28,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -54,7 +55,6 @@ HMODULE activeXeFgModule = nullptr;
 HMODULE activeXeLlModule = nullptr;
 bool xeFgPatchRecoveryFailed = false;
 std::atomic<bool> additionalXeFgProviderObserved { false };
-std::atomic<HMODULE> observedXeFgModule { nullptr };
 
 std::wstring GetModulePath(HMODULE module)
 {
@@ -199,11 +199,6 @@ void PublishStatus(MfgUnlock::FamilyStatus status, bool error = false,
         LOG_INFO("{}", wstring_to_string(text));
 }
 
-void StoreStatus(MfgUnlock::FamilyStatus status)
-{
-    MfgUnlock::StatusRegistry::Set(MfgUnlock::Family::XeFG, std::move(status));
-}
-
 void AddModuleMetadata(MfgUnlock::FamilyStatus& status)
 {
     const std::filesystem::path path(status.modulePath);
@@ -231,25 +226,47 @@ void SetWaitingStatus(std::string reason)
     PublishStatus(std::move(status));
 }
 
-bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule, bool logStatus = true)
+// The XeFG/XeLL pair that stood aside, by module and path: the same pair is not scanned again on the next context.
+// Forgotten when either module really unloads. Guarded by xeFgMutex.
+struct XeFgDecision
 {
-    const auto publish = [logStatus](MfgUnlock::FamilyStatus status, bool error = false)
-    {
-        if (logStatus)
-            PublishStatus(std::move(status), error);
-        else
-            StoreStatus(std::move(status));
-    };
+    HMODULE xeFg = nullptr;
+    HMODULE xeLl = nullptr;
+    std::wstring xeFgPath;
+    std::wstring xeLlPath;
+};
+std::optional<XeFgDecision> xeFgStoodAside;
 
+bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule)
+{
     const auto mode = Config::Instance()->MfgUnlockXeFG.value_or_default();
     if (mode == MfgUnlockMode::Off)
         return false;
 
+    const XeFgDecision pair { xeFgModule, xeLlModule, GetModulePath(xeFgModule), GetModulePath(xeLlModule) };
+    std::lock_guard lock(xeFgMutex);
+    if (xeFgStoodAside.has_value() && xeFgStoodAside->xeFg == pair.xeFg && xeFgStoodAside->xeLl == pair.xeLl &&
+        xeFgStoodAside->xeFgPath == pair.xeFgPath && xeFgStoodAside->xeLlPath == pair.xeLlPath)
+        return false;
+    // Publishes a stand-aside for this pair and remembers it (xeFgMutex is held).
+    const auto standAside = [&pair](MfgUnlock::FamilyStatus status)
+    {
+        xeFgStoodAside = pair;
+        PublishStatus(std::move(status), true);
+    };
+
+    // A game that owns frame generation may ship its own libxess_fg.dll; it is never patched.
+    if (State::Instance().externalFrameGeneration)
+    {
+        standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, nullptr,
+                              "external frame generation is active"));
+        return false;
+    }
+
     if (!HasModuleFilename(xeFgModule, L"libxess_fg.dll"))
     {
-        publish(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, nullptr,
-                           "loaded XeFG module is not libxess_fg.dll"),
-                true);
+        standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, nullptr,
+                              "loaded XeFG module is not libxess_fg.dll"));
         return false;
     }
     if (!HasModuleFilename(xeLlModule, L"libxell.dll"))
@@ -258,14 +275,14 @@ bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule, bool logStatus = true)
         return false;
     }
 
-    std::lock_guard lock(xeFgMutex);
     if (xeFgPatchSet.IsActive())
     {
         if (xeFgModule == activeXeFgModule && xeLlModule == activeXeLlModule)
             return true;
-        publish(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, nullptr,
-                           "another XeFG/XeLL provider pair is already patched"),
-                true);
+        // Not remembered: this pair may be patched once the other one unloads.
+        PublishStatus(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, nullptr,
+                                 "another XeFG/XeLL provider pair is already patched"),
+                      true);
         return false;
     }
 
@@ -280,16 +297,15 @@ bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule, bool logStatus = true)
         static_cast<uint8_t>(std::clamp(requested, MfgUnlock::kXeFGOriginalDefaultMaxInterpolations, 5)));
     if (!report.Complete())
     {
-        publish(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report, report.failure), true);
+        standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report, report.failure));
         return false;
     }
 
     const auto operations = MfgUnlock::FamilyXeFG::BuildOperations(report, xeFgImage, xeLlImage);
     if (operations.size() != report.patches.size())
     {
-        publish(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report,
-                           "could not build the complete patch transaction"),
-                true);
+        standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report,
+                              "could not build the complete patch transaction"));
         return false;
     }
 
@@ -304,9 +320,10 @@ bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule, bool logStatus = true)
             if (!recovery.applied)
             {
                 xeFgPatchRecoveryFailed = true;
-                publish(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report,
-                                   "patch transaction failed and partial changes could not be restored"),
-                        true);
+                // Not remembered: PrepareXeFG keeps retrying the restore.
+                PublishStatus(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report,
+                                         "patch transaction failed and partial changes could not be restored"),
+                              true);
                 return false;
             }
             xeFgPatchRecoveryFailed = false;
@@ -318,16 +335,15 @@ bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule, bool logStatus = true)
             applied.failedIndexValid && applied.failedIndex < report.patches.size()
                 ? report.patches[applied.failedIndex].name
                 : "page protection";
-        publish(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report,
-                           "transaction failed at " + failedPatch),
-                true);
+        standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report,
+                              "transaction failed at " + failedPatch));
         return false;
     }
 
     activeXeFgModule = xeFgModule;
     activeXeLlModule = xeLlModule;
     xeFgPatchRecoveryFailed = false;
-    publish(MakeStatus(MfgUnlock::FamilyState::Active, xeFgModule, &report));
+    PublishStatus(MakeStatus(MfgUnlock::FamilyState::Active, xeFgModule, &report));
     return true;
 }
 
@@ -903,12 +919,10 @@ HMODULE FindXeFGModule()
             return activeXeFgModule;
     }
 
-    const std::array<HMODULE, 3> candidates = { XeFGProxy::Module(), XeFGProxy::MemModule(),
-                                                observedXeFgModule.load(std::memory_order_acquire) };
-    for (const HMODULE candidate : candidates)
-        if (candidate != nullptr && HasModuleFilename(candidate, L"libxess_fg.dll"))
-            return candidate;
-    return nullptr;
+    // Only the copy OptiScaler's own XeFG output calls is patched. A libxess_fg.dll the game loaded for its own frame
+    // generation (XeFGProxy::MemModule, or any other load) is never touched.
+    const HMODULE module = XeFGProxy::Module();
+    return module != nullptr && HasModuleFilename(module, L"libxess_fg.dll") ? module : nullptr;
 }
 } // namespace
 
@@ -960,19 +974,11 @@ void MfgUnlock::ObserveProviderModule(HMODULE module)
     if (Config::Instance()->MfgUnlockXeFG.value_or_default() == MfgUnlockMode::Off)
         return;
 
-    {
-        std::lock_guard lock(xeFgMutex);
-        if (xeFgPatchSet.IsActive() && module != activeXeFgModule)
-        {
-            additionalXeFgProviderObserved.store(true, std::memory_order_release);
-            return;
-        }
-        observedXeFgModule.store(module, std::memory_order_release);
-    }
-
-    const auto xeLlModule = XeLLProxy::Module();
-    if (xeLlModule != nullptr)
-        TryApplyXeFG(module, xeLlModule, false);
+    // XeFG is patched from PrepareXeFG, before OptiScaler's XeFG output creates its context, and only in the copy that
+    // output uses; a load is only noted here.
+    std::lock_guard lock(xeFgMutex);
+    if (xeFgPatchSet.IsActive() && module != activeXeFgModule)
+        additionalXeFgProviderObserved.store(true, std::memory_order_release);
 }
 
 bool MfgUnlock::PrepareXeFG()
@@ -1063,7 +1069,8 @@ void MfgUnlock::RefreshXeFGStatus()
                  "untouched");
 
     auto status = StatusRegistry::Get(Family::XeFG);
-    if (status.modulePath.empty() ||
+    // Hashed once per status: every later context creation would only repeat the same line.
+    if (status.modulePath.empty() || !status.sha256.empty() ||
         (status.state != FamilyState::Active && status.state != FamilyState::StoodAside))
         return;
 
@@ -1090,7 +1097,7 @@ bool MfgUnlock::IsTrackedProviderModule(HMODULE module)
 
     std::lock_guard lock(xeFgMutex);
     return module == activeXeFgModule || module == activeXeLlModule ||
-           module == observedXeFgModule.load(std::memory_order_acquire);
+           (xeFgStoodAside.has_value() && (module == xeFgStoodAside->xeFg || module == xeFgStoodAside->xeLl));
 }
 
 bool MfgUnlock::BeforeModuleUnload(HMODULE module)
@@ -1166,6 +1173,8 @@ void MfgUnlock::AfterModuleUnload(HMODULE module)
 
 void MfgUnlock::OnModuleUnloaded(HMODULE module)
 {
-    HMODULE observed = module;
-    observedXeFgModule.compare_exchange_strong(observed, nullptr, std::memory_order_acq_rel);
+    // The pair that stood aside is judged again if one of its modules comes back.
+    std::lock_guard lock(xeFgMutex);
+    if (xeFgStoodAside.has_value() && (module == xeFgStoodAside->xeFg || module == xeFgStoodAside->xeLl))
+        xeFgStoodAside.reset();
 }

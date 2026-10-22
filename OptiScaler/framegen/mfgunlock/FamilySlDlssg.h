@@ -177,7 +177,7 @@ inline void LocateFlip(const ImageView& image, Report& report)
     {
         IMAGE_SECTION_HEADER section {};
         if (!image.SectionAt(index, section) || (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
-            section.Misc.VirtualSize < kStoreLength)
+            (section.Characteristics & IMAGE_SCN_MEM_READ) == 0 || section.Misc.VirtualSize < kStoreLength)
             continue;
         for (uint32_t offset = 0; offset + kStoreLength <= section.Misc.VirtualSize; ++offset)
         {

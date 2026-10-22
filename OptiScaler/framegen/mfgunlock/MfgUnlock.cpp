@@ -101,6 +101,32 @@ size_t GetMappedImageSize(HMODULE module)
     return mappedSize;
 }
 
+// Locators read live provider memory. A page that is gone or not readable must make the family stand aside, not take
+// the game down, so each top-level locate runs under SEH. __try allows no C++ object with a destructor in its frame,
+// hence the plain callback; the caller holds no lock that the locate itself takes.
+bool RunGuarded(void (*locate)(void*), void* context)
+{
+    __try
+    {
+        locate(context);
+        return true;
+    }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == EXCEPTION_IN_PAGE_ERROR
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH)
+    {
+        return false;
+    }
+}
+
+// False when the locate faulted; whatever it produced is then incomplete and must not be applied.
+template <typename Locate> bool Guarded(Locate&& locate)
+{
+    using Callable = std::remove_reference_t<Locate>;
+    return RunGuarded([](void* context) { (*static_cast<Callable*>(context))(); },
+                      const_cast<void*>(static_cast<const void*>(&locate)));
+}
+
 std::string HashFileSha256(const std::wstring& path)
 {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -291,17 +317,28 @@ bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule)
     const MfgUnlock::ImageView xeFgImage(xeFgModule, xeFgSize);
     const MfgUnlock::ImageView xeLlImage(xeLlModule, xeLlSize);
     // The patched sites hold XeFG's own ceiling (3); a value below it would lower XeFG under its stock behaviour.
-    const int requested = Config::Instance()->FGXeFGMaxInterpolations.value_or_default();
-    const auto report = MfgUnlock::FamilyXeFG::Locate(
-        xeFgImage, xeLlImage,
-        static_cast<uint8_t>(std::clamp(requested, MfgUnlock::kXeFGOriginalDefaultMaxInterpolations, 5)));
+    const auto count = static_cast<uint8_t>(std::clamp(Config::Instance()->FGXeFGMaxInterpolations.value_or_default(),
+                                                       MfgUnlock::kXeFGOriginalDefaultMaxInterpolations, 5));
+    MfgUnlock::FamilyXeFG::Report report;
+    std::vector<MfgUnlock::PatchOperation> operations;
+    if (!Guarded(
+            [&]
+            {
+                report = MfgUnlock::FamilyXeFG::Locate(xeFgImage, xeLlImage, count);
+                if (report.Complete())
+                    operations = MfgUnlock::FamilyXeFG::BuildOperations(report, xeFgImage, xeLlImage);
+            }))
+    {
+        standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, nullptr,
+                              "provider memory could not be read while locating"));
+        return false;
+    }
     if (!report.Complete())
     {
         standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report, report.failure));
         return false;
     }
 
-    const auto operations = MfgUnlock::FamilyXeFG::BuildOperations(report, xeFgImage, xeLlImage);
     if (operations.size() != report.patches.size())
     {
         standAside(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report,
@@ -660,6 +697,83 @@ bool EnableTuringCudaRewrite()
     return InstallCudaHooksIfWanted();
 }
 
+// Locates every site of one provider: the sl.dlss_g pair, or the nvngx_dlssg gates plus, by tier, the midpoint fix
+// (Ada) or the architecture sites and kernels (RTX 20/30). Reads live module memory; run it through Guarded.
+void LocateRtx40(const MfgUnlock::ImageView& image, bool streamlinePlugin, Rtx40Tier tier,
+                 MfgUnlock::FamilyRtx40::Report& report, std::vector<MfgUnlock::PatchOperation>& operations,
+                 std::string& layouts)
+{
+    if (streamlinePlugin)
+    {
+        const auto slReport = MfgUnlock::FamilyRtx40::Streamline::Locate(image);
+        report.patches = slReport.patches;
+        report.failure = slReport.failure;
+        if (slReport.Complete())
+            operations = MfgUnlock::FamilyRtx40::Streamline::BuildOperations(slReport, image);
+        layouts = "sl.dlss_g compiled ceiling=" + std::to_string(slReport.compiledCeiling) +
+                  " flip field=" + std::to_string(slReport.flipField);
+        return;
+    }
+
+    report = MfgUnlock::FamilyRtx40::Locate(image);
+    layouts = "advertise=" + report.advertiseLayout + " validate=" + report.validateLayout;
+    if (!report.Complete())
+        return;
+    operations = MfgUnlock::FamilyRtx40::BuildOperations(report, image);
+
+    if (tier == Rtx40Tier::Ampere || tier == Rtx40Tier::Turing)
+    {
+        // RTX 30: every kernel retargeted to sm_86 in place. RTX 20: the kernels are rewritten into PTX text at load
+        // time (CUDA hook), so the fatbin is only checked here (shape and rewrite). Either way the architecture is
+        // reported as the card's own and there is no partial set.
+        const bool turing = tier == Rtx40Tier::Turing;
+        const char* label = turing ? "RTX 20" : "RTX 30";
+        const auto arch = MfgUnlock::FamilyAmpere::Locate(
+            image, turing ? MfgUnlock::FamilyAmpere::kArchTuringLow : MfgUnlock::FamilyAmpere::kArchAmpereLow);
+        const auto kernels =
+            MfgUnlock::FamilyRtx40::Fatbin::Locate(image, MfgUnlock::FamilyRtx40::Fatbin::Target::Ampere);
+        report.patches.insert(report.patches.end(), arch.patches.begin(), arch.patches.end());
+        std::string kernelFailure;
+        if (!arch.Complete())
+            report.failure =
+                arch.failure.empty() ? std::string(label) + " architecture sites incomplete" : arch.failure;
+        else if (!kernels.Complete())
+            report.failure = std::string(label) + " kernel check: " + kernels.failure;
+        else if (turing && !CheckTuringKernels(image, kernelFailure))
+            report.failure = std::string(label) + " kernel check: " + kernelFailure;
+        else
+        {
+            auto archOps = MfgUnlock::FamilyRtx40::BuildOperationsFromPatches(arch.patches, image);
+            operations.insert(operations.end(), archOps.begin(), archOps.end());
+            if (turing)
+            {
+                layouts += " sm_75 kernels=" + std::to_string(kernels.containers) + " containers (PTX rewrite)";
+            }
+            else
+            {
+                auto kernelOps = MfgUnlock::FamilyRtx40::Fatbin::BuildOperations(kernels, image);
+                operations.insert(operations.end(), kernelOps.begin(), kernelOps.end());
+                layouts += " sm_86 kernels=" + std::to_string(kernels.containers) + " containers";
+            }
+        }
+        return;
+    }
+
+    // The midpoint fix is added when this build has its kernel containers; the gates work without it.
+    const auto fatbin = MfgUnlock::FamilyRtx40::Fatbin::Locate(image);
+    auto midpoint = MfgUnlock::FamilyRtx40::Fatbin::BuildOperations(fatbin, image);
+    if (!operations.empty() && !midpoint.empty())
+    {
+        operations.insert(operations.end(), std::make_move_iterator(midpoint.begin()),
+                          std::make_move_iterator(midpoint.end()));
+        layouts += " midpoint=" + std::to_string(fatbin.containers) + " containers";
+    }
+    else
+    {
+        layouts += " midpoint=not applied (" + fatbin.failure + ")";
+    }
+}
+
 // Drops everything known about a module (guarded by rtx40Mutex); returns whether its patches were in place. Nothing
 // is written back: the module is gone, or a different one now sits at its address.
 bool DropRtx40Locked(HMODULE module)
@@ -718,76 +832,13 @@ bool DecideRtx40(HMODULE module, MfgUnlockMode mode, MfgUnlockMode mode2030, boo
     MfgUnlock::FamilyRtx40::Report report;
     std::vector<MfgUnlock::PatchOperation> operations;
     std::string layouts;
-    if (streamlinePlugin)
+    const bool readable =
+        Guarded([&] { LocateRtx40(image, streamlinePlugin, tier, report, operations, layouts); });
+    if (!readable)
     {
-        const auto slReport = MfgUnlock::FamilyRtx40::Streamline::Locate(image);
-        report.patches = slReport.patches;
-        report.failure = slReport.failure;
-        if (slReport.Complete())
-            operations = MfgUnlock::FamilyRtx40::Streamline::BuildOperations(slReport, image);
-        layouts = "sl.dlss_g compiled ceiling=" + std::to_string(slReport.compiledCeiling) +
-                  " flip field=" + std::to_string(slReport.flipField);
-    }
-    else
-    {
-        report = MfgUnlock::FamilyRtx40::Locate(image);
-        layouts = "advertise=" + report.advertiseLayout + " validate=" + report.validateLayout;
-        if (report.Complete())
-        {
-            operations = MfgUnlock::FamilyRtx40::BuildOperations(report, image);
-
-            if (tier == Rtx40Tier::Ampere || tier == Rtx40Tier::Turing)
-            {
-                // RTX 30: every kernel retargeted to sm_86 in place. RTX 20: the kernels are rewritten into PTX
-                // text at load time (CUDA hook), so the fatbin is only checked for the expected shape here.
-                // Either way the architecture is reported as the card's own and there is no partial set.
-                const bool turing = tier == Rtx40Tier::Turing;
-                const char* label = turing ? "RTX 20" : "RTX 30";
-                const auto arch = MfgUnlock::FamilyAmpere::Locate(
-                    image, turing ? MfgUnlock::FamilyAmpere::kArchTuringLow : MfgUnlock::FamilyAmpere::kArchAmpereLow);
-                const auto kernels = MfgUnlock::FamilyRtx40::Fatbin::Locate(
-                    image, MfgUnlock::FamilyRtx40::Fatbin::Target::Ampere);
-                report.patches.insert(report.patches.end(), arch.patches.begin(), arch.patches.end());
-                if (!arch.Complete())
-                    report.failure = arch.failure.empty() ? std::string(label) + " architecture sites incomplete"
-                                                          : arch.failure;
-                else if (!kernels.Complete())
-                    report.failure = std::string(label) + " kernel check: " + kernels.failure;
-                else if (std::string kernelFailure; turing && !CheckTuringKernels(image, kernelFailure))
-                    report.failure = std::string(label) + " kernel check: " + kernelFailure;
-                else
-                {
-                    auto archOps = MfgUnlock::FamilyRtx40::BuildOperationsFromPatches(arch.patches, image);
-                    operations.insert(operations.end(), archOps.begin(), archOps.end());
-                    if (turing)
-                    {
-                        layouts += " sm_75 kernels=" + std::to_string(kernels.containers) + " containers (PTX rewrite)";
-                    }
-                    else
-                    {
-                        auto kernelOps = MfgUnlock::FamilyRtx40::Fatbin::BuildOperations(kernels, image);
-                        operations.insert(operations.end(), kernelOps.begin(), kernelOps.end());
-                        layouts += " sm_86 kernels=" + std::to_string(kernels.containers) + " containers";
-                    }
-                }
-            }
-            else
-            {
-            // The midpoint fix is added when this build has its kernel containers; the gates work without it.
-            const auto fatbin = MfgUnlock::FamilyRtx40::Fatbin::Locate(image);
-            auto midpoint = MfgUnlock::FamilyRtx40::Fatbin::BuildOperations(fatbin, image);
-            if (!operations.empty() && !midpoint.empty())
-            {
-                operations.insert(operations.end(), std::make_move_iterator(midpoint.begin()),
-                                  std::make_move_iterator(midpoint.end()));
-                layouts += " midpoint=" + std::to_string(fatbin.containers) + " containers";
-            }
-            else
-            {
-                layouts += " midpoint=not applied (" + fatbin.failure + ")";
-            }
-            }
-        }
+        report = {};
+        operations.clear();
+        report.failure = "provider memory could not be read while locating";
     }
     if (!report.Complete())
     {

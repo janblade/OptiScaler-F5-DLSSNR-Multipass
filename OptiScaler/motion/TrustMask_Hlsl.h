@@ -77,11 +77,26 @@ void ClearCounter()
     Counter.Store(0, 0);
 }
 
+// Immutable fixed-coordinate source samples only. The 8x8 group needs a
+// clamped 10x10 source tile for each pixel's original 3x3 range. Reprojected
+// samples, tolerances, reductions and acceptance remain private to each pixel.
+groupshared float gTrustLuma[100];
+groupshared float gTrustDepth[100];
+void PrepareTrust(uint3 group,uint gi) {
+    int2 origin=int2(group.xy)*8-1;
+    [loop] for(uint k=gi;k<100u;k+=64u) {
+        int2 q=clamp(origin+int2(k%10u,k/10u),0,int2(size)-1);
+        gTrustLuma[k]=LumaNow.Load(int3(q,0));
+        gTrustDepth[k]=DepthBefore.Load(int3(q,0));
+    }
+}
+
 // One pixel's native history decision, shared mechanically with the ReShade port.
 // 0 trusts history, 1 rejects it. Texture structure is intentionally not an input.
 float TrustPixel(int2 p)
 {
     float mask = 1.0;
+    int2 tile=(p&7)+1;
 
     // The flow found a hard cut on this very frame: what the previous frame holds is another scene, so every pixel stays
     // distrusted (the history is not remembered into it either: the mask is one everywhere, as on a first frame).
@@ -119,7 +134,7 @@ float TrustPixel(int2 p)
                     float z = DepthBefore.Load(int3(clamp(qi + int2(i, j), 0, int2(size) - 1), 0));
                     relativeBest = min(relativeBest, abs(z - zNow) / zNow);
 
-                    float here = DepthBefore.Load(int3(clamp(p + int2(i, j), 0, int2(size) - 1), 0));
+                    float here = gTrustDepth[(tile.y+j)*10+tile.x+i];
                     farthestHere = max(farthestHere, here);
                 }
 
@@ -143,7 +158,7 @@ float TrustPixel(int2 p)
             [unroll] for (int j = -1; j <= 1; ++j)
                 [unroll] for (int i = -1; i <= 1; ++i)
                 {
-                    float l = LumaNow.Load(int3(clamp(p + int2(i, j), 0, int2(size) - 1), 0));
+                    float l = gTrustLuma[(tile.y+j)*10+tile.x+i];
                     lo = min(lo, l);
                     hi = max(hi, l);
                 }
@@ -174,9 +189,10 @@ float TrustPixel(int2 p)
 groupshared uint gDistrusted;
 
 [numthreads(8, 8, 1)]
-void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void Trust(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex, uint3 group : SV_GroupID)
 {
     if (gi == 0) gDistrusted = 0;
+    PrepareTrust(group,gi);
     GroupMemoryBarrierWithGroupSync();
     bool inside = id.x < size.x && id.y < size.y;
     float mask = inside ? TrustPixel(int2(id.xy)) : 1.0;

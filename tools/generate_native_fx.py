@@ -86,6 +86,8 @@ parts=[]
 # points never share contents. Alias only arrays whose entry points cannot run
 # together in one invocation; preserve every index, value, barrier and operation.
 scratch_layout={
+ 'gTrustLuma':('float','F5TrustScratchScalar',0,100),
+ 'gTrustDepth':('float','F5TrustScratchScalar',100,100),
  'gCurrentTile':('float','F5ScratchScalar',0,256),
  'gMatchDepth':('float','F5ScratchScalar',256,256),
  'gZeroPrevious':('float','F5ScratchScalar',512,256),
@@ -200,7 +202,7 @@ namespace('F5Guide',guide,{'Flow':('sUncovered','float4'),'GuideRawDepth':('sGui
           {'OutFlow':'stPixelMotion'},dict(trustdefs,size='uint2(BUFFER_WIDTH,BUFFER_HEIGHT)'))
 # Port the native per-pixel trust decision, including decaying memory and the
 # current GPU scene-cut flag. The statistical counter remains native-only.
-namespace('F5Trust','static const float kSky=5e19;\n'+func(trust,'TrustPixel'),
+namespace('F5Trust','static const float kSky=5e19;\ngroupshared float gTrustLuma[100];\ngroupshared float gTrustDepth[100];\n'+func(trust,'PrepareTrust')+'\n'+func(trust,'TrustPixel'),
           {'Flow':('sSmooth','float4'),'FlowBefore':('sPreviousSmooth','float4'),
            'DepthNow':('sProxy','float'),'DepthBefore':('sPreviousProxy','float'),
            'LumaNow':('sC0','float'),'LumaBefore':('sP0','float'),
@@ -210,7 +212,7 @@ namespace('F5Trust','static const float kSky=5e19;\n'+func(trust,'TrustPixel'),
                lumaTolerance='max(MV_TrustLumaTolerance,1e-4)',decay='saturate(MV_TrustDecay)',debugView='0u'))
 rounding='''// Preserve HLSL halfway rounding on the SPIR-V backend as well.
 float F5RoundEven(float v) {
-#if __RENDERER__ == 0x20000
+#if (__RENDERER__ & 0xF0000) == 0x20000
     float b=floor(v),f=v-b;
     return b+((f>0.5 || (f==0.5 && (int(b)&1)!=0))?1.0:0.0);
 #else
@@ -221,7 +223,16 @@ float2 F5RoundEven(float2 v){return float2(F5RoundEven(v.x),F5RoundEven(v.y));}
 float3 F5RoundEven(float3 v){return float3(F5RoundEven(v.x),F5RoundEven(v.y),F5RoundEven(v.z));}
 float4 F5RoundEven(float4 v){return float4(F5RoundEven(v.x),F5RoundEven(v.y),F5RoundEven(v.z),F5RoundEven(v.w));}
 '''
-core='// Generated mechanically from the active native F5Low and TrustMask kernels.\n'+rounding+'groupshared float4 F5ScratchVector[576];\ngroupshared float F5ScratchScalar[1152];\ngroupshared int2 F5ScratchBase;\n'+'\n'.join(parts)
+trustScratch='''// A distinct workgroup object regressed the measured SPIR-V path.
+// Reuse its existing pool; DX11 can allocate only the 200 Trust floats.
+// Both layouts address the same immutable samples at the same tile offsets.
+#if (__RENDERER__ & 0xF0000) == 0x20000
+#define F5TrustScratchScalar F5ScratchScalar
+#else
+groupshared float F5TrustScratchScalar[200];
+#endif
+'''
+core='// Generated mechanically from the active native F5Low and TrustMask kernels.\n'+rounding+'groupshared float4 F5ScratchVector[576];\ngroupshared float F5ScratchScalar[1152];\n'+trustScratch+'groupshared int2 F5ScratchBase;\n'+'\n'.join(parts)
 (OUT/'F5LowNativeCore.fxh').write_text(core,encoding='utf-8')
 
 header='''// Identical source-image sample reuse is built in. Displaced LK reads remain per pixel.
@@ -380,7 +391,7 @@ void CS_Guide(uint3 id:SV_DispatchThreadID){
  tex2Dstore(stPublishedTrust,int2(id.xy),excluded?1.0:tex2Dlod(sTrust,float4(uv,0,0)).x);
  tex2Dstore(stPublishedConfidence,int2(id.xy),excluded?0.0:tex2Dlod(sSmooth,float4(uv,0,0)).w);
 }
-void CS_Trust(uint3 id:SV_DispatchThreadID){if(all(id.xy<uint2(SIZE0)))tex2Dstore(stTrust,int2(id.xy),F5Trust::TrustPixel(int2(id.xy)));}
+void CS_Trust(uint3 id:SV_DispatchThreadID,uint3 group:SV_GroupID,uint3 local:SV_GroupThreadID){F5Trust::PrepareTrust(group,local.y*8u+local.x);barrier();if(all(id.xy<uint2(SIZE0)))tex2Dstore(stTrust,int2(id.xy),F5Trust::TrustPixel(int2(id.xy)));}
 void CS_SaveTrust(uint3 id:SV_DispatchThreadID){if(all(id.xy<uint2(SIZE0))){tex2Dstore(stPreviousTrust,int2(id.xy),tex2Dfetch(sTrust,int2(id.xy)));tex2Dstore(stPreviousSmooth,int2(id.xy),tex2Dfetch(sSmooth,int2(id.xy)));}}
 float PS_TrustGuide(float4 p:SV_Position,float2 uv:TEXCOORD):SV_Target{return tex2Dlod(sTrust,float4(uv,0,0)).x;}
 void CS_SaveProxy(uint3 id:SV_DispatchThreadID){if(all(id.xy<uint2(SIZE0)))tex2Dstore(stPreviousProxy,int2(id.xy),tex2Dfetch(sProxy,int2(id.xy)));}

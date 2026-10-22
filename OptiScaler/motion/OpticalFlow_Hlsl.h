@@ -950,6 +950,13 @@ float4 SmoothRegion(int2 at,float4 centre) {
     float centreMagnitude=dot(centre.xy,centre.xy);
     float alignment=(centreMagnitude>0.0025 && magnitude2>0.0025)?dot(centre.xy,mean)*rsqrt(centreMagnitude*magnitude2):-1.0;
     conflict*=1.0-smoothstep(0.5,0.9,alignment);
+    // A coherent moving neighbourhood can also disagree with an attenuated
+    // centre in speed, even when all nonzero vectors point the same way.
+    // This is only a proposal: CameraFuse retains the original per-pixel
+    // photometric/depth validation before accepting any regional influence.
+    float relativeChange=length(centre.xy-mean)/max(length(mean),0.10);
+    float speedConflict=smoothstep(0.25,0.75,relativeChange)*smoothstep(0.75,0.95,coherence);
+    conflict=max(conflict,speedConflict);
     // Cancellation is not evidence for an arbitrary nonzero direction.
     // Zero is only a proposal and still faces the same per-pixel photo test.
     if(coherence<0.15 && magnitude2<0.25)mean=0.0;

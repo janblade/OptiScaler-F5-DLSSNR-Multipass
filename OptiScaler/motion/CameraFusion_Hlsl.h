@@ -79,8 +79,10 @@ float2 CameraFuse(int2 p,float2 motion,float structure,float vectorEvidence,bool
     float regionalAllowance=(16.0/255.0)*(1.0-0.5*saturate(structure));
     bool confirmedRegion=false;
     float acceptedRegion=0.0;
+    float regionalCost=ownCost;
     if(regionalReady) {
         float regionCost=CameraPhotoCost(p,regional,w,cur);
+        regionalCost=regionCost;
         float compatible=saturate(1.0-max(regionCost-ownCost,0.0)/regionalAllowance);
         float blend=conflict*compatible*compatible*(3.0-2.0*compatible);
         motion=lerp(motion,regional,blend);
@@ -113,30 +115,47 @@ float2 CameraFuse(int2 p,float2 motion,float structure,float vectorEvidence,bool
         // improvement in this pixel's original weighted photometric window.
         // Do not infer it from darkness or from the camera fit itself.
         float photoGain=max(cameraCost-bestCost,0.0);
-        float advection=smoothstep(0.70,0.95,coherence)
-            *smoothstep(0.015,0.10,length(regional-camera))
-            *smoothstep(0.08,0.35,photoGain/max(cameraCost,1e-4))
-            *smoothstep(0.0001,0.0008,photoGain);
+        // All checks remain necessary, without multiplying four partial
+        // supports into near zero. Low contrast is not a surface classification:
+        // textured water/highlights may also have weak correspondence evidence.
+        float advection=min(smoothstep(0.75,0.95,coherence),
+            min(smoothstep(0.015,0.10,length(regional-camera)),
+            min(smoothstep(0.08,0.30,photoGain/max(cameraCost,1e-4)),
+                smoothstep(0.0001,0.00065,photoGain))));
         if(advection>0.0) {
             // Without reliable geometry, a high-contrast mixed window at a
             // horizon must not masquerade as weak independent fog/advection.
             float lo=cur[0],hi=cur[0];
             [unroll]for(int k=1;k<16;++k){lo=min(lo,cur[k]);hi=max(hi,cur[k]);}
-            advection*=1.0-smoothstep(0.08,0.18,hi-lo);
+            float lowContrast=1.0-smoothstep(0.08,0.18,hi-lo);
+            float texturedEvidence=smoothstep(0.04,0.16,structure);
+            advection=min(advection,max(lowContrast,texturedEvidence));
             // Confirm the same pixel's independently measured correspondence
             // in the previous frame, at its own reprojected position. This is
-            // raw matched history, before camera fusion: a suppressed prior
-            // must not permanently prevent genuine small motion from returning.
+            // raw matched history, before camera fusion. Confirm the pre-Smooth
+            // measured centre at its own reprojection; a consistent neighbour
+            // proposal alone does not establish this pixel's correspondence.
+            // Relative/absolute photo gain, directional coherence and the
+            // high-contrast mixed-window guard still apply.
             float temporal=0.0;
             if(hasHistory!=0u) {
-                float2 prior=History.SampleLevel(Linear,(float2(p)+motion*0.5+0.5)/float2(size),0).xy*2.0;
-                float speed=length(motion),oldSpeed=length(prior);
-                float agreement=dot(motion,prior)/max(speed*oldSpeed,1e-6);
-                float change=length(motion-prior)/max(max(speed,oldSpeed),0.05);
-                temporal=smoothstep(0.75,0.95,agreement)*(1.0-smoothstep(0.25,0.75,change));
+                float2 independent=measured;
+                float2 prior=History.SampleLevel(Linear,(float2(p)+independent*0.5+0.5)/float2(size),0).xy*2.0;
+                float speed=length(independent),oldSpeed=length(prior);
+                float agreement=dot(independent,prior)/max(speed*oldSpeed,1e-6);
+                float change=length(independent-prior)/max(max(speed,oldSpeed),0.05);
+                temporal=smoothstep(0.80,0.98,agreement)*(1.0-smoothstep(0.30,0.90,change));
             }
-            advection*=temporal;
+            advection=min(advection,temporal);
         }
+        // Once all independent checks agree, avoid retaining a large fraction
+        // of the camera-biased velocity solely because several supports are
+        // partial. Very weak joint evidence still receives no recovery.
+        advection=smoothstep(0.05,0.30,advection);
+        // Restore speed toward the same coherent regional proposal only when
+        // that proposal improves this pixel's own original photometric window.
+        if(regionalReady && regionalCost<ownCost)
+            motion=lerp(motion,regional,advection);
         localEvidence=max(localEvidence,advection);
         float cameraStrength=saturate(my.w/0.75);
         float blend=ambiguity*cameraStrength*compatible*compatible*(3.0-2.0*compatible)*(1.0-localEvidence);

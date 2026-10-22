@@ -24,7 +24,7 @@ struct Stats {
 int main(int argc,char** argv){
     kWidth=641;kHeight=361;setvbuf(stdout,nullptr,_IONBF,0);
     Gpu gpu;if(!gpu.Init())return 2;
-    unsigned flags=argc>1?unsigned(atoi(argv[1])):1;
+    unsigned flags=argc>1?unsigned(atoi(argv[1])):7;
     printf("scene,stage,band,samples,EPE,p50,p95,over1px,aligned30,opposed,zero,jitter\n");
     struct Case{const char* name;float panx,pany,noise;int scene;bool square,depth;float fraction=0.0f;bool anchored=false;};
     const Case cases[]={

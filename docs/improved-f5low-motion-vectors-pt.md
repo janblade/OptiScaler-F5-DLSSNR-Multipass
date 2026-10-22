@@ -2,11 +2,12 @@
 
 ## Escopo
 
-Mudanças do OptiScaler baseadas no F5Low 0.1.31 do Janblade
-(`aeb439482c13dd7364ee2bef16fa41b902be6f98`), integradas à versão 0.1.32
-(`fadc3bf67f6c8548e94914baec3f2e551ba8d8a4`). A main avançou depois para
-0.1.33; os resultados descrevem esta branch testada, não uma integração ainda
-não testada da 0.1.33. O PR não publica uma versão nem substitui a main.
+Referência do estimador: F5Low original **0.1.31**
+(`aeb439482c13dd7364ee2bef16fa41b902be6f98`). A proposta está integrada à
+**0.1.33** atual (`2a5be38dc778913b4229efbeb750e2a2c6474242`), compilada e
+testada. O PR contém somente OptiScaler, sem publicar release nem substituir
+a main. O pacote complementar contém Feeder/ReShade/Host modificados; esses
+projetos/binários não entram neste repositório.
 
 Objetivo: vetores coerentes e baratos para NR e frame generation, preservando
 movimentos independentes reais de água, fumaça e neblina. Os testes sintéticos
@@ -49,21 +50,16 @@ de profundidade/luminância. Movimento independente confiável e bordas de prime
 plano são protegidos. Não se impõe uma direção única à imagem inteira: rotação,
 paralaxe e objetos independentes exigem direções distintas.
 
-A correção final de baixo contraste preserva advecção independente quando ela
-explica a imagem melhor que a câmera, mesmo com pouca estrutura de textura.
-Exige ganho fotométrico absoluto e relativo, coerência local e confirmação no
-histórico bruto do matching daquele pixel, na sua posição reprojetada. Usar
-esse histórico anterior à fusão evita que uma supressão passada bloqueie para
-sempre movimento real. Uma proteção de janelas com contraste alto reduz a
-confusão em bordas de horizonte. Não há aumento global arbitrário de confiança.
-
-No teste controlado de 8 bits, uma região movendo 0,8 pixel/quadro sobre fundo
-parado, contraste 0,04, teve erro final de aproximadamente 0,814 para 0,261 pixel;
-em contraste 0,12, de 0,544 para 0,118. Com pan de 0,7 e movimento independente
-de 0,8 pixel/quadro, contraste 0,12, de 0,474 para 0,083. Isso não significa que
-toda fumaça será recuperada. Movimento de apenas 0,05 pixel/quadro em RGBA8 com
-pouco contraste pode já faltar no matching, antes da fusão; não é considerado
-resolvido.
+A recuperação de advecção serve tanto a materiais de baixo contraste quanto
+a água/reflexos texturizados com evidência suficiente. Smooth detecta divergência
+de velocidade além da direção. Cada proposta continua validada na janela
+fotométrica original do próprio pixel. Exige coerência espacial, ganho fotométrico
+absoluto/relativo sobre a câmera e confirmação do vetor medido **antes do Smooth**
+na própria reprojeção no histórico bruto do Match. Critérios parciais usam o
+mínimo em vez de serem multiplicados quase a zero. A velocidade regional só é
+recuperada se melhorar o objetivo original do pixel. Permanecem as proteções de
+elementos estáticos e bordas de profundidade. A recuperação e suas regressões
+temporais são detalhadas nas medições finais abaixo.
 
 ## Otimizações que preservam dados
 
@@ -161,9 +157,6 @@ precisam de conferência visual do usuário na versão final.
 
 ## Medições
 
-Os resultados finais são anexados abaixo. O custo nativo total inclui estimador,
-trust, desoclusão e guia em resolução completa; exclui NR, debug, readback e IPC.
-O custo das técnicas ReShade e Feeder é listado separadamente. Comparações usam
-quadros parados e em movimento, mesma GPU, resolução, entradas e configurações,
-com aquecimento e repetições. Variações de FPS do jogo não são apresentadas como
-economia medida isoladamente nos vetores.
+Consulte os resultados finais e limites detalhados no [relatório bilíngue](f5low-final-validation-en-pt.md).
+
+Custo nativo total em 3413×1920/RTX 3080/LK normal: movimento **3,531264 → 3,056640 ms** (original 1.31 → final); estático **3,503616 → 2,201600 ms**. Inclui estimador, Trust/desoclusão e guia; exclui NR, FG, debug, readback e IPC. Shader + Feeder: DX11 **3,604128 ms**, Vulkan **5,044224 ms**, produtor x86 para Host64 **3,828064 ms**. Essas cargas diferem do benchmark nativo. A meta adicional de 0,7 ms não foi demonstrada; Vulkan/Host64 tiveram pequeno aumento de custo nesta rodada. Há recuperação real de movimento, porém maior variação temporal em alguns casos e falha no limite rigoroso de céu/granulado. Não é certificação de qualidade final para frame generation.

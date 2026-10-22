@@ -51,6 +51,13 @@ review for its change type below, against the specs here.**
    `dlssnr_detail_stats_Shader.cso` / `.h` (Tune's statistics) are dxc `-T cs_6_0 -E CSMain -O3 -Qstrip_reflect` DXIL (the
    header with `-Fh -Vn dlssnr_detail_stats_cso`), which reproduces the committed binary byte-identically; its SPIR-V
    uses the dlssnr recipe (`dlssnr_detail_stats_spv`).
+   **Superior Scaling blobs** (`shaders/dlssnr/superior/precompile/*_Shader.cso` / `.h`): the `host_*` ones are built
+   from this live `dlssnr.hlsl` (through `superior/HostResolve.hlsli`) and from `dlssnr_spatial_warp.hlsli` (through
+   `superior/WarpMap.hlsli`), so ANY change to either -- even one that leaves the default path alone -- means running
+   `tools/compile_nr_interpass.ps1` (PowerShell + the tree's dxc, no Python) and committing what it writes. CI
+   (`.github/workflows/superior_checks.yml`) rebuilds them all and fails on any difference. The other Superior blobs
+   come from `superior/precompile/dlssnr.hlsl`, a frozen v59 copy of this shader that does not receive changes made
+   here (see its header and `docs/Superior-Scaling-port.md`, "Frozen v59 shader baseline"); never edit it for NR work.
 7. **Passthrough is sacred.** Any encode/decode/proxy change must leave already-tone-mapped
    (`gPassthrough != 0`) frames untouched. Both the encode AND every place that reproduces the encode
    (e.g. the matched-residual `fullProxy`) must carry the same passthrough gate. (This is exactly the

@@ -152,8 +152,7 @@ matching when present, fused carrier/motion preparation, identity carrier decode
 **NR and private DLSS inference are excluded**; both variants use identity carrier output in place of private inference.
 Common colour/guide packing is prepared outside timestamps. The new feature has fewer private-DLSS pixels, but the actual
 inference saving is unmeasured. These figures are component results and do not establish total in-game performance or
-visual parity. [Raw samples](validation/superior-packed-route-timing.csv) and
-[statistics/metadata](validation/superior-packed-route-timing.json) preserve all samples and variability.
+visual parity. Raw samples are summarised in [validation/README.md](validation/README.md).
 
 ### Superior isolation, residual flags and lossless host optimization
 
@@ -195,8 +194,7 @@ Resident final-composition timestamps, 8 ABBA/BAAB blocks, separate warm-up, 640
 
 All eight paired block medians are negative for each packed profile. Ordinary controls use identical bytecode and show
 only sampling variability. These are **final-shader-only** timings, excluding NR/DLSS inference and other pipeline stages.
-[Raw samples](validation/superior-host-opt-timing.csv) and [metadata/spread](validation/superior-host-opt-timing.json)
-retain all samples. Full in-game savings remain unmeasured.
+Raw samples: see [validation/README.md](validation/README.md). Full in-game savings remain unmeasured.
 
 Audit of the other Superior stages: fixed Area and colour packing, cached inter-pass Low36/Cross5, carrier preparation,
 Low64 and private DLSS retain their prior algorithms. Removing the carrier decode store or approximating filtered samples
@@ -221,8 +219,7 @@ Final-stage inputs use FP16 proxy/answer/residual and output; the original frame
 Historical comparison up to 606638ef; it does not measure the subsequently enabled private DLSS/guided native path.
 At 100% with compression, the previous final pass omitted frequency shaping; the corrected path does real additional
 Low64 work. This is a correctness cost, not an optimization gain. At reduced scales the temporal resolve shader is
-byte-identical to the baseline; the gain coefficients change. Raw samples and standard deviations are in
-[CSV](validation/superior-spatial-timing.csv) and [JSON](validation/superior-spatial-timing.json).
+byte-identical to the baseline; the gain coefficients change. Raw samples: see [validation/README.md](validation/README.md).
 These component timings exclude NR/DLSS inference, changes in inter-pass count, colour pack/unpack and the complete game.
 
 ### Native temporal final-stage cost
@@ -239,8 +236,7 @@ Structure=Intensity=1. The same timestamp method and FP16 production texture for
 These small, noisy differences describe only the final stage and do not establish a total performance gain.
 **Private DLSS inference, carrier encode/decode and guide preparation are excluded**; enabling them adds work
 whose complete cost must be measured in game. The candidate uses a prepared decoded residual outside the timing window.
-[Raw samples](validation/superior-native-temporal-timing.csv) and
-[statistics/metadata](validation/superior-native-temporal-timing.json) retain all samples, including outliers.
+Raw samples: see [validation/README.md](validation/README.md).
 
 ## Install
 
@@ -296,7 +292,7 @@ Eight blocks alternate ABBA/BAAB with separate warm-up, 40 quartets per block an
 
 Paired median differences are -0.000128 to +0.000384 ms, much smaller than observed variability
 (per-variant standard deviation about 0.038-0.056 ms). There is no resolved timing difference in this fixture.
-[Raw samples](validation/superior-port-v59-timing.csv) and [statistics/metadata](validation/superior-port-v59-timing.json) are committed.
+Raw samples: see [validation/README.md](validation/README.md).
 This does **not** prove equal total in-game performance or complete temporal image equivalence.
 
 ### Reproduce and complete game validation

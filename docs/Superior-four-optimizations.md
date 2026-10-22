@@ -91,10 +91,5 @@ Fusion's paired deltas range from -0.003584 to +0.003200 ms, with mixed block ou
 there is no stable saving supporting adoption.
 The full LDS matrix loses by 0.0225-0.1072 ms (paired medians), including bit-exact 4K checks.
 
-[All statistics, variability, paired blocks and metadata](validation/superior-four-results.json).
-Raw samples: [final](validation/superior-four-final.csv),
-[specialization](validation/superior-four-specialization.csv),
-[lookup after specialization](validation/superior-four-lookup_after_specialization.csv),
-[rejected LDS](validation/superior-four-lds.csv),
-[rejected fusion](validation/superior-four-fusion.csv),
-[SDR recheck](validation/superior-four-sdr_recheck.csv).
+The raw samples and statistics (final, specialization, lookup after specialization, rejected LDS, rejected fusion,
+SDR recheck) are summarised, with how to regenerate them, in [validation/README.md](validation/README.md).

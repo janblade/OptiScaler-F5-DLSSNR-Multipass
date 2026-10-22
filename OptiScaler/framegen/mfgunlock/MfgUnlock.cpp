@@ -43,7 +43,6 @@ namespace
 {
 std::mutex rtx40Mutex;
 std::map<HMODULE, std::unique_ptr<MfgUnlock::AppliedPatchSet>> rtx40PatchSets;
-std::set<HMODULE> rtx40RecoveryFailed;
 std::map<HMODULE, MfgUnlock::Family> rtx40Families;
 // Modules already decided (patched, stood aside or not needed), by path: a repeated load of the same module is not
 // scanned again. Dropped when the module really unloads.
@@ -101,6 +100,13 @@ size_t GetMappedImageSize(HMODULE module)
     return mappedSize;
 }
 
+// Handles only a bad read of mapped memory; everything else keeps unwinding so real faults are not swallowed.
+inline int AccessViolationFilter(unsigned code)
+{
+    return code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR ? EXCEPTION_EXECUTE_HANDLER
+                                                                                 : EXCEPTION_CONTINUE_SEARCH;
+}
+
 // Locators read live provider memory. A page that is gone or not readable must make the family stand aside, not take
 // the game down, so each top-level locate runs under SEH. __try allows no C++ object with a destructor in its frame,
 // hence the plain callback; the caller holds no lock that the locate itself takes.
@@ -111,9 +117,7 @@ bool RunGuarded(void (*locate)(void*), void* context)
         locate(context);
         return true;
     }
-    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == EXCEPTION_IN_PAGE_ERROR
-                  ? EXCEPTION_EXECUTE_HANDLER
-                  : EXCEPTION_CONTINUE_SEARCH)
+    __except (AccessViolationFilter(GetExceptionCode()))
     {
         return false;
     }
@@ -430,8 +434,9 @@ bool IsBlackwellOrNewer()
     return gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_GB200;
 }
 
-// RTX 20/30 wins on Ampere and Turing cards; RTX 40 covers Ada (or any older NVIDIA GPU when forced). Forcing RTX
-// 20/30 on another card uses the Ampere kernels.
+// RTX 20/30 wins on Ampere and Turing cards; RTX 40 covers Ada. The Ada gates and kernels only make sense on Ada, so
+// RTX40 maps to the Ada tier only on an Ada card, in detect and On alike (On never widens it to Hopper 0x180 or
+// datacentre Blackwell 0x1A0). RTX2030 On forces the Ampere kernels on any other NVIDIA card.
 Rtx40Tier ChooseRtx40Tier(MfgUnlockMode mode40, MfgUnlockMode mode2030)
 {
     const auto gpu = IdentifyGpu::getPrimaryGpu();
@@ -446,7 +451,7 @@ Rtx40Tier ChooseRtx40Tier(MfgUnlockMode mode40, MfgUnlockMode mode2030)
         if (arch == NV_GPU_ARCHITECTURE_TU100)
             return Rtx40Tier::Turing;
     }
-    if (mode40 != MfgUnlockMode::Off && (mode40 == MfgUnlockMode::On ? nvidia : arch == NV_GPU_ARCHITECTURE_AD100))
+    if (mode40 != MfgUnlockMode::Off && nvidia && arch == NV_GPU_ARCHITECTURE_AD100)
         return Rtx40Tier::Ada;
     if (mode2030 == MfgUnlockMode::On && nvidia)
         return Rtx40Tier::Ampere;
@@ -459,6 +464,11 @@ Rtx40Tier ChooseRtx40Tier(MfgUnlockMode mode40, MfgUnlockMode mode2030)
 std::atomic<bool> turingRewriteWanted { false };
 std::atomic<bool> cudaHooksInstalled { false };
 HMODULE hookedNvcuda = nullptr; // guarded by cudaRewriteMutex
+// A live export of the hooked nvcuda and the first bytes Detours left there, so a fresh copy of nvcuda that returns
+// at the same base without an unload notice (its detour gone) is noticed instead of trusted. Guarded by
+// cudaRewriteMutex.
+const void* hookedProbeAddr = nullptr;
+std::array<uint8_t, 8> hookedProbeBytes {};
 std::mutex cudaRewriteMutex;
 
 struct CudaRewriteEntry
@@ -484,7 +494,7 @@ bool ReadMagic(const void* image, uint32_t& magic)
         magic = *static_cast<const volatile uint32_t*>(image);
         return true;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER)
+    __except (AccessViolationFilter(GetExceptionCode()))
     {
         return false;
     }
@@ -514,7 +524,7 @@ uint64_t ContainerHash(const void* image)
             hash = (hash ^ container[i]) * 1099511628211ull;
         return hash;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER)
+    __except (AccessViolationFilter(GetExceptionCode()))
     {
         return 0;
     }
@@ -605,7 +615,14 @@ bool InstallCudaHooksIfWanted()
 
     std::lock_guard lock(cudaRewriteMutex);
     if (cudaHooksInstalled.load(std::memory_order_relaxed) && nvcuda == hookedNvcuda)
-        return true;
+    {
+        // Trust the installed hooks only while the probe export still carries Detours' trampoline jump. A fresh
+        // nvcuda at this base reads back its own prologue, so it is re-hooked below.
+        uint32_t magic = 0;
+        if (hookedProbeAddr != nullptr && ReadMagic(hookedProbeAddr, magic) &&
+            std::memcmp(hookedProbeAddr, hookedProbeBytes.data(), hookedProbeBytes.size()) == 0)
+            return true;
+    }
     cudaRewriteCache.clear();
 
     o_cuModuleLoadData = reinterpret_cast<PFN_cuModuleLoadData>(GetProcAddress(nvcuda, "cuModuleLoadData"));
@@ -646,6 +663,12 @@ bool InstallCudaHooksIfWanted()
         return false;
     }
     hookedNvcuda = nvcuda;
+    // Remember a hooked export's live bytes to tell this instance from a later reload at the same base.
+    hookedProbeAddr = GetProcAddress(nvcuda, o_cuModuleLoadData != nullptr        ? "cuModuleLoadData"
+                                             : o_cuModuleLoadDataEx != nullptr    ? "cuModuleLoadDataEx"
+                                                                                  : "cuLibraryLoadData");
+    if (hookedProbeAddr != nullptr)
+        std::memcpy(hookedProbeBytes.data(), hookedProbeAddr, hookedProbeBytes.size());
     cudaHooksInstalled.store(true, std::memory_order_release);
     LOG_INFO("[MFGUnlock] RTX 20: CUDA module loaders hooked (kernels are rewritten for sm_75)");
     return true;
@@ -657,6 +680,7 @@ void ForgetCudaHooks()
     std::lock_guard lock(cudaRewriteMutex);
     cudaHooksInstalled.store(false, std::memory_order_relaxed);
     hookedNvcuda = nullptr;
+    hookedProbeAddr = nullptr;
     cudaRewriteCache.clear();
 }
 
@@ -786,7 +810,6 @@ bool DropRtx40Locked(HMODULE module)
     const bool wasActive = found != rtx40PatchSets.end() && found->second && found->second->IsActive();
     rtx40PatchSets.erase(module);
     rtx40Families.erase(module);
-    rtx40RecoveryFailed.erase(module);
     rtx40Decided.erase(module);
     turingModules.erase(module);
     // The rewrite only runs while a Turing provider is patched; a reapply turns it back on.
@@ -795,8 +818,36 @@ bool DropRtx40Locked(HMODULE module)
     return wasActive;
 }
 
-// Patches one nvngx_dlssg copy (the game's and the driver's can both load). Detect acts on Ada only and writes
-// nothing elsewhere; On forces it on any older NVIDIA GPU. Stands aside when another frame generation owns the
+// True when a module of `family` other than `except` still has its patches applied (guarded by rtx40Mutex). The
+// status registry has one slot per family, so a non-active module must not overwrite another copy's Active status.
+bool AnotherActiveRtx40Locked(MfgUnlock::Family family, HMODULE except)
+{
+    for (const auto& [module, set] : rtx40PatchSets)
+    {
+        if (module == except || !set || !set->IsActive())
+            continue;
+        const auto found = rtx40Families.find(module);
+        if (found != rtx40Families.end() && found->second == family)
+            return true;
+    }
+    return false;
+}
+
+// Publishes a non-active status only when no other module of the family is still active.
+void PublishRtx40InactiveLocked(MfgUnlock::FamilyStatus status, bool error, MfgUnlock::Family family, HMODULE except)
+{
+    if (!AnotherActiveRtx40Locked(family, except))
+        PublishRtx40(std::move(status), error, family);
+}
+
+void PublishRtx40Inactive(MfgUnlock::FamilyStatus status, bool error, MfgUnlock::Family family, HMODULE except)
+{
+    std::lock_guard lock(rtx40Mutex);
+    PublishRtx40InactiveLocked(std::move(status), error, family, except);
+}
+
+// Patches one nvngx_dlssg copy (the game's and the driver's can both load). RTX40 acts on Ada only (detect and On
+// alike); RTX2030 On also forces its Ampere kernels on another NVIDIA card. Stands aside when another frame gen owns the
 // output. decided turns false only when the module could not be judged (a data-file load).
 bool DecideRtx40(HMODULE module, MfgUnlockMode mode, MfgUnlockMode mode2030, bool& decided)
 {
@@ -807,21 +858,21 @@ bool DecideRtx40(HMODULE module, MfgUnlockMode mode, MfgUnlockMode mode2030, boo
                             : MfgUnlock::Family::RTX2030;
     if (State::Instance().externalFrameGeneration)
     {
-        PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, nullptr,
-                                     "external frame generation is active"),
-                     false, family);
+        PublishRtx40Inactive(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, nullptr,
+                                             "external frame generation is active"),
+                             false, family, module);
         return false;
     }
     if (tier == Rtx40Tier::None)
     {
         const bool only2030 = mode == MfgUnlockMode::Off;
         const bool nvidia = IsNvidiaGpu();
-        PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::NotNeeded, module, nullptr,
-                                     !nvidia                ? "primary GPU is not NVIDIA"
-                                     : IsBlackwellOrNewer() ? "primary GPU is an RTX 50 or newer (MFG is native)"
-                                     : only2030             ? "primary GPU is not an RTX 20/30 (Turing/Ampere)"
-                                                : "primary GPU is not an RTX 40 (Ada)"),
-                     false, family);
+        PublishRtx40Inactive(MakeRtx40Status(MfgUnlock::FamilyState::NotNeeded, module, nullptr,
+                                             !nvidia                ? "primary GPU is not NVIDIA"
+                                             : IsBlackwellOrNewer() ? "primary GPU is an RTX 50 or newer (MFG is native)"
+                                             : only2030 ? "primary GPU is not an RTX 20/30 (Turing/Ampere)"
+                                                        : "primary GPU is not an RTX 40 (Ada)"),
+                             false, family, module);
         return false;
     }
     const size_t mappedSize = GetMappedImageSize(module);
@@ -846,62 +897,67 @@ bool DecideRtx40(HMODULE module, MfgUnlockMode mode, MfgUnlockMode mode2030, boo
     }
     if (!report.Complete())
     {
-        PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report, report.failure), true,
-                     family);
+        PublishRtx40Inactive(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report, report.failure), true,
+                             family, module);
         return false;
     }
 
     if (operations.empty())
     {
-        PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report,
-                                     "could not build the patch transaction"),
-                     true, family);
+        PublishRtx40Inactive(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report,
+                                             "could not build the patch transaction"),
+                             true, family, module);
         return false;
     }
 
-    std::lock_guard lock(rtx40Mutex);
-    auto& slot = rtx40PatchSets[module];
-    if (!slot)
-        slot = std::make_unique<MfgUnlock::AppliedPatchSet>();
-    // Another thread may have patched this module while this one scanned it; never undo that.
-    if (slot->IsActive())
-        return true;
-    const auto applied = slot->Apply(operations);
-    if (!applied.applied)
     {
-        bool restored = true;
+        std::lock_guard lock(rtx40Mutex);
+        auto& slot = rtx40PatchSets[module];
+        if (!slot)
+            slot = std::make_unique<MfgUnlock::AppliedPatchSet>();
+        // Another thread may have patched this module while this one scanned it; never undo that.
         if (slot->IsActive())
-            restored = slot->Restore().applied;
-        if (!restored)
-            rtx40RecoveryFailed.insert(module);
-        PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report,
-                                     restored ? "patch transaction failed"
-                                              : "patch transaction failed and partial changes could not be restored"),
-                     true, family);
-        return false;
-    }
+            return true;
 
-    if (tier == Rtx40Tier::Turing)
-    {
-        // Without the CUDA hooks the patched module would advertise a feature whose kernels can never load.
-        if (!EnableTuringCudaRewrite())
+        if (tier == Rtx40Tier::Turing)
         {
-            if (turingModules.empty())
+            // The CUDA rewrite is enabled before the patches are applied: the patched module advertises a feature
+            // whose kernels can only load rewritten, and a hook failure after applying would need a rollback of
+            // multi-byte patches on possibly running code. The hooks pass everything through while no Turing module
+            // is patched, so enabling them early is harmless; it is wound back if this is the last candidate.
+            if (!EnableTuringCudaRewrite())
+            {
+                if (turingModules.empty())
+                    turingRewriteWanted.store(false, std::memory_order_release);
+                PublishRtx40InactiveLocked(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report,
+                                                           "could not hook the CUDA module loaders"),
+                                           true, family, module);
+                return false;
+            }
+        }
+
+        const auto applied = slot->Apply(operations);
+        if (!applied.applied)
+        {
+            // ApplyTransaction already rolled its own partial writes back; nothing multi-byte is left on live code.
+            const bool restored = !slot->IsActive() || slot->Restore().applied;
+            if (tier == Rtx40Tier::Turing && turingModules.empty())
                 turingRewriteWanted.store(false, std::memory_order_release);
-            const bool restored = slot->Restore().applied;
-            if (!restored)
-                rtx40RecoveryFailed.insert(module);
-            PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report,
-                                         restored ? "could not hook the CUDA module loaders"
-                                                  : "could not hook the CUDA module loaders and the patches could "
-                                                    "not be restored"),
-                         true, family);
+            PublishRtx40InactiveLocked(
+                MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, &report,
+                                restored ? "patch transaction failed"
+                                         : "patch transaction failed and partial changes could not be restored"),
+                true, family, module);
             return false;
         }
-        turingModules.insert(module);
+
+        if (tier == Rtx40Tier::Turing)
+            turingModules.insert(module);
+        rtx40Families[module] = family;
     }
-    rtx40RecoveryFailed.erase(module);
-    rtx40Families[module] = family;
+
+    // The DLL is hashed and its version read outside rtx40Mutex: that touches the file system and must not block
+    // another provider load.
     auto status = MakeRtx40Status(MfgUnlock::FamilyState::Active, module, &report);
     status.failure = layouts;
     AddModuleMetadata(status);
@@ -921,14 +977,24 @@ bool TryApplyRtx40(HMODULE module)
     const auto path = GetModulePath(module);
     {
         std::lock_guard lock(rtx40Mutex);
-        const auto found = rtx40PatchSets.find(module);
         const auto known = rtx40Decided.find(module);
         if (known != rtx40Decided.end() && known->second != path)
-            DropRtx40Locked(module); // the module we judged went without an unload notice
-        else if (found != rtx40PatchSets.end() && found->second->IsActive())
-            return true;
+        {
+            DropRtx40Locked(module); // the module we judged went without an unload notice; re-decide below
+        }
         else if (known != rtx40Decided.end())
-            return false;
+        {
+            const auto found = rtx40PatchSets.find(module);
+            if (found == rtx40PatchSets.end() || !found->second->IsActive())
+                return false; // decided earlier (stood aside / not needed): do not rescan the same module
+            // The same DLL can return at this address without an unload notice. A cached Active decision is trusted
+            // only when a patch site still reads back the replacement; a fresh copy reads the original bytes.
+            bool stillApplied = false;
+            const bool read = Guarded([&] { stillApplied = found->second->StillApplied(); });
+            if (read && stillApplied)
+                return true;
+            DropRtx40Locked(module); // reloaded fresh at this address: re-apply below
+        }
     }
 
     bool decided = false;
@@ -969,20 +1035,24 @@ bool IsRtx40Module(HMODULE module)
 void ForgetRtx40Module(HMODULE module)
 {
     bool wasActive = false;
+    bool anotherActive = false;
     auto family = MfgUnlock::Family::RTX40;
     {
         std::lock_guard lock(rtx40Mutex);
         if (const auto found = rtx40Families.find(module); found != rtx40Families.end())
             family = found->second;
         wasActive = DropRtx40Locked(module);
+        anotherActive = AnotherActiveRtx40Locked(family, module);
     }
     {
         std::lock_guard cacheLock(cudaRewriteMutex);
         cudaRewriteCache.clear();
     }
 
-    // A stood-aside or not-needed diagnostic stays as it was.
-    if (wasActive)
+    // Only the module that was active publishes, and only when no other copy of the family is still patched: a
+    // second provider's Active status must not be replaced by this one's "unloaded". A stood-aside or not-needed
+    // diagnostic stays as it was.
+    if (wasActive && !anotherActive)
     {
         MfgUnlock::FamilyStatus status;
         status.state = MfgUnlock::FamilyState::Waiting;

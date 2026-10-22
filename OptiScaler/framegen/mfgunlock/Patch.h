@@ -417,6 +417,18 @@ class AppliedPatchSet
 
     bool IsActive() const { return !_operations.empty(); }
 
+    // True when the first operation's bytes are still the replacement. A module reloaded fresh at the same address
+    // reads back the original bytes, so this tells a live patch from a stale bookkeeping entry. Reads under SEH is
+    // the caller's job (the address may be unmapped); here the set is assumed to point at readable memory.
+    bool StillApplied() const
+    {
+        if (_operations.empty())
+            return false;
+        const auto& first = _operations.front();
+        return first.address != nullptr &&
+               std::memcmp(first.address, first.replacement.data(), first.replacement.size()) == 0;
+    }
+
   private:
     std::vector<PatchOperation> _operations;
 };

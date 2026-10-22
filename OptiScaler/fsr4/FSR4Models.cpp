@@ -93,6 +93,10 @@ bool hkIsSupported(void* provider, void* device)
     if (!selected.has_value())
         selected = detected;
 
+    // A choice this GPU can't run (e.g. an ini copied from another machine) falls back to the detected model
+    if (selected.has_value() && !FSR4Models::CanGpuRun(*selected))
+        selected = detected;
+
     auto gpuCanRunSelected = selected.has_value() && FSR4Models::CanGpuRun(*selected);
 
     std::unique_lock lock(hookMutex);

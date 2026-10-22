@@ -224,13 +224,6 @@ static std::wstring PluginVersionNumber(const std::filesystem::path& plugin)
     return std::format(L"{}.{}.{}.{}", version.major, version.minor, version.patch, version.reserved);
 }
 
-// " (v1.2.3.4)" for support logs (an unlocker built for one XeFG/DLSS-G version, say); empty when it has none
-static std::wstring PluginVersion(const std::filesystem::path& plugin)
-{
-    const std::wstring version = PluginVersionNumber(plugin);
-    return version.empty() ? std::wstring() : std::format(L" (v{})", version);
-}
-
 // Runs a freshly loaded plugin's entry points; OptiPatcher-style plugins report that they patched the game, and then
 // the spoofing that would have hidden the GPU is turned off.
 static void InitializeAsiModule(HMODULE hMod)

@@ -341,8 +341,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (auto setting = readInt("FSR", "Fsr4Preset"); setting.has_value() && setting >= 0 && setting <= 5)
                 Fsr4Preset.set_from_config(setting);
 
-            Fsr4Model.set_from_config(readEnum<FSR4Model>("FSR", "Fsr4Model"));
-
             FsrNonLinearColorSpace.set_from_config(readBool("FSR", "FsrNonLinearColorSpace"));
             FsrNonLinearPQ.set_from_config(readBool("FSR", "FsrNonLinearPQ"));
             FsrNonLinearSRGB.set_from_config(readBool("FSR", "FsrNonLinearSRGB"));

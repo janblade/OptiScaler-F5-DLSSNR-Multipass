@@ -543,6 +543,12 @@ bool FFXFeatureDx12::InitFFX(const NVSDK_NGX_Parameter* InParameters)
 
         QueryVersionsDx12(Device);
 
+        if (State::Instance().ffxUpscalerVersionIds.empty() || State::Instance().ffxUpscalerVersionNames.empty())
+        {
+            LOG_ERROR("No FFX upscalers reported!");
+            return false;
+        }
+
         InitFlags();
 
         ffxCreateBackendDX12Desc backendDesc = { 0 };

@@ -1203,8 +1203,8 @@ class FfxApiProxy
     {
         auto type = GetType(desc->type);
 
-        if (auto overrideVersion = FindOverrideVersion(desc);
-            type == FFXStructType::Upscaling && overrideVersion && *overrideVersion == FSR4DriverProviderDx12::VersionId())
+        if (auto overrideVersion = FindOverrideVersion(desc); type == FFXStructType::Upscaling && overrideVersion &&
+                                                              *overrideVersion == FSR4DriverProviderDx12::VersionId())
         {
             return FSR4DriverProviderDx12::CreateContext(context, desc, memCb);
         }

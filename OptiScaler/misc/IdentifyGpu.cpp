@@ -732,7 +732,7 @@ void IdentifyGpu::updateInt8Support(bool sdkSupportsInt8, bool driverSupportsInt
     std::scoped_lock lock(mutex);
     for (auto& gpuInfo : cache)
     {
-        if (gpuInfo.fsr4Support != FSR4Support::INT8)
+        if (!IsFsr4Int8(gpuInfo.fsr4Support))
             continue;
 
         LOG_DEBUG("Neither driver nor the sdk supports FSR 4 Int 8, disabling FSR 4 for {}", gpuInfo.name);

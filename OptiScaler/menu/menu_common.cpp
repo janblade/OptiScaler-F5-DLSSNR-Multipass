@@ -3158,7 +3158,11 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     // than one of them
                     HMODULE modelModule = nullptr;
                     const auto ffxIndex = config->FfxUpscalerIndex.value_or_default();
-                    if (ffxIndex >= 0 && ffxIndex < state.ffxUpscalerVersionIds.size())
+                    // The version list is shared with Vulkan and DX11, only the DX12 ones come from the driver provider
+                    const bool dx12Upscaler = (state.api == API::DX12 && currentBackend == Upscaler::FFX) ||
+                                              currentBackend == Upscaler::FFX_on12;
+
+                    if (dx12Upscaler && ffxIndex >= 0 && ffxIndex < state.ffxUpscalerVersionIds.size())
                         modelModule = FfxApiProxy::UpscalerModule(state.ffxUpscalerVersionIds[ffxIndex]);
 
                     if (auto models = FSR4Models::SelectableModels(modelModule); !models.empty())

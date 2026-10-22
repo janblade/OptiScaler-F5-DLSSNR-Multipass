@@ -54,9 +54,7 @@ inline void MeasureCandidate(LowFixture& f, std::ofstream& out, const char* name
     std::cout << name << " P" << scale << " complete\n" << std::flush;
 }
 
-inline ComPtr<ID3D12Resource>
-CachedWarp(Runner& r, const DlssNr::Spatial::Layout& layout,
-           const std::string& shaderDirectory = "OptiScaler/shaders/dlssnr/superior/precompile")
+inline ComPtr<ID3D12Resource> CachedWarp(Runner& r, const DlssNr::Spatial::Layout& layout)
 {
     auto metadata = UploadWarp(r, layout);
     auto d = metadata->GetDesc();
@@ -64,7 +62,7 @@ CachedWarp(Runner& r, const DlssNr::Spatial::Layout& layout,
     d.Height = 3;
     d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     auto result = r.resource(d, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    auto pso = r.pipeline(shaderDirectory, "host_warp_cache");
+    auto pso = r.pipeline("OptiScaler/shaders/dlssnr/superior/precompile", "host_warp_cache");
     HostConstants c {};
     c.Width = layout.nativeW;
     c.Height = layout.nativeH;

@@ -2270,9 +2270,6 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _superiorRawLow->Release();
     if (_superiorWarpCache)
         _superiorWarpCache->Release();
-    for (auto* pipeline : _superiorNativeResolve)
-        if (pipeline)
-            pipeline->Release();
     for (auto* pipeline : _superiorNormalResolve)
         if (pipeline)
             pipeline->Release();

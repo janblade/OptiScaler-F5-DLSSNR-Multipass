@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <random>
 
 namespace
@@ -163,9 +164,11 @@ bool Numeric()
         a[i] = HalfWord();
         b[i] = HalfWord();
     }
-    // Every pair of the edge values, in both halves (swapped in the high one): signed zeros, a canonical NaN, the
-    // infinities, a subnormal and equal values.
-    constexpr uint16_t edges[] = { 0x0000, 0x8000, 0x7FFF, 0x3C00, 0xBC00, 0x7C00, 0xFC00, 0x0001, 0x8001 };
+    // Every pair of the edge values, in both halves (swapped in the high one): signed zeros, the canonical NaN, two
+    // non-canonical NaN payloads (quiet and signalling), the infinities, a subnormal and equal values. The
+    // non-canonical NaNs exercise the both-NaN canonicalisation.
+    constexpr uint16_t edges[] = { 0x0000, 0x8000, 0x7FFF, 0x7E00, 0x7C01, 0xFE01,
+                                   0x3C00, 0xBC00, 0x7C00, 0xFC00, 0x0001, 0x8001 };
     size_t slot = 0;
     for (const uint16_t x : edges)
     {
@@ -175,6 +178,18 @@ bool Numeric()
             b[slot] = y | (static_cast<uint32_t>(x) << 16);
             ++slot;
         }
+    }
+    // Mix a NaN or infinity into some otherwise-finite random words, so both-NaN and NaN/finite pairs appear widely.
+    for (size_t i = slot; i < n; ++i)
+    {
+        if ((rng() & 7) == 0)
+            a[i] = (a[i] & 0xFFFF) | (edges[rng() % std::size(edges)] << 16);
+        if ((rng() & 7) == 0)
+            b[i] = (b[i] & 0xFFFF) | (edges[rng() % std::size(edges)] << 16);
+        if ((rng() & 7) == 0)
+            a[i] = (a[i] & 0xFFFF0000) | edges[rng() % std::size(edges)];
+        if ((rng() & 7) == 0)
+            b[i] = (b[i] & 0xFFFF0000) | edges[rng() % std::size(edges)];
     }
     bool ok = true;
     for (const char* op : { "min", "max" })

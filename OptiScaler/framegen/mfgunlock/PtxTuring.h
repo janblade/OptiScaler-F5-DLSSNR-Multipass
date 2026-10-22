@@ -166,6 +166,9 @@ inline size_t TryMma(std::string_view text, size_t at, std::string& out, bool& a
     return cursor.At();
 }
 
+// The fp16 NaN that PTX min/max return when both operands are NaN (verified against the driver by the Turing probe).
+inline const std::string kCanonNaN = "0x7FFF";
+
 // {min.f16x2 d, a, b; } / {max.f16x2 ...}  and the scalar {min.f16 ...}
 inline size_t TryMinMax(std::string_view text, size_t at, std::string& out, bool& vector)
 {
@@ -189,67 +192,40 @@ inline size_t TryMinMax(std::string_view text, size_t at, std::string& out, bool
     if (!cursor.Lit("}"))
         return 0;
 
-    const std::string_view compare = isMin ? "lt" : "gt";
-    // Equal values have the same bits except +0/-0, where PTX orders -0 below +0: or-ing the bits gives min's -0,
-    // and-ing them gives max's +0.
-    const std::string_view tie = isMin ? "or" : "and";
+    const std::string cmp = isMin ? "lt" : "gt";
+    // Equal values share their bits except +0/-0, where PTX orders -0 below +0: or-ing the two gives min's -0,
+    // and-ing them gives max's +0. For any other equal pair both operands are identical, so the tie value is that
+    // value.
+    const std::string tie = isMin ? "or" : "and";
+
+    // One half-lane: r = (a<b, or b NaN) ? a : b; equal -> the sign tie; both NaN -> the canonical NaN kCanonNaN.
+    // Reads a and b before it writes r, so r may be a or b (scalar d aliases a or b). s is a unique scratch suffix.
+    const auto half = [&](const std::string& x, const std::string& y, const std::string& r, const std::string& s)
+    {
+        return "setp." + cmp + ".f16 p" + s + ", " + x + ", " + y + "; setp.nan.f16 na" + s + ", " + x + ", " + x +
+               "; setp.nan.f16 nb" + s + ", " + y + ", " + y + "; or.pred p" + s + ", p" + s + ", nb" + s +
+               "; setp.eq.f16 e" + s + ", " + x + ", " + y + "; and.pred bo" + s + ", na" + s + ", nb" + s + ";\n" +
+               tie + ".b16 t" + s + ", " + x + ", " + y + "; selp.b16 " + r + ", " + x + ", " + y + ", p" + s +
+               "; selp.b16 " + r + ", t" + s + ", " + r + ", e" + s + "; selp.b16 " + r + ", cn, " + r + ", bo" + s +
+               ";\n";
+    };
+
+    const std::string as(a);
+    const std::string bs(b);
+    const std::string ds(d);
     if (vector)
     {
-        // PTX min/max return the other operand when one is NaN: take a if a<b (ordered) or b is NaN.
-        out += "{.reg .b16 xl, xh, yl, yh, el, eh; .reg .pred pl, ph, nl, nh, ql, qh;\nmov.b32 {xl, xh}, ";
-        Append(out, a);
-        out += "; mov.b32 {yl, yh}, ";
-        Append(out, b);
-        out += ";\nsetp.";
-        Append(out, compare);
-        out += ".f16 pl, xl, yl; setp.";
-        Append(out, compare);
-        out += ".f16 ph, xh, yh; setp.nan.f16 nl, yl, yl; setp.nan.f16 nh, yh, yh;\n"
-               "or.pred pl, pl, nl; or.pred ph, ph, nh;\n"
-               "setp.eq.f16 ql, xl, yl; setp.eq.f16 qh, xh, yh; ";
-        Append(out, tie);
-        out += ".b16 el, xl, yl; ";
-        Append(out, tie);
-        out += ".b16 eh, xh, yh;\n"
-               "selp.b16 xl, xl, yl, pl; selp.b16 xh, xh, yh, ph;\n"
-               "selp.b16 xl, el, xl, ql; selp.b16 xh, eh, xh, qh;\nmov.b32 ";
-        Append(out, d);
-        out += ", {xl, xh};}";
+        out += "{.reg .b16 xl, xh, yl, yh, tl, th, cn; .reg .pred pl, nal, nbl, el, bol, ph, nah, nbh, eh, boh;\n";
+        out += "mov.b16 cn, " + kCanonNaN + "; mov.b32 {xl, xh}, " + as + "; mov.b32 {yl, yh}, " + bs + ";\n";
+        out += half("xl", "yl", "xl", "l");
+        out += half("xh", "yh", "xh", "h");
+        out += "mov.b32 " + ds + ", {xl, xh};}";
     }
     else
     {
-        // The tie value is formed before d is written, so d may alias a or b.
-        out += "{.reg .pred pm, pn, pq; .reg .b16 te; setp.";
-        Append(out, compare);
-        out += ".f16 pm, ";
-        Append(out, a);
-        out += ", ";
-        Append(out, b);
-        out += "; setp.nan.f16 pn, ";
-        Append(out, b);
-        out += ", ";
-        Append(out, b);
-        out += "; or.pred pm, pm, pn; setp.eq.f16 pq, ";
-        Append(out, a);
-        out += ", ";
-        Append(out, b);
-        out += "; ";
-        Append(out, tie);
-        out += ".b16 te, ";
-        Append(out, a);
-        out += ", ";
-        Append(out, b);
-        out += "; selp.b16 ";
-        Append(out, d);
-        out += ", ";
-        Append(out, a);
-        out += ", ";
-        Append(out, b);
-        out += ", pm; selp.b16 ";
-        Append(out, d);
-        out += ", te, ";
-        Append(out, d);
-        out += ", pq;}";
+        out += "{.reg .pred ps, nas, nbs, es, bos; .reg .b16 ts, cn; mov.b16 cn, " + kCanonNaN + ";\n";
+        out += half(as, bs, ds, "s");
+        out += "}";
     }
     return cursor.At();
 }

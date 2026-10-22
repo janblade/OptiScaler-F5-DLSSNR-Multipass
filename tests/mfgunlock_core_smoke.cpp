@@ -373,7 +373,8 @@ double HalfValue(uint16_t bits)
 
 bool HalfIsNan(uint16_t bits) { return ((bits >> 10) & 31) == 31 && (bits & 0x3FF) != 0; }
 
-// PTX min/max.f16: a NaN operand gives the other one (two NaNs give the canonical NaN), -0 orders below +0.
+// PTX min/max.f16 as the reference, written independently of the rewrite under test: a NaN operand gives the other
+// one, two NaNs give the canonical NaN, equal values tie by sign so min(-0,+0) = -0 and max(+0,-0) = +0.
 uint16_t PtxMinMax(bool isMin, uint16_t a, uint16_t b)
 {
     if (HalfIsNan(a) && HalfIsNan(b))
@@ -384,9 +385,16 @@ uint16_t PtxMinMax(bool isMin, uint16_t a, uint16_t b)
         return a;
     const double x = HalfValue(a);
     const double y = HalfValue(b);
-    if (x == y)
-        return isMin ? static_cast<uint16_t>(a | b) : static_cast<uint16_t>(a & b); // only +-0 differ in bits
-    return (x < y) == isMin ? a : b;
+    if (x < y)
+        return isMin ? a : b;
+    if (y < x)
+        return isMin ? b : a;
+    // Equal (only +-0 differ in bits here): min wants the negative one, max the positive one.
+    const bool aNegative = (a & 0x8000) != 0;
+    const bool bNegative = (b & 0x8000) != 0;
+    if (isMin)
+        return aNegative ? a : (bNegative ? b : a);
+    return !aNegative ? a : (!bNegative ? b : a);
 }
 
 // Runs the straight-line PTX this port emits for min/max (mov.b32 pack/unpack, setp.{lt,gt,eq,nan}.f16, or.pred,
@@ -459,6 +467,16 @@ class PtxRunner
         const auto value = [&](const std::string& name) { return regs[name]; };
         const auto half = [&](const std::string& name) { return static_cast<uint16_t>(regs[name] & 0xFFFF); };
 
+        if (op == "mov.b16" && args.size() == 2)
+        {
+            // a register copy, or an immediate (decimal or 0x hex) into a register
+            const std::string& src = args[1];
+            if (!src.empty() && (src.front() == '%'))
+                regs[args[0]] = value(src) & 0xFFFF;
+            else
+                regs[args[0]] = static_cast<uint32_t>(std::stoul(src, nullptr, 0)) & 0xFFFF;
+            return true;
+        }
         if (op == "mov.b32" && args.size() == 2 && args[0].front() == '{')
         {
             const auto parts = Operands(args[0].substr(1, args[0].size() - 2));
@@ -491,9 +509,10 @@ class PtxRunner
             regs[args[0]] = result ? 1 : 0;
             return true;
         }
-        if ((op == "or.pred" || op == "or.b16" || op == "and.b16") && args.size() == 3)
+        if ((op == "or.pred" || op == "and.pred" || op == "or.b16" || op == "and.b16") && args.size() == 3)
         {
-            regs[args[0]] = op == "and.b16" ? (value(args[1]) & value(args[2])) : (value(args[1]) | value(args[2]));
+            const bool bitAnd = op == "and.b16" || op == "and.pred";
+            regs[args[0]] = bitAnd ? (value(args[1]) & value(args[2])) : (value(args[1]) | value(args[2]));
             return true;
         }
         if (op == "selp.b16" && args.size() == 4)
@@ -1031,8 +1050,10 @@ int main()
     }
 
     {
-        // RTX 20 min/max rewrite run on host values against PTX's rules: signed zeros, NaN, infinities, subnormals.
-        constexpr uint16_t edges[] = { 0x0000, 0x8000, 0x7FFF, 0x3C00, 0xBC00, 0x7C00, 0xFC00, 0x0001, 0x8001, 0x3555 };
+        // RTX 20 min/max rewrite run on host values against the independent reference: signed zeros, the canonical
+        // NaN, two non-canonical NaN payloads (for the both-NaN rule), infinities, subnormals and a finite value.
+        constexpr uint16_t edges[] = { 0x0000, 0x8000, 0x7FFF, 0x7E00, 0x7C01, 0xFE01,
+                                       0x3C00, 0xBC00, 0x7C00, 0xFC00, 0x0001, 0x8001, 0x3555 };
         bool ran = true;
         bool vectorOk = true;
         bool scalarOk = true;

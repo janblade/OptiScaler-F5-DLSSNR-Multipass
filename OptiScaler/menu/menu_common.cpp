@@ -3150,6 +3150,53 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                         ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "(Potential FSR3 fallback)");
                     else
                         ImGui::TextDisabled("(Failed to hook)");
+
+                    // FSR 4 models, only listed when the GPU can run more than one of the module's
+                    HMODULE modelModule = FSR4Models::SelectingModule();
+                    if (auto models = FSR4Models::SelectableModels(modelModule); !models.empty())
+                    {
+                        auto& selectedModel = config->Fsr4Model;
+                        auto selectedName = selectedModel.has_value() ? FSR4Models::Name(selectedModel.value()) : "Auto";
+                        bool modelChanged = false;
+
+                        ImGui::SetNextItemWidth(150.0f * menuResScale);
+                        if (ImGui::BeginCombo("FSR4 Model", selectedName))
+                        {
+                            if (ImGui::Selectable("Auto", !selectedModel.has_value()) && selectedModel.has_value())
+                            {
+                                selectedModel.reset();
+                                modelChanged = true;
+                            }
+
+                            for (auto model : models)
+                            {
+                                bool isSelected = selectedModel.has_value() && selectedModel.value() == model;
+
+                                if (ImGui::Selectable(FSR4Models::Name(model), isSelected) && !isSelected)
+                                {
+                                    selectedModel = model;
+                                    modelChanged = true;
+                                }
+                            }
+
+                            ImGui::EndCombo();
+                        }
+
+                        if (modelChanged)
+                        {
+                            state.newBackend = currentBackend;
+                            MARK_ALL_BACKENDS_CHANGED();
+                        }
+
+                        ShowHelpMarker("FSR 4 network to run.\n"
+                                       "Auto lets FFX pick the best one the GPU supports.");
+
+                        ImGui::SameLine();
+                        if (auto activeModel = FSR4Models::ActiveModel(modelModule))
+                            ImGui::TextDisabled("(Active: %s)", FSR4Models::Name(*activeModel));
+                        else
+                            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "(Potential FSR3 fallback)");
+                    }
                 }
 
                 if (majorFsrVersion >= 3)

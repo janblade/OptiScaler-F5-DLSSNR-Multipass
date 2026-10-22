@@ -179,6 +179,12 @@
     <ClInclude Include="scanner\scanner.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="scanner\rtti.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="fsr4\FSR4Models.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="State.h">
       <Filter>Config</Filter>
     </ClInclude>
@@ -1335,6 +1341,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="scanner\scanner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="scanner\rtti.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="fsr4\FSR4Models.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="shaders\bias\Bias_Dx11.cpp">

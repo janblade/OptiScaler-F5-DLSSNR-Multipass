@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Config.h"
+#include "FSR4Models.h"
 
 typedef uint64_t (*PFN_getModelBlob)(uint32_t preset, uint64_t unknown, uint64_t* source, uint64_t* size);
 typedef uint64_t (*PFN_createModel)(void* context, uint32_t preset);
@@ -30,5 +31,5 @@ class FSR4ModelSelection
   public:
     static void Hook(HMODULE module, FSR4Source source);
     static bool IsCreateModelDriver2Hooked() { return o_createModelDriver2; };
-    static bool IsInt8FsrHooked() { return o_createModelSDK2 || o_createModelDriver2; };
+    static bool IsInt8FsrHooked() { return o_createModelSDK2 || o_createModelDriver2 || FSR4Models::AnyModuleSelectsModels(); };
 };

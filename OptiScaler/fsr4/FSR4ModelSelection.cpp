@@ -106,6 +106,14 @@ void FSR4ModelSelection::Hook(HMODULE module, FSR4Source source)
     if (module == nullptr)
         return;
 
+    // FSR 4.1.1+ modules carry every model as its own provider, selected through their support checks
+    FSR4Models::Hook(module);
+    if (FSR4Models::SelectsModels(module))
+    {
+        LOG_DEBUG("Model providers of the module are patched, skipping the byte pattern hooks");
+        return;
+    }
+
     if (source == FSR4Source::SDK && (o_getModelBlobSDK || o_createModelSDK))
     {
         DetourTransactionBegin();

@@ -26,6 +26,7 @@
 #include <fsr4/FSR4Presets.h>
 #include <proxies/Streamline_Proxy.h>
 
+#include <framegen/mfgunlock/Status.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 
 #include <nvapi/fakenvapi.h>
@@ -3588,6 +3589,21 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                    "\nDoes not install an unlocker or enable FG in unsupported games.");
     if (external != state.externalFrameGeneration)
         ImGui::TextWrapped("Save Settings and restart to change frame-generation ownership.");
+
+    ImGui::SeparatorText("Built-in MFG unlock");
+    const std::array unlockModes = { config->MfgUnlockXeFG.value_or_default(),
+                                     config->MfgUnlockRTX40.value_or_default(),
+                                     config->MfgUnlockRTX2030.value_or_default() };
+    for (size_t index = 0; index < unlockModes.size(); ++index)
+    {
+        const auto family = static_cast<MfgUnlock::Family>(index);
+        const auto status = MfgUnlock::StatusRegistry::Get(family);
+        const std::string text = unlockModes[index] == MfgUnlockMode::Off      ? "off"
+                                 : status.state == MfgUnlock::FamilyState::Off ? "waiting for a provider"
+                                                                               : MfgUnlock::FormatStatus(status);
+        const auto name = MfgUnlock::kFamilyNames[index];
+        ImGui::Text("%.*s: %s", static_cast<int>(name.size()), name.data(), text.c_str());
+    }
 
     auto& menuResScale = ctx.menuResScale;
     auto& primaryGpu = *ctx.primaryGpu;

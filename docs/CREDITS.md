@@ -21,11 +21,9 @@ The optical flow for the native input producer is our own (a luma pyramid, block
 Process-exit hardening (a heap-leaked state singleton, an atomic shutdown flag, an `ExitProcess`-aware
 `DllMain`, and safe feature teardown during shutdown) is adapted from [wilsjo2's fork](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass), commit [`dac290ed`](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/commit/dac290ed17ed88962a7f9ee63a41b7500a0fc923).
 
-## RTX 40 MFG unlock
+## Built-in MFG unlock
 
-Up to 0.1.31 OptiScaler carried a built-in RTX 40 multi frame generation unlock (removed in 0.1.32), adapted from [y4my4my4m's fork](https://github.com/y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG) (GPL-3.0). The provider discovery, the Streamline plugin frame-ceiling patch, the software frame pacing option and the PTX temporal fix are adapted from [KleberMotta's fork](https://github.com/KleberMotta/OptiScaler-DLSS5-MFG-RTX40) (MIT), a port of the MFG Unlock ReShade addon by [Dreamt](https://github.com/ImDreamt/MFGAdaUnlock-RenoDx) and [mavismmg](https://github.com/mavismmg/MFGAdaUnlock-RenoDx). The technique originates from [dashdogy's RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock), which is also the optional external unlocker (see [RTX40-MFG.md](RTX40-MFG.md)).
-
-In that unlock, the fix for an unsynchronized read/write race in `MfgUnlock::LastStatus()` followed the same lock-and-return-by-value approach as [wilsjo2's fork](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass), commit [`bf91eebd`](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/commit/bf91eebd00da40d079b8d987dbf44aca0be598e0) ("Extend optional Ada MFG support with shared patch and status locking"); the write side of the race (`MfgUnlock::TryApply`) was found and fixed independently during review.
+The provider-recognition helper in `OptiScaler/framegen/mfgunlock/Provider.h` is adapted from [KleberMotta's fork](https://github.com/KleberMotta/OptiScaler-DLSS5-MFG-RTX40) (MIT), a port of the MFG Unlock ReShade addon by [Dreamt](https://github.com/ImDreamt/MFGAdaUnlock-RenoDx) and [mavismmg](https://github.com/mavismmg/MFGAdaUnlock-RenoDx). The structural locators use MinHook's Hacker Disassembler Engine 64 to verify x64 branch and string-reference anchors. License notices for both are reproduced in [MFGUnlock_LICENSE.txt](../Licenses/MFGUnlock_LICENSE.txt). The PE image, transaction and checker framework is original to this fork. Design ideas from [dashdogy's MFG-Unlocker](https://github.com/dashdogy/MFG-Unlocker) are independently implemented; no source code was copied.
 
 ## KCD2 HDR compatibility
 

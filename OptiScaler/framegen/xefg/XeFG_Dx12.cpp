@@ -10,6 +10,7 @@
 #include <nvapi/fakenvapi.h>
 #include <low_latency/input/input_common.h>
 #include <misc/FrameLimit.h>
+#include <framegen/mfgunlock/MfgUnlock.h>
 
 #include <magic_enum.hpp>
 
@@ -49,6 +50,12 @@ bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
         return false;
     }
 
+    if (!MfgUnlock::PrepareXeFG())
+    {
+        LOG_ERROR("XeFG MFG unlock recovery failed; refusing to create a context with partially patched code");
+        return false;
+    }
+
     auto createResult = false;
 
 #ifndef DONT_USE_XMX
@@ -58,6 +65,7 @@ bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
     do
     {
         auto result = XeFGProxy::D3D12CreateContext()(device, &_swapChainContext);
+        MfgUnlock::RefreshXeFGStatus();
 
         if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
         {
@@ -101,6 +109,40 @@ bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
     } while (false);
 
     return createResult;
+}
+
+void XeFG_Dx12::ApplyMaxInterpolations(uint32_t reported)
+{
+    // Without the unlock the reported value is used as is, as before the unlock existed.
+    if (!MfgUnlock::IsXeFGActive())
+    {
+        _nativeMaxInterpolations = static_cast<int>(reported);
+        _maxInterpolationCount = _nativeMaxInterpolations;
+        LOG_INFO("Max supported interpolations: {}", reported);
+        return;
+    }
+
+    const int reportedMax = reported < 1 ? 1 : static_cast<int>(reported);
+    _nativeMaxInterpolations = std::min(reportedMax, MfgUnlock::kXeFGOriginalDefaultMaxInterpolations);
+    const int configured = std::clamp(Config::Instance()->FGXeFGMaxInterpolations.value_or_default(), 1, 5);
+    _maxInterpolationCount = std::max(_nativeMaxInterpolations, configured);
+
+    if (_maxInterpolationCount > _nativeMaxInterpolations)
+        LOG_INFO("Max supported interpolations: {} (XeFG native maximum {}, raised by MaxInterpolations)",
+                 _maxInterpolationCount, _nativeMaxInterpolations);
+    else
+        LOG_INFO("Max supported interpolations: {}", _maxInterpolationCount);
+}
+
+void XeFG_Dx12::LogAcceptedInterpolations()
+{
+    if (!MfgUnlock::IsXeFGActive() || XeFGProxy::D3D12GetInitializationParameters() == nullptr)
+        return;
+
+    xefg_swapchain_d3d12_init_params_t used {};
+    if (XeFGProxy::D3D12GetInitializationParameters()(_swapChainContext, &used) == XEFG_SWAPCHAIN_RESULT_SUCCESS)
+        LOG_INFO("XeFG initialised for up to {} interpolated frames (native maximum {})",
+                 used.maxInterpolatedFrames, _nativeMaxInterpolations);
 }
 
 const char* XeFG_Dx12::Name()
@@ -262,10 +304,7 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
         xefg_swapchain_properties_t props {};
         auto result = XeFGProxy::GetProperties()(_swapChainContext, &props);
         if (result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
-        {
-            _maxInterpolationCount = props.maxSupportedInterpolations;
-            LOG_INFO("Max supported interpolations: {}", props.maxSupportedInterpolations);
-        }
+            ApplyMaxInterpolations(props.maxSupportedInterpolations);
         else
         {
             LOG_ERROR("Can't get swapchain properties: {} ({})", magic_enum::enum_name(result), (UINT) result);
@@ -385,6 +424,17 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
     result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, realQueue, factory12,
                                                      &params);
 
+    if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS && MfgUnlock::IsXeFGActive() &&
+        params.maxInterpolatedFrames > static_cast<uint32_t>(_nativeMaxInterpolations))
+    {
+        LOG_WARN("XeFG refused {} interpolated frames ({}), retrying with its own maximum {}",
+                 params.maxInterpolatedFrames, magic_enum::enum_name(result), _nativeMaxInterpolations);
+        _maxInterpolationCount = _nativeMaxInterpolations;
+        params.maxInterpolatedFrames = static_cast<uint32_t>(_nativeMaxInterpolations);
+        result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, realQueue,
+                                                         factory12, &params);
+    }
+
     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
     {
         LOG_ERROR("D3D12InitFromSwapChainDesc error: {} ({:X})", magic_enum::enum_name(result), (UINT) result);
@@ -392,6 +442,7 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
     }
 
     LOG_INFO("XeFG swapchain created");
+    LogAcceptedInterpolations();
     result = XeFGProxy::D3D12GetSwapChainPtr()(_swapChainContext, IID_PPV_ARGS(swapChain));
     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
     {
@@ -457,10 +508,7 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
         xefg_swapchain_properties_t props {};
         auto result = XeFGProxy::GetProperties()(_swapChainContext, &props);
         if (result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
-        {
-            _maxInterpolationCount = props.maxSupportedInterpolations;
-            LOG_INFO("Max supported interpolations: {}", props.maxSupportedInterpolations);
-        }
+            ApplyMaxInterpolations(props.maxSupportedInterpolations);
         else
         {
             LOG_ERROR("Can't get swapchain properties: {} ({})", magic_enum::enum_name(result), (UINT) result);
@@ -542,6 +590,17 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
 #endif // !DONT_USE_XMX
         result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, desc, pFullscreenDesc, realQueue,
                                                          factory12, &params);
+
+        if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS && MfgUnlock::IsXeFGActive() &&
+            params.maxInterpolatedFrames > static_cast<uint32_t>(_nativeMaxInterpolations))
+        {
+            LOG_WARN("XeFG refused {} interpolated frames ({}), retrying with its own maximum {}",
+                     params.maxInterpolatedFrames, magic_enum::enum_name(result), _nativeMaxInterpolations);
+            _maxInterpolationCount = _nativeMaxInterpolations;
+            params.maxInterpolatedFrames = static_cast<uint32_t>(_nativeMaxInterpolations);
+            result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, desc, pFullscreenDesc,
+                                                             realQueue, factory12, &params);
+        }
     }
 
     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
@@ -551,6 +610,7 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     }
 
     LOG_INFO("XeFG swapchain created");
+    LogAcceptedInterpolations();
     result = XeFGProxy::D3D12GetSwapChainPtr()(_swapChainContext, IID_PPV_ARGS(swapChain));
     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
     {

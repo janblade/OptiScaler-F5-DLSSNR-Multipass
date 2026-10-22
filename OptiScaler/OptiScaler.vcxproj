@@ -256,6 +256,7 @@ copy "$(SolutionDir)Licenses\ReShade_GenericDepth_LICENSE.txt" $(SolutionDir)x64
 copy "$(SolutionDir)Licenses\DLSS5Feeder_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 copy "$(SolutionDir)Licenses\Inter_OFL.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 copy "$(SolutionDir)Licenses\PeripheralWarp_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
+copy "$(SolutionDir)Licenses\MFGUnlock_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 md $(SolutionDir)x64\Release\a\OptiScaler
 copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
@@ -329,6 +330,22 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h" />
     <ClInclude Include="framegen\dlssg\DlssgTelemetry.h" />
     <ClInclude Include="framegen\dlssg\Kcd2Hdr.h" />
+    <ClInclude Include="framegen\mfgunlock\hde\hde64.h" />
+    <ClInclude Include="framegen\mfgunlock\hde\pstdint.h" />
+    <ClInclude Include="framegen\mfgunlock\hde\table64.h" />
+    <ClInclude Include="framegen\mfgunlock\Image.h" />
+    <ClInclude Include="framegen\mfgunlock\FamilyAmpere.h" />
+    <ClInclude Include="framegen\mfgunlock\FamilyFatbin.h" />
+    <ClInclude Include="framegen\mfgunlock\FamilyRtx40.h" />
+    <ClInclude Include="framegen\mfgunlock\FamilySlDlssg.h" />
+    <ClInclude Include="framegen\mfgunlock\FamilyXeFG.h" />
+    <ClInclude Include="framegen\mfgunlock\MfgUnlock.h" />
+    <ClInclude Include="framegen\mfgunlock\Mode.h" />
+    <ClInclude Include="framegen\mfgunlock\Locator.h" />
+    <ClInclude Include="framegen\mfgunlock\Patch.h" />
+    <ClInclude Include="framegen\mfgunlock\Provider.h" />
+    <ClInclude Include="framegen\mfgunlock\PtxTuring.h" />
+    <ClInclude Include="framegen\mfgunlock\Status.h" />
     <ClInclude Include="dlssnr\PassProfiles.h" />
     <ClInclude Include="dlssnr\DlssNr_LookPresets.h" />
     <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />
@@ -742,6 +759,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="fsr4\FSR4DriverProviderDx12.cpp" />
     <ClCompile Include="gpu_time\GpuTime_Dx11.cpp" />
     <ClCompile Include="gpu_time\GpuTime_Dx12.cpp" />
+    <ClCompile Include="framegen\mfgunlock\MfgUnlock.cpp" />
+    <ClCompile Include="framegen\mfgunlock\hde\hde64.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <DisableSpecificWarnings>4701</DisableSpecificWarnings>
+    </ClCompile>
     <ClCompile Include="hooks\Amdxc64_Hooks.cpp" />
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp" />
     <ClCompile Include="framegen\dlssg\Kcd2Hdr.cpp" />

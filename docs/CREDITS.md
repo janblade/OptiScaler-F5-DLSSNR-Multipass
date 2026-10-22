@@ -8,6 +8,13 @@ Colour processing is derived from [RenoDX by clshortfuse](https://github.com/cls
 
 Automatic exposure from the HDR frame, the wider exposure Trim range and the Trim Anchor points are @mattjaas's work, from [wilsjo2's PR #77](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/pull/77), adapted onto this fork's code.
 
+## Superior Scaling
+
+The Superior Scaling Enlargement mode (custom Area downsample, private DLSS stabilisation of the NR residual, guided
+residual reconstruction and its calibrated frequency gains) is @mattjaas's work, from
+[PR #230](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/pull/230), integrated into this fork's pipeline
+and reviewed here. Their commits are kept in this fork's history.
+
 ## Depth buffer detection
 
 The rules the native depth finder uses to pick the scene's depth buffer (how draws are weighed, the aspect-ratio test, which frames are ignored, the snapshot taken before a clear) are adapted from the [Generic Depth add-on in ReShade](https://github.com/crosire/reshade/blob/main/examples/09-depth/generic_depth_addon.cpp) by Patrick Mours (BSD-3-Clause). See the [licence](../Licenses/ReShade_GenericDepth_LICENSE.txt).

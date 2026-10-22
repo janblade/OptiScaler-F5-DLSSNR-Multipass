@@ -245,6 +245,15 @@ ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(const DlssNrConstants&
                                                           bool cachedWarp)
 {
     using namespace DlssNr::Superior::HostBytecode;
+    // Every packed PSO fixes gGuideHeight to 0 (precompile/dlssnr.hlsl, DLSSNR_SUPERIOR_HOST_RESOLVE): it adds the
+    // decoded signed DLSS residual to the proxy. A raw NR answer there would be added as if it were a residual. A
+    // packed generation is always temporal (NeedsTemporal), so this only guards that invariant: no PSO, game frame kept.
+    if (packed && rawAnswer)
+    {
+        static std::once_flag once;
+        std::call_once(once, [] { LOG_ERROR("Superior Scaling: packed resolve asked for a raw NR answer; skipped"); });
+        return nullptr;
+    }
     int normal =
         DlssNr::SuperiorScaling::NormalResolveVariant(rawAnswer, packed, params.Passthrough, params.ReversibleMode,
                                                       params.DebugView, params.CompareMode, params.ApplyModel);

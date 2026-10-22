@@ -93,12 +93,13 @@ int main() {
         future.DlssNrPass3Style = 9;
         future.DlssNrExtraPasses[0].style = 2;
         future.DlssNrExtraPasses[26].style = 8;
-        require(GainPresetSelection(future, 0) == 7 && GainStyleSelection(future, 0) == 4);
+        // Out-of-range ini values are clamped exactly like PassPreset/PassStyle, so the gains follow the running model.
+        require(GainPresetSelection(future, 0) == 3 && GainStyleSelection(future, 0) == 2);
         require(GainPresetSelection(future, 1) == 0 && GainStyleSelection(future, 1) == 1);
         require(High(GainStyleSelection(future, 1), GainPresetSelection(future, 1)) == .925f);
-        require(GainPresetSelection(future, 2) == 1 && GainStyleSelection(future, 2) == 9);
-        require(GainStyleSelection(future, 3) == 2 && GainPresetSelection(future, 3) == 7);
-        require(GainStyleSelection(future, 29) == 8 && GainStyleSelection(future, 30) == 4);
+        require(GainPresetSelection(future, 2) == 1 && GainStyleSelection(future, 2) == 2);
+        require(GainStyleSelection(future, 3) == 2 && GainPresetSelection(future, 3) == 3);
+        require(GainStyleSelection(future, 29) == 2 && GainStyleSelection(future, 30) == 2);
         const auto futureSchedule =
             DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
                                                 [&](unsigned pass) -> DlssNr::InterPass::ScheduleGains
@@ -107,8 +108,8 @@ int main() {
                                                                preset = GainPresetSelection(future, pass);
                                                     return { High(style, preset), Low(style, preset) };
                                                 });
-        require(std::abs(futureSchedule.Block(0, 3).high - .950f * .925f * .950f) < 1e-6f);
-        require(std::abs(futureSchedule.Block(0, 3).low - (.850f + .838f + .850f) / 3) < 1e-6f);
+        require(std::abs(futureSchedule.Block(0, 3).high - .955f * .925f * .95f) < 1e-6f);
+        require(std::abs(futureSchedule.Block(0, 3).low - (.861f + .838f + .784f) / 3) < 1e-6f);
         require(EffectiveBand(.8f,.5f,1,1)==.8f);
         require(EffectiveBand(.8f,1,1,1)==1 && EffectiveBand(.8f,.5f,.75f,0)==1);
         require(std::abs(EffectiveBand(.8f,.5f,.5f,.5f)-.95f)<1e-6f);

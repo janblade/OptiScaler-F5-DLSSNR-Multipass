@@ -36,24 +36,25 @@ inline unsigned EffectiveNrPreset(unsigned requested, bool mainOnly) { return ma
 // Calibrated IDs: styles Standard/Natural/Cinematic; presets Default/A/B and legacy Small alias 3.
 constexpr float UncalibratedHigh = .950f, UncalibratedLow = .850f;
 inline bool Calibrated(unsigned style, unsigned nrPreset) { return style < 3u && nrPreset <= 3u; }
-// Preserve future identifiers for gain selection. Janblade's model/menu validation remains unchanged.
+// The preset and style the model actually runs with: the same clamps as PassPreset/PassStyle (PassProfiles.h), so a
+// hand-edited ini value above the range gets the calibrated gains of the model that really runs.
 template <class C> inline unsigned GainPresetSelection(const C& cfg, unsigned pass)
 {
     if (pass == 1 && cfg.DlssNrPass2Preset.has_value())
-        return cfg.DlssNrPass2Preset.value();
+        return std::min(cfg.DlssNrPass2Preset.value(), 3u);
     if (pass == 2 && cfg.DlssNrPass3Preset.has_value())
-        return cfg.DlssNrPass3Preset.value();
-    return cfg.DlssNrPreset.value_or_default();
+        return std::min(cfg.DlssNrPass3Preset.value(), 3u);
+    return std::min(cfg.DlssNrPreset.value_or_default(), 3u);
 }
 template <class C> inline unsigned GainStyleSelection(const C& cfg, unsigned pass)
 {
     if (pass == 1 && cfg.DlssNrPass2Style.has_value())
-        return cfg.DlssNrPass2Style.value();
+        return std::min(cfg.DlssNrPass2Style.value(), 2u);
     if (pass == 2 && cfg.DlssNrPass3Style.has_value())
-        return cfg.DlssNrPass3Style.value();
+        return std::min(cfg.DlssNrPass3Style.value(), 2u);
     if (pass >= 3 && pass < 30 && cfg.DlssNrExtraPasses[pass - 3].style.has_value())
-        return cfg.DlssNrExtraPasses[pass - 3].style.value();
-    return cfg.DlssNrStyle.value_or_default();
+        return std::min(cfg.DlssNrExtraPasses[pass - 3].style.value(), 2u);
+    return std::min(cfg.DlssNrStyle.value_or_default(), 2u);
 }
 inline float High(unsigned style, unsigned nrPreset = 1u, bool mainOnly = false)
 {

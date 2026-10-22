@@ -5037,6 +5037,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     unsigned int evalMotionBaseX = cachePlan.runs ? cachePlan.motionBaseX : reusePlan.motionBaseX;
     unsigned int evalMotionBaseY = cachePlan.runs ? cachePlan.motionBaseY : reusePlan.motionBaseY;
 
+    bool superiorMatched = false;
     if (superiorGeneration && superiorGeneration->temporal && !superiorPacked && !cached)
     {
         auto matchedRegions = guides;
@@ -5050,6 +5051,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             result = NVSDK_NGX_Result_Fail;
         else if (!spatial)
         {
+            superiorMatched = true;
             modelDepth = superiorGeneration->depth.Get();
             evalMotion = superiorGeneration->motion.Get();
             evalGuideW = evalMotionW = workWidth;
@@ -5057,10 +5059,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             evalDepthX = evalDepthY = evalMotionBaseX = evalMotionBaseY = 0;
         }
     }
-    if (superior && !spatial)
+    if (superiorMatched)
     {
-        // NR reads displacement in pixels of its motion subrect: the matched grid below native,
-        // the game's valid motion region otherwise. Allocation/depth dimensions never set these units.
+        // NR reads displacement in pixels of its motion subrect: the matched grid. Only when the temporal path matched
+        // the guides above; otherwise ordinary NR keeps its own guideMvScale * work / width units (see g_nr.guideMvScaleX).
         evalMvScaleX = DlssNr::SuperiorScaling::MotionScale(
             frame.MvScaleX, evalMotionW,
             frame.MotionVectorsLowResolution ? frame.RenderSubrectWidth : frame.OutputWidth, guides.motion.width);
@@ -5413,6 +5415,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.DebugView = cfg.DlssNrDebugView.value_or_default();
         resolveParams.MaxRatio = std::clamp(cfg.DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
         resolveParams.Transfer = cfg.DlssNrTransfer.value_or_default();
+        // The shared shader knows Classic/Matched/NVIDIA residual only. Superior's own resolve PSOs fix their transfer
+        // at compile time (DLSSNR_SUPERIOR_HOST_RESOLVE); every other resolve with Superior selected (100% without
+        // compression, supersampling, or Superior given up on) runs Matched residual on purpose, not by accident.
+        if (DlssNr::SuperiorScaling::Enabled(resolveParams.Transfer))
+            resolveParams.Transfer = DlssNr::SuperiorScaling::FallbackTransfer;
         // The debug views' scale when the shader has no live exposure to take the base white point from: the white
         // point in force on a linear HDR frame, the Paper white slider on a tone-mapped one. See DebugViewScale in
         // dlssnr.hlsl, which prefers the base white point (before the Trim) whenever the exposure texture is bound.

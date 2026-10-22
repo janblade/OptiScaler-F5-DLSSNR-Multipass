@@ -2930,18 +2930,21 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
-    const bool superior = DlssNr::SuperiorScaling::Enabled(cfg);
+    // Superior Scaling (superior/Pipeline.inl) runs only while selected and not given up on this session; otherwise the
+    // ordinary path runs, with Matched residual in its place. Selecting it again retries.
+    const bool superiorSelected = DlssNr::SuperiorScaling::Enabled(cfg);
     auto& superiorState = SuperiorRun::GetState();
-    if (superiorState.wasEnabled != superior)
+    if (superiorState.wasSelected != superiorSelected)
     {
-        superiorState.wasEnabled = superior;
+        superiorState.wasSelected = superiorSelected;
+        superiorState.unavailable.clear();
+    }
+    const bool superior = superiorSelected && superiorState.unavailable.empty();
+    if (superiorState.wasActive != superior)
+    {
+        superiorState.wasActive = superior;
         g_nr.reset = true;
-        if (superiorState.current)
-        {
-            auto old = std::move(superiorState.current);
-            superiorState.lifetime.Retire([old] {});
-            superiorState.lifetime.BeginGeneration();
-        }
+        SuperiorRun::Drop();
     }
 
     // Depth is the one input the model can run without: NVIDIA's own retail DLL treats it as an optional
@@ -3675,11 +3678,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ResTrack_Dx12::HookLateNrQueue(device);
         const bool temporal = DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, spatial,
                                                                      modelWidth, modelHeight);
-        if (!SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height,
-                                superiorPacked ? modelWidth : workWidth, superiorPacked ? modelHeight : workHeight,
-                                frame, temporal, depth && guides.depth.valid(),
-                                timingQueue ? timingQueue : (ID3D12CommandQueue*) State::Instance().currentCommandQueue,
-                                superiorPacked ? &EdgeCompression::Layout() : nullptr))
+        // Wait: the private DLSS was just created, its first evaluate waits for a later submission (one frame, like
+        // the NR feature's own creation). Unavailable: given up for this session (logged once); this frame is skipped
+        // and from the next one the ordinary path runs with Matched residual.
+        if (SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height,
+                               superiorPacked ? modelWidth : workWidth, superiorPacked ? modelHeight : workHeight,
+                               frame, temporal, depth && guides.depth.valid(),
+                               superiorPacked ? &EdgeCompression::Layout() : nullptr) != SuperiorRun::Began::Run)
         {
             device->Release();
             return;
@@ -6587,6 +6592,8 @@ void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     DeferredSr::Shutdown();
+    if (SuperiorRun::g_used)
+        SuperiorRun::Shutdown();
     CalibrationShutdown();
     EdgeCompression::Shutdown();
 
@@ -6844,4 +6851,25 @@ std::string DlssNr::SuperiorScaling::Status()
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     return SuperiorRun::GetState().status;
+}
+
+std::string DlssNr::SuperiorScaling::Unavailable()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    return SuperiorRun::GetState().unavailable;
+}
+
+bool DlssNr::SuperiorScaling::SrUnavailable()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    return SuperiorRun::GetState().srUnavailable;
+}
+
+void DlssNr::SuperiorScaling::NgxDx12Shutdown()
+{
+    // Nothing to do (and no NR lock taken in the game's NGX shutdown) unless Superior has ever run.
+    if (!SuperiorRun::g_used)
+        return;
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    SuperiorRun::NgxShutdown();
 }

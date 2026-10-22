@@ -418,6 +418,9 @@ class NVNGXProxy
     inline static bool _cudaInited = false;
     inline static bool _dx11Inited = false;
     inline static bool _dx12Inited = false;
+    // Bumped whenever the D3D12 NGX runtime starts or stops, so a handle created under an older runtime is known to
+    // be gone (NGX shutdown destroys every feature and parameter block) and is never released or evaluated again.
+    inline static std::atomic<uint64_t> _dx12Epoch = 0;
     inline static bool _vulkanInited = false;
 
     inline static void LogCallback(const char* message, NVSDK_NGX_Logging_Level loggingLevel,
@@ -795,10 +798,25 @@ class NVNGXProxy
         LOG_INFO("result: {0:X}", (UINT) nvResult);
 
         _dx12Inited = (nvResult == NVSDK_NGX_Result_Success);
+
+        if (_dx12Inited)
+            ++_dx12Epoch;
+
         return _dx12Inited;
     }
 
-    static void SetDx12Inited(bool value) { _dx12Inited = value; }
+    static void SetDx12Inited(bool value)
+    {
+        if (_dx12Inited != value)
+            ++_dx12Epoch;
+
+        _dx12Inited = value;
+    }
+
+    // NGX D3D12 shut down (or restarted) without the inited flag changing, e.g. DLSSFeatureDx12::Shutdown.
+    static void BumpDx12Epoch() { ++_dx12Epoch; }
+
+    static uint64_t Dx12Epoch() { return _dx12Epoch.load(); }
 
     static bool IsDx12Inited() { return _dx12Inited; }
 

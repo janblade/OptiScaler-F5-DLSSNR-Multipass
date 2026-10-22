@@ -10,6 +10,9 @@ using Microsoft::WRL::ComPtr;
 constexpr auto Uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 constexpr auto Srv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
+// Frames to wait for the private DLSS creation's submission before giving up on it for this session.
+constexpr unsigned kCreationWaitFrames = 240;
+
 struct Texture
 {
     ComPtr<ID3D12Resource> resource;
@@ -23,19 +26,27 @@ struct Texture
     }
 };
 
+// Whether a handle made under NGX runtime `epoch` still exists. NGX shutdown destroys every feature and parameter
+// block itself, so after it (or after a restart) the handle is dropped rather than released or evaluated.
+bool NgxAlive(uint64_t epoch) { return NVNGXProxy::IsDx12Inited() && NVNGXProxy::Dx12Epoch() == epoch; }
+
 struct Generation
 {
     ComPtr<ID3D12Device> device;
-    ComPtr<ID3D12CommandQueue> queue;
     unsigned width = 0, height = 0, workWidth = 0, workHeight = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool inverted = false, beforeSr = false, reset = true;
-    bool temporal = false, packed = false, submitted = false, failed = false;
+    bool temporal = false, packed = false;
     DlssNr::Spatial::Layout layout {};
     Texture warp, warpCache;
     ComPtr<ID3D12Resource> warpUpload;
     unsigned preset = 1;
-    ID3D12GraphicsCommandList* creation = nullptr; // normalized identity only
+    // Creation is gated like the NR feature's: the first evaluate waits for a later submission epoch.
+    const void* creation = nullptr; // identity only, to notice a creation recording thrown away by Reset
+    bool creationSubmitted = false;
+    unsigned long long createEpoch = 0;
+    unsigned waitedFrames = 0;
+    uint64_t ngxEpoch = 0;
     NVSDK_NGX_Parameter* parameters = nullptr;
     NVSDK_NGX_Handle* feature = nullptr;
     Texture depth, motion, interLow, interWorking, finalLow;
@@ -43,8 +54,16 @@ struct Generation
     uint32_t expectedMask = 0, successfulMask = 0;
     unsigned previousPasses = 0, lastCompleted = 0, lastCovered = 0;
     bool haveSchedule = false;
+    // Forget the NGX handles without releasing them: NGX shut down (or restarted) and destroyed them already.
+    void DropNgx()
+    {
+        feature = nullptr;
+        parameters = nullptr;
+    }
     ~Generation()
     {
+        if (!NgxAlive(ngxEpoch))
+            return;
         if (feature && NVNGXProxy::D3D12_ReleaseFeature())
             NVNGXProxy::D3D12_ReleaseFeature()(feature);
         if (parameters && NVNGXProxy::D3D12_DestroyParameters())
@@ -52,13 +71,56 @@ struct Generation
     }
 };
 
+// Superior's identities that the shared 64-entry watched table could not take (DlssNr_WatchedLists.h). Counted in
+// g_overflow, so the hooks still take the lock for them, and dropped when the list is reset or destroyed.
+struct Overflow
+{
+    std::mutex mutex;
+    std::vector<const void*> lists;
+};
+Overflow& GetOverflow()
+{
+    static auto* value = new Overflow;
+    return *value;
+}
+void Watch(const void* identity)
+{
+    if (identity == nullptr)
+        return;
+    auto& overflow = GetOverflow();
+    std::lock_guard lock(overflow.mutex);
+    if (std::find(overflow.lists.begin(), overflow.lists.end(), identity) != overflow.lists.end())
+        return;
+    if (DlssNrWatchedLists::TryAdd(identity))
+        return;
+    overflow.lists.push_back(identity);
+    ++DlssNrWatchedLists::g_overflow;
+}
+void Forget(const void* identity)
+{
+    auto& overflow = GetOverflow();
+    std::lock_guard lock(overflow.mutex);
+    if (const auto it = std::find(overflow.lists.begin(), overflow.lists.end(), identity); it != overflow.lists.end())
+    {
+        overflow.lists.erase(it);
+        --DlssNrWatchedLists::g_overflow;
+    }
+}
+// A recorded list was destroyed (GpuLifetime's watch, on the destroying thread): it can never be submitted again.
+void Destroyed(const void* identity)
+{
+    DlssNrWatchedLists::Remove(1, &identity);
+    Forget(identity);
+}
+
 struct State
 {
-    DlssNr::GpuLifetime lifetime;
+    DlssNr::GpuLifetime lifetime { &Destroyed };
     std::shared_ptr<Generation> current;
-    bool wasEnabled = false;
+    bool wasSelected = false, wasActive = false;
     std::string status;
-    std::array<ID3D12CommandList*, 64> watched {};
+    std::string unavailable;   // why Superior is not running this session; empty while it runs
+    bool srUnavailable = false; // the NGX DLSS SR runtime itself failed: the menu greys Superior out
 };
 // Same process-local ownership as janblade's g_nr. Keep unresolved GPU ownership at teardown.
 State& GetState()
@@ -66,6 +128,8 @@ State& GetState()
     static auto* value = new State;
     return *value;
 }
+// Set by the first Superior frame. Until then the NGX shutdown path does not touch the NR lock at all.
+std::atomic_bool g_used = false;
 
 void Say(const char* text)
 {
@@ -77,47 +141,63 @@ void Say(const char* text)
         LOG_INFO("Superior Scaling: {}", text);
 }
 
+// Retire the current generation: its resources and NGX handles go once every list that used them has completed.
+void Drop()
+{
+    auto& s = GetState();
+    if (!s.current)
+        return;
+    auto old = std::move(s.current);
+    s.lifetime.Retire([old] {});
+    s.lifetime.BeginGeneration();
+}
+
+// For the rest of the session (until Superior is selected again) the ordinary path runs, with Matched residual.
+void GiveUp(const std::string& reason, bool srUnavailable)
+{
+    auto& s = GetState();
+    s.unavailable = reason;
+    s.srUnavailable = s.srUnavailable || srUnavailable;
+    LOG_WARN("Superior Scaling unavailable: {}; using Matched residual instead", reason);
+    Say("");
+    Drop();
+}
+
 void Record(ID3D12GraphicsCommandList* cmd)
 {
-    GetState().lifetime.Record(cmd);
-    ID3D12GraphicsCommandList* real = nullptr;
-    auto* identity = Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**) &real) ? real : cmd;
-    DlssNrWatchedLists::Add(identity);
-    auto& watched = GetState().watched;
-    if (std::find(watched.begin(), watched.end(), identity) == watched.end())
-        if (const auto empty = std::find(watched.begin(), watched.end(), nullptr); empty != watched.end())
-            *empty = identity;
-        else
-            DlssNrWatchedLists::g_full = true; // conservative overflow: never miss a reset/submit
+    auto& s = GetState();
+    s.lifetime.Record(cmd);
+    Watch(Util::RealObjectIdentity(cmd));
 }
 
 void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
     auto& s = GetState();
     s.lifetime.Submitted(queue, count, lists);
-    // Keep these identities watched until Reset, including replayed command lists.
-    // The generic janblade timers stop watching after the first submission.
-    for (UINT i = 0; i < count; ++i)
-        if (std::find(s.watched.begin(), s.watched.end(), lists[i]) != s.watched.end())
-            DlssNrWatchedLists::Add(lists[i]);
-    if (s.current && !s.current->submitted)
+    // The hook stopped watching these lists after this submission. A list whose recording is still open can be
+    // submitted again (replayed) and is still to be Reset, so it stays watched until then; others are forgotten.
+    if (s.current && s.current->creation)
         for (UINT i = 0; i < count; ++i)
             if (lists[i] == s.current->creation)
-                s.current->submitted = true;
+                s.current->creationSubmitted = true;
+    for (UINT i = 0; i < count; ++i)
+        if (s.lifetime.Open(lists[i]))
+            Watch(lists[i]);
+        else
+            Forget(lists[i]);
 }
 
 void ResetRecording(ID3D12CommandList* cmd)
 {
     auto& s = GetState();
     s.lifetime.ResetRecording(cmd);
-    for (auto& list : s.watched)
-        if (list == cmd)
-            list = nullptr;
-    if (s.current && !s.current->submitted && s.current->creation == cmd)
+    Forget(cmd);
+    // The private DLSS creation was recorded on a list that is being reset without ever being submitted:
+    // those creation commands never run, so the feature must be built again.
+    if (s.current && s.current->feature && s.current->creation == cmd && !s.current->creationSubmitted)
     {
-        auto old = std::move(s.current);
-        s.lifetime.Retire([old] {});
-        s.lifetime.BeginGeneration();
+        Drop();
+        g_nr.reset = true;
     }
 }
 
@@ -225,7 +305,28 @@ bool CreateWarp(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* c
     return true;
 }
 
-bool CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd)
+enum class Created
+{
+    Ok,
+    ResourcesFailed, // our own surfaces or passes: worth another try once Superior is selected again
+    SrUnavailable    // the NGX DLSS SR runtime: not here on this machine/runtime
+};
+
+NVSDK_NGX_Result CreateFeature(Generation& g, ID3D12GraphicsCommandList* cmd, unsigned preset)
+{
+    auto* p = g.parameters;
+    for (const char* key :
+         { NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
+           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
+           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality })
+        p->Set(key, preset);
+    g.feature = nullptr;
+    return NVNGXProxy::D3D12_CreateFeature()(cmd, NVSDK_NGX_Feature_SuperSampling, p, &g.feature);
+}
+
+Created CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd)
 {
     Record(cmd); // includes unit-exposure initialization even if NGX creation fails
     const auto w = g.workWidth, h = g.workHeight;
@@ -233,18 +334,24 @@ bool CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandLis
         !Ensure(g.temporalOutput, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, w, h) ||
         !Ensure(g.temporalMotion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, w, h) || !CreateWarp(g, shader, cmd) ||
         !Ensure(g.unit, g.device.Get(), DXGI_FORMAT_R32_FLOAT, 1, 1))
-        return false;
+        return Created::ResourcesFailed;
     Constants unit {};
     unit.Mode = 7u;
     unit.Width = unit.Height = 1u;
+    // Mode 7 only writes 1.0 (precompile/dlssnr.hlsl, "gMode == 7") and reads no SRV. g_nr.output, at rest in UAV
+    // state, is just the stand-in every SRV slot must hold; it is never accessed through that descriptor.
     if (!Dispatch(shader, cmd, unit, g_nr.output, nullptr, nullptr, nullptr, nullptr, nullptr, g.unit))
-        return false;
+        return Created::ResourcesFailed;
     if (!NVNGXProxy::InitDx12(g.device.Get()) || !NVNGXProxy::D3D12_AllocateParameters() ||
         !NVNGXProxy::D3D12_DestroyParameters() || !NVNGXProxy::D3D12_CreateFeature() ||
         !NVNGXProxy::D3D12_EvaluateFeature() || !NVNGXProxy::D3D12_ReleaseFeature())
-        return false;
+        return Created::SrUnavailable;
+    g.ngxEpoch = NVNGXProxy::Dx12Epoch();
     if (NVNGXProxy::D3D12_AllocateParameters()(&g.parameters) != NVSDK_NGX_Result_Success || !g.parameters)
-        return false;
+    {
+        g.parameters = nullptr;
+        return Created::SrUnavailable;
+    }
     auto* p = g.parameters;
     p->Set(NVSDK_NGX_Parameter_Width, w);
     p->Set(NVSDK_NGX_Parameter_Height, h);
@@ -253,22 +360,23 @@ bool CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandLis
     p->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
     p->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
     p->Set(NVSDK_NGX_Parameter_PerfQualityValue, (int) NVSDK_NGX_PerfQuality_Value_DLAA);
-    for (const char* key :
-         { NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
-           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
-           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
-           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
-           NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality })
-        p->Set(key, (unsigned) g.preset);
     const unsigned flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
                            NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
                            (g.inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0u);
     p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
     Record(cmd);
-    const auto result = NVNGXProxy::D3D12_CreateFeature()(cmd, NVSDK_NGX_Feature_SuperSampling, p, &g.feature);
-    ID3D12GraphicsCommandList* real = nullptr;
-    g.creation = Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**) &real) ? real : cmd;
-    return result == NVSDK_NGX_Result_Success && g.feature;
+    auto result = CreateFeature(g, cmd, g.preset);
+    if (result != NVSDK_NGX_Result_Success || !g.feature)
+    {
+        // A runtime without the requested preset (newer 310.x DLLs dropped the CNN presets A-E): its default.
+        static std::once_flag once;
+        std::call_once(once, [&]
+                       { LOG_WARN("Superior Scaling: private DLSS preset {} unavailable ({:X}); using the runtime's "
+                                  "default preset", g.preset, (unsigned) result); });
+        result = CreateFeature(g, cmd, NVSDK_NGX_DLSS_Hint_Render_Preset_Default);
+    }
+    g.creation = Util::RealObjectIdentity(cmd);
+    return result == NVSDK_NGX_Result_Success && g.feature ? Created::Ok : Created::SrUnavailable;
 }
 
 Constants Shaping(const Config& cfg, unsigned first, unsigned completed,
@@ -327,6 +435,8 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
                           const DlssNrFrameInfo& frame, bool reset, bool hold, ID3D12Resource* packedDepth,
                           ID3D12Resource* packedMotion)
 {
+    if (!g.feature || !g.parameters || !NgxAlive(g.ngxEpoch))
+        return nullptr;
     auto encode = GuideConstants(g.workWidth, g.workHeight, regions, frame, true, hold);
     encode.Mode = 39u; // v50: fixed carrier + motion; reuse this frame's exact NR depth.
     auto* motion = originalMotion;
@@ -381,40 +491,52 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
     return g.carrier.Get();
 }
 
+enum class Began
+{
+    Run,        // record Superior this frame
+    Wait,       // private DLSS creation recorded; skip NR until its submission epoch has passed (one frame)
+    Unavailable // Superior cannot run: GiveUp() was called, skip this frame, the next one runs the ordinary path
+};
+
 // Called before janblade records its normal input/exposure path. Only private DLSS
 // creation gets a submission-only frame, exactly like NR feature creation above it.
-bool Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* device, DXGI_FORMAT format,
-           unsigned width, unsigned height, unsigned workWidth, unsigned workHeight, const DlssNrFrameInfo& frame,
-           bool temporal, bool haveDepth, ID3D12CommandQueue* queue, const DlssNr::Spatial::Layout* layout)
+Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* device, DXGI_FORMAT format,
+            unsigned width, unsigned height, unsigned workWidth, unsigned workHeight, const DlssNrFrameInfo& frame,
+            bool temporal, bool haveDepth, const DlssNr::Spatial::Layout* layout)
 {
     auto& state = GetState();
+    g_used = true;
     state.lifetime.Collect();
     if (temporal && !haveDepth)
     {
-        Say("Temporal stabilization needs current depth and motion guides.");
-        return false;
+        GiveUp("temporal stabilization needs the game's depth and motion guides", false);
+        return Began::Unavailable;
     }
     const unsigned preset =
         DlssNr::SuperiorScaling::Preset(Config::Instance()->DlssNrSuperiorScalingPreset.value_or_default());
-    auto* previous = state.current.get();
-    if (previous && (previous->device.Get() != device || previous->width != width || previous->height != height ||
-                     previous->workWidth != workWidth || previous->workHeight != workHeight ||
-                     previous->format != format || previous->inverted != frame.DepthInverted ||
-                     previous->beforeSr != frame.BeforeUpscale || previous->temporal != temporal ||
-                     previous->packed != (layout != nullptr) || (layout && previous->layout != *layout) ||
-                     previous->preset != preset || (queue && previous->queue.Get() != queue)))
+    if (auto* previous = state.current.get())
     {
-        auto old = std::move(state.current);
-        state.lifetime.Retire([old] {});
-        state.lifetime.BeginGeneration();
-        g_nr.reset = true;
+        // Handles from a runtime NGX has since shut down are gone already: never evaluate or release them.
+        const bool ngxGone = (previous->feature || previous->parameters) && !NgxAlive(previous->ngxEpoch);
+        if (ngxGone)
+            previous->DropNgx();
+        // The game's queue is not part of the key: NGX records on the given list and the lifetime tracker follows
+        // the lists to whichever queue runs them.
+        if (ngxGone || previous->device.Get() != device || previous->width != width || previous->height != height ||
+            previous->workWidth != workWidth || previous->workHeight != workHeight || previous->format != format ||
+            previous->inverted != frame.DepthInverted || previous->beforeSr != frame.BeforeUpscale ||
+            previous->temporal != temporal || previous->packed != (layout != nullptr) ||
+            (layout && previous->layout != *layout) || previous->preset != preset)
+        {
+            Drop();
+            g_nr.reset = true;
+        }
     }
     if (!state.current)
     {
         state.current = std::make_shared<Generation>();
         auto& g = *state.current;
         g.device = device;
-        g.queue = queue;
         g.width = width;
         g.height = height;
         g.workWidth = workWidth;
@@ -429,18 +551,59 @@ bool Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* de
         g.preset = preset;
     }
     auto& g = *state.current;
-    if (g.failed)
-        return false;
     if (temporal && !g.feature)
     {
-        g.failed = !CreateTemporal(g, shader, cmd);
-        Say(g.failed ? "Private DLSS initialization failed." : "Waiting for private DLSS creation submission.");
-        return false;
+        switch (CreateTemporal(g, shader, cmd))
+        {
+        case Created::Ok:
+            g.createEpoch = frame.SubmissionEpoch;
+            g.waitedFrames = 0;
+            Say("Waiting for private DLSS creation submission.");
+            return Began::Wait;
+        case Created::ResourcesFailed:
+            GiveUp("its surfaces or passes could not be created", false);
+            return Began::Unavailable;
+        case Created::SrUnavailable:
+            GiveUp("private NVIDIA DLSS SR (NGX) is not available", true);
+            return Began::Unavailable;
+        }
     }
-    if (temporal && !g.submitted)
-        return false;
+    // A later call is not proof the creation was submitted (some engines record more than one upscale per list):
+    // the submission epoch must have moved on, as for the NR feature itself.
+    if (temporal && g.waitedFrames != UINT_MAX)
+    {
+        if (frame.SubmissionEpoch == g.createEpoch)
+        {
+            if (++g.waitedFrames > kCreationWaitFrames)
+            {
+                GiveUp("the private DLSS creation was never submitted", false);
+                return Began::Unavailable;
+            }
+            return Began::Wait;
+        }
+        g.waitedFrames = UINT_MAX; // ready
+        Say("");
+    }
     Record(cmd);
-    return true;
+    return Began::Run;
+}
+
+// The NGX D3D12 runtime is going away; it destroys every handle itself, so ours are dropped, not released.
+void NgxShutdown()
+{
+    auto& s = GetState();
+    if (s.current)
+        s.current->DropNgx();
+    Drop();
+}
+
+// NR shutdown: retire the current generation and run what has already completed; anything still in flight keeps its
+// ownership for process teardown (like DeferredSr::Shutdown), never released under the GPU.
+void Shutdown()
+{
+    auto& s = GetState();
+    Drop();
+    s.lifetime.Collect();
 }
 
 bool MatchGuides(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* depth,

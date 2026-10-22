@@ -8,6 +8,7 @@
 #include "proxies/NVNGX_Proxy.h"
 #include "dlssnr/DlssNr.h"
 #include "dlssnr/DlssNr_ExposureScan.h"
+#include "dlssnr/DlssNr_SuperiorScaling.h"
 #include <upscalers/dlss/DLSSFeature_Dx12.h>
 #include <shaders/output_scaling/OS_Dx12.h>
 
@@ -390,6 +391,11 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
 
     shutdown = true;
     State::Instance().nvngxDx12Inited = false;
+
+    // Superior Scaling's private DLSS feature lives in this runtime. Its handles are dropped, never released, from
+    // here on: NGX destroys them, and a later frame rebuilds them under the next runtime (NVNGXProxy::Dx12Epoch).
+    DlssNr::SuperiorScaling::NgxDx12Shutdown();
+    NVNGXProxy::BumpDx12Epoch();
 
     D3D12Device = nullptr;
 

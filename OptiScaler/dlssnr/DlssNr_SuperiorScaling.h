@@ -8,7 +8,14 @@
 
 namespace DlssNr::SuperiorScaling
 {
+// Runtime state, defined with the D3D12 pipeline (DlssNr_Dx12.cpp). Status: the last thing worth telling the user.
 std::string Status();
+// Why Superior is not running this session (empty while it runs); the ordinary path uses Matched residual meanwhile.
+// Selecting Superior again retries. SrUnavailable: the NGX DLSS SR runtime itself could not be used here.
+std::string Unavailable();
+bool SrUnavailable();
+// The game's NGX D3D12 runtime is shutting down: every NGX handle is about to be destroyed by NGX itself.
+void NgxDx12Shutdown();
 constexpr uint32_t Transfer = 11u;
 // Where Superior cannot run (native Vulkan, no NGX DLSS SR, no depth), the ordinary path runs Matched residual.
 constexpr uint32_t FallbackTransfer = 1u;

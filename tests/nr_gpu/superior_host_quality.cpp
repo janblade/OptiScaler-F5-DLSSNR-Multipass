@@ -18,8 +18,8 @@ int main()
         auto candidateSdr = r.pipeline(shaders + "superior/precompile", "host_resolve_sdr");
         auto referenceRawHdr = r.pipeline("artifacts/validation/host-shaders", "reference_raw_hdr");
         auto referenceRawSdr = r.pipeline("artifacts/validation/host-shaders", "reference_raw_sdr");
-        auto candidateRawHdr = r.pipeline(shaders + "superior/precompile", "host_resolve_raw_hdr");
-        auto candidateRawSdr = r.pipeline(shaders + "superior/precompile", "host_resolve_raw_sdr");
+        auto candidateRawHdr = r.pipeline(shaders + "superior/precompile", "host_resolve_raw");
+        auto candidateRawSdr = r.pipeline(shaders + "superior/precompile", "host_resolve_raw");
         size_t words = 0;
         unsigned cases = 0;
         for (const auto dims : { std::pair<UINT, UINT> { 1, 1 }, { 17, 11 }, { 65, 37 } })

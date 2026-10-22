@@ -27,16 +27,18 @@ float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
 {
     // Non-temporal fallback (e.g. an above-native ordinary grid with reduced packed NR).
     // Packed temporal reconstruction instead uses the direct warped query below.
+    // Non-finite NR or proxy values (an Inf from a pass) must not reach the frame. SanitizeFinite3 returns finite
+    // values unchanged, so finite results are bit-identical.
     if (gGuideHeight != 0u)
-        return SuperiorShapeEdit(gModel.SampleLevel(gLinear, uvq, 0).rgb -
-                                  gSource.SampleLevel(gLinear, uvq, 0).rgb, uvq);
+        return SuperiorShapeEdit(SanitizeFinite3(gModel.SampleLevel(gLinear, uvq, 0).rgb -
+                                                 gSource.SampleLevel(gLinear, uvq, 0).rgb, 0.0), uvq);
     uint srcW, srcH;
     gSource.GetDimensions(srcW, srcH);
 #if defined(DLSSNR_SUPERIOR_HOST_PACKED)
     // Map the native query directly to the packed lattice; no bilinear intermediate images.
     uvq = SuperiorPackedUv(uvq);
 #endif
-    const float3 fallback = gModel.SampleLevel(gLinear, saturate(uvq), 0).rgb;
+    const float3 fallback = SanitizeFinite3(gModel.SampleLevel(gLinear, saturate(uvq), 0).rgb, 0.0);
     const float rangeSigma = max(abs(0.015), 1e-5);
     const float spatialSigma = max(abs(3.0), 1e-4);
     const float invRange2 = 1.0 / (rangeSigma * rangeSigma);
@@ -61,8 +63,9 @@ float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
         for (int ox = -1; ox <= 1; ++ox)
         {
             const int2 p = clamp(base + int2(ox, oy), int2(0, 0), int2((int)srcW - 1, (int)srcH - 1));
-            const float3 proxy = gSource.Load(int3(p, 0)).rgb;
-            const float3 residual = gModel.Load(int3(p, 0)).rgb;
+            // A non-finite proxy tap gets ~zero range weight, a non-finite residual tap contributes nothing.
+            const float3 proxy = SanitizeFinite3(gSource.Load(int3(p, 0)).rgb, 1e4);
+            const float3 residual = SanitizeFinite3(gModel.Load(int3(p, 0)).rgb, 0.0);
             const float3 colourDelta = proxy - nativeGuide;
             const float rangeDistance2 = dot(colourDelta, colourDelta) * (1.0 / 3.0);
             const float2 spatialDelta = float2(p) - sourcePos;

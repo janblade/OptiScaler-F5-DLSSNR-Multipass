@@ -218,8 +218,7 @@ namespace DlssNr::Superior::HostBytecode
 {
 #include "precompile/host_resolve_hdr_Shader.h"
 #include "precompile/host_resolve_sdr_Shader.h"
-#include "precompile/host_resolve_raw_hdr_Shader.h"
-#include "precompile/host_resolve_raw_sdr_Shader.h"
+#include "precompile/host_resolve_raw_Shader.h"
 #include "precompile/host_low_raw_Shader.h"
 #include "precompile/host_resolve_packed_hdr_Shader.h"
 #include "precompile/host_resolve_packed_sdr_Shader.h"
@@ -286,15 +285,16 @@ ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(const DlssNrConstants&
             return pso;
     }
     const bool sdr = params.Passthrough != 0;
-    const auto index = (sdr ? 1u : 0u) + (packed ? 4u : rawAnswer ? 2u : 0u);
+    // The raw (non-temporal) resolve compiles to the same bytecode for SDR and HDR: one blob, one PSO (slot 2).
+    const auto index = packed ? 4u + (sdr ? 1u : 0u) : rawAnswer ? 2u : (sdr ? 1u : 0u);
     auto*& pso = _superiorResolve[index];
     if (!_superiorResolveAttempted[index])
     {
         _superiorResolveAttempted[index] = true;
-        const void* blobs[] { host_resolve_hdr_cso,     host_resolve_sdr_cso,        host_resolve_raw_hdr_cso,
-                              host_resolve_raw_sdr_cso, host_resolve_packed_hdr_cso, host_resolve_packed_sdr_cso };
+        const void* blobs[] { host_resolve_hdr_cso, host_resolve_sdr_cso,        host_resolve_raw_cso,
+                              host_resolve_raw_cso, host_resolve_packed_hdr_cso, host_resolve_packed_sdr_cso };
         const size_t sizes[] { sizeof(host_resolve_hdr_cso),        sizeof(host_resolve_sdr_cso),
-                               sizeof(host_resolve_raw_hdr_cso),    sizeof(host_resolve_raw_sdr_cso),
+                               sizeof(host_resolve_raw_cso),        sizeof(host_resolve_raw_cso),
                                sizeof(host_resolve_packed_hdr_cso), sizeof(host_resolve_packed_sdr_cso) };
         CreateComputePipeline(_device, &pso, blobs[index], sizes[index], nullptr);
     }

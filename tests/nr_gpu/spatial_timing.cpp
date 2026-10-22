@@ -111,12 +111,12 @@ int main(int argc, char** argv)
                 r.finish();
                 const auto layout = Sp::Build(settings, 3840, 2160, scale / 100.f, false);
                 auto before = nativeTemporal
-                                  ? r.pipeline(current, hdr < 0 ? "host_resolve_raw_sdr" : "host_resolve_raw_hdr")
+                                  ? r.pipeline(current, "host_resolve_raw")
                               : scale == 100 ? legacy
                                              : r.pipeline("artifacts/validation/pre-spatial",
                                                           hdr < 0 ? "host_resolve_sdr" : "host_resolve_hdr");
                 auto after = r.pipeline(current, scale == 100 && !nativeTemporal
-                                                     ? (hdr < 0 ? "host_resolve_raw_sdr" : "host_resolve_raw_hdr")
+                                                     ? ("host_resolve_raw")
                                                      : (hdr < 0 ? "host_resolve_sdr" : "host_resolve_hdr"));
                 HostConstants h {};
                 h.Mode = 1;

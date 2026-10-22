@@ -3168,6 +3168,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!std::isfinite(workScale))
         workScale = 1.0f;
     workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
+    // Superior keeps its exact raster (below), which would follow every pixel of a moving Auto scale and rebuild the
+    // NR feature and its private DLSS each time; it moves only when the ordinary 16-pixel cell does.
+    if (superior && !frame.BeforeUpscale && cfg.DlssNrModelResolutionAuto.value_or_default())
+    {
+        static DlssNr::SuperiorScaling::ScaleHold superiorScaleHold;
+        workScale = superiorScaleHold.Hold(width, height,
+                                           AlignWorkSize((unsigned int) (width * workScale + 0.5f), width),
+                                           AlignWorkSize((unsigned int) (height * workScale + 0.5f), height), workScale);
+    }
     g_nr.appliedWorkScale = workScale;
     const auto workWidth = superior ? DlssNr::SuperiorScaling::WorkingExtent(width, workScale)
                                     : AlignWorkSize((unsigned int) (width * workScale + 0.5f), width);

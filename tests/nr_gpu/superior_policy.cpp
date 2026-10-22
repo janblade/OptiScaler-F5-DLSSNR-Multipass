@@ -147,6 +147,16 @@ int main() {
         require(WorkingExtent(3840,.59f)==2266 && WorkingExtent(2160,.59f)==1274);
         require(WorkingExtent(1919,1.0f)==1919 && WorkingExtent(1079,1.0f)==1079);
         require(WorkingExtent(1919,.65f)==1247 && WorkingExtent(1079,.65f)==701);
+        {
+            // Auto scale hysteresis: the exact raster only moves with the ordinary 16-pixel cell or the frame size.
+            ScaleHold hold;
+            require(hold.Hold(3840, 2160, 2496, 1408, .650f) == .650f);
+            require(hold.Hold(3840, 2160, 2496, 1408, .652f) == .650f); // same cells: no new raster
+            require(hold.Hold(3840, 2160, 2512, 1408, .654f) == .654f); // width cell moved
+            require(hold.Hold(3840, 2160, 2512, 1424, .656f) == .656f); // height cell moved
+            require(hold.Hold(2560, 1440, 2512, 1424, .657f) == .657f); // frame size changed
+            require(WorkingExtent(3840, .650f) != WorkingExtent(3840, .652f)); // what the hold saves a rebuild for
+        }
         require(MotionScale(1920,1920,1920)==1920); // native NR, game uses render-size vectors
         require(MotionScale(1920,2496,1920)==2496); // P65 of 3840, matched guides
         require(MotionScale(3840,2496,3840)==2496); // high-resolution motion texture

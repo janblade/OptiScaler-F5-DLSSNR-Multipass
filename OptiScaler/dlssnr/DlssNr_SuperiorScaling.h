@@ -91,6 +91,26 @@ inline unsigned WorkingExtent(unsigned native, float scale)
 {
     return std::max(1u, static_cast<unsigned>(native * scale + .5f));
 }
+// Hysteresis for a continuously moving scale (Auto model resolution, dynamic resolution). Superior keeps its exact
+// raster, but a new raster rebuilds the NR feature and the private DLSS generation, so the scale only moves when the
+// ordinary path's own 16-pixel grid cell (the aligned extents, `bucket`) or the frame size changes.
+struct ScaleHold
+{
+    unsigned nativeW = 0, nativeH = 0, bucketW = 0, bucketH = 0;
+    float scale = 0.0f;
+    float Hold(unsigned w, unsigned h, unsigned alignedW, unsigned alignedH, float requested)
+    {
+        if (scale <= 0.0f || w != nativeW || h != nativeH || alignedW != bucketW || alignedH != bucketH)
+        {
+            nativeW = w;
+            nativeH = h;
+            bucketW = alignedW;
+            bucketH = alignedH;
+            scale = requested;
+        }
+        return scale;
+    }
+};
 // Isotropic gain tables use one global linear scale, including actual raster rounding.
 inline float ResolutionScale(unsigned nativeW, unsigned nativeH, unsigned modelW, unsigned modelH)
 {

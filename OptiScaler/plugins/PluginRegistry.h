@@ -39,6 +39,7 @@ enum class State
     Disabled, // named in [Plugins] DisabledAsi: never opened
     Failed,   // LoadLibrary said no, see Entry::error
     Skipped,  // [Plugins] LoadAsiPlugins is off: seen, not opened
+    Blocked,  // a loader the ini turns on that another setting stops this session
     Off,
     On
 };
@@ -277,6 +278,8 @@ inline const wchar_t* StateText(State state)
         return L"failed";
     case State::Skipped:
         return L"skipped";
+    case State::Blocked:
+        return L"blocked";
     case State::Off:
         return L"off";
     case State::On:

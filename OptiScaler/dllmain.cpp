@@ -2180,9 +2180,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             Plugins::RegisterBuiltinMfg(registry, { Config::Instance()->MfgUnlockXeFG.value_or_default(),
                                                     Config::Instance()->MfgUnlockRTX40.value_or_default(),
                                                     Config::Instance()->MfgUnlockRTX2030.value_or_default() });
-            Plugins::RegisterLoaders(registry, Config::Instance()->LoadSpecialK.value_or_default(),
-                                     Config::Instance()->LoadReShade.value_or_default(),
-                                     Config::Instance()->LoadCustomAmdxc64OnRdna2.value_or_default());
+
+            // The ini values: a setting another option turned off for this session (volatile) still reads as on here
+            auto* config = Config::Instance();
+            const bool skIni = config->LoadSpecialK.value_for_config().value_or(false);
+            Plugins::RegisterLoaders(registry, skIni, config->LoadReShade.value_for_config().value_or(false),
+                                     config->LoadCustomAmdxc64OnRdna2.value_for_config().value_or(false));
+
+            if (skIni && !config->LoadSpecialK.value_or_default())
+                registry.SetState(Plugins::Kind::Loader, Plugins::kLoaderSpecialK, Plugins::State::Blocked);
         }
 
         spdlog::info("");

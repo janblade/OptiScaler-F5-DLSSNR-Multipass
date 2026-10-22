@@ -79,6 +79,12 @@ inline std::string ErrorText(uint32_t error)
     return reason != nullptr ? std::format("0x{:X}, {}", error, reason) : std::format("0x{:X}", error);
 }
 
+// "failed to load (0x7E, module not found)"; without a code it is only "failed to load"
+inline std::string FailedText(uint32_t error)
+{
+    return error == 0 ? std::string("failed to load") : "failed to load (" + ErrorText(error) + ")";
+}
+
 inline RowView AsiRow(const Entry& entry, int lateDelaySeconds)
 {
     RowView row;
@@ -111,7 +117,7 @@ inline RowView AsiRow(const Entry& entry, int lateDelaySeconds)
         row.tone = Tone::Grey;
         break;
     case State::Failed:
-        row.state = "failed to load (" + ErrorText(entry.error) + ")";
+        row.state = FailedText(entry.error);
         row.tone = Tone::Red;
         break;
     default:
@@ -165,8 +171,12 @@ inline RowView LoaderRow(const Entry& entry)
         row.tone = Tone::Green;
         break;
     case State::Failed:
-        row.state = "failed to load (" + ErrorText(entry.error) + ")";
+        row.state = FailedText(entry.error);
         row.tone = Tone::Red;
+        break;
+    case State::Blocked:
+        row.state = "on, not loaded: a frame generation input is on";
+        row.tone = Tone::Amber;
         break;
     case State::On:
         row.state = "on, not loaded this session";

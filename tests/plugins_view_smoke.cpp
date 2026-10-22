@@ -96,6 +96,22 @@ int main()
         entry.desired = 2;
         entry.startedWith = 1;
         Check(BuiltinRow(entry, MfgUnlockMode::On, live).pending, "a changed mode is pending");
+
+        // The text follows the mode the process started with: started on and active, now set to off in the menu, is
+        // still active this session and only pending
+        live.state = MfgUnlock::FamilyState::Active;
+        live.patches = { { "a", "found" } };
+        entry.startedWith = static_cast<int>(MfgUnlockMode::On);
+        entry.desired = static_cast<int>(MfgUnlockMode::Off);
+        row = BuiltinRow(entry, static_cast<MfgUnlockMode>(entry.startedWith), live);
+        Check(row.state == "active: 1 of 1 patches" && row.pending, "started on and active stays active, pending");
+
+        // started off, now on in the menu: nothing is armed this session
+        entry.startedWith = static_cast<int>(MfgUnlockMode::Off);
+        entry.desired = static_cast<int>(MfgUnlockMode::On);
+        live = {};
+        row = BuiltinRow(entry, static_cast<MfgUnlockMode>(entry.startedWith), live);
+        Check(row.state == "off" && row.pending, "started off stays off, pending");
     }
 
     // Loader rows
@@ -114,6 +130,19 @@ int main()
         entry.error = 2;
         Check(LoaderRow(entry).tone == Tone::Red && LoaderRow(entry).state.find("not found") != std::string::npos,
               "loader failed is red with the reason");
+
+        // ini says on but another setting stopped it: amber, and still ticked for the next start
+        entry.state = State::Blocked;
+        entry.error = 0;
+        entry.startedWith = entry.desired = 1;
+        Check(LoaderRow(entry).tone == Tone::Amber && LoaderRow(entry).checked &&
+                  LoaderRow(entry).state.find("not loaded") != std::string::npos,
+              "blocked loader is amber and stays ticked");
+
+        // a failure with no Windows code does not show 0x0
+        entry.state = State::Failed;
+        Check(LoaderRow(entry).state == "failed to load", "no error code, no 0x0");
+        Check(AsiRow(Asi(L"f.asi", State::Failed, 0), 30).state == "failed to load", "asi: no error code, no 0x0");
     }
 
     // The both-unlocks warning names no product: any loaded file with the word 'unlock', or the external FG switch

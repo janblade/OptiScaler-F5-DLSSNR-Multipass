@@ -171,6 +171,16 @@ int main(int argc, char** argv)
         Check(disabledText.empty() || disabledText == "auto", "shipped ini: DisabledAsi lists nothing (auto)");
     }
 
+    // (k) the session info round trips
+    {
+        Registry reg;
+        Check(!reg.GetSession().asiEnabled && reg.GetSession().folder.empty() && !reg.GetSession().folderFound,
+              "a new registry has an empty session");
+        reg.SetSession({ .asiEnabled = true, .folder = L"x\\plugins", .folderFound = true });
+        const auto session = reg.GetSession();
+        Check(session.asiEnabled && session.folder == L"x\\plugins" && session.folderFound, "session round trip");
+    }
+
     // (i) built-in MFG entries need no file
     {
         Registry reg;

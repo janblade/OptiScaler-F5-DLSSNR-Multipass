@@ -81,7 +81,9 @@ void RenderBuiltin(Config* config, const std::vector<Plugins::Entry>& entries, b
         anyBuiltinOn = anyBuiltinOn || mode != MfgUnlockMode::Off;
 
         const auto live = MfgUnlock::StatusRegistry::Get(static_cast<MfgUnlock::Family>(entry.family));
-        const Plugins::RowView row = Plugins::BuiltinRow(entry, mode, live);
+        // The state text describes this session, so it follows the mode the process started with; the combo holds
+        // the next start's value and "restart to apply" shows the difference
+        const Plugins::RowView row = Plugins::BuiltinRow(entry, static_cast<MfgUnlockMode>(entry.startedWith), live);
 
         ImGui::PushID(entry.family);
         ImGui::AlignTextToFramePadding();
@@ -187,7 +189,7 @@ void RenderLoaders(Config* config, const std::vector<Plugins::Entry>& entries)
         const Plugins::RowView row = Plugins::LoaderRow(*found);
 
         ImGui::PushID(static_cast<int>(index));
-        bool on = switches[index].option->value_or_default();
+        bool on = row.checked; // what the next start will do, not the session's volatile value
         if (ImGui::Checkbox(row.label.c_str(), &on))
         {
             *switches[index].option = on;
@@ -242,9 +244,9 @@ void PluginsPage::Render(Config* config)
         ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
+        ImGui::TextDisabled("Unticked files are not loaded at the next start.");
+        HelpMarker("The file itself is not changed. Tick it again to load it.\nini: [Plugins] DisabledAsi");
         RenderAsiFiles(config, entries, master);
-        HelpMarker("Unticked files are not loaded at the next start; the file itself is not changed.\n"
-                   "ini: [Plugins] DisabledAsi");
     }
 
     // Optional loaders

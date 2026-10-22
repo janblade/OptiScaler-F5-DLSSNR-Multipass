@@ -142,9 +142,11 @@ bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample, bool u
 {
     const unsigned int want[6] = { l.modelW, l.modelH, l.ordinaryW, l.ordinaryH, l.nativeW, l.nativeH };
 
+    // Unpack textures already there satisfy a frame that does not need them (e.g. after exposure calibration ends),
+    // and a frame that newly needs them only adds them: neither re-makes the packed colour/depth/motion.
     if (color != nullptr && std::equal(std::begin(want), std::end(want), std::begin(madeFor)) &&
-        madeSuper == supersample && madeUnpack == unpack)
-        return true;
+        madeSuper == supersample)
+        return madeUnpack || !unpack || PrepareUnpack(device, l);
 
     Release();
 

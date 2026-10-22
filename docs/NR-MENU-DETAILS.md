@@ -107,6 +107,8 @@ It also sets NR Pass at: to Before Super Resolution. Anything not listed here is
 
 The green button is the tier currently in effect; changing NR Pass at:, Upscale Mode, Upscale Method, Model resolution or Final Image Composition clears it.
 
+A tier leaves Upscale Mode on Superior Scaling if you selected it, and still counts as in effect then.
+
 ## Follow the game's exposure
 
 For games that hand over their frame before applying their own exposure: on by default for those known to (RDR2), off for every other game. Automatic learns how its own metering relates to the game's exposure in the first seconds of play, then follows the game's exposure, so brightness moves exactly with the game: cutscenes, menus, fades. In a game whose own exposure never moves, if the two stay more than 0.75 EV apart for a moment, the calibration eases toward Automatic (0.25 EV a second at most).
@@ -218,6 +220,12 @@ The model averages its input 2x2 before its main network runs, so that network a
 When NR runs after SR -- Apply before SR off, or Ray Reconstruction, which always runs it after -- derive the working scale from the render:output ratio the upscaler itself already reconstructed detail at, instead of the slider above.
 
 That output already reconstructed detail at that ratio, so NR running at the same reduced scale costs nothing extra to tune for. No effect while NR runs before SR -- the slider applies as usual.
+
+## Upscale Mode: Superior Scaling
+
+An Upscale Mode of its own (NR Output). Below 100% Model resolution it shrinks the picture with an Area filter, shapes NR's change by frequency between passes and at the end, and runs a private NVIDIA DLSS (DLAA) on that change to keep it steady over time. Once selected it also works at 100% while Compress screen edges shrinks the model's input. **DLSS to temporally stabilize NR** picks that private DLSS's preset: A (faster) or K (steadier in motion); if the runtime does not offer it, its default preset is used.
+
+It needs DirectX 12 (or a DirectX 12 bridge), the game's depth and motion, and NVIDIA DLSS through NGX. Where any of these is missing (Vulkan, a non-NVIDIA card, the vendor-neutral port) Matched residual runs instead and the menu says why; select Superior Scaling again to retry. Upscale Method has no effect with it. Details: [Superior-Scaling-port.md](Superior-Scaling-port.md).
 
 ## Final Image Composition
 

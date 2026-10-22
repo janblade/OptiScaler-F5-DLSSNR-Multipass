@@ -14,6 +14,7 @@ This is an experimental community version of OptiScaler. Results and game suppor
 - Apply NR to the finished picture to help with green noise. Works with frame generation on or off in native DirectX 12 games, including HDR.
 - Apply it more than once, with different settings each time. Extra passes cost more performance.
 - Lower the model resolution to reduce the performance cost.
+- Use Superior Scaling (Upscale Mode) to enlarge reduced-resolution NR with a private DLSS that steadies it over time (DirectX 12, NVIDIA DLSS).
 
 ## What you need
 

@@ -1,18 +1,19 @@
 // Compress screen edges, D3D12 (menu: NR Input, "Compress screen edges"; ini [DlssNr] Spatial*).
 //
-// NR works on a smaller picture: the middle of the frame stays 1:1 and the edges are squeezed into the rest of the space
-// (DlssNr_Spatial.h has the layout, precompile/dlssnr_spatial.hlsl the three passes). A frame goes
+// NR works on a smaller picture: the middle of the frame stays 1:1 and the edges are squeezed into the rest of the
+// space (DlssNr_Spatial.h has the layout, precompile/dlssnr_spatial.hlsl the three passes). A frame goes
 //   encode -> pack the colour (100) and the depth + motion (101) -> the model at the packed size ->
 //   unpack the packed model input and the model's answer to the ordinary grid (102) -> the resolve.
-// The ordinary grid is the one NR works on without compression (the model resolution, 16-pixel grid), so the resolve,
-// the enlargement and the supersample down-leg see the same kind of pair they always did, only softer at the edges:
-// both halves go through the same resampling, so what the resolve carries over to the frame is the model's change.
+// The ordinary grid is the one NR works on without compression (16-pixel grid, or Superior's exact raster), so the
+// resolve, the enlargement and the supersample down-leg see the same kind of pair they always did, only softer at the
+// edges: both halves go through the same resampling, so what the resolve carries over to the frame is the model's
+// change.
 //
 // Motion is packed by its end points (Pack(p + v) - Pack(p)), so the packed vectors are exact in packed pixels and the
 // model gets a scale of 1. The packed textures are RGBA16F, also the model's own input and output surfaces: the answer
-// is a resample of a resample, not something the swap chain's format should quantise. (So against no compression an 8 or
-// 10-bit game's model works on RGBA16F; what is bit-identical is the 1:1 middle between the Replace correction, mode 103,
-// and the plain unpack, mode 102.)
+// is a resample of a resample, not something the swap chain's format should quantise. (So against no compression an 8
+// or 10-bit game's model works on RGBA16F; what is bit-identical is the 1:1 middle between the Replace correction, mode
+// 103, and the plain unpack, mode 102.)
 //
 // Anything that goes wrong turns compression off (Status::TurnedOff*), not NR: the next frame runs the ordinary path,
 // and a change of layout (or Retry) tries again. Reuse detail between frames does not run while this does.
@@ -40,7 +41,7 @@ ID3D12Resource* answerNative = nullptr;
 OS_Dx12* proxyDown = nullptr; // the down-leg for the proxy; the answer goes through g_nr.superDown, the same filter
 Scaler proxyDownScaler = Scaler::Count; // the filter proxyDown was built with: it must be the answer's, or halos
 unsigned int madeFor[6] = {}; // packed w/h, ordinary w/h, native w/h the textures above were made for
-bool madeSuper = false;
+bool madeSuper = false, madeUnpack = true;
 
 std::mutex publishedLock;
 Sp::Published published;
@@ -81,11 +82,12 @@ uint64_t SignatureOf(DXGI_FORMAT colour, DXGI_FORMAT depthFormat, unsigned int d
 
 // Decides this frame. Returns whether the picture is packed. resetHistory is set when the packed picture is a different
 // one from last frame's.
-bool Begin(const Config& cfg, unsigned int width, unsigned int height, float scale, bool proxyBackend,
-           uint64_t signature, bool& resetHistory)
+bool Begin(const Config& cfg, unsigned int width, unsigned int height, float scale, bool gridOrdinary,
+           bool proxyBackend, uint64_t signature, bool& resetHistory)
 {
     const Sp::Settings settings = Sp::ReadSettings(cfg);
-    const Sp::Tracker::Frame frame = tracker.Begin(settings, width, height, scale, true, proxyBackend, signature);
+    const Sp::Tracker::Frame frame =
+        tracker.Begin(settings, width, height, scale, gridOrdinary, proxyBackend, signature);
     const Sp::Layout& next = tracker.layout();
 
     if (frame.resetHistory)
@@ -125,22 +127,35 @@ bool Make(ID3D12Resource*& slot, ID3D12Device* device, DXGI_FORMAT format, unsig
     return slot != nullptr;
 }
 
+// Calibration can start after Prepare in this frame. Add only its ordinary pair without replacing live packed guides.
+bool PrepareUnpack(ID3D12Device* device, const Sp::Layout& l)
+{
+    const bool ok = (proxy || Make(proxy, device, kFormat, l.ordinaryW, l.ordinaryH)) &&
+                    (answer || Make(answer, device, kFormat, l.ordinaryW, l.ordinaryH));
+    if (ok)
+        madeUnpack = true;
+    return ok;
+}
+
 // The textures for this layout, made again when the sizes change. False if one could not be made.
-bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample)
+bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample, bool unpack)
 {
     const unsigned int want[6] = { l.modelW, l.modelH, l.ordinaryW, l.ordinaryH, l.nativeW, l.nativeH };
 
+    // Unpack textures already there satisfy a frame that does not need them (e.g. after exposure calibration ends),
+    // and a frame that newly needs them only adds them: neither re-makes the packed colour/depth/motion.
     if (color != nullptr && std::equal(std::begin(want), std::end(want), std::begin(madeFor)) &&
         madeSuper == supersample)
-        return true;
+        return madeUnpack || !unpack || PrepareUnpack(device, l);
 
     Release();
 
     bool ok = Make(color, device, kFormat, l.modelW, l.modelH) &&
               Make(depth, device, DXGI_FORMAT_R32_FLOAT, l.modelW, l.modelH) &&
-              Make(motion, device, DXGI_FORMAT_R32G32_FLOAT, l.modelW, l.modelH) &&
-              Make(proxy, device, kFormat, l.ordinaryW, l.ordinaryH) &&
-              Make(answer, device, kFormat, l.ordinaryW, l.ordinaryH);
+              Make(motion, device, DXGI_FORMAT_R32G32_FLOAT, l.modelW, l.modelH);
+
+    if (ok && unpack)
+        ok = PrepareUnpack(device, l);
 
     if (ok && supersample)
         ok = Make(proxyNative, device, kFormat, l.nativeW, l.nativeH) &&
@@ -154,6 +169,7 @@ bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample)
 
     std::copy(std::begin(want), std::end(want), std::begin(madeFor));
     madeSuper = supersample;
+    madeUnpack = unpack;
     return true;
 }
 

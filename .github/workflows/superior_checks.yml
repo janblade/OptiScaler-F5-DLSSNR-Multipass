@@ -1,0 +1,80 @@
+name: Superior Scaling checks
+
+# Superior Scaling ships precompiled blobs built from the live NR shader (precompile/dlssnr.hlsl via
+# superior/HostResolve.hlsli, precompile/dlssnr_spatial_warp.hlsli via superior/WarpMap.hlsli) and from its frozen
+# v59 copy. This rebuilds all of them with the repository's dxc and fails if anything differs from what is committed,
+# and builds and runs the self-contained CPU policy tests. GPU tests are local only (tools/test_superior_port.ps1).
+on:
+  push:
+    paths:
+      - 'OptiScaler/shaders/dlssnr/**'
+      - 'OptiScaler/dlssnr/DlssNr_Superior*'
+      - 'OptiScaler/dlssnr/DlssNr_InterPass*'
+      - 'OptiScaler/dlssnr/DlssNr_GuidedShaping.h'
+      - 'OptiScaler/shaders/shader_tools/**'
+      - 'tests/nr_gpu/**'
+      - 'tests/nr_guides_smoke.cpp'
+      - 'tests/nr_surface_formats_smoke.cpp'
+      - 'tests/test_nr_superior_scaling.py'
+      - 'tools/compile_nr_interpass.ps1'
+      - 'tools/test_superior_port.ps1'
+      - 'docs/superior-v59-shaders.json'
+      - '.github/workflows/superior_checks.yml'
+  pull_request:
+    paths:
+      - 'OptiScaler/shaders/dlssnr/**'
+      - 'OptiScaler/dlssnr/DlssNr_Superior*'
+      - 'OptiScaler/dlssnr/DlssNr_InterPass*'
+      - 'OptiScaler/dlssnr/DlssNr_GuidedShaping.h'
+      - 'OptiScaler/shaders/shader_tools/**'
+      - 'tests/nr_gpu/**'
+      - 'tests/nr_guides_smoke.cpp'
+      - 'tests/nr_surface_formats_smoke.cpp'
+      - 'tests/test_nr_superior_scaling.py'
+      - 'tools/compile_nr_interpass.ps1'
+      - 'tools/test_superior_port.ps1'
+      - 'docs/superior-v59-shaders.json'
+      - '.github/workflows/superior_checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shader-blobs:
+    name: Superior shader blobs rebuild byte for byte
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Rebuild every Superior blob with the repository's dxc
+      shell: powershell
+      run: |
+        ./tools/compile_nr_interpass.ps1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $changed = git status --porcelain -- OptiScaler/shaders/dlssnr/superior/precompile
+        if ($changed) {
+          $changed
+          git diff --stat -- OptiScaler/shaders/dlssnr/superior/precompile
+          Write-Error 'Committed Superior blobs differ from a rebuild: run tools/compile_nr_interpass.ps1 and commit the result.'
+          exit 1
+        }
+
+    - name: v59 identity, constant ABI and embedded bytecode
+      run: python tests/test_nr_superior_scaling.py
+
+  cpu-tests:
+    name: Superior CPU policy tests
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Build and run the self-contained tests
+      shell: powershell
+      run: |
+        ./tools/test_superior_port.ps1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

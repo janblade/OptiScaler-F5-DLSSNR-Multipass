@@ -493,6 +493,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrReplaceDetailStrength.set_from_config(readFloat("DlssNr", "ReplaceDetailStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
             DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
+            DlssNrSuperiorScalingPreset.set_from_config(readUInt("DlssNr", "SuperiorScalingPreset"));
 
             DlssNrWhitePointFromExposure.set_from_config(readBool("DlssNr", "WhitePointFromExposure"));
             DlssNrProbeD3D11.set_from_config(readBool("DlssNr", "ProbeD3D11"));
@@ -1638,6 +1639,8 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrReplaceDetailStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "MaxRatio", GetFloatValue(Instance()->DlssNrMaxRatio.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Transfer", GetIntValue(Instance()->DlssNrTransfer.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SuperiorScalingPreset",
+                 GetIntValue(Instance()->DlssNrSuperiorScalingPreset.value_for_config()).c_str());
 
     ini.SetValue("DlssNr", "ProbeD3D11",
                  GetBoolValue(Instance()->DlssNrProbeD3D11.value_for_config()).c_str());

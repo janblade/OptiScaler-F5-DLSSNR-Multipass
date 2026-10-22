@@ -4,6 +4,7 @@
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_LookPresets.h"
+#include "DlssNr_SuperiorScaling.h"
 #include "DlssNrNative.h"
 
 
@@ -813,7 +814,10 @@ static void ApplyResolutionTier(Config* config, int& pendingScale, const Resolut
     config->DlssNrRunBeforeSr = placement.runBeforeSr;
     config->DlssNrDeferredDlss = placement.deferred;
 
-    config->DlssNrTransfer = 2u; // Upscale Mode: NVIDIA residual
+    // Upscale Mode: NVIDIA residual. A Superior Scaling choice is kept: it is an enlargement of its own, not a tier
+    // setting, and the tier still sets the Model resolution it works at.
+    if (!DlssNr::SuperiorScaling::Enabled(*config))
+        config->DlssNrTransfer = 2u;
     config->DlssNrReducedUpscaleMethod = tier.upscaleMethod;
     config->DlssNrModelResolutionAuto = false;
     config->DlssNrWorkingScale = tier.workingScale;
@@ -833,7 +837,7 @@ static bool ResolutionTierActive(Config* config, const ResolutionTier& tier, boo
                { config->DlssNrFinishedPicture.value_or_default(), config->DlssNrRunBeforeSr.value_or_default(),
                  config->DlssNrDeferredDlss.value_or_default() },
                beforeSuperResolution) &&
-           config->DlssNrTransfer.value_or_default() == 2u &&
+           (config->DlssNrTransfer.value_or_default() == 2u || DlssNr::SuperiorScaling::Enabled(*config)) &&
            config->DlssNrReducedUpscaleMethod.value_or_default() == tier.upscaleMethod &&
            !config->DlssNrModelResolutionAuto.value_or_default() &&
            std::fabs(config->DlssNrWorkingScale.value_or_default() - tier.workingScale) < 0.005f;
@@ -1830,13 +1834,13 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     tierRow("pre", true);
     HelpMarker("Quality tiers for NR before SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
                "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
-               "Green = in effect; changing those clears it.");
+               "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
 
     ImGui::SeparatorText("Post-SR Presets");
     tierRow("post", false);
     HelpMarker("Quality tiers for NR after SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
                "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
-               "Green = in effect; changing those clears it.");
+               "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
 }
 
 // NR Exposure, drawn at the end of the NR Input page.
@@ -3239,8 +3243,14 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         // the layout's own sliders).
     }
 
-    HelpMarker("Size NR works at, relative to its input. Lower: faster, less fine detail. Above 100%: costs more. "
-               "The game's resolution is unchanged.");
+    if (DlssNr::SuperiorScaling::Enabled(*config))
+        HelpMarker("Size NR works at, relative to its input. Lower: faster, less fine detail. Above 100%: costs more. "
+                   "The game's resolution is unchanged.\n\n"
+                   "With Superior Scaling, some percentages may look unusual or differ noticeably from NR at full "
+                   "resolution. If so, try a few percentage points higher or lower.");
+    else
+        HelpMarker("Size NR works at, relative to its input. Lower: faster, less fine detail. Above 100%: costs more. "
+                   "The game's resolution is unchanged.");
 
     {
         unsigned int modelWidth = 0;
@@ -3392,29 +3402,78 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
 
     // Meaningful only when the model runs BELOW the frame's size. At 100% -- and above, where
     // supersampling composites its down-legged answer at native -- the residual collapses to the
-    // model's own picture and the two modes are identical, so the control says so by going grey.
+    // model's own picture and the modes are identical, so the control says so by going grey. Superior
+    // Scaling is the exception while it is selected: with Compress screen edges it also works at 100%, and it must
+    // always be possible to switch it off.
     {
         // The applied scale, not the slider: with Auto after SR the slider can say 100% while NR runs smaller.
         const bool reduced = AppliedModelScale(config, nr) < 0.999f;
+        const bool superior = DlssNr::SuperiorScaling::Enabled(*config);
 
-        if (!reduced)
+        // Superior needs D3D12 (or a D3D12 bridge) and NVIDIA's DLSS SR through NGX for its temporal part.
+        const bool superiorBlocked = nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable();
+
+        if (!reduced && !superior)
             ImGui::BeginDisabled();
 
-        static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual" };
-        int enlarge = (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
+        static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
+        const int enlarge =
+            superior ? 3 : (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
 
-        if (ImGui::Combo("Upscale Mode", &enlarge, enlargeNames, IM_ARRAYSIZE(enlargeNames)))
-            config->DlssNrTransfer = (uint32_t) enlarge;
+        if (ImGui::BeginCombo("Upscale Mode", enlargeNames[enlarge]))
+        {
+            for (int i = 0; i < IM_ARRAYSIZE(enlargeNames); ++i)
+            {
+                const bool blocked = i == 3 && superiorBlocked && !superior;
 
-        if (!reduced)
+                if (ImGui::Selectable(enlargeNames[i], i == enlarge,
+                                      blocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None))
+                    config->DlssNrTransfer = i == 3 ? DlssNr::SuperiorScaling::Transfer : (uint32_t) i;
+
+                if (i == enlarge)
+                    ImGui::SetItemDefaultFocus();
+            }
+
+            ImGui::EndCombo();
+        }
+
+        if (!reduced && !superior)
             ImGui::EndDisabled();
 
         HelpMarker("Below 100% Model resolution, how NR's result is enlarged.\n"
                    "Classic: the whole output.\n"
                    "Matched residual: only NR's changes; less blur and colour shift.\n"
-                   "NVIDIA residual: only the changes, NVIDIA's way.");
+                   "NVIDIA residual: only the changes, NVIDIA's way.\n"
+                   "Superior Scaling: its own Area downsample, frequency shaping and a private DLSS that steadies NR "
+                   "over time. Once selected it also works at 100% with Compress screen edges. Needs DirectX 12 and "
+                   "NVIDIA DLSS; where it cannot run, Matched residual is used.");
 
-        if (!reduced)
+        if (superior)
+        {
+            static const char* presets[] = { "A - higher performance", "K - slower, more stable NR in motion" };
+            int preset =
+                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
+
+            if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
+                config->DlssNrSuperiorScalingPreset = preset == 1 ? 11u : 1u;
+
+            HelpMarker("Superior Scaling: a private DLSS in DLAA mode, applied to NR's change at its working "
+                       "resolution. Independent of the NR model preset and the game's own DLSS preset.");
+
+            const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
+
+            if (nr.vulkan)
+                ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "
+                                   "used here.");
+            else if (!unavailable.empty())
+                ImGui::TextWrapped("Superior Scaling is not running (%s); Matched residual is used. Select it again "
+                                   "to retry.",
+                                   unavailable.c_str());
+            else if (const auto status = DlssNr::SuperiorScaling::Status(); !status.empty())
+                ImGui::TextWrapped("%s", status.c_str());
+        }
+
+        if (!reduced || superior)
             ImGui::BeginDisabled();
 
         static const char* upscaleMethodNames[] = { "Bilinear (fast)", "SGSR1" };
@@ -3423,11 +3482,11 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         if (ImGui::Combo("Upscale Method", &upscaleMethod, upscaleMethodNames, IM_ARRAYSIZE(upscaleMethodNames)))
             config->DlssNrReducedUpscaleMethod = (uint32_t) upscaleMethod;
 
-        if (!reduced)
+        if (!reduced || superior)
             ImGui::EndDisabled();
 
         HelpMarker("Below 100% Model resolution, the filter that enlarges NR's result. Bilinear: cheapest, softest. "
-                   "SGSR1: edge-aware, sharper.");
+                   "SGSR1: edge-aware, sharper. No effect with Superior Scaling, which enlarges its own way.");
     }
 
     // How the game's colour is decoded (DlssNr_ColourEncoding.h). Auto trusts the game; a forced choice is applied

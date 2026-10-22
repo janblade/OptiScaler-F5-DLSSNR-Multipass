@@ -3317,12 +3317,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_nr.output == nullptr)
     {
         g_nr.output = CreateScratch(device, modelFormat, modelWidth, modelHeight);
+        g_nr.colorCopy = CreateScratch(device, colourFormat, width, height);
         g_nr.workWidth = modelWidth;
         g_nr.workHeight = modelHeight;
     }
 
-    if (g_nr.colorCopy == nullptr)
-        g_nr.colorCopy = CreateScratch(device, colourFormat, width, height);
     if (g_nr.hdrCopy == nullptr)
         g_nr.hdrCopy = CreateScratch(device, keepFormat, width, height);
 
@@ -5673,8 +5672,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             SuperiorRun::Say(composed ? "" : "Superior reconstruction failed; keeping the game frame.");
         }
         else
-            composed = DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal, motionIn,
-                                    exposureTex, resolveTarget, nullptr);
+        {
+            const bool dispatched = DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal,
+                                                 motionIn, exposureTex, resolveTarget, nullptr);
+            // Without Superior the frame counts as composed whatever the dispatch says, exactly as before.
+            composed = dispatched || !superior;
+        }
         if (cached)
             composed = true;
         if (superiorGeneration && !composed)

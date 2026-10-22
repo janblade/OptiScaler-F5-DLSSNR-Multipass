@@ -229,6 +229,9 @@ inline bool IsZeroInitialiser(const ImageView& image, const ByteStore& store)
         if ((decoded.flags & F_ERROR) != 0 || decoded.len == 0 || decoded.len > take)
             return false;
 
+        // An indirect jump (jump-table dispatch) can land anywhere in the function: the order is then unprovable.
+        if (decoded.opcode == 0xFF && (decoded.modrm_reg == 4 || decoded.modrm_reg == 5))
+            return false;
         uint32_t branch = 0;
         if ((decoded.flags & F_RELATIVE) != 0 && DecodeRelativeBranchTarget(image, cursor, branch))
             branchTargets.push_back(branch);
@@ -255,7 +258,9 @@ inline bool IsZeroInitialiser(const ImageView& image, const ByteStore& store)
                                                     decoded.opcode == 0xC6 || decoded.opcode == 0xC7 || sseStore);
                 const bool otherLoad =
                     (decoded.opcode == 0x8A || decoded.opcode == 0x8B || decoded.opcode == 0x8D) && reg != source;
-                const bool nop = decoded.opcode == 0x90 || (decoded.opcode == 0x0F && decoded.opcode2 == 0x1F);
+                // 90 is a nop only without REX (41 90 is xchg eax, r8d); 66/F3 90 are nop/pause.
+                const bool nop = (decoded.opcode == 0x90 && (decoded.flags & F_PREFIX_REX) == 0) ||
+                                 (decoded.opcode == 0x0F && decoded.opcode2 == 0x1F);
                 if (!memoryStore && !otherLoad && !nop)
                     cleared = false;
             }

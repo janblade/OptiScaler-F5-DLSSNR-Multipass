@@ -936,6 +936,14 @@ int main()
                         holder); // xor eax,eax / mov [rbx+f], al / mov [rbx+f], dil
         Check(report.Complete() && report.initialisers == 1 && report.patches.size() == 2,
               "sl.dlss_g leaves the zero initialisation and pins the runtime store");
+        report = slCase({ 0x33, 0xc0, 0x41, 0x90, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00, 0x40, 0x88, 0xbb, 0xf8, 0x44,
+                          0x00, 0x00 },
+                        holder); // xor eax,eax / xchg eax,r8d / mov [rbx+f], al
+        Check(!report.Complete(), "sl.dlss_g does not take 41 90 (xchg eax, r8d) for a nop in the zero proof");
+        report = slCase({ 0x33, 0xc0, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00, 0x40, 0x88, 0xbb, 0xf8, 0x44, 0x00, 0x00,
+                          0xff, 0xe0 },
+                        holder); // ... / jmp rax
+        Check(!report.Complete(), "sl.dlss_g gives up the zero proof in a function with an indirect jump");
     }
 
     {

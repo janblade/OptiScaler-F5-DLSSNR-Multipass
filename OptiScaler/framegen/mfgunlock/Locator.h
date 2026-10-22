@@ -2,7 +2,7 @@
 
 #include "Image.h"
 
-#include "../../../external/RTX40MFG-Unlock/source/native/third_party/minhook/src/hde/hde64.h"
+#include "hde/hde64.h"
 
 #include <algorithm>
 #include <array>

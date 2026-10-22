@@ -1,5 +1,5 @@
 // Build: cl /std:c++20 /EHsc /W4 /wd4701 tests\mfgunlock_core_smoke.cpp
-// external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\hde64.c
+// OptiScaler\framegen\mfgunlock\hde\hde64.c
 #include "../OptiScaler/framegen/mfgunlock/Locator.h"
 #include "../OptiScaler/framegen/mfgunlock/FamilyXeFG.h"
 #include "../OptiScaler/framegen/mfgunlock/FamilyRtx40.h"

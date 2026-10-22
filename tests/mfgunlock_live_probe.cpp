@@ -1,5 +1,5 @@
 // Build: cl /std:c++20 /EHsc /W4 /wd4701 tests\mfgunlock_live_probe.cpp
-// external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\hde64.c
+// OptiScaler\framegen\mfgunlock\hde\hde64.c
 // Loads a real libxess_fg.dll + libxell.dll pair normally, locates the six sites and applies/restores the patch
 // transaction, printing the protection state of every touched region. Patches live copies only; files are untouched.
 #include "../OptiScaler/framegen/mfgunlock/FamilyXeFG.h"

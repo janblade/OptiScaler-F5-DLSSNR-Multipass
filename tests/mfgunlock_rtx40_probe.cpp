@@ -1,5 +1,5 @@
 // Build: cl /std:c++20 /EHsc /W4 /wd4701 tests\mfgunlock_rtx40_probe.cpp
-// external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\hde64.c
+// OptiScaler\framegen\mfgunlock\hde\hde64.c
 // Usage: mfgunlock_rtx40_probe.exe <nvngx_dlssg.dll | driver .bin>
 // Maps the provider without running it, applies the RTX 40 transaction, verifies the bytes and restores them.
 #include "../OptiScaler/framegen/mfgunlock/FamilyRtx40.h"

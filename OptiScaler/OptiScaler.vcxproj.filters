@@ -1028,10 +1028,28 @@
     <ClInclude Include="framegen\mfgunlock\Status.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\hde64.h">
+    <ClInclude Include="framegen\mfgunlock\FamilyAmpere.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\pstdint.h">
+    <ClInclude Include="framegen\mfgunlock\FamilyFatbin.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\FamilyRtx40.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\FamilySlDlssg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\PtxTuring.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\hde\hde64.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\hde\pstdint.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\hde\table64.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader.h">
@@ -1778,7 +1796,7 @@
     <ClCompile Include="framegen\mfgunlock\MfgUnlock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\hde64.c">
+    <ClCompile Include="framegen\mfgunlock\hde\hde64.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="OptiTypes.cpp">

@@ -352,6 +352,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="framegen\mfgunlock\FamilyXeFG.h" />
     <ClInclude Include="framegen\mfgunlock\MfgUnlock.h" />
     <ClInclude Include="framegen\mfgunlock\Mode.h" />
+    <ClInclude Include="plugins\PluginRegistry.h" />
+    <ClInclude Include="plugins\PluginsView.h" />
+    <ClInclude Include="menu\PluginsPage.h" />
     <ClInclude Include="framegen\mfgunlock\Locator.h" />
     <ClInclude Include="framegen\mfgunlock\Patch.h" />
     <ClInclude Include="framegen\mfgunlock\Provider.h" />
@@ -1070,6 +1073,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="hooks\D3D11_Hooks.cpp" />
     <ClCompile Include="hooks\Vulkan_Hooks.cpp" />
     <ClCompile Include="menu\menu_common.cpp" />
+    <ClCompile Include="menu\PluginsPage.cpp" />
     <ClCompile Include="menu\menu_dx_base.cpp" />
     <ClCompile Include="menu\menu_dx11.cpp" />
     <ClCompile Include="menu\menu_dx12.cpp" />

@@ -2,6 +2,7 @@
 #include "LibraryLoad_Hooks.h"
 
 #include <Config.h>
+#include <plugins/PluginRegistry.h>
 #include <DllNames.h>
 
 #include <proxies/Ntdll_Proxy.h>
@@ -614,6 +615,10 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 
                 if (moduleAmdxc64 == nullptr && memModule != nullptr)
                     moduleAmdxc64 = memModule;
+
+                Plugins::Registry::Global().SetState(Plugins::Kind::Loader, Plugins::kLoaderAmdxc64,
+                                                     moduleAmdxc64 != nullptr ? Plugins::State::Loaded
+                                                                              : Plugins::State::Failed);
             }
         }
 

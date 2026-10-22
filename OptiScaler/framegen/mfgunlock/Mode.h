@@ -44,6 +44,11 @@ inline std::optional<MfgUnlockMode> ParseMode(std::string_view text, bool& valid
     return std::nullopt;
 }
 
+// What a family does when its key is missing, `auto` or not a mode: nothing.
+inline constexpr MfgUnlockMode kDefaultMode = MfgUnlockMode::Off;
+
+inline MfgUnlockMode EffectiveMode(std::optional<MfgUnlockMode> mode) { return mode.value_or(kDefaultMode); }
+
 // The text saved for a value: nullopt (the default) is saved as auto.
 inline const char* ModeText(std::optional<MfgUnlockMode> mode)
 {

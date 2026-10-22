@@ -1046,6 +1046,15 @@
     <ClInclude Include="framegen\mfgunlock\Mode.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="plugins\PluginRegistry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="plugins\PluginsView.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="menu\PluginsPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="framegen\mfgunlock\hde\hde64.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1425,6 +1434,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="menu\menu_common.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="menu\PluginsPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="menu\menu_dx_base.cpp">

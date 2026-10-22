@@ -1,5 +1,5 @@
 #pragma once
-#include "../../OptiScaler/dlssnr/DlssNr_InterPassPolicy.h"
+#include "InterPassPaths.h"
 #include <array>
 namespace DlssNr
 {

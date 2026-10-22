@@ -18,19 +18,14 @@ struct GainSelections
     std::array<Extra, 27> DlssNrExtraPasses {};
 };
 struct SavedSettings {
-    Setting<uint32_t> DlssNrTransfer {11}, DlssNrInterPassReconstruction {0},
-        DlssNrProxyDownscaleFilter {11}, DlssNrGuidedResidualRadius {3}, DlssNrGuidedResidualShaping {0};
-    Setting<float> DlssNrGuidedResidualRangeSigma {.2f}, DlssNrGuidedResidualSpatialSigma {.5f},
-        DlssNrGuidedResidualGuideStrength {0};
+    Setting<uint32_t> DlssNrTransfer {11};
 };
 void require(bool condition) { if(!condition)throw std::runtime_error("Superior policy check failed"); }
 int main() {
     try {
         using namespace DlssNr::SuperiorScaling;
         SavedSettings cfg;
-        require(Enabled(cfg) && InterPassMode(cfg)==8 && DownscaleFilter(cfg)==0);
-        require(Radius(cfg)==1 && RangeSigma(cfg)==.015f && SpatialSigma(cfg)==3 && GuideStrength(cfg)==1);
-        require(ShapingMode(cfg)==2);
+        require(Enabled(cfg));
         for (bool packed : { false, true })
             for (unsigned mapping = 0; mapping < 12; ++mapping)
                 for (unsigned pass : { 0u, 1u })
@@ -267,11 +262,8 @@ int main() {
         resolve.Width=resolve.Height=1;require(!NormalResolve(resolve,1,1)); // A rounded 1x1 is not reduced.
         for(uint32_t mode=0;mode<=10;++mode) {
             cfg.DlssNrTransfer.value=mode;
-            require(!Enabled(cfg) && InterPassMode(cfg)==0 && DownscaleFilter(cfg)==11);
-            require(Radius(cfg)==3 && RangeSigma(cfg)==.2f && SpatialSigma(cfg)==.5f && GuideStrength(cfg)==0);
-            require(ShapingMode(cfg)==0);
+            require(!Enabled(cfg));
         }
-        require(cfg.DlssNrInterPassReconstruction.value==0 && cfg.DlssNrProxyDownscaleFilter.value==11);
         std::cout << "Superior policy PASS: Main/Small/Default/legacy presets on 310.8 and 310.9, mixed gain blocks "
                      "and schedules, fixed settings, A/K, guides and PSO guards\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

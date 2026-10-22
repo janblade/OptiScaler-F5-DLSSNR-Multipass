@@ -222,35 +222,4 @@ template <class C> inline uint32_t NormalColorProfile(const C& c)
     // HDR soft knee is tried separately, with this general PSO retained as fallback.
     return c.ReversibleMode == 2u ? 2u : c.ReversibleMode == 4u ? 3u : 0u;
 }
-template <class C> inline uint32_t InterPassMode(const C& cfg)
-{
-    return Enabled(cfg) ? 8u : std::min(cfg.DlssNrInterPassReconstruction.value_or_default(), 8u);
-}
-template <class C> inline uint32_t DownscaleFilter(const C& cfg)
-{
-    return Enabled(cfg) ? 0u : cfg.DlssNrProxyDownscaleFilter.value_or_default();
-}
-template <class C> inline uint32_t Radius(const C& cfg)
-{
-    return Enabled(cfg) ? 1u : std::clamp(cfg.DlssNrGuidedResidualRadius.value_or_default(), 1u, 3u);
-}
-template <class C> inline float RangeSigma(const C& cfg)
-{
-    const float v = Enabled(cfg) ? .015f : cfg.DlssNrGuidedResidualRangeSigma.value_or_default();
-    return std::isfinite(v) ? v : .015f;
-}
-template <class C> inline float SpatialSigma(const C& cfg)
-{
-    const float v = Enabled(cfg) ? 3.0f : cfg.DlssNrGuidedResidualSpatialSigma.value_or_default();
-    return std::isfinite(v) ? v : 1.2f;
-}
-template <class C> inline float GuideStrength(const C& cfg)
-{
-    const float v = Enabled(cfg) ? 1.0f : cfg.DlssNrGuidedResidualGuideStrength.value_or_default();
-    return std::isfinite(v) ? v : .75f;
-}
-template <class C> inline uint32_t ShapingMode(const C& cfg)
-{
-    return Enabled(cfg) ? 2u : std::min(cfg.DlssNrGuidedResidualShaping.value_or_default(), 2u);
-}
 } // namespace DlssNr::SuperiorScaling

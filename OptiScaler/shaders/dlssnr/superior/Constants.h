@@ -4,65 +4,22 @@
 // v59 ABI; intentionally distinct from janblade's composition constants.
 namespace DlssNr::Superior
 {
+// The modes the shipped Superior path dispatches (superior/Pipeline.inl, Shader.inl, DlssNr_Dx12.cpp). The frozen v59
+// shader (precompile/dlssnr.hlsl) still contains its lab/legacy modes; they are not reachable from the host and are
+// not listed here.
 enum DlssNrMode : uint32_t
 {
-    DlssNrMode_Encode = 0,         // the frame -> a tone-mapped proxy, plus an untouched copy
-    DlssNrMode_Resolve = 1,        // proxy + the model's answer + the untouched copy -> the edited frame
-    DlssNrMode_Downsample = 2,     // the proxy -> a smaller proxy, when the model works below full size
-    DlssNrMode_EncodeResidual = 5, // NR-composed minus original; signed difference encoded around 0.5
-    DlssNrMode_ApplyResidual = 6,  // decode private DLSS result and add to clean SR output
-    DlssNrMode_UnitExposure = 7,   // constant exposure for the private DLSS feature
-    DlssNrMode_ClampProxy = 8,     // restore the encoded RGB range between model passes
-    DlssNrMode_EncodeProxyResidual = 9,
-    DlssNrMode_Meter = 3,
-    DlssNrMode_AutoExposure = 11,
-    DlssNrMode_ResizePrivateGuides = 10,
-    DlssNrMode_EncodeResizeField = 12,
-    // Direct DLSS: copy NR50 into the private-DLSS carrier and pack P50 + an NR-suppression gate.
-    DlssNrMode_EncodeDirectDetail = 13,
-    // Generic bilinear source->target resize, used by Direct NR A/B upscaler tests.
-    DlssNrMode_UpscaleBilinear = 14,
-    // Direct NR detail recovery: write only the NR-retention gate to alpha; no NR50 carrier copy.
-    DlssNrMode_EncodeDirectDetailMaskOnly = 15,
-    // Detail-quality lab: one low-resolution pass between proxy downscale and NVIDIA NR.
-    DlssNrMode_ExperimentPrefilter = 16,
-    // Detail-quality lab: one low-resolution pass after NVIDIA NR, before enlargement/resolve.
-    DlssNrMode_ExperimentNrPostfilter = 17,
-    // P100-guided residual: collapse E50=NR50-P50 to an 1/8-size positive-lobe low-frequency field.
-    DlssNrMode_GuidedResidualLow = 18,
-    // Legacy temporal residual carrier encoder; retained for captures/backward experiments.
-    DlssNrMode_EncodeRawResidualCarrier = 19,
-    // Temporal carrier first-stage analysis: per ~32x32 source tile strict/robust safe-K statistics.
-    DlssNrMode_TemporalCarrierLimits = 20,
-    // Reduce temporal carrier statistics to one pixel.
-    DlssNrMode_TemporalCarrierReduce = 21,
-    // Encode nonlinear/linear residual or image-anchored carrier using the same-frame GPU K.
-    DlssNrMode_TemporalCarrierEncode = 22,
-    // Decode the private DLAA output back to a signed raw-domain E50 residual.
-    DlssNrMode_TemporalCarrierDecode = 23,
-    // Sum-reduce diagnostic counts emitted beside K-limit tiles.
-    DlssNrMode_TemporalCarrierDiagnosticsReduce = 24,
-    // Build only the compressed image anchor for the paired independent DLAA baseline.
-    DlssNrMode_TemporalAnchorEncode = 25,
-    // Exact raw texture copy used only to snapshot the pre-DLAA carrier for debug display.
-    DlssNrMode_TemporalCarrierDebugCopy = 26,
-    // Between NR passes: reconstruct P100 + guided cumulative residual into a native P100 scratch.
-    DlssNrMode_InterPassGuidedP100 = 27,
-    // Between NR passes: evaluate the same corrected P100 procedurally while downsampling to working-res.
-    DlssNrMode_InterPassGuidedWorking = 28,
-    // Final post-NR colour matching: sparse paired OKLab statistics from original and composed output.
-    DlssNrMode_FinalColourStats = 29,
-    // Reduce paired statistics, derive correction and temporally smooth it entirely on the GPU.
-    DlssNrMode_FinalColourReduce = 30,
-    // Apply global chromaticity plus Saturation/Vibrance recovery to the already composed NR output.
-    DlssNrMode_FinalColourApply = 31,
-    // v5 classical inter-pass: same downfilter as Mode 2, but clamp/sanitize
-    // directly to the working input, avoiding the extra ClampProxy dispatch.
-    DlssNrMode_DownsampleClampProxy = 32,
-    // Opt-in approximation: one native guide and one 3x3 residual estimate per working pixel.
-    DlssNrMode_InterPassFastGuided = 33,
-    DlssNrMode_InterPassLow36 = 34,
-    DlssNrMode_InterPassFastCross5 = 36,
+    DlssNrMode_Encode = 0,              // the frame -> a tone-mapped proxy, plus an untouched copy
+    DlssNrMode_Resolve = 1,             // proxy + the model's answer + the untouched copy -> the edited frame
+    DlssNrMode_Downsample = 2,          // Area downsample of the proxy to the working raster
+    DlssNrMode_Meter = 3,               // automatic exposure, 64x64 meter
+    DlssNrMode_UnitExposure = 7,        // constant exposure for the private DLSS feature (reads no SRV)
+    DlssNrMode_ClampProxy = 8,          // restore the encoded RGB range between model passes
+    DlssNrMode_ResizePrivateGuides = 10, // match depth/motion to the working raster for the private DLSS
+    DlssNrMode_AutoExposure = 11,       // automatic exposure, 1x1 white reduction
+    DlssNrMode_GuidedResidualLow = 18,  // 1/8-size low-frequency field of the residual (final shaping)
+    DlssNrMode_InterPassLow36 = 34,     // between passes: 1/8-size low field
+    DlssNrMode_InterPassFastCross5 = 36, // between passes: guided working-raster reconstruction
     DlssNrMode_SuperiorCarrierEncode = 37, // fixed clamp(0.5 + N-P, -1, 2), no gain analysis
     DlssNrMode_SuperiorCarrierDecode = 38, // fixed DLAA(carrier)-0.5, no gain texture
     DlssNrMode_SuperiorCarrierMotion = 39  // fixed carrier plus exact private motion resize
@@ -126,7 +83,7 @@ struct alignas(256) DlssNrConstants
     // thing carried up from small is the edit itself.
     //
     // The idea and the cube-scaled residual are hhkbble's, from the multi-pass PR against this fork.
-    uint32_t Transfer; // 7 = internal DX12 Direct-NR fused resolve; 8 = internal P100-guided residual resolve.
+    uint32_t Transfer;
 
     // What the debug views are multiplied by on their way out.
     //

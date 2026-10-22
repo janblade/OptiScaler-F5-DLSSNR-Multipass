@@ -29,8 +29,9 @@ int wmain(int argc, wchar_t** argv)
     if (argument.find(L"sl.dlss_g") != std::wstring_view::npos)
     {
         const auto sl = MfgUnlock::FamilyRtx40::Streamline::Locate(image);
-        std::printf("sl.dlss_g complete=%d ceiling=%u field=0x%X value=%u %s\n", sl.Complete() ? 1 : 0,
-                    sl.compiledCeiling, sl.flipField, sl.flipValue, sl.failure.c_str());
+        std::printf("sl.dlss_g complete=%d ceiling=%u field=0x%X value=%u initialisers=%u %s\n",
+                    sl.Complete() ? 1 : 0, sl.compiledCeiling, sl.flipField, sl.flipValue, sl.initialisers,
+                    sl.failure.c_str());
         if (!sl.Complete())
             return 1;
         const auto slOperations = MfgUnlock::FamilyRtx40::Streamline::BuildOperations(sl, image);

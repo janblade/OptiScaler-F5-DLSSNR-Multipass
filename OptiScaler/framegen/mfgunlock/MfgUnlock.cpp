@@ -711,7 +711,8 @@ void LocateRtx40(const MfgUnlock::ImageView& image, bool streamlinePlugin, Rtx40
         if (slReport.Complete())
             operations = MfgUnlock::FamilyRtx40::Streamline::BuildOperations(slReport, image);
         layouts = "sl.dlss_g compiled ceiling=" + std::to_string(slReport.compiledCeiling) +
-                  " flip field=" + std::to_string(slReport.flipField);
+                  " flip field=" + std::to_string(slReport.flipField) +
+                  " initialisers=" + std::to_string(slReport.initialisers);
         return;
     }
 

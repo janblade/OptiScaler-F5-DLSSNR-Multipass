@@ -7,7 +7,9 @@
 //    the count NGX reports is not lowered back to the plugin's compiled maximum;
 //  - software pacing: the plugin has a fallback for a missing flip-metering DLL that logs "FG1 DLL has been detected"
 //    and writes one byte of its context. That (offset, value) pair is read from the fallback itself and every other
-//    store to the offset is pinned to the same value, so hardware flip metering cannot freeze more than 2x.
+//    byte store to the offset is pinned to the same value, so hardware flip metering cannot freeze more than 2x. The
+//    member initialisation (a cleared register stored once) keeps the starting value; any other store that cannot be
+//    pinned in place stands the family aside.
 // Adapted from KleberMotta/OptiScaler-DLSS5-MFG-RTX40 (MIT, from the RenoDX MFG Unlock addon). See
 // Licenses/MFGUnlock_LICENSE.txt.
 namespace MfgUnlock::FamilyRtx40::Streamline
@@ -25,6 +27,7 @@ struct Report
     uint8_t compiledCeiling = 0;
     uint32_t flipField = 0;
     uint8_t flipValue = 0;
+    unsigned initialisers = 0; // zero-initialising register stores to the state, left as they are (see LocateFlip)
     std::string failure;
 
     bool Complete() const
@@ -93,6 +96,200 @@ inline bool IsInstructionStart(const ImageView& image, uint32_t rva)
         cursor += decoded.len;
     }
     return false;
+}
+
+inline std::string Hex(uint32_t value)
+{
+    constexpr char digits[] = "0123456789ABCDEF";
+    std::string text;
+    for (int shift = 28; shift >= 0; shift -= 4)
+        if (!text.empty() || (value >> shift) != 0 || shift == 0)
+            text += digits[(value >> shift) & 15];
+    return text;
+}
+
+inline std::string HexBytes(const ImageView& image, uint32_t rva, size_t length)
+{
+    constexpr char digits[] = "0123456789ABCDEF";
+    std::string text;
+    const auto* bytes = image.DataAtRva(rva, length);
+    for (size_t index = 0; bytes != nullptr && index < length; ++index)
+    {
+        const auto value = std::to_integer<uint8_t>(bytes[index]);
+        if (index != 0)
+            text += ' ';
+        text += digits[value >> 4];
+        text += digits[value & 15];
+    }
+    return text;
+}
+
+struct ByteStore
+{
+    uint32_t rva = 0;
+    hde64s decoded {};
+    bool knownInstruction = true; // false: outside every unwind function, so not provably an instruction
+};
+
+// Instructions that write one byte to their memory operand.
+inline bool WritesByte(const hde64s& decoded)
+{
+    const uint8_t op = decoded.opcode;
+    const uint8_t reg = decoded.modrm_reg;
+    if (op == 0x0F)
+        return (decoded.opcode2 >= 0x90 && decoded.opcode2 <= 0x9F) || decoded.opcode2 == 0xB0 ||
+               decoded.opcode2 == 0xC0; // setcc, cmpxchg r/m8, xadd r/m8
+    return op == 0xC6 || op == 0x88 || op == 0x86 || (op == 0x80 && reg != 7) ||
+           (op <= 0x30 && (op & 7) == 0) || (op == 0xFE && reg <= 1) || (op == 0xF6 && (reg == 2 || reg == 3));
+}
+
+// The instruction whose disp32 sits at dispRva, when it writes one byte to [base + field] (mod 10, with or without
+// SIB). Reads and wider writes of that offset are other data and are not reported.
+inline bool FindByteStore(const ImageView& image, uint32_t dispRva, uint32_t field, ByteStore& store)
+{
+    for (uint32_t back = 2; back <= 5 && back <= dispRva; ++back)
+    {
+        const uint32_t start = dispRva - back;
+        const size_t room = image.ImageSize() - start;
+        const size_t take = room < 15 ? room : 15;
+        const auto* bytes = image.DataAtRva(start, take);
+        if (bytes == nullptr)
+            continue;
+        uint8_t copy[16] {};
+        std::memcpy(copy, bytes, take);
+        hde64s decoded {};
+        hde64_disasm(copy, &decoded);
+        if ((decoded.flags & F_ERROR) != 0 || decoded.len == 0 || decoded.len > take ||
+            (decoded.flags & F_DISP32) == 0 || decoded.modrm_mod != 2 || decoded.disp.disp32 != field)
+            continue;
+        const uint32_t immediate = (decoded.flags & F_IMM8) != 0    ? 1
+                                   : (decoded.flags & F_IMM16) != 0 ? 2
+                                   : (decoded.flags & F_IMM32) != 0 ? 4
+                                   : (decoded.flags & F_IMM64) != 0 ? 8
+                                                                    : 0;
+        if (start + decoded.len - immediate - sizeof(uint32_t) != dispRva || !WritesByte(decoded))
+            continue;
+
+        FunctionRange function {};
+        const bool inFunction = image.FindFunctionRange(start, function);
+        if (inFunction && !IsInstructionStart(image, start))
+            continue;
+        store.rva = start;
+        store.decoded = decoded;
+        store.knownInstruction = inFunction;
+        return true;
+    }
+    return false;
+}
+
+// A `mov [base+field], r8` without REX (six bytes) has no in-place imm8 form. The known providers have exactly one:
+// the object's member initialisation, storing a register cleared by `xor r32, r32`. It is accepted only when that is
+// provable in a linear walk of its function: the xor is the last write of the register before the store, everything in
+// between is a memory store, a load into another register or a nop, and no relative branch lands in between.
+inline bool IsZeroInitialiser(const ImageView& image, const ByteStore& store)
+{
+    const auto& target = store.decoded;
+    const bool rex = (target.flags & F_PREFIX_REX) != 0;
+    const uint8_t source = static_cast<uint8_t>(target.modrm_reg | (target.rex_r << 3));
+    FunctionRange function {};
+    if (target.opcode != 0x88 || !store.knownInstruction || (!rex && source >= 4) || // ah..bh
+        !image.FindFunctionRange(store.rva, function))
+        return false;
+
+    uint32_t clearedAt = 0;
+    bool cleared = false;
+    std::vector<uint32_t> branchTargets;
+    for (uint32_t cursor = function.begin; cursor < function.end;)
+    {
+        const uint32_t room = function.end - cursor;
+        const size_t take = room < 15 ? room : 15;
+        const auto* bytes = image.DataAtRva(cursor, take);
+        if (bytes == nullptr)
+            return false;
+        uint8_t copy[16] {};
+        std::memcpy(copy, bytes, take);
+        hde64s decoded {};
+        hde64_disasm(copy, &decoded);
+        if ((decoded.flags & F_ERROR) != 0 || decoded.len == 0 || decoded.len > take)
+            return false;
+
+        uint32_t branch = 0;
+        if ((decoded.flags & F_RELATIVE) != 0 && DecodeRelativeBranchTarget(image, cursor, branch))
+            branchTargets.push_back(branch);
+
+        if (cursor < store.rva)
+        {
+            const bool memory = (decoded.flags & F_MODRM) != 0 && decoded.modrm_mod != 3;
+            const uint8_t reg = static_cast<uint8_t>(decoded.modrm_reg | (decoded.rex_r << 3));
+            const uint8_t rm = static_cast<uint8_t>(decoded.modrm_rm | (decoded.rex_b << 3));
+            if ((decoded.opcode == 0x31 || decoded.opcode == 0x33) && (decoded.flags & F_MODRM) != 0 && !memory &&
+                reg == rm && reg == source && (decoded.flags & F_PREFIX_66) == 0)
+            {
+                cleared = true;
+                clearedAt = cursor;
+            }
+            else if (cleared)
+            {
+                // General-purpose stores and the SSE stores (movups/movaps/movdqa/movq/movntps) of initialisers.
+                const bool sseStore = decoded.opcode == 0x0F &&
+                                      (decoded.opcode2 == 0x11 || decoded.opcode2 == 0x13 || decoded.opcode2 == 0x17 ||
+                                       decoded.opcode2 == 0x29 || decoded.opcode2 == 0x2B || decoded.opcode2 == 0x7F ||
+                                       decoded.opcode2 == 0xD6 || decoded.opcode2 == 0xE7);
+                const bool memoryStore = memory && (decoded.opcode == 0x88 || decoded.opcode == 0x89 ||
+                                                    decoded.opcode == 0xC6 || decoded.opcode == 0xC7 || sseStore);
+                const bool otherLoad =
+                    (decoded.opcode == 0x8A || decoded.opcode == 0x8B || decoded.opcode == 0x8D) && reg != source;
+                const bool nop = decoded.opcode == 0x90 || (decoded.opcode == 0x0F && decoded.opcode2 == 0x1F);
+                if (!memoryStore && !otherLoad && !nop)
+                    cleared = false;
+            }
+        }
+        cursor += decoded.len;
+    }
+    if (!cleared)
+        return false;
+    for (const uint32_t branch : branchTargets)
+        if (branch > clearedAt && branch <= store.rva)
+            return false;
+    return true;
+}
+
+// The bytes that make the store write `want`; empty when it already does. False when it cannot be rewritten in place:
+// a store outside every unwind function, any byte write other than `mov`, an immediate that is not 0/1, or a register
+// store whose immediate form is longer.
+inline bool PinByteStore(const ImageView& image, const ByteStore& store, uint8_t want, std::vector<std::byte>& replacement)
+{
+    replacement.clear();
+    const auto& decoded = store.decoded;
+    const auto* bytes = image.DataAtRva(store.rva, decoded.len);
+    if (!store.knownInstruction || bytes == nullptr)
+        return false;
+
+    if (decoded.opcode == 0xC6 && decoded.modrm_reg == 0)
+    {
+        const uint8_t value = decoded.imm.imm8;
+        if (value == want)
+            return true;
+        if (value != 1 - want)
+            return false;
+        replacement.assign(bytes, bytes + decoded.len);
+        replacement.back() = static_cast<std::byte>(want);
+        return true;
+    }
+
+    // mov [base(+index)+disp32], r8 with a REX prefix that only names the source register (or nothing): dropping the
+    // REX for the imm8 keeps the length, C6 modrm [sib] disp32 imm8.
+    const bool sib = (decoded.flags & F_SIB) != 0;
+    const size_t expected = 1 + 1 + 1 + (sib ? 1 : 0) + sizeof(uint32_t);
+    if (decoded.opcode != 0x88 || (decoded.flags & F_PREFIX_ANY) != F_PREFIX_REX || decoded.rex_b != 0 ||
+        decoded.rex_x != 0 || decoded.len != expected)
+        return false;
+    replacement.reserve(decoded.len);
+    replacement.push_back(std::byte { 0xC6 });
+    replacement.push_back(static_cast<std::byte>(0x80 | decoded.modrm_rm));
+    replacement.insert(replacement.end(), bytes + 3, bytes + decoded.len); // [sib] disp32
+    replacement.push_back(static_cast<std::byte>(want));
+    return replacement.size() == decoded.len;
 }
 
 inline void Fail(Report& report, std::string message)
@@ -170,57 +367,62 @@ inline void LocateFlip(const ImageView& image, Report& report)
     report.flipField = wantField;
     report.flipValue = wantValue;
 
-    // Every other store to the field in executable code is pinned to the same value.
-    const uint8_t opposite = static_cast<uint8_t>(1 - wantValue);
+    // Every other byte store to the field in executable code is pinned to the same value. Stores are found by their
+    // displacement and decoded, so every encoding is seen; one that cannot be rewritten in place stands the family
+    // aside rather than staying un-pinned behind a complete report.
     std::vector<LocatedPatch> sites;
-    for (WORD index = 0; index < image.SectionCount(); ++index)
+    std::vector<uint32_t> seen;
+    std::string unpinnable;
+    for (WORD index = 0; index < image.SectionCount() && unpinnable.empty(); ++index)
     {
         IMAGE_SECTION_HEADER section {};
         if (!image.SectionAt(index, section) || (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
-            (section.Characteristics & IMAGE_SCN_MEM_READ) == 0 || section.Misc.VirtualSize < kStoreLength)
+            (section.Characteristics & IMAGE_SCN_MEM_READ) == 0 || section.Misc.VirtualSize < sizeof(uint32_t))
             continue;
-        for (uint32_t offset = 0; offset + kStoreLength <= section.Misc.VirtualSize; ++offset)
+        const auto* data = image.DataAtRva(section.VirtualAddress, section.Misc.VirtualSize);
+        if (data == nullptr)
+            continue;
+        for (uint32_t offset = 0; offset + sizeof(uint32_t) <= section.Misc.VirtualSize; ++offset)
         {
-            const uint32_t rva = section.VirtualAddress + offset;
-            const auto* p = image.DataAtRva(rva, kStoreLength);
-            if (p == nullptr)
+            if (ReadU32(data + offset) != wantField)
+                continue;
+            const uint32_t dispRva = section.VirtualAddress + offset;
+            ByteStore store;
+            if (!FindByteStore(image, dispRva, wantField, store) ||
+                std::find(seen.begin(), seen.end(), store.rva) != seen.end())
+                continue;
+            seen.push_back(store.rva);
+
+            std::vector<std::byte> replacement;
+            if (!PinByteStore(image, store, wantValue, replacement) && IsZeroInitialiser(image, store))
+            {
+                // The member initialisation: the state's starting value, not one of the runtime writes pinned here.
+                ++report.initialisers;
+                continue;
+            }
+            if (!PinByteStore(image, store, wantValue, replacement))
+            {
+                unpinnable = "the store at RVA 0x" + Hex(store.rva) + " (" + HexBytes(image, store.rva, store.decoded.len) +
+                             (store.knownInstruction ? ")" : ", outside every unwind function)") +
+                             " cannot be pinned in place";
                 break;
-
-            std::vector<std::byte> replacement(p, p + kStoreLength);
-            if (p[0] == std::byte { 0xC6 })
-            {
-                const auto modrm = std::to_integer<uint8_t>(p[1]);
-                if (!IsDisp32NoSib(modrm) || (modrm & 0x38) != 0 || ReadU32(p + 2) != wantField ||
-                    std::to_integer<uint8_t>(p[6]) != opposite)
-                    continue;
-                replacement[6] = static_cast<std::byte>(wantValue);
             }
-            else if (p[0] == std::byte { 0x40 } && p[1] == std::byte { 0x88 })
-            {
-                // REX exactly 0x40 keeps the store seven bytes, the length of the C6 form with the same base.
-                const auto modrm = std::to_integer<uint8_t>(p[2]);
-                if (!IsDisp32NoSib(modrm) || ReadU32(p + 3) != wantField)
-                    continue;
-                replacement[0] = std::byte { 0xC6 };
-                replacement[1] = static_cast<std::byte>(0x80 | (modrm & 7));
-                std::memcpy(replacement.data() + 2, &wantField, sizeof(wantField));
-                replacement[6] = static_cast<std::byte>(wantValue);
-            }
-            else
-            {
-                continue;
-            }
-
-            if (!IsInstructionStart(image, rva))
-                continue;
+            if (replacement.empty())
+                continue; // already writes the wanted state
             if (sites.size() >= kMaxSites)
             {
                 report.patches.push_back({ "F2 flip metering stores", LocateState::Ambiguous, 0, {}, {} });
                 Fail(report, "F2 flip metering stores: too many stores to the state");
                 return;
             }
-            sites.push_back(MakePatch("F2 flip metering store", image, rva, std::move(replacement)));
+            sites.push_back(MakePatch("F2 flip metering store", image, store.rva, std::move(replacement)));
         }
+    }
+    if (!unpinnable.empty())
+    {
+        report.patches.push_back({ "F2 flip metering stores", LocateState::AnchorFailed, 0, {}, {} });
+        Fail(report, "F2 flip metering stores: " + unpinnable);
+        return;
     }
     if (sites.empty())
     {
@@ -232,7 +434,8 @@ inline void LocateFlip(const ImageView& image, Report& report)
     {
         for (size_t j = i + 1; j < sites.size(); ++j)
         {
-            if (sites[i].rva < sites[j].rva + kStoreLength && sites[j].rva < sites[i].rva + kStoreLength)
+            if (sites[i].rva < sites[j].rva + sites[j].replacement.size() &&
+                sites[j].rva < sites[i].rva + sites[i].replacement.size())
             {
                 report.patches.push_back({ "F2 flip metering stores", LocateState::Ambiguous, 0, {}, {} });
                 Fail(report, "F2 flip metering stores: stores overlap");

@@ -721,6 +721,65 @@ int main()
     }
 
     {
+        // sl.dlss_g flip-metering stores in other encodings, after the fallback's own store (state 1) at 0x1011.
+        const auto slCase = [&](std::initializer_list<uint8_t> stores, std::unique_ptr<SyntheticImage>& holder)
+        {
+            holder = std::make_unique<SyntheticImage>();
+            SyntheticImage& target = *holder;
+            const IMAGE_RUNTIME_FUNCTION_ENTRY longer { 0x1000, 0x1080, 0x2100 };
+            std::memcpy(target.bytes + 0x2000, &longer, sizeof(longer));
+            for (size_t offset = 0x1000; offset < 0x1080; ++offset)
+                writeCode(target, offset, { 0xcc });
+            constexpr char marker[] = "FG1 DLL has been detected: forcing flip-metering off.";
+            std::memcpy(target.bytes + 0x3100, marker, sizeof(marker));
+            writeCode(target, 0x1000, { 0xba, 0x05, 0x00, 0x00, 0x00, 0x3b, 0xca, 0x0f, 0x42, 0xd1 });
+            target.SetLea(0x100a, 0x3100);
+            writeCode(target, 0x1011, { 0xc6, 0x83, 0xf8, 0x44, 0x00, 0x00, 0x01 });
+            writeCode(target, 0x1018, stores);
+            return MfgUnlock::FamilyRtx40::Streamline::Locate(
+                MfgUnlock::ImageView(target.bytes, SyntheticImage::kSize));
+        };
+        const auto storeAt = [](const SyntheticImage& target, size_t offset, std::initializer_list<uint8_t> bytes)
+        {
+            size_t cursor = offset;
+            for (const uint8_t value : bytes)
+                if (target.bytes[cursor++] != static_cast<std::byte>(value))
+                    return false;
+            return true;
+        };
+        const auto pinned = [&](const MfgUnlock::FamilyRtx40::Streamline::Report& report, SyntheticImage& target,
+                                size_t offset, std::initializer_list<uint8_t> bytes)
+        {
+            const MfgUnlock::ImageView view(target.bytes, SyntheticImage::kSize);
+            MfgUnlock::AppliedPatchSet set;
+            const bool applied =
+                report.Complete() && set.Apply(MfgUnlock::FamilyRtx40::Streamline::BuildOperations(report, view)).applied;
+            const bool matches = applied && storeAt(target, offset, bytes);
+            set.Restore();
+            return matches;
+        };
+
+        std::unique_ptr<SyntheticImage> holder;
+        auto report = slCase({ 0x44, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // mov [rbx+f], r8b
+        Check(pinned(report, *holder, 0x1018, { 0xc6, 0x83, 0xf8, 0x44, 0x00, 0x00, 0x01 }),
+              "sl.dlss_g pins a REX.R register store (44 88) to the imm8 form");
+        report = slCase({ 0xc6, 0x84, 0x24, 0xf8, 0x44, 0x00, 0x00, 0x00 }, holder); // mov byte [rsp+f], 0
+        Check(pinned(report, *holder, 0x1018, { 0xc6, 0x84, 0x24, 0xf8, 0x44, 0x00, 0x00, 0x01 }),
+              "sl.dlss_g pins an imm8 store with a SIB byte");
+        report = slCase({ 0x41, 0x88, 0x87, 0xf8, 0x44, 0x00, 0x00 }, holder); // mov [r15+f], al
+        Check(!report.Complete() && report.failure.find("cannot be pinned") != std::string::npos,
+              "sl.dlss_g stands aside on a REX.B register store (no in-place imm8 form)");
+        report = slCase({ 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // mov [rbx+f], al, al unknown
+        Check(!report.Complete(), "sl.dlss_g stands aside on a six-byte register store of an unknown value");
+        report = slCase({ 0x0f, 0x94, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // sete [rbx+f]
+        Check(!report.Complete(), "sl.dlss_g stands aside on a setcc to the state");
+        report = slCase({ 0x33, 0xc0, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00, 0x40, 0x88, 0xbb, 0xf8, 0x44, 0x00, 0x00 },
+                        holder); // xor eax,eax / mov [rbx+f], al / mov [rbx+f], dil
+        Check(report.Complete() && report.initialisers == 1 && report.patches.size() == 2,
+              "sl.dlss_g leaves the zero initialisation and pins the runtime store");
+    }
+
+    {
         // RTX 30 retarget of an LZ4-compressed Ada PTX (0x40-byte image header with the payload sizes).
         const auto writeCompressedContainer = [](SyntheticImage& target, size_t base, const std::vector<uint8_t>& stream,
                                                  uint64_t uncompressed)

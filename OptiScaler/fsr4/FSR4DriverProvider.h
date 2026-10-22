@@ -55,7 +55,7 @@ struct ProviderOption
 {
     uint32_t type = 0; // Seemingly unused
     ProviderEffect effect = ProviderEffect::Upscale;
-    bool enable = true;
+    uint64_t enable = 1; // A full 8 bytes so the padding after a bool can't hold garbage the driver reads
     ProviderOption* next = nullptr;
 };
 

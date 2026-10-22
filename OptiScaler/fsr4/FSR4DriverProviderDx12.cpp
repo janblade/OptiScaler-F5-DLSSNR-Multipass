@@ -87,8 +87,23 @@ FSR4DriverDll& FSR4DriverProviderDx12::Dll() { return amdxcffx64; }
 
 void FSR4DriverProviderDx12::UpdateInt8Support(HMODULE sdkModule)
 {
-    auto sdkHasInt8 = FSR4Models::ModuleHasModel(sdkModule, FSR4Model::INT8);
-    auto driverHasInt8 = FSR4Models::ModuleHasModel(LoadedModule(), FSR4Model::INT8);
+    // The INT8 model of the GPU, RDNA2 and APUs have their own
+    auto gpuModel = FSR4Model::INT8;
+    switch (IdentifyGpu::getPrimaryGpu().fsr4Support)
+    {
+    case FSR4Support::INT8_2:
+        gpuModel = FSR4Model::INT8_2;
+        break;
+    case FSR4Support::INT8Lite:
+        gpuModel = FSR4Model::INT8Lite;
+        break;
+    default:
+        break;
+    }
+
+    // An FFX SDK dll that isn't loaded yet doesn't count as one without the model
+    auto sdkHasInt8 = sdkModule == nullptr || FSR4Models::ModuleHasModel(sdkModule, gpuModel);
+    auto driverHasInt8 = FSR4Models::ModuleHasModel(LoadedModule(), gpuModel);
 
     IdentifyGpu::updateInt8Support(sdkHasInt8, driverHasInt8);
 }
@@ -157,13 +172,19 @@ ffxReturnCode_t FSR4DriverProviderDx12::DestroyContext(ffxContext* context, cons
     if (!OwnsContext(context))
         return FFX_API_RETURN_ERROR_PARAMETER;
 
+    // Forgotten before the driver frees it, a context created meanwhile can get the same handle
     auto handle = *context;
-    auto result = upscaler.functions.destroyContext(context, memCb);
-
-    if (result == FFX_API_RETURN_OK)
     {
         std::scoped_lock lock(contextsMutex);
         contexts.erase(handle);
+    }
+
+    auto result = upscaler.functions.destroyContext(context, memCb);
+
+    if (result != FFX_API_RETURN_OK)
+    {
+        std::scoped_lock lock(contextsMutex);
+        contexts.insert(handle);
     }
 
     return result;

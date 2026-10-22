@@ -187,7 +187,12 @@ void FSR4Presets::Hook(HMODULE module)
     auto createModel = FindCreateModel(module);
     if (createModel == nullptr)
     {
-        LOG_ERROR("Couldn't find FSR 4 preset selection in {}", moduleName);
+        // A module without FSR 4 (an FSR 3.1 SDK dll) isn't an error
+        if (rtti::FindVtable(module, "ffxProvider_FSR4") == nullptr)
+            LOG_DEBUG("No FSR 4 in {}", moduleName);
+        else
+            LOG_ERROR("Couldn't find FSR 4 preset selection in {}", moduleName);
+
         return;
     }
 

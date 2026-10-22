@@ -84,7 +84,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             MfgUnlockXeFG.set_from_config(readMfgUnlockMode("XeFG"));
             MfgUnlockRTX40.set_from_config(readMfgUnlockMode("RTX40"));
             MfgUnlockRTX2030.set_from_config(readMfgUnlockMode("RTX2030"));
-            // The built-in MFG unlocks were removed in 0.1.33: their keys are only read to say so once at startup
+            // The old [DLSSG] unlock keys were replaced by [MFGUnlock]: they are only read to say so once at startup
             RemovedAdaMfgUnlockSet = readBool("DLSSG", "AdaMfgUnlock").value_or(false);
             RemovedAmpereMfgUnlockSet = readBool("DLSSG", "AmpereMfgUnlock").value_or(false);
             FGDebugView.set_from_config(readBool("FrameGen", "DebugView"));
@@ -1285,7 +1285,7 @@ bool Config::SaveIni()
         ini.SetValue("MFGUnlock", "RTX40", MfgUnlock::ModeText(Instance()->MfgUnlockRTX40.value_for_config()));
         ini.SetValue("MFGUnlock", "RTX2030", MfgUnlock::ModeText(Instance()->MfgUnlockRTX2030.value_for_config()));
 
-        // The built-in MFG unlocks were removed in 0.1.33; drop their keys so the startup note stops after a save
+        // The old [DLSSG] unlock keys were replaced by [MFGUnlock]; drop them so the startup note stops after a save
         for (const char* key : { "AdaMfgUnlock", "AdaBlackwellKernels", "AdaTemporalFix", "AdaFlipMeteringPatch",
                                  "AmpereMfgUnlock", "AmpereMfgMaxFrames", "AmpereMfgKernelImage",
                                  "AmpereMfgHardwareBilinear" })

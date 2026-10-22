@@ -1148,8 +1148,8 @@ class Config
     CustomOptional<MfgUnlockMode> MfgUnlockXeFG { MfgUnlockMode::Off };
     CustomOptional<MfgUnlockMode> MfgUnlockRTX40 { MfgUnlockMode::Off };
     CustomOptional<MfgUnlockMode> MfgUnlockRTX2030 { MfgUnlockMode::Off };
-    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: the built-in MFG unlocks were removed in 0.1.32,
-    // and startup says so once. Read only, never saved.
+    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: those keys were replaced by [MFGUnlock] RTX40 /
+    // RTX2030, and startup says so once. Read only, never saved.
     bool RemovedAdaMfgUnlockSet = false;
     bool RemovedAmpereMfgUnlockSet = false;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };

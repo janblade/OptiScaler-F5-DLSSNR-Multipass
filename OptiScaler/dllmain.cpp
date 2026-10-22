@@ -1919,27 +1919,28 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // Initial state of FG
         State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default();
 
-        // The built-in MFG unlocks were removed in 0.1.33. The RTX 20/30 one also turned External on (and saved it),
-        // which now leaves such a player with no frame generation at all: say how to get OptiScaler's back.
+        // The old [DLSSG] unlock keys were replaced by [MFGUnlock]. The old RTX 20/30 one also turned External on (and
+        // saved it), which leaves such a player with no frame generation at all: say how to get OptiScaler's back.
         if (Config::Instance()->RemovedAmpereMfgUnlockSet && State::Instance().externalFrameGeneration)
         {
-            spdlog::warn("[DLSSG] AmpereMfgUnlock is set, but the built-in RTX 20/30 MFG unlock was removed in 0.1.33 "
-                         "and the key is ignored. [FrameGen] External=true was most likely set by it: untick External "
-                         "frame generation (or set External=false), Save Settings and restart to use OptiScaler's "
-                         "frame generation.");
+            spdlog::warn("[DLSSG] AmpereMfgUnlock is set, but that key was replaced by [MFGUnlock] RTX2030 and is "
+                         "ignored. [FrameGen] External=true was most likely set by it: untick External frame generation "
+                         "(or set External=false), set [MFGUnlock] RTX2030=detect, Save Settings and restart to use "
+                         "OptiScaler's frame generation.");
 
             ImGuiToast notification({ ImGuiToastType::Warning, 30000,
-                                      "The built-in RTX 20/30 MFG unlock was removed in 0.1.33.\n"
+                                      "[DLSSG] AmpereMfgUnlock was replaced by [MFGUnlock] RTX2030.\n"
                                       "External frame generation is still on from it, so OptiScaler's FG is off.\n"
-                                      "Untick External frame generation, Save Settings and restart." });
-            notification.setTitle("RTX 20/30 MFG unlock removed");
+                                      "Untick External frame generation, set RTX2030=detect, Save Settings and "
+                                      "restart." });
+            notification.setTitle("RTX 20/30 MFG unlock moved");
             ImGui::InsertNotification(notification);
         }
         else if (Config::Instance()->RemovedAdaMfgUnlockSet || Config::Instance()->RemovedAmpereMfgUnlockSet)
         {
-            spdlog::warn("[DLSSG] AdaMfgUnlock/AmpereMfgUnlock is set, but the built-in MFG unlock was removed in "
-                         "0.1.33 and these keys are ignored. On RTX 40, use an external MFG unlocker with [FrameGen] "
-                         "External=true. Save Settings drops the old keys.");
+            spdlog::warn("[DLSSG] AdaMfgUnlock/AmpereMfgUnlock is set, but these keys were replaced by [MFGUnlock] "
+                         "RTX40 / RTX2030 (off by default; detect or true turns them on) and are ignored. Save "
+                         "Settings drops the old keys.");
         }
 
         if (State::Instance().externalFrameGeneration)

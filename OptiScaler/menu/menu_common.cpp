@@ -3156,7 +3156,8 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     if (auto models = FSR4Models::SelectableModels(modelModule); !models.empty())
                     {
                         auto& selectedModel = config->Fsr4Model;
-                        auto selectedName = selectedModel.has_value() ? FSR4Models::Name(selectedModel.value()) : "Auto";
+                        auto selectedName =
+                            selectedModel.has_value() ? FSR4Models::Name(selectedModel.value()) : "Auto";
                         bool modelChanged = false;
 
                         ImGui::SetNextItemWidth(150.0f * menuResScale);

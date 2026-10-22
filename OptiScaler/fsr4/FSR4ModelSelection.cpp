@@ -107,12 +107,8 @@ void FSR4ModelSelection::Hook(HMODULE module, FSR4Source source)
         return;
 
     // FSR 4.1.1+ modules carry every model as its own provider, selected through their support checks
+    // The byte pattern hooks below stay, they also apply the preset override and report the active preset
     FSR4Models::Hook(module);
-    if (FSR4Models::SelectsModels(module))
-    {
-        LOG_DEBUG("Model providers of the module are patched, skipping the byte pattern hooks");
-        return;
-    }
 
     if (source == FSR4Source::SDK && (o_getModelBlobSDK || o_createModelSDK))
     {

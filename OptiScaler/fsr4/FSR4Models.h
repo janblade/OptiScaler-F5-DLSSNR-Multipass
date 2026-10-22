@@ -21,7 +21,6 @@ class FSR4Models
     // Newest module whose models can be selected, nullptr when there is none
     static HMODULE SelectingModule();
 
-    static bool ModuleHasModel(HMODULE module, FSR4Model model);
     static bool CanGpuRun(FSR4Model model);
 
     // Models of the module that can be switched between, empty when there is nothing to switch

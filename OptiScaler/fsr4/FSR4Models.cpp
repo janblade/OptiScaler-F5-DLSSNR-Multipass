@@ -52,6 +52,9 @@ struct HookedModule
 std::deque<HookedModule> hookedModules;
 std::mutex hookMutex;
 
+// Module whose support check FFX asked last, the one the game runs
+HMODULE lastQueriedModule = nullptr;
+
 const ModelProvider& Provider(FSR4Model model)
 {
     return *std::ranges::find(modelProviders, model, &ModelProvider::model);
@@ -83,6 +86,15 @@ bool hkIsSupported(void* provider, void* device)
 {
     auto vtable = *static_cast<void***>(provider);
 
+    // GPU info and config are read before the lock, they take locks of their own
+    auto detected = DetectedModel();
+    std::optional<FSR4Model> selected = Config::Instance()->Fsr4Model;
+    // Without a selected model use the detected one, as if it was selected
+    if (!selected.has_value())
+        selected = detected;
+
+    auto gpuCanRunSelected = selected.has_value() && FSR4Models::CanGpuRun(*selected);
+
     std::unique_lock lock(hookMutex);
 
     for (auto& hooked : hookedModules)
@@ -92,16 +104,12 @@ bool hkIsSupported(void* provider, void* device)
             continue;
 
         auto patched = &*found;
+        lastQueriedModule = hooked.module;
 
         auto model = patched->provider->model;
         auto o_IsSupported = patched->o_IsSupported;
-        // Without a selected model use the detected one, as if it was selected
-        auto detected = DetectedModel();
-        std::optional<FSR4Model> selected = Config::Instance()->Fsr4Model;
-        if (!selected.has_value())
-            selected = detected;
 
-        auto useSelected = selected.has_value() && hooked.HasModel(*selected) && FSR4Models::CanGpuRun(*selected);
+        auto useSelected = gpuCanRunSelected && hooked.HasModel(*selected);
         lock.unlock();
 
         auto supported = o_IsSupported(provider, device);
@@ -198,19 +206,8 @@ bool FSR4Models::AnyModuleSelectsModels()
 {
     std::scoped_lock lock(hookMutex);
 
-    return std::ranges::any_of(hookedModules, [](const HookedModule& hooked) { return !hooked.patchedProviders.empty(); });
-}
-
-bool FSR4Models::ModuleHasModel(HMODULE module, FSR4Model model)
-{
-    {
-        std::scoped_lock lock(hookMutex);
-
-        if (auto hooked = FindHookedModule(module))
-            return hooked->HasModel(model);
-    }
-
-    return rtti::FindVtable(module, Provider(model).className) != nullptr;
+    return std::ranges::any_of(hookedModules,
+                               [](const HookedModule& hooked) { return !hooked.patchedProviders.empty(); });
 }
 
 bool FSR4Models::CanGpuRun(FSR4Model model)
@@ -220,7 +217,7 @@ bool FSR4Models::CanGpuRun(FSR4Model model)
     switch (model)
     {
     case FSR4Model::FP8:
-        // FP8 forced through Fsr4GpuSupport, RDNA 4, or emulated on Linux (e.g. RDNA 3 with the WMMA workaround)
+        // FP8 forced through Fsr4ForceModel, RDNA 4, or emulated on Linux (e.g. RDNA 3 with the WMMA workaround)
         return gpu.fsr4Support == FSR4Support::FP8 || gpu.realFsr4Support == FSR4Support::FP8;
 
     case FSR4Model::INT8:
@@ -289,7 +286,11 @@ HMODULE FSR4Models::SelectingModule()
 {
     std::scoped_lock lock(hookMutex);
 
-    // The newest module is the one the game's upscaler runs through the most likely
+    // The module FFX asked last is the one the game runs
+    if (auto lastQueried = FindHookedModule(lastQueriedModule); lastQueried && !lastQueried->patchedProviders.empty())
+        return lastQueried->module;
+
+    // Nothing asked yet, the newest module is the most likely one
     for (auto hooked = hookedModules.rbegin(); hooked != hookedModules.rend(); ++hooked)
     {
         if (!hooked->patchedProviders.empty())

@@ -555,11 +555,14 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
 
                     // Check for native INT8 support, the same way the driver picks the model
                     // Don't treat this as real because RDNA3 on Linux may be able to support FP8, useful for FG
-                    if (res.fsr4Support == FSR4Support::None && IsFsr4Int8(gpuInfo.fsr4DriverModel))
-                        res.fsr4Support = gpuInfo.fsr4DriverModel;
+                    // The RDNA2 and APU models are in the Vulkan driver FSR only, DX12 keeps treating those GPUs as
+                    // without FSR 4 unless one is forced
+                    if (res.fsr4Support == FSR4Support::None && gpuInfo.fsr4DriverModel == FSR4Support::INT8)
+                        res.fsr4Support = FSR4Support::INT8;
 
-                    // Asic info not available (e.g. Linux), fall back to device_info
-                    if (res.fsr4Support == FSR4Support::None && gpuInfo.amdAsicFamily == 0)
+                    // Asic info not available (e.g. Linux) or not a family the driver check knows, fall back to
+                    // device_info
+                    if (res.fsr4Support == FSR4Support::None && gpuInfo.fsr4DriverModel == FSR4Support::None)
                     {
                         device_info::AdapterId adapterId(gpuInfo.vendorId, gpuInfo.deviceId, gpuInfo.revisionId);
                         auto cardInfo = device_info::GetCardInfo(adapterId);

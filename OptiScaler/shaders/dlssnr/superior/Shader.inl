@@ -21,6 +21,25 @@ namespace DlssNr::Superior::Bytecode
 #include "precompile/dlssnr_superior_sdr_Shader.h"
 } // namespace DlssNr::Superior::Bytecode
 
+bool DlssNr_Dx12::EnsureSuperiorRing()
+{
+    if (_superiorRingAttempted)
+        return _superiorRingReady;
+    _superiorRingAttempted = true;
+    D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(DlssNr::Superior::DlssNrConstants));
+    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    for (auto& buffer : _superiorConstantBuffers)
+        if (FAILED(_device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer))))
+        {
+            LOG_ERROR("[{0}] Superior Scaling: constant buffers could not be created", _name);
+            return false;
+        }
+    _superiorHeaps = std::make_unique<FrameDescriptorHeap[]>(DLSSNR_SUPERIOR_NUM_OF_HEAPS);
+    _superiorRingReady = InitHeaps(_device, _superiorHeaps.get(), DLSSNR_SUPERIOR_NUM_OF_HEAPS);
+    return _superiorRingReady;
+}
+
 ID3D12PipelineState* DlssNr_Dx12::SuperiorPipeline(const DlssNr::Superior::DlssNrConstants& constants,
                                                    ID3D12Resource* source)
 {
@@ -123,15 +142,15 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
     }
     if (!pipeline)
         pipeline = get(13u, DlssNr::Superior::Bytecode::DlssNr_cso, sizeof(DlssNr::Superior::Bytecode::DlssNr_cso));
-    if (!_init || !pipeline || !InCmdList || !_device || !InSource || !OutTarget)
+    if (!_init || !pipeline || !InCmdList || !_device || !InSource || !OutTarget || !EnsureSuperiorRing())
         return false;
 
     const bool reuse = immutableSlot && *immutableSlot != UINT32_MAX;
-    const uint32_t slot = reuse ? *immutableSlot : _heapIndex;
+    const uint32_t slot = reuse ? *immutableSlot : _superiorHeapIndex;
     if (!reuse)
-        _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+        _superiorHeapIndex = (_superiorHeapIndex + 1) % DLSSNR_SUPERIOR_NUM_OF_HEAPS;
 
-    FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
+    FrameDescriptorHeap& currentHeap = _superiorHeaps[slot];
     if (!reuse)
     {
 
@@ -162,7 +181,7 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
         for (uint32_t i = 0; i < kUavCount; ++i)
             CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
 
-        if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+        if (!CreateConstantsBuffer(_device, _superiorConstantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
         {
             LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
             return false;
@@ -282,19 +301,19 @@ bool DlssNr_Dx12::BuildSuperiorWarpCache(ID3D12GraphicsCommandList* cmd, unsigne
         _superiorWarpCacheAttempted = true;
         CreateComputePipeline(_device, &_superiorWarpCache, host_warp_cache_cso, sizeof(host_warp_cache_cso), nullptr);
     }
-    if (!_superiorWarpCache || !metadata || !output || !cmd || !_init)
+    if (!_superiorWarpCache || !metadata || !output || !cmd || !_init || !EnsureSuperiorRing())
         return false;
-    DlssNrConstants params {};
+    DlssNr::Superior::DlssNrConstants params {};
     params.Width = width;
     params.Height = height;
-    const uint32_t slot = _heapIndex;
-    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
-    auto& heap = _frameHeaps[slot];
+    const uint32_t slot = _superiorHeapIndex;
+    _superiorHeapIndex = (_superiorHeapIndex + 1) % DLSSNR_SUPERIOR_NUM_OF_HEAPS;
+    auto& heap = _superiorHeaps[slot];
     for (uint32_t i = 0; i < kSrvCount; ++i)
         CreateShaderResourceView(_device, metadata, heap.GetSrvCPU(i));
     for (uint32_t i = 0; i < kUavCount; ++i)
         CreateUnorderedAccessView(_device, output, heap.GetUavCPU(i), 0);
-    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], params, heap.GetCbvCPU(0)))
+    if (!CreateConstantsBuffer(_device, _superiorConstantBuffers[slot], params, heap.GetCbvCPU(0)))
         return false;
     ID3D12DescriptorHeap* heaps[] = { heap.GetHeapCSU() };
     cmd->SetDescriptorHeaps(1, heaps);

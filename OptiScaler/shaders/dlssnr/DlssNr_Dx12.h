@@ -45,8 +45,12 @@
 // detail's, which does not run beside it. The edit cache (DlssNr_EditCache.inl) adds seven on a cached frame (ring,
 // context, carry, three cell levels, apply) and up to five on a refresh (ring, compose, context, capture, a crossfade).
 // Ninety-six slots leave four or more such frames before descriptor/constant reuse; many more passes leave fewer.
-// Superior adds up to two dispatches per boundary; allow six in-flight 30-pass frames.
-#define DLSSNR_NUM_OF_HEAPS 512
+#define DLSSNR_NUM_OF_HEAPS 96
+
+// Superior Scaling's own passes (superior/Shader.inl) go through a separate ring, made only the first time Superior
+// runs, so nobody else pays for it. Up to two dispatches per pass boundary plus about ten per frame: six in-flight
+// 30-pass frames.
+#define DLSSNR_SUPERIOR_NUM_OF_HEAPS 416
 
 // Goes through the same constant-buffer ring as DlssNrConstants.
 static_assert(sizeof(DlssNrDetailReuseConstants) == sizeof(DlssNrConstants));
@@ -67,6 +71,13 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12Resource* _constantBuffers[DLSSNR_NUM_OF_HEAPS] = {};
 
     uint32_t _heapIndex = 0;
+
+    std::unique_ptr<FrameDescriptorHeap[]> _superiorHeaps;
+    ID3D12Resource* _superiorConstantBuffers[DLSSNR_SUPERIOR_NUM_OF_HEAPS] = {};
+    uint32_t _superiorHeapIndex = 0;
+    bool _superiorRingAttempted = false;
+    bool _superiorRingReady = false;
+    bool EnsureSuperiorRing();
 
     ID3D12PipelineState* _superiorResolve[6] {};
     bool _superiorResolveAttempted[6] {};

@@ -2266,6 +2266,12 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 
 DlssNr_Dx12::~DlssNr_Dx12()
 {
+    for (auto& buffer : _superiorConstantBuffers)
+        if (buffer != nullptr)
+        {
+            buffer->Release();
+            buffer = nullptr;
+        }
     if (_superiorRawLow)
         _superiorRawLow->Release();
     if (_superiorWarpCache)

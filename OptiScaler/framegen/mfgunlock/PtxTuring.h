@@ -190,10 +190,13 @@ inline size_t TryMinMax(std::string_view text, size_t at, std::string& out, bool
         return 0;
 
     const std::string_view compare = isMin ? "lt" : "gt";
+    // Equal values have the same bits except +0/-0, where PTX orders -0 below +0: or-ing the bits gives min's -0,
+    // and-ing them gives max's +0.
+    const std::string_view tie = isMin ? "or" : "and";
     if (vector)
     {
         // PTX min/max return the other operand when one is NaN: take a if a<b (ordered) or b is NaN.
-        out += "{.reg .b16 xl, xh, yl, yh; .reg .pred pl, ph, nl, nh;\nmov.b32 {xl, xh}, ";
+        out += "{.reg .b16 xl, xh, yl, yh, el, eh; .reg .pred pl, ph, nl, nh, ql, qh;\nmov.b32 {xl, xh}, ";
         Append(out, a);
         out += "; mov.b32 {yl, yh}, ";
         Append(out, b);
@@ -203,13 +206,20 @@ inline size_t TryMinMax(std::string_view text, size_t at, std::string& out, bool
         Append(out, compare);
         out += ".f16 ph, xh, yh; setp.nan.f16 nl, yl, yl; setp.nan.f16 nh, yh, yh;\n"
                "or.pred pl, pl, nl; or.pred ph, ph, nh;\n"
-               "selp.b16 xl, xl, yl, pl; selp.b16 xh, xh, yh, ph;\nmov.b32 ";
+               "setp.eq.f16 ql, xl, yl; setp.eq.f16 qh, xh, yh; ";
+        Append(out, tie);
+        out += ".b16 el, xl, yl; ";
+        Append(out, tie);
+        out += ".b16 eh, xh, yh;\n"
+               "selp.b16 xl, xl, yl, pl; selp.b16 xh, xh, yh, ph;\n"
+               "selp.b16 xl, el, xl, ql; selp.b16 xh, eh, xh, qh;\nmov.b32 ";
         Append(out, d);
         out += ", {xl, xh};}";
     }
     else
     {
-        out += "{.reg .pred pm, pn; setp.";
+        // The tie value is formed before d is written, so d may alias a or b.
+        out += "{.reg .pred pm, pn, pq; .reg .b16 te; setp.";
         Append(out, compare);
         out += ".f16 pm, ";
         Append(out, a);
@@ -219,13 +229,27 @@ inline size_t TryMinMax(std::string_view text, size_t at, std::string& out, bool
         Append(out, b);
         out += ", ";
         Append(out, b);
-        out += "; or.pred pm, pm, pn; selp.b16 ";
+        out += "; or.pred pm, pm, pn; setp.eq.f16 pq, ";
+        Append(out, a);
+        out += ", ";
+        Append(out, b);
+        out += "; ";
+        Append(out, tie);
+        out += ".b16 te, ";
+        Append(out, a);
+        out += ", ";
+        Append(out, b);
+        out += "; selp.b16 ";
         Append(out, d);
         out += ", ";
         Append(out, a);
         out += ", ";
         Append(out, b);
-        out += ", pm;}";
+        out += ", pm; selp.b16 ";
+        Append(out, d);
+        out += ", te, ";
+        Append(out, d);
+        out += ", pq;}";
     }
     return cursor.At();
 }
@@ -312,6 +336,46 @@ inline bool Lz4Decompress(const uint8_t* src, size_t srcSize, std::vector<uint8_
     return o == outSize;
 }
 
+// Returns the first instruction sm_75 lacks that this port does not rewrite, or an empty view. Any min/max with an
+// f16/bf16 type (whatever modifiers: .ftz, .NaN, .xorsign.abs, x2 or scalar) and any cvt producing f16x2 or bf16
+// (.relu, .satfinite, ...) counts, so a form the rewrite does not know fails closed instead of reaching the driver.
+inline std::string_view FindUnportedInstruction(std::string_view text)
+{
+    const auto isWord = [](char c)
+    { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; };
+    for (size_t at = 0; at < text.size(); ++at)
+    {
+        if (!isWord(text[at]) || (at != 0 && (isWord(text[at - 1]) || text[at - 1] == '.' || text[at - 1] == '%' ||
+                                               text[at - 1] == '$')))
+            continue;
+        size_t end = at;
+        while (end < text.size() && (isWord(text[end]) || text[end] == '.'))
+            ++end;
+        const std::string_view token = text.substr(at, end - at);
+        at = end;
+
+        const size_t dot = token.find('.');
+        if (dot == std::string_view::npos)
+            continue;
+        const std::string_view mnemonic = token.substr(0, dot);
+        const bool minMax = mnemonic == "min" || mnemonic == "max";
+        const bool cvt = mnemonic == "cvt";
+        if (!minMax && !cvt)
+            continue;
+        for (size_t part = dot; part != std::string_view::npos;)
+        {
+            const size_t next = token.find('.', part + 1);
+            const std::string_view modifier =
+                token.substr(part + 1, next == std::string_view::npos ? std::string_view::npos : next - part - 1);
+            if (modifier == "bf16" || modifier == "bf16x2" || modifier == "f16x2" ||
+                (minMax && modifier == "f16"))
+                return token;
+            part = next;
+        }
+    }
+    return {};
+}
+
 template <typename T> inline T Load(const uint8_t* at)
 {
     T value;
@@ -369,14 +433,15 @@ inline Rewrite RewriteText(std::string_view text)
         ++at;
     }
 
-    for (const std::string_view leftover : { std::string_view("m16n8k16"), std::string_view("min.f16"),
-                                             std::string_view("max.f16"), std::string_view("cvt.rn.f16x2") })
+    if (out.find("m16n8k16") != std::string::npos)
     {
-        if (out.find(leftover) != std::string::npos)
-        {
-            result.failure = "unrewritten construct left in the PTX: " + std::string(leftover);
-            return result;
-        }
+        result.failure = "unrewritten construct left in the PTX: m16n8k16";
+        return result;
+    }
+    if (const auto leftover = detail::FindUnportedInstruction(out); !leftover.empty())
+    {
+        result.failure = "unrewritten construct left in the PTX: " + std::string(leftover);
+        return result;
     }
 
     result.ok = true;

@@ -163,17 +163,35 @@ bool Numeric()
         a[i] = HalfWord();
         b[i] = HalfWord();
     }
+    // Every pair of the edge values, in both halves (swapped in the high one): signed zeros, a canonical NaN, the
+    // infinities, a subnormal and equal values.
+    constexpr uint16_t edges[] = { 0x0000, 0x8000, 0x7FFF, 0x3C00, 0xBC00, 0x7C00, 0xFC00, 0x0001, 0x8001 };
+    size_t slot = 0;
+    for (const uint16_t x : edges)
+    {
+        for (const uint16_t y : edges)
+        {
+            a[slot] = x | (static_cast<uint32_t>(y) << 16);
+            b[slot] = y | (static_cast<uint32_t>(x) << 16);
+            ++slot;
+        }
+    }
     bool ok = true;
     for (const char* op : { "min", "max" })
     {
+        // Signed zeros and NaN operands included, the rewrite has to match bit for bit.
         const std::string vec = std::string("{") + op + ".f16x2 %r3,%r1,%r2;\n}";
         const long vectorDiffs = Compare((std::string(op) + ".f16x2").c_str(), vec, a, b);
-        // only the signed-zero tie documented in the DLSS-Weights notes may differ
-        ok = ok && vectorDiffs >= 0 && vectorDiffs < static_cast<long>(n / 1000);
+        ok = ok && vectorDiffs == 0;
         const std::string scalar = std::string("mov.b32 {%rs1,%rs5}, %r1; mov.b32 {%rs2,%rs5}, %r2;\n{") + op +
                                    ".f16 %rs3,%rs1,%rs2;\n}\ncvt.u32.u16 %r3, %rs3;";
         const long scalarDiffs = Compare((std::string(op) + ".f16").c_str(), scalar, a, b);
-        ok = ok && scalarDiffs >= 0 && scalarDiffs < static_cast<long>(n / 1000);
+        ok = ok && scalarDiffs == 0;
+        // The destination is also the first source.
+        const std::string aliased = std::string("mov.b32 {%rs1,%rs5}, %r1; mov.b32 {%rs2,%rs5}, %r2;\n{") + op +
+                                    ".f16 %rs1,%rs1,%rs2;\n}\ncvt.u32.u16 %r3, %rs1;";
+        const long aliasedDiffs = Compare((std::string(op) + ".f16 d=a").c_str(), aliased, a, b);
+        ok = ok && aliasedDiffs == 0;
     }
     std::vector<uint32_t> fa(n), fb(n);
     std::normal_distribution<float> normal;

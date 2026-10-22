@@ -355,21 +355,16 @@ inline bool CollectAmpere(Report& report, const ImageView& image, uint32_t conta
 }
 } // namespace detail
 
-inline Report Locate(const ImageView& image, Target target = Target::Ada)
+// Calls visit(containerRva, fatSize) for every fatbin container header in the readable, non-executable sections. A
+// container's bytes are skipped when visit returns true (they are its images, not further containers).
+template <typename Visit> inline void ForEachContainer(const ImageView& image, Visit&& visit)
 {
-    Report report;
-    report.requireEveryContainer = target == Target::Ampere;
-    if (!image.IsValid())
-    {
-        report.failure = "invalid image";
-        return report;
-    }
-
     constexpr uint8_t magic[] = { 0x50, 0xED, 0x55, 0xBA };
     for (WORD index = 0; index < image.SectionCount(); ++index)
     {
         IMAGE_SECTION_HEADER section {};
-        if (!image.SectionAt(index, section) || (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
+        if (!image.SectionAt(index, section) || (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 ||
+            (section.Characteristics & IMAGE_SCN_MEM_READ) == 0)
             continue;
 
         const uint32_t size = section.Misc.VirtualSize;
@@ -389,23 +384,52 @@ inline Report Locate(const ImageView& image, Target target = Target::Ada)
             if (headerSize != kContainerHeader || fatSize == 0 || fatSize > size - offset - kContainerHeader)
                 continue;
 
-            const size_t before = report.patches.size();
-            const bool qualifies = target == Target::Ampere
-                                       ? detail::CollectAmpere(report, image, section.VirtualAddress + offset, fatSize)
-                                       : detail::Collect(report, image, section.VirtualAddress + offset, fatSize);
-            if (qualifies)
-            {
-                ++report.containers;
-                // Whatever bytes sit inside an accepted container are its images, not further containers.
+            if (visit(section.VirtualAddress + offset, fatSize))
                 offset += static_cast<uint32_t>(kContainerHeader + fatSize) - 1;
-            }
-            else
-            {
-                report.patches.resize(before);
-                ++report.rejected;
-            }
         }
     }
+}
+
+// The fatbin containers of an image (header RVAs), whole and inside their section.
+inline std::vector<uint32_t> ContainerRvas(const ImageView& image)
+{
+    std::vector<uint32_t> rvas;
+    if (image.IsValid())
+        ForEachContainer(image,
+                         [&rvas](uint32_t rva, uint64_t)
+                         {
+                             rvas.push_back(rva);
+                             return true;
+                         });
+    return rvas;
+}
+
+inline Report Locate(const ImageView& image, Target target = Target::Ada)
+{
+    Report report;
+    report.requireEveryContainer = target == Target::Ampere;
+    if (!image.IsValid())
+    {
+        report.failure = "invalid image";
+        return report;
+    }
+
+    ForEachContainer(image,
+                     [&](uint32_t containerRva, uint64_t fatSize)
+                     {
+                         const size_t before = report.patches.size();
+                         const bool qualifies = target == Target::Ampere
+                                                    ? detail::CollectAmpere(report, image, containerRva, fatSize)
+                                                    : detail::Collect(report, image, containerRva, fatSize);
+                         if (qualifies)
+                         {
+                             ++report.containers;
+                             return true;
+                         }
+                         report.patches.resize(before);
+                         ++report.rejected;
+                         return false;
+                     });
 
     if (report.containers == 0)
         report.failure = target == Target::Ampere ? "no fatbin container that can be retargeted to sm_86"

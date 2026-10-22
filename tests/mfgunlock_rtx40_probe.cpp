@@ -122,6 +122,17 @@ int wmain(int argc, wchar_t** argv)
     if (!ampereArch.Complete() || !ampereFatbin.Complete())
         return 1;
 
+    // RTX 20 locate-time check: every container must come out of the sm_75 rewrite.
+    const auto containerRvas = MfgUnlock::FamilyRtx40::Fatbin::ContainerRvas(image);
+    unsigned turingOk = 0;
+    for (const uint32_t rva : containerRvas)
+        turingOk += MfgUnlock::PtxTuring::BuildFromContainer(
+                        reinterpret_cast<const uint8_t*>(image.DataAtRva(rva, 16)))
+                        .ok;
+    std::printf("turing containers=%zu rewritable=%u\n", containerRvas.size(), turingOk);
+    if (containerRvas.empty() || turingOk != containerRvas.size())
+        return 1;
+
     auto ampereOperations = operations;
     auto archOperations = MfgUnlock::FamilyRtx40::BuildOperationsFromPatches(ampereArch.patches, image);
     auto kernelOperations = MfgUnlock::FamilyRtx40::Fatbin::BuildOperations(ampereFatbin, image);

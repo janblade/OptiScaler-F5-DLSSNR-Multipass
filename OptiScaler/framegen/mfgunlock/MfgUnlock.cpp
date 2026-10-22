@@ -631,6 +631,29 @@ bool IsHookedNvcuda(HMODULE module)
 
 std::set<HMODULE> turingModules; // guarded by rtx40Mutex
 
+// RTX 20: every kernel container has to come out of the sm_75 rewrite now, at locate time. A container the rewrite
+// cannot take would reach the driver as shipped at load time and fail there, after the module already advertised MFG.
+bool CheckTuringKernels(const MfgUnlock::ImageView& image, std::string& failure)
+{
+    const auto containers = MfgUnlock::FamilyRtx40::Fatbin::ContainerRvas(image);
+    if (containers.empty())
+    {
+        failure = "no kernel containers";
+        return false;
+    }
+    for (const uint32_t rva : containers)
+    {
+        const auto* container = image.DataAtRva(rva, MfgUnlock::FamilyRtx40::Fatbin::kContainerHeader);
+        const auto built = MfgUnlock::PtxTuring::BuildFromContainer(reinterpret_cast<const uint8_t*>(container));
+        if (!built.ok)
+        {
+            failure = "container@" + std::to_string(rva) + " cannot be rewritten for sm_75: " + built.failure;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool EnableTuringCudaRewrite()
 {
     turingRewriteWanted.store(true, std::memory_order_release);
@@ -730,6 +753,8 @@ bool DecideRtx40(HMODULE module, MfgUnlockMode mode, MfgUnlockMode mode2030, boo
                                                           : arch.failure;
                 else if (!kernels.Complete())
                     report.failure = std::string(label) + " kernel check: " + kernels.failure;
+                else if (std::string kernelFailure; turing && !CheckTuringKernels(image, kernelFailure))
+                    report.failure = std::string(label) + " kernel check: " + kernelFailure;
                 else
                 {
                     auto archOps = MfgUnlock::FamilyRtx40::BuildOperationsFromPatches(arch.patches, image);

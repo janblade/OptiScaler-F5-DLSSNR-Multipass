@@ -22,6 +22,7 @@ class NtdllHooks
     inline static NtdllProxy::PFN_NtLoadDll o_NtLoadDll = nullptr;
     inline static NtdllProxy::PFN_LdrLoadDll o_LdrLoadDll = nullptr;
     inline static NtdllProxy::PFN_LdrUnloadDll o_LdrUnloadDll = nullptr;
+    inline static std::atomic<bool> unloadHookForMfgOnly { false };
 
     static NTSTATUS ObserveXeFGLoadResult(NTSTATUS result, std::wstring_view name, PHANDLE moduleHandle)
     {
@@ -177,10 +178,14 @@ class NtdllHooks
 
         if (!State::Instance().isShuttingDown)
         {
-            auto result = LibraryLoadHooks::FreeLibrary(lpLibrary);
+            // Hooked only for the MFG unlock (UseNtdllHooks off): direct LdrUnloadDll callers get nothing else.
+            if (!unloadHookForMfgOnly)
+            {
+                auto result = LibraryLoadHooks::FreeLibrary(lpLibrary);
 
-            if (result.has_value())
-                return result.value();
+                if (result.has_value())
+                    return result.value();
+            }
 
             const HMODULE module = static_cast<HMODULE>(lpLibrary);
             const bool trackedProvider = MfgUnlock::IsTrackedProviderModule(module);
@@ -215,7 +220,10 @@ class NtdllHooks
         {
             // Only the MFG unlock needs the unload notification; without it this stays unhooked as before.
             if (o_LdrUnloadDll == nullptr && MfgUnlock::AnyFamilyEnabled())
+            {
+                unloadHookForMfgOnly = true;
                 o_LdrUnloadDll = NtdllProxy::Hook_LdrUnloadDll(hkLdrUnloadDll);
+            }
             return;
         }
 

@@ -273,9 +273,11 @@ bool TryApplyXeFG(HMODULE xeFgModule, HMODULE xeLlModule, bool logStatus = true)
     const size_t xeLlSize = GetMappedImageSize(xeLlModule);
     const MfgUnlock::ImageView xeFgImage(xeFgModule, xeFgSize);
     const MfgUnlock::ImageView xeLlImage(xeLlModule, xeLlSize);
+    // The patched sites hold XeFG's own ceiling (3); a value below it would lower XeFG under its stock behaviour.
     const int requested = Config::Instance()->FGXeFGMaxInterpolations.value_or_default();
     const auto report = MfgUnlock::FamilyXeFG::Locate(
-        xeFgImage, xeLlImage, static_cast<uint8_t>(std::clamp(requested, 1, 5)));
+        xeFgImage, xeLlImage,
+        static_cast<uint8_t>(std::clamp(requested, MfgUnlock::kXeFGOriginalDefaultMaxInterpolations, 5)));
     if (!report.Complete())
     {
         publish(MakeStatus(MfgUnlock::FamilyState::StoodAside, xeFgModule, &report, report.failure), true);

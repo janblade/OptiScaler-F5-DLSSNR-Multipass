@@ -15,6 +15,7 @@ This is an experimental community version of OptiScaler. Results and game suppor
 - Apply it more than once, with different settings each time. Extra passes cost more performance.
 - Lower the model resolution to reduce the performance cost.
 - Use Superior Scaling (Upscale Mode) to enlarge reduced-resolution NR with a private DLSS that steadies it over time (DirectX 12, NVIDIA DLSS).
+- Switch plugins on or off on the **Plugins** page: see which `*.asi` plugins loaded or failed, disable one without touching the file, and turn the built-in multi frame generation unlock on per GPU family (off by default, no extra file needed). Changes apply at the next start. See [Plugins page](docs/PLUGINS.md).
 
 ## What you need
 

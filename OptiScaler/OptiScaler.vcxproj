@@ -340,6 +340,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="framegen\mfgunlock\FamilySlDlssg.h" />
     <ClInclude Include="framegen\mfgunlock\FamilyXeFG.h" />
     <ClInclude Include="framegen\mfgunlock\MfgUnlock.h" />
+    <ClInclude Include="framegen\mfgunlock\Mode.h" />
     <ClInclude Include="framegen\mfgunlock\Locator.h" />
     <ClInclude Include="framegen\mfgunlock\Patch.h" />
     <ClInclude Include="framegen\mfgunlock\Provider.h" />

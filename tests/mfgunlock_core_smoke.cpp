@@ -8,6 +8,7 @@
 #include "../OptiScaler/framegen/mfgunlock/PtxTuring.h"
 #include "../OptiScaler/framegen/mfgunlock/Patch.h"
 #include "../OptiScaler/framegen/mfgunlock/Status.h"
+#include "../OptiScaler/framegen/mfgunlock/Mode.h"
 
 #include <array>
 #include <cstdio>
@@ -717,6 +718,25 @@ int main()
         std::memcpy(container.data() + 0x10 + 0x38, &uncompressed, 8);
         Check(!MfgUnlock::PtxTuring::BuildFromContainer(container.data()).ok,
               "rejects a one-byte compressed payload without reading past it");
+    }
+
+    {
+        bool valid = false;
+        const bool autoIsDefault = !MfgUnlock::ParseMode("auto", valid).has_value() && valid &&
+                                   !MfgUnlock::ParseMode("AUTO", valid).has_value() && valid &&
+                                   !MfgUnlock::ParseMode("", valid).has_value() && valid;
+        const bool detect = MfgUnlock::ParseMode("Detect", valid) == MfgUnlockMode::Detect && valid;
+        const bool onOff = MfgUnlock::ParseMode("true", valid) == MfgUnlockMode::On &&
+                           MfgUnlock::ParseMode("on", valid) == MfgUnlockMode::On &&
+                           MfgUnlock::ParseMode("false", valid) == MfgUnlockMode::Off &&
+                           MfgUnlock::ParseMode("OFF", valid) == MfgUnlockMode::Off && valid;
+        const bool invalid = !MfgUnlock::ParseMode("yes", valid).has_value() && !valid;
+        Check(autoIsDefault && detect && onOff && invalid,
+              "config: auto is the default (off), detect is its own mode, junk is rejected");
+        Check(std::string(MfgUnlock::ModeText(std::nullopt)) == "auto" &&
+                  std::string(MfgUnlock::ModeText(MfgUnlockMode::Detect)) == "detect" &&
+                  std::string(MfgUnlock::ModeText(MfgUnlockMode::On)) == "true",
+              "config: modes save as auto, detect and true");
     }
 
     return failures == 0 ? 0 : 1;

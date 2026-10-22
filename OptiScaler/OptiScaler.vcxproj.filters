@@ -1043,6 +1043,9 @@
     <ClInclude Include="framegen\mfgunlock\PtxTuring.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\Mode.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="framegen\mfgunlock\hde\hde64.h">
       <Filter>Header Files</Filter>
     </ClInclude>

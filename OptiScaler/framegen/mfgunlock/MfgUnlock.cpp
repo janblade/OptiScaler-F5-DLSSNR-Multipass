@@ -607,7 +607,7 @@ bool EnableTuringCudaRewrite()
     return InstallCudaHooksIfWanted();
 }
 
-// Patches one nvngx_dlssg copy (the game's and the driver's can both load). Auto acts on Ada only and writes
+// Patches one nvngx_dlssg copy (the game's and the driver's can both load). Detect acts on Ada only and writes
 // nothing elsewhere; On forces it on any NVIDIA GPU. Stands aside when another frame generation owns the output.
 bool TryApplyRtx40(HMODULE module)
 {

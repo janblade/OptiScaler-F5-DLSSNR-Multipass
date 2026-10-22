@@ -5,6 +5,7 @@
 #include "native/NativeLowLatencyRule.h"
 #include "motion/MotionProfiles.h"
 #include "shaders/dlssnr/DlssNr_InputStyles.h"
+#include "framegen/mfgunlock/Mode.h"
 
 #include <optional>
 #include <filesystem>
@@ -14,13 +15,6 @@ enum HasDefaultValue
     WithDefault,
     NoDefault,
     SoftDefault // Change always gets saved to the config
-};
-
-enum class MfgUnlockMode
-{
-    Auto,
-    Off,
-    On
 };
 
 template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptional : public std::optional<T>

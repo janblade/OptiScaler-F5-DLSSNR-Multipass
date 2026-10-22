@@ -72,20 +72,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             ExternalFrameGeneration.set_from_config(readBool("FrameGen", "External"));
             const auto readMfgUnlockMode = [this](const char* key)
             {
-                std::string value = ini.GetValue("MFGUnlock", key, "off");
-                std::string lower = value;
-                std::ranges::transform(lower, lower.begin(), [](unsigned char c) { return std::tolower(c); });
+                const std::string value = ini.GetValue("MFGUnlock", key, "auto");
                 _log.push_back(std::format("MFGUnlock.{}: {}", key, value));
 
-                if (lower == "auto")
-                    return std::optional<MfgUnlockMode>(MfgUnlockMode::Auto);
-                if (lower == "false" || lower == "off")
-                    return std::optional<MfgUnlockMode>(MfgUnlockMode::Off);
-                if (lower == "true" || lower == "on")
-                    return std::optional<MfgUnlockMode>(MfgUnlockMode::On);
-
-                LOG_WARN("[MFGUnlock] {} has invalid value '{}'; using off", key, value);
-                return std::optional<MfgUnlockMode>(MfgUnlockMode::Off);
+                bool valid = true;
+                const auto mode = MfgUnlock::ParseMode(value, valid);
+                if (!valid)
+                    LOG_WARN("[MFGUnlock] {} has invalid value '{}'; using the default (off)", key, value);
+                return mode;
             };
             MfgUnlockXeFG.set_from_config(readMfgUnlockMode("XeFG"));
             MfgUnlockRTX40.set_from_config(readMfgUnlockMode("RTX40"));
@@ -1287,22 +1281,9 @@ bool Config::SaveIni()
     {
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
         ini.SetValue("FrameGen", "External", GetBoolValue(Instance()->ExternalFrameGeneration.value_for_config_or(false)).c_str());
-        const auto mfgUnlockModeText = [](MfgUnlockMode mode)
-        {
-            switch (mode)
-            {
-            case MfgUnlockMode::Auto:
-                return "auto";
-            case MfgUnlockMode::Off:
-                return "false";
-            case MfgUnlockMode::On:
-                return "true";
-            }
-            return "false";
-        };
-        ini.SetValue("MFGUnlock", "XeFG", mfgUnlockModeText(Instance()->MfgUnlockXeFG.value_or_default()));
-        ini.SetValue("MFGUnlock", "RTX40", mfgUnlockModeText(Instance()->MfgUnlockRTX40.value_or_default()));
-        ini.SetValue("MFGUnlock", "RTX2030", mfgUnlockModeText(Instance()->MfgUnlockRTX2030.value_or_default()));
+        ini.SetValue("MFGUnlock", "XeFG", MfgUnlock::ModeText(Instance()->MfgUnlockXeFG.value_for_config()));
+        ini.SetValue("MFGUnlock", "RTX40", MfgUnlock::ModeText(Instance()->MfgUnlockRTX40.value_for_config()));
+        ini.SetValue("MFGUnlock", "RTX2030", MfgUnlock::ModeText(Instance()->MfgUnlockRTX2030.value_for_config()));
 
         // The built-in MFG unlocks were removed in 0.1.33; drop their keys so the startup note stops after a save
         for (const char* key : { "AdaMfgUnlock", "AdaBlackwellKernels", "AdaTemporalFix", "AdaFlipMeteringPatch",

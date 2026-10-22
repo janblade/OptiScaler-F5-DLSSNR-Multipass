@@ -44,6 +44,9 @@ std::mutex rtx40Mutex;
 std::map<HMODULE, std::unique_ptr<MfgUnlock::AppliedPatchSet>> rtx40PatchSets;
 std::set<HMODULE> rtx40RecoveryFailed;
 std::map<HMODULE, MfgUnlock::Family> rtx40Families;
+// Modules already decided (patched, stood aside or not needed), by path: a repeated load of the same module is not
+// scanned again. Dropped when the module really unloads.
+std::map<HMODULE, std::wstring> rtx40Decided;
 
 std::mutex xeFgMutex;
 MfgUnlock::AppliedPatchSet xeFgPatchSet;
@@ -616,22 +619,29 @@ bool EnableTuringCudaRewrite()
     return InstallCudaHooksIfWanted();
 }
 
-// Patches one nvngx_dlssg copy (the game's and the driver's can both load). Detect acts on Ada only and writes
-// nothing elsewhere; On forces it on any NVIDIA GPU. Stands aside when another frame generation owns the output.
-bool TryApplyRtx40(HMODULE module)
+// Drops everything known about a module (guarded by rtx40Mutex); returns whether its patches were in place. Nothing
+// is written back: the module is gone, or a different one now sits at its address.
+bool DropRtx40Locked(HMODULE module)
 {
-    const auto mode = Config::Instance()->MfgUnlockRTX40.value_or_default();
-    const auto mode2030 = Config::Instance()->MfgUnlockRTX2030.value_or_default();
-    if (mode == MfgUnlockMode::Off && mode2030 == MfgUnlockMode::Off)
-        return false;
+    const auto found = rtx40PatchSets.find(module);
+    const bool wasActive = found != rtx40PatchSets.end() && found->second && found->second->IsActive();
+    rtx40PatchSets.erase(module);
+    rtx40Families.erase(module);
+    rtx40RecoveryFailed.erase(module);
+    rtx40Decided.erase(module);
+    turingModules.erase(module);
+    // The rewrite only runs while a Turing provider is patched; a reapply turns it back on.
+    if (turingModules.empty())
+        turingRewriteWanted.store(false, std::memory_order_release);
+    return wasActive;
+}
 
-    {
-        std::lock_guard lock(rtx40Mutex);
-        const auto found = rtx40PatchSets.find(module);
-        if (found != rtx40PatchSets.end() && found->second->IsActive())
-            return true;
-    }
-
+// Patches one nvngx_dlssg copy (the game's and the driver's can both load). Detect acts on Ada only and writes
+// nothing elsewhere; On forces it on any older NVIDIA GPU. Stands aside when another frame generation owns the
+// output. decided turns false only when the module could not be judged (a data-file load).
+bool DecideRtx40(HMODULE module, MfgUnlockMode mode, MfgUnlockMode mode2030, bool& decided)
+{
+    decided = true;
     const auto tier = ChooseRtx40Tier(mode, mode2030);
     const auto family = tier == Rtx40Tier::Ada || (tier == Rtx40Tier::None && mode2030 == MfgUnlockMode::Off)
                             ? MfgUnlock::Family::RTX40
@@ -657,7 +667,10 @@ bool TryApplyRtx40(HMODULE module)
     }
     const size_t mappedSize = GetMappedImageSize(module);
     if (mappedSize == 0) // data-file or resource load, not a running image
+    {
+        decided = false;
         return false;
+    }
 
     const MfgUnlock::ImageView image(module, mappedSize);
     const bool streamlinePlugin = MfgUnlock::Provider::IsStreamlineDlssgPath(GetModulePath(module));
@@ -798,12 +811,70 @@ bool TryApplyRtx40(HMODULE module)
     return true;
 }
 
+// Each module is judged once per load: the kernel32 and ntdll hooks both report a load, and games load the provider
+// repeatedly. The decision is forgotten when the module really unloads (ForgetRtx40Module).
+bool TryApplyRtx40(HMODULE module)
+{
+    const auto mode = Config::Instance()->MfgUnlockRTX40.value_or_default();
+    const auto mode2030 = Config::Instance()->MfgUnlockRTX2030.value_or_default();
+    if (mode == MfgUnlockMode::Off && mode2030 == MfgUnlockMode::Off)
+        return false;
+
+    const auto path = GetModulePath(module);
+    {
+        std::lock_guard lock(rtx40Mutex);
+        const auto found = rtx40PatchSets.find(module);
+        const auto known = rtx40Decided.find(module);
+        if (known != rtx40Decided.end() && known->second != path)
+            DropRtx40Locked(module); // the module we judged went without an unload notice
+        else if (found != rtx40PatchSets.end() && found->second->IsActive())
+            return true;
+        else if (known != rtx40Decided.end())
+            return false;
+    }
+
+    bool decided = false;
+    const bool active = DecideRtx40(module, mode, mode2030, decided);
+    if (decided)
+    {
+        std::lock_guard lock(rtx40Mutex);
+        rtx40Decided[module] = path;
+    }
+    return active;
+}
+
 bool IsRtx40Module(HMODULE module)
 {
     if (module == nullptr)
         return false;
     std::lock_guard lock(rtx40Mutex);
-    return rtx40PatchSets.contains(module);
+    return rtx40PatchSets.contains(module) || rtx40Decided.contains(module);
+}
+
+// The module really unloaded: its pages, and the patches in them, are gone. Only the bookkeeping is dropped.
+void ForgetRtx40Module(HMODULE module)
+{
+    bool wasActive = false;
+    auto family = MfgUnlock::Family::RTX40;
+    {
+        std::lock_guard lock(rtx40Mutex);
+        if (const auto found = rtx40Families.find(module); found != rtx40Families.end())
+            family = found->second;
+        wasActive = DropRtx40Locked(module);
+    }
+    {
+        std::lock_guard cacheLock(cudaRewriteMutex);
+        cudaRewriteCache.clear();
+    }
+
+    // A stood-aside or not-needed diagnostic stays as it was.
+    if (wasActive)
+    {
+        MfgUnlock::FamilyStatus status;
+        status.state = MfgUnlock::FamilyState::Waiting;
+        status.failure = "provider unloaded";
+        PublishRtx40(std::move(status), false, family);
+    }
 }
 
 HMODULE FindXeFGModule()
@@ -1004,35 +1075,13 @@ bool MfgUnlock::IsTrackedProviderModule(HMODULE module)
 
 bool MfgUnlock::BeforeModuleUnload(HMODULE module)
 {
+    // nvngx_dlssg / sl.dlss_g patches are never undone before an unload. A FreeLibrary that only drops a reference
+    // leaves the module running, and its multi-byte instruction rewrites are written one byte at a time: undoing and
+    // redoing them under a running thread could execute a half-written instruction. When the module really goes its
+    // pages go with it, and AfterModuleUnload drops the bookkeeping. (Every XeFG write is a single atomic store, so
+    // XeFG keeps its restore.)
     if (IsRtx40Module(module))
-    {
-        std::lock_guard lock(rtx40Mutex);
-        auto& slot = rtx40PatchSets[module];
-        if (slot && slot->IsActive() && !slot->Restore().applied)
-        {
-            rtx40RecoveryFailed.insert(module);
-            auto status = StatusRegistry::Get(rtx40Families.contains(module) ? rtx40Families[module] : Family::RTX40);
-            status.state = FamilyState::StoodAside;
-            status.failure = "could not restore provider patches before unload; unload is being held";
-            PublishRtx40(std::move(status), true, rtx40Families.contains(module) ? rtx40Families[module] : Family::RTX40);
-            return false;
-        }
-        rtx40RecoveryFailed.erase(module);
-        // The rewrite only runs while a Turing provider is patched; a reapply turns it back on.
-        turingModules.erase(module);
-        if (turingModules.empty())
-            turingRewriteWanted.store(false, std::memory_order_release);
-        {
-            std::lock_guard cacheLock(cudaRewriteMutex);
-            cudaRewriteCache.clear();
-        }
-        MfgUnlock::FamilyStatus status;
-        status.state = MfgUnlock::FamilyState::Waiting;
-        status.failure = "provider unloaded; patches restored";
-        PublishRtx40(std::move(status), false,
-                     rtx40Families.contains(module) ? rtx40Families[module] : Family::RTX40);
         return true;
-    }
 
     std::lock_guard lock(xeFgMutex);
     if (!xeFgPatchSet.IsActive() || (module != activeXeFgModule && module != activeXeLlModule))
@@ -1079,17 +1128,9 @@ void MfgUnlock::AfterModuleUnload(HMODULE module)
     }
     if (rtx40)
     {
-        if (remainsLoaded)
-        {
-            TryApplyRtx40(module);
-        }
-        else
-        {
-            std::lock_guard lock(rtx40Mutex);
-            rtx40PatchSets.erase(module);
-            rtx40Families.erase(module);
-            rtx40RecoveryFailed.erase(module);
-        }
+        // Still loaded: only a reference went, the patches and their state stay as they are.
+        if (!remainsLoaded)
+            ForgetRtx40Module(module);
         return;
     }
     if (remainsLoaded)

@@ -843,6 +843,22 @@ bool TryApplyRtx40(HMODULE module)
     return active;
 }
 
+// nvcuda.dll loaded after a Turing provider was patched, and its module loaders could not be hooked. The patches are
+// not undone on live code (see BeforeModuleUnload), so the rewrite stops being wanted and every patched Turing
+// provider is reported as stood aside: DLSS-G is advertised but its kernels cannot load on this card.
+void StandAsideTuringWithoutCuda()
+{
+    std::lock_guard lock(rtx40Mutex);
+    turingRewriteWanted.store(false, std::memory_order_release);
+    for (const HMODULE module : turingModules)
+    {
+        PublishRtx40(MakeRtx40Status(MfgUnlock::FamilyState::StoodAside, module, nullptr,
+                                     "could not hook the CUDA module loaders of a later nvcuda.dll; RTX 20 frame "
+                                     "generation will not work until the game restarts"),
+                     true, MfgUnlock::Family::RTX2030);
+    }
+}
+
 bool IsRtx40Module(HMODULE module)
 {
     if (module == nullptr)
@@ -927,7 +943,8 @@ void MfgUnlock::ObserveProviderModule(HMODULE module)
 
     if (HasModuleFilename(module, L"nvcuda.dll"))
     {
-        InstallCudaHooksIfWanted();
+        if (!InstallCudaHooksIfWanted())
+            StandAsideTuringWithoutCuda();
         return;
     }
 

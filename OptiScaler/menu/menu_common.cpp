@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "menu_common.h"
 #include "MenuPages.h"
+#include "PluginsPage.h"
 #include <framegen/dlssg/DlssgTelemetry.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
@@ -3604,6 +3605,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         const auto name = MfgUnlock::kFamilyNames[index];
         ImGui::Text("%.*s: %s", static_cast<int>(name.size()), name.data(), text.c_str());
     }
+    if (ImGui::SmallButton("Change on the Plugins page"))
+        MenuPages::RequestPage(MenuPages::Page::Plugins);
 
     auto& menuResScale = ctx.menuResScale;
     auto& primaryGpu = *ctx.primaryGpu;
@@ -6992,12 +6995,6 @@ void MenuCommon::RenderAdvancedSettings(RenderMenuContext& ctx)
             MARK_ALL_BACKENDS_CHANGED();
         }
 
-        if (bool asiPlugins = config->LoadAsiPlugins.value_or_default();
-            ImGui::Checkbox("Load ASI plugins", &asiPlugins))
-            config->LoadAsiPlugins = asiPlugins;
-        ShowHelpMarker("Let OptiScaler load *.asi files from the plugins folder\n"
-                       "ini: [Plugins] LoadAsiPlugins. Save Settings and restart to apply.");
-
         // DRS
         ImGui::SeparatorText("DRS (Dynamic Resolution Scaling)");
         if (ImGui::BeginTable("drs", 2, ImGuiTableFlags_SizingStretchProp))
@@ -8151,6 +8148,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
         navItem(Page::OverlayLook);
         navItem(Page::Input);
         navItem(Page::Misc);
+        navItem(Page::Plugins);
 
         if (modern)
             ImGui::PopStyleColor(3);
@@ -8209,6 +8207,9 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             section(RenderAdvancedSettings, true);
             section(RenderLoggingSettings, true);
             section(RenderApiAndTextureSettings, true);
+            break;
+        case Page::Plugins:
+            PluginsPage::Render(ctx.config);
             break;
         case Page::NrF5Low:
         case Page::NrStatus:

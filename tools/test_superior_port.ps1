@@ -9,7 +9,9 @@ param(
     [switch]$GpuPackedTiming,
     [switch]$GpuHostOptTiming,
     [switch]$GpuCandidates,
-    [switch]$GpuCandidateTiming
+    [switch]$GpuCandidateTiming,
+    [switch]$GpuNativeCenter,
+    [switch]$GpuNativeCenterTiming
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -46,6 +48,12 @@ try {
         python tools/prepare_superior_host_tests.py
         if ($LASTEXITCODE -ne 0) { throw 'Host shader reference compilation failed' }
         $names += @('superior_host_quality', 'packed_host_quality')
+    }
+    if ($GpuNativeCenter -or $GpuNativeCenterTiming) {
+        python tools/prepare_native_center_tests.py
+        if ($LASTEXITCODE -ne 0) { throw 'Native centre reference/probe compilation failed' }
+        $names += 'native_center_mask'
+        if ($GpuNativeCenterTiming) { $names += 'native_center_timing' }
     }
     if ($GpuCandidates -or $GpuCandidateTiming) {
         python tools/prepare_superior_candidates.py
@@ -86,11 +94,19 @@ try {
         & "$out/packed_prepare_quality.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Packed carrier/guide comparison failed' }
     }
+    if ($GpuNativeCenter -or $GpuNativeCenterTiming) {
+        & "$out/native_center_mask.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Native centre identity/transition mask failed' }
+    }
     if ($GpuHost) {
         & "$out/superior_host_quality.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Host composition comparison failed' }
         & "$out/packed_host_quality.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Packed host composition comparison failed' }
+    }
+    if ($GpuNativeCenterTiming) {
+        & "$out/native_center_timing.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Native centre GPU timing failed' }
     }
     if ($GpuSpatialTiming) {
         & "$out/spatial_timing.exe"

@@ -76,6 +76,10 @@ low mean rules are unchanged. Historical GPU measurements below and in the four-
 change; this coefficient/schedule change has no newly claimed performance result and changes no shader bytecode.
 At or below 100% with active compression, the sequence is:
 
+At native Model resolution only, the uncompressed interior bypasses the guided filter while retaining NR, private DLSS,
+frequency shaping and composition. A four-pixel smooth transition precedes compression, which always receives full
+guided reconstruction. Details and validation: [Superior-native-center.md](Superior-native-center.md).
+
 | Stage, 3840x2160 output | 65% + Balanced | 100% + Balanced |
 | --- | --- | --- |
 | Original Compress colour/depth/motion pack | 2240x1264 | 3456x1952 |

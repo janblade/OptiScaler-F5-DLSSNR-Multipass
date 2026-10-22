@@ -97,9 +97,11 @@ try {
     $hostVariants += @("normal_sdr", "normal_hdr0", "normal_hdr2", "normal_hdr4", "normal_hdr6",
                        "normal_packed_sdr", "normal_packed_hdr0", "normal_packed_hdr2", "normal_packed_hdr4", "normal_packed_hdr6")
     $hostVariants += @('cached_packed_sdr', 'cached_packed_hdr0', 'cached_packed_hdr2', 'cached_packed_hdr4', 'cached_packed_hdr6')
+    $hostVariants += @('native_packed_hdr', 'native_packed_sdr', 'native_cached_packed_sdr', 'native_cached_packed_hdr0',
+                       'native_cached_packed_hdr2', 'native_cached_packed_hdr4', 'native_cached_packed_hdr6')
     foreach ($variant in $hostVariants) {
-        $specialized = $variant.StartsWith('normal_') -or $variant.StartsWith('cached_')
-        $stem = if ($specialized) { "host_$variant" } else { "host_resolve_$variant" }
+        $specialized = $variant.StartsWith('normal_') -or $variant.Contains('cached_')
+        $stem = if ($specialized -or $variant.StartsWith('native_')) { "host_$variant" } else { "host_resolve_$variant" }
         $defines = @("-D", "DLSSNR_SUPERIOR_HOST_RESOLVE=1")
         if ($variant.EndsWith("sdr")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_SDR=1") }
         if ($variant.StartsWith("raw_")) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_RAW=1") }
@@ -110,7 +112,8 @@ try {
             $defines += @('-D', 'DLSSNR_SUPERIOR_HOST_NORMAL=1', '-D', "DLSSNR_SUPERIOR_HOST_PASSTHROUGH=$pass",
                           '-D', "DLSSNR_SUPERIOR_HOST_MAPPING=$mapping")
         }
-        if ($variant.StartsWith('cached_')) { $defines += @('-D', 'DLSSNR_SUPERIOR_HOST_CACHED=1') }
+        if ($variant.Contains('cached_')) { $defines += @('-D', 'DLSSNR_SUPERIOR_HOST_CACHED=1') }
+        if ($variant.StartsWith('native_')) { $defines += @('-D', 'DLSSNR_SUPERIOR_NATIVE_CENTER=1') }
         $dest = "../superior/precompile/${stem}_Shader"
         & ../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect @defines dlssnr.hlsl -Fo "$dest.cso"
         if ($LASTEXITCODE -ne 0) { throw "Host resolve DXC failed: $variant" }

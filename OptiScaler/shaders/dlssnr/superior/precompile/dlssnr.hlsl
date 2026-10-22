@@ -245,7 +245,7 @@ float3 ClampAp1(float3 color)
 // The composition below (UpgradeToneMap's two-branch ratio, the OkLab hue correction, and the blend
 // between a luminance-only result and the model's own colour) is taken from RenoDX's DLSS 5 addon by
 // clshortfuse -- https://github.com/clshortfuse/renodx. It is their design, not ours; see
-// Licenses/RenoDX_LICENSE.txt. The OkLab matrices are Bjorn Ottosson's published constants and the
+// Licenses/RenoDX_ATTRIBUTION.txt. The OkLab matrices are Bjorn Ottosson's published constants and the
 // AP1, sRGB and PQ transforms are standard colour science.
 // ---------------------------------------------------------------------------------------------
 
@@ -547,7 +547,7 @@ float3 SoftKnee(float3 display)
 
 // Unclipped, hue-preserving Neutwo proxy adapted from clshortfuse/RenoDX.
 // One scalar maps the peak channel to [0,1), preserving RGB ratios.
-// Negative input channels are clamped before encoding. See Licenses/RenoDX_LICENSE.txt.
+// Negative input channels are clamped before encoding. See Licenses/RenoDX_ATTRIBUTION.txt.
 float Neutwo(float x) { return x * rsqrt(x * x + 1.0); } // [0, inf) -> [0, 1), no clip point
 
 float3 NeutwoEncode(float3 v)

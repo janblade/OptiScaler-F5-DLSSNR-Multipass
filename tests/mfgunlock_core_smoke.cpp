@@ -929,8 +929,20 @@ int main()
         Check(!report.Complete(), "sl.dlss_g stands aside on a six-byte register store of an unknown value");
         report = slCase({ 0x0f, 0x94, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // sete [rbx+f]
         Check(!report.Complete(), "sl.dlss_g stands aside on a setcc to the state");
+        report = slCase({ 0x89, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // mov [rbx+f], eax (dword covers the byte)
+        Check(!report.Complete() && report.failure.find("writes 4 bytes") != std::string::npos,
+              "sl.dlss_g stands aside on a dword store that covers the state byte");
+        report = slCase({ 0x89, 0x83, 0xf6, 0x44, 0x00, 0x00 }, holder); // mov [rbx+f-2], eax covers f, f+1
+        Check(!report.Complete(), "sl.dlss_g stands aside on a dword store at field-2 that reaches the state byte");
+        report = slCase({ 0x0f, 0x11, 0x83, 0xf0, 0x44, 0x00, 0x00 }, holder); // movups [rbx+f-8], xmm0
+        Check(!report.Complete() && report.failure.find("writes 16 bytes") != std::string::npos,
+              "sl.dlss_g stands aside on a movups block that reaches the state byte");
+        // mov [rbx+f-4], eax ends one byte short of the field, then a pinnable byte store.
+        report = slCase({ 0x89, 0x83, 0xf4, 0x44, 0x00, 0x00, 0x40, 0x88, 0xbb, 0xf8, 0x44, 0x00, 0x00 }, holder);
+        Check(report.Complete() && report.patches.size() == 2,
+              "sl.dlss_g ignores a dword store that ends just below the state byte");
         report = slCase({ 0xc5, 0xf8, 0x77, 0x44, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00 }, holder); // vzeroupper / store
-        Check(!report.Complete() && report.failure.find("outside every unwind function") != std::string::npos,
+        Check(!report.Complete() && report.failure.find("walk could not reach it") != std::string::npos,
               "sl.dlss_g stands aside on a store the function walk cannot decode its way to");
         report = slCase({ 0x33, 0xc0, 0x88, 0x83, 0xf8, 0x44, 0x00, 0x00, 0x40, 0x88, 0xbb, 0xf8, 0x44, 0x00, 0x00 },
                         holder); // xor eax,eax / mov [rbx+f], al / mov [rbx+f], dil

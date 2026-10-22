@@ -143,26 +143,68 @@ struct ByteStore
 {
     uint32_t rva = 0;
     hde64s decoded {};
-    bool knownInstruction = true; // false: outside every unwind function, so not provably an instruction
+    bool knownInstruction = true; // false: the function walk could not reach it, so not provably an instruction
+    uint32_t width = 0;           // bytes written to the memory operand
+    uint32_t disp = 0;            // the memory displacement [base + disp]
 };
 
-// Instructions that write one byte to their memory operand.
-inline bool WritesByte(const hde64s& decoded)
+// Bytes an instruction writes to its memory operand, or 0 when it is not a memory write this recognises (a read, a
+// register-only form, or an opcode not listed). SSE stores are over-estimated at 16 bytes, which only widens the
+// range checked for coverage, so it fails closed.
+inline uint32_t MemoryWriteWidth(const hde64s& d)
 {
-    const uint8_t op = decoded.opcode;
-    const uint8_t reg = decoded.modrm_reg;
-    if (op == 0x0F)
-        return (decoded.opcode2 >= 0x90 && decoded.opcode2 <= 0x9F) || decoded.opcode2 == 0xB0 ||
-               decoded.opcode2 == 0xC0; // setcc, cmpxchg r/m8, xadd r/m8
-    return op == 0xC6 || op == 0x88 || op == 0x86 || (op == 0x80 && reg != 7) ||
-           (op <= 0x30 && (op & 7) == 0) || (op == 0xFE && reg <= 1) || (op == 0xF6 && (reg == 2 || reg == 3));
+    if ((d.flags & F_MODRM) == 0 || d.modrm_mod == 3)
+        return 0;
+    const uint32_t wide = (d.flags & F_PREFIX_66) != 0 ? 2u : (d.rex_w != 0 ? 8u : 4u);
+    const uint8_t reg = d.modrm_reg;
+    if (d.opcode == 0x0F)
+    {
+        const uint8_t o2 = d.opcode2;
+        if ((o2 >= 0x90 && o2 <= 0x9F) || o2 == 0xB0 || o2 == 0xC0)
+            return 1; // setcc / cmpxchg r/m8 / xadd r/m8
+        if (o2 == 0xB1 || o2 == 0xC1)
+            return wide; // cmpxchg / xadd
+        if (o2 == 0x11 || o2 == 0x13 || o2 == 0x17 || o2 == 0x29 || o2 == 0x2B || o2 == 0x7F || o2 == 0xD6 ||
+            o2 == 0xE7)
+            return 16; // movups/movlps/movhps/movaps/movntps/movdqa/movq/movntdq stores
+        return 0;
+    }
+    switch (d.opcode)
+    {
+    case 0xC6:                                                                        // mov m8, imm8
+    case 0x88:                                                                        // mov m8, r8
+    case 0x86:                                                                        // xchg m8, r8
+    case 0x00: case 0x08: case 0x10: case 0x18: case 0x20: case 0x28: case 0x30:      // alu m8, r8 (0x38 cmp reads)
+    case 0xC0: case 0xD0: case 0xD2:                                                  // shift/rotate m8
+        return 1;
+    case 0x80:
+        return reg != 7 ? 1u : 0u; // grp1 m8, imm8 (cmp reads)
+    case 0xFE:
+        return reg <= 1 ? 1u : 0u; // inc/dec m8
+    case 0xF6:
+        return (reg == 2 || reg == 3) ? 1u : 0u; // not/neg m8
+    case 0xC7:                                                                        // mov m, imm
+    case 0x89:                                                                        // mov m, r
+    case 0x87:                                                                        // xchg m, r
+    case 0x01: case 0x09: case 0x11: case 0x19: case 0x21: case 0x29: case 0x31:      // alu m, r (0x39 cmp reads)
+    case 0xC1: case 0xD1: case 0xD3:                                                  // shift/rotate m
+        return wide;
+    case 0x81: case 0x83:
+        return reg != 7 ? wide : 0u; // grp1 imm (cmp reads)
+    case 0xFF:
+        return reg <= 1 ? wide : 0u; // inc/dec m
+    case 0xF7:
+        return (reg == 2 || reg == 3) ? wide : 0u; // not/neg m
+    default:
+        return 0;
+    }
 }
 
-// The instruction whose disp32 sits at dispRva, when it writes one byte to [base + field] (mod 10, with or without
-// SIB). Reads and wider writes of that offset are other data and are not reported.
-inline bool FindByteStore(const ImageView& image, uint32_t dispRva, uint32_t field, ByteStore& store)
+// The memory-writing instruction whose disp32 sits at dispRva (mod 10, with or without SIB), with the bytes it writes.
+// Reads and register forms are not reported. `back` spans the longest prefix+opcode+modrm+sib run before a disp32.
+inline bool FindCoveringStore(const ImageView& image, uint32_t dispRva, ByteStore& store)
 {
-    for (uint32_t back = 2; back <= 5 && back <= dispRva; ++back)
+    for (uint32_t back = 2; back <= 11 && back <= dispRva; ++back)
     {
         const uint32_t start = dispRva - back;
         const size_t room = image.ImageSize() - start;
@@ -175,14 +217,17 @@ inline bool FindByteStore(const ImageView& image, uint32_t dispRva, uint32_t fie
         hde64s decoded {};
         hde64_disasm(copy, &decoded);
         if ((decoded.flags & F_ERROR) != 0 || decoded.len == 0 || decoded.len > take ||
-            (decoded.flags & F_DISP32) == 0 || decoded.modrm_mod != 2 || decoded.disp.disp32 != field)
+            (decoded.flags & F_DISP32) == 0 || decoded.modrm_mod != 2)
             continue;
         const uint32_t immediate = (decoded.flags & F_IMM8) != 0    ? 1
                                    : (decoded.flags & F_IMM16) != 0 ? 2
                                    : (decoded.flags & F_IMM32) != 0 ? 4
                                    : (decoded.flags & F_IMM64) != 0 ? 8
                                                                     : 0;
-        if (start + decoded.len - immediate - sizeof(uint32_t) != dispRva || !WritesByte(decoded))
+        if (start + decoded.len - immediate - sizeof(uint32_t) != dispRva)
+            continue;
+        const uint32_t width = MemoryWriteWidth(decoded);
+        if (width == 0)
             continue;
 
         // Only a clean walk past `start` rules a candidate out. When the walk cannot reach it the store may be real,
@@ -193,6 +238,8 @@ inline bool FindByteStore(const ImageView& image, uint32_t dispRva, uint32_t fie
         store.rva = start;
         store.decoded = decoded;
         store.knownInstruction = walk == Walk::Start;
+        store.width = width;
+        store.disp = decoded.disp.disp32;
         return true;
     }
     return false;
@@ -403,19 +450,26 @@ inline void LocateFlip(const ImageView& image, Report& report)
         const auto* data = image.DataAtRva(section.VirtualAddress, section.Misc.VirtualSize);
         if (data == nullptr)
             continue;
+        // A store covers the state byte when its displacement is in [field - 15, field] and the bytes it writes reach
+        // it. The widest store here is 16 bytes, so disp32 values that far below the field are read as candidates too.
         for (uint32_t offset = 0; offset + sizeof(uint32_t) <= section.Misc.VirtualSize; ++offset)
         {
-            if (ReadU32(data + offset) != wantField)
+            const uint32_t candidate = ReadU32(data + offset);
+            if (candidate > wantField || wantField - candidate > 15)
                 continue;
             const uint32_t dispRva = section.VirtualAddress + offset;
             ByteStore store;
-            if (!FindByteStore(image, dispRva, wantField, store) ||
+            if (!FindCoveringStore(image, dispRva, store) ||
+                !(store.disp <= wantField && wantField - store.disp < store.width) ||
                 std::find(seen.begin(), seen.end(), store.rva) != seen.end())
                 continue;
             seen.push_back(store.rva);
 
+            // Only the exact one-byte store at the field can be pinned or kept; anything wider or offset covers the
+            // state byte and cannot be rewritten in place.
             std::vector<std::byte> replacement;
-            if (!PinByteStore(image, store, wantValue, replacement) && IsZeroInitialiser(image, store))
+            const bool exactByte = store.width == 1 && store.disp == wantField;
+            if (exactByte && !PinByteStore(image, store, wantValue, replacement) && IsZeroInitialiser(image, store))
             {
                 // Accepted residual: the member initialisation writes 0, which is hardware flip metering (the
                 // opposite of the pinned state when that is 1). It is kept on the basis of the object-construction
@@ -424,11 +478,13 @@ inline void LocateFlip(const ImageView& image, Report& report)
                 ++report.initialisers;
                 continue;
             }
-            if (!PinByteStore(image, store, wantValue, replacement))
+            if (!exactByte || !PinByteStore(image, store, wantValue, replacement))
             {
-                unpinnable = "the store at RVA 0x" + Hex(store.rva) + " (" + HexBytes(image, store.rva, store.decoded.len) +
-                             (store.knownInstruction ? ")" : ", outside every unwind function)") +
-                             " cannot be pinned in place";
+                unpinnable = "the store at RVA 0x" + Hex(store.rva) + " (" +
+                             HexBytes(image, store.rva, store.decoded.len) +
+                             (store.width != 1 ? ", writes " + std::to_string(store.width) + " bytes" : "") +
+                             (store.knownInstruction ? "" : ", the function walk could not reach it") +
+                             ") cannot be pinned in place";
                 break;
             }
             if (replacement.empty())

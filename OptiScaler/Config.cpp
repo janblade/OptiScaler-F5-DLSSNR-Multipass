@@ -325,10 +325,15 @@ bool Config::Reload(std::filesystem::path iniPath)
             FsrUseMaskForTransparency.set_from_config(readBool("FSR", "UseReactiveMaskForTransparency"));
             DlssReactiveMaskBias.set_from_config(readFloat("FSR", "DlssReactiveMaskBias"));
 
-            if (auto v = readEnum<FSR4Support>("FSR", "Fsr4ForceModel"))
-                Fsr4ForceModel.set_from_config(*v);
+            if (auto v = readEnum<FSR4Support>("FSR", "Fsr4GpuSupport"))
+                Fsr4GpuSupport.set_from_config(*v);
             else
-                Fsr4ForceModel.reset();
+                Fsr4GpuSupport.reset();
+
+            if (auto v = readEnum<FSR4Model>("FSR", "Fsr4Model"))
+                Fsr4Model.set_from_config(*v);
+            else
+                Fsr4Model.reset();
 
             Fsr4EnableWatermark.set_from_config(readBool("FSR", "Fsr4EnableWatermark"));
             Fsr4DoNotLoadAmdxc64.set_from_config(readBool("FSR", "Fsr4DoNotLoadAmdxc64"));
@@ -1178,6 +1183,13 @@ bool Config::Reload(std::filesystem::path iniPath)
         // Reading old configs for compatibility reasons
         {
             _DONTUSE_Fsr4ForceEnableInt8.set_from_config(readBool("FSR", "Fsr4ForceEnableInt8"));
+
+            // Named Fsr4ForceModel in older nightlies
+            if (!Fsr4GpuSupport.has_value())
+            {
+                if (auto v = readEnum<FSR4Support>("FSR", "Fsr4ForceModel"))
+                    Fsr4GpuSupport.set_from_config(*v);
+            }
         }
 
         return true;
@@ -1536,8 +1548,9 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FsrUseMaskForTransparency.value_for_config()).c_str());
         ini.SetValue("FSR", "DlssReactiveMaskBias",
                      GetFloatValue(Instance()->DlssReactiveMaskBias.value_for_config()).c_str());
-        ini.SetValue("FSR", "Fsr4ForceModel", GetIntValue(Instance()->Fsr4ForceModel.value_for_config()).c_str());
+        ini.SetValue("FSR", "Fsr4GpuSupport", GetIntValue(Instance()->Fsr4GpuSupport.value_for_config()).c_str());
         ini.SetValue("FSR", "Fsr4Preset", GetIntValue(Instance()->Fsr4Preset.value_for_config()).c_str());
+        ini.SetValue("FSR", "Fsr4Model", GetIntValue(Instance()->Fsr4Model.value_for_config()).c_str());
         ini.SetValue("FSR", "Fsr4EnableWatermark",
                      GetBoolValue(Instance()->Fsr4EnableWatermark.value_for_config()).c_str());
         ini.SetValue("FSR", "Fsr4DoNotLoadAmdxc64",
@@ -2253,6 +2266,7 @@ bool Config::SaveIni()
     // Old configs, just delete them
     {
         ini.Delete("FSR", "Fsr4ForceEnableInt8");
+        ini.Delete("FSR", "Fsr4ForceModel");
         ini.Delete("Nukems", "MakeDepthCopy", true);
     }
 

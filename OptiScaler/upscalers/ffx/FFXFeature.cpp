@@ -26,14 +26,18 @@ void FFXFeature::QueryVersionsDx12(ID3D12Device* device)
     versionQuery.device = device;
     uint64_t versionCount = 0;
     versionQuery.outputCount = &versionCount;
-    FfxApiProxy::D3D12_Query(nullptr, &versionQuery.header);
+
+    // The driver upscaler is always offered in the menu, even when the FFX SDK has a newer one
+    constexpr auto driverListing = FSR4DriverProviderDx12::Listing::Always;
+
+    FfxApiProxy::D3D12_QueryUpscalerVersions(&versionQuery, driverListing);
 
     // Fill version ids and names arrays
     State::Instance().ffxUpscalerVersionIds.resize(versionCount);
     State::Instance().ffxUpscalerVersionNames.resize(versionCount);
     versionQuery.versionIds = State::Instance().ffxUpscalerVersionIds.data();
     versionQuery.versionNames = State::Instance().ffxUpscalerVersionNames.data();
-    FfxApiProxy::D3D12_Query(nullptr, &versionQuery.header);
+    FfxApiProxy::D3D12_QueryUpscalerVersions(&versionQuery, driverListing);
 }
 
 void FFXFeature::QueryVersionsVulkan()

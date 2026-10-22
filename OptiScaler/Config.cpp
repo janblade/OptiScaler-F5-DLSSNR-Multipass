@@ -70,6 +70,26 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             FGEnabled.set_from_config(readBool("FrameGen", "Enabled"));
             ExternalFrameGeneration.set_from_config(readBool("FrameGen", "External"));
+            const auto readMfgUnlockMode = [this](const char* key)
+            {
+                std::string value = ini.GetValue("MFGUnlock", key, "off");
+                std::string lower = value;
+                std::ranges::transform(lower, lower.begin(), [](unsigned char c) { return std::tolower(c); });
+                _log.push_back(std::format("MFGUnlock.{}: {}", key, value));
+
+                if (lower == "auto")
+                    return std::optional<MfgUnlockMode>(MfgUnlockMode::Auto);
+                if (lower == "false" || lower == "off")
+                    return std::optional<MfgUnlockMode>(MfgUnlockMode::Off);
+                if (lower == "true" || lower == "on")
+                    return std::optional<MfgUnlockMode>(MfgUnlockMode::On);
+
+                LOG_WARN("[MFGUnlock] {} has invalid value '{}'; using off", key, value);
+                return std::optional<MfgUnlockMode>(MfgUnlockMode::Off);
+            };
+            MfgUnlockXeFG.set_from_config(readMfgUnlockMode("XeFG"));
+            MfgUnlockRTX40.set_from_config(readMfgUnlockMode("RTX40"));
+            MfgUnlockRTX2030.set_from_config(readMfgUnlockMode("RTX2030"));
             // The built-in MFG unlocks were removed in 0.1.33: their keys are only read to say so once at startup
             RemovedAdaMfgUnlockSet = readBool("DLSSG", "AdaMfgUnlock").value_or(false);
             RemovedAmpereMfgUnlockSet = readBool("DLSSG", "AmpereMfgUnlock").value_or(false);
@@ -220,6 +240,11 @@ bool Config::Reload(std::filesystem::path iniPath)
         }
 
         {
+            FGXeFGMaxInterpolations.set_from_config(readInt("XeFG", "MaxInterpolations"));
+            if (FGXeFGMaxInterpolations.has_value() &&
+                (FGXeFGMaxInterpolations.value() < 1 || FGXeFGMaxInterpolations.value() > 5))
+                FGXeFGMaxInterpolations.reset();
+
             FGXeFGInterpolationCount.set_from_config(readInt("XeFG", "InterpolationCount"));
             if (FGXeFGInterpolationCount.has_value() && FGXeFGInterpolationCount.value() < 1)
                 FGXeFGInterpolationCount.reset();
@@ -1262,6 +1287,22 @@ bool Config::SaveIni()
     {
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
         ini.SetValue("FrameGen", "External", GetBoolValue(Instance()->ExternalFrameGeneration.value_for_config_or(false)).c_str());
+        const auto mfgUnlockModeText = [](MfgUnlockMode mode)
+        {
+            switch (mode)
+            {
+            case MfgUnlockMode::Auto:
+                return "auto";
+            case MfgUnlockMode::Off:
+                return "false";
+            case MfgUnlockMode::On:
+                return "true";
+            }
+            return "false";
+        };
+        ini.SetValue("MFGUnlock", "XeFG", mfgUnlockModeText(Instance()->MfgUnlockXeFG.value_or_default()));
+        ini.SetValue("MFGUnlock", "RTX40", mfgUnlockModeText(Instance()->MfgUnlockRTX40.value_or_default()));
+        ini.SetValue("MFGUnlock", "RTX2030", mfgUnlockModeText(Instance()->MfgUnlockRTX2030.value_or_default()));
 
         // The built-in MFG unlocks were removed in 0.1.33; drop their keys so the startup note stops after a save
         for (const char* key : { "AdaMfgUnlock", "AdaBlackwellKernels", "AdaTemporalFix", "AdaFlipMeteringPatch",
@@ -1384,6 +1425,8 @@ bool Config::SaveIni()
 
     // XeFG output
     {
+        ini.SetValue("XeFG", "MaxInterpolations",
+                     GetIntValue(Instance()->FGXeFGMaxInterpolations.value_for_config()).c_str());
         ini.SetValue("XeFG", "InterpolationCount",
                      GetIntValue(Instance()->FGXeFGInterpolationCount.value_for_config()).c_str());
         ini.SetValue("XeFG", "DynamicMFG", GetBoolValue(Instance()->FGXeFGDynamicMFG.value_for_config()).c_str());

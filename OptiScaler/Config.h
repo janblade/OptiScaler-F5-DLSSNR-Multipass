@@ -16,6 +16,13 @@ enum HasDefaultValue
     SoftDefault // Change always gets saved to the config
 };
 
+enum class MfgUnlockMode
+{
+    Auto,
+    Off,
+    On
+};
+
 template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptional : public std::optional<T>
 {
   private:
@@ -1144,6 +1151,9 @@ class Config
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
     CustomOptional<bool> ExternalFrameGeneration { false };
+    CustomOptional<MfgUnlockMode> MfgUnlockXeFG { MfgUnlockMode::Off };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX40 { MfgUnlockMode::Off };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX2030 { MfgUnlockMode::Off };
     // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: the built-in MFG unlocks were removed in 0.1.32,
     // and startup says so once. Read only, never saved.
     bool RemovedAdaMfgUnlockSet = false;
@@ -1233,6 +1243,7 @@ class Config
 
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
+    CustomOptional<int> FGXeFGMaxInterpolations { 5 };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
     CustomOptional<bool> FGXeFGDynamicMFG { false };          // Count picked per frame, up to the InterpolationCount
     CustomOptional<float> FGXeFGFramerateTargetDMFG { 0.0f }; // 0: the FPS limit, else just under the refresh rate

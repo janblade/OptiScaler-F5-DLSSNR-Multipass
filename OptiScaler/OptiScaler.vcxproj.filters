@@ -1007,6 +1007,33 @@
     <ClInclude Include="framegen\dlssg\Kcd2Hdr.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\Image.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\FamilyXeFG.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\MfgUnlock.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\Locator.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\Patch.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\Provider.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\mfgunlock\Status.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\hde64.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\pstdint.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1746,6 +1773,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\dlssg\Kcd2Hdr.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="framegen\mfgunlock\MfgUnlock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\external\RTX40MFG-Unlock\source\native\third_party\minhook\src\hde\hde64.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="OptiTypes.cpp">

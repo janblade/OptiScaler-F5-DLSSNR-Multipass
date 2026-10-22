@@ -4,6 +4,7 @@
 #include <State.h>
 #include <Config.h>
 #include <DllNames.h>
+#include <framegen/mfgunlock/MfgUnlock.h>
 
 #include "LibraryLoad_Hooks.h"
 #include "Hook_Utils.h"
@@ -21,6 +22,13 @@ class NtdllHooks
     inline static NtdllProxy::PFN_NtLoadDll o_NtLoadDll = nullptr;
     inline static NtdllProxy::PFN_LdrLoadDll o_LdrLoadDll = nullptr;
     inline static NtdllProxy::PFN_LdrUnloadDll o_LdrUnloadDll = nullptr;
+
+    static NTSTATUS ObserveXeFGLoadResult(NTSTATUS result, std::wstring_view name, PHANDLE moduleHandle)
+    {
+        if (result >= 0 && moduleHandle != nullptr && *moduleHandle != nullptr && MfgUnlock::IsProviderModuleName(name))
+            MfgUnlock::ObserveProviderModule(static_cast<HMODULE>(*moduleHandle));
+        return result;
+    }
 
     static NTSTATUS NTAPI hkRtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation)
     {
@@ -70,7 +78,8 @@ class NtdllHooks
                 LibraryLoadHooks::EndsWithInsensitive(name, std::wstring(skip + L".dll")))
             {
                 LOG_TRACE("Skip checks for: {}", wstring_to_string(name.data()));
-                return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+                return ObserveXeFGLoadResult(o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle), name,
+                                             ModuleHandle);
             }
         }
 
@@ -88,11 +97,12 @@ class NtdllHooks
             {
                 LOG_TRACE("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
                 *ModuleHandle = (HANDLE) moduleHandle;
-                return (NTSTATUS) 0x00000000L;
+                return ObserveXeFGLoadResult((NTSTATUS) 0x00000000L, name, ModuleHandle);
             }
         }
 
-        return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        return ObserveXeFGLoadResult(o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle), name,
+                                     ModuleHandle);
     }
 
     static NTSTATUS NTAPI hkNtLoadDll(PUNICODE_STRING PathToFile, PULONG Flags, PUNICODE_STRING ModuleFileName,
@@ -171,6 +181,16 @@ class NtdllHooks
 
             if (result.has_value())
                 return result.value();
+
+            const HMODULE module = static_cast<HMODULE>(lpLibrary);
+            const bool trackedProvider = MfgUnlock::IsTrackedProviderModule(module);
+            if (trackedProvider && !MfgUnlock::BeforeModuleUnload(module))
+                return static_cast<NTSTATUS>(0xC0000001L);
+
+            const NTSTATUS unloadResult = o_LdrUnloadDll(lpLibrary);
+            if (trackedProvider)
+                MfgUnlock::AfterModuleUnload(module);
+            return unloadResult;
         }
 
         return o_LdrUnloadDll(lpLibrary);
@@ -188,11 +208,16 @@ class NtdllHooks
 
         LOG_FUNC();
 
-        if (!Config::Instance()->UseNtdllHooks.value_or_default())
-            return;
-
         if (NtdllProxy::Module() == nullptr)
             return;
+
+        if (!Config::Instance()->UseNtdllHooks.value_or_default())
+        {
+            // Only the MFG unlock needs the unload notification; without it this stays unhooked as before.
+            if (o_LdrUnloadDll == nullptr && MfgUnlock::AnyFamilyEnabled())
+                o_LdrUnloadDll = NtdllProxy::Hook_LdrUnloadDll(hkLdrUnloadDll);
+            return;
+        }
 
         if (o_RtlGetVersion == nullptr)
             o_RtlGetVersion = NtdllProxy::Hook_RtlGetVersion(hkRtlGetVersion);

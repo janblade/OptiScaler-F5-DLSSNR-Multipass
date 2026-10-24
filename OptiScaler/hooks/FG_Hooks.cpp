@@ -6,6 +6,7 @@
 
 #include <framegen/ffx/FSRFG_Dx12.h>
 #include <framegen/xefg/XeFG_Dx12.h>
+#include <framegen/xefg/XeFG_ShownRate.h>
 #include <framegen/dlssg/DLSSG_Dx12.h>
 
 #include <inputs/FG/FSR3_Dx12_FG.h>
@@ -1646,11 +1647,9 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         {
             InputCommon::xefg_present_status(xefgFrameId, status.framesPresented);
 
-            if (status.framesPresented != 0)
-            {
-                state.xefgShownFrames += status.framesPresented;
-                state.xefgShownPresents++;
-            }
+            // A present that sent nothing counts too: leaving it out would hide a stall
+            if (status.framesPresented != 0 || status.isFrameGenEnabled != 0)
+                xefg::AddShownPresent(state.xefgShown, status.framesPresented);
         }
     }
 

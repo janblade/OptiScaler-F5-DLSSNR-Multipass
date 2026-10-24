@@ -343,9 +343,9 @@ class State
     // limiter, not the low latency sleep after it (InputCommon::take_sleep_ms). For XeFG's Dynamic MFG.
     std::atomic<double> lastFGPresentMs = 0.0;
     // Frames XeFG sent to be shown, and the game presents that sent them (xefgSwapChainGetLastPresentStatus), running
-    // totals. For XeFG's Dynamic MFG: the presented frame rate it follows is the one shown, not count x real.
-    std::atomic<uint64_t> xefgShownFrames = 0;
-    std::atomic<uint64_t> xefgShownPresents = 0;
+    // totals packed in one word (framegen/xefg/XeFG_ShownRate.h). For XeFG's Dynamic MFG: the presented frame rate it
+    // follows is the one XeFG sends, not count x real.
+    std::atomic<uint64_t> xefgShown = 0;
     double presentFrameTime = 0.0;
     std::mutex frameTimeMutex;
 

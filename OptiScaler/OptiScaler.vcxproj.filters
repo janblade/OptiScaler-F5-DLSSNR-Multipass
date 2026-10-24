@@ -719,6 +719,9 @@
     <ClInclude Include="framegen\xefg\XeFG_DynamicTarget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\xefg\XeFG_ShownRate.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="proxies\XeFG_Proxy.h">
       <Filter>Header Files</Filter>
     </ClInclude>

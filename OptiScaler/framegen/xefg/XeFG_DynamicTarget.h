@@ -28,33 +28,4 @@ inline float DynamicTargetFps(float setFps, float limitFps, float refreshFps, bo
 
     return target;
 }
-
-// Frames XeFG showed per real frame, from the presents' own counts (xefgSwapChainGetLastPresentStatus) given as running
-// totals: the count asked for is not what is shown (a frame XeFG could not generate, frames V-Sync drops). Smoothed;
-// Restart on a count change. 0 until a present was seen.
-class ShownPerFrame
-{
-  public:
-    void Update(uint64_t shownTotal, uint64_t presentTotal)
-    {
-        const auto presents = presentTotal - _presentTotal;
-        const auto shown = shownTotal - _shownTotal;
-        _presentTotal = presentTotal;
-        _shownTotal = shownTotal;
-
-        if (presents == 0 || presentTotal < presents)
-            return;
-
-        const double sample = (double) shown / (double) presents;
-        _value = _value > 0.0 ? _value + 0.1 * (sample - _value) : sample;
-    }
-
-    void Restart() { _value = 0.0; }
-    double Value() const { return _value; }
-
-  private:
-    uint64_t _shownTotal = 0;
-    uint64_t _presentTotal = 0;
-    double _value = 0.0;
-};
 } // namespace xefg

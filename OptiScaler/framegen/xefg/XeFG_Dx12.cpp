@@ -1118,8 +1118,9 @@ int XeFG_Dx12::DynamicCount(int maxCount)
         _shownCount = current;
     }
 
-    _shownPerFrame.Update(state.xefgShownFrames.load(), state.xefgShownPresents.load());
+    _shownPerFrame.Update(state.xefgShown.load());
     const double shownPerFrame = _shownPerFrame.Value();
+    const double rawShownPerFrame = _shownPerFrame.Sample();
 
     // What the game waited in OptiScaler: its low latency sleep, the present and OptiScaler's limiter (inside the
     // present's time). The cap controller takes the sleeps alone, its probing covers a present held by V-Sync.
@@ -1152,7 +1153,7 @@ int XeFG_Dx12::DynamicCount(int maxCount)
         if (!_dynamicCapActive)
             _dynamicCap.Reset();
 
-        count = _dynamicCap.Update({ now, frameMs, sleepMs + limiterMs, target, maxCount, kept, shownPerFrame });
+        count = _dynamicCap.Update({ now, frameMs, sleepMs + limiterMs, target, maxCount, kept, shownPerFrame, rawShownPerFrame });
 
         if (count != current || now - _dynamicLogMs >= 5000.0)
         {
@@ -1181,7 +1182,7 @@ int XeFG_Dx12::DynamicCount(int maxCount)
             _dynamicCount.Restart();
 
         count = _dynamicCount.Update({ now, frameMs, waitMs, target, refresh, config->FramerateLimit.value_or_default(),
-                                       maxCount, current, rounding, minCount, shownPerFrame });
+                                       maxCount, current, rounding, minCount, shownPerFrame, rawShownPerFrame });
 
         if (count != current || now - _dynamicLogMs >= 5000.0)
         {
@@ -1221,6 +1222,8 @@ void XeFG_Dx12::StopDynamic()
     _dynamicCount.Reset();
     _dynamicCap.Reset();
     _dynamicCapActive = false;
+    _shownPerFrame.Rebase();
+    _shownCount = -1;
     State::Instance().xefgDynamicCapFps = 0.0f;
 
     if (_generationOff)

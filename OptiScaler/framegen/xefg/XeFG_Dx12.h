@@ -10,6 +10,7 @@
 #include "XeFG_DynamicCount.h"
 #include "XeFG_DynamicCap.h"
 #include "XeFG_DynamicTarget.h"
+#include "XeFG_ShownRate.h"
 
 #include <xell.h>
 #include <xell_d3d12.h>
@@ -43,7 +44,7 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     bool _dynamicDrain = true; // the next frame's sleep times reach back before Dynamic ran: dropped
     double _dynamicLogMs = 0.0;
     xefg::ShownPerFrame _shownPerFrame;
-    int _shownCount = -1; // the count it was measured at
+    int _shownCount = -1; // the count it was measured at (-1: none yet)
     int _refreshRate = 0;
     double _refreshCheckedMs = 0.0;
 

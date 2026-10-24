@@ -77,7 +77,8 @@ class XeFG_DynamicCount
         int currentCount = 1;    // interpolated frames in use
         int rounding = 1;        // Rounding: 0 down, 1 nearest, 2 up
         int minCount = 1;        // fewest interpolated frames: 0 allows 1X (frame generation off)
-        double shownPerFrame = 0.0; // frames shown per real frame, measured; 0: not known (count + 1)
+        double shownPerFrame = 0.0; // frames shown per real frame, measured and smoothed; 0: not known (count + 1)
+        double rawShownPerFrame = -1.0; // this frame's own measure, for the check windows; < 0: none
     };
 
     enum class Rounding
@@ -146,6 +147,7 @@ class XeFG_DynamicCount
         // Shown per real frame: measured, never above what the count asks for
         const double shown = s.shownPerFrame > 0.0 ? std::min(s.shownPerFrame, count + 1.0) : count + 1.0;
         const double presented = 1000.0 * shown / _frameMs;
+        const double rawShown = s.rawShownPerFrame >= 0.0 ? std::min(s.rawShownPerFrame, count + 1.0) : shown;
         // Presented at one step less: from 2X to 1X frame generation stops altogether, which saves more than a frame
         const bool toOff = count == 1;
         const double saved = toOff && _offSamples > 0 ? _offMs : _genMs;
@@ -195,7 +197,7 @@ class XeFG_DynamicCount
             if (++_checkFrames > kCheckSkipFrames)
             {
                 _checkSumMs += s.frameMs;
-                _checkShownSum += shown;
+                _checkShownSum += rawShown;
                 _checkWorkSumMs += work;
                 ++_checkCount;
             }

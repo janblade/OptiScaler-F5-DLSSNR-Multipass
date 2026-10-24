@@ -55,12 +55,13 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     float DynamicTargetFps(double nowMs);
 
     // XeFG's frame ID of each slot's frame (FrameIdFor): one more than the last, or our XeLL's ID for that frame while it
-    // rises by 1 too
+    // rises by 1 too, and where XeFG's history is reset anyway
     enum class FrameIdMode
     {
         Own, // no XeLL ID
         OwnForGame,
         OwnAfterJump,
+        OwnUnusable,
         FollowsOurs
     };
 

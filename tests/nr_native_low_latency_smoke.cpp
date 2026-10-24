@@ -645,21 +645,31 @@ int main()
         CHECK(ids.For(2, 0, XellIdSource::None).id == 2);
         CHECK(!ids.For(3, 0, XellIdSource::None).followsXell);
 
-        // Our XeLL fed from the next frame on: followed, no reset (nothing followed before)
+        using xefg::OwnReason;
+
+        // Our XeLL fed from the next frame on (XeFG numbered 3 frames): followed; 18 is not 3 + 1, history reset
         auto pick = ids.For(4, 18, XellIdSource::Ours);
-        CHECK(pick.id == 18 && pick.followsXell && !pick.steppedBack && !pick.jumped && pick.picked);
-        CHECK(ids.For(5, 19, XellIdSource::Ours).id == 19);
+        CHECK(pick.id == 18 && pick.followsXell && pick.resetHistory && pick.picked);
+        pick = ids.For(5, 19, XellIdSource::Ours);
+        CHECK(pick.id == 19 && pick.followsXell && !pick.resetHistory);
 
         // The frame's ID is kept for all of its uses (tags, constants, present), whatever XeLL says by then
         pick = ids.For(5, 20, XellIdSource::Ours);
         CHECK(pick.id == 19 && !pick.picked);
 
-        // Low latency started after XeFG numbered thousands of frames: followed downwards with no reset
+        // Nothing numbered before: the first ID is followed whatever it is, no reset
+        FrameIds<4> fresh;
+        pick = fresh.For(1, 700, XellIdSource::Ours);
+        CHECK(pick.id == 700 && pick.followsXell && !pick.resetHistory);
+
+        // Low latency started after XeFG numbered thousands of frames: followed downwards, with a history reset
         FrameIds<4> late;
         for (uint64_t f = 1; f <= 4420; ++f)
             late.For(f, 0, XellIdSource::None);
         pick = late.For(4421, 1, XellIdSource::Ours);
-        CHECK(pick.id == 1 && pick.followsXell && !pick.steppedBack);
+        CHECK(pick.id == 1 && pick.followsXell && pick.resetHistory);
+        pick = late.For(4422, 2, XellIdSource::Ours);
+        CHECK(pick.id == 2 && pick.followsXell && !pick.resetHistory);
 
         // The game's own Reflex IDs skip (a tester's Forza Motorsport log) and come from the latest marker, not the
         // frame's: never followed, XeFG's IDs rise by 1
@@ -669,7 +679,7 @@ int main()
         for (uint64_t f = 0; f < sizeof(skipping) / sizeof(skipping[0]); ++f)
         {
             pick = game.For(f + 1, skipping[f], XellIdSource::Game);
-            CHECK(!pick.followsXell && !pick.steppedBack && !pick.jumped);
+            CHECK(!pick.followsXell && !pick.resetHistory && pick.ownReason == OwnReason::None);
             CHECK(previous == 0 || pick.id == previous + 1);
             previous = pick.id;
         }
@@ -679,46 +689,76 @@ int main()
         for (uint32_t id = 300; id < 320; ++id)
         {
             pick = ours.For(id, id, XellIdSource::Ours);
-            CHECK(pick.id == id && pick.followsXell && !pick.steppedBack && !pick.jumped);
+            CHECK(pick.id == id && pick.followsXell && !pick.resetHistory && pick.ownReason == OwnReason::None);
         }
 
-        // One jump in our XeLL IDs: XeFG's IDs go on by 1, and the jump is flagged
+        // One jump in our XeLL IDs mid-stream: XeFG's IDs go on by 1, the jump is flagged, no re-sync without a reset
         FrameIds<4> jump;
         for (uint32_t id = 10; id <= 12; ++id)
             jump.For(id, id, XellIdSource::Ours);
         pick = jump.For(13, 20, XellIdSource::Ours);
-        CHECK(pick.id == 13 && !pick.followsXell && pick.jumped);
+        CHECK(pick.id == 13 && !pick.followsXell && pick.ownReason == OwnReason::Jumped);
         for (uint32_t id = 21; id < 30; ++id)
         {
             pick = jump.For(id - 7, id, XellIdSource::Ours);
-            CHECK(pick.id == id - 7 && !pick.followsXell);
+            CHECK(pick.id == id - 7 && !pick.followsXell && !pick.resetHistory);
         }
+
+        // Pause and resume: FG paused for 10 frames while our XeLL ran on (no For call); the first frame after is
+        // followed again with a history reset, then without
+        FrameIds<4> pause;
+        for (uint32_t id = 100; id <= 105; ++id)
+            pause.For(id, id, XellIdSource::Ours);
+        pick = pause.For(116, 116, XellIdSource::Ours);
+        CHECK(pick.id == 116 && pick.followsXell && pick.resetHistory);
+        pick = pause.For(117, 117, XellIdSource::Ours);
+        CHECK(pick.id == 117 && pick.followsXell && !pick.resetHistory);
+
+        // A frame with a history reset (the game's reset flag) re-syncs too, not one without
+        FrameIds<4> reset;
+        for (uint32_t id = 50; id <= 52; ++id)
+            reset.For(id, id, XellIdSource::Ours);
+        pick = reset.For(53, 60, XellIdSource::Ours, false);
+        CHECK(pick.id == 53 && !pick.followsXell && pick.ownReason == OwnReason::Jumped);
+        pick = reset.For(54, 61, XellIdSource::Ours, true);
+        CHECK(pick.id == 61 && pick.followsXell && pick.resetHistory);
+        // With resets switched off (FGSkipReset) nothing is re-synced
+        pick = reset.For(55, 70, XellIdSource::Ours, true, false);
+        CHECK(pick.id == 62 && !pick.followsXell && !pick.resetHistory);
 
         // The game takes XeLL over from ours: XeFG's IDs go on by 1, and a later start of ours is followed again
         FrameIds<4> handover;
         handover.For(1, 5, XellIdSource::Ours);
         handover.For(2, 6, XellIdSource::Ours);
         pick = handover.For(3, 900, XellIdSource::Game);
-        CHECK(pick.id == 7 && !pick.followsXell && !pick.jumped);
+        CHECK(pick.id == 7 && !pick.followsXell && pick.ownReason == OwnReason::None);
         pick = handover.For(4, 2, XellIdSource::Ours);
-        CHECK(pick.id == 2 && pick.followsXell && !pick.steppedBack);
+        CHECK(pick.id == 2 && pick.followsXell && pick.resetHistory);
 
         // Our XeLL restarts its IDs (NBA 2K27: 241 -> 2): followed, with a history reset
         FrameIds<4> restart;
         for (uint32_t id = 230; id <= 241; ++id)
             restart.For(id, id, XellIdSource::Ours);
         pick = restart.For(242, 2, XellIdSource::Ours);
-        CHECK(pick.id == 2 && pick.followsXell && pick.steppedBack);
+        CHECK(pick.id == 2 && pick.followsXell && pick.resetHistory);
         pick = restart.For(243, 3, XellIdSource::Ours);
-        CHECK(pick.id == 3 && pick.followsXell && !pick.steppedBack);
+        CHECK(pick.id == 3 && pick.followsXell && !pick.resetHistory);
 
-        // XeLL's ID does not advance (a frame started twice): XeFG's ID still rises
+        // XeLL's ID does not advance (a frame started twice): XeFG's ID still rises, with a reason. Frame 3: XeLL's 51 is XeFG's
+        // last, so it is not usable either (no silent follow)
         FrameIds<4> twice;
         CHECK(twice.For(1, 50, XellIdSource::Ours).id == 50);
         pick = twice.For(2, 50, XellIdSource::Ours);
-        CHECK(pick.id == 51 && !pick.followsXell && !pick.steppedBack && !pick.jumped);
+        CHECK(pick.id == 51 && !pick.followsXell && !pick.resetHistory && pick.ownReason == OwnReason::Unusable);
         pick = twice.For(3, 51, XellIdSource::Ours);
-        CHECK(pick.id == 52 && !pick.steppedBack);
+        CHECK(pick.id == 52 && !pick.followsXell && !pick.resetHistory && pick.ownReason == OwnReason::Unusable);
+
+        // An ID XeFG still holds after a gap (a pause): not followed, flagged
+        FrameIds<4> held;
+        for (uint32_t id = 40; id <= 43; ++id)
+            held.For(id, id, XellIdSource::Ours);
+        pick = held.For(50, 42, XellIdSource::Ours);
+        CHECK(pick.id == 44 && !pick.followsXell && pick.ownReason == OwnReason::Unusable);
 
         // An XeLL ID that stays the same for a long time is never followed again (no reset every few frames)
         FrameIds<4> stale;
@@ -729,12 +769,20 @@ int main()
         for (uint64_t f = 2; f < 40; ++f)
         {
             pick = stale.For(f, 70, XellIdSource::Ours);
-            resets += pick.steppedBack ? 1 : 0;
+            resets += pick.resetHistory ? 1 : 0;
             follows += pick.followsXell ? 1 : 0;
-            CHECK(pick.id == last + 1);
+            CHECK(pick.id == last + 1 && pick.ownReason == OwnReason::Unusable);
             last = pick.id;
         }
         CHECK(resets == 0 && follows == 0);
+
+        // XeFG's own counter wraps past 0xFFFFFFFF without handing out 0
+        FrameIds<4> wrap;
+        wrap.For(1, 0xFFFFFFFEu, XellIdSource::Ours);
+        wrap.For(2, 0xFFFFFFFFu, XellIdSource::Ours);
+        pick = wrap.For(3, 0, XellIdSource::None);
+        CHECK(pick.id == 1 && !pick.followsXell);
+        CHECK(wrap.For(4, 0, XellIdSource::None).id == 2);
 
         // The history holds the newest kSize IDs only
         xefg::FrameIdHistory history;

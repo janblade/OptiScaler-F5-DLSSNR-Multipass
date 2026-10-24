@@ -977,13 +977,13 @@ bool XeFG_Dx12::Dispatch()
     constData.motionVectorScaleX = _mvScaleX[fIndex];
     constData.motionVectorScaleY = _mvScaleY[fIndex];
 
-    // The frame's XeLL ID (FrameIdFor): Present Id and Present Start Id (XeLL's PRESENT_START) match while XeLL is fed
+    // The frame's ID (FrameIdFor): Present Id and Present Start Id (XeLL's PRESENT_START) match while our XeLL is followed
     const auto framePick = FrameIdFor(willDispatchFrame);
     const auto frameId = framePick.id;
 
-    // An XeLL ID below the last one followed (the game restarted its IDs): no interpolation across it
+    // A followed XeLL ID that is not XeFG's last + 1 (a pause, or our XeLL restarted its IDs): no interpolation across it
     if (!Config::Instance()->FGSkipReset.value_or_default())
-        constData.resetHistory = _reset[fIndex] || framePick.steppedBack;
+        constData.resetHistory = _reset[fIndex] || framePick.resetHistory;
     else
         constData.resetHistory = false;
 
@@ -1634,8 +1634,10 @@ xefg::FrameIdPick XeFG_Dx12::FrameIdFor(UINT64 fgFrame)
     std::scoped_lock lock(_frameIdMutex);
 
     const auto lastFollowed = _frameIds.LastFollowedXell();
+    const auto lastId = _frameIds.LastId();
     const auto xell = XellFrameId();
-    const auto pick = _frameIds.For(fgFrame, xell.id, xell.source);
+    const bool canReset = !Config::Instance()->FGSkipReset.value_or_default();
+    const auto pick = _frameIds.For(fgFrame, xell.id, xell.source, _reset[fgFrame % BUFFER_COUNT] != 0, canReset);
 
     if (!pick.picked)
         return pick;
@@ -1647,12 +1649,20 @@ xefg::FrameIdPick XeFG_Dx12::FrameIdFor(UINT64 fgFrame)
 
         _frameIdMode = FrameIdMode::FollowsOurs;
     }
-    else if (pick.jumped)
+    else if (pick.ownReason == xefg::OwnReason::Jumped)
     {
         if (_frameIdMode != FrameIdMode::OwnAfterJump)
-            LOG_INFO("XeFG frame IDs: own counter, XeLL ID jumped {} -> {}", lastFollowed, xell.id);
+            LOG_INFO("XeFG frame IDs: own counter, XeLL ID jumped {} -> {} (XeFG last {})", lastFollowed, xell.id,
+                     lastId);
 
         _frameIdMode = FrameIdMode::OwnAfterJump;
+    }
+    else if (pick.ownReason == xefg::OwnReason::Unusable)
+    {
+        if (_frameIdMode != FrameIdMode::OwnUnusable)
+            LOG_INFO("XeFG frame IDs: own counter, our XeLL ID {} not usable (XeFG last {})", xell.id, lastId);
+
+        _frameIdMode = FrameIdMode::OwnUnusable;
     }
     else if (xell.source == xefg::XellIdSource::Game)
     {
@@ -1661,13 +1671,16 @@ xefg::FrameIdPick XeFG_Dx12::FrameIdFor(UINT64 fgFrame)
 
         _frameIdMode = FrameIdMode::OwnForGame;
     }
-    else if (xell.source == xefg::XellIdSource::None)
+    else
     {
+        if (_frameIdMode != FrameIdMode::Own)
+            LOG_INFO("XeFG frame IDs: own counter (no XeLL IDs)");
+
         _frameIdMode = FrameIdMode::Own;
     }
 
-    if (pick.steppedBack)
-        LOG_INFO("XeFG frame IDs step back to XeLL's {} (from {}), history reset", pick.id, lastFollowed);
+    if (pick.resetHistory)
+        LOG_INFO("XeFG frame IDs: XeLL's {} is not XeFG's last {} + 1, history reset", pick.id, lastId);
 
     return pick;
 }

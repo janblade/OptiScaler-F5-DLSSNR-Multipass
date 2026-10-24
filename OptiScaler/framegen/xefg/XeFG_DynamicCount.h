@@ -77,6 +77,7 @@ class XeFG_DynamicCount
         int currentCount = 1;    // interpolated frames in use
         int rounding = 1;        // Rounding: 0 down, 1 nearest, 2 up
         int minCount = 1;        // fewest interpolated frames: 0 allows 1X (frame generation off)
+        double shownPerFrame = 0.0; // frames shown per real frame, measured; 0: not known (count + 1)
     };
 
     enum class Rounding
@@ -142,7 +143,9 @@ class XeFG_DynamicCount
             _workMs += kAlpha * (work - _workMs);
         }
 
-        const double presented = 1000.0 * (count + 1) / _frameMs;
+        // Shown per real frame: measured, never above what the count asks for
+        const double shown = s.shownPerFrame > 0.0 ? std::min(s.shownPerFrame, count + 1.0) : count + 1.0;
+        const double presented = 1000.0 * shown / _frameMs;
         // Presented at one step less: from 2X to 1X frame generation stops altogether, which saves more than a frame
         const bool toOff = count == 1;
         const double saved = toOff && _offSamples > 0 ? _offMs : _genMs;
@@ -192,13 +195,14 @@ class XeFG_DynamicCount
             if (++_checkFrames > kCheckSkipFrames)
             {
                 _checkSumMs += s.frameMs;
+                _checkShownSum += shown;
                 _checkWorkSumMs += work;
                 ++_checkCount;
             }
 
             const bool enough = _checkCount >= kCheckMinFrames && sinceChange >= kCheckMinMs;
             const bool end = enough && nowMs >= _checkUntilMs;
-            const double mean = enough ? 1000.0 * (count + 1) * _checkCount / _checkSumMs : 0.0;
+            const double mean = enough ? 1000.0 * _checkShownSum / _checkSumMs : 0.0;
 
             if (_checkFree)
             {
@@ -736,6 +740,7 @@ class XeFG_DynamicCount
         _checkFrames = 0;
         _checkCount = 0;
         _checkSumMs = 0.0;
+        _checkShownSum = 0.0;
         _checkWorkSumMs = 0.0;
 
         // The real frame time changes with the count, start the averages over.
@@ -770,6 +775,7 @@ class XeFG_DynamicCount
     int _checkFrames = 0; // frames since the change
     int _checkCount = 0;  // of them averaged
     double _checkSumMs = 0.0;
+    double _checkShownSum = 0.0; // frames shown over them
     double _checkWorkSumMs = 0.0;
 
     double _goalFps = 0.0; // target and rounding, for noticing new ones

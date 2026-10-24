@@ -232,6 +232,42 @@ int main()
         Check(clamped.changesLate <= 2, "clamped: settles");
     }
 
+    std::printf("Measured shown frames:\n");
+    {
+        // A tester's Forza Motorsport log: 6X asked for, 1.4 frames shown per real frame. The estimate counts the shown
+        // frames, not count x real.
+        XeFG_DynamicCount dc;
+        dc.Update({ 1000.0, 10.0, 0.0, 168.0, 0.0, 0.0, 5, 5, 1, 0, 1.4 });
+        Check(std::abs(dc.PresentedFps() - 140.0) < 0.5, "Dynamic MFG: presented rate from the shown frames");
+
+        XeFG_DynamicCount nominal;
+        nominal.Update({ 1000.0, 10.0, 0.0, 168.0, 0.0, 0.0, 5, 5, 1, 0 });
+        Check(std::abs(nominal.PresentedFps() - 600.0) < 0.5, "Dynamic MFG: nothing measured, count x real");
+
+        XeFG_DynamicCount over;
+        over.Update({ 1000.0, 10.0, 0.0, 168.0, 0.0, 0.0, 5, 1, 1, 0, 9.0 });
+        Check(std::abs(over.PresentedFps() - 200.0) < 0.5, "Dynamic MFG: never above what the count asks for");
+
+        XeFG_DynamicCap cap;
+        cap.Update({ 1000.0, 10.0, 0.0, 168.0, 5, 5, 1.4 });
+        Check(std::abs(cap.PresentedFps() - 140.0) < 0.5, "cap: presented rate from the shown frames");
+
+        xefg::ShownPerFrame shown;
+        Check(shown.Value() == 0.0, "no present seen: not known");
+        shown.Update(0, 0);
+        Check(shown.Value() == 0.0, "no change: not known");
+        for (uint64_t frame = 1; frame <= 50; ++frame)
+            shown.Update(frame * 6, frame);
+        Check(std::abs(shown.Value() - 6.0) < 1e-6, "6 shown per present");
+        for (uint64_t frame = 51; frame <= 250; ++frame)
+            shown.Update(300 + (frame - 50) * 1, frame);
+        Check(std::abs(shown.Value() - 1.0) < 0.01, "follows the shown frames down to 1");
+        shown.Restart();
+        Check(shown.Value() == 0.0, "restarted");
+        shown.Update(600, 251);
+        Check(shown.Value() == 100.0, "counts presents since the restart");
+    }
+
     std::printf(failures == 0 ? "xefg_dynamic_count_smoke: PASS\n" : "xefg_dynamic_count_smoke: FAIL (%d)\n", failures);
     return failures == 0 ? 0 : 1;
 }

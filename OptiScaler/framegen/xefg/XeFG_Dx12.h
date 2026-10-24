@@ -42,6 +42,8 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     bool _dynamicCapActive = false;
     bool _dynamicDrain = true; // the next frame's sleep times reach back before Dynamic ran: dropped
     double _dynamicLogMs = 0.0;
+    xefg::ShownPerFrame _shownPerFrame;
+    int _shownCount = -1; // the count it was measured at
     int _refreshRate = 0;
     double _refreshCheckedMs = 0.0;
 

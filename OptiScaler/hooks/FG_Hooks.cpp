@@ -1645,6 +1645,12 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             XEFG_SWAPCHAIN_RESULT_SUCCESS)
         {
             InputCommon::xefg_present_status(xefgFrameId, status.framesPresented);
+
+            if (status.framesPresented != 0)
+            {
+                state.xefgShownFrames += status.framesPresented;
+                state.xefgShownPresents++;
+            }
         }
     }
 

@@ -1111,6 +1111,16 @@ int XeFG_Dx12::DynamicCount(int maxCount)
     const int kept = _framesToInterpolate >= 1 ? std::min(_framesToInterpolate, maxCount) : maxCount;
     const int current = _generationOff ? 0 : kept;
 
+    // Shown per real frame, measured (the count asked for is not always what XeFG shows): started over at a new count
+    if (current != _shownCount)
+    {
+        _shownPerFrame.Restart();
+        _shownCount = current;
+    }
+
+    _shownPerFrame.Update(state.xefgShownFrames.load(), state.xefgShownPresents.load());
+    const double shownPerFrame = _shownPerFrame.Value();
+
     // What the game waited in OptiScaler: its low latency sleep, the present and OptiScaler's limiter (inside the
     // present's time). The cap controller takes the sleeps alone, its probing covers a present held by V-Sync.
     double sleepMs = InputCommon::take_sleep_ms();
@@ -1142,7 +1152,7 @@ int XeFG_Dx12::DynamicCount(int maxCount)
         if (!_dynamicCapActive)
             _dynamicCap.Reset();
 
-        count = _dynamicCap.Update({ now, frameMs, sleepMs + limiterMs, target, maxCount, kept });
+        count = _dynamicCap.Update({ now, frameMs, sleepMs + limiterMs, target, maxCount, kept, shownPerFrame });
 
         if (count != current || now - _dynamicLogMs >= 5000.0)
         {
@@ -1171,7 +1181,7 @@ int XeFG_Dx12::DynamicCount(int maxCount)
             _dynamicCount.Restart();
 
         count = _dynamicCount.Update({ now, frameMs, waitMs, target, refresh, config->FramerateLimit.value_or_default(),
-                                       maxCount, current, rounding, minCount });
+                                       maxCount, current, rounding, minCount, shownPerFrame });
 
         if (count != current || now - _dynamicLogMs >= 5000.0)
         {

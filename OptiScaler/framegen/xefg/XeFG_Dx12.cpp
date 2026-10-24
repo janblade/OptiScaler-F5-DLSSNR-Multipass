@@ -14,7 +14,13 @@
 
 #include <magic_enum.hpp>
 
-static uint32_t XellFrameId();
+struct XellFrameIdAndSource
+{
+    uint32_t id = 0;
+    xefg::XellIdSource source = xefg::XellIdSource::None;
+};
+
+static XellFrameIdAndSource XellFrameId();
 
 #include <DirectXMath.h>
 
@@ -999,7 +1005,7 @@ bool XeFG_Dx12::Dispatch()
     LOG_DEBUG("Reset: {}, Opti FT: {}, Source FT: {}, Set FT: {}, Opti Id: {}, Present Id: {}, Reflex Id: {}, XeLL Id "
               "now: {}, Present Start Id: {}",
               constData.resetHistory, constData.frameRenderTime, _ftDelta[fIndex], constData.frameRenderTime,
-              _frameCount, frameId, State::Instance().reflexFrameId, XellFrameId(),
+              _frameCount, frameId, State::Instance().reflexFrameId, XellFrameId().id,
               ReflexHooks::lastMarkerFrameId(PRESENT_START));
 
     auto result = XeFGProxy::TagFrameConstants()(_swapChainContext, frameId, &constData);
@@ -1598,14 +1604,17 @@ bool XeFG_Dx12::Present()
     return Dispatch();
 }
 
-// XeLL's frame ID of the frame being rendered: ours while Optical F5Low's low latency feeds XeFG's XeLL, else the
-// game's when its own Reflex feeds XeLL, else 0 (XeFG numbers frames itself)
-static uint32_t XellFrameId()
+// XeLL's frame ID of the frame being rendered and whose it is: ours while Optical F5Low's low latency feeds XeFG's XeLL,
+// else the game's when its own Reflex feeds XeLL, else 0 (XeFG numbers frames itself)
+static XellFrameIdAndSource XellFrameId()
 {
     if (const auto ours = native::lowlatency::FrameIdForFrameGeneration(); ours != 0)
-        return ours;
+        return { ours, xefg::XellIdSource::Ours };
 
-    return ReflexHooks::gameXellFrameId();
+    if (const auto game = ReflexHooks::gameXellFrameId(); game != 0)
+        return { game, xefg::XellIdSource::Game };
+
+    return {};
 }
 
 // Picked at the frame's first use (its first tagged resource, else its Dispatch) and kept for all of the frame's tags
@@ -1615,25 +1624,41 @@ xefg::FrameIdPick XeFG_Dx12::FrameIdFor(UINT64 fgFrame)
     std::scoped_lock lock(_frameIdMutex);
 
     const auto lastFollowed = _frameIds.LastFollowedXell();
-    const auto xellId = XellFrameId();
-    const auto pick = _frameIds.For(fgFrame, xellId);
+    const auto xell = XellFrameId();
+    const auto pick = _frameIds.For(fgFrame, xell.id, xell.source);
 
     if (!pick.picked)
         return pick;
 
-    if (_frameIdFollowsXell != pick.followsXell && (xellId != 0 || _frameIdFollowsXell.has_value()))
+    if (pick.followsXell)
     {
-        if (pick.followsXell)
-            LOG_INFO("XeFG frame IDs follow XeLL's (from {})", pick.id);
-        else
-            LOG_INFO("XeFG frame ID {} numbered on its own (XeLL's: {})", pick.id, xellId);
+        if (_frameIdMode != FrameIdMode::FollowsOurs)
+            LOG_INFO("XeFG frame IDs follow our XeLL's (from {})", pick.id);
+
+        _frameIdMode = FrameIdMode::FollowsOurs;
     }
-    else if (pick.steppedBack)
+    else if (pick.jumped)
     {
-        LOG_INFO("XeFG frame IDs step back to XeLL's {} (from {}), history reset", pick.id, lastFollowed);
+        if (_frameIdMode != FrameIdMode::OwnAfterJump)
+            LOG_INFO("XeFG frame IDs: own counter, XeLL ID jumped {} -> {}", lastFollowed, xell.id);
+
+        _frameIdMode = FrameIdMode::OwnAfterJump;
+    }
+    else if (xell.source == xefg::XellIdSource::Game)
+    {
+        if (_frameIdMode != FrameIdMode::OwnForGame)
+            LOG_INFO("XeFG frame IDs: own counter (game Reflex IDs not followed)");
+
+        _frameIdMode = FrameIdMode::OwnForGame;
+    }
+    else if (xell.source == xefg::XellIdSource::None)
+    {
+        _frameIdMode = FrameIdMode::Own;
     }
 
-    _frameIdFollowsXell = pick.followsXell;
+    if (pick.steppedBack)
+        LOG_INFO("XeFG frame IDs step back to XeLL's {} (from {}), history reset", pick.id, lastFollowed);
+
     return pick;
 }
 

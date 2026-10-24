@@ -52,10 +52,19 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     float DisplayRefreshFps(double nowMs);
     float DynamicTargetFps(double nowMs);
 
-    // XeFG's frame ID of each slot's frame (FrameIdFor): XeLL's ID for that frame where one is known
+    // XeFG's frame ID of each slot's frame (FrameIdFor): one more than the last, or our XeLL's ID for that frame while it
+    // rises by 1 too
+    enum class FrameIdMode
+    {
+        Own, // no XeLL ID
+        OwnForGame,
+        OwnAfterJump,
+        FollowsOurs
+    };
+
     std::mutex _frameIdMutex;
     xefg::FrameIds<BUFFER_COUNT> _frameIds;
-    std::optional<bool> _frameIdFollowsXell;
+    FrameIdMode _frameIdMode = FrameIdMode::Own;
 
     xefg::FrameIdPick FrameIdFor(UINT64 fgFrame);
 

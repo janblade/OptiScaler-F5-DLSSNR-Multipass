@@ -480,26 +480,6 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetParameters(NVSDK_NGX_Paramete
     return NVSDK_NGX_Result_Success;
 }
 
-// NGX returns arrays it owns and frees them when its snippets get reloaded (Streamline's NGX init does that),
-// but games keep pointing at the names for vkCreateInstance/vkCreateDevice and their own checks afterwards
-static NVSDK_NGX_Result CopyNgxExtensionProperties(NVSDK_NGX_Result result, const uint32_t* count,
-                                                   VkExtensionProperties** properties)
-{
-    if (result != NVSDK_NGX_Result_Success || count == nullptr || *count == 0 || properties == nullptr ||
-        *properties == nullptr)
-        return result;
-
-    // Never freed, callers don't say when they are done with the names
-    static std::list<std::vector<VkExtensionProperties>> copies;
-    static std::mutex copiesMutex;
-
-    std::scoped_lock lock(copiesMutex);
-    auto& copy = copies.emplace_back(*properties, *properties + *count);
-    *properties = copy.data();
-
-    return result;
-}
-
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements(
     const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo, uint32_t* OutExtensionCount,
     VkExtensionProperties** OutExtensionProperties)

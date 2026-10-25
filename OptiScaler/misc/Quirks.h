@@ -41,6 +41,7 @@ enum class GameQuirk : uint64_t
     DoNotLoadAmdxc64,
     DontUseUnrealMVBarriers,
     DontUseUnrealColorBarriers,
+    SimulateWaitableObject,
 
     // Quirks that are applied deeper in code
     CyberpunkHudlessState,
@@ -367,6 +368,17 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("metroexodus.exe", GameQuirk::DisableDxgiSpoofing, GameQuirk::ForceBorderlessWhenUsingXeFG,
                 GameQuirk::ForceAutoExposure, GameQuirk::DisableHudfix),
 
+    // METRO 2033 Redux, METRO Last Light Redux
+    QUIRK_ENTRY("metro.exe", GameQuirk::DisableDxgiSpoofing),
+
+    // BeamNG.drive
+    QUIRK_ENTRY("beamng.drive.x64.exe", GameQuirk::DisableDxgiSpoofing),
+
+    // Gears of War: E-Day
+    // Fixes FSR-FG output freeze on boot
+    QUIRK_ENTRY("goweday-steam.exe", GameQuirk::AlwaysCaptureFSRFGSwapchain),
+    QUIRK_ENTRY("goweday.exe", GameQuirk::AlwaysCaptureFSRFGSwapchain),
+
     // Star Wars: Outlaws
     // SL spoof enough to unlock everything DLSS, Hudfix incompatible
     QUIRK_ENTRY("outlaws.exe", GameQuirk::DisableFSR2Inputs, GameQuirk::DisableFSR3Inputs,
@@ -489,8 +501,8 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("fbcfirebreak.exe", GameQuirk::DisableDxgiSpoofing),
 
     // CONTROL Resonant
-    // SL spoof enough to unlock everything DLSS
-    QUIRK_ENTRY("controlresonant.exe", GameQuirk::DisableDxgiSpoofing),
+    // SL spoof enough to unlock everything DLSS, SimulateWaitableObject required to avoid a freeze with DLSSG inputs
+    QUIRK_ENTRY("controlresonant.exe", GameQuirk::DisableDxgiSpoofing, GameQuirk::SimulateWaitableObject),
 
     // SL spoof enough to unlock everything DLSS/No spoof needed for DLSS inputs
     //

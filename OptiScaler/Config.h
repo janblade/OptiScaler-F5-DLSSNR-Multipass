@@ -6,6 +6,7 @@
 #include "motion/MotionProfiles.h"
 #include "shaders/dlssnr/DlssNr_InputStyles.h"
 #include "framegen/mfgunlock/Mode.h"
+#include "dlssnr/DlssNr_Profiles.h"
 
 #include <optional>
 #include <filesystem>
@@ -1330,6 +1331,15 @@ class Config
 
     bool LoadFromPath(const wchar_t* InPath);
     bool SaveIni();
+
+    // NR profiles (dlssnr/DlssNr_Profiles.h): the kept [DlssNr] settings to and from a profile file, and back to the
+    // saved ini (what OptiScaler.ini held at the last load or Save Settings).
+    bool SaveDlssNrProfile(const std::filesystem::path& path, std::string& error);
+    bool LoadDlssNrProfile(const std::filesystem::path& path, std::string& error);
+    void RevertDlssNrToSaved();
+    DlssNrProfiles::Section DlssNrSnapshot();
+    DlssNrProfiles::Section SavedDlssNrSection();
+    static std::optional<DlssNrProfiles::File> ReadDlssNrProfile(const std::filesystem::path& path);
     bool SaveXeFG();
 
     void CheckUpscalerFiles();
@@ -1354,6 +1364,7 @@ class Config
 
     bool Reload(std::filesystem::path iniPath);
     void ReadDlssNr();
+    size_t ApplyDlssNrSection(const DlssNrProfiles::Section& section);
 
     std::optional<std::string> readString(std::string section, std::string key, bool lowercase = false);
     std::optional<std::wstring> readWString(std::string section, std::string key, bool lowercase = false);

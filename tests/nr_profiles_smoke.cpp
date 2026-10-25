@@ -55,9 +55,19 @@ static void Keys()
     Check(IsKept("Pass4Style") && IsKept("Pass30AutoMask") && IsKept("Pass17LocalTone"), "passes 4-30 kept");
     Check(!IsKept("Pass31Style") && !IsKept("Pass3x") && !IsKept("Pass4") && !IsKept("Pass04Style"),
           "not a pass key");
-    Check(!IsKept("Enabled") && !IsKept("WhitePointSource") && !IsKept("NativeMotion") && !IsKept("ColourEncoding"),
-          "game / display keys left out");
+    Check(IsKept("WhitePointSource") && IsKept("NativeMotion") && IsKept("ColourEncoding") &&
+              IsKept("FinishedPicture") && IsKept("SpatialCenterX"),
+          "the game's own settings kept (a profile is shared for one game)");
+    Check(!IsKept("Enabled") && !IsKept("ToggleKey") && !IsKept("DisplayPaperWhiteNits") && !IsKept("HoldFrame") &&
+              !IsKept("NativeDebugView") && !IsKept("Compare"),
+          "the player's own and session keys left out");
     Check(!IsKept("Unknown"), "unknown key left out");
+
+    Check(SameGame("NBA2K27.exe", "nba2k27.EXE") && SameGame("", "x.exe") && !SameGame("Cyberpunk2077.exe", "x.exe"),
+          "same game by exe name, a file without one counts as this game's");
+    Check(NativeChanged({ { "NativeMotion", "true" } }, {}) && !NativeChanged({ { "NativeMotion", "auto" } }, {}) &&
+              !NativeChanged({ { "Passes", "3" } }, { { "Passes", "2" } }),
+          "only a Native key change counts as an Optical F5Low change");
 
     for (auto key : kKeptKeys)
         Check(!IsLeftOut(key), "key in both lists: " + std::string(key));

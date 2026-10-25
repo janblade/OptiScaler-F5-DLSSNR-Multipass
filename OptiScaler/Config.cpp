@@ -1199,7 +1199,7 @@ void Config::ReadDlssNr()
     DlssNrAutoExposureAdaptDarkerSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptDarkerSeconds"));
     DlssNrAutoExposureAdaptSeconds.set_from_config(readFloat("DlssNr", "AutoExposureAdaptSeconds"));
     // An ini from before the two speeds were split keeps its one speed both ways.
-    if (DlssNrAutoExposureAdaptSeconds.has_value())
+    if (readSource == &ini && DlssNrAutoExposureAdaptSeconds.has_value()) // not from a profile: left-out settings
     {
         if (!DlssNrAutoExposureAdaptBrighterSeconds.has_value())
             DlssNrAutoExposureAdaptBrighterSeconds = DlssNrAutoExposureAdaptSeconds.value();
@@ -1213,7 +1213,7 @@ void Config::ReadDlssNr()
     // Migrate the retired flag only when the new key was genuinely absent, which is why this
     // has to run AFTER the read above -- set_from_config assigns only into an empty optional,
     // so an ini that carries both keys keeps its explicit WhitePointSource.
-    if (!DlssNrWhitePointSource.has_value() && DlssNrWhitePointFromExposure.has_value())
+    if (readSource == &ini && !DlssNrWhitePointSource.has_value() && DlssNrWhitePointFromExposure.has_value())
         DlssNrWhitePointSource = DlssNrWhitePointFromExposure.value() ? 1u : 0u;
     DlssNrScanMeter.set_from_config(readBool("DlssNr", "ScanMeter"));
     DlssNrScanTrim.set_from_config(readFloat("DlssNr", "ScanTrim"));
@@ -1510,6 +1510,253 @@ static void WriteDlssNr(CSimpleIniA& out)
     out.SetValue("DlssNr", "LutStrength", GetFloatValue(Config::Instance()->DlssNrLutStrength.value_for_config()).c_str());
     out.SetValue("DlssNr", "ApplyModel", GetBoolValue(Config::Instance()->DlssNrApplyModel.value_for_config()).c_str());
     out.SetValue("DlssNr", "HoldFrame", GetBoolValue(Config::Instance()->DlssNrHoldFrame.value_for_config()).c_str());
+}
+
+// --- NR profiles (dlssnr/DlssNr_Profiles.h) ---
+
+// The kept keys of one ini's [DlssNr] section
+static DlssNrProfiles::Section KeptSection(const CSimpleIniA& from)
+{
+    DlssNrProfiles::Section section;
+    CSimpleIniA::TNamesDepend keys;
+    from.GetAllKeys("DlssNr", keys);
+
+    for (const auto& key : keys)
+    {
+        if (DlssNrProfiles::IsKept(key.pItem))
+            section[key.pItem] = from.GetValue("DlssNr", key.pItem, "auto");
+    }
+
+    return section;
+}
+
+DlssNrProfiles::Section Config::DlssNrSnapshot()
+{
+    CSimpleIniA current;
+    WriteDlssNr(current);
+    return KeptSection(current);
+}
+
+DlssNrProfiles::Section Config::SavedDlssNrSection() { return KeptSection(ini); }
+
+std::optional<DlssNrProfiles::File> Config::ReadDlssNrProfile(const std::filesystem::path& path)
+{
+    CSimpleIniA file;
+    if (file.LoadFile(path.c_str()) != SI_OK)
+        return std::nullopt;
+    return DlssNrProfiles::File { KeptSection(file), file.GetValue("Profile", "SavedFrom", "") };
+}
+
+bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& error)
+{
+    CSimpleIniA out;
+    out.SetValue("Profile", "Version", std::to_string(DlssNrProfiles::kFileVersion).c_str(),
+                 "; OptiScaler NR profile: Neural Rendering settings for the game in SavedFrom. Load it from the menu,\n"
+                 "; Neural Rendering > Status & Presets > NR Profiles.");
+    out.SetValue("Profile", "SavedFrom", wstring_to_string(Util::ExePath().filename().wstring()).c_str());
+
+    CSimpleIniA all;
+    WriteDlssNr(all);
+    for (const auto& [key, value] : KeptSection(all))
+        out.SetValue("DlssNr", key.c_str(), value.c_str());
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec)
+    {
+        error = "Could not make the folder: " + ec.message();
+        return false;
+    }
+
+    if (out.SaveFile(path.c_str()) < 0)
+    {
+        error = "Could not write the file.";
+        return false;
+    }
+
+    LOG_INFO("NR profile saved: {}", wstring_to_string(path.wstring()));
+    return true;
+}
+
+bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& error)
+{
+    const auto profile = ReadDlssNrProfile(path);
+    if (!profile)
+    {
+        error = "Could not read the file.";
+        return false;
+    }
+
+    const size_t defaulted = ApplyDlssNrSection(profile->settings);
+    LOG_INFO("NR profile loaded: {} (saved in {}; {} settings, {} at their default)", wstring_to_string(path.wstring()),
+             profile->savedFrom.empty() ? "?" : profile->savedFrom, profile->settings.size(), defaulted);
+    return true;
+}
+
+void Config::RevertDlssNrToSaved()
+{
+    const size_t defaulted = ApplyDlssNrSection(SavedDlssNrSection());
+    LOG_INFO("NR settings back to the saved ini ({} at their default)", defaulted);
+}
+
+// Sets every kept setting from the section: cleared first, since set_from_config fills only an empty setting, so a
+// key the section does not have ends at its default and a profile gives the same picture whatever was set before.
+// Returns how many kept settings ended at their default.
+size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
+{
+#define NR_PROFILE_FIELD(key, field) { key, [](Config& c) { c.field.reset(); } }
+    static const std::pair<std::string_view, void (*)(Config&)> fields[] = {
+        NR_PROFILE_FIELD("RunBeforeSR", DlssNrRunBeforeSr),
+        NR_PROFILE_FIELD("DeferredDLSS", DlssNrDeferredDlss),
+        NR_PROFILE_FIELD("FinishedPicture", DlssNrFinishedPicture),
+        NR_PROFILE_FIELD("Precision", DlssNrPrecision),
+        NR_PROFILE_FIELD("Preset", DlssNrPreset),
+        NR_PROFILE_FIELD("WorkingScale", DlssNrWorkingScale),
+        NR_PROFILE_FIELD("ModelResolutionAuto", DlssNrModelResolutionAuto),
+        NR_PROFILE_FIELD("ReducedUpscaleMethod", DlssNrReducedUpscaleMethod),
+        NR_PROFILE_FIELD("Transfer", DlssNrTransfer),
+        NR_PROFILE_FIELD("SuperiorScalingPreset", DlssNrSuperiorScalingPreset),
+        NR_PROFILE_FIELD("ScalingDownscaler", DlssNrScalingDownscaler),
+        NR_PROFILE_FIELD("VitEvery", DlssNrVitEvery),
+        NR_PROFILE_FIELD("VitEveryPlain", DlssNrVitEveryPlain),
+        NR_PROFILE_FIELD("DetailReuse", DlssNrDetailReuse),
+        NR_PROFILE_FIELD("DetailReuseSteady", DlssNrDetailReuseSteady),
+        NR_PROFILE_FIELD("DetailReuseFill", DlssNrDetailReuseFill),
+        NR_PROFILE_FIELD("DetailReuseInterval", DlssNrDetailReuseInterval),
+        NR_PROFILE_FIELD("DetailReuseSpread", DlssNrDetailReuseSpread),
+        NR_PROFILE_FIELD("DetailReuseDepthTolerance", DlssNrDetailReuseDepthTolerance),
+        NR_PROFILE_FIELD("DetailReuseClipGamma", DlssNrDetailReuseClipGamma),
+        NR_PROFILE_FIELD("DetailReuseClipFalloff", DlssNrDetailReuseClipFalloff),
+        NR_PROFILE_FIELD("DetailReuseSigmaFloor", DlssNrDetailReuseSigmaFloor),
+        NR_PROFILE_FIELD("DetailReuseWithFG", DlssNrDetailReuseWithFg),
+        NR_PROFILE_FIELD("DetailReuseMinFps", DlssNrDetailReuseMinFps),
+        NR_PROFILE_FIELD("DetailReuseMaxDropped", DlssNrDetailReuseMaxDropped),
+        NR_PROFILE_FIELD("SceneCut", DlssNrSceneCut),
+        NR_PROFILE_FIELD("EditCache", DlssNrEditCache),
+        NR_PROFILE_FIELD("EditCacheInterval", DlssNrEditCacheInterval),
+        NR_PROFILE_FIELD("EditCacheCrossfade", DlssNrEditCacheCrossfade),
+        NR_PROFILE_FIELD("TransferStrength", DlssNrTransferStrength),
+        NR_PROFILE_FIELD("ColourStrength", DlssNrColourStrength),
+        NR_PROFILE_FIELD("ReplaceDetailStrength", DlssNrReplaceDetailStrength),
+        NR_PROFILE_FIELD("MaxRatio", DlssNrMaxRatio),
+        NR_PROFILE_FIELD("ReversibleMode", DlssNrReversibleMode),
+        NR_PROFILE_FIELD("Passes", DlssNrPasses),
+        NR_PROFILE_FIELD("PassFeedback", DlssNrPassFeedback),
+        NR_PROFILE_FIELD("UnlockPasses", DlssNrUnlockPasses),
+        NR_PROFILE_FIELD("Style", DlssNrStyle),
+        NR_PROFILE_FIELD("Intensity", DlssNrIntensity),
+        NR_PROFILE_FIELD("LocalStructure", DlssNrLocalStructure),
+        NR_PROFILE_FIELD("LocalTone", DlssNrLocalTone),
+        NR_PROFILE_FIELD("SkinStructure", DlssNrSkinStructure),
+        NR_PROFILE_FIELD("AutoMask", DlssNrAutoMask),
+        NR_PROFILE_FIELD("Pass2Preset", DlssNrPass2Preset),
+        NR_PROFILE_FIELD("Pass2Style", DlssNrPass2Style),
+        NR_PROFILE_FIELD("Pass2Intensity", DlssNrPass2Intensity),
+        NR_PROFILE_FIELD("Pass2LocalStructure", DlssNrPass2LocalStructure),
+        NR_PROFILE_FIELD("Pass2LocalTone", DlssNrPass2LocalTone),
+        NR_PROFILE_FIELD("Pass2SkinStructure", DlssNrPass2SkinStructure),
+        NR_PROFILE_FIELD("Pass2AutoMask", DlssNrPass2AutoMask),
+        NR_PROFILE_FIELD("Pass3Preset", DlssNrPass3Preset),
+        NR_PROFILE_FIELD("Pass3Style", DlssNrPass3Style),
+        NR_PROFILE_FIELD("Pass3Intensity", DlssNrPass3Intensity),
+        NR_PROFILE_FIELD("Pass3LocalStructure", DlssNrPass3LocalStructure),
+        NR_PROFILE_FIELD("Pass3LocalTone", DlssNrPass3LocalTone),
+        NR_PROFILE_FIELD("Pass3SkinStructure", DlssNrPass3SkinStructure),
+        NR_PROFILE_FIELD("Pass3AutoMask", DlssNrPass3AutoMask),
+        NR_PROFILE_FIELD("SkinProtection", DlssNrSkinProtection),
+        NR_PROFILE_FIELD("SkinToneEnabled", DlssNrSkinToneEnabled),
+        NR_PROFILE_FIELD("SkinDetail", DlssNrSkinDetail),
+        NR_PROFILE_FIELD("SkinColour", DlssNrSkinColour),
+        NR_PROFILE_FIELD("EnvironmentDetail", DlssNrEnvironmentDetail),
+        NR_PROFILE_FIELD("EnvironmentColour", DlssNrEnvironmentColour),
+        NR_PROFILE_FIELD("InputFlatten", DlssNrInputFlatten),
+        NR_PROFILE_FIELD("InputFlattenStrength", DlssNrInputFlattenStrength),
+        NR_PROFILE_FIELD("InputStructureHint", DlssNrInputStructureHint),
+        NR_PROFILE_FIELD("InputStructureStrength", DlssNrInputStructureStrength),
+        NR_PROFILE_FIELD("InputStyleFacesOnly", DlssNrInputStyleFacesOnly),
+        NR_PROFILE_FIELD("LutFile", DlssNrLutFile),
+        NR_PROFILE_FIELD("LutStrength", DlssNrLutStrength),
+        NR_PROFILE_FIELD("WhitePointSource", DlssNrWhitePointSource),
+        NR_PROFILE_FIELD("GameExposureScale", DlssNrGameExposureScale),
+        NR_PROFILE_FIELD("WhitePointTrim", DlssNrWhitePointTrim),
+        NR_PROFILE_FIELD("WhitePointScale", DlssNrWhitePointScale),
+        NR_PROFILE_FIELD("AutoExposureTrim", DlssNrAutoExposureTrim),
+        NR_PROFILE_FIELD("AutoExposureShadowProtection", DlssNrAutoExposureShadowProtection),
+        NR_PROFILE_FIELD("AutoExposureMeter", DlssNrAutoExposureMeter),
+        NR_PROFILE_FIELD("AutoExposureMeterLowPercent", DlssNrAutoExposureMeterLowPercent),
+        NR_PROFILE_FIELD("AutoExposureMeterHighPercent", DlssNrAutoExposureMeterHighPercent),
+        NR_PROFILE_FIELD("AutoExposureAdaptBrighterSeconds", DlssNrAutoExposureAdaptBrighterSeconds),
+        NR_PROFILE_FIELD("AutoExposureAdaptDarkerSeconds", DlssNrAutoExposureAdaptDarkerSeconds),
+        NR_PROFILE_FIELD("AutoExposureFollowGame", DlssNrAutoExposureFollowGame),
+        NR_PROFILE_FIELD("GameExposureTrimAnchors", DlssNrGameExposureTrimAnchors),
+        NR_PROFILE_FIELD("AutoExposureTrimAnchors", DlssNrAutoExposureTrimAnchors),
+        NR_PROFILE_FIELD("ScanTrim", DlssNrScanTrim),
+        NR_PROFILE_FIELD("ScanAnchorValue", DlssNrScanAnchorValue),
+        NR_PROFILE_FIELD("ScanAnchorWhitePoint", DlssNrScanAnchorWhitePoint),
+        NR_PROFILE_FIELD("ScanAnchors", DlssNrScanAnchors),
+        NR_PROFILE_FIELD("ScanInverted", DlssNrScanInverted),
+        NR_PROFILE_FIELD("ScanMeter", DlssNrScanMeter),
+        NR_PROFILE_FIELD("ColourEncoding", DlssNrColourEncoding),
+        NR_PROFILE_FIELD("NativeDepthFinder", DlssNrNativeDepthFinder),
+        NR_PROFILE_FIELD("NativeDepthVkCopyUsage", DlssNrNativeDepthVkCopyUsage),
+        NR_PROFILE_FIELD("NativeDepthResolveInList", DlssNrNativeDepthResolveInList),
+        NR_PROFILE_FIELD("NativeDxvkVulkan", DlssNrNativeDxvkVulkan),
+        NR_PROFILE_FIELD("NativeDepthWarmupFrames", DlssNrNativeDepthWarmupFrames),
+        NR_PROFILE_FIELD("NativeMotionProfile", DlssNrNativeMotionProfile),
+        NR_PROFILE_FIELD("NativeMotionProfileCustom", DlssNrNativeMotionProfileCustom),
+        NR_PROFILE_FIELD("NativeMotion", DlssNrNativeMotion),
+        NR_PROFILE_FIELD("NativeInput", DlssNrNativeInput),
+        NR_PROFILE_FIELD("NativeUpscaler", DlssNrNativeUpscaler),
+        NR_PROFILE_FIELD("NativeUpscalerPass", DlssNrNativeUpscalerPass),
+        NR_PROFILE_FIELD("NativeFrameGenerationOnly", DlssNrNativeFrameGenerationOnly),
+        NR_PROFILE_FIELD("NativeLowLatencyBoost", DlssNrNativeLowLatencyBoost),
+        NR_PROFILE_FIELD("NativeLowLatencyDxvkGameThread", DlssNrNativeLowLatencyDxvkGameThread),
+        NR_PROFILE_FIELD("SpatialCompression", DlssNrSpatialCompression),
+        NR_PROFILE_FIELD("SpatialCenterX", DlssNrSpatialCenterX),
+        NR_PROFILE_FIELD("SpatialCenterY", DlssNrSpatialCenterY),
+        NR_PROFILE_FIELD("SpatialWorkX", DlssNrSpatialWorkX),
+        NR_PROFILE_FIELD("SpatialWorkY", DlssNrSpatialWorkY),
+        NR_PROFILE_FIELD("SpatialOffsetX", DlssNrSpatialOffsetX),
+        NR_PROFILE_FIELD("SpatialOffsetY", DlssNrSpatialOffsetY),
+        NR_PROFILE_FIELD("SpatialShiftX", DlssNrSpatialShiftX),
+        NR_PROFILE_FIELD("SpatialShiftY", DlssNrSpatialShiftY),
+    };
+#undef NR_PROFILE_FIELD
+
+    CSimpleIniA source;
+    size_t defaulted = 0;
+
+    for (const auto& [key, clear] : fields)
+    {
+        clear(*this);
+        const auto it = section.find(std::string(key));
+        if (it == section.end() || DlssNrProfiles::EqualNoCase(it->second, "auto"))
+            ++defaulted;
+        else
+            source.SetValue("DlssNr", std::string(key).c_str(), it->second.c_str());
+    }
+
+    for (auto& pass : DlssNrExtraPasses)
+    {
+        pass.style.reset();
+        pass.intensity.reset();
+        pass.structure.reset();
+        pass.tone.reset();
+        pass.skin.reset();
+        pass.autoMask.reset();
+    }
+
+    for (const auto& [key, value] : section)
+    {
+        if (DlssNrProfiles::IsExtraPassKey(key))
+            source.SetValue("DlssNr", key.c_str(), value.c_str());
+    }
+
+    readSource = &source;
+    ReadDlssNr();
+    readSource = &ini;
+
+    return defaulted;
 }
 
 bool Config::SaveIni()

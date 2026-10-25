@@ -1,14 +1,15 @@
 #pragma once
 
-// NR profiles: the Neural Rendering settings saved under a name in OptiScaler\NRProfiles\<name>.ini and loaded back,
-// in this game or another. Plain data and rules, no config and no ImGui, so tests/nr_profiles_smoke.cpp runs them;
-// Config.cpp writes and reads the files, dlssnr/DlssNr_Menu.cpp draws the NR Profiles section.
+// NR profiles: the Neural Rendering settings saved under a name in OptiScaler\NRProfiles\<name>.ini and loaded back.
+// Plain data and rules, no config and no ImGui, so tests/nr_profiles_smoke.cpp runs them; Config.cpp writes and reads
+// the files, dlssnr/DlssNr_Menu.cpp draws the NR Profiles section.
 //
-// A profile keeps how NR looks and how much it costs: what the preset rows set, plus passes, colour, output, input
-// style, reuse and the LUT. It leaves out what belongs to the game, the display or the session (exposure, colour
-// encoding, paper white, Optical F5Low, Finished Picture, edge compression, debug views, the toggle key), so a profile
-// made in one game does not break another. Every key Config::SaveIni writes is in exactly one of the two lists; the
-// test fails on a new key that is in neither.
+// A profile is made to be shared for one game: it keeps how NR looks and what it costs (what the preset rows set,
+// passes, colour, output, input style, reuse, LUT) and the game's own settings (exposure, colour encoding, Finished
+// Picture, Optical F5Low, edge compression). It records the game it was saved in, and the menu warns when it is loaded
+// in another. It leaves out what is the player's own or only for the session: on/off, the toggle key, the display's
+// paper white, debug and compare views, diagnostics. Every key Config::SaveIni writes is in exactly one of the two
+// lists; the test fails on a new key that is in neither.
 
 #include <algorithm>
 #include <cctype>
@@ -28,8 +29,8 @@ inline constexpr int kFileVersion = 1; // [Profile] Version
 // [DlssNr] keys a profile keeps. Pass4..Pass30 keys (written in a loop) are kept too, see IsKept.
 inline constexpr std::string_view kKeptKeys[] = {
     // placement and model
-    "RunBeforeSR", "DeferredDLSS", "Precision", "Preset", "WorkingScale", "ModelResolutionAuto", "ReducedUpscaleMethod",
-    "Transfer", "SuperiorScalingPreset", "ScalingDownscaler",
+    "RunBeforeSR", "DeferredDLSS", "FinishedPicture", "Precision", "Preset", "WorkingScale", "ModelResolutionAuto",
+    "ReducedUpscaleMethod", "Transfer", "SuperiorScalingPreset", "ScalingDownscaler",
     // reuse
     "VitEvery", "VitEveryPlain", "DetailReuse", "DetailReuseSteady", "DetailReuseFill", "DetailReuseInterval",
     "DetailReuseSpread", "DetailReuseDepthTolerance", "DetailReuseClipGamma", "DetailReuseClipFalloff",
@@ -45,33 +46,35 @@ inline constexpr std::string_view kKeptKeys[] = {
     // input style and grade
     "InputFlatten", "InputFlattenStrength", "InputStructureHint", "InputStructureStrength", "InputStyleFacesOnly",
     "LutFile", "LutStrength",
+    // the game's: exposure and colour encoding
+    "WhitePointSource", "GameExposureScale", "WhitePointTrim", "WhitePointScale", "AutoExposureTrim",
+    "AutoExposureShadowProtection", "AutoExposureMeter", "AutoExposureMeterLowPercent", "AutoExposureMeterHighPercent",
+    "AutoExposureAdaptBrighterSeconds", "AutoExposureAdaptDarkerSeconds", "AutoExposureFollowGame",
+    "GameExposureTrimAnchors", "AutoExposureTrimAnchors", "ScanTrim", "ScanAnchorValue", "ScanAnchorWhitePoint",
+    "ScanAnchors", "ScanInverted", "ScanMeter", "ColourEncoding",
+    // the game's: Optical F5Low and the native path (a change may need a restart: the Optical F5Low page says which)
+    "NativeDepthFinder", "NativeDepthVkCopyUsage", "NativeDepthResolveInList", "NativeDxvkVulkan",
+    "NativeDepthWarmupFrames", "NativeMotionProfile", "NativeMotionProfileCustom", "NativeMotion", "NativeInput",
+    "NativeUpscaler", "NativeUpscalerPass", "NativeFrameGenerationOnly", "NativeLowLatencyBoost",
+    "NativeLowLatencyDxvkGameThread",
+    // the game's: edge compression, laid out for its picture
+    "SpatialCompression", "SpatialCenterX", "SpatialCenterY", "SpatialWorkX", "SpatialWorkY", "SpatialOffsetX",
+    "SpatialOffsetY", "SpatialShiftX", "SpatialShiftY",
 };
 
 // [DlssNr] keys a profile leaves out.
 inline constexpr std::string_view kLeftOutKeys[] = {
-    // on/off and the game's own path
-    "Enabled", "FinishedPicture", "ToggleKey", "NativeLowLatency",
-    // the old single input style: written from the input style card for older builds, the card's keys are kept
-    "InputStyle", "InputStyleStrength",
-    // exposure, colour encoding, display
-    "WhitePointFromExposure", "WhitePointSource", "GameExposureScale", "WhitePointTrim", "WhitePointScale",
-    "AutoExposureTrim", "AutoExposureShadowProtection", "AutoExposureMeter", "AutoExposureMeterLowPercent",
-    "AutoExposureMeterHighPercent", "AutoExposureAdaptBrighterSeconds", "AutoExposureAdaptDarkerSeconds",
-    "AutoExposureFollowGame", "GameExposureTrimAnchors", "AutoExposureTrimAnchors", "ScanTrim", "ScanAnchorValue",
-    "ScanAnchorWhitePoint", "ScanAnchors", "ScanInverted", "ScanMeter", "ScanExposure", "RecordExposureScan",
-    "ColourEncoding", "DisplayPaperWhiteNits",
-    // Optical F5Low and the native path
-    "NativeDepthFinder", "NativeDepthVkCopyUsage", "NativeDepthResolveInList", "NativeDxvkVulkan",
-    "NativeDepthWarmupFrames", "NativeDepthOverlay", "NativeDebugView", "NativeMotionProfile",
-    "NativeMotionProfileCustom", "NativeMotion", "NativeInput", "NativeUpscaler", "NativeUpscalerPass",
-    "NativeFrameGenerationOnly", "NativeLowLatencyBoost", "NativeLowLatencyDxvkGameThread",
-    // edge compression: laid out for this game's picture
-    "SpatialCompression", "SpatialCenterX", "SpatialCenterY", "SpatialWorkX", "SpatialWorkY", "SpatialOffsetX",
-    "SpatialOffsetY", "SpatialShiftX", "SpatialShiftY",
-    // views, diagnostics, testing
+    // the player's own
+    "Enabled", "ToggleKey", "DisplayPaperWhiteNits",
+    // old keys kept for older builds: NativeLowLatency is [Framerate] LowLatencyInput's, InputStyle and
+    // InputStyleStrength are written from the input style card (whose keys are kept), WhitePointFromExposure became
+    // WhitePointSource
+    "NativeLowLatency", "InputStyle", "InputStyleStrength", "WhitePointFromExposure",
+    // views, diagnostics, developer overrides, testing
     "DebugView", "Compare", "CompareSplit", "CompareZoom", "CompareSwap", "CompareTags", "TagScale", "ShowSkinMask",
-    "DetailReuseDebug", "EditCacheDebug", "ProbeD3D11", "FrameStats", "KernelProfile", "AutoCapture", "UseProxy",
-    "ProxyProbe", "ApplyModel", "HoldFrame",
+    "NativeDepthOverlay", "NativeDebugView", "DetailReuseDebug", "EditCacheDebug", "ProbeD3D11", "FrameStats",
+    "KernelProfile", "AutoCapture", "ScanExposure", "RecordExposureScan", "UseProxy", "ProxyProbe", "ApplyModel",
+    "HoldFrame",
 };
 
 inline bool EqualNoCase(std::string_view a, std::string_view b)
@@ -189,6 +192,19 @@ struct NoCaseLess
 };
 using Section = std::map<std::string, std::string, NoCaseLess>;
 
+// A profile file: its kept [DlssNr] settings and the game it was saved in ([Profile] SavedFrom, the exe's file name)
+struct File
+{
+    Section settings;
+    std::string savedFrom;
+};
+
+// Whether a profile was saved in this game. A file with no SavedFrom (made by hand) counts as this game's.
+inline bool SameGame(std::string_view savedFrom, std::string_view exeName)
+{
+    return savedFrom.empty() || EqualNoCase(savedFrom, exeName);
+}
+
 inline Section Filter(const Section& section)
 {
     Section kept;
@@ -217,5 +233,21 @@ inline bool Same(const Section& a, const Section& b)
         }
     }
     return true;
+}
+
+// Whether a load changed an Optical F5Low (Native) setting, which may need a restart
+inline bool NativeChanged(const Section& before, const Section& after)
+{
+    const auto native = [](const Section& s) {
+        Section only;
+        for (const auto& [key, value] : s)
+        {
+            if (EqualNoCase(std::string_view(key).substr(0, 6), "Native"))
+                only.emplace(key, value);
+        }
+        return only;
+    };
+
+    return !Same(native(before), native(after));
 }
 } // namespace DlssNrProfiles

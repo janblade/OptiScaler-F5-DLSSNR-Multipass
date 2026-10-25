@@ -2014,6 +2014,9 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
 
     const float presetWidth = PresetButtonWidth();
 
+    // Saved profiles first: one sets everything the preset cards below set
+    RenderProfilesSection(config);
+
     if (auto card = ScopedCollapsingHeader("Look Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         const auto now = ReadLook(config);
@@ -2190,7 +2193,6 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                    "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
     }
 
-    RenderProfilesSection(config);
 }
 
 // NR Exposure, drawn at the end of the NR Input page.

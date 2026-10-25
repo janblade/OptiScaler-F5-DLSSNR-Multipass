@@ -111,7 +111,8 @@ A tier leaves Upscale Mode on Superior Scaling if you selected it, and still cou
 
 ## NR Profiles
 
-Saves this game's Neural Rendering settings under a name and loads them back. The last section of Status & Presets.
+Saves this game's Neural Rendering settings under a name and loads them back. The first card of Status & Presets,
+under Status.
 
 A profile is made to be shared for one game. It holds how NR looks and what it costs (everything the preset rows set,
 the passes and their overrides, colour, output, input style, detail reuse, the LUT) and the game's own settings: the

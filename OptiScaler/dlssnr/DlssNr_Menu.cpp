@@ -4,6 +4,7 @@
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNr_LookPresets.h"
+#include "DlssNr_Profiles.h"
 #include "DlssNr_SuperiorScaling.h"
 #include "DlssNrNative.h"
 
@@ -1659,6 +1660,354 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
 }
 
 // Status & Presets: a line pointing to Optical F5Low, and the pass-count and quality-tier presets.
+// NR Profiles (DlssNr_Profiles.h): the NR settings saved under a name in NRProfiles inside the OptiScaler folder,
+// beside LUTs, and loaded back. Made to be shared for one game, so it carries that game's exposure and Optical F5Low
+// settings too, and says so when a profile from another game is picked. Scanned once and on Rescan, like the LUTs.
+static std::filesystem::path ProfileFolder()
+{
+    return std::filesystem::path(Config::Instance()->MainDllPath.value_or(Util::DllPath().parent_path().wstring())) /
+           DlssNrProfiles::kFolderName;
+}
+
+struct ProfileEntry
+{
+    std::string name;
+    std::filesystem::path path;
+    DlssNrProfiles::File file;
+};
+
+static std::vector<ProfileEntry> ScanProfileFolder()
+{
+    std::vector<ProfileEntry> found;
+    std::error_code ec;
+    const std::filesystem::path folder = ProfileFolder();
+
+    if (!std::filesystem::exists(folder, ec) || ec)
+        return found;
+
+    for (const auto& entry : std::filesystem::directory_iterator(folder, ec))
+    {
+        if (ec)
+            break;
+        if (!entry.is_regular_file())
+            continue;
+
+        const auto name = DlssNrProfiles::NameFromPath(entry.path());
+        if (!name)
+            continue;
+
+        if (auto file = Config::ReadDlssNrProfile(entry.path()))
+            found.push_back({ *name, entry.path(), std::move(*file) });
+    }
+
+    std::sort(found.begin(), found.end(),
+              [](const ProfileEntry& a, const ProfileEntry& b)
+              {
+                  return std::lexicographical_compare(
+                      a.name.begin(), a.name.end(), b.name.begin(), b.name.end(),
+                      [](char x, char y) { return std::tolower((unsigned char) x) < std::tolower((unsigned char) y); });
+              });
+    return found;
+}
+
+// After a load: a LUT the profile names that is not on this PC is looked for in this game's LUTs folder by its file
+// name, else the LUT goes off. Returns what to tell the player, empty when the LUT is fine.
+static std::string FindProfileLut(Config* config)
+{
+    const std::string lut = config->DlssNrLutFile.value_or_default();
+    std::error_code ec;
+
+    if (lut.empty() || std::filesystem::exists(lut, ec))
+        return {};
+
+    const std::filesystem::path here = LutFolder() / std::filesystem::path(lut).filename();
+    if (std::filesystem::exists(here, ec))
+    {
+        config->DlssNrLutFile = here.string();
+        return {};
+    }
+
+    config->DlssNrLutFile = std::string();
+    return " LUT " + std::filesystem::path(lut).filename().string() + " is not in OptiScaler\\LUTs: LUT off.";
+}
+
+// Error prevention by construction: only the characters a profile name may have can be typed
+static int ProfileNameCharFilter(ImGuiInputTextCallbackData* data)
+{
+    const ImWchar c = data->EventChar;
+    const bool allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' ||
+                         c == '-' || c == '_' || c == '.';
+    return allowed ? 0 : 1;
+}
+
+static void RenderProfilesSection(Config* config)
+{
+    using namespace DlssNrProfiles;
+
+    enum class Ask
+    {
+        None,
+        Replace,
+        Delete
+    };
+
+    static std::vector<ProfileEntry> profiles = ScanProfileFolder();
+    static int selected = profiles.empty() ? -1 : 0;
+    static char typedName[kMaxNameLength + 1] = "";
+    static Ask ask = Ask::None;
+    static std::filesystem::path askPath;
+    static std::string askName;
+    static std::string result;
+    static bool resultIsError = false;
+    static bool resultNative = false;
+    static ULONGLONG compared = 0;
+    static Section now;
+    static Section saved;
+    const std::string& exeName = State::Instance().gameExe;
+
+    // Compared at most 4 times a second: a snapshot writes every NR setting into a scratch ini
+    if (GetTickCount64() - compared >= 250)
+    {
+        now = config->DlssNrSnapshot();
+        saved = config->SavedDlssNrSection();
+        compared = GetTickCount64();
+    }
+
+    const auto refresh = [&] { compared = 0; };
+    const auto rescan = [&](const std::string& keep)
+    {
+        profiles = ScanProfileFolder();
+        selected = profiles.empty() ? -1 : 0;
+        for (int i = 0; i < (int) profiles.size(); ++i)
+        {
+            if (profiles[i].name == keep)
+                selected = i;
+        }
+    };
+    const auto say = [&](std::string text, bool error, bool native = false)
+    {
+        result = std::move(text);
+        resultIsError = error;
+        resultNative = native;
+    };
+
+    // Load and revert change many settings at once, like a preset: a drag in flight is dropped, and leaving Finished
+    // Picture clears a session failure, as the tiers do
+    const auto afterApply = [&](bool finishedBefore)
+    {
+        pendingScale = -1;
+        if (finishedBefore && !config->DlssNrFinishedPicture.value_or_default())
+            RetryNr();
+        refresh();
+    };
+
+    const auto save = [&](const std::filesystem::path& path, const std::string& name)
+    {
+        std::string error;
+        if (config->SaveDlssNrProfile(path, error))
+        {
+            rescan(name);
+            say("Saved " + name + ".", false);
+        }
+        else
+        {
+            say("Could not save " + name + ": " + error, true);
+        }
+        refresh();
+    };
+
+    ImGui::SeparatorText("NR Profiles");
+
+    const auto picked = [&]() -> const ProfileEntry*
+    { return selected >= 0 && selected < (int) profiles.size() ? &profiles[selected] : nullptr; };
+    const ProfileEntry* pick = picked();
+    const bool pickInEffect = pick && Same(pick->file.settings, now);
+
+    ImGui::PushItemWidth(PresetButtonWidth() * 3.0f);
+    if (ImGui::BeginCombo("Profile##nrprofile", pick ? pick->name.c_str() : "(none saved yet)"))
+    {
+        for (int i = 0; i < (int) profiles.size(); ++i)
+        {
+            const bool inEffect = Same(profiles[i].file.settings, now);
+            if (inEffect)
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.8f, 0.45f, 1.0f));
+            if (ImGui::Selectable(profiles[i].name.c_str(), i == selected))
+            {
+                selected = i;
+                ask = Ask::None;
+                result.clear();
+            }
+            if (inEffect)
+                ImGui::PopStyleColor();
+            if (!SameGame(profiles[i].file.savedFrom, exeName) && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Saved in %s", profiles[i].file.savedFrom.c_str());
+            if (i == selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Rescan##nrprofile"))
+        rescan(pick ? pick->name : std::string());
+
+    ImGui::SameLine();
+    HelpMarker("Saves this game's NR settings under a name and loads them back: the look, passes, quality and reuse, "
+               "and the game's own exposure, colour encoding, Optical F5Low and edge compression settings. Not in a "
+               "profile: Enable Neural Rendering, the toggle key, the display's paper white and the debug views.\n"
+               "Files are in OptiScaler\\NRProfiles; copy one into the same folder of another install of the game to "
+               "share it. Green = the profile's settings are what is in effect.\n"
+               "Save Settings (at the bottom) still saves this game's OptiScaler.ini; a profile is a separate file.");
+
+    ImGui::BeginDisabled(pick == nullptr);
+    if (PresetButton("Load##nrprofile", pickInEffect) && pick)
+    {
+        const bool finishedBefore = config->DlssNrFinishedPicture.value_or_default();
+        const Section before = config->DlssNrSnapshot();
+        std::string error;
+
+        if (config->LoadDlssNrProfile(pick->path, error))
+        {
+            const std::string lutNote = FindProfileLut(config);
+            afterApply(finishedBefore);
+            const bool native = NativeChanged(before, config->DlssNrSnapshot());
+            say("Loaded " + pick->name + "." + lutNote, !lutNote.empty(), native);
+        }
+        else
+        {
+            say("Could not load " + pick->name + ": " + error, true);
+        }
+        ask = Ask::None;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Save##nrprofile") && pick)
+    {
+        ask = Ask::Replace;
+        askPath = pick->path;
+        askName = pick->name;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Delete##nrprofile") && pick)
+    {
+        ask = Ask::Delete;
+        askPath = pick->path;
+        askName = pick->name;
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine(0.0f, 20.0f);
+    ImGui::SetNextItemWidth(PresetButtonWidth() * 2.0f);
+    ImGui::InputTextWithHint("##nrprofilename", "new profile name", typedName, sizeof(typedName),
+                             ImGuiInputTextFlags_CallbackCharFilter, ProfileNameCharFilter);
+
+    const auto typed = SanitiseName(typedName);
+    const auto typedPath = typed ? ProfilePath(ProfileFolder(), *typed) : std::nullopt;
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!typedPath);
+    if (ImGui::Button("Save as new##nrprofile") && typedPath)
+    {
+        std::error_code ec;
+        if (std::filesystem::exists(*typedPath, ec))
+        {
+            ask = Ask::Replace;
+            askPath = *typedPath;
+            askName = *typed;
+        }
+        else
+        {
+            save(*typedPath, *typed);
+            typedName[0] = '\0';
+            ask = Ask::None;
+        }
+    }
+    if (!typedPath && typedName[0] != '\0' && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Not a usable name: letters, digits, spaces, - _ and . only, not starting or ending with a "
+                          "dot, and not a Windows device name (CON, NUL, COM1 ...).");
+    ImGui::EndDisabled();
+
+    // One line for a question or the last result, one for a profile from another game: the buttons below stay put
+    const float slot = StatusSlotBegin();
+    if (ask != Ask::None)
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text(ask == Ask::Replace ? "Replace %s with the settings now in effect?" : "Delete %s?",
+                    askName.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Yes##nrprofileask"))
+        {
+            if (ask == Ask::Replace)
+            {
+                save(askPath, askName);
+                typedName[0] = '\0';
+            }
+            else
+            {
+                std::error_code ec;
+                if (std::filesystem::remove(askPath, ec))
+                {
+                    rescan(std::string());
+                    say("Deleted " + askName + ".", false);
+                }
+                else
+                {
+                    say("Could not delete " + askName + (ec ? ": " + ec.message() : "."), true);
+                }
+            }
+            ask = Ask::None;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("No##nrprofileask"))
+            ask = Ask::None;
+    }
+    else if (!result.empty())
+    {
+        ImGui::TextColored(resultIsError ? ImVec4(0.9f, 0.6f, 0.25f, 1.0f) : ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "%s",
+                           result.c_str());
+        if (resultNative)
+        {
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Optical F5Low settings changed; some need a restart.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open Optical F5Low##nrprofile"))
+                MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+        }
+    }
+
+    pick = picked(); // a save or delete above rescans the folder
+    if (pick && !SameGame(pick->file.savedFrom, exeName))
+        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                           "%s was saved in %s: its exposure and Optical F5Low settings are for that game.",
+                           pick->name.c_str(), pick->file.savedFrom.c_str());
+    StatusSlotEnd(slot, 2);
+
+    // What OptiScaler.ini held at the start or the last Save Settings, for the NR settings a profile keeps
+    const float unsavedSlot = StatusSlotBegin();
+    if (!Same(now, saved))
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("NR settings changed since the game started or the last Save Settings.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Revert NR to saved##nrprofile"))
+        {
+            const bool finishedBefore = config->DlssNrFinishedPicture.value_or_default();
+            const Section before = config->DlssNrSnapshot();
+            config->RevertDlssNrToSaved();
+            afterApply(finishedBefore);
+            say("NR settings back to the saved ones.", false, NativeChanged(before, config->DlssNrSnapshot()));
+            ask = Ask::None;
+        }
+        ImGui::SameLine();
+        HelpMarker("Puts the NR settings a profile holds back to what OptiScaler.ini has (from the game's start or "
+                   "the last Save Settings). Enable Neural Rendering, the toggle key, paper white and the debug views "
+                   "are left as they are.");
+    }
+    StatusSlotEnd(unsavedSlot, 1);
+}
+
 static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
 {
     const auto shown = DlssNrNativeMode::FromKeys(
@@ -1841,6 +2190,8 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     HelpMarker("Quality tiers for NR after SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
                "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
                "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
+
+    RenderProfilesSection(config);
 }
 
 // NR Exposure, drawn at the end of the NR Input page.

@@ -928,6 +928,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             }
         }
 
+        savedDlssNr = DlssNrSnapshot();
+
         return true;
     }
 
@@ -1282,219 +1284,220 @@ void Config::ReadDlssNr()
     DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
 }
 
-// [DlssNr] as SaveIni writes it, into the ini given: OptiScaler.ini, or a profile / snapshot (DlssNr_Profiles.h).
-static void WriteDlssNr(CSimpleIniA& out)
+// [DlssNr] as SaveIni writes it, from the config given (not Instance(): a load snapshots it while the config is being
+// built), into the ini given: OptiScaler.ini, or a profile / snapshot (DlssNr_Profiles.h).
+static void WriteDlssNr(Config& c, CSimpleIniA& out)
 {
     // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
-    out.SetValue("DlssNr", "Enabled", GetBoolValue(Config::Instance()->DlssNrEnabled.value_for_config()).c_str());
-    out.SetValue("DlssNr", "FinishedPicture", GetBoolValue(Config::Instance()->DlssNrFinishedPicture.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Enabled", GetBoolValue(c.DlssNrEnabled.value_for_config()).c_str());
+    out.SetValue("DlssNr", "FinishedPicture", GetBoolValue(c.DlssNrFinishedPicture.value_for_config()).c_str());
     out.SetValue("DlssNr", "RunBeforeSR",
-                 GetBoolValue(Config::Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrRunBeforeSr.value_for_config()).c_str());
     out.SetValue("DlssNr", "DeferredDLSS",
-                 GetBoolValue(Config::Instance()->DlssNrDeferredDlss.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Precision", GetIntValue(Config::Instance()->DlssNrPrecision.value_for_config()).c_str());
-    out.SetValue("DlssNr", "VitEvery", GetIntValue(Config::Instance()->DlssNrVitEvery.value_for_config()).c_str());
-    out.SetValue("DlssNr", "VitEveryPlain", GetIntValue(Config::Instance()->DlssNrVitEveryPlain.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuse", GetBoolValue(Config::Instance()->DlssNrDetailReuse.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseDebug", GetBoolValue(Config::Instance()->DlssNrDetailReuseDebug.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseSteady", GetFloatValue(Config::Instance()->DlssNrDetailReuseSteady.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(Config::Instance()->DlssNrDetailReuseFill.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseInterval", GetIntValue(Config::Instance()->DlssNrDetailReuseInterval.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseSpread", GetIntValue(Config::Instance()->DlssNrDetailReuseSpread.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseDepthTolerance", GetFloatValue(Config::Instance()->DlssNrDetailReuseDepthTolerance.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseClipGamma", GetFloatValue(Config::Instance()->DlssNrDetailReuseClipGamma.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseClipFalloff", GetFloatValue(Config::Instance()->DlssNrDetailReuseClipFalloff.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseSigmaFloor", GetFloatValue(Config::Instance()->DlssNrDetailReuseSigmaFloor.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(Config::Instance()->DlssNrDetailReuseWithFg.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SceneCut", GetIntValue(Config::Instance()->DlssNrSceneCut.value_for_config()).c_str());
-    out.SetValue("DlssNr", "EditCache", GetBoolValue(Config::Instance()->DlssNrEditCache.value_for_config()).c_str());
-    out.SetValue("DlssNr", "EditCacheInterval", GetIntValue(Config::Instance()->DlssNrEditCacheInterval.value_for_config()).c_str());
-    out.SetValue("DlssNr", "EditCacheCrossfade", GetIntValue(Config::Instance()->DlssNrEditCacheCrossfade.value_for_config()).c_str());
-    out.SetValue("DlssNr", "EditCacheDebug", GetIntValue(Config::Instance()->DlssNrEditCacheDebug.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(Config::Instance()->DlssNrDetailReuseMinFps.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DetailReuseMaxDropped", GetFloatValue(Config::Instance()->DlssNrDetailReuseMaxDropped.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrDeferredDlss.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Precision", GetIntValue(c.DlssNrPrecision.value_for_config()).c_str());
+    out.SetValue("DlssNr", "VitEvery", GetIntValue(c.DlssNrVitEvery.value_for_config()).c_str());
+    out.SetValue("DlssNr", "VitEveryPlain", GetIntValue(c.DlssNrVitEveryPlain.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuse", GetBoolValue(c.DlssNrDetailReuse.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseDebug", GetBoolValue(c.DlssNrDetailReuseDebug.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseSteady", GetFloatValue(c.DlssNrDetailReuseSteady.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseFill", GetFloatValue(c.DlssNrDetailReuseFill.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseInterval", GetIntValue(c.DlssNrDetailReuseInterval.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseSpread", GetIntValue(c.DlssNrDetailReuseSpread.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseDepthTolerance", GetFloatValue(c.DlssNrDetailReuseDepthTolerance.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseClipGamma", GetFloatValue(c.DlssNrDetailReuseClipGamma.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseClipFalloff", GetFloatValue(c.DlssNrDetailReuseClipFalloff.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseSigmaFloor", GetFloatValue(c.DlssNrDetailReuseSigmaFloor.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseWithFG", GetBoolValue(c.DlssNrDetailReuseWithFg.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SceneCut", GetIntValue(c.DlssNrSceneCut.value_for_config()).c_str());
+    out.SetValue("DlssNr", "EditCache", GetBoolValue(c.DlssNrEditCache.value_for_config()).c_str());
+    out.SetValue("DlssNr", "EditCacheInterval", GetIntValue(c.DlssNrEditCacheInterval.value_for_config()).c_str());
+    out.SetValue("DlssNr", "EditCacheCrossfade", GetIntValue(c.DlssNrEditCacheCrossfade.value_for_config()).c_str());
+    out.SetValue("DlssNr", "EditCacheDebug", GetIntValue(c.DlssNrEditCacheDebug.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseMinFps", GetFloatValue(c.DlssNrDetailReuseMinFps.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DetailReuseMaxDropped", GetFloatValue(c.DlssNrDetailReuseMaxDropped.value_for_config()).c_str());
     {
-        auto toggle = Config::Instance()->DlssNrToggleKey.value_for_config();
+        auto toggle = c.DlssNrToggleKey.value_for_config();
         out.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());
     }
     out.SetValue("DlssNr", "TransferStrength",
-                 GetFloatValue(Config::Instance()->DlssNrTransferStrength.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrTransferStrength.value_for_config()).c_str());
     out.SetValue("DlssNr", "ColourStrength",
-                 GetFloatValue(Config::Instance()->DlssNrColourStrength.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrColourStrength.value_for_config()).c_str());
     out.SetValue("DlssNr", "ReplaceDetailStrength",
-                 GetFloatValue(Config::Instance()->DlssNrReplaceDetailStrength.value_for_config()).c_str());
-    out.SetValue("DlssNr", "MaxRatio", GetFloatValue(Config::Instance()->DlssNrMaxRatio.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Transfer", GetIntValue(Config::Instance()->DlssNrTransfer.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrReplaceDetailStrength.value_for_config()).c_str());
+    out.SetValue("DlssNr", "MaxRatio", GetFloatValue(c.DlssNrMaxRatio.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Transfer", GetIntValue(c.DlssNrTransfer.value_for_config()).c_str());
     out.SetValue("DlssNr", "SuperiorScalingPreset",
-                 GetIntValue(Config::Instance()->DlssNrSuperiorScalingPreset.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrSuperiorScalingPreset.value_for_config()).c_str());
 
     out.SetValue("DlssNr", "ProbeD3D11",
-                 GetBoolValue(Config::Instance()->DlssNrProbeD3D11.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrProbeD3D11.value_for_config()).c_str());
     out.SetValue("DlssNr", "FrameStats",
-                 GetBoolValue(Config::Instance()->DlssNrFrameStats.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrFrameStats.value_for_config()).c_str());
     out.SetValue("DlssNr", "KernelProfile",
-                 GetBoolValue(Config::Instance()->DlssNrKernelProfile.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrKernelProfile.value_for_config()).c_str());
     out.SetValue("DlssNr", "WhitePointFromExposure",
-                 GetBoolValue(Config::Instance()->DlssNrWhitePointFromExposure.value_for_config()).c_str());
-    out.SetValue("DlssNr", "DebugView", GetIntValue(Config::Instance()->DlssNrDebugView.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Compare", GetIntValue(Config::Instance()->DlssNrCompare.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrWhitePointFromExposure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "DebugView", GetIntValue(c.DlssNrDebugView.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Compare", GetIntValue(c.DlssNrCompare.value_for_config()).c_str());
     out.SetValue("DlssNr", "CompareSplit",
-                 GetFloatValue(Config::Instance()->DlssNrCompareSplit.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrCompareSplit.value_for_config()).c_str());
     out.SetValue("DlssNr", "CompareZoom",
-                 GetFloatValue(Config::Instance()->DlssNrCompareZoom.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrCompareZoom.value_for_config()).c_str());
     out.SetValue("DlssNr", "CompareSwap",
-                 GetBoolValue(Config::Instance()->DlssNrCompareSwap.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrCompareSwap.value_for_config()).c_str());
     out.SetValue("DlssNr", "CompareTags",
-                 GetBoolValue(Config::Instance()->DlssNrCompareTags.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrCompareTags.value_for_config()).c_str());
     out.SetValue("DlssNr", "TagScale",
-                 GetFloatValue(Config::Instance()->DlssNrTagScale.value_for_config()).c_str());
-    out.SetValue("DlssNr", "WorkingScale", GetFloatValue(Config::Instance()->DlssNrWorkingScale.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrTagScale.value_for_config()).c_str());
+    out.SetValue("DlssNr", "WorkingScale", GetFloatValue(c.DlssNrWorkingScale.value_for_config()).c_str());
     out.SetValue("DlssNr", "ReducedUpscaleMethod",
-                 GetIntValue(Config::Instance()->DlssNrReducedUpscaleMethod.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrReducedUpscaleMethod.value_for_config()).c_str());
     out.SetValue("DlssNr", "ModelResolutionAuto",
-                 GetBoolValue(Config::Instance()->DlssNrModelResolutionAuto.value_for_config()).c_str());
-    out.SetValue("DlssNr", "InputFlatten", GetIntValue(Config::Instance()->DlssNrInputFlatten.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrModelResolutionAuto.value_for_config()).c_str());
+    out.SetValue("DlssNr", "InputFlatten", GetIntValue(c.DlssNrInputFlatten.value_for_config()).c_str());
     out.SetValue("DlssNr", "InputFlattenStrength",
-                 GetFloatValue(Config::Instance()->DlssNrInputFlattenStrength.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrInputFlattenStrength.value_for_config()).c_str());
     out.SetValue("DlssNr", "InputStructureHint",
-                 GetBoolValue(Config::Instance()->DlssNrInputStructureHint.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrInputStructureHint.value_for_config()).c_str());
     out.SetValue("DlssNr", "InputStructureStrength",
-                 GetFloatValue(Config::Instance()->DlssNrInputStructureStrength.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrInputStructureStrength.value_for_config()).c_str());
     out.SetValue("DlssNr", "InputStyleFacesOnly",
-                 GetBoolValue(Config::Instance()->DlssNrInputStyleFacesOnly.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrInputStyleFacesOnly.value_for_config()).c_str());
 
     // The old single key for a build from before the card: the first style that runs (auto when none does)
     {
-        const auto first = DlssNrInput::ToSingle(Config::Instance()->DlssNrInputStyles());
+        const auto first = DlssNrInput::ToSingle(c.DlssNrInputStyles());
         out.SetValue("DlssNr", "InputStyle", first.style == 0u ? "auto" : std::to_string(first.style).c_str());
         out.SetValue("DlssNr", "InputStyleStrength",
                      first.style == 0u ? "auto" : GetFloatValue(std::optional<float>(first.strength)).c_str());
     }
     out.SetValue("DlssNr", "SpatialCompression",
-                 GetBoolValue(Config::Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(Config::Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialCenterY", GetFloatValue(Config::Instance()->DlssNrSpatialCenterY.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialWorkX", GetFloatValue(Config::Instance()->DlssNrSpatialWorkX.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialWorkY", GetFloatValue(Config::Instance()->DlssNrSpatialWorkY.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialOffsetX", GetFloatValue(Config::Instance()->DlssNrSpatialOffsetX.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialOffsetY", GetFloatValue(Config::Instance()->DlssNrSpatialOffsetY.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialShiftX", GetFloatValue(Config::Instance()->DlssNrSpatialShiftX.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialShiftY", GetFloatValue(Config::Instance()->DlssNrSpatialShiftY.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Config::Instance()->DlssNrScalingDownscaler).c_str());
-    out.SetValue("DlssNr", "AutoCapture", GetBoolValue(Config::Instance()->DlssNrAutoCapture.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrSpatialCompression.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(c.DlssNrSpatialCenterX.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialCenterY", GetFloatValue(c.DlssNrSpatialCenterY.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialWorkX", GetFloatValue(c.DlssNrSpatialWorkX.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialWorkY", GetFloatValue(c.DlssNrSpatialWorkY.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialOffsetX", GetFloatValue(c.DlssNrSpatialOffsetX.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialOffsetY", GetFloatValue(c.DlssNrSpatialOffsetY.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialShiftX", GetFloatValue(c.DlssNrSpatialShiftX.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialShiftY", GetFloatValue(c.DlssNrSpatialShiftY.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(c.DlssNrScalingDownscaler).c_str());
+    out.SetValue("DlssNr", "AutoCapture", GetBoolValue(c.DlssNrAutoCapture.value_for_config()).c_str());
 
     // These were read every launch but never written, so nothing set through the menu survived a
     // restart -- the white-point source, both trims, the anchor, the pass count and the rest all
     // reset to default on the next run.
-    out.SetValue("DlssNr", "WhitePointSource", GetIntValue(Config::Instance()->DlssNrWhitePointSource.value_for_config()).c_str());
+    out.SetValue("DlssNr", "WhitePointSource", GetIntValue(c.DlssNrWhitePointSource.value_for_config()).c_str());
     out.SetValue("DlssNr", "GameExposureScale",
-                 GetIntValue(Config::Instance()->DlssNrGameExposureScale.value_for_config()).c_str());
-    out.SetValue("DlssNr", "WhitePointTrim", GetFloatValue(Config::Instance()->DlssNrWhitePointTrim.value_for_config()).c_str());
-    out.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(Config::Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrGameExposureScale.value_for_config()).c_str());
+    out.SetValue("DlssNr", "WhitePointTrim", GetFloatValue(c.DlssNrWhitePointTrim.value_for_config()).c_str());
+    out.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(c.DlssNrAutoExposureTrim.value_for_config()).c_str());
     out.SetValue("DlssNr", "AutoExposureShadowProtection",
-                 GetFloatValue(Config::Instance()->DlssNrAutoExposureShadowProtection.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrAutoExposureShadowProtection.value_for_config()).c_str());
     // The one speed both used to share is only read (and copied into both); drop it so a choice equal to a default is not
     // overridden by it on the next load.
     out.Delete("DlssNr", "AutoExposureAdaptSeconds");
-    out.SetValue("DlssNr", "AutoExposureMeter", GetIntValue(Config::Instance()->DlssNrAutoExposureMeter.value_for_config()).c_str());
+    out.SetValue("DlssNr", "AutoExposureMeter", GetIntValue(c.DlssNrAutoExposureMeter.value_for_config()).c_str());
     out.SetValue("DlssNr", "AutoExposureMeterLowPercent",
-                 GetFloatValue(Config::Instance()->DlssNrAutoExposureMeterLowPercent.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrAutoExposureMeterLowPercent.value_for_config()).c_str());
     out.SetValue("DlssNr", "AutoExposureMeterHighPercent",
-                 GetFloatValue(Config::Instance()->DlssNrAutoExposureMeterHighPercent.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrAutoExposureMeterHighPercent.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeDepthFinder",
-                 GetBoolValue(Config::Instance()->DlssNrNativeDepthFinder.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeDepthFinder.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeDepthVkCopyUsage",
-                 GetBoolValue(Config::Instance()->DlssNrNativeDepthVkCopyUsage.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeDepthVkCopyUsage.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeDepthResolveInList",
-                 GetBoolValue(Config::Instance()->DlssNrNativeDepthResolveInList.value_for_config()).c_str());
-    out.SetValue("DlssNr", "NativeDxvkVulkan", GetBoolValue(Config::Instance()->DlssNrNativeDxvkVulkan.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeDepthResolveInList.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDxvkVulkan", GetBoolValue(c.DlssNrNativeDxvkVulkan.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeDepthWarmupFrames",
-                 GetIntValue(Config::Instance()->DlssNrNativeDepthWarmupFrames.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrNativeDepthWarmupFrames.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeDepthOverlay",
-                 GetBoolValue(Config::Instance()->DlssNrNativeDepthOverlay.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeDepthOverlay.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeDebugView",
-                 GetBoolValue(Config::Instance()->DlssNrNativeDebugView.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeDebugView.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeMotionProfile",
-                 native::motion::ProfileIniText(Config::Instance()->DlssNrNativeMotionProfile.value_or_default()));
+                 native::motion::ProfileIniText(c.DlssNrNativeMotionProfile.value_or_default()));
     out.SetValue("DlssNr", "NativeMotionProfileCustom",
-                 Config::Instance()->DlssNrNativeMotionProfileCustom.value_for_config_or("").c_str());
-    out.SetValue("DlssNr", "NativeMotion", GetBoolValue(Config::Instance()->DlssNrNativeMotion.value_for_config()).c_str());
-    out.SetValue("DlssNr", "NativeInput", GetBoolValue(Config::Instance()->DlssNrNativeInput.value_for_config()).c_str());
+                 c.DlssNrNativeMotionProfileCustom.value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "NativeMotion", GetBoolValue(c.DlssNrNativeMotion.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeInput", GetBoolValue(c.DlssNrNativeInput.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeUpscaler",
-                 GetBoolValue(Config::Instance()->DlssNrNativeUpscaler.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeUpscaler.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeUpscalerPass",
-                 GetBoolValue(Config::Instance()->DlssNrNativeUpscalerPass.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeUpscalerPass.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeFrameGenerationOnly",
-                 GetBoolValue(Config::Instance()->DlssNrNativeFrameGenerationOnly.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeFrameGenerationOnly.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeLowLatencyBoost",
-                 GetBoolValue(Config::Instance()->DlssNrNativeLowLatencyBoost.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeLowLatencyBoost.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeLowLatencyDxvkGameThread",
-                 GetBoolValue(Config::Instance()->DlssNrNativeLowLatencyDxvkGameThread.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrNativeLowLatencyDxvkGameThread.value_for_config()).c_str());
     out.SetValue("DlssNr", "AutoExposureAdaptBrighterSeconds",
-                 GetFloatValue(Config::Instance()->DlssNrAutoExposureAdaptBrighterSeconds.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrAutoExposureAdaptBrighterSeconds.value_for_config()).c_str());
     out.SetValue("DlssNr", "AutoExposureAdaptDarkerSeconds",
-                 GetFloatValue(Config::Instance()->DlssNrAutoExposureAdaptDarkerSeconds.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrAutoExposureAdaptDarkerSeconds.value_for_config()).c_str());
     out.SetValue("DlssNr", "AutoExposureFollowGame",
-                 GetBoolValue(Config::Instance()->DlssNrAutoExposureFollowGame.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrAutoExposureFollowGame.value_for_config()).c_str());
     out.SetValue("DlssNr", "GameExposureTrimAnchors",
-                 Config::Instance()->DlssNrGameExposureTrimAnchors.value_for_config_or("").c_str());
+                 c.DlssNrGameExposureTrimAnchors.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "AutoExposureTrimAnchors",
-                 Config::Instance()->DlssNrAutoExposureTrimAnchors.value_for_config_or("").c_str());
-    out.SetValue("DlssNr", "ScanTrim", GetFloatValue(Config::Instance()->DlssNrScanTrim.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ScanAnchorValue", GetFloatValue(Config::Instance()->DlssNrScanAnchorValue.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ScanAnchorWhitePoint", GetFloatValue(Config::Instance()->DlssNrScanAnchorWhitePoint.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ScanAnchors", Config::Instance()->DlssNrScanAnchors.value_for_config_or("").c_str());
-    out.SetValue("DlssNr", "ScanInverted", GetBoolValue(Config::Instance()->DlssNrScanInverted.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ScanMeter", GetBoolValue(Config::Instance()->DlssNrScanMeter.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Passes", GetIntValue(Config::Instance()->DlssNrPasses.value_for_config()).c_str());
-    out.SetValue("DlssNr", "PassFeedback", GetFloatValue(Config::Instance()->DlssNrPassFeedback.value_for_config()).c_str());
-    out.SetValue("DlssNr", "UseProxy", GetBoolValue(Config::Instance()->DlssNrUseProxy.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ProxyProbe", GetBoolValue(Config::Instance()->DlssNrProxyProbe.value_for_config()).c_str());
+                 c.DlssNrAutoExposureTrimAnchors.value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "ScanTrim", GetFloatValue(c.DlssNrScanTrim.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ScanAnchorValue", GetFloatValue(c.DlssNrScanAnchorValue.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ScanAnchorWhitePoint", GetFloatValue(c.DlssNrScanAnchorWhitePoint.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ScanAnchors", c.DlssNrScanAnchors.value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "ScanInverted", GetBoolValue(c.DlssNrScanInverted.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ScanMeter", GetBoolValue(c.DlssNrScanMeter.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Passes", GetIntValue(c.DlssNrPasses.value_for_config()).c_str());
+    out.SetValue("DlssNr", "PassFeedback", GetFloatValue(c.DlssNrPassFeedback.value_for_config()).c_str());
+    out.SetValue("DlssNr", "UseProxy", GetBoolValue(c.DlssNrUseProxy.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ProxyProbe", GetBoolValue(c.DlssNrProxyProbe.value_for_config()).c_str());
     // ScanExposure and RecordExposureScan are developer overrides with no menu control; persist them so a set ini keeps
     // them.
-    out.SetValue("DlssNr", "ScanExposure", GetBoolValue(Config::Instance()->DlssNrScanExposure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ScanExposure", GetBoolValue(c.DlssNrScanExposure.value_for_config()).c_str());
     out.SetValue("DlssNr", "RecordExposureScan",
-                 GetBoolValue(Config::Instance()->DlssNrRecordExposureScan.value_for_config()).c_str());
+                 GetBoolValue(c.DlssNrRecordExposureScan.value_for_config()).c_str());
     out.SetValue("DlssNr", "WhitePointScale",
-                 GetFloatValue(Config::Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Preset", GetIntValue(Config::Instance()->DlssNrPreset.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Intensity", GetFloatValue(Config::Instance()->DlssNrIntensity.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Style", GetIntValue(Config::Instance()->DlssNrStyle.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrWhitePointScale.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Preset", GetIntValue(c.DlssNrPreset.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Intensity", GetFloatValue(c.DlssNrIntensity.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Style", GetIntValue(c.DlssNrStyle.value_for_config()).c_str());
     out.SetValue("DlssNr", "Pass2Preset",
-                 GetIntValue(Config::Instance()->DlssNrPass2Preset.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrPass2Preset.value_for_config()).c_str());
     out.SetValue("DlssNr", "Pass2Style",
-                 GetIntValue(Config::Instance()->DlssNrPass2Style.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrPass2Style.value_for_config()).c_str());
     out.SetValue("DlssNr", "Pass3Preset",
-                 GetIntValue(Config::Instance()->DlssNrPass3Preset.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrPass3Preset.value_for_config()).c_str());
     out.SetValue("DlssNr", "Pass3Style",
-                 GetIntValue(Config::Instance()->DlssNrPass3Style.value_for_config()).c_str());
+                 GetIntValue(c.DlssNrPass3Style.value_for_config()).c_str());
     out.SetValue("DlssNr", "LocalStructure",
-                 GetFloatValue(Config::Instance()->DlssNrLocalStructure.value_for_config()).c_str());
-    out.SetValue("DlssNr", "LocalTone", GetFloatValue(Config::Instance()->DlssNrLocalTone.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrLocalStructure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LocalTone", GetFloatValue(c.DlssNrLocalTone.value_for_config()).c_str());
     out.SetValue("DlssNr", "SkinStructure",
-                 GetFloatValue(Config::Instance()->DlssNrSkinStructure.value_for_config()).c_str());
-    out.SetValue("DlssNr", "AutoMask", GetBoolValue(Config::Instance()->DlssNrAutoMask.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SkinProtection", GetBoolValue(Config::Instance()->DlssNrSkinProtection.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SkinToneEnabled", GetBoolValue(Config::Instance()->DlssNrSkinToneEnabled.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SkinDetail", GetFloatValue(Config::Instance()->DlssNrSkinDetail.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SkinColour", GetFloatValue(Config::Instance()->DlssNrSkinColour.value_for_config()).c_str());
-    out.SetValue("DlssNr", "EnvironmentDetail", GetFloatValue(Config::Instance()->DlssNrEnvironmentDetail.value_for_config()).c_str());
-    out.SetValue("DlssNr", "EnvironmentColour", GetFloatValue(Config::Instance()->DlssNrEnvironmentColour.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ShowSkinMask", GetBoolValue(Config::Instance()->DlssNrShowSkinMask.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass2Intensity", GetFloatValue(Config::Instance()->DlssNrPass2Intensity.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass2LocalStructure", GetFloatValue(Config::Instance()->DlssNrPass2LocalStructure.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass2LocalTone", GetFloatValue(Config::Instance()->DlssNrPass2LocalTone.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass2SkinStructure", GetFloatValue(Config::Instance()->DlssNrPass2SkinStructure.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass2AutoMask", GetBoolValue(Config::Instance()->DlssNrPass2AutoMask.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass3Intensity", GetFloatValue(Config::Instance()->DlssNrPass3Intensity.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass3LocalStructure", GetFloatValue(Config::Instance()->DlssNrPass3LocalStructure.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass3LocalTone", GetFloatValue(Config::Instance()->DlssNrPass3LocalTone.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass3SkinStructure", GetFloatValue(Config::Instance()->DlssNrPass3SkinStructure.value_for_config()).c_str());
-    out.SetValue("DlssNr", "Pass3AutoMask", GetBoolValue(Config::Instance()->DlssNrPass3AutoMask.value_for_config()).c_str());
-    out.SetValue("DlssNr", "UnlockPasses", GetBoolValue(Config::Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrSkinStructure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "AutoMask", GetBoolValue(c.DlssNrAutoMask.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SkinProtection", GetBoolValue(c.DlssNrSkinProtection.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SkinToneEnabled", GetBoolValue(c.DlssNrSkinToneEnabled.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SkinDetail", GetFloatValue(c.DlssNrSkinDetail.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SkinColour", GetFloatValue(c.DlssNrSkinColour.value_for_config()).c_str());
+    out.SetValue("DlssNr", "EnvironmentDetail", GetFloatValue(c.DlssNrEnvironmentDetail.value_for_config()).c_str());
+    out.SetValue("DlssNr", "EnvironmentColour", GetFloatValue(c.DlssNrEnvironmentColour.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ShowSkinMask", GetBoolValue(c.DlssNrShowSkinMask.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass2Intensity", GetFloatValue(c.DlssNrPass2Intensity.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass2LocalStructure", GetFloatValue(c.DlssNrPass2LocalStructure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass2LocalTone", GetFloatValue(c.DlssNrPass2LocalTone.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass2SkinStructure", GetFloatValue(c.DlssNrPass2SkinStructure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass2AutoMask", GetBoolValue(c.DlssNrPass2AutoMask.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass3Intensity", GetFloatValue(c.DlssNrPass3Intensity.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass3LocalStructure", GetFloatValue(c.DlssNrPass3LocalStructure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass3LocalTone", GetFloatValue(c.DlssNrPass3LocalTone.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass3SkinStructure", GetFloatValue(c.DlssNrPass3SkinStructure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "Pass3AutoMask", GetBoolValue(c.DlssNrPass3AutoMask.value_for_config()).c_str());
+    out.SetValue("DlssNr", "UnlockPasses", GetBoolValue(c.DlssNrUnlockPasses.value_for_config()).c_str());
     for (unsigned int i = 0; i < 27; ++i)
     {
-        auto& pass = Config::Instance()->DlssNrExtraPasses[i];
+        auto& pass = c.DlssNrExtraPasses[i];
         out.SetValue("DlssNr", std::format("Pass{}Style", i + 4).c_str(), GetIntValue(pass.style.value_for_config()).c_str());
         out.SetValue("DlssNr", std::format("Pass{}Intensity", i + 4).c_str(), GetFloatValue(pass.intensity.value_for_config()).c_str());
         out.SetValue("DlssNr", std::format("Pass{}LocalStructure", i + 4).c_str(), GetFloatValue(pass.structure.value_for_config()).c_str());
@@ -1502,14 +1505,14 @@ static void WriteDlssNr(CSimpleIniA& out)
         out.SetValue("DlssNr", std::format("Pass{}SkinStructure", i + 4).c_str(), GetFloatValue(pass.skin.value_for_config()).c_str());
         out.SetValue("DlssNr", std::format("Pass{}AutoMask", i + 4).c_str(), GetBoolValue(pass.autoMask.value_for_config()).c_str());
     }
-    out.SetValue("DlssNr", "ReversibleMode", GetIntValue(Config::Instance()->DlssNrReversibleMode.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ColourEncoding", GetIntValue(Config::Instance()->DlssNrColourEncoding.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ReversibleMode", GetIntValue(c.DlssNrReversibleMode.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ColourEncoding", GetIntValue(c.DlssNrColourEncoding.value_for_config()).c_str());
     out.SetValue("DlssNr", "DisplayPaperWhiteNits",
-                 GetFloatValue(Config::Instance()->DlssNrDisplayPaperWhiteNits.value_for_config()).c_str());
-    out.SetValue("DlssNr", "LutFile", Config::Instance()->DlssNrLutFile.value_for_config_or("").c_str());
-    out.SetValue("DlssNr", "LutStrength", GetFloatValue(Config::Instance()->DlssNrLutStrength.value_for_config()).c_str());
-    out.SetValue("DlssNr", "ApplyModel", GetBoolValue(Config::Instance()->DlssNrApplyModel.value_for_config()).c_str());
-    out.SetValue("DlssNr", "HoldFrame", GetBoolValue(Config::Instance()->DlssNrHoldFrame.value_for_config()).c_str());
+                 GetFloatValue(c.DlssNrDisplayPaperWhiteNits.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutFile", c.DlssNrLutFile.value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "LutStrength", GetFloatValue(c.DlssNrLutStrength.value_for_config()).c_str());
+    out.SetValue("DlssNr", "ApplyModel", GetBoolValue(c.DlssNrApplyModel.value_for_config()).c_str());
+    out.SetValue("DlssNr", "HoldFrame", GetBoolValue(c.DlssNrHoldFrame.value_for_config()).c_str());
 }
 
 // --- NR profiles (dlssnr/DlssNr_Profiles.h) ---
@@ -1533,11 +1536,13 @@ static DlssNrProfiles::Section KeptSection(const CSimpleIniA& from)
 DlssNrProfiles::Section Config::DlssNrSnapshot()
 {
     CSimpleIniA current;
-    WriteDlssNr(current);
+    WriteDlssNr(*this, current);
     return KeptSection(current);
 }
 
-DlssNrProfiles::Section Config::SavedDlssNrSection() { return KeptSection(ini); }
+// Taken in the snapshot's own form right after a load and a Save Settings: the ini's text can differ from what the
+// writer gives for the same value (0.5 against 0.500000, a default written out), and would read as a change.
+DlssNrProfiles::Section Config::SavedDlssNrSection() { return savedDlssNr; }
 
 std::optional<DlssNrProfiles::File> Config::ReadDlssNrProfile(const std::filesystem::path& path)
 {
@@ -1550,13 +1555,14 @@ std::optional<DlssNrProfiles::File> Config::ReadDlssNrProfile(const std::filesys
 bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& error)
 {
     CSimpleIniA out;
-    out.SetValue("Profile", "Version", std::to_string(DlssNrProfiles::kFileVersion).c_str(),
-                 "; OptiScaler NR profile: Neural Rendering settings for the game in SavedFrom. Load it from the menu,\n"
-                 "; Neural Rendering > Status & Presets > NR Profiles.");
-    out.SetValue("Profile", "SavedFrom", wstring_to_string(Util::ExePath().filename().wstring()).c_str());
+    out.SetValue(
+        "Profile", "Version", std::to_string(DlssNrProfiles::kFileVersion).c_str(),
+        "; OptiScaler NR profile: Neural Rendering settings for the game in SavedFrom. Load it from the menu,\n"
+        "; Neural Rendering > Status & Presets > NR Profiles.");
+    out.SetValue("Profile", "SavedFrom", State::Instance().gameExe.c_str());
 
     CSimpleIniA all;
-    WriteDlssNr(all);
+    WriteDlssNr(*this, all);
     for (const auto& [key, value] : KeptSection(all))
         out.SetValue("DlssNr", key.c_str(), value.c_str());
 
@@ -2086,7 +2092,7 @@ bool Config::SaveIni()
     {
         ini.SetValue("DLSS", "Enabled", GetBoolValue(Instance()->DLSSEnabled.value_for_config()).c_str());
 
-        WriteDlssNr(ini);
+        WriteDlssNr(*this, ini);
         ini.SetValue("DLSS", "RenderPresetOverride",
                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetForAll",
@@ -2566,7 +2572,11 @@ bool Config::SaveIni()
 
     LOG_INFO("Trying to save ini to: {0}", wstring_to_string(pathWStr));
 
-    return ini.SaveFile(absoluteFileName.wstring().c_str()) >= 0;
+    if (ini.SaveFile(absoluteFileName.wstring().c_str()) < 0)
+        return false;
+
+    savedDlssNr = DlssNrSnapshot();
+    return true;
 }
 
 bool Config::SaveXeFG()

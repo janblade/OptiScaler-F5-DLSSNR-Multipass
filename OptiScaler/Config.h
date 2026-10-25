@@ -1333,7 +1333,7 @@ class Config
     bool SaveIni();
 
     // NR profiles (dlssnr/DlssNr_Profiles.h): the kept [DlssNr] settings to and from a profile file, and back to the
-    // saved ini (what OptiScaler.ini held at the last load or Save Settings).
+    // saved ones (what OptiScaler.ini held at the last load or Save Settings).
     bool SaveDlssNrProfile(const std::filesystem::path& path, std::string& error);
     bool LoadDlssNrProfile(const std::filesystem::path& path, std::string& error);
     void RevertDlssNrToSaved();
@@ -1365,6 +1365,7 @@ class Config
     bool Reload(std::filesystem::path iniPath);
     void ReadDlssNr();
     size_t ApplyDlssNrSection(const DlssNrProfiles::Section& section);
+    DlssNrProfiles::Section savedDlssNr; // the kept [DlssNr] settings at the last load or Save Settings
 
     std::optional<std::string> readString(std::string section, std::string key, bool lowercase = false);
     std::optional<std::wstring> readWString(std::string section, std::string key, bool lowercase = false);

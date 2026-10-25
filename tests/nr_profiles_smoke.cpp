@@ -30,8 +30,9 @@ static void Names()
     Check(SanitiseName("a_b") == std::optional<std::string>("a_b"), "underscore kept");
     Check(SanitiseName(std::string(kMaxNameLength, 'x')).has_value(), "longest name kept");
 
-    for (const char* bad : { "", "   ", "..\\x", "a/b", "a\\b", "c:x", "a*b", "a?b", "a\"b", "a<b", "a|b", ".hidden",
-                             "trailing.", "CON", "con", "nul.txt", "Com1", "LPT9.ini", "AUX", "PRN", "a\tb" })
+    for (const char* bad :
+         { "",        "   ",       "..\\x", "a/b", "a\\b",    "c:x",  "a*b",      "a?b", "a\"b", "a<b", "a|b",
+           ".hidden", "trailing.", "CON",   "con", "nul.txt", "Com1", "LPT9.ini", "AUX", "PRN",  "a\tb" })
         Check(!SanitiseName(bad).has_value(), std::string("name rejected: '") + bad + "'");
 
     Check(!SanitiseName(std::string(kMaxNameLength + 1, 'x')).has_value(), "too long rejected");
@@ -53,8 +54,7 @@ static void Keys()
 {
     Check(IsKept("Passes") && IsKept("passes") && IsKept("PASSES"), "keys match case-insensitively (as the ini does)");
     Check(IsKept("Pass4Style") && IsKept("Pass30AutoMask") && IsKept("Pass17LocalTone"), "passes 4-30 kept");
-    Check(!IsKept("Pass31Style") && !IsKept("Pass3x") && !IsKept("Pass4") && !IsKept("Pass04Style"),
-          "not a pass key");
+    Check(!IsKept("Pass31Style") && !IsKept("Pass3x") && !IsKept("Pass4") && !IsKept("Pass04Style"), "not a pass key");
     Check(IsKept("WhitePointSource") && IsKept("NativeMotion") && IsKept("ColourEncoding") &&
               IsKept("FinishedPicture") && IsKept("SpatialCenterX"),
           "the game's own settings kept (a profile is shared for one game)");

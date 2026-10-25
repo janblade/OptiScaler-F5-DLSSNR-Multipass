@@ -29,59 +29,172 @@ inline constexpr int kFileVersion = 1; // [Profile] Version
 // [DlssNr] keys a profile keeps. Pass4..Pass30 keys (written in a loop) are kept too, see IsKept.
 inline constexpr std::string_view kKeptKeys[] = {
     // placement and model
-    "RunBeforeSR", "DeferredDLSS", "FinishedPicture", "Precision", "Preset", "WorkingScale", "ModelResolutionAuto",
-    "ReducedUpscaleMethod", "Transfer", "SuperiorScalingPreset", "ScalingDownscaler",
+    "RunBeforeSR",
+    "DeferredDLSS",
+    "FinishedPicture",
+    "Precision",
+    "Preset",
+    "WorkingScale",
+    "ModelResolutionAuto",
+    "ReducedUpscaleMethod",
+    "Transfer",
+    "SuperiorScalingPreset",
+    "ScalingDownscaler",
     // reuse
-    "VitEvery", "VitEveryPlain", "DetailReuse", "DetailReuseSteady", "DetailReuseFill", "DetailReuseInterval",
-    "DetailReuseSpread", "DetailReuseDepthTolerance", "DetailReuseClipGamma", "DetailReuseClipFalloff",
-    "DetailReuseSigmaFloor", "DetailReuseWithFG", "DetailReuseMinFps", "DetailReuseMaxDropped", "SceneCut", "EditCache",
-    "EditCacheInterval", "EditCacheCrossfade",
+    "VitEvery",
+    "VitEveryPlain",
+    "DetailReuse",
+    "DetailReuseSteady",
+    "DetailReuseFill",
+    "DetailReuseInterval",
+    "DetailReuseSpread",
+    "DetailReuseDepthTolerance",
+    "DetailReuseClipGamma",
+    "DetailReuseClipFalloff",
+    "DetailReuseSigmaFloor",
+    "DetailReuseWithFG",
+    "DetailReuseMinFps",
+    "DetailReuseMaxDropped",
+    "SceneCut",
+    "EditCache",
+    "EditCacheInterval",
+    "EditCacheCrossfade",
     // look
-    "TransferStrength", "ColourStrength", "ReplaceDetailStrength", "MaxRatio", "ReversibleMode", "Passes",
-    "PassFeedback", "UnlockPasses", "Style", "Intensity", "LocalStructure", "LocalTone", "SkinStructure", "AutoMask",
-    "Pass2Preset", "Pass2Style", "Pass2Intensity", "Pass2LocalStructure", "Pass2LocalTone", "Pass2SkinStructure",
-    "Pass2AutoMask", "Pass3Preset", "Pass3Style", "Pass3Intensity", "Pass3LocalStructure", "Pass3LocalTone",
-    "Pass3SkinStructure", "Pass3AutoMask", "SkinProtection", "SkinToneEnabled", "SkinDetail", "SkinColour",
-    "EnvironmentDetail", "EnvironmentColour",
+    "TransferStrength",
+    "ColourStrength",
+    "ReplaceDetailStrength",
+    "MaxRatio",
+    "ReversibleMode",
+    "Passes",
+    "PassFeedback",
+    "UnlockPasses",
+    "Style",
+    "Intensity",
+    "LocalStructure",
+    "LocalTone",
+    "SkinStructure",
+    "AutoMask",
+    "Pass2Preset",
+    "Pass2Style",
+    "Pass2Intensity",
+    "Pass2LocalStructure",
+    "Pass2LocalTone",
+    "Pass2SkinStructure",
+    "Pass2AutoMask",
+    "Pass3Preset",
+    "Pass3Style",
+    "Pass3Intensity",
+    "Pass3LocalStructure",
+    "Pass3LocalTone",
+    "Pass3SkinStructure",
+    "Pass3AutoMask",
+    "SkinProtection",
+    "SkinToneEnabled",
+    "SkinDetail",
+    "SkinColour",
+    "EnvironmentDetail",
+    "EnvironmentColour",
     // input style and grade
-    "InputFlatten", "InputFlattenStrength", "InputStructureHint", "InputStructureStrength", "InputStyleFacesOnly",
-    "LutFile", "LutStrength",
+    "InputFlatten",
+    "InputFlattenStrength",
+    "InputStructureHint",
+    "InputStructureStrength",
+    "InputStyleFacesOnly",
+    "LutFile",
+    "LutStrength",
     // the game's: exposure and colour encoding
-    "WhitePointSource", "GameExposureScale", "WhitePointTrim", "WhitePointScale", "AutoExposureTrim",
-    "AutoExposureShadowProtection", "AutoExposureMeter", "AutoExposureMeterLowPercent", "AutoExposureMeterHighPercent",
-    "AutoExposureAdaptBrighterSeconds", "AutoExposureAdaptDarkerSeconds", "AutoExposureFollowGame",
-    "GameExposureTrimAnchors", "AutoExposureTrimAnchors", "ScanTrim", "ScanAnchorValue", "ScanAnchorWhitePoint",
-    "ScanAnchors", "ScanInverted", "ScanMeter", "ColourEncoding",
+    "WhitePointSource",
+    "GameExposureScale",
+    "WhitePointTrim",
+    "WhitePointScale",
+    "AutoExposureTrim",
+    "AutoExposureShadowProtection",
+    "AutoExposureMeter",
+    "AutoExposureMeterLowPercent",
+    "AutoExposureMeterHighPercent",
+    "AutoExposureAdaptBrighterSeconds",
+    "AutoExposureAdaptDarkerSeconds",
+    "AutoExposureFollowGame",
+    "GameExposureTrimAnchors",
+    "AutoExposureTrimAnchors",
+    "ScanTrim",
+    "ScanAnchorValue",
+    "ScanAnchorWhitePoint",
+    "ScanAnchors",
+    "ScanInverted",
+    "ScanMeter",
+    "ColourEncoding",
     // the game's: Optical F5Low and the native path (a change may need a restart: the Optical F5Low page says which)
-    "NativeDepthFinder", "NativeDepthVkCopyUsage", "NativeDepthResolveInList", "NativeDxvkVulkan",
-    "NativeDepthWarmupFrames", "NativeMotionProfile", "NativeMotionProfileCustom", "NativeMotion", "NativeInput",
-    "NativeUpscaler", "NativeUpscalerPass", "NativeFrameGenerationOnly", "NativeLowLatencyBoost",
+    "NativeDepthFinder",
+    "NativeDepthVkCopyUsage",
+    "NativeDepthResolveInList",
+    "NativeDxvkVulkan",
+    "NativeDepthWarmupFrames",
+    "NativeMotionProfile",
+    "NativeMotionProfileCustom",
+    "NativeMotion",
+    "NativeInput",
+    "NativeUpscaler",
+    "NativeUpscalerPass",
+    "NativeFrameGenerationOnly",
+    "NativeLowLatencyBoost",
     "NativeLowLatencyDxvkGameThread",
     // the game's: edge compression, laid out for its picture
-    "SpatialCompression", "SpatialCenterX", "SpatialCenterY", "SpatialWorkX", "SpatialWorkY", "SpatialOffsetX",
-    "SpatialOffsetY", "SpatialShiftX", "SpatialShiftY",
+    "SpatialCompression",
+    "SpatialCenterX",
+    "SpatialCenterY",
+    "SpatialWorkX",
+    "SpatialWorkY",
+    "SpatialOffsetX",
+    "SpatialOffsetY",
+    "SpatialShiftX",
+    "SpatialShiftY",
 };
 
 // [DlssNr] keys a profile leaves out.
 inline constexpr std::string_view kLeftOutKeys[] = {
     // the player's own
-    "Enabled", "ToggleKey", "DisplayPaperWhiteNits",
+    "Enabled",
+    "ToggleKey",
+    "DisplayPaperWhiteNits",
     // old keys kept for older builds: NativeLowLatency is [Framerate] LowLatencyInput's, InputStyle and
     // InputStyleStrength are written from the input style card (whose keys are kept), WhitePointFromExposure became
     // WhitePointSource
-    "NativeLowLatency", "InputStyle", "InputStyleStrength", "WhitePointFromExposure",
+    "NativeLowLatency",
+    "InputStyle",
+    "InputStyleStrength",
+    "WhitePointFromExposure",
     // views, diagnostics, developer overrides, testing
-    "DebugView", "Compare", "CompareSplit", "CompareZoom", "CompareSwap", "CompareTags", "TagScale", "ShowSkinMask",
-    "NativeDepthOverlay", "NativeDebugView", "DetailReuseDebug", "EditCacheDebug", "ProbeD3D11", "FrameStats",
-    "KernelProfile", "AutoCapture", "ScanExposure", "RecordExposureScan", "UseProxy", "ProxyProbe", "ApplyModel",
+    "DebugView",
+    "Compare",
+    "CompareSplit",
+    "CompareZoom",
+    "CompareSwap",
+    "CompareTags",
+    "TagScale",
+    "ShowSkinMask",
+    "NativeDepthOverlay",
+    "NativeDebugView",
+    "DetailReuseDebug",
+    "EditCacheDebug",
+    "ProbeD3D11",
+    "FrameStats",
+    "KernelProfile",
+    "AutoCapture",
+    "ScanExposure",
+    "RecordExposureScan",
+    "UseProxy",
+    "ProxyProbe",
+    "ApplyModel",
     "HoldFrame",
 };
 
 inline bool EqualNoCase(std::string_view a, std::string_view b)
 {
-    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
-               return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
-           });
+    return a.size() == b.size() &&
+           std::equal(
+               a.begin(), a.end(), b.begin(), [](char x, char y)
+               { return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y)); });
 }
 
 // Pass4Style .. Pass30AutoMask (Config::DlssNrExtraPasses)
@@ -111,7 +224,8 @@ inline bool IsKept(std::string_view key)
 {
     if (IsExtraPassKey(key))
         return true;
-    return std::any_of(std::begin(kKeptKeys), std::end(kKeptKeys), [&](std::string_view k) { return EqualNoCase(k, key); });
+    return std::any_of(std::begin(kKeptKeys), std::end(kKeptKeys),
+                       [&](std::string_view k) { return EqualNoCase(k, key); });
 }
 
 inline bool IsLeftOut(std::string_view key)
@@ -185,9 +299,9 @@ struct NoCaseLess
 {
     bool operator()(const std::string& a, const std::string& b) const
     {
-        return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), [](char x, char y) {
-            return std::tolower(static_cast<unsigned char>(x)) < std::tolower(static_cast<unsigned char>(y));
-        });
+        return std::lexicographical_compare(
+            a.begin(), a.end(), b.begin(), b.end(), [](char x, char y)
+            { return std::tolower(static_cast<unsigned char>(x)) < std::tolower(static_cast<unsigned char>(y)); });
     }
 };
 using Section = std::map<std::string, std::string, NoCaseLess>;
@@ -219,7 +333,8 @@ inline Section Filter(const Section& section)
 // Whether two sections hold the same kept settings. A missing key reads as "auto", as the ini reader has it.
 inline bool Same(const Section& a, const Section& b)
 {
-    const auto valueIn = [](const Section& s, const std::string& key) -> std::string {
+    const auto valueIn = [](const Section& s, const std::string& key) -> std::string
+    {
         const auto it = s.find(key);
         return it == s.end() ? std::string("auto") : it->second;
     };
@@ -238,7 +353,8 @@ inline bool Same(const Section& a, const Section& b)
 // Whether a load changed an Optical F5Low (Native) setting, which may need a restart
 inline bool NativeChanged(const Section& before, const Section& after)
 {
-    const auto native = [](const Section& s) {
+    const auto native = [](const Section& s)
+    {
         Section only;
         for (const auto& [key, value] : s)
         {

@@ -1353,6 +1353,7 @@ class Config
     std::wstring fileName = L"OptiScaler.ini";
 
     bool Reload(std::filesystem::path iniPath);
+    void ReadDlssNr();
 
     std::optional<std::string> readString(std::string section, std::string key, bool lowercase = false);
     std::optional<std::wstring> readWString(std::string section, std::string key, bool lowercase = false);

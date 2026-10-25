@@ -1137,15 +1137,19 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
     if (nrColor)
         InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) nrColor);
 
-    // The inputs of the native Vulkan FG output (OptiFG), not for the upscalers that run on D3D12
-    if (!bridged)
-        UpscalerInputsVk::UpscaleStart(InCmdList, InParameters, deviceContext);
+    // The inputs of the native Vulkan FG output (OptiFG)
+    UpscalerInputsVk::UpscaleStart(InCmdList, InParameters, deviceContext);
+
+    NVSDK_NGX_Resource_VK* output = nullptr;
+    InParameters->Get(NVSDK_NGX_Parameter_Output, (void**) &output);
 
     auto upscaleResult = deviceContext->Evaluate(InCmdList, InParameters);
     if (nrColor)
         InParameters->Set(NVSDK_NGX_Parameter_Color, originalColor);
 
-    if (!upscaleResult)
+    if (upscaleResult)
+        UpscalerInputsVk::UpscaleEnd(InCmdList, output);
+    else
         ImGui::InsertNotification({ ImGuiToastType::Error, 10000, "Upscaler failed to run!" });
 
     if ((!upscaleResult || !deviceContext->IsInited()) &&

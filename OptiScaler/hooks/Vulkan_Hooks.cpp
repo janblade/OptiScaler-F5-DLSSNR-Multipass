@@ -19,6 +19,7 @@
 #include "Reflex_Hooks.h"
 
 #include <spoofing/Vulkan_Spoofing.h>
+#include <hudfix/Hudfix_Vk.h>
 
 #include <vulkan/vulkan.hpp>
 
@@ -340,6 +341,14 @@ void VulkanHooks::NoteLatencySwapchain(VkDevice device, VkSwapchainKHR swapchain
 
     std::unique_lock lock(LatencySwapchainMutex());
     _latencySwapchains[device] = { swapchain, true };
+}
+
+PFN_vkVoidFunction VulkanHooks::GetInstanceProcAddr(VkInstance instance, const char* pName)
+{
+    if (o_vkGetInstanceProcAddr != nullptr)
+        return o_vkGetInstanceProcAddr(instance, pName);
+
+    return vkGetInstanceProcAddr(instance, pName);
 }
 
 PFN_vkVoidFunction VulkanHooks::OriginalSwapchainFunction(const char* pName)
@@ -1179,6 +1188,7 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     {
         nativeFg->OnDeviceCreated(*pDevice);
         HookDevice(*pDevice);
+        Hudfix_Vk::HookDevice(*pDevice);
     }
 
     if (antiLagBorrowedFlag != nullptr)
@@ -1357,6 +1367,10 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
         else
             currentFeature->TickFrozenCheck();
     }
+
+    // Ends the hudless search before the menu renders to the swapchain
+    if (nativeFg != nullptr)
+        Hudfix_Vk::PresentStart();
 
     VkPresentInfoKHR localPresentInfo {};
     memcpy(&localPresentInfo, pPresentInfo, sizeof(VkPresentInfoKHR));
@@ -1772,7 +1786,12 @@ static VkResult hkvkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapch
         fg != nullptr && fg->OwnsSwapchain(swapchain) && !FromFGOutput(_ReturnAddress()))
     {
         ScopedFGCall fgCall {};
-        return fg->GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+        auto result = fg->GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+
+        if (result == VK_SUCCESS && pSwapchainImages != nullptr)
+            Hudfix_Vk::AddSwapchainImages(pSwapchainImages, *pSwapchainImageCount);
+
+        return result;
     }
 
     return o_GetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages);

@@ -550,7 +550,7 @@ static IFGFeature_Vk* CreateFGFeature()
 {
     auto& state = State::Instance();
 
-    const bool supportedInput = state.activeFgInput == FGInput::DLSSG;
+    const bool supportedInput = state.activeFgInput == FGInput::DLSSG || state.activeFgInput == FGInput::Upscaler;
 
     if (state.currentVkFG != nullptr || !supportedInput)
         return state.currentVkFG;
@@ -716,7 +716,8 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     VkPhysicalDeviceTimelineSemaphoreFeatures nativeFgTimeline {};
 
     if (!ScopedSkipVulkanHooks::Active() && !D3DOnVulkanModule(Util::GetCallerModule(_ReturnAddress())) &&
-        !VkPresentBridge::DxvkGame() && (nativeFg = CreateFGFeature()) != nullptr)
+        !VkPresentBridge::DxvkGame() && !VkPresentBridge::ModeWantsBridge() &&
+        (nativeFg = CreateFGFeature()) != nullptr)
     {
         if (EnableTimelineSemaphores(physicalDevice, localCreteInfo, nativeFgTimeline))
         {

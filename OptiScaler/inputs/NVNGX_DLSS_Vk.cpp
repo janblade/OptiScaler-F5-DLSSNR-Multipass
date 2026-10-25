@@ -8,6 +8,7 @@
 
 #include "NVNGX_DLSS.h"
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <inputs/FG/Upscaler_Inputs_Vk.h>
 #include "NVNGX_Parameter.h"
 #include "proxies/NVNGX_Proxy.h"
 
@@ -1135,6 +1136,11 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
                        : nullptr;
     if (nrColor)
         InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) nrColor);
+
+    // The inputs of the native Vulkan FG output (OptiFG), not for the upscalers that run on D3D12
+    if (!bridged)
+        UpscalerInputsVk::UpscaleStart(InCmdList, InParameters, deviceContext);
+
     auto upscaleResult = deviceContext->Evaluate(InCmdList, InParameters);
     if (nrColor)
         InParameters->Set(NVSDK_NGX_Parameter_Color, originalColor);

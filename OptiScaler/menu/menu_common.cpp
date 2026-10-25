@@ -3636,6 +3636,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     // game starts: they are offered while it is up, and before it while Optical F5Low can make one (choose, save, restart).
     const bool vulkanNoFg = state.swapchainApi == API::Vulkan && state.swapchainInteropApi != SwapchainInteropApi::VkwDx12 &&
                             (IdentifyGpu::getPrimaryGpu().usesDxvk || !config->DlssNrEnabled.value_or_default());
+    // A native Vulkan game (not through dxvk) can have the FSR and DLSSG outputs on FFX's and Streamline's Vulkan swapchain
+    // (framegen/ffx/FSRFG_Vk.h, framegen/dlssg/DLSSG_Vk.h), fed by OptiFG or the game's own DLSSG, without the bridge.
+    const bool vulkanNativeFg = state.swapchainApi == API::Vulkan && !IdentifyGpu::getPrimaryGpu().usesDxvk;
+    const bool vulkanOutputBlocked = vulkanNoFg && !vulkanNativeFg;
 
     /// FG INPUTS
     if (state.externalFrameGeneration)
@@ -3674,10 +3678,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // OptiFG requirements
     auto constexpr optiFgIndex = (uint32_t) FGInput::Upscaler;
-    inputOptions[optiFgIndex].set_disabled(vulkanNoFg, "Unsupported API");
+    inputOptions[optiFgIndex].set_disabled(vulkanOutputBlocked, "Unsupported API");
 
-    if (!inputOptions[optiFgIndex].disabled && state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady() &&
-        !ffxInitTried)
+    // The native Vulkan FG output reads the upscaler's inputs; FSR FG's Vulkan dll is loaded with the device
+    if (state.swapchainApi != API::Vulkan && !inputOptions[optiFgIndex].disabled &&
+        state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady() && !ffxInitTried)
     {
         ffxInitTried = true;
         FfxApiProxy::InitFfxDx12();
@@ -3735,6 +3740,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             "No real DLSSG, unsupported hardware\nOnly Nvngx FG replacements available";
     }
 
+    outputOptions[dlssgOutputIndex].set_disabled(vulkanOutputBlocked, "Unsupported API");
     outputOptions[dlssgOutputIndex].set_disabled(!supportsDlssg && !hasDlssgReplacement,
                                                  "Unsupported hardware and no replacements");
 
@@ -3744,6 +3750,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         state.swapchainApi == API::DX11 &&
         (streamlineVersion == feature_version { 0, 0, 0 } || streamlineVersion > feature_version { 2, 0, 1 });
     inputOptions[nvngxInputIndex].set_disabled(nukemsUnsupportedApi, "Unsupported API");
+
+    // FSR FG output requirements
+    auto constexpr fsrfgOutputIndex = (uint32_t) FGOutput::FSRFG;
+    outputOptions[fsrfgOutputIndex].set_disabled(vulkanOutputBlocked, "Unsupported API");
 
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
@@ -4378,8 +4388,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
     if (state.activeFgOutput == FGOutput::FSRFG && state.activeFgInput != FGInput::NoFG &&
         state.FGSwapchainExists())
     {
-        if (state.activeFgInput != FGInput::Upscaler ||
-            (currentFeature != nullptr && !currentFeature->IsFrozen()) && FfxApiProxy::IsFGReady())
+        if (state.activeFgInput != FGInput::Upscaler || (currentFeature != nullptr && !currentFeature->IsFrozen()) &&
+                                                            (state.currentVkFG != nullptr || FfxApiProxy::IsFGReady()))
         {
             ImGui::SeparatorText("Frame Generation (FSR FG)");
 

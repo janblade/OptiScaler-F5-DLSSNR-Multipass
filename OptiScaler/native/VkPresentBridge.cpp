@@ -1050,6 +1050,12 @@ std::string FailureReason()
     return g_outputGivenUp ? g_giveUpReason : std::string {};
 }
 
+bool ModeWantsBridge()
+{
+    std::lock_guard lock(g_mutex);
+    return !g_outputGivenUp && FrameGenerationChosen() && ModeOn();
+}
+
 bool WantsNewSwapchain(VkSwapchainKHR swapchain)
 {
     std::lock_guard lock(g_mutex);

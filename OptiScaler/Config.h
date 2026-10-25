@@ -734,11 +734,12 @@ class Config
     // with NR on, NR runs on the game's picture in place, as in NativeInput (native/VirtualUpscalerMode.h). true: the
     // backend's pass, NR (when on) on its output. The menu's "Run the upscaler on the picture".
     CustomOptional<bool> DlssNrNativeUpscalerPass { false };
-    // NativeFrameGenerationOnly: a Vulkan game that calls DLSS, FSR or XeSS of its own gets OptiScaler's frame generation
-    // from that call. The Vulkan present bridge (native/VkPresentBridge.h) puts frame generation's D3D12 swapchain on the
-    // window, and the game's upscaler runs through a Vulkan-on-D3D12 backend (DLSS_on12, FFX_on12, FSR21_on12) on the
-    // bridge's device, whose evaluate hands frame generation the game's motion vectors, depth and output
-    // (upscalers/IFeature_VkwDx12.cpp). No Optical F5Low motion. The Frame Generation page's Vulkan route "Bridge, game's upscaler".
+    // NativeFrameGenerationOnly: a Vulkan game that calls DLSS, FSR or XeSS of its own gets OptiScaler's frame
+    // generation from that call. The Vulkan present bridge (native/VkPresentBridge.h) puts frame generation's D3D12
+    // swapchain on the window, and the game's upscaler runs through a Vulkan-on-D3D12 backend (DLSS_on12, FFX_on12,
+    // FSR21_on12) on the bridge's device, whose evaluate hands frame generation the game's motion vectors, depth and
+    // output (upscalers/IFeature_VkwDx12.cpp). No Optical F5Low motion. The Frame Generation page's Vulkan route
+    // "Bridge, game's upscaler".
     CustomOptional<bool> DlssNrNativeFrameGenerationOnly { false };
     // NativeLowLatencyBoost: Reflex's Boost with it (the GPU keeps its clocks up between frames), also for DLSS frame
     // generation's Streamline Reflex on an Optical F5Low game. NVIDIA Reflex only: XeLL, Anti-Lag 2 and LatencyFlex

@@ -95,8 +95,9 @@ std::unordered_map<VkSurfaceKHR, HWND> g_windows;
 std::unique_ptr<Bridge> g_bridge;
 std::vector<std::unique_ptr<Bridge>> g_retired; // output gone, hidden surface kept until their swapchains are destroyed
 
-// the Vulkan route "Bridge, game's upscaler": the game's upscaler call, on a Vulkan-on-D3D12 feature, copied this frame's motion
-// vectors and depth for frame generation on its own queue; frame generation's queue waits for that before it reads them.
+// the Vulkan route "Bridge, game's upscaler": the game's upscaler call, on a Vulkan-on-D3D12 feature, copied this
+// frame's motion vectors and depth for frame generation on its own queue; frame generation's queue waits for that
+// before it reads them.
 ComPtr<ID3D12Fence> g_feedFence;
 uint64_t g_feedValue = 0;
 

@@ -181,8 +181,9 @@ int main()
         CHECK(WarningFor(Shown::Off, bits & 1, bits & 2, true) == Warning::None);
     }
 
-    // Vulkan route "Bridge, game's upscaler" (Frame Generation page): not a mode. Native Vulkan games only; its warnings come in
-    // order: the game's upscaler call, then a D3D12 backend, then the bridge; choosing a motion mode ends it.
+    // Vulkan route "Bridge, game's upscaler" (Frame Generation page): not a mode. Native Vulkan games only; its
+    // warnings come in order: the game's upscaler call, then a D3D12 backend, then the bridge; choosing a motion mode
+    // ends it.
     {
         CHECK(RouteOffered(true, false));
         CHECK(!RouteOffered(true, true));

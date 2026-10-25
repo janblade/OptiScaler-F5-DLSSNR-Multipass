@@ -126,7 +126,8 @@ inline constexpr std::string_view kKeptKeys[] = {
     "ScanInverted",
     "ScanMeter",
     "ColourEncoding",
-    // the game's: Optical F5Low and the native path (a change may need a restart: the Optical F5Low page says which)
+    // the game's: Optical F5Low, the native path and the Vulkan route (a change may need a restart: the pages say
+    // which)
     "NativeDepthFinder",
     "NativeDepthVkCopyUsage",
     "NativeDepthResolveInList",

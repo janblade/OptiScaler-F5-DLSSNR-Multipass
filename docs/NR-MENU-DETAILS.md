@@ -49,7 +49,7 @@ NR runs only with Enable Neural Rendering on. Changes apply at once.
 
 Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode already on stands aside.
 
-A Vulkan game that calls DLSS, FSR or XeSS of its own is not an Optical F5Low mode: choose the Vulkan route "Bridge, game's upscaler" on the Frame Generation page instead. Frame generation runs from that call, with the game's own motion and depth; no motion is estimated. The game's upscaler runs through a D3D12 copy of it (DLSS on D3D12 where DLSS can run, FSR otherwise), chosen for you; switching back to "Native swapchain" puts your upscaler back. Choosing a mode on this page turns the route off.
+A Vulkan game that calls DLSS, FSR or XeSS of its own is not an Optical F5Low mode: choose the Vulkan route "Bridge, game's upscaler" on the Frame Generation page instead. Frame generation runs from that call, with the game's own motion and depth; no motion is estimated. The game's upscaler runs through a D3D12 copy of it (DLSS on D3D12 where DLSS can run, FSR otherwise), chosen for you; switching back to "Native swapchain" puts your upscaler back. Choosing NR only or NR + frame generation on this page turns the route off; Off leaves it on.
 
 D3D11, D3D12 and Vulkan games. On Vulkan, frame generation needs the Frame Generation input (OptiFG, Upscaler) and an output set when the game starts; the mode itself can be switched on later.
 

@@ -172,15 +172,15 @@ enum class Warning
     None,
     GameUpscaler,        // a mode is on while the game calls an upscaler of its own: it stands aside
     VulkanNeedsRestart,  // NR + frame generation in a Vulkan game whose swapchain was made without the bridge
-    NrDisabled,           // Enable Neural Rendering is off
-    NeedsFinishedPicture  // NR only, with NR Pass at: not on Finished Picture
+    NrDisabled,          // Enable Neural Rendering is off
+    NeedsFinishedPicture // NR only, with NR Pass at: not on Finished Picture
 };
 
 // gameUpscaler: as for Selectable; it comes first, since nothing else matters while the mode stands aside.
 // NR only has no warning for a D3D11 or Vulkan game whose swap chain frame generation replaced: it runs from that swap
 // chain's present (NativeMotionDx11::OnFGPresent, the Vulkan present bridge), as NR + frame generation does.
 // vulkanNoBridge: a Vulkan game whose swapchain was made without the present bridge (native/VkPresentBridge.h): frame
-// frame generation starts with the next start of the game, once chosen.
+// generation starts with the next start of the game, once chosen.
 inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, bool gameUpscaler,
                           bool vulkanNoBridge = false)
 {
@@ -207,10 +207,10 @@ inline Warning WarningFor(Shown shown, bool nrEnabled, bool finishedPicture, boo
     return Warning::None;
 }
 
-// "Game's upscaler" route (Frame Generation page, [DlssNr] NativeFrameGenerationOnly): a Vulkan game that calls an upscaler
-// of its own gets frame generation from that call, which runs through a Vulkan-on-D3D12 backend on the present bridge's
-// device. No Optical F5Low motion: it excludes the modes above that feed frame generation (NR + frame generation), and NR
-// itself stays independent (on the game's upscaler output, after SR).
+// "Game's upscaler" route (Frame Generation page, [DlssNr] NativeFrameGenerationOnly): a Vulkan game that calls an
+// upscaler of its own gets frame generation from that call, which runs through a Vulkan-on-D3D12 backend on the present
+// bridge's device. No Optical F5Low motion: it excludes the modes above that feed frame generation (NR + frame
+// generation), and NR itself stays independent (on the game's upscaler output, after SR).
 
 // Offered for a native Vulkan game; a dxvk game's upscaler calls are D3D11 ones.
 inline bool RouteOffered(bool vulkanGame, bool dxvkGame) { return vulkanGame && !dxvkGame; }
@@ -235,8 +235,8 @@ inline RouteWarning RouteWarningFor(bool gameUpscaler, bool on12Backend, bool vu
     return vulkanNoBridge ? RouteWarning::VulkanNeedsRestart : RouteWarning::None;
 }
 
-// Turning the route on clears the keys of every mode (FinishedPicture off is the caller's: NR, if on, runs on the game's
-// upscaler output, not on the finished picture). Choosing a mode that runs motion turns the route off.
+// Turning the route on clears the keys of every mode (FinishedPicture off is the caller's: NR, if on, runs on the
+// game's upscaler output, not on the finished picture). Choosing a mode that runs motion turns the route off.
 inline Keys KeysForRouteOn() { return Keys {}; }
 
 inline bool ModeEndsRoute(Mode mode) { return mode != Mode::Off; }

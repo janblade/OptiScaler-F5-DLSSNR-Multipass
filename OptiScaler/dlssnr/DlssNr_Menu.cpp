@@ -955,7 +955,7 @@ static bool NativeNrOnlyRunning(NativeApi api)
     }
 }
 
-// "FG only (game's upscaler)": frame generation is fed from a Vulkan-on-D3D12 backend's evaluate
+// Vulkan route "Bridge, game's upscaler": frame generation is fed from a Vulkan-on-D3D12 backend's evaluate
 // (upscalers/IFeature_VkwDx12.cpp), so the game's Vulkan upscaler call has to run through one. (Such a feature reports
 // API::DX12: its upscaler type is what says so.)
 static bool VulkanFeatureIsOn12()
@@ -964,7 +964,7 @@ static bool VulkanFeatureIsOn12()
     return feature != nullptr && FeatureProvider_Vk::IsOn12(feature->GetUpscalerType());
 }
 
-// The backend frame generation only runs the game's upscaler on, and the one to go back to when the mode is left.
+// The backend the route runs the game's upscaler on, and the one to go back to when the route is left.
 static std::optional<Upscaler> g_backendBeforeRoute;
 
 static void SwitchVulkanBackend(Config* config, Upscaler backend)
@@ -1011,6 +1011,9 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
                    config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
     const bool routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
+    // What the route does here: nothing on a D3D game or a dxvk one, where a stray key in an ini or profile is left
+    // alone (a click on a mode still clears it)
+    const bool routeActive = routeOn && RouteOffered(api == NativeApi::Vulkan, VkPresentBridge::DxvkGame());
 
     struct ModeChoice
     {
@@ -1079,19 +1082,22 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                "frame generation. It does not process the picture unless you tick Run the upscaler on the picture.\n"
                "On Vulkan, set up frame generation before the game starts.");
 
-    if (routeOn)
-        ImGui::TextDisabled("Frame generation runs from the game's upscaler (Vulkan route, Frame Generation page).");
+    if (routeActive)
+        ImGui::TextDisabled("Frame generation runs from the game's upscaler (Vulkan route, Frame Generation page). Off "
+                            "here keeps it; NR only and NR + frame generation end it.");
 
     if (RouteOverridesModes(
             { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
               config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() },
-            routeOn))
-        ImGui::TextWrapped("The Vulkan route on the Frame Generation page is on as well; it takes precedence over this "
-                           "mode. Click Off, or a mode, to settle it.");
+            routeActive))
+        ImGui::TextWrapped(gameUpscaler ? "The Vulkan route on the Frame Generation page and this mode are both on. "
+                                          "Click Off to settle it."
+                                        : "The Vulkan route on the Frame Generation page and this mode are both on. "
+                                          "Click Off, or a mode, to settle it.");
 
     if (shown == Shown::Off)
     {
-        if (gameUpscaler && !routeOn)
+        if (gameUpscaler && !routeActive)
             ImGui::TextWrapped("The game is calling an upscaler of its own, so NR runs on that call; this is not "
                                "needed.");
 
@@ -1957,7 +1963,7 @@ static void RenderProfilesSection(Config* config)
         if (resultNative)
         {
             ImGui::SameLine();
-            ImGui::TextUnformatted("Optical F5Low settings changed; some need a restart.");
+            ImGui::TextUnformatted("Optical F5Low or Vulkan route settings changed; some need a restart.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Open Optical F5Low##nrprofile"))
                 MenuPages::RequestPage(MenuPages::Page::NrF5Low);
@@ -4210,6 +4216,8 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     in.f5lowNrOnlyRunning = NativeNrOnlyRunning(api);
     in.nrEnabled = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
     in.frameGeneration = state.CurrentFG() != nullptr && state.CurrentFG()->IsActive() && !state.CurrentFG()->IsPaused();
+    in.vulkanRoute = config->DlssNrNativeFrameGenerationOnly.value_or_default() &&
+                     DlssNrNativeMode::RouteOffered(api == NativeApi::Vulkan, VkPresentBridge::DxvkGame());
     return in;
 }
 
@@ -4349,6 +4357,23 @@ void RenderVulkanRoute(Config* config)
     const bool f5lowFg = !routeOn && shown == Shown::NrAndFrameGeneration;
     const bool bridgeUp = VkPresentBridge::IsUp();
 
+    // A profile (or Revert) can set or clear the key without a click here: bring the backend along, once per switch.
+    static bool backendFollowedRoute = false;
+    const auto liveFeature = State::Instance().currentFeature;
+
+    if (routeOn && liveFeature != nullptr && !VulkanFeatureIsOn12() && !backendFollowedRoute)
+    {
+        backendFollowedRoute = true;
+        EnterGameUpscalerRoute(config);
+    }
+    else if (!routeOn)
+    {
+        backendFollowedRoute = false;
+
+        if (g_backendBeforeRoute.has_value())
+            LeaveGameUpscalerRoute(config);
+    }
+
     ImGui::SeparatorText("Vulkan route");
 
     if (ImGui::RadioButton("Native swapchain##vkroute", !routeOn && !f5lowFg) && routeOn)
@@ -4379,24 +4404,27 @@ void RenderVulkanRoute(Config* config)
         EnterGameUpscalerRoute(config);
     }
 
-    HelpMarker("For Vulkan games that call DLSS, FSR or XeSS themselves.\n"
-               "Native swapchain: FSR frame generation or DLSS-G on the Vulkan swapchain itself (no XeFG).\n"
-               "Bridge, game's upscaler: frame generation reads the game's upscaler call through its D3D12 copy, on the "
-               "present bridge; XeFG, FSR and DLSS-G are all available. NR stays on or off by itself.\n"
-               "Optical F5Low's NR + frame generation (for games with no upscaler call) is the third route; choose it "
-               "on the Optical F5Low page.\n"
-               "Set this up before the game starts: leaving the bridge takes effect after a restart.");
+    HelpMarker(
+        "For Vulkan games that call DLSS, FSR or XeSS themselves.\n"
+        "Native swapchain: FSR frame generation or DLSS-G on the Vulkan swapchain itself (no XeFG).\n"
+        "Bridge, game's upscaler: frame generation reads the game's upscaler call through its D3D12 copy, on the "
+        "present bridge; XeFG, FSR and DLSS-G are all available. NR stays on or off by itself.\n"
+        "Optical F5Low's NR + frame generation (for games with no upscaler call) is the third route; choose it "
+        "on the Optical F5Low page.\n"
+        "Set this up before the game starts: leaving the bridge takes effect after a restart.");
 
     if (f5lowFg)
     {
-        ImGui::TextDisabled("Optical F5Low's NR + frame generation is on (Optical F5Low page).");
+        ImGui::TextDisabled("Optical F5Low's NR + frame generation is on (Optical F5Low page); choosing the bridge "
+                            "turns it off.");
         return;
     }
 
     if (!routeOn)
     {
         if (bridgeUp)
-            ImGui::TextDisabled("The bridge is up: native swapchain applies after the game is restarted.");
+            ImGui::TextDisabled("The bridge is up: native swapchain applies after the game is restarted (no frame "
+                                "generation until then).");
 
         return;
     }

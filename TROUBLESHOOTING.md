@@ -95,7 +95,8 @@ isn't listed there is on its default. If the player also uploads `OptiScaler.ini
 **Game with its own upscaler, Vulkan**
 - DLSS-NR works with the game's DLSS, FSR or XeSS. With a `[Upscalers] VulkanUpscaler` ending in `_12` (`ffx_12`,
   `fsr21_12`, ...) it runs on DirectX 12; with the plain Vulkan ones it runs on Vulkan itself.
-- Frame generation in a Vulkan game needs the Vulkan route "Bridge, game's upscaler" (Frame Generation page):
+- XeFG, or frame generation from the game's upscaler on the bridge, needs the Vulkan route "Bridge, game's upscaler"
+  (Frame Generation page):
   `[DlssNr] NativeFrameGenerationOnly = true`, together with `FGInput = upscaler` and an `FGOutput`, set before the game
   starts. Without it the log says
   `frame generation is chosen, but neither "NR + frame generation" nor the Vulkan route "Bridge, game's upscaler" is on: the game presents as it is`.

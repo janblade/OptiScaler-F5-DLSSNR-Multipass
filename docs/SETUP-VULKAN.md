@@ -4,7 +4,8 @@ Many Vulkan programs, emulators such as shadPS4 among them, make **no DLSS, FSR 
 OptiScaler uses **Optical F5Low**, its own motion estimate from the finished picture. That is what lets DLSS-NR and frame
 generation work there. Frame generation then presents through OptiScaler's Vulkan bridge.
 
-A Vulkan game that **does** call its own upscaler needs the Vulkan route "Bridge, game's upscaler" instead; see
+A Vulkan game that **does** call its own upscaler uses the Vulkan route "Bridge, game's upscaler" instead (XeFG needs
+it; FSR frame generation and DLSS-G can also use the "Native swapchain" route); see
 [TROUBLESHOOTING.md](../TROUBLESHOOTING.md) ("Game with its own upscaler, Vulkan").
 
 ## 1. Install

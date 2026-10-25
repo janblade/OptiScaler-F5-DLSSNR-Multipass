@@ -76,9 +76,9 @@ bool RenderHeaderBanner(::Config* config, HeaderBanner::Feature feature, bool up
 void RenderF5LowUpscalerNote();
 void RenderF5LowFrameGenHint(::Config* config, bool noUpscalerFeature);
 
-// The "Vulkan route" choice on the Frame Generation page, for a Vulkan game that is not run through dxvk: native swapchain
-// or the bridge with the game's upscaler ([DlssNr] NativeFrameGenerationOnly). Optical F5Low's NR + frame generation is
-// the third route and is chosen on its own page.
+// The "Vulkan route" choice on the Frame Generation page, for a Vulkan game that is not run through dxvk: native
+// swapchain or the bridge with the game's upscaler ([DlssNr] NativeFrameGenerationOnly). Optical F5Low's NR + frame
+// generation is the third route and is chosen on its own page.
 void RenderVulkanRoute(::Config* config);
 
 // Once per frame: after about ten seconds with no upscaler call (and the header making its Optical F5Low offer), one

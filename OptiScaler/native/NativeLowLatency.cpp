@@ -204,6 +204,8 @@ Inputs GatherInputs()
     in.setting = rule.setting;
     in.blockGameLowLatency = rule.blockGameLowLatency && !FrameGenerationNeedsReflex();
 
+    // Optical F5Low's modes only: the Vulkan route (frame generation from the game's upscaler) is not Optical F5Low,
+    // and with no upscaler call (menus) it has nothing running to pace.
     in.f5lowRunning = shown != DlssNrNativeMode::Shown::Off && !gameUpscaler;
     in.xefgRunning = state.activeFgOutput == FGOutput::XeFG && state.currentFG != nullptr &&
                      state.currentFG->SwapchainContext() != nullptr;

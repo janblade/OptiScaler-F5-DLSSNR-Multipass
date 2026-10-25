@@ -8,6 +8,7 @@
 #include <SysUtils.h>
 
 #include <menu/menu_overlay_vk.h>
+#include <menu/menu_common.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <upscaler_time/UpscalerTime_Vk.h>
 
@@ -169,6 +170,13 @@ static bool D3DOnVulkanModule(HMODULE module)
     return d3d;
 }
 
+// FG outputs present the real and the generated frames through this
+static VkResult FGOutputQueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
+{
+    MenuCommon::FGOutputPresent();
+    return o_QueuePresentKHR(queue, pPresentInfo);
+}
+
 // OptiScaler's Streamline calls the driver's swapchain functions directly. Overlays like RTSS hook the same ones on top
 // of OptiScaler, through them its calls, also those from its own present thread, would look like the game's.
 static PFN_vkVoidFunction StreamlineSwapchainFunction(const char* pName, void* returnAddress)
@@ -319,9 +327,12 @@ void VulkanHooks::NoteLatencySwapchain(VkDevice device, VkSwapchainKHR swapchain
     if (device == VK_NULL_HANDLE || swapchain == VK_NULL_HANDLE)
         return;
 
-    // The game's handle of the native FG output's swapchain is no driver one, and FFX's real one has no latency mode
-    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+    // FFX's handle of the native FG output's swapchain is no driver one, and its real one has no latency mode
+    if (auto fg = State::Instance().currentVkFG;
+        fg != nullptr && fg->OwnsSwapchain(swapchain) && !fg->HasDriverSwapchain())
+    {
         return;
+    }
 
     // Every call of the game's names it: the exclusive lock only when it is news
     if (auto known = LatencySwapchainOf(device); known.swapchain == swapchain && known.latencyMode)
@@ -346,7 +357,7 @@ PFN_vkVoidFunction VulkanHooks::OriginalSwapchainFunction(const char* pName)
         return (PFN_vkVoidFunction) o_AcquireNextImageKHR;
 
     if (std::strcmp(pName, "vkQueuePresentKHR") == 0)
-        return (PFN_vkVoidFunction) o_QueuePresentKHR;
+        return o_QueuePresentKHR != nullptr ? (PFN_vkVoidFunction) FGOutputQueuePresent : nullptr;
 
     return nullptr;
 }
@@ -1238,6 +1249,7 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             _device = *pDevice;
             LOG_DEBUG("_device captured: {0:X}", (UINT64) _device);
             HookDevice(_device);
+            MenuOverlayVk::DeviceCreated(_device, &localCreteInfo);
         }
 
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
@@ -1311,7 +1323,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     // FFX presents the real swapchain from its own queue
     if (FromFGOutput(_ReturnAddress()) || (nativeFg != nullptr && nativeFg->OwnsQueue(queue)))
-        return o_QueuePresentKHR(queue, pPresentInfo);
+        return FGOutputQueuePresent(queue, pPresentInfo);
 
     LOG_FUNC();
 
@@ -1380,6 +1392,8 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // The game's swapchain is the native FG output's (FFX's swapchain): the frame goes to FSR FG before the real present
     const bool nativeFgPresent = !bridged && nativeFg != nullptr && localPresentInfo.swapchainCount == 1 &&
                                  nativeFg->OwnsSwapchain(localPresentInfo.pSwapchains[0]);
+
+    MenuCommon::FGOutputPresents(nativeFgPresent && nativeFg->IsActive() && !nativeFg->IsPaused());
 
     if (nativeFgPresent)
     {
@@ -1512,7 +1526,10 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
         // Unsure about Vulkan Reflex fps limit and if that could be causing an issue here
         if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap())
-            FrameLimit::sleep();
+            FrameLimit::sleep(nativeFgPresent
+                                  ? native::lowlatency::ShownPerRendered(nativeFg->IsGenerating(),
+                                                                         nativeFg->GetInterpolatedFrameCount())
+                                  : 1);
     }
 
     NotePresentTiming(hookStartMs);

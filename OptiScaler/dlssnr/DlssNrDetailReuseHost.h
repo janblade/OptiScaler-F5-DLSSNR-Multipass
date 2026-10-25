@@ -97,7 +97,7 @@ struct Wanted
 inline const char* FrameGenerationInUse(unsigned long long present, bool vulkan)
 {
     auto& state = State::Instance();
-    if (state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused())
+    if (state.CurrentFG() != nullptr && state.CurrentFG()->IsActive() && !state.CurrentFG()->IsPaused())
         return "off while frame generation is on";
     // A DLSS-G evaluate within the last 30 presents that generates frames (or does not say how many: DLSS-G builds
     // without multi frame generation leave the count out). PresentsSince reads "never" as endlessly long ago.

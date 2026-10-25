@@ -1,5 +1,6 @@
 ﻿#include "pch.h"
 #include "menu_common.h"
+#include "PresentRateMeter.h"
 #include "MenuPages.h"
 #include "PluginsPage.h"
 #include <framegen/dlssg/DlssgTelemetry.h>
@@ -127,7 +128,7 @@ static int DlssgInterpolationCount(const State& state)
     if (const int reported = state.dlssgDetectedInterpolationCount; reported > 0)
         return reported;
 
-    const auto fg = state.currentFG;
+    const auto fg = state.CurrentFG();
 
     if (state.activeFgOutput == FGOutput::DLSSG && state.activeFgInput == FGInput::Upscaler && fg != nullptr &&
         fg->IsGenerating())
@@ -1559,6 +1560,17 @@ struct VersionCheckStatus
     std::string error;
 };
 
+static PresentRateMeter fgOutputPresentRate;
+
+// Streamline can present real and generated frames from different threads.
+// Measure the actual output-present cadence, not the number of presents
+// observed between two (independently paced) menu frames.
+void MenuCommon::FGOutputPresent() { fgOutputPresentRate.Present(Util::MillisecondsNow()); }
+
+void MenuCommon::FGOutputPresents(bool presents) { fgOutputPresentRate.SetEnabled(presents); }
+
+static double FGOutputFrameTime(double now) { return fgOutputPresentRate.FrameTime(now); }
+
 struct MenuCommon::RenderMenuContext
 {
     State& state;
@@ -1569,6 +1581,8 @@ struct MenuCommon::RenderMenuContext
     double now = 0.0;
     double frameTime = 0.0;
     double frameRate = 0.0;
+    // Current Vulkan FG output rate, kept separate from the long-term history.
+    double fgOutputFrameTimeMs = 0.0;
     float menuResScale = 1.0f;
     float fpsScale = 1.0f;
     float averageFrameTime = 0.0f;
@@ -1625,6 +1639,13 @@ void MenuCommon::UpdateRenderTiming(RenderMenuContext& ctx)
                                    frameTime > 0.0)
     {
         frameTime /= (double) (fg->GetInterpolatedFrameCount() + 1);
+        frameRate = 1000.0 / frameTime;
+    }
+
+    ctx.fgOutputFrameTimeMs = FGOutputFrameTime(now);
+    if (ctx.fgOutputFrameTimeMs > 0.0)
+    {
+        frameTime = ctx.fgOutputFrameTimeMs;
         frameRate = 1000.0 / frameTime;
     }
 
@@ -2024,6 +2045,15 @@ void MenuCommon::UpdateFrameTimeAverages(RenderMenuContext& ctx)
         frameTime /= frameCnt;
         frameRate = 1000.0 / frameTime;
         frameTimesCalculated = true;
+
+        // Vulkan FG output timing is already averaged across the last 125 ms.
+        // Use it directly for the current FPS readout; preserve the shared
+        // history for the separately labelled average and frame-time graph.
+        if (ctx.fgOutputFrameTimeMs > 0.0)
+        {
+            frameTime = ctx.fgOutputFrameTimeMs;
+            frameRate = 1000.0 / frameTime;
+        }
 
         float lastFT = static_cast<float>(state.frameTimes.empty() ? 0.0f : state.frameTimes.back());
         float lastUT = static_cast<float>(state.upscaleTimes.empty() ? 0.0f : state.upscaleTimes.back());
@@ -4212,7 +4242,7 @@ void MenuCommon::RenderFGFollowGame()
         return;
     }
 
-    const int outputMax = state.currentFG != nullptr ? state.currentFG->GetMaxInterpolationCount() : 0;
+    const int outputMax = state.CurrentFG() != nullptr ? state.CurrentFG()->GetMaxInterpolationCount() : 0;
     const int running = config->FGInterpolationCount(1, outputMax);
 
     if (running == game.count)
@@ -8717,7 +8747,7 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
     auto config = ctx.config;
     auto& io = ctx.io;
 
-    auto fg = state.currentFG;
+    auto fg = state.CurrentFG();
     if (_showHudlessWindow && config->FGHUDFix.value_or_default() && fg != nullptr && fg->IsActive())
     {
         auto posX = (io.DisplaySize.x - 400.0f) / 2.0f;

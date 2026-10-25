@@ -32,6 +32,10 @@ static bool _vulkanObjectsCreated = false;
 static std::mutex _vkCleanMutex;
 static std::mutex _vkPresentMutex;
 
+// Family of every queue, games can present from queues the menu can't submit to
+static std::unordered_map<VkQueue, uint32_t> _queueFamilies;
+static std::mutex _queueFamiliesMutex;
+
 // imgui stuff
 struct ImGui_ImplVulkan_InitInfo _ImVulkan_Info = {};
 struct ImGui_ImplVulkanH_Frame* _ImVulkan_Frames = VK_NULL_HANDLE;
@@ -556,6 +560,27 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
     _vkCleanMutex.unlock();
 }
 
+void MenuOverlayVk::DeviceCreated(VkDevice device, const VkDeviceCreateInfo* pCreateInfo)
+{
+    std::lock_guard lock(_queueFamiliesMutex);
+
+    for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++)
+    {
+        auto& info = pCreateInfo->pQueueCreateInfos[i];
+
+        // Queues with flags need vkGetDeviceQueue2, not presented from in practice
+        if (info.flags != 0)
+            continue;
+
+        for (uint32_t index = 0; index < info.queueCount; index++)
+        {
+            VkQueue queue = VK_NULL_HANDLE;
+            vkGetDeviceQueue(device, info.queueFamilyIndex, index, &queue);
+            _queueFamilies[queue] = info.queueFamilyIndex;
+        }
+    }
+}
+
 bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 {
     LOG_FUNC();
@@ -584,6 +609,19 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     {
         auto semaphoreIndex = _frameCount % _scImageCount;
 
+        // With DLSSG the present comes from Streamline's thread, while the game's queue can be waiting on that
+        // thread. The presenting queue avoids a deadlock, when the menu can submit to it.
+        VkQueue menuQueue = _ImVulkan_Info.Queue;
+        {
+            std::lock_guard lock(_queueFamiliesMutex);
+            if (auto it = _queueFamilies.find(queue);
+                it != _queueFamilies.end() && it->second == _ImVulkan_Info.QueueFamily)
+            {
+                menuQueue = queue;
+            }
+        }
+
+        ImGui_ImplVulkan_SetQueue(menuQueue);
         ImGui_ImplVulkan_NewFrame();
 
         if (State::Instance().delayMenuRenderBy > 0)
@@ -643,8 +681,8 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 submit_info.signalSemaphoreCount = 1;
                 submit_info.pSignalSemaphores = &_ImVulkan_Semaphores[semaphoreIndex];
 
-                LogMenuSubmitThread("menu draw submit", _ImVulkan_Info.Queue);
-                auto qResult = vkQueueSubmit(_ImVulkan_Info.Queue, 1, &submit_info, fd->Fence);
+                LogMenuSubmitThread("menu draw submit", menuQueue);
+                auto qResult = vkQueueSubmit(menuQueue, 1, &submit_info, fd->Fence);
                 if (qResult != VK_SUCCESS)
                 {
                     LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) qResult);

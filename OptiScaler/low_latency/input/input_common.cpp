@@ -1555,7 +1555,7 @@ void InputCommon::update()
             forceDisabled || blocked || side != lloutput::XefgLatency::XeLL, intelGpu,
             native::lowlatency::XefgGenerating(), state.fgPresentVsync.load(std::memory_order_relaxed));
         in.fsrFgOutput = state.activeFgOutput == FGOutput::FSRFG;
-        in.fgActive = state.currentFG != nullptr && state.currentFG->IsGenerating();
+        in.fgActive = state.CurrentFG() != nullptr && state.CurrentFG()->IsGenerating();
         in.blocked = blocked;
         in.xefgShownPerRendered = native::lowlatency::XefgShownPerRendered();
         in.dlssgFramesToGenerate = ReflexHooks::dlssgFrameCountToGenerate();

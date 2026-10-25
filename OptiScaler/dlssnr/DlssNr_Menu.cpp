@@ -4233,7 +4233,7 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     in.nrAvailable = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
     in.f5lowNrOnlyRunning = NativeNrOnlyRunning(api);
     in.nrEnabled = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
-    in.frameGeneration = state.currentFG != nullptr && state.currentFG->IsActive() && !state.currentFG->IsPaused();
+    in.frameGeneration = state.CurrentFG() != nullptr && state.CurrentFG()->IsActive() && !state.CurrentFG()->IsPaused();
     return in;
 }
 

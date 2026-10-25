@@ -63,28 +63,32 @@ class ScopedCollapsingHeader
 
         ImGui::PushID(label);
 
-        // Modern: a top-level section is a rounded card, a header nested in a card stays flat.
+        // A top-level section is a card in both themes: a 1 px border in the theme's border colour and inner padding,
+        // so its controls do not sit against the next section. Modern also gives it its card colours (and sets
+        // ChildBorderSize 0 for other children); a header nested in a card stays flat.
         const bool modern = MenuStyle::IsModern();
-        const bool card = modern && _depth == 0;
+        const bool card = _depth == 0;
         ImGuiChildFlags childFlags = ImGuiChildFlags_AutoResizeY;
 
         if (card)
         {
-            childFlags |= ImGuiChildFlags_AlwaysUseWindowPadding;
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, MenuStyle::CardColor());
+            childFlags |= ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders;
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
         }
-        else if (modern)
-        {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-        }
+
+        if (modern)
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, card ? MenuStyle::CardColor() : ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 
         ImGui::BeginChild("##CollapsingHeaderChild", ImVec2(0, 0), childFlags,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         if (modern)
             ImGui::PopStyleColor();
-
         if (card)
+            ImGui::PopStyleVar();
+
+        const bool cardColours = card && modern;
+        if (cardColours)
         {
             ImGui::PushStyleColor(ImGuiCol_Header, MenuStyle::CardHeaderColor());
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuStyle::CardHeaderHoverColor());
@@ -93,7 +97,7 @@ class ScopedCollapsingHeader
 
         _headerOpen = ImGui::CollapsingHeader(label, flags);
 
-        if (card)
+        if (cardColours)
             ImGui::PopStyleColor(3);
 
         _depth++;

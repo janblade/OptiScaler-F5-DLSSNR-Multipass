@@ -156,6 +156,9 @@ class State
     // Reseting on creation of new feature
     std::optional<bool> autoExposure;
 
+    // Passed through from the game's FFX create flags
+    bool dynamicResolution = false;
+
     // FG
     uint64_t fgLastFrame = 0;
 
@@ -256,6 +259,10 @@ class State
     // Vulkan presents (the vkQueuePresentKHR hook, installed with the overlay). frameCount counts DXGI presents only.
     std::atomic<UINT64> vulkanPresentCount { 0 };
     bool vkAntiLagSupported = false;
+
+    // AMD driver flip metering
+    bool amdFlipMeterCreated = false;
+    uint32_t amdFlipMeterMode = 0;
 
     // for realtime changes
     ankerl::unordered_dense::map<unsigned int, bool> changeBackend;

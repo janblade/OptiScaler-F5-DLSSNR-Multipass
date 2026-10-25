@@ -4488,14 +4488,9 @@ void RenderVulkanRoute(Config* config)
         EnterGameUpscalerRoute(config);
     }
 
-    HelpMarker(
-        "For Vulkan games that call DLSS, FSR or XeSS themselves.\n"
-        "Native swapchain: FSR frame generation or DLSS-G on the Vulkan swapchain itself (no XeFG).\n"
-        "Bridge, game's upscaler: frame generation reads the game's upscaler call through its D3D12 copy, on the "
-        "present bridge; XeFG, FSR and DLSS-G are all available. NR stays on or off by itself.\n"
-        "Optical F5Low's NR + frame generation (for games with no upscaler call) is the third route; choose it "
-        "on the Optical F5Low page.\n"
-        "Set this up before the game starts: leaving the bridge takes effect after a restart.");
+    HelpMarker("Native swapchain: FSR FG or DLSS-G on the game's own swapchain. No XeFG.\n"
+               "Bridge: reads the game's upscaler call. XeFG, FSR FG and DLSS-G.\n"
+               "Choose before the game starts; leaving the bridge needs a restart.");
 
     if (f5lowFg)
     {

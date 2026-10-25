@@ -1798,7 +1798,10 @@ static void RenderProfilesSection(Config* config)
         refresh();
     };
 
-    ImGui::SeparatorText("NR Profiles");
+    // A card like the rest of Status & Presets; the scoped header ends it when this function returns
+    auto card = ScopedCollapsingHeader("NR Profiles", ImGuiTreeNodeFlags_DefaultOpen);
+    if (!card.IsHeaderOpen())
+        return;
 
     const auto picked = [&]() -> const ProfileEntry*
     { return selected >= 0 && selected < (int) profiles.size() ? &profiles[selected] : nullptr; };
@@ -1997,18 +2000,25 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
           config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
           config->DlssNrNativeFrameGenerationOnly.value_or_default() });
 
-    ImGui::Text("Optical F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
-    ImGui::SameLine();
+    // Each section is a card (ScopedCollapsingHeader, open by default), like the Plugins page
+    if (auto card = ScopedCollapsingHeader("Status", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
+    {
+        RenderRunningStatus(config, nr);
 
-    if (ImGui::SmallButton("Open Optical F5Low##statuslink"))
-        MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+        ImGui::Text("Optical F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton("Open Optical F5Low##statuslink"))
+            MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+    }
 
     const float presetWidth = PresetButtonWidth();
 
-    ImGui::SeparatorText("Look Presets");
+    if (auto card = ScopedCollapsingHeader("Look Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         const auto now = ReadLook(config);
-        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h DlssNrInputFlatten ...)
+        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h
+        // DlssNrInputFlatten ...)
         const bool inputStyleOff = config->DlssNrWorkingScale.value_or_default() > 1.0f + 0.005f ||
                                    config->DlssNrDeferredDlss.value_or_default();
 
@@ -2028,8 +2038,8 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
             if (i != 0 && i != 4)
                 ImGui::SameLine();
 
-            const bool active = look.isModifier ? inEffect && inEffect->look == look.id
-                                                : DlssNrLook::Matches(now, look.settings);
+            const bool active =
+                look.isModifier ? inEffect && inEffect->look == look.id : DlssNrLook::Matches(now, look.settings);
 
             if (PresetButton(look.name, active, presetWidth))
                 WriteLook(config, look.isModifier ? DlssNrLook::ComposeLook(look.id, pickedBase) : look.settings);
@@ -2070,85 +2080,88 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
             const char* name = DlssNrLook::Get(inEffect->look).name;
 
             if (config->DlssNrDeferredDlss.value_or_default())
-                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f), "%s: no effect with \"Generate before SR, apply after SR\".",
-                                   name);
+                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                   "%s: no effect with \"Generate before SR, apply after SR\".", name);
             else
                 ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
                                    "%s: no effect at %.0f%% model resolution (works at 100%% or below).", name,
                                    config->DlssNrWorkingScale.value_or_default() * 100.0f);
         }
-    }
-    HelpMarker("How NR's edit looks: each pass's style and strengths, the curve, Detail and Colour strength, skin and "
-               "scenery, and the input style. Leaves the pass count, the quality tier and exposure alone. Green = in "
-               "effect; changing one of its settings clears it.");
 
-    ImGui::SeparatorText("Multipass Presets");
-    for (uint32_t passes = 1; passes <= IM_ARRAYSIZE(PassPresetNames); ++passes)
+        HelpMarker("How NR's edit looks: each pass's style and strengths, the curve, Detail and Colour strength, skin "
+                   "and scenery, and the input style. Leaves the pass count, the quality tier and exposure alone. "
+                   "Green = in effect; changing one of its settings clears it.");
+    }
+
+    if (auto card = ScopedCollapsingHeader("Multipass Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
-        if (passes > 1)
+        for (uint32_t passes = 1; passes <= IM_ARRAYSIZE(PassPresetNames); ++passes)
+        {
+            if (passes > 1)
+                ImGui::SameLine();
+            if (PresetButton(PassPresetNames[passes - 1], PassPresetActive(config, passes), presetWidth))
+                ApplyPassPreset(config, passes);
+        }
+        HelpMarker("Sets the pass count, with NR on FP8 and the default exposure. How each pass looks is the Look "
+                   "presets'. Green = in effect; changing the pass count clears it.");
+
+        // Directly under the pass presets, since those buttons set this slider's value. This page
+        // has no page-wide item width, so this block pushes its own to keep the slider's width.
+        ImGui::PushItemWidth(220.0f * menuResScale);
+
+        // The checkbox that sets this lives under "Apply the model" on the NR Options page; read from config.
+        bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
+        const unsigned int passLimit = unlockPasses ? MaxPassCount : DefaultMaxPassCount;
+
+        {
+            int passes = (int) std::clamp(config->DlssNrPasses.value_or_default(), 1u, passLimit);
+            const ImVec4 colour = passes <= 1   ? ImVec4(0.35f, 0.88f, 0.38f, 1.0f)
+                                  : passes == 2 ? ImVec4(0.95f, 0.70f, 0.20f, 1.0f)
+                                                : ImVec4(0.92f, 0.30f, 0.25f, 1.0f);
+
+            ImGui::PushStyleColor(ImGuiCol_Text, colour);
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab, colour);
+
+            if (ImGui::SliderInt("Model passes", &passes, 1, (int) passLimit,
+                                 passes == 1 ? "%d (normal)" : "%dx model cost"))
+                config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, (int) passLimit);
+
+            ImGui::PopStyleColor(2);
+
+            // Reset's own label stays plain text -- placed after PopStyleColor so the
+            // passes-based warning colour above doesn't tint it too.
             ImGui::SameLine();
-        if (PresetButton(PassPresetNames[passes - 1], PassPresetActive(config, passes), presetWidth))
-            ApplyPassPreset(config, passes);
+            if (ImGui::SmallButton("Reset##modelpasses"))
+                config->DlssNrPasses = 1u;
+
+            HelpMarker("How often the model runs per frame. Higher: stronger effect, more GPU time. Default: 1.");
+        }
+
+        {
+            // Disabled rather than hidden at Passes == 1: the control exists, it just has nothing to
+            // do yet (there is no boundary between passes to damp), which is a clearer statement
+            // than making it vanish and reappear as Passes changes.
+            const bool noBoundary = config->DlssNrPasses.value_or_default() <= 1;
+            ImGui::BeginDisabled(noBoundary);
+            float feedback = config->DlssNrPassFeedback.value_or_default();
+            if (ImGui::SliderFloat("Pass feedback", &feedback, 0.0f, 1.0f,
+                                   feedback >= 1.0f ? "%.2f (full, current behaviour)" : "%.2f"))
+                config->DlssNrPassFeedback = std::clamp(feedback, 0.0f, 1.0f);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##passfeedback"))
+                config->DlssNrPassFeedback = 1.0f;
+            ImGui::EndDisabled();
+
+            HelpMarker("How much of each extra pass's change reaches the next. Higher (1.0): full effect. Lower: "
+                       "gentler, steadier extra passes. Default: 1.0. No effect with 1 pass.");
+        }
+
+        ImGui::PopItemWidth();
     }
-    HelpMarker("Sets the pass count, with NR on FP8 and the default exposure. How each pass looks is the Look "
-               "presets'. Green = in effect; changing the pass count clears it.");
-
-    // Directly under the pass presets, since those buttons set this slider's value. This page
-    // has no page-wide item width, so this block pushes its own to keep the slider's width.
-    ImGui::PushItemWidth(220.0f * menuResScale);
-
-    // The checkbox that sets this lives under "Apply the model" on the NR Options page; read from config.
-    bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
-    const unsigned int passLimit = unlockPasses ? MaxPassCount : DefaultMaxPassCount;
-
-    {
-        int passes = (int) std::clamp(config->DlssNrPasses.value_or_default(), 1u,
-                                      passLimit);
-        const ImVec4 colour = passes <= 1   ? ImVec4(0.35f, 0.88f, 0.38f, 1.0f)
-                              : passes == 2 ? ImVec4(0.95f, 0.70f, 0.20f, 1.0f)
-                                            : ImVec4(0.92f, 0.30f, 0.25f, 1.0f);
-
-        ImGui::PushStyleColor(ImGuiCol_Text, colour);
-        ImGui::PushStyleColor(ImGuiCol_SliderGrab, colour);
-
-        if (ImGui::SliderInt("Model passes", &passes, 1, (int) passLimit,
-                             passes == 1 ? "%d (normal)" : "%dx model cost"))
-            config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, (int) passLimit);
-
-        ImGui::PopStyleColor(2);
-
-        // Reset's own label stays plain text -- placed after PopStyleColor so the
-        // passes-based warning colour above doesn't tint it too.
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Reset##modelpasses"))
-            config->DlssNrPasses = 1u;
-
-        HelpMarker("How often the model runs per frame. Higher: stronger effect, more GPU time. Default: 1.");
-    }
-
-    {
-        // Disabled rather than hidden at Passes == 1: the control exists, it just has nothing to
-        // do yet (there is no boundary between passes to damp), which is a clearer statement
-        // than making it vanish and reappear as Passes changes.
-        const bool noBoundary = config->DlssNrPasses.value_or_default() <= 1;
-        ImGui::BeginDisabled(noBoundary);
-        float feedback = config->DlssNrPassFeedback.value_or_default();
-        if (ImGui::SliderFloat("Pass feedback", &feedback, 0.0f, 1.0f,
-                               feedback >= 1.0f ? "%.2f (full, current behaviour)" : "%.2f"))
-            config->DlssNrPassFeedback = std::clamp(feedback, 0.0f, 1.0f);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Reset##passfeedback"))
-            config->DlssNrPassFeedback = 1.0f;
-        ImGui::EndDisabled();
-
-        HelpMarker("How much of each extra pass's change reaches the next. Higher (1.0): full effect. Lower: "
-                   "gentler, steadier extra passes. Default: 1.0. No effect with 1 pass.");
-    }
-
-    ImGui::PopItemWidth();
 
     // Both rows share the same button labels, so each gets its own ImGui ID scope.
-    const auto tierRow = [&](const char* id, bool beforeSuperResolution) {
+    const auto tierRow = [&](const char* id, bool beforeSuperResolution)
+    {
         ImGui::PushID(id);
         for (int i = 0; i < IM_ARRAYSIZE(ResolutionTiers); ++i)
         {
@@ -2161,17 +2174,21 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
         ImGui::PopID();
     };
 
-    ImGui::SeparatorText("Pre-SR Presets");
-    tierRow("pre", true);
-    HelpMarker("Quality tiers for NR before SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
-               "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
-               "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
+    if (auto card = ScopedCollapsingHeader("Pre-SR Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
+    {
+        tierRow("pre", true);
+        HelpMarker("Quality tiers for NR before SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
+                   "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
+                   "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
+    }
 
-    ImGui::SeparatorText("Post-SR Presets");
-    tierRow("post", false);
-    HelpMarker("Quality tiers for NR after SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
-               "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
-               "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
+    if (auto card = ScopedCollapsingHeader("Post-SR Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
+    {
+        tierRow("post", false);
+        HelpMarker("Quality tiers for NR after SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
+                   "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
+                   "Superior Scaling, if selected, is kept. Green = in effect; changing those clears it.");
+    }
 
     RenderProfilesSection(config);
 }
@@ -4355,13 +4372,12 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
 {
     using MenuPages::Page;
 
-    // The Enable checkbox and the running status head every Neural Rendering page.
+    // The Enable checkbox and the running status head every Neural Rendering page (Status & Presets: in its Status
+    // card).
     RenderEnableToggle(config);
     const NrCommon nr = ReadNrCommon(config);
 
-    if (page == Page::NrStatus)
-        RenderRunningStatus(config, nr);
-    else
+    if (page != Page::NrStatus)
         RenderStatusLine(nr);
 
     switch (page)

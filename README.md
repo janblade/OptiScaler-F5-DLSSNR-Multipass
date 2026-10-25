@@ -38,7 +38,7 @@ See the [setup guide](INSTALL-DLSSNR.md) for game-specific steps and troubleshoo
 - The optional **hybrid mode** is for RTX 50 GPUs. Its files are included. Loading may pause the game and look like a freeze; please wait.
 - Avoid anti-cheat-protected multiplayer games.
 
-For frame generation, see the [setup notes](docs/DLSS-FRAME-GENERATION.md). For bugs, [open an issue](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/issues) with your game, GPU, settings and `OptiScaler.log`. For questions and help, join the [Discord server](https://discord.gg/xzkNNwxbZu).
+For frame generation, see the [setup notes](docs/DLSS-FRAME-GENERATION.md). More setup guides: [ReShade](docs/SETUP-RESHADE.md) · [Vulkan games and emulators](docs/SETUP-VULKAN.md) · [dxvk](docs/SETUP-DXVK.md) · [DirectX 11 games without DLSS](docs/SETUP-DX11.md). For bugs, [open an issue](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/issues) with your game, GPU, settings and `OptiScaler.log`. For questions and help, join the [Discord server](https://discord.gg/xzkNNwxbZu).
 
 ## Credits
 

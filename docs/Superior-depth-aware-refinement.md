@@ -1,7 +1,10 @@
 # Superior Scaling depth-aware refinement
 
-Based on janblade's latest `release/0.1.34` at `b276cbb4` (2026-10-25), on the independent branch
-`codex/superior-depth-aware-refinement`. This is a prospective follow-up to merged PR #237.
+Originally developed on janblade's `release/0.1.34` at `b276cbb4` (2026-10-25). The branch now
+also includes current upstream `main` at `61c97d64`, including release 0.1.34 at `e7d6e5a8`,
+the new Neural Rendering page cards and the version bump. Our controls live inside the new
+Upscale card; CNN/Transformer selection and the native-scale selection fix are retained.
+The independent branch is `codex/superior-depth-aware-refinement`, a prospective follow-up to merged PR #237.
 No pull request has been created; game validation is required before submitting a new PR.
 
 ## Behaviour
@@ -145,3 +148,8 @@ Raw samples, summaries and quality results are retained in `validation/superior-
 
 The subsequent quality-preserving [private guide/carrier fusion](Superior-private-guide-fusion.md)
 reduces native-compression preparation cost; its A/B baseline is this branch, not janblade.
+
+The upstream UI/version synchronization changes only `DlssNr_Menu.cpp` and `resource.h`;
+rendering sources and all 51 shipped shader blobs are identical to `0471ab95`. The recorded GPU
+timings therefore still describe this implementation. CPU/ABI checks and a new full Release build
+validate the integration; a visual menu check in the game remains necessary.

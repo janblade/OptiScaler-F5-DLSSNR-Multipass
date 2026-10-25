@@ -418,7 +418,7 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
             std::vector<VkExtensionProperties> supported(count);
             o_vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, supported.data());
 
-            static std::vector<const char*> filteredExtensions;
+            thread_local std::vector<const char*> filteredExtensions;
             filteredExtensions.clear();
 
             for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)

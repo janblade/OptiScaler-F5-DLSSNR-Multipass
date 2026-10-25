@@ -160,7 +160,7 @@ void UpscalerInputsVk::UpscaleEnd(VkCommandBuffer cmdBuffer, const NVSDK_NGX_Res
 {
     auto& state = State::Instance();
 
-    if (state.currentVkFG == nullptr || state.activeFgInput != FGInput::Upscaler)
+    if (state.currentVkFG == nullptr || state.activeFgInput != FGInput::Upscaler || !state.currentVkFG->HasSwapchain())
         return;
 
     Hudfix_Vk::UpscaleEnd(cmdBuffer);

@@ -276,13 +276,23 @@ static bool EnableTimelineSemaphores(VkPhysicalDevice physicalDevice, VkDeviceCr
     {
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
         {
-            ((VkPhysicalDeviceVulkan12Features*) next)->timelineSemaphore = VK_TRUE;
+            auto* flag = &((VkPhysicalDeviceVulkan12Features*) next)->timelineSemaphore;
+            // The game's memory, possibly read-only
+            if (!DlssNr::VkExt::IsWritable(flag))
+                return false;
+
+            *flag = VK_TRUE;
             return true;
         }
 
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)
         {
-            ((VkPhysicalDeviceTimelineSemaphoreFeatures*) next)->timelineSemaphore = VK_TRUE;
+            auto* flag = &((VkPhysicalDeviceTimelineSemaphoreFeatures*) next)->timelineSemaphore;
+
+            if (!DlssNr::VkExt::IsWritable(flag))
+                return false;
+
+            *flag = VK_TRUE;
             return true;
         }
     }
@@ -730,7 +740,8 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     VkPhysicalDeviceTimelineSemaphoreFeatures nativeFgTimeline {};
 
     if (!ScopedSkipVulkanHooks::Active() && !D3DOnVulkanModule(Util::GetCallerModule(_ReturnAddress())) &&
-        !VkPresentBridge::DxvkGame() && !VkPresentBridge::ModeWantsBridge() &&
+        !VkPresentBridge::DxvkGame() && !VkPresentBridge::ModeWantsBridge() && !StreamlineProxy::IsInitializing() &&
+        State::Instance().currentD3D12Device == nullptr &&
         (nativeFg = CreateFGFeature()) != nullptr)
     {
         if (EnableTimelineSemaphores(physicalDevice, localCreteInfo, nativeFgTimeline))
@@ -1374,7 +1385,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     }
 
     // Ends the hudless search before the menu renders to the swapchain
-    if (nativeFg != nullptr)
+    if (nativeFg != nullptr && nativeFg->HasSwapchain())
         Hudfix_Vk::PresentStart();
 
     VkPresentInfoKHR localPresentInfo {};
@@ -1632,7 +1643,7 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         if (nativeFgSwapchain)
         {
             ScopedFGCall fgCall {};
-            fgSwapchain = nativeFg->CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+            fgSwapchain = nativeFg->CreateSwapchain(device, &localCreateInfo, pAllocator, pSwapchain);
             result = VK_SUCCESS;
 
             // FFX could not make it: the game's own swapchain, as without the output

@@ -524,6 +524,9 @@ class NrCard
         ImGui::PushItemWidth(220.0f * menuResScale);
     }
 
+    NrCard(const NrCard&) = delete;
+    NrCard& operator=(const NrCard&) = delete;
+
     ~NrCard() { ImGui::PopItemWidth(); }
 
     bool IsOpen() const { return _header.IsHeaderOpen(); }
@@ -3136,6 +3139,19 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
             ImGui::TextWrapped("Pre-SR changes: %s", DlssNr::DeferredDlssStatus().c_str());
     }
 
+    // Keep failure details in the log without displaying changing kernel counters in the menu.
+    auto hybridStatus = DlssNrNative::Status();
+    hybridStatus = hybridStatus.substr(0, hybridStatus.find(" |"));
+    static std::string lastHybridWarning;
+    if (hybridStatus.rfind("Restart required:", 0) == 0 || hybridStatus.find("fallback") != std::string::npos)
+    {
+        if (hybridStatus != lastHybridWarning)
+            LOG_WARN("Hybrid: {}", hybridStatus);
+        lastHybridWarning = hybridStatus;
+    }
+    else
+        lastHybridWarning.clear();
+
     if (auto card = ScopedCollapsingHeader("Model and speed", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         int precisionChoice = config->DlssNrPrecision.value_or_default() == 4 ? 1 : 0;
@@ -3169,18 +3185,6 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
             ImGui::TextUnformatted(enabled && DlssNrNative::IsActive() ? "Hybrid: active" : "Hybrid: inactive");
             ImGui::TextWrapped("Loading may pause the game and look like a freeze. Please wait.");
         }
-        // Keep failure details in the log without displaying changing kernel counters in the menu.
-        auto hybridStatus = DlssNrNative::Status();
-        hybridStatus = hybridStatus.substr(0, hybridStatus.find(" |"));
-        static std::string lastHybridWarning;
-        if (hybridStatus.rfind("Restart required:", 0) == 0 || hybridStatus.find("fallback") != std::string::npos)
-        {
-            if (hybridStatus != lastHybridWarning)
-                LOG_WARN("Hybrid: {}", hybridStatus);
-            lastHybridWarning = hybridStatus;
-        }
-        else
-            lastHybridWarning.clear();
         if (detailReuseRunning)
             ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
         else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
@@ -3398,7 +3402,7 @@ static void RenderLutSection(Config* config)
     }
 }
 
-// Compress screen edges, in the NR Input "Size" group after the Downscaler. The checkbox, the layout, what is happening,
+// Compress screen edges, its own card on the NR Input page. The checkbox, the layout, what is happening,
 // the on-screen layout, and the advanced values. The runtime rebuilds on any change (a layout change resets NR's
 // history once); every edit goes through Spatial::Constrain, the same limits the runtime checks against.
 static void StoreSpatialSettings(Config* config, const DlssNr::Spatial::Settings& s)
@@ -3780,15 +3784,19 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
             config->SetDlssNrInputStyles(styles);
     }
 
-    if (NrCard card("Compress screen edges (experimental)", menuResScale, false); card.IsOpen())
+    // Open while a setting in them is on, so it is not hidden
+    const bool spatialOn = config->DlssNrSpatialCompression.value_or_default();
+    const bool lutOn = !config->DlssNrLutFile.value_or_default().empty();
+
+    if (NrCard card("Compress screen edges (experimental)##card", menuResScale, spatialOn); card.IsOpen())
         RenderEdgeCompression(config, menuResScale, nr);
 
-    if (NrCard card("LUT", menuResScale, false); card.IsOpen())
+    if (NrCard card("LUT##card", menuResScale, lutOn); card.IsOpen())
         RenderLutSection(config);
 
     ImGui::PopItemWidth();
 
-    // After the pop: the exposure controls keep the default width they always had.
+    // After the pop: the exposure controls use the card's default control width.
     if (auto card = ScopedCollapsingHeader("NR Exposure", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
         RenderExposureControls(config, menuResScale);
 }
@@ -4182,7 +4190,7 @@ static void RenderDebugPage(Config* config, float menuResScale)
 {
     ImGui::PushItemWidth(220.0f * menuResScale);
 
-    if (NrCard card("Compare", menuResScale); card.IsOpen())
+    if (NrCard card("Compare##card", menuResScale); card.IsOpen())
     {
         // Freeze the frame the model works on, so a setting change re-renders it in place -- the only
         // clean way to A/B our own settings (a moving scene confounds every other comparison). See
@@ -4241,7 +4249,7 @@ static void RenderDebugPage(Config* config, float menuResScale)
         }
     }
 
-    if (NrCard card("Debug view", menuResScale); card.IsOpen())
+    if (NrCard card("Debug view##card", menuResScale); card.IsOpen())
     {
         static const char* debugNames[] = { "Off", "Proxy (what the model sees)", "Model output (raw)",
                                             "Difference (amplified)" };

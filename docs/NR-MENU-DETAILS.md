@@ -109,6 +109,33 @@ The green button is the tier currently in effect; changing NR Pass at:, Upscale 
 
 A tier leaves Upscale Mode on Superior Scaling if you selected it, and still counts as in effect then.
 
+## NR Profiles
+
+Saves this game's Neural Rendering settings under a name and loads them back. The last section of Status & Presets.
+
+A profile is made to be shared for one game. It holds how NR looks and what it costs (everything the preset rows set,
+the passes and their overrides, colour, output, input style, detail reuse, the LUT) and the game's own settings: the
+exposure source and its trims and calibration points, Colour Encoding, NR Only (Finished Picture), Optical F5Low and
+Compress screen edges. It leaves out what is yours or only for this session: Enable Neural Rendering, the toggle key,
+the display's paper white, Compare and the debug views, and the diagnostic switches.
+
+- Files are `OptiScaler\NRProfiles\<name>.ini`. To share one, send the file; the other player puts it in the same
+  folder of their install and presses Rescan.
+- Load sets every setting the profile holds. One the file does not have goes to its default, so a profile gives the
+  same picture whatever was set before.
+- A profile records the game it was saved in. Picking one saved in another game shows that in amber: its exposure and
+  Optical F5Low settings are for that game.
+- The LUT is saved by its file name only and loaded only from this game's `OptiScaler\LUTs`. If the file is not there,
+  the LUT is turned off and the menu says so.
+- Some Optical F5Low settings take effect after a restart; after a load that changed them the menu links to the Optical
+  F5Low page, which says which.
+- Load is green when the profile's settings are the ones in effect; changing one of them clears it.
+- Save over a profile and Delete ask first. Names can use letters, digits, spaces, `-`, `_` and `.`.
+- A profile is a separate file: Save Settings at the bottom of the menu still saves this game's OptiScaler.ini.
+
+Revert NR to saved shows when the NR settings a profile holds have changed since the game started or the last Save
+Settings, and puts them back. The settings a profile leaves out are not touched.
+
 ## Follow the game's exposure
 
 For games that hand over their frame before applying their own exposure: on by default for those known to (RDR2), off for every other game. Automatic learns how its own metering relates to the game's exposure in the first seconds of play, then follows the game's exposure, so brightness moves exactly with the game: cutscenes, menus, fades. In a game whose own exposure never moves, if the two stay more than 0.75 EV apart for a moment, the calibration eases toward Automatic (0.25 EV a second at most).

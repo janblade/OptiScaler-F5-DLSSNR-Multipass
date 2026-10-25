@@ -80,6 +80,9 @@ static void Keys()
     Check(Same({ { "Passes", "auto" } }, {}), "missing = auto");
     Check(!Same({ { "Passes", "3" } }, { { "Passes", "2" } }), "different value differs");
     Check(Same({ { "passes", "3" } }, { { "Passes", "3" } }), "key case does not count");
+    Check(Same({ { "LutFile", "warm.cube" } }, { { "LutFile", "C:\\Games\\X\\OptiScaler\\LUTs\\warm.cube" } }) &&
+              !Same({ { "LutFile", "warm.cube" } }, { { "LutFile", "C:\\LUTs\\cold.cube" } }),
+          "the LUT counts by file name");
 }
 
 // Every key SaveIni writes into [DlssNr] is kept or left out. The Pass{}... keys written in a loop are covered by the

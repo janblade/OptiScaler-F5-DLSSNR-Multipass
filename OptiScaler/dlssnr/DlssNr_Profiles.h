@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -24,7 +25,8 @@ namespace DlssNrProfiles
 {
 inline constexpr const wchar_t* kFolderName = L"NRProfiles"; // inside the OptiScaler folder, beside LUTs
 inline constexpr std::size_t kMaxNameLength = 48;
-inline constexpr int kFileVersion = 1; // [Profile] Version
+inline constexpr int kFileVersion = 1;                     // [Profile] Version
+inline constexpr std::uintmax_t kMaxFileBytes = 64 * 1024; // a real profile is ~5 KB; anything larger is not read
 
 // [DlssNr] keys a profile keeps. Pass4..Pass30 keys (written in a loop) are kept too, see IsKept.
 inline constexpr std::string_view kKeptKeys[] = {
@@ -330,13 +332,16 @@ inline Section Filter(const Section& section)
     return kept;
 }
 
-// Whether two sections hold the same kept settings. A missing key reads as "auto", as the ini reader has it.
+// Whether two sections hold the same kept settings. A missing key reads as "auto", as the ini reader has it. The LUT
+// counts by file name: a profile keeps only the name, the config the path it was found at.
 inline bool Same(const Section& a, const Section& b)
 {
     const auto valueIn = [](const Section& s, const std::string& key) -> std::string
     {
         const auto it = s.find(key);
-        return it == s.end() ? std::string("auto") : it->second;
+        if (it == s.end())
+            return "auto";
+        return EqualNoCase(key, "LutFile") ? std::filesystem::path(it->second).filename().string() : it->second;
     };
 
     for (const Section* s : { &a, &b })

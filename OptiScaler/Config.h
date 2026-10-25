@@ -1335,7 +1335,7 @@ class Config
     // NR profiles (dlssnr/DlssNr_Profiles.h): the kept [DlssNr] settings to and from a profile file, and back to the
     // saved ones (what OptiScaler.ini held at the last load or Save Settings).
     bool SaveDlssNrProfile(const std::filesystem::path& path, std::string& error);
-    bool LoadDlssNrProfile(const std::filesystem::path& path, std::string& error);
+    bool LoadDlssNrProfile(const std::filesystem::path& path, std::string& error, std::string& note);
     void RevertDlssNrToSaved();
     DlssNrProfiles::Section DlssNrSnapshot();
     DlssNrProfiles::Section SavedDlssNrSection();

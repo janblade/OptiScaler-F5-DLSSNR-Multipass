@@ -1544,8 +1544,14 @@ DlssNrProfiles::Section Config::DlssNrSnapshot()
 // writer gives for the same value (0.5 against 0.500000, a default written out), and would read as a change.
 DlssNrProfiles::Section Config::SavedDlssNrSection() { return savedDlssNr; }
 
+// A profile may come from someone else: one larger than any real profile is not read at all
 std::optional<DlssNrProfiles::File> Config::ReadDlssNrProfile(const std::filesystem::path& path)
 {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size > DlssNrProfiles::kMaxFileBytes)
+        return std::nullopt;
+
     CSimpleIniA file;
     if (file.LoadFile(path.c_str()) != SI_OK)
         return std::nullopt;
@@ -1564,7 +1570,12 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
     CSimpleIniA all;
     WriteDlssNr(*this, all);
     for (const auto& [key, value] : KeptSection(all))
-        out.SetValue("DlssNr", key.c_str(), value.c_str());
+    {
+        // The LUT by file name only: a shared profile must not carry this PC's folders (see ProfileLut)
+        const bool lut = DlssNrProfiles::EqualNoCase(key, "LutFile") && !value.empty();
+        out.SetValue("DlssNr", key.c_str(),
+                     lut ? std::filesystem::path(value).filename().string().c_str() : value.c_str());
+    }
 
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
@@ -1584,14 +1595,41 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
     return true;
 }
 
-bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& error)
+// A profile's LUT is looked for by its file name in this game's OptiScaler\LUTs only, never at a folder the file names:
+// a shared profile could otherwise point the game at someone else's folders or a network path. Not there: LUT off.
+static std::string ProfileLut(Config& c, std::string& lut)
 {
-    const auto profile = ReadDlssNrProfile(path);
+    const std::filesystem::path name = std::filesystem::path(lut).filename();
+    if (lut.empty() || DlssNrProfiles::EqualNoCase(lut, "auto"))
+        return {};
+
+    const std::filesystem::path here =
+        std::filesystem::path(c.MainDllPath.value_or(Util::DllPath().parent_path().wstring())) / L"LUTs" / name;
+    std::error_code ec;
+
+    if (!name.empty() && name != "." && name != ".." && here.parent_path().filename() == L"LUTs" &&
+        std::filesystem::is_regular_file(here, ec))
+    {
+        lut = here.string();
+        return {};
+    }
+
+    const std::string missing = name.string();
+    lut.clear();
+    return "LUT " + missing + " is not in OptiScaler\\LUTs: LUT off.";
+}
+
+bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& error, std::string& note)
+{
+    auto profile = ReadDlssNrProfile(path);
     if (!profile)
     {
         error = "Could not read the file.";
         return false;
     }
+
+    if (const auto lut = profile->settings.find("LutFile"); lut != profile->settings.end())
+        note = ProfileLut(*this, lut->second);
 
     const size_t defaulted = ApplyDlssNrSection(profile->settings);
     LOG_INFO("NR profile loaded: {} (saved in {}; {} settings, {} at their default)", wstring_to_string(path.wstring()),

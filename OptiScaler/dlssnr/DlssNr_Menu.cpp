@@ -1689,7 +1689,8 @@ static std::vector<ProfileEntry> ScanProfileFolder()
     {
         if (ec)
             break;
-        if (!entry.is_regular_file())
+        // A link could send a save somewhere else: only plain files are profiles
+        if (!entry.is_regular_file() || entry.is_symlink())
             continue;
 
         const auto name = DlssNrProfiles::NameFromPath(entry.path());
@@ -1708,27 +1709,6 @@ static std::vector<ProfileEntry> ScanProfileFolder()
                       [](char x, char y) { return std::tolower((unsigned char) x) < std::tolower((unsigned char) y); });
               });
     return found;
-}
-
-// After a load: a LUT the profile names that is not on this PC is looked for in this game's LUTs folder by its file
-// name, else the LUT goes off. Returns what to tell the player, empty when the LUT is fine.
-static std::string FindProfileLut(Config* config)
-{
-    const std::string lut = config->DlssNrLutFile.value_or_default();
-    std::error_code ec;
-
-    if (lut.empty() || std::filesystem::exists(lut, ec))
-        return {};
-
-    const std::filesystem::path here = LutFolder() / std::filesystem::path(lut).filename();
-    if (std::filesystem::exists(here, ec))
-    {
-        config->DlssNrLutFile = here.string();
-        return {};
-    }
-
-    config->DlssNrLutFile = std::string();
-    return " LUT " + std::filesystem::path(lut).filename().string() + " is not in OptiScaler\\LUTs: LUT off.";
 }
 
 // Error prevention by construction: only the characters a profile name may have can be typed
@@ -1792,12 +1772,14 @@ static void RenderProfilesSection(Config* config)
     };
 
     // Load and revert change many settings at once, like a preset: a drag in flight is dropped, and leaving Finished
-    // Picture clears a session failure, as the tiers do
+    // Picture clears a session failure, as the tiers do. The exposure scan's calibration points are read once a
+    // session, so they are read again here.
     const auto afterApply = [&](bool finishedBefore)
     {
         pendingScale = -1;
         if (finishedBefore && !config->DlssNrFinishedPicture.value_or_default())
             RetryNr();
+        DlssNr::ExposureScan::LoadAnchors(config->DlssNrScanAnchors.value_or_default());
         refresh();
     };
 
@@ -1866,13 +1848,13 @@ static void RenderProfilesSection(Config* config)
         const bool finishedBefore = config->DlssNrFinishedPicture.value_or_default();
         const Section before = config->DlssNrSnapshot();
         std::string error;
+        std::string lutNote;
 
-        if (config->LoadDlssNrProfile(pick->path, error))
+        if (config->LoadDlssNrProfile(pick->path, error, lutNote))
         {
-            const std::string lutNote = FindProfileLut(config);
             afterApply(finishedBefore);
             const bool native = NativeChanged(before, config->DlssNrSnapshot());
-            say("Loaded " + pick->name + "." + lutNote, !lutNote.empty(), native);
+            say("Loaded " + pick->name + "." + (lutNote.empty() ? "" : " " + lutNote), !lutNote.empty(), native);
         }
         else
         {

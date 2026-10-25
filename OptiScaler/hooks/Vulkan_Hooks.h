@@ -18,6 +18,13 @@ class VulkanHooks
     static PFN_vkGetLatencyTimingsNV o_vkGetLatencyTimingsNV;
     static PFN_vkQueueNotifyOutOfBandNV o_vkQueueNotifyOutOfBandNV;
 
+    // Set while the FG output shows a surface the game created to its Streamline, whose vkCreateWin32SurfaceKHR gets
+    // this one instead of a new one
+    inline static thread_local VkSurfaceKHR existingSurface = VK_NULL_HANDLE;
+
+    // The window a surface was created for
+    static HWND SurfaceWindow(VkSurfaceKHR surface);
+
     // vkGetDeviceProcAddr past our hook
     static PFN_vkVoidFunction GetDeviceProcAddr(VkDevice device, const char* name);
 

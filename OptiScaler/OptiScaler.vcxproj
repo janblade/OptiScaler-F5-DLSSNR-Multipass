@@ -338,6 +338,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="exports\winhttp.h" />
     <ClInclude Include="exports\wininet.h" />
     <ClInclude Include="exports\winmm.h" />
+    <ClInclude Include="framegen\dlssg\DLSSG_Common.h" />
     <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h" />
     <ClInclude Include="framegen\dlssg\DlssgTelemetry.h" />
     <ClInclude Include="framegen\dlssg\Kcd2Hdr.h" />
@@ -362,6 +363,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="framegen\mfgunlock\Status.h" />
     <ClInclude Include="dlssnr\PassProfiles.h" />
     <ClInclude Include="dlssnr\DlssNr_LookPresets.h" />
+    <ClInclude Include="framegen\dlssg\DLSSG_Vk.h" />
+    <ClInclude Include="proxies\sl_helpers_vk.h" />
     <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />
     <ClInclude Include="framegen\ffx\FSRFG_Vk.h" />
     <ClInclude Include="framegen\IFGFeature.h" />
@@ -788,8 +791,10 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
       <DisableSpecificWarnings>4701</DisableSpecificWarnings>
     </ClCompile>
     <ClCompile Include="hooks\Amdxc64_Hooks.cpp" />
+    <ClCompile Include="framegen\dlssg\DLSSG_Common.cpp" />
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp" />
     <ClCompile Include="framegen\dlssg\Kcd2Hdr.cpp" />
+    <ClCompile Include="framegen\dlssg\DLSSG_Vk.cpp" />
     <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />
     <ClCompile Include="framegen\ffx\FSRFG_Vk.cpp" />
     <ClCompile Include="framegen\IFGFeature.cpp" />

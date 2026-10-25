@@ -12,6 +12,7 @@
 #include <upscaler_time/UpscalerTime_Vk.h>
 
 #include <framegen/ffx/FSRFG_Vk.h>
+#include <framegen/dlssg/DLSSG_Vk.h>
 #include <proxies/FfxApi_Proxy.h>
 #include <misc/FrameLimit.h>
 #include "Reflex_Hooks.h"
@@ -52,6 +53,9 @@ static VkDevice _device = VK_NULL_HANDLE;
 static VkInstance _instance = VK_NULL_HANDLE;
 static VkPhysicalDevice _PD = VK_NULL_HANDLE;
 static HWND _hwnd = nullptr;
+
+static std::mutex _surfaceWindowsMutex;
+static std::unordered_map<VkSurfaceKHR, HWND> _surfaceWindows;
 
 static std::mutex _vkPresentMutex;
 
@@ -99,8 +103,25 @@ static void hkvkSetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount, cons
                                   const VkHdrMetadataEXT* pMetadata);
 static VkResult hkvkWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout);
 
-// FFX creates its real swapchain while creating the FG one
-static bool _creatingFGSwapchain = false;
+// Set while the FG output handles a swapchain call
+static thread_local bool _inFGCall = false;
+
+struct ScopedFGCall
+{
+    ScopedFGCall() { _inFGCall = true; }
+    ~ScopedFGCall() { _inFGCall = false; }
+};
+
+// FFX's and Streamline's swapchains call the driver through these hooks, those go straight to it.
+// Streamline's DLSSG also presents the generated frames from its own thread.
+static bool FromFGOutput(void* returnAddress)
+{
+    if (_inFGCall)
+        return true;
+
+    auto& state = State::Instance();
+    return state.optiSlInterposer != nullptr && state.IsOptiStreamlineModule(Util::GetCallerModule(returnAddress));
+}
 
 // A bridged swapchain is on a hidden window and made with exclusive full screen disallowed (native/VkPresentBridge.h):
 // the game's own acquire and release of the mode succeed without doing anything.
@@ -146,6 +167,18 @@ static bool D3DOnVulkanModule(HMODULE module)
                      name == L"d3d12core.dll" || name == L"dxgi.dll" || name == L"nvapi64.dll";
     cache[module] = d3d;
     return d3d;
+}
+
+// OptiScaler's Streamline calls the driver's swapchain functions directly. Overlays like RTSS hook the same ones on top
+// of OptiScaler, through them its calls, also those from its own present thread, would look like the game's.
+static PFN_vkVoidFunction StreamlineSwapchainFunction(const char* pName, void* returnAddress)
+{
+    auto func = VulkanHooks::OriginalSwapchainFunction(pName);
+
+    if (func == nullptr || !State::Instance().IsOptiStreamlineModule(Util::GetCallerModule(returnAddress)))
+        return nullptr;
+
+    return func;
 }
 
 // The game's own Vulkan low latency calls are InputCommon's inputs (low_latency/input): VK_NV_low_latency2's
@@ -209,6 +242,44 @@ static bool TimelineFeatureOn(const void* chain)
     }
 
     return false;
+}
+
+// The FG outputs sync with timeline semaphores, turns them on when the game didn't. Spoofing adds their extension.
+// `added` gets chained into createInfo when the game has no feature struct for them, it has to outlive vkCreateDevice.
+static bool EnableTimelineSemaphores(VkPhysicalDevice physicalDevice, VkDeviceCreateInfo& createInfo,
+                                     VkPhysicalDeviceTimelineSemaphoreFeatures& added)
+{
+    if (TimelineFeatureOn(createInfo.pNext))
+        return true;
+
+    VkPhysicalDeviceTimelineSemaphoreFeatures supported {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES
+    };
+    VkPhysicalDeviceFeatures2 features { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported };
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
+
+    if (!supported.timelineSemaphore)
+        return false;
+
+    // A feature struct of the game already listing it as off, otherwise a new one
+    for (auto next = (VkBaseOutStructure*) createInfo.pNext; next != nullptr; next = next->pNext)
+    {
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+        {
+            ((VkPhysicalDeviceVulkan12Features*) next)->timelineSemaphore = VK_TRUE;
+            return true;
+        }
+
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)
+        {
+            ((VkPhysicalDeviceTimelineSemaphoreFeatures*) next)->timelineSemaphore = VK_TRUE;
+            return true;
+        }
+    }
+
+    added = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, (void*) createInfo.pNext, VK_TRUE };
+    createInfo.pNext = &added;
+    return true;
 }
 
 // Devices made with VK_NV_low_latency2 and timeline semaphores, not for a D3D device (VulkanHooks::LowLatency2On)
@@ -278,6 +349,14 @@ PFN_vkVoidFunction VulkanHooks::OriginalSwapchainFunction(const char* pName)
         return (PFN_vkVoidFunction) o_QueuePresentKHR;
 
     return nullptr;
+}
+
+HWND VulkanHooks::SurfaceWindow(VkSurfaceKHR surface)
+{
+    std::scoped_lock lock(_surfaceWindowsMutex);
+
+    auto it = _surfaceWindows.find(surface);
+    return it != _surfaceWindows.end() ? it->second : nullptr;
 }
 
 // A promoted core function is missing on a device that only has its extension (RDR2's vkGetSemaphoreCounterValue and
@@ -460,12 +539,24 @@ static IFGFeature_Vk* CreateFGFeature()
 {
     auto& state = State::Instance();
 
-    if (state.currentVkFG == nullptr && state.activeFgInput == FGInput::DLSSG && state.activeFgOutput == FGOutput::FSRFG)
+    const bool supportedInput = state.activeFgInput == FGInput::DLSSG;
+
+    if (state.currentVkFG != nullptr || !supportedInput)
+        return state.currentVkFG;
+
+    if (state.activeFgOutput == FGOutput::FSRFG)
     {
         if (FfxApiProxy::InitFfxVk())
             state.currentVkFG = new FSRFG_Vk();
         else
             LOG_ERROR("Can't load amd_fidelityfx_vk.dll, FSR FG won't be available");
+    }
+    else if (state.activeFgOutput == FGOutput::DLSSG)
+    {
+        if (StreamlineProxy::InitWithVulkan())
+            state.currentVkFG = new DLSSG_Vk();
+        else
+            LOG_ERROR("Can't init Streamline, DLSSG won't be available");
     }
 
     return state.currentVkFG;
@@ -475,9 +566,21 @@ VALIDATE_HOOK(hkvkCreateWin32SurfaceKHR, PFN_vkCreateWin32SurfaceKHR)
 static VkResult hkvkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32SurfaceCreateInfoKHR* pCreateInfo,
                                           const VkAllocationCallbacks* pAllocator, VkSurfaceKHR* pSurface)
 {
+    if (VulkanHooks::existingSurface != VK_NULL_HANDLE)
+    {
+        *pSurface = VulkanHooks::existingSurface;
+        return VK_SUCCESS;
+    }
+
     LOG_FUNC();
 
     auto result = o_vkCreateWin32SurfaceKHR(instance, pCreateInfo, pAllocator, pSurface);
+
+    if (result == VK_SUCCESS && pSurface != nullptr)
+    {
+        std::scoped_lock lock(_surfaceWindowsMutex);
+        _surfaceWindows[*pSurface] = pCreateInfo->hwnd;
+    }
 
     auto procHwnd = Util::GetProcessWindow();
     LOG_DEBUG("procHwnd: {0:X}, swapchain hwnd: {1:X}", (UINT64) procHwnd, (UINT64) pCreateInfo->hwnd);
@@ -516,13 +619,35 @@ static VkResult hkvkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, cons
 
     VulkanSpoofing::hkvkCreateInstance(&localCreateInfo, pAllocator, pInstance);
 
+    // FFX and Streamline use Vulkan 1.2 core functions like vkWaitSemaphores. Wine only provides those to 1.2 apps,
+    // older ones crash calling them, Streamline's own vkCreateInstance raises the version too.
+    VkApplicationInfo appInfo { VK_STRUCTURE_TYPE_APPLICATION_INFO };
+    const auto fgOutput = State::Instance().activeFgOutput;
+
+    if ((fgOutput == FGOutput::FSRFG || fgOutput == FGOutput::DLSSG) && !ScopedSkipVulkanHooks::Active() &&
+        !VkPresentBridge::DxvkGame())
+    {
+        if (localCreateInfo.pApplicationInfo != nullptr)
+            appInfo = *localCreateInfo.pApplicationInfo;
+
+        if (appInfo.apiVersion < VK_API_VERSION_1_2)
+        {
+            LOG_INFO("Raising the API version from {}.{} to 1.2 for FG", VK_API_VERSION_MAJOR(appInfo.apiVersion),
+                     VK_API_VERSION_MINOR(appInfo.apiVersion));
+
+            appInfo.apiVersion = VK_API_VERSION_1_2;
+            localCreateInfo.pApplicationInfo = &appInfo;
+        }
+    }
+
     VkResult result;
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
         result = o_vkCreateInstance(&localCreateInfo, pAllocator, pInstance);
     }
 
-    if (result == VK_SUCCESS)
+    // OptiScaler's own Streamline only makes short lived ones
+    if (result == VK_SUCCESS && !StreamlineProxy::IsInitializing())
     {
         State::Instance().VulkanInstance = *pInstance;
         LOG_DEBUG("State::Instance().VulkanInstance captured: {0:X}", (UINT64) State::Instance().VulkanInstance);
@@ -572,6 +697,25 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     {
         o_vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
         State::Instance().vkAntiLagSupported = antiLagFeatures.antiLag != 0;
+    }
+
+    // Not for the D3D layers' own devices (dxvk, vkd3d-proton): their games present through DXGI. Before spoofing,
+    // which drops the extensions it only pretends to have.
+    IFGFeature_Vk* nativeFg = nullptr;
+    VkPhysicalDeviceTimelineSemaphoreFeatures nativeFgTimeline {};
+
+    if (!ScopedSkipVulkanHooks::Active() && !D3DOnVulkanModule(Util::GetCallerModule(_ReturnAddress())) &&
+        !VkPresentBridge::DxvkGame() && (nativeFg = CreateFGFeature()) != nullptr)
+    {
+        if (EnableTimelineSemaphores(physicalDevice, localCreteInfo, nativeFgTimeline))
+        {
+            nativeFg->PrepareDevice(physicalDevice, localCreteInfo);
+        }
+        else
+        {
+            LOG_WARN("Timeline semaphores aren't supported, can't use FG with this device");
+            nativeFg = nullptr;
+        }
     }
 
     VulkanSpoofing::hkvkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
@@ -1017,24 +1161,6 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
         LOG_INFO("Vulkan Anti-Lag: antiLag feature {}", what);
     }
 
-    // Not for the D3D layers' own devices (dxvk, vkd3d-proton): their games present through DXGI
-    IFGFeature_Vk* nativeFg = nullptr;
-
-    if (!ScopedSkipVulkanHooks::Active() && !D3DOnVulkanModule(Util::GetCallerModule(_ReturnAddress())) &&
-        !VkPresentBridge::DxvkGame() && (nativeFg = CreateFGFeature()) != nullptr)
-    {
-        // FFX's swapchain syncs with them
-        if (TimelineFeatureOn(localCreteInfo.pNext))
-        {
-            nativeFg->ReserveQueues(physicalDevice, localCreteInfo);
-        }
-        else
-        {
-            LOG_WARN("Device created without timeline semaphores, can't use FG with it");
-            nativeFg = nullptr;
-        }
-    }
-
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
 
     if (result == VK_SUCCESS && nativeFg != nullptr)
@@ -1184,7 +1310,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     auto nativeFg = State::Instance().currentVkFG;
 
     // FFX presents the real swapchain from its own queue
-    if (nativeFg != nullptr && nativeFg->OwnsQueue(queue))
+    if (FromFGOutput(_ReturnAddress()) || (nativeFg != nullptr && nativeFg->OwnsQueue(queue)))
         return o_QueuePresentKHR(queue, pPresentInfo);
 
     LOG_FUNC();
@@ -1339,8 +1465,15 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     {
         ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
-        result = nativeFgPresent ? nativeFg->QueuePresent(queue, &localPresentInfo)
-                                 : o_QueuePresentKHR(queue, &localPresentInfo);
+        if (nativeFgPresent)
+        {
+            ScopedFGCall fgCall {};
+            result = nativeFg->QueuePresent(queue, &localPresentInfo);
+        }
+        else
+        {
+            result = o_QueuePresentKHR(queue, &localPresentInfo);
+        }
     }
 
     _presentTiming.Record(Stage::Present, Util::MillisecondsNow() - presentStartMs);
@@ -1392,8 +1525,8 @@ VALIDATE_HOOK(hkvkCreateSwapchainKHR, PFN_vkCreateSwapchainKHR)
 static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                        const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain)
 {
-    // FFX's own swapchain create while it makes the FG one
-    if (_creatingFGSwapchain)
+    // The swapchain create of FFX or Streamline while it makes the FG one
+    if (FromFGOutput(_ReturnAddress()))
         return o_CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
 
     LOG_FUNC();
@@ -1461,9 +1594,8 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 
         if (nativeFgSwapchain)
         {
-            _creatingFGSwapchain = true;
+            ScopedFGCall fgCall {};
             fgSwapchain = nativeFg->CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
-            _creatingFGSwapchain = false;
             result = VK_SUCCESS;
 
             // FFX could not make it: the game's own swapchain, as without the output
@@ -1566,8 +1698,12 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         // The menu is drawn on the D3D12 swapchain of the bridge, not on the hidden Vulkan one. Before that swapchain's
         // first present, which is where the D3D12 menu starts.
         if (!bridged)
-            MenuOverlayVk::CreateSwapchain(device, swapchainPhysicalDevice(), _instance, _hwnd, pCreateInfo, pAllocator,
+        {
+            const auto surfaceWindow = VulkanHooks::SurfaceWindow(pCreateInfo->surface);
+            MenuOverlayVk::CreateSwapchain(device, swapchainPhysicalDevice(), _instance,
+                                           surfaceWindow != nullptr ? surfaceWindow : _hwnd, pCreateInfo, pAllocator,
                                            pSwapchain);
+        }
         else
             MenuOverlayVk::HandOverToBridge();
     }
@@ -1579,6 +1715,12 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 VALIDATE_HOOK(hkvkDestroySwapchainKHR, PFN_vkDestroySwapchainKHR)
 static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator)
 {
+    if (FromFGOutput(_ReturnAddress()))
+    {
+        o_DestroySwapchainKHR(device, swapchain, pAllocator);
+        return;
+    }
+
     // Before it goes: InputCommon's Reflex output stops using it, after a call of it that is under way
     // (VulkanHooks::LatencySwapchainUse)
     if (swapchain != VK_NULL_HANDLE)
@@ -1590,8 +1732,13 @@ static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, c
             it->second = {};
     }
 
-    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->DestroySwapchain(device, swapchain, pAllocator))
-        return;
+    if (auto fg = State::Instance().currentVkFG; fg != nullptr)
+    {
+        ScopedFGCall fgCall {};
+
+        if (fg->DestroySwapchain(device, swapchain, pAllocator))
+            return;
+    }
 
     o_DestroySwapchainKHR(device, swapchain, pAllocator);
 
@@ -1603,8 +1750,12 @@ VALIDATE_HOOK(hkvkGetSwapchainImagesKHR, PFN_vkGetSwapchainImagesKHR)
 static VkResult hkvkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount,
                                           VkImage* pSwapchainImages)
 {
-    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+    if (auto fg = State::Instance().currentVkFG;
+        fg != nullptr && fg->OwnsSwapchain(swapchain) && !FromFGOutput(_ReturnAddress()))
+    {
+        ScopedFGCall fgCall {};
         return fg->GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+    }
 
     return o_GetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages);
 }
@@ -1613,8 +1764,12 @@ VALIDATE_HOOK(hkvkAcquireNextImageKHR, PFN_vkAcquireNextImageKHR)
 static VkResult hkvkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
                                         VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex)
 {
-    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+    if (auto fg = State::Instance().currentVkFG;
+        fg != nullptr && fg->OwnsSwapchain(swapchain) && !FromFGOutput(_ReturnAddress()))
+    {
+        ScopedFGCall fgCall {};
         return fg->AcquireNextImage(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    }
 
     return o_AcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
 }
@@ -1625,9 +1780,11 @@ VALIDATE_HOOK(hkvkAcquireNextImage2KHR, PFN_vkAcquireNextImage2KHR)
 static VkResult hkvkAcquireNextImage2KHR(VkDevice device, const VkAcquireNextImageInfoKHR* pAcquireInfo,
                                          uint32_t* pImageIndex)
 {
-    if (auto fg = State::Instance().currentVkFG;
-        fg != nullptr && pAcquireInfo != nullptr && fg->OwnsSwapchain(pAcquireInfo->swapchain))
+    if (auto fg = State::Instance().currentVkFG; fg != nullptr && pAcquireInfo != nullptr &&
+                                                 fg->OwnsSwapchain(pAcquireInfo->swapchain) &&
+                                                 !FromFGOutput(_ReturnAddress()))
     {
+        ScopedFGCall fgCall {};
         return fg->AcquireNextImage(device, pAcquireInfo->swapchain, pAcquireInfo->timeout, pAcquireInfo->semaphore,
                                     pAcquireInfo->fence, pImageIndex);
     }
@@ -1640,8 +1797,11 @@ static VkResult hkvkAcquireNextImage2KHR(VkDevice device, const VkAcquireNextIma
 VALIDATE_HOOK(hkvkWaitForPresentKHR, PFN_vkWaitForPresentKHR)
 static VkResult hkvkWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)
 {
-    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+    if (auto fg = State::Instance().currentVkFG;
+        fg != nullptr && fg->OwnsSwapchain(swapchain) && !FromFGOutput(_ReturnAddress()))
+    {
         return VK_SUCCESS;
+    }
 
     return o_WaitForPresentKHR(device, swapchain, presentId, timeout);
 }
@@ -1654,8 +1814,11 @@ static void hkvkSetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount, cons
 
     for (uint32_t i = 0; i < swapchainCount; i++)
     {
-        if (fg != nullptr && fg->OwnsSwapchain(pSwapchains[i]))
+        if (fg != nullptr && fg->OwnsSwapchain(pSwapchains[i]) && !FromFGOutput(_ReturnAddress()))
+        {
+            ScopedFGCall fgCall {};
             fg->SetHdrMetadata(device, pSwapchains[i], &pMetadata[i]);
+        }
         else
             o_SetHdrMetadataEXT(device, 1, &pSwapchains[i], &pMetadata[i]);
     }
@@ -1756,6 +1919,9 @@ PFN_vkVoidFunction hkvkGetInstanceProcAddr(VkInstance instance, const char* pNam
         return (PFN_vkVoidFunction) hkvkDestroyDevice;
     }
 
+    if (auto direct = StreamlineSwapchainFunction(procName.c_str(), _ReturnAddress()))
+        return direct;
+
     if (auto lowLatency = LowLatencyInputHook(procName, orgFunc, _ReturnAddress()); lowLatency != nullptr)
         return lowLatency;
 
@@ -1800,6 +1966,9 @@ PFN_vkVoidFunction hkvkGetDeviceProcAddr(VkDevice device, const char* pName)
 
         return (PFN_vkVoidFunction) hkvkDestroyDevice;
     }
+
+    if (auto direct = StreamlineSwapchainFunction(procName.c_str(), _ReturnAddress()))
+        return direct;
 
     if (auto lowLatency = LowLatencyInputHook(procName, orgFunc, _ReturnAddress()); lowLatency != nullptr)
         return lowLatency;

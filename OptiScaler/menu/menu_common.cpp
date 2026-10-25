@@ -2225,7 +2225,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             else
                 ImGui::SetWindowFontScale(fpsScale);
 
-            auto fg = state.currentFG;
+            auto fg = state.CurrentFG();
             auto fgText =
                 (fg != nullptr && fg->IsGenerating()) ? (" (" + std::string(fg->Name()) + ")") : std::string();
 
@@ -3705,7 +3705,6 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             "No real DLSSG, unsupported hardware\nOnly Nvngx FG replacements available";
     }
 
-    outputOptions[dlssgOutputIndex].set_disabled(vulkanNoFg, "Unsupported API");
     outputOptions[dlssgOutputIndex].set_disabled(!supportsDlssg && !hasDlssgReplacement,
                                                  "Unsupported hardware and no replacements");
 
@@ -4340,7 +4339,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
     auto& currentFeature = ctx.currentFeature;
     auto& menuResScale = ctx.menuResScale;
     auto& primaryGpu = *ctx.primaryGpu;
-    auto fgOutput = state.currentFG;
+    auto fgOutput = state.CurrentFG();
 
     const UiTargetMode uiTargetMode = getUiTargetMode();
     const bool outputIsHdr = uiTargetMode != UiTargetMode::SDR;
@@ -4354,7 +4353,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         {
             ImGui::SeparatorText("Frame Generation (FSR FG)");
 
-            if (_ffxFGIndex < 0)
+            // The output resets an index from a game with more FFX versions
+            if (_ffxFGIndex < 0 || _ffxFGIndex >= (int) state.ffxFGVersionNames.size())
                 _ffxFGIndex = config->FfxFGIndex.value_or_default();
 
             if (state.ffxFGVersionNames.size() > 0)
@@ -4876,7 +4876,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
     // DLSSG controls
     if (state.activeFgOutput == FGOutput::DLSSG && state.activeFgInput != FGInput::NoFG &&
-        state.currentFGSwapchain != nullptr && StreamlineProxy::LoadStreamline() && fgOutput)
+        state.FGSwapchainExists() && StreamlineProxy::LoadStreamline() && fgOutput)
     {
         ImGui::SeparatorText("Frame Generation (DLSSG)");
 
@@ -4989,7 +4989,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
 
         bool useGamesMarkers = config->FGDLSSGUseGamesReflexMarkers.value_or_default();
-        ImGui::BeginDisabled(!ReflexHooks::gameIsSendingMarkers());
+        // Vulkan games' markers don't reach OptiScaler's Streamline
+        ImGui::BeginDisabled(!ReflexHooks::gameIsSendingMarkers() || state.swapchainApi == API::Vulkan);
         if (ImGui::Checkbox("Use Game's Reflex Markers", &useGamesMarkers))
         {
             config->FGDLSSGUseGamesReflexMarkers = useGamesMarkers;
@@ -5499,7 +5500,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
             if (activeNvngxFg == FGNvngxReplacement::FFX || activeNvngxFg == FGNvngxReplacement::Combo)
             {
-                if (_ffxFGIndex < 0)
+                if (_ffxFGIndex < 0 || _ffxFGIndex >= (int) state.ffxFGVersionNames.size())
                     _ffxFGIndex = config->FfxFGIndex.value_or_default();
 
                 if (state.ffxFGVersionNames.size() > 0)

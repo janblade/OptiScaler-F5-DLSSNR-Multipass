@@ -2,6 +2,7 @@
 #include <Config.h>
 #include "FFXFeature.h"
 #include <proxies/FfxApi_Proxy.h>
+#include <fsr4/FSR4DriverProviderVk.h>
 
 static void FfxLogCallback(uint32_t type, const wchar_t* message)
 {
@@ -49,14 +50,33 @@ void FFXFeature::QueryVersionsVulkan()
     // versionQuery.device = Device; // only for DirectX 12 applications
     uint64_t versionCount = 0;
     versionQuery.outputCount = &versionCount;
-    FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
 
-    // Fill version ids and names arrays
-    State::Instance().ffxUpscalerVersionIds.resize(versionCount);
-    State::Instance().ffxUpscalerVersionNames.resize(versionCount);
-    versionQuery.versionIds = State::Instance().ffxUpscalerVersionIds.data();
-    versionQuery.versionNames = State::Instance().ffxUpscalerVersionNames.data();
-    FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
+    auto& state = State::Instance();
+
+    // The driver provided FSR 4 works without amd_fidelityfx_vk.dll
+    if (FfxApiProxy::VULKAN_Query() != nullptr)
+    {
+        FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
+
+        // Fill version ids and names arrays
+        state.ffxUpscalerVersionIds.resize(versionCount);
+        state.ffxUpscalerVersionNames.resize(versionCount);
+        versionQuery.versionIds = state.ffxUpscalerVersionIds.data();
+        versionQuery.versionNames = state.ffxUpscalerVersionNames.data();
+        FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
+    }
+    else
+    {
+        state.ffxUpscalerVersionIds.clear();
+        state.ffxUpscalerVersionNames.clear();
+    }
+
+    // FSR 4 provided by the Vulkan driver
+    if (FSR4DriverProviderVk::Init())
+    {
+        state.ffxUpscalerVersionIds.push_back(FSR4DriverProviderVk::VersionId());
+        state.ffxUpscalerVersionNames.push_back(FSR4DriverProviderVk::VersionName());
+    }
 }
 
 void FFXFeature::InitFlags()

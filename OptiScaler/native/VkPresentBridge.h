@@ -30,6 +30,11 @@ bool DxvkThroughVulkan();
 // The game runs on dxvk, key or not (IdentifyGpu's usesDxvk), cached the same way: it is asked on every present.
 bool DxvkGame();
 
+// The frame generation chosen and the mode on are such that the bridge takes the game's swapchains. Asked where only the
+// settings are known (the device is made), a swapchain may still be refused later (format, window). The native Vulkan FG
+// output (FSRFG_Vk, DLSSG_Vk) is for the games it does not take.
+bool ModeWantsBridge();
+
 // The fullScreenExclusive mode of a VkSurfaceFullScreenExclusiveInfoEXT in a create info's chain, or null. The swapchain
 // made on the hidden surface is asked for DISALLOWED through it (and the game's value put back after the call): the hidden
 // window must never take the screen, and the D3D12 swapchain on the real window handles full screen as for a D3D12 game.

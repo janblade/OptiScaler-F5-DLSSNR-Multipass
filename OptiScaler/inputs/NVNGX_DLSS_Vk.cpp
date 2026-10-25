@@ -8,6 +8,7 @@
 
 #include "NVNGX_DLSS.h"
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <inputs/FG/Upscaler_Inputs_Vk.h>
 #include "NVNGX_Parameter.h"
 #include "proxies/NVNGX_Proxy.h"
 
@@ -196,16 +197,17 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init_Ext2(
     if (InFeatureInfo != nullptr && InSDKVersion > 0x0000013)
         State::Instance().NVNGX_Logger = InFeatureInfo->LoggingInfo;
 
+    // Streamline initializes NGX for DLSSG with the device the game's DLSS already did
+    if (State::Instance().activeFgNvngx != FGNvngxReplacement::None)
+    {
+        Nvngx_FG::VULKAN_Init_Ext2(InApplicationId, InApplicationDataPath, InInstance, InPD, InDevice, InGIPA, InGDPA,
+                                   InSDKVersion, &localFeatureInfo);
+    }
+
     if (State::Instance().nvngxVkInited && InInstance == vkInstance && InDevice == vkDevice && InPD == vkPD)
     {
         LOG_WARN("NVNGX already inited");
         return NVSDK_NGX_Result_Success;
-    }
-
-    if (State::Instance().activeFgInput == FGInput::NvngxFG)
-    {
-        Nvngx_FG::VULKAN_Init_Ext2(InApplicationId, InApplicationDataPath, InInstance, InPD, InDevice, InGIPA, InGDPA,
-                                   InSDKVersion, &localFeatureInfo);
     }
 
     LOG_INFO("AppId: {0}", InApplicationId);
@@ -1028,6 +1030,30 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
     }
 
     auto handleId = InFeatureHandle->Id;
+
+    // Same as D3D12, the DLSSG state shown in the menu comes from the game's own FG evaluations.
+    // Replacements are handled below, so this has to be done before that
+    static size_t evalWithoutFG = 0;
+    static bool fgEvalSeen = false;
+    if (handleId >= NVNGX_PROVIDER_ID_OFFSET)
+    {
+        // Older DLSSG doesn't set the count at all, eval means at least 2x
+        int frameCount = 1;
+        if (InParameters == nullptr ||
+            InParameters->Get("DLSSG.MultiFrameCount", &frameCount) != NVSDK_NGX_Result_Success)
+        {
+            frameCount = 1;
+        }
+        state.dlssgDetectedInterpolationCount = frameCount;
+        evalWithoutFG = 0;
+        fgEvalSeen = true;
+    }
+    else if (fgEvalSeen && ++evalWithoutFG == 6)
+    {
+        // Game stopped evaluating FG, report it as disabled
+        state.dlssgDetectedInterpolationCount = 0;
+    }
+
     if (VkContexts[handleId].feature == nullptr) // prevent source api name flicker when dlssg is active
         state.setInputApiName = state.currentInputApiName;
 
@@ -1117,11 +1143,20 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
                        : nullptr;
     if (nrColor)
         InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) nrColor);
+
+    // The inputs of the native Vulkan FG output (OptiFG)
+    UpscalerInputsVk::UpscaleStart(InCmdList, InParameters, deviceContext);
+
+    NVSDK_NGX_Resource_VK* output = nullptr;
+    InParameters->Get(NVSDK_NGX_Parameter_Output, (void**) &output);
+
     auto upscaleResult = deviceContext->Evaluate(InCmdList, InParameters);
     if (nrColor)
         InParameters->Set(NVSDK_NGX_Parameter_Color, originalColor);
 
-    if (!upscaleResult)
+    if (upscaleResult)
+        UpscalerInputsVk::UpscaleEnd(InCmdList, output);
+    else
         ImGui::InsertNotification({ ImGuiToastType::Error, 10000, "Upscaler failed to run!" });
 
     if ((!upscaleResult || !deviceContext->IsInited()) &&

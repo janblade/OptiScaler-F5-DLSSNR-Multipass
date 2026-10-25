@@ -124,6 +124,10 @@ bool hkIsSupported(void* provider, void* device)
 
         LOG_DEBUG("{}: {}", Provider(model).name, supported);
 
+        // A query without a device is no report of the GPU's support
+        if (device == nullptr)
+            return supported;
+
         lock.lock();
         patched->lastReportedSupport = supported;
 

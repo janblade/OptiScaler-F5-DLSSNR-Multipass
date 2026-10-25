@@ -18,6 +18,9 @@
 #include <vulkan/vulkan.hpp>
 #include <ankerl/unordered_dense.h>
 #include <imgui/ImGuiNotify.hpp>
+#include <list>
+#include <mutex>
+#include <vector>
 #include <misc/IdentifyGpu.h>
 
 VkInstance vkInstance;
@@ -477,6 +480,26 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetParameters(NVSDK_NGX_Paramete
     return NVSDK_NGX_Result_Success;
 }
 
+// NGX returns arrays it owns and frees them when its snippets get reloaded (Streamline's NGX init does that),
+// but games keep pointing at the names for vkCreateInstance/vkCreateDevice and their own checks afterwards
+static NVSDK_NGX_Result CopyNgxExtensionProperties(NVSDK_NGX_Result result, const uint32_t* count,
+                                                   VkExtensionProperties** properties)
+{
+    if (result != NVSDK_NGX_Result_Success || count == nullptr || *count == 0 || properties == nullptr ||
+        *properties == nullptr)
+        return result;
+
+    // Never freed, callers don't say when they are done with the names
+    static std::list<std::vector<VkExtensionProperties>> copies;
+    static std::mutex copiesMutex;
+
+    std::scoped_lock lock(copiesMutex);
+    auto& copy = copies.emplace_back(*properties, *properties + *count);
+    *properties = copy.data();
+
+    return result;
+}
+
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements(
     const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo, uint32_t* OutExtensionCount,
     VkExtensionProperties** OutExtensionProperties)
@@ -495,6 +518,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequi
         LOG_INFO("calling NVNGXProxy::VULKAN_GetFeatureInstanceExtensionRequirements");
         auto result = NVNGXProxy::VULKAN_GetFeatureInstanceExtensionRequirements()(
             FeatureDiscoveryInfo, OutExtensionCount, OutExtensionProperties);
+        CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
         LOG_INFO("NVNGXProxy::VULKAN_GetFeatureInstanceExtensionRequirements result: {0:X}", (UINT) result);
 
         if (result == NVSDK_NGX_Result_Success)
@@ -509,8 +533,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequi
     if (NVNGXProxy::NVNGXModule() != nullptr && NVNGXProxy::VULKAN_GetFeatureInstanceExtensionRequirements() != nullptr)
     {
         LOG_INFO("returning original needed extensions");
-        return NVNGXProxy::VULKAN_GetFeatureInstanceExtensionRequirements()(FeatureDiscoveryInfo, OutExtensionCount,
-                                                                            OutExtensionProperties);
+        auto result = NVNGXProxy::VULKAN_GetFeatureInstanceExtensionRequirements()(
+            FeatureDiscoveryInfo, OutExtensionCount, OutExtensionProperties);
+        return CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
     }
     else
     {
@@ -587,6 +612,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequire
         LOG_INFO("calling NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements");
         auto result = NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements()(
             Instance, PhysicalDevice, FeatureDiscoveryInfo, OutExtensionCount, OutExtensionProperties);
+        CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
         LOG_INFO("NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements result: {0:X}", (UINT) result);
 
         if (result == NVSDK_NGX_Result_Success)
@@ -601,8 +627,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequire
     if (NVNGXProxy::NVNGXModule() != nullptr && NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements() != nullptr)
     {
         LOG_INFO("returning original needed extensions");
-        return NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements()(
+        auto result = NVNGXProxy::VULKAN_GetFeatureDeviceExtensionRequirements()(
             Instance, PhysicalDevice, FeatureDiscoveryInfo, OutExtensionCount, OutExtensionProperties);
+        return CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
     }
     else
     {

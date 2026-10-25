@@ -26,6 +26,7 @@
 #include <upscalers/ffx/FFXFeature.h>
 #include <fsr4/FSR4Models.h>
 #include <fsr4/FSR4Presets.h>
+#include <fsr4/FSR4DriverProviderVk.h>
 #include <proxies/Streamline_Proxy.h>
 
 #include <framegen/mfgunlock/Status.h>
@@ -3186,7 +3187,16 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                                               currentBackend == Upscaler::FFX_on12;
 
                     if (dx12Upscaler && ffxIndex >= 0 && ffxIndex < state.ffxUpscalerVersionIds.size())
+                    {
                         modelModule = FfxApiProxy::UpscalerModule(state.ffxUpscalerVersionIds[ffxIndex]);
+                    }
+                    else if (state.api == API::Vulkan && currentBackend == Upscaler::FFX &&
+                             FSR4DriverProviderVk::IsAvailable() && ffxIndex >= 0 &&
+                             ffxIndex < state.ffxUpscalerVersionIds.size() &&
+                             state.ffxUpscalerVersionIds[ffxIndex] == FSR4DriverProviderVk::VersionId())
+                    {
+                        modelModule = FSR4DriverProviderVk::Module()->dll;
+                    }
 
                     if (auto models = FSR4Models::SelectableModels(modelModule); !models.empty())
                     {

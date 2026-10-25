@@ -1570,6 +1570,7 @@ class FfxApiProxy
 
     static HMODULE VkModule() { return main_vk.dll; }
     static std::wstring VkModule_Path() { return main_vk.filePath; }
+    static FfxModule* VkFfxModule() { return &main_vk; }
 
     static bool InitFfxVk(HMODULE module = nullptr)
     {

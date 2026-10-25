@@ -14,6 +14,7 @@
 
 #include <framegen/ffx/FSRFG_Vk.h>
 #include <framegen/dlssg/DLSSG_Vk.h>
+#include <fsr4/FSR4DriverProviderVk.h>
 #include <proxies/FfxApi_Proxy.h>
 #include <misc/FrameLimit.h>
 #include "Reflex_Hooks.h"
@@ -566,7 +567,11 @@ static IFGFeature_Vk* CreateFGFeature()
 
     if (state.activeFgOutput == FGOutput::FSRFG)
     {
-        if (FfxApiProxy::InitFfxVk())
+        // Driver provided ML FG works without amd_fidelityfx_vk.dll
+        const bool sdkLoaded = FfxApiProxy::InitFfxVk();
+        const bool driverLoaded = FSR4DriverProviderVk::InitFg();
+
+        if (sdkLoaded || driverLoaded)
             state.currentVkFG = new FSRFG_Vk();
         else
             LOG_ERROR("Can't load amd_fidelityfx_vk.dll, FSR FG won't be available");

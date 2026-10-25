@@ -9,7 +9,13 @@
 class FFXFeatureVk : public FFXFeature, public IFeature_Vk
 {
   private:
+    // amd_fidelityfx_vk.dll or the driver provided upscaler
+    FfxModule* _ffx = nullptr;
+
     std::unique_ptr<VelocityConvert_Vk> _velocityConvert = nullptr;
+
+    // Last logged inputs of the driver provided FSR 4
+    std::string _lastFsr4Inputs;
 
   protected:
     bool InitFFX(const NVSDK_NGX_Parameter* InParameters);
@@ -32,7 +38,7 @@ class FFXFeatureVk : public FFXFeature, public IFeature_Vk
         if (State::Instance().isShuttingDown)
             return;
 
-        if (_context != nullptr)
-            FfxApiProxy::VULKAN_DestroyContext()(&_context, NULL);
+        if (_context != nullptr && _ffx != nullptr)
+            _ffx->DestroyContext(&_context, NULL);
     }
 };

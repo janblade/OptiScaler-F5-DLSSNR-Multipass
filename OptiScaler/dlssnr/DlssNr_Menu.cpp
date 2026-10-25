@@ -965,7 +965,7 @@ static bool VulkanFeatureIsOn12()
 }
 
 // The backend frame generation only runs the game's upscaler on, and the one to go back to when the mode is left.
-static std::optional<Upscaler> g_backendBeforeFrameGenerationOnly;
+static std::optional<Upscaler> g_backendBeforeRoute;
 
 static void SwitchVulkanBackend(Config* config, Upscaler backend)
 {
@@ -978,7 +978,7 @@ static void SwitchVulkanBackend(Config* config, Upscaler backend)
         changeBackend.second = true;
 }
 
-static void EnterFrameGenerationOnly(Config* config)
+static void EnterGameUpscalerRoute(Config* config)
 {
     const Upscaler current = config->VulkanUpscaler.value_or_default();
 
@@ -987,18 +987,18 @@ static void EnterFrameGenerationOnly(Config* config)
     const Upscaler target = FeatureProvider_Vk::On12For(current);
 
     if (target != current)
-        g_backendBeforeFrameGenerationOnly = current;
+        g_backendBeforeRoute = current;
 
     SwitchVulkanBackend(config, target);
 }
 
-static void LeaveFrameGenerationOnly(Config* config)
+static void LeaveGameUpscalerRoute(Config* config)
 {
-    if (!g_backendBeforeFrameGenerationOnly.has_value())
+    if (!g_backendBeforeRoute.has_value())
         return;
 
-    SwitchVulkanBackend(config, g_backendBeforeFrameGenerationOnly.value());
-    g_backendBeforeFrameGenerationOnly.reset();
+    SwitchVulkanBackend(config, g_backendBeforeRoute.value());
+    g_backendBeforeRoute.reset();
 }
 
 static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPicture)
@@ -1009,8 +1009,8 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     const bool gameUpscaler = NativeGameCallsUpscaler(api);
     const Shown shown =
         FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
-          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
+                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+    const bool routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
 
     struct ModeChoice
     {
@@ -1023,20 +1023,13 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         { Mode::Off, Shown::Off, "Off##nativemode" },
         { Mode::NrOnly, Shown::NrOnly, "NR only##nativemode" },
         { Mode::NrAndFrameGeneration, Shown::NrAndFrameGeneration, "NR + frame generation##nativemode" },
-        { Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, "FG only (game's upscaler)##nativemode" },
     };
 
-    // FG only feeds frame generation from the game's Vulkan upscaler call through a Vulkan-on-D3D12 backend; a dxvk
-    // game's upscaler calls are D3D11 ones, so it is not offered there.
-    const bool vulkan = api == NativeApi::Vulkan && !VkPresentBridge::DxvkGame();
     const float rowRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     ImGui::TextUnformatted("Mode:");
 
     for (const auto& choice : kModes)
     {
-        if (!Offered(choice.mode, vulkan))
-            continue;
-
         const float width = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
                             ImGui::CalcTextSize(choice.label, nullptr, true).x;
         ImGui::SameLine();
@@ -1044,13 +1037,21 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
         if (ImGui::GetCursorScreenPos().x + width > rowRight)
             ImGui::NewLine();
 
-        const bool selectable = Selectable(choice.mode, gameUpscaler, vulkan);
+        const bool selectable = Selectable(choice.mode, gameUpscaler);
         ImGui::BeginDisabled(!selectable);
         const bool clicked = ImGui::RadioButton(choice.label, shown == choice.shown);
         ImGui::EndDisabled();
 
         if (clicked && selectable)
         {
+            // The game's-upscaler route (Frame Generation page) and a mode that runs motion feed frame generation
+            // from different places: choosing the mode turns the route off.
+            if (ModeEndsRoute(choice.mode) && routeOn)
+            {
+                config->DlssNrNativeFrameGenerationOnly = false;
+                LeaveGameUpscalerRoute(config);
+            }
+
             const Change change = ForClick(choice.mode, shown, finishedPicture);
 
             if (change.keys.has_value())
@@ -1059,12 +1060,6 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                 config->DlssNrNativeMotion = change.keys->motion;
                 config->DlssNrNativeInput = change.keys->input;
                 config->DlssNrNativeUpscaler = change.keys->upscaler;
-                config->DlssNrNativeFrameGenerationOnly = change.keys->frameGenerationOnly;
-
-                if (change.keys->frameGenerationOnly)
-                    EnterFrameGenerationOnly(config);
-                else if (shown == Shown::FrameGenerationOnly)
-                    LeaveFrameGenerationOnly(config);
             }
 
             if (change.retryAfterFailure)
@@ -1082,16 +1077,23 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                "NR only: NR on the finished picture. Cheapest; no frame generation.\n"
                "NR + frame generation: adds OptiScaler's upscaler, which gives frame generation its input; needed for "
                "frame generation. It does not process the picture unless you tick Run the upscaler on the picture.\n"
-               "FG only (Vulkan): frame generation for Vulkan games that call DLSS, FSR or XeSS themselves.\n"
-               "Needs Enable Neural Rendering. On Vulkan, set up frame generation before the game starts.");
+               "On Vulkan, set up frame generation before the game starts.");
+
+    if (routeOn)
+        ImGui::TextDisabled("Frame generation runs from the game's upscaler (Vulkan route, Frame Generation page).");
+
+    if (RouteOverridesModes(
+            { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+              config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() },
+            routeOn))
+        ImGui::TextWrapped("The Vulkan route on the Frame Generation page is on as well; it takes precedence over this "
+                           "mode. Click Off, or a mode, to settle it.");
 
     if (shown == Shown::Off)
     {
-        if (gameUpscaler)
-            ImGui::TextWrapped(vulkan ? "The game is calling an upscaler of its own, so NR runs on that call. For "
-                                        "frame generation, choose FG only (game's upscaler)."
-                                      : "The game is calling an upscaler of its own, so NR runs on that call; this "
-                                        "is not needed.");
+        if (gameUpscaler && !routeOn)
+            ImGui::TextWrapped("The game is calling an upscaler of its own, so NR runs on that call; this is not "
+                               "needed.");
 
         return;
     }
@@ -1117,8 +1119,7 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
     // A dxvk game reporting NativeApi::Vulkan (NativeDxvkVulkan) gets its frame generation from the same present bridge as
     // a native Vulkan game, on dxvk's own Vulkan swapchain.
     const bool vulkanNoBridge = api == NativeApi::Vulkan && !VkPresentBridge::IsUp();
-    const Warning warning =
-        WarningFor(shown, nrEnabled, finishedPicture, gameUpscaler, vulkanNoBridge, VulkanFeatureIsOn12());
+    const Warning warning = WarningFor(shown, nrEnabled, finishedPicture, gameUpscaler, vulkanNoBridge);
     const char* warningText = nullptr;
 
     switch (warning)
@@ -1132,14 +1133,6 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                       "changes, switch the game's window mode or resolution once; if it still does not start, the Frame "
                       "Generation input (OptiFG, Upscaler) and output were not set when the game started: set them, "
                       "save the settings and restart the game.";
-        break;
-    case Warning::NeedsGameUpscaler:
-        warningText = "The game is not calling an upscaler now: turn DLSS, FSR or XeSS on in the game's settings. (In "
-                      "its menus a game often makes no upscaler call; frame generation starts in play.)";
-        break;
-    case Warning::NeedsOn12Backend:
-        warningText = "Switching the game's upscaler to its D3D12 copy (DLSS or FSR on D3D12), which feeds frame "
-                      "generation; it is rebuilt on the game's next upscaler call.";
         break;
     case Warning::NrDisabled:
         warningText = shown == Shown::NrOnly ? "Enable Neural Rendering (above) is off, so NR does not run."
@@ -1165,19 +1158,6 @@ static void RenderNativeMode(Config* config, bool nrEnabled, bool& finishedPictu
                            "then).");
 
     ImGui::PopStyleColor();
-
-    if (shown == Shown::FrameGenerationOnly)
-    {
-        if (warning == Warning::None)
-        {
-            const auto feature = State::Instance().currentFeature;
-            ImGui::TextDisabled("Frame generation from the game's upscaler (%s on D3D12).",
-                                feature != nullptr ? feature->Name().c_str() : "upscaler");
-        }
-
-        StatusSlotEnd(slot, 4);
-        return;
-    }
 
     if (!depthRestart)
         NativeDepthStatus(api);
@@ -1349,8 +1329,6 @@ static const char* NativeModeName(DlssNrNativeMode::Shown shown)
         return "NR + frame generation";
     case DlssNrNativeMode::Shown::MotionOnly:
         return "motion only";
-    case DlssNrNativeMode::Shown::FrameGenerationOnly:
-        return "FG only (game's upscaler)";
     default:
         return "Off";
     }
@@ -2020,8 +1998,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
 {
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
-          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
 
     // Each section is a card (ScopedCollapsingHeader, open by default), like the Plugins page
     // Folded, the Status card still leaves the one-line status every other NR page has (Off ... Retry included)
@@ -4226,8 +4203,7 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     in.gameCallsUpscaler = NativeGameCallsUpscaler(api);
     in.mode = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
-          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
     // Optical F5Low is for D3D11, D3D12 and Vulkan games, and only helps where NR is switched on and has not failed
     // this session.
     in.nrAvailable = config->DlssNrEnabled.value_or_default() && FailureReason()[0] == 0;
@@ -4353,6 +4329,111 @@ void RenderF5LowFrameGenHint(Config* config, bool noUpscalerFeature)
         MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
     ImGui::Spacing();
+}
+
+void RenderVulkanRoute(Config* config)
+{
+    using namespace DlssNrNativeMode;
+
+    const NativeApi api = CurrentNativeApi();
+
+    // Not for a dxvk game: its upscaler calls are D3D11 ones. (CurrentNativeApi reads the interop, so this stays shown
+    // while the route itself is live and the game's swapchain reads as D3D12.)
+    if (!RouteOffered(api == NativeApi::Vulkan, VkPresentBridge::DxvkGame()))
+        return;
+
+    const bool routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
+    const Shown shown =
+        FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+    const bool f5lowFg = !routeOn && shown == Shown::NrAndFrameGeneration;
+    const bool bridgeUp = VkPresentBridge::IsUp();
+
+    ImGui::SeparatorText("Vulkan route");
+
+    if (ImGui::RadioButton("Native swapchain##vkroute", !routeOn && !f5lowFg) && routeOn)
+    {
+        config->DlssNrNativeFrameGenerationOnly = false;
+        LeaveGameUpscalerRoute(config);
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::RadioButton("Bridge, game's upscaler##vkroute", routeOn) && !routeOn)
+    {
+        // Frame generation reads the game's upscaler call: the motion modes stand down, and NR, if on, runs on that
+        // call's output (after SR), not on the finished picture.
+        const Keys keys = KeysForRouteOn();
+        config->DlssNrNativeDepthFinder = keys.depthFinder;
+        config->DlssNrNativeMotion = keys.motion;
+        config->DlssNrNativeInput = keys.input;
+        config->DlssNrNativeUpscaler = keys.upscaler;
+        config->DlssNrNativeFrameGenerationOnly = true;
+
+        if (config->DlssNrFinishedPicture.value_or_default())
+        {
+            config->DlssNrFinishedPicture = false;
+            RetryNr();
+        }
+
+        EnterGameUpscalerRoute(config);
+    }
+
+    HelpMarker("For Vulkan games that call DLSS, FSR or XeSS themselves.\n"
+               "Native swapchain: FSR frame generation or DLSS-G on the Vulkan swapchain itself (no XeFG).\n"
+               "Bridge, game's upscaler: frame generation reads the game's upscaler call through its D3D12 copy, on the "
+               "present bridge; XeFG, FSR and DLSS-G are all available. NR stays on or off by itself.\n"
+               "Optical F5Low's NR + frame generation (for games with no upscaler call) is the third route; choose it "
+               "on the Optical F5Low page.\n"
+               "Set this up before the game starts: leaving the bridge takes effect after a restart.");
+
+    if (f5lowFg)
+    {
+        ImGui::TextDisabled("Optical F5Low's NR + frame generation is on (Optical F5Low page).");
+        return;
+    }
+
+    if (!routeOn)
+    {
+        if (bridgeUp)
+            ImGui::TextDisabled("The bridge is up: native swapchain applies after the game is restarted.");
+
+        return;
+    }
+
+    const RouteWarning warning =
+        RouteWarningFor(NativeGameCallsUpscaler(api), VulkanFeatureIsOn12(), api == NativeApi::Vulkan && !bridgeUp);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
+
+    switch (warning)
+    {
+    case RouteWarning::NeedsGameUpscaler:
+        ImGui::TextWrapped("The game is not calling an upscaler now: turn DLSS, FSR or XeSS on in the game's settings. "
+                           "(In its menus a game often makes no upscaler call; frame generation starts in play.)");
+        break;
+    case RouteWarning::NeedsOn12Backend:
+        ImGui::TextWrapped("Switching the game's upscaler to its D3D12 copy (DLSS or FSR on D3D12), which feeds frame "
+                           "generation; it is rebuilt on the game's next upscaler call.");
+        break;
+    case RouteWarning::VulkanNeedsRestart:
+        ImGui::TextWrapped("Waiting for the game to make a new swapchain for frame generation (it was told to). If "
+                           "nothing changes, switch the game's window mode or resolution once; if it still does not "
+                           "start, the Frame Generation input (OptiFG, Upscaler) and output were not set when the game "
+                           "started: set them, save the settings and restart the game.");
+        break;
+    case RouteWarning::None:
+        break;
+    }
+
+    ImGui::PopStyleColor();
+
+    if (warning == RouteWarning::None)
+    {
+        const auto feature = State::Instance().currentFeature;
+        ImGui::TextDisabled("Frame generation from the game's upscaler (%s on D3D12).",
+                            feature != nullptr ? feature->Name().c_str() : "upscaler");
+    }
 }
 
 void UpdateF5LowHint(Config* config)

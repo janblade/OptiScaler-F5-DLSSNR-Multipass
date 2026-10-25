@@ -49,7 +49,7 @@ static ULONG64 _frameCount;
 
 // ImGui's renderer backend is the Vulkan one. Not a given: with the frame-generation bridge (native/VkPresentBridge.h)
 // the menu moves to the D3D12 swapchain and its backend, and when the game then makes a swapchain the bridge does not
-// take, ImGui_ImplVulkan_Shutdown with no Vulkan backend reads through a null pointer (RDR2, FG only).
+// take, ImGui_ImplVulkan_Shutdown with no Vulkan backend reads through a null pointer (RDR2, bridge with the game's upscaler).
 static bool VulkanBackendIsUp()
 {
     if (ImGui::GetCurrentContext() == nullptr)

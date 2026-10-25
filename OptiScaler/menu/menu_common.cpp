@@ -609,13 +609,13 @@ void MenuCommon::AddDx12Backends(Upscaler upscaler)
 
 void MenuCommon::AddVulkanBackends(Upscaler upscaler)
 {
-    // "FG only (game's upscaler)" feeds frame generation from a Vulkan-on-D3D12 backend only: the others would leave it
-    // without inputs (upscalers/FeatureProvider_Vk.h)
+    // The Vulkan route "Bridge, game's upscaler" feeds frame generation from a Vulkan-on-D3D12 backend only: the others
+    // would leave it without inputs (upscalers/FeatureProvider_Vk.h)
     if (Config::Instance()->DlssNrNativeFrameGenerationOnly.value_or_default())
     {
         RenderUpscalerCombo(API::Vulkan, upscaler, { Upscaler::DLSS_on12, Upscaler::FFX_on12, Upscaler::FSR21_on12 });
-        ShowHelpMarker("FG only (Optical F5Low) is on: frame generation runs from the upscaler's D3D12 copy, so only "
-                       "those are listed. Leave the mode to choose another.");
+        ShowHelpMarker("Vulkan route \"Bridge, game's upscaler\" is on: frame generation runs from the upscaler's D3D12 "
+                       "copy, so only those are listed. Choose Native swapchain (Frame Generation page) to pick another.");
         return;
     }
 
@@ -3613,6 +3613,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     auto& state = ctx.state;
     auto config = ctx.config;
     DlssNr::RenderF5LowFrameGenHint(config, ctx.currentFeature == nullptr || !ctx.currentFeature->IsInited());
+    DlssNr::RenderVulkanRoute(config);
     bool external = config->ExternalFrameGeneration.value_or_default();
     if (ImGui::Checkbox("External frame generation / MFG unlocker", &external))
         config->ExternalFrameGeneration = external;
@@ -3643,9 +3644,12 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     auto& primaryGpu = *ctx.primaryGpu;
 
     // A Vulkan game gets OptiFG and the outputs through the present bridge (native/VkPresentBridge.h), which is made when the
-    // game starts: they are offered while it is up, and before it while Optical F5Low can make one (choose, save, restart).
+    // game starts: they are offered while it is up, and before it while Optical F5Low or the Vulkan route (bridge, game's
+    // upscaler) can make one (choose, save, restart).
     const bool vulkanNoFg = state.swapchainApi == API::Vulkan && state.swapchainInteropApi != SwapchainInteropApi::VkwDx12 &&
-                            (IdentifyGpu::getPrimaryGpu().usesDxvk || !config->DlssNrEnabled.value_or_default());
+                            (IdentifyGpu::getPrimaryGpu().usesDxvk ||
+                             !(config->DlssNrEnabled.value_or_default() ||
+                               config->DlssNrNativeFrameGenerationOnly.value_or_default()));
     // A native Vulkan game (not through dxvk) can have the FSR and DLSSG outputs on FFX's and Streamline's Vulkan swapchain
     // (framegen/ffx/FSRFG_Vk.h, framegen/dlssg/DLSSG_Vk.h), fed by OptiFG or the game's own DLSSG, without the bridge.
     const bool vulkanNativeFg = state.swapchainApi == API::Vulkan && !IdentifyGpu::getPrimaryGpu().usesDxvk;

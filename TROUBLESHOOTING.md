@@ -95,18 +95,20 @@ isn't listed there is on its default. If the player also uploads `OptiScaler.ini
 **Game with its own upscaler, Vulkan**
 - DLSS-NR works with the game's DLSS, FSR or XeSS. With a `[Upscalers] VulkanUpscaler` ending in `_12` (`ffx_12`,
   `fsr21_12`, ...) it runs on DirectX 12; with the plain Vulkan ones it runs on Vulkan itself.
-- Frame generation in a Vulkan game needs the Optical F5Low mode "FG only (game's upscaler)":
+- Frame generation in a Vulkan game needs the Vulkan route "Bridge, game's upscaler" (Frame Generation page):
   `[DlssNr] NativeFrameGenerationOnly = true`, together with `FGInput = upscaler` and an `FGOutput`, set before the game
   starts. Without it the log says
-  `frame generation is chosen, but neither "NR + frame generation" nor "FG only" is on: the game presents as it is`.
-  For a game with its own upscaler the answer is always "FG only": the "NR + frame generation" mode is for games without
-  one, and Optical F5Low stands aside for good once the game calls its own upscaler.
+  `frame generation is chosen, but neither "NR + frame generation" nor the Vulkan route "Bridge, game's upscaler" is on: the game presents as it is`.
+  For a game with its own upscaler the answer is the Vulkan route: the "NR + frame generation" mode is for games without
+  one, and Optical F5Low stands aside for good once the game calls its own upscaler. NR stays on or off by itself.
+- The other Vulkan route, "Native swapchain" (FSR frame generation or DLSS-G on the Vulkan swapchain, no XeFG), is made
+  when the game's device is made: switching to it from the bridge takes effect after a restart.
 
 **Game without its own upscaler (any API): Optical F5Low**
 - "NR + frame generation" mode needs all of: `[DlssNr] Enabled = true`, `NativeMotion = true`, `NativeUpscaler = true`,
   `NativeDepthFinder = true` (optional but better), `NativeInput = false`, `FinishedPicture = false`, and for frame
   generation `[FrameGen] FGInput = upscaler` plus an `FGOutput`. Choosing the mode on the Optical F5Low page sets these.
-- In a **Vulkan** game, frame generation works only in this mode (or in "FG only" above): the same "neither ... is on"
+- In a **Vulkan** game, frame generation works only in this mode (or in the Vulkan route "Bridge, game's upscaler" above): the same "neither ... is on"
   line appears when it is missing.
 - `FinishedPicture = true` is for DirectX 12 games only. In a Vulkan game it keeps DLSS-NR from starting (the menu shows
   "Waiting for a finished picture.").

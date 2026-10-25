@@ -1621,8 +1621,17 @@ void InputCommon::update()
 
 InputResult InputCommon::mark_present_start(IUnknown* pDevice)
 {
-    // TODO: could allow AL2 but need to check the InputMarkerMode of the active AL2 input
-    if (activeInput != LowLatencyInput::UeLowLatency)
+    auto fg = State::Instance().currentFG;
+    bool fsrfgTypesFrames =
+        State::Instance().activeFgOutput == FGOutput::FSRFG && fg != nullptr && fg->IsActive() && !fg->IsPaused();
+
+    // UE only sends simulation markers. AL2 sends present markers only when FSR-FG is the one typing the frames and
+    // AL2 itself doesn't report frame generation.
+    bool marksEnds =
+        activeInput == LowLatencyInput::UeLowLatency || (activeInput == LowLatencyInput::AntiLag2 && fsrfgTypesFrames &&
+                                                         !reports_frame_generation(LowLatencyInput::AntiLag2));
+
+    if (!marksEnds)
         return InputResult::InputNotSupported;
 
     // TODO: this is missing the frame id required by other outputs

@@ -1393,6 +1393,9 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::Kcd2DlssgHdr10)
         stringQuirks.push_back("KCD2 native HDR10 for DLSSG");
 
+    if (quirks & GameQuirk::SimulateWaitableObject)
+        stringQuirks.push_back("Simulate frame latency waitable object by default");
+
     if (quirks & GameQuirk::REFrameworkCompat)
         stringQuirks.push_back("REFramework compatibility (XeFG)");
 
@@ -1613,6 +1616,13 @@ static void CheckQuirks(bool isNvidia)
     }
     else
         quirks.reset(GameQuirk::SpoofRegistry);
+
+    if (quirks & GameQuirk::SimulateWaitableObject && !Config::Instance()->SimulateWaitableObject.has_value())
+    {
+        Config::Instance()->SimulateWaitableObject.set_volatile_value(true);
+    }
+    else
+        quirks.reset(GameQuirk::SimulateWaitableObject);
 
     if (quirks & GameQuirk::DisableFakenvapi && !Config::Instance()->UseFakenvapi.has_value())
     {

@@ -6831,6 +6831,20 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
                     ShowHelpMarker("Fix for games that send motion data with preapplied jitter");
 
                     ImGui::TableNextColumn();
+                    ImGui::BeginDisabled(currentBackend != Upscaler::FFX && currentBackend != Upscaler::FFX_on12);
+
+                    if (bool drs = currentFeature->DynamicResolution(); ImGui::Checkbox("Dynamic Res. (DRS)", &drs))
+                    {
+                        config->DynamicResolution = drs;
+                        ReInitUpscaler();
+                    }
+                    ShowResetButton(&config->DynamicResolution, "R##5");
+                    ShowHelpMarker("Enable if the game uses dynamic resolution\n"
+                                   "Prevents FSR 4 from switching models when the render size changes");
+
+                    ImGui::EndDisabled();
+
+                    ImGui::TableNextColumn();
                     ImGui::EndTable();
                 }
 

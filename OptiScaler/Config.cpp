@@ -950,6 +950,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DepthInverted.set_from_config(readBool("InitFlags", "DepthInverted"));
             JitterCancellation.set_from_config(readBool("InitFlags", "JitterCancellation"));
             DisplayResolution.set_from_config(readBool("InitFlags", "DisplayResolution"));
+            DynamicResolution.set_from_config(readBool("InitFlags", "DynamicResolution"));
             DisableReactiveMask.set_from_config(readBool("InitFlags", "DisableReactiveMask"));
         }
 
@@ -2001,6 +2002,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->JitterCancellation.value_for_config()).c_str());
         ini.SetValue("InitFlags", "DisplayResolution",
                      GetBoolValue(Instance()->DisplayResolution.value_for_config()).c_str());
+        ini.SetValue("InitFlags", "DynamicResolution",
+                     GetBoolValue(Instance()->DynamicResolution.value_for_config()).c_str());
         ini.SetValue("InitFlags", "DisableReactiveMask",
                      GetBoolValue(Instance()->DisableReactiveMask.value_for_config()).c_str());
     }

@@ -53,6 +53,7 @@
 #include <misc/XeModuleInfo.h>
 #include <misc/FrameLimit.h>
 #include <hooks/Xell_Hooks.h>
+#include <hooks/Amdxc64_Hooks.h>
 #include <low_latency/input/input_common.h>
 
 enum class UiTargetMode
@@ -4428,6 +4429,29 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 }
             }
             ShowHelpMarker("Enable Async for better FG performance\nMight cause crashes, especially with HUD Fix!");
+
+            if (state.amdFlipMeterCreated)
+            {
+                ImGui::SameLine(0.0f, 16.0f);
+
+                bool disableFlipMetering = config->FSRFGDisableFlipMetering.value_or_default();
+                if (ImGui::Checkbox("Disable HW Flip Metering", &disableFlipMetering))
+                {
+                    config->FSRFGDisableFlipMetering = disableFlipMetering;
+                    Amdxc64Hooks::ApplyFlipMeterOverride();
+                }
+                ShowHelpMarker("Overrides the AMD hardware flip metering requested by FSR");
+
+                ImGui::SameLine(0.0f, 8.0f);
+
+                if (state.amdFlipMeterMode != 0)
+                    ImGui::TextDisabled("(Mode %u)", state.amdFlipMeterMode);
+                else
+                    ImGui::TextDisabled("(Off)");
+
+                ShowTooltip("Flip metering mode applied in the driver\nFSR only requests it in exclusive or "
+                            "borderless fullscreen");
+            }
 
             ImGui::SameLine(0.0f, 16.0f);
 

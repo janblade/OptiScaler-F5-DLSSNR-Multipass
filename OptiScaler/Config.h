@@ -1235,6 +1235,7 @@ class Config
     CustomOptional<bool> FGFPTAllowHybridSpin { false };
     CustomOptional<int> FGFPTHybridSpinTime { 2 };
     CustomOptional<bool> FGFPTAllowWaitForSingleObjectOnFence { false };
+    CustomOptional<bool> FSRFGDisableFlipMetering { false };
 
     CustomOptional<bool> FSRFGSkipConfigForHudless { false };
     CustomOptional<bool> FSRFGSkipDispatchForHudless { false };

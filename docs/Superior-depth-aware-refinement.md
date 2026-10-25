@@ -94,3 +94,51 @@ Balanced compression. The measured route includes colour packing, guide preparat
 private guide reconstruction where needed, carrier preparation/decode, low field and final cached
 guided composition with barriers. It excludes proprietary NR/DLSS inference and therefore does not
 establish a full-game frame-time gain or the relative cost of CNN versus Transformer.
+
+## Recorded local verification (2026-10-25)
+
+CPU checks passed, including the cubic endpoints, the 70% example, monotonicity, strict CNN sigma
+threshold (exactly 0.01 stays A), Transformer stability and native-mode menu selection policy.
+All 50 shader blobs and generated headers match a clean rebuild. GPU validation passed:
+
+- Existing host composition: 2304 cases / 5,974,272 words, fixed-sigma reference parity.
+- Independent cubic literal references: 360 cases / 18,018,720 components, 50/65/70/88/100%,
+  SDR/HDR, game/automatic exposure, packed/uniform/cached queries and FP16/FP32 outputs.
+  Maximum component error 0.000488281 (FP16 rounding); comparisons enforce FP16-relative and
+  FP32 2e-5-relative bounds. This checks implementation, not superiority of the new visual tuning.
+- Joint guide reconstruction: 1092 cases / 10,284,288 pixels, including 84 render-resolution cases.
+  Plane depth RMS 0.000072889837 to 0.000000023551; depth/MV layer mismatches 976 to 976
+  across 4,407,552 fixture queries. Bounded same-surface motion and non-minified preservation checks pass.
+- Smaller guide/private conversion: 559,104 NR pixels and 6,488,064 private motion components.
+- Original Compress pack/unpack and 48 carrier/MV parity cases also pass.
+
+### Timestamp comparison
+
+RTX 4090, driver 616.56, output 3840x2160, Balanced compression. Sloped R32F depth and affine
+RG32F MV are generated at 1080p or 1440p. Base is janblade `b276cbb4`: point guides, colour-sized
+compressed guides and fixed range sigma 0.015. Candidate is code commit `3f3e1046`: joint guides,
+render-resolution packed guides at 100%, private guide reconstruction and cubic sigma.
+The full synthetic changed route described above is timed together, with **NR/DLSS inference excluded**.
+
+Before testing the GPU was at 2%, 27.57 W, 210 MHz; after settling it returned to 2%, 27.50 W,
+210 MHz. Eight alternating ABBA/BAAB blocks each use eight warmup quartets and 40 measured
+quartets, with four GPU repetitions per timestamp: 640 samples per variant/configuration.
+Delta is the median of paired-quartet differences; variability is the standard deviation of those
+paired differences. Timing is not a measurement of game image quality or model inference cost.
+
+| Render | Output | Model resolution | Base ms | Candidate ms | Paired delta ms | Delta stddev ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1080p | SDR | 65% | 0.595328 | 0.646144 | +0.049920 | 0.047227 |
+| 1080p | HDR soft knee | 65% | 0.514560 | 0.568320 | +0.053184 | 0.045769 |
+| 1080p | SDR | 100% | 0.868352 | 0.990336 | +0.120448 | 0.065094 |
+| 1080p | HDR soft knee | 100% | 0.753664 | 0.872960 | +0.117504 | 0.062193 |
+| 1440p | SDR | 65% | 0.607872 | 0.704256 | +0.094400 | 0.053017 |
+| 1440p | HDR soft knee | 65% | 0.527872 | 0.624640 | +0.094016 | 0.062121 |
+| 1440p | SDR | 100% | 0.892160 | 1.085952 | +0.191808 | 0.064035 |
+| 1440p | HDR soft knee | 100% | 0.778368 | 0.970624 | +0.189568 | 0.059409 |
+
+The new guide reconstruction has measurable overhead in these fixtures: approximately 0.05 ms
+at 65% / 1080p render and 0.12 ms at native 100% + Balanced, increasing to approximately
+0.09 / 0.19 ms at 1440p render. These are intentional reconstruction changes, not a demonstrated
+performance optimization. CNN A/E inference cost is not covered and can change the full-frame result.
+Raw samples, summaries and quality results are retained in `validation/superior-refinement-*`.

@@ -1,0 +1,25 @@
+Superior policy PASS: Main/Small/Default/legacy presets on 310.8 and 310.9, mixed gain blocks and schedules, fixed settings, A/K, guides and PSO guards
+Render-resolution guide geometry PASS: 480 normalized warp/end-point checks; native-only gating, odd sizes, offset/shift and overscan
+Minified MV dispatch coverage PASS: 136 layouts; no-depth, 25/40/50/65/100/125%, offset MV rectangles and 4K
+Spatial metadata and final-resolution gain policy PASS: 48 cases; 11520 split high/low gain cases, mixed blocks and final tails; native/pre/post-SR, clipped/offset guides, exact Superior grid and both packed axes
+Inter-pass policy PASS: measured winners, aligned P40, rounded P42, all percentages, gain lookahead, scale/Structure/Intensity, multiplied Structure/Intensity, adjusted low means, strict gap and failure accounting, reference isolation, filters/radii and 37622 tile axes (21 guarded overflow axes)
+PASS: NR guide regions (pre/post SR, MVLowRes, offsets, clipping, missing/invalid metadata, no depth)
+PASS: nr_surface_formats_smoke
+PASS: NR compress screen edges D3D12 pack / unpack (colour, depth point-sampled, motion end points)
+Spatial raw low GPU bit parity PASS: 216 cases, 59616 words, FP16/FP32 targets, HDR/nonfinite inputs and partial tiles
+Packed carrier/MV preparation bit parity PASS: 48 cases, 4202496 words, finite/nonfinite, hold, FP16/FP32
+Host composition GPU bit parity PASS: 2304 cases, 5974272 words
+Packed guided host reference PASS: 3072 cases, 666267648 components, max absolute error 0
+Revealed background: 32736 current-frame queries; point/bilinear/limited RMS 0.870852764 / 0.870853126 / 0.000001047 px
+Shared NR/private-DLSS motion: 70686528 components, single unit conversion and Hold checked
+2D minifier work-list dispatches: 140
+Regressed depth-layer choices: 0
+Minified motion: 2880 cases, 21008340 pixels, 1514252 recoverable queries; mixed vectors 0; affine max 0.000026703 px
+Against 2b2eb39f: 8607572 bit-identical non-minified/no-depth queries; 2008 corrected layer choices; layer RMS 0.414471601 -> 0.387100630 px (1550096 queries)
+Joint render-resolution guide cases: 84
+Joint depth/MV: 1092 cases, 10284288 pixels; FP16/FP32, reversed Z, padded/independent regions, uniform/packed 25/65/100/125%, invalid/missing depth
+Plane depth RMS 0.000072889837 -> 0.000000023551; working MV RMS 0.000638487 -> 0.000638489 (1148352 pixels)
+Depth/MV layer mismatches 976 -> 976 of 4407552; same-grid pair checks 2965248; recovered foreground coverage 4920
+Render-resolution guides PASS: 559104 NR pixels, 6488064 private MV components; point/bilinear/surface/joint, odd render sizes, offset/shift, source subrects, reversed Z, private unit conversion and hold
+Cubic guided PASS: 360 cases / 18018720 components; maximum error 0.000488281; literal 50/65/70/88/100%, SDR/HDR, game/automatic exposure, packed/uniform/cached, FP16/FP32
+All 50 shader blobs and headers match a rebuild byte for byte.

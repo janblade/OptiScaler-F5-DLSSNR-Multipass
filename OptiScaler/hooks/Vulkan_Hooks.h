@@ -21,6 +21,10 @@ class VulkanHooks
     // vkGetDeviceProcAddr past our hook
     static PFN_vkVoidFunction GetDeviceProcAddr(VkDevice device, const char* name);
 
+    // The driver's swapchain function behind OptiScaler's hook, below hooks others (overlays) put on the same function.
+    // nullptr when it isn't hooked.
+    static PFN_vkVoidFunction OriginalSwapchainFunction(const char* pName);
+
     // The device was created with VK_NV_low_latency2 and the timeline semaphore feature on (its sleep signals one), and
     // not by dxvk or vkd3d-proton for a D3D device (those run the D3D game's own Reflex themselves)
     static bool LowLatency2On(VkDevice device);

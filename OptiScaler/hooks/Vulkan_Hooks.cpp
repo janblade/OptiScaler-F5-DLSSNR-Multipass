@@ -11,6 +11,8 @@
 #include <proxies/KernelBase_Proxy.h>
 #include <upscaler_time/UpscalerTime_Vk.h>
 
+#include <framegen/ffx/FSRFG_Vk.h>
+#include <proxies/FfxApi_Proxy.h>
 #include <misc/FrameLimit.h>
 #include "Reflex_Hooks.h"
 
@@ -60,6 +62,9 @@ PFN_vkCreateWin32SurfaceKHR o_vkCreateWin32SurfaceKHR = nullptr;
 PFN_vkQueuePresentKHR o_QueuePresentKHR = nullptr;
 PFN_vkCreateSwapchainKHR o_CreateSwapchainKHR = nullptr;
 static PFN_vkDestroySwapchainKHR o_DestroySwapchainKHR = nullptr;
+static PFN_vkGetSwapchainImagesKHR o_GetSwapchainImagesKHR = nullptr;
+static PFN_vkAcquireNextImageKHR o_AcquireNextImageKHR = nullptr;
+static PFN_vkSetHdrMetadataEXT o_SetHdrMetadataEXT = nullptr;
 static PFN_vkDestroySurfaceKHR o_vkDestroySurfaceKHR = nullptr;
 static PFN_vkAcquireFullScreenExclusiveModeEXT o_AcquireFullScreenExclusiveModeEXT = nullptr;
 static PFN_vkReleaseFullScreenExclusiveModeEXT o_ReleaseFullScreenExclusiveModeEXT = nullptr;
@@ -82,6 +87,15 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                        const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
 static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
+static VkResult hkvkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount,
+                                          VkImage* pSwapchainImages);
+static VkResult hkvkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
+                                        VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex);
+static void hkvkSetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount, const VkSwapchainKHR* pSwapchains,
+                                  const VkHdrMetadataEXT* pMetadata);
+
+// FFX creates its real swapchain while creating the FG one
+static bool _creatingFGSwapchain = false;
 
 // A bridged swapchain is on a hidden window and made with exclusive full screen disallowed (native/VkPresentBridge.h):
 // the game's own acquire and release of the mode succeed without doing anything.
@@ -229,12 +243,36 @@ void VulkanHooks::NoteLatencySwapchain(VkDevice device, VkSwapchainKHR swapchain
     if (device == VK_NULL_HANDLE || swapchain == VK_NULL_HANDLE)
         return;
 
+    // The game's handle of the native FG output's swapchain is no driver one, and FFX's real one has no latency mode
+    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+        return;
+
     // Every call of the game's names it: the exclusive lock only when it is news
     if (auto known = LatencySwapchainOf(device); known.swapchain == swapchain && known.latencyMode)
         return;
 
     std::unique_lock lock(LatencySwapchainMutex());
     _latencySwapchains[device] = { swapchain, true };
+}
+
+PFN_vkVoidFunction VulkanHooks::OriginalSwapchainFunction(const char* pName)
+{
+    if (std::strcmp(pName, "vkCreateSwapchainKHR") == 0)
+        return (PFN_vkVoidFunction) o_CreateSwapchainKHR;
+
+    if (std::strcmp(pName, "vkDestroySwapchainKHR") == 0)
+        return (PFN_vkVoidFunction) o_DestroySwapchainKHR;
+
+    if (std::strcmp(pName, "vkGetSwapchainImagesKHR") == 0)
+        return (PFN_vkVoidFunction) o_GetSwapchainImagesKHR;
+
+    if (std::strcmp(pName, "vkAcquireNextImageKHR") == 0)
+        return (PFN_vkVoidFunction) o_AcquireNextImageKHR;
+
+    if (std::strcmp(pName, "vkQueuePresentKHR") == 0)
+        return (PFN_vkVoidFunction) o_QueuePresentKHR;
+
+    return nullptr;
 }
 
 PFN_vkVoidFunction VulkanHooks::GetDeviceProcAddr(VkDevice device, const char* name)
@@ -324,6 +362,9 @@ static void HookDevice(VkDevice InDevice)
     o_QueuePresentKHR = (PFN_vkQueuePresentKHR) (vkGetDeviceProcAddr(InDevice, "vkQueuePresentKHR"));
     o_CreateSwapchainKHR = (PFN_vkCreateSwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkCreateSwapchainKHR"));
     o_DestroySwapchainKHR = (PFN_vkDestroySwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkDestroySwapchainKHR"));
+    o_GetSwapchainImagesKHR = (PFN_vkGetSwapchainImagesKHR) (vkGetDeviceProcAddr(InDevice, "vkGetSwapchainImagesKHR"));
+    o_AcquireNextImageKHR = (PFN_vkAcquireNextImageKHR) (vkGetDeviceProcAddr(InDevice, "vkAcquireNextImageKHR"));
+    o_SetHdrMetadataEXT = (PFN_vkSetHdrMetadataEXT) (vkGetDeviceProcAddr(InDevice, "vkSetHdrMetadataEXT"));
     o_AcquireFullScreenExclusiveModeEXT = (PFN_vkAcquireFullScreenExclusiveModeEXT) (vkGetDeviceProcAddr(
         InDevice, "vkAcquireFullScreenExclusiveModeEXT"));
     o_ReleaseFullScreenExclusiveModeEXT = (PFN_vkReleaseFullScreenExclusiveModeEXT) (vkGetDeviceProcAddr(
@@ -346,6 +387,15 @@ static void HookDevice(VkDevice InDevice)
         if (o_DestroySwapchainKHR != nullptr)
             DetourAttach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
 
+        if (o_GetSwapchainImagesKHR != nullptr)
+            DetourAttach(&(PVOID&) o_GetSwapchainImagesKHR, hkvkGetSwapchainImagesKHR);
+
+        if (o_AcquireNextImageKHR != nullptr)
+            DetourAttach(&(PVOID&) o_AcquireNextImageKHR, hkvkAcquireNextImageKHR);
+
+        if (o_SetHdrMetadataEXT != nullptr)
+            DetourAttach(&(PVOID&) o_SetHdrMetadataEXT, hkvkSetHdrMetadataEXT);
+
         if (o_AcquireFullScreenExclusiveModeEXT != nullptr)
             DetourAttach(&(PVOID&) o_AcquireFullScreenExclusiveModeEXT, hkvkAcquireFullScreenExclusiveModeEXT);
 
@@ -358,8 +408,29 @@ static void HookDevice(VkDevice InDevice)
             LOG_ERROR("Failed to hook VkDevice, error code: {:X}", detourResult);
             o_QueuePresentKHR = nullptr;
             o_CreateSwapchainKHR = nullptr;
+            o_GetSwapchainImagesKHR = nullptr;
+            o_AcquireNextImageKHR = nullptr;
+            o_SetHdrMetadataEXT = nullptr;
         }
     }
+}
+
+// Created with the device as the output's queues have to be added to it. This is the native Vulkan FG output, FFX's
+// swapchain in place of the game's; a game that takes the present bridge (native/VkPresentBridge.h) keeps its own swapchain
+// on a hidden window and its frame generation is the D3D12 outputs'.
+static IFGFeature_Vk* CreateFGFeature()
+{
+    auto& state = State::Instance();
+
+    if (state.currentVkFG == nullptr && state.activeFgInput == FGInput::DLSSG && state.activeFgOutput == FGOutput::FSRFG)
+    {
+        if (FfxApiProxy::InitFfxVk())
+            state.currentVkFG = new FSRFG_Vk();
+        else
+            LOG_ERROR("Can't load amd_fidelityfx_vk.dll, FSR FG won't be available");
+    }
+
+    return state.currentVkFG;
 }
 
 VALIDATE_HOOK(hkvkCreateWin32SurfaceKHR, PFN_vkCreateWin32SurfaceKHR)
@@ -904,7 +975,31 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
         LOG_INFO("Vulkan Anti-Lag: antiLag feature {}", what);
     }
 
+    // Not for the D3D layers' own devices (dxvk, vkd3d-proton): their games present through DXGI
+    IFGFeature_Vk* nativeFg = nullptr;
+
+    if (!ScopedSkipVulkanHooks::Active() && !D3DOnVulkanModule(Util::GetCallerModule(_ReturnAddress())) &&
+        !VkPresentBridge::DxvkGame() && (nativeFg = CreateFGFeature()) != nullptr)
+    {
+        // FFX's swapchain syncs with them
+        if (TimelineFeatureOn(localCreteInfo.pNext))
+        {
+            nativeFg->ReserveQueues(physicalDevice, localCreteInfo);
+        }
+        else
+        {
+            LOG_WARN("Device created without timeline semaphores, can't use FG with it");
+            nativeFg = nullptr;
+        }
+    }
+
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
+
+    if (result == VK_SUCCESS && nativeFg != nullptr)
+    {
+        nativeFg->OnDeviceCreated(*pDevice);
+        HookDevice(*pDevice);
+    }
 
     if (antiLagBorrowedFlag != nullptr)
         *antiLagBorrowedFlag = VK_FALSE;
@@ -1044,6 +1139,12 @@ static void NotePresentTiming(double hookStartMs)
 VALIDATE_HOOK(hkvkQueuePresentKHR, PFN_vkQueuePresentKHR)
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
+    auto nativeFg = State::Instance().currentVkFG;
+
+    // FFX presents the real swapchain from its own queue
+    if (nativeFg != nullptr && nativeFg->OwnsQueue(queue))
+        return o_QueuePresentKHR(queue, pPresentInfo);
+
     LOG_FUNC();
 
     using native::presenttiming::Stage;
@@ -1070,7 +1171,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // Tick feature to let it know if it's frozen
     if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
     {
-        if (auto currentFg = State::Instance().currentFG; currentFg != nullptr)
+        if (auto currentFg = State::Instance().CurrentFG(); currentFg != nullptr)
             currentFeature->TickFrozenCheck(currentFg->GetInterpolatedFrameCount());
         else
             currentFeature->TickFrozenCheck();
@@ -1106,6 +1207,24 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
         LOG_ERROR("QueuePresent: false!");
         NotePresentTiming(hookStartMs);
         return VK_ERROR_OUT_OF_DATE_KHR;
+    }
+
+    // The game's swapchain is the native FG output's (FFX's swapchain): the frame goes to FSR FG before the real present
+    const bool nativeFgPresent = !bridged && nativeFg != nullptr && localPresentInfo.swapchainCount == 1 &&
+                                 nativeFg->OwnsSwapchain(localPresentInfo.pSwapchains[0]);
+
+    if (nativeFgPresent)
+    {
+        auto& state = State::Instance();
+        state.fgLastFrame++;
+
+        static double lastPresentTime = 0.0;
+        auto now = Util::MillisecondsNow();
+        state.lastFGFrameTime = lastPresentTime > 0.0 ? now - lastPresentTime : 0.0;
+        lastPresentTime = now;
+
+        if (nativeFg->IsActive() && !nativeFg->IsPaused())
+            nativeFg->Present();
     }
 
     ReflexHooks::presentUpdate(lloutput::PresentSite::Vulkan, false);
@@ -1178,7 +1297,8 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     {
         ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
-        result = o_QueuePresentKHR(queue, &localPresentInfo);
+        result = nativeFgPresent ? nativeFg->QueuePresent(queue, &localPresentInfo)
+                                 : o_QueuePresentKHR(queue, &localPresentInfo);
     }
 
     _presentTiming.Record(Stage::Present, Util::MillisecondsNow() - presentStartMs);
@@ -1230,6 +1350,10 @@ VALIDATE_HOOK(hkvkCreateSwapchainKHR, PFN_vkCreateSwapchainKHR)
 static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                        const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain)
 {
+    // FFX's own swapchain create while it makes the FG one
+    if (_creatingFGSwapchain)
+        return o_CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+
     LOG_FUNC();
 
     ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
@@ -1262,11 +1386,18 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
         }
     }
 
-    // InputCommon's Reflex output on VK_NV_low_latency2 needs the swapchain's latency mode
+    // The native FG output (FFX's swapchain in place of the game's) when the game does not take the bridge
+    IFGFeature_Vk* nativeFg = State::Instance().currentVkFG;
+    const bool nativeFgSwapchain = nativeFg != nullptr && pCreateInfo != nullptr && !bridged &&
+                                   !ScopedSkipVulkanHooks::Active() && !VkPresentBridge::DxvkGame() &&
+                                   !D3DOnVulkanModule(Util::GetCallerModule(_ReturnAddress()));
+
+    // InputCommon's Reflex output on VK_NV_low_latency2 needs the swapchain's latency mode. Not on FFX's swapchain: the
+    // game's handle of it is no driver one, and FFX's real one has none.
     VkSwapchainLatencyCreateInfoNV latencyInfo {};
     bool latencyMode = false;
 
-    if (pCreateInfo != nullptr && !ScopedSkipVulkanHooks::Active())
+    if (pCreateInfo != nullptr && !ScopedSkipVulkanHooks::Active() && !nativeFgSwapchain)
         latencyMode = ChainLatencyMode(device, localCreateInfo, latencyInfo);
 
     // On the hidden surface the swapchain never takes the screen; the game's own value is put back after the call.
@@ -1284,8 +1415,23 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
-        result = o_CreateSwapchainKHR(device, pCreateInfo != nullptr ? &localCreateInfo : nullptr, pAllocator,
-                                      pSwapchain);
+        bool fgSwapchain = false;
+
+        if (nativeFgSwapchain)
+        {
+            _creatingFGSwapchain = true;
+            fgSwapchain = nativeFg->CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+            _creatingFGSwapchain = false;
+            result = VK_SUCCESS;
+
+            // FFX could not make it: the game's own swapchain, as without the output
+            if (!fgSwapchain)
+                latencyMode = ChainLatencyMode(device, localCreateInfo, latencyInfo);
+        }
+
+        if (!fgSwapchain)
+            result = o_CreateSwapchainKHR(device, pCreateInfo != nullptr ? &localCreateInfo : nullptr, pAllocator,
+                                          pSwapchain);
     }
 
     if (fullScreenMode != nullptr)
@@ -1402,10 +1548,48 @@ static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, c
             it->second = {};
     }
 
+    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->DestroySwapchain(device, swapchain, pAllocator))
+        return;
+
     o_DestroySwapchainKHR(device, swapchain, pAllocator);
 
     if (swapchain != VK_NULL_HANDLE)
         VkPresentBridge::OnSwapchainDestroyed(device, swapchain);
+}
+
+VALIDATE_HOOK(hkvkGetSwapchainImagesKHR, PFN_vkGetSwapchainImagesKHR)
+static VkResult hkvkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount,
+                                          VkImage* pSwapchainImages)
+{
+    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+        return fg->GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+
+    return o_GetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+}
+
+VALIDATE_HOOK(hkvkAcquireNextImageKHR, PFN_vkAcquireNextImageKHR)
+static VkResult hkvkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
+                                        VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex)
+{
+    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+        return fg->AcquireNextImage(device, swapchain, timeout, semaphore, fence, pImageIndex);
+
+    return o_AcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+}
+
+VALIDATE_HOOK(hkvkSetHdrMetadataEXT, PFN_vkSetHdrMetadataEXT)
+static void hkvkSetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount, const VkSwapchainKHR* pSwapchains,
+                                  const VkHdrMetadataEXT* pMetadata)
+{
+    auto fg = State::Instance().currentVkFG;
+
+    for (uint32_t i = 0; i < swapchainCount; i++)
+    {
+        if (fg != nullptr && fg->OwnsSwapchain(pSwapchains[i]))
+            fg->SetHdrMetadata(device, pSwapchains[i], &pMetadata[i]);
+        else
+            o_SetHdrMetadataEXT(device, 1, &pSwapchains[i], &pMetadata[i]);
+    }
 }
 
 VALIDATE_HOOK(hkvkDestroySurfaceKHR, PFN_vkDestroySurfaceKHR)
@@ -1665,6 +1849,15 @@ void VulkanHooks::Unhook()
     if (o_DestroySwapchainKHR != nullptr)
         DetourDetach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
 
+    if (o_GetSwapchainImagesKHR != nullptr)
+        DetourDetach(&(PVOID&) o_GetSwapchainImagesKHR, hkvkGetSwapchainImagesKHR);
+
+    if (o_AcquireNextImageKHR != nullptr)
+        DetourDetach(&(PVOID&) o_AcquireNextImageKHR, hkvkAcquireNextImageKHR);
+
+    if (o_SetHdrMetadataEXT != nullptr)
+        DetourDetach(&(PVOID&) o_SetHdrMetadataEXT, hkvkSetHdrMetadataEXT);
+
     if (o_AcquireFullScreenExclusiveModeEXT != nullptr)
         DetourDetach(&(PVOID&) o_AcquireFullScreenExclusiveModeEXT, hkvkAcquireFullScreenExclusiveModeEXT);
 
@@ -1699,6 +1892,9 @@ void VulkanHooks::Unhook()
         o_QueuePresentKHR = nullptr;
         o_CreateSwapchainKHR = nullptr;
         o_DestroySwapchainKHR = nullptr;
+        o_GetSwapchainImagesKHR = nullptr;
+        o_AcquireNextImageKHR = nullptr;
+        o_SetHdrMetadataEXT = nullptr;
         o_AcquireFullScreenExclusiveModeEXT = nullptr;
         o_ReleaseFullScreenExclusiveModeEXT = nullptr;
         o_vkDestroySurfaceKHR = nullptr;

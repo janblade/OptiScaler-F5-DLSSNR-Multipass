@@ -42,6 +42,16 @@ int main()
         CHECK(b.line == Line::OfferNoFiles && b.action == Action::UseF5Low);
     }
 
+    // The Vulkan route is on: today's lines, no offer, even while the game makes no upscaler call (title screen)
+    {
+        Inputs in = Make(Feature::None, true, false, Shown::Off, true);
+        in.vulkanRoute = true;
+        const Banner b = Decide(in);
+        CHECK(b.line == Line::SelectUpscaler && b.action == Action::None);
+        in.upscalerFiles = false;
+        CHECK(Decide(in).line == Line::NoFiles && Decide(in).action == Action::None);
+    }
+
     // NR not available: today's lines, no offer.
     {
         const Banner b = Decide(Make(Feature::None, true, false, Shown::Off, false));

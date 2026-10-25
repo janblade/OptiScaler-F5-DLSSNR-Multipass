@@ -196,8 +196,7 @@ Inputs GatherInputs()
     Inputs in;
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default(),
-          config->DlssNrNativeFrameGenerationOnly.value_or_default() });
+          config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
     const bool gameUpscaler = GameUpscalerCalledRecently();
     const bool virtualUpscaler = shown == DlssNrNativeMode::Shown::NrAndFrameGeneration && !gameUpscaler;
     const auto input = EffectiveInput(config->FramerateLowLatencyInput.value_or_default(), virtualUpscaler);
@@ -205,6 +204,8 @@ Inputs GatherInputs()
     in.setting = rule.setting;
     in.blockGameLowLatency = rule.blockGameLowLatency && !FrameGenerationNeedsReflex();
 
+    // Optical F5Low's modes only: the Vulkan route (frame generation from the game's upscaler) is not Optical F5Low,
+    // and with no upscaler call (menus) it has nothing running to pace.
     in.f5lowRunning = shown != DlssNrNativeMode::Shown::Off && !gameUpscaler;
     in.xefgRunning = state.activeFgOutput == FGOutput::XeFG && state.currentFG != nullptr &&
                      state.currentFG->SwapchainContext() != nullptr;

@@ -28,6 +28,7 @@ struct Inputs
     bool f5lowNrOnlyRunning = false; // the native driver has run NR on the finished picture
     bool nrEnabled = false;          // Enable Neural Rendering is on and NR has not failed (any API)
     bool frameGeneration = false;    // OptiScaler's frame generation is running
+    bool vulkanRoute = false;        // the Vulkan route "Bridge, game's upscaler" is on (it feeds frame generation)
 };
 
 enum class Line
@@ -95,7 +96,8 @@ inline Banner Decide(const Inputs& in)
     // lines stand.
     const Line today = in.upscalerFiles ? Line::SelectUpscaler : Line::NoFiles;
 
-    if (in.gameCallsUpscaler || !in.nrAvailable)
+    // The route has frame generation fed from the game's upscaler: Optical F5Low has nothing to offer there.
+    if (in.gameCallsUpscaler || !in.nrAvailable || in.vulkanRoute)
         return { today, Action::None };
 
     return { in.upscalerFiles ? Line::OfferWithFiles : Line::OfferNoFiles, Action::UseF5Low };

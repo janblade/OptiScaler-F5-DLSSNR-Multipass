@@ -95,8 +95,9 @@ std::unordered_map<VkSurfaceKHR, HWND> g_windows;
 std::unique_ptr<Bridge> g_bridge;
 std::vector<std::unique_ptr<Bridge>> g_retired; // output gone, hidden surface kept until their swapchains are destroyed
 
-// "FG only (game's upscaler)": the game's upscaler call, on a Vulkan-on-D3D12 feature, copied this frame's motion
-// vectors and depth for frame generation on its own queue; frame generation's queue waits for that before it reads them.
+// the Vulkan route "Bridge, game's upscaler": the game's upscaler call, on a Vulkan-on-D3D12 feature, copied this
+// frame's motion vectors and depth for frame generation on its own queue; frame generation's queue waits for that
+// before it reads them.
 ComPtr<ID3D12Fence> g_feedFence;
 uint64_t g_feedValue = 0;
 
@@ -152,7 +153,7 @@ bool FrameGenerationChosen()
 }
 
 // OptiFG's Upscaler input is fed by Optical F5Low's virtual upscaler ("NR + frame generation"), or by the
-// game's own upscaler call through a Vulkan-on-D3D12 backend ("FG only (game's upscaler)",
+// game's own upscaler call through a Vulkan-on-D3D12 backend (the Vulkan route "Bridge, game's upscaler",
 // upscalers/IFeature_VkwDx12.cpp): without one of the two there is nothing for it to read.
 bool ModeOn()
 {
@@ -188,8 +189,8 @@ bool Wanted(const VkSwapchainCreateInfoKHR& in, HWND window, std::string& why)
 
     if (!ModeOn())
     {
-        why = "frame generation is chosen, but neither \"NR + frame generation\" nor \"FG only\" is on: "
-              "the game presents as it is";
+        why = "frame generation is chosen, but neither \"NR + frame generation\" nor the Vulkan route \"Bridge, game's "
+              "upscaler\" is on: the game presents as it is";
         return false;
     }
 
@@ -963,7 +964,7 @@ void PresentOutput()
     if (fgQueue != nullptr && fgQueue != queue12 && copyFence != nullptr && copyValue != 0)
         fgQueue->Wait(copyFence, copyValue);
 
-    // The game's motion vectors and depth, copied for frame generation by its upscaler call (FG only)
+    // The game's motion vectors and depth, copied for frame generation by its upscaler call (Vulkan route)
     if (feedFence != nullptr && feedValue != 0)
         (fgQueue != nullptr ? fgQueue : queue12)->Wait(feedFence.Get(), feedValue);
 

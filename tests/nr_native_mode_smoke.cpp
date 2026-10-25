@@ -181,42 +181,34 @@ int main()
         CHECK(WarningFor(Shown::Off, bits & 1, bits & 2, true) == Warning::None);
     }
 
-    // FG only (game's upscaler): the reverse rule. Vulkan games that call an upscaler only; its own key, which comes
-    // before the motion keys; NR Pass at: off Finished Picture; Off clears it.
+    // Vulkan route "Bridge, game's upscaler" (Frame Generation page): not a mode. Native Vulkan games only; its
+    // warnings come in order: the game's upscaler call, then a D3D12 backend, then the bridge; choosing a motion mode
+    // ends it.
     {
-        CHECK(Selectable(Mode::FrameGenerationOnly, true, true));
-        CHECK(!Selectable(Mode::FrameGenerationOnly, false, true));
-        CHECK(!Selectable(Mode::FrameGenerationOnly, true, false));
-        CHECK(!Selectable(Mode::FrameGenerationOnly, false, false));
-        CHECK(Offered(Mode::FrameGenerationOnly, true) && !Offered(Mode::FrameGenerationOnly, false));
-        CHECK(Offered(Mode::NrOnly, false) && Offered(Mode::NrAndFrameGeneration, false) && Offered(Mode::Off, false));
-        // The other modes keep their rule on Vulkan too
-        CHECK(!Selectable(Mode::NrOnly, true, true) && Selectable(Mode::NrOnly, false, true));
+        CHECK(RouteOffered(true, false));
+        CHECK(!RouteOffered(true, true));
+        CHECK(!RouteOffered(false, false));
+        CHECK(!RouteOffered(false, true));
 
-        for (bool fp : { false, true })
-        {
-            const auto change = ForMode(Mode::FrameGenerationOnly, fp);
-            CHECK(change.keys.has_value() && change.keys->frameGenerationOnly && !change.keys->motion &&
-                  !change.keys->upscaler && !change.keys->input && !change.keys->depthFinder);
-            CHECK(change.finishedPicture.has_value() == fp && change.retryAfterFailure == fp);
-            CHECK(FromKeys(change.keys.value()) == Shown::FrameGenerationOnly);
+        CHECK(RouteWarningFor(false, true, false) == RouteWarning::NeedsGameUpscaler);
+        CHECK(RouteWarningFor(true, false, false) == RouteWarning::NeedsOn12Backend);
+        CHECK(RouteWarningFor(true, true, true) == RouteWarning::VulkanNeedsRestart);
+        CHECK(RouteWarningFor(true, true, false) == RouteWarning::None);
 
-            for (Mode other : { Mode::Off, Mode::NrOnly, Mode::NrAndFrameGeneration })
-                CHECK(!ForMode(other, fp).keys->frameGenerationOnly);
-        }
+        // The route clears every mode key; only Off keeps it on
+        const Keys cleared = KeysForRouteOn();
+        CHECK(!cleared.motion && !cleared.upscaler && !cleared.input && !cleared.depthFinder);
+        CHECK(FromKeys(cleared) == Shown::Off);
+        CHECK(!ModeEndsRoute(Mode::Off) && ModeEndsRoute(Mode::NrOnly) && ModeEndsRoute(Mode::NrAndFrameGeneration));
 
-        Keys both = K(true, true, false, true);
-        both.frameGenerationOnly = true;
-        CHECK(FromKeys(both) == Shown::FrameGenerationOnly);
-        CHECK(!ForClick(Mode::FrameGenerationOnly, Shown::FrameGenerationOnly, false).keys.has_value());
-        CHECK(ForClick(Mode::Off, Shown::FrameGenerationOnly, false).keys.has_value());
+        // An ini with both: the route is reported as overriding the mode
+        CHECK(RouteOverridesModes(K(true, true, false, true), true));
+        CHECK(!RouteOverridesModes(K(true, true, false, true), false));
+        CHECK(!RouteOverridesModes(cleared, true));
 
-        // Needs the game's upscaler call (where the other modes stand aside), then a D3D12 backend, then the bridge
-        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, false) == Warning::NeedsGameUpscaler);
-        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, true, false, false) == Warning::NeedsOn12Backend);
-        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, true, true, true) == Warning::VulkanNeedsRestart);
-        CHECK(WarningFor(Shown::FrameGenerationOnly, true, false, true, false, true) == Warning::None);
-        CHECK(WarningFor(Shown::FrameGenerationOnly, false, false, true) == Warning::None); // NR off: still FG
+        // The modes keep their rule: they stand aside while the game calls an upscaler
+        CHECK(!Selectable(Mode::NrOnly, true) && Selectable(Mode::NrOnly, false));
+        CHECK(!Selectable(Mode::NrAndFrameGeneration, true) && Selectable(Mode::Off, true));
     }
 
     // Which API the game is: the answer must not follow the D3D12 swapchain of a bridged Vulkan game (XeFG's presents

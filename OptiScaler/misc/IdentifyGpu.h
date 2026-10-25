@@ -65,6 +65,9 @@ struct GpuInformation
     FSR4Support fsr4Support {};
     FSR4Support realFsr4Support {};
     device_info::HwGeneration amdHwGeneration = device_info::HwGeneration::kUndefinedGeneration;
+    uint32_t amdAsicFamily = 0; // amdgpu family from the kernel driver, 0 if unknown
+    uint32_t amdAsicRevision = 0;
+    FSR4Support fsr4DriverModel {}; // FSR 4 model the driver would pick
 
     // Nvidia
     bool dlssCapable = false;
@@ -85,6 +88,8 @@ class IdentifyGpu
 
     static std::vector<GpuInformation> checkGpuInfo();
     static void queryNvapi(GpuInformation& gpuInfo);
+    static bool queryAmdAsicInfo(LUID luid, uint32_t vendorId, uint32_t deviceId, uint32_t& family, uint32_t& revision);
+    static FSR4Support getFsr4ModelForAsic(uint32_t family, uint32_t revision, uint32_t deviceId, bool asicInfoValid);
 
   public:
     static void getHardwareAdapter(IDXGIFactory* InFactory, IDXGIAdapter** InAdapter,
@@ -94,5 +99,5 @@ class IdentifyGpu
     static std::vector<GpuInformation> getAllGpus();
     static GpuInformation getPrimaryGpu();
     static void updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3D12CreateDevice = nullptr);
-    static void updateInt8Support(std::optional<bool>& sdkSupportsInt8, std::optional<bool>& amdxcffx64SupportsInt8);
+    static void updateInt8Support(bool sdkSupportsInt8, bool driverSupportsInt8);
 };

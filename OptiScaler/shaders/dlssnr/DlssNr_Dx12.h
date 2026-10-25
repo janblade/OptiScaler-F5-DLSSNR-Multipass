@@ -18,6 +18,7 @@
 //   Resolve  proxy + model answer + untouched copy -> the frame, edited
 
 #include "DlssNr_Common.h"
+#include "superior/Fields.h"
 #include "DlssNr_DetailReuseConstants.h"
 #include "DlssNr_EditCacheConstants.h"
 #include "DlssNr_LutConstants.h"
@@ -46,6 +47,11 @@
 // Ninety-six slots leave four or more such frames before descriptor/constant reuse; many more passes leave fewer.
 #define DLSSNR_NUM_OF_HEAPS 96
 
+// Superior Scaling's own passes (superior/Shader.inl) go through a separate ring, made only the first time Superior
+// runs, so nobody else pays for it. Up to two dispatches per pass boundary plus about ten per frame: six in-flight
+// 30-pass frames.
+#define DLSSNR_SUPERIOR_NUM_OF_HEAPS 416
+
 // Goes through the same constant-buffer ring as DlssNrConstants.
 static_assert(sizeof(DlssNrDetailReuseConstants) == sizeof(DlssNrConstants));
 static_assert(sizeof(DlssNrEditCacheConstants) == sizeof(DlssNrConstants));
@@ -65,6 +71,28 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12Resource* _constantBuffers[DLSSNR_NUM_OF_HEAPS] = {};
 
     uint32_t _heapIndex = 0;
+
+    std::unique_ptr<FrameDescriptorHeap[]> _superiorHeaps;
+    ID3D12Resource* _superiorConstantBuffers[DLSSNR_SUPERIOR_NUM_OF_HEAPS] = {};
+    uint32_t _superiorHeapIndex = 0;
+    bool _superiorRingAttempted = false;
+    bool _superiorRingReady = false;
+    bool EnsureSuperiorRing();
+
+    ID3D12PipelineState* _superiorResolve[6] {};
+    bool _superiorResolveAttempted[6] {};
+    ID3D12PipelineState* _superiorNormalResolve[15] {};
+    bool _superiorNormalResolveAttempted[15] {};
+    ID3D12PipelineState* _superiorWarpCache = nullptr;
+    bool _superiorWarpCacheAttempted = false;
+    ID3D12PipelineState* SuperiorResolvePipeline(const DlssNrConstants& params, bool rawAnswer, bool packed,
+                                                 bool cachedWarp);
+    ID3D12PipelineState* _superiorRawLow = nullptr;
+    bool _superiorRawLowAttempted = false;
+    ID3D12PipelineState* SuperiorRawLowPipeline();
+    ID3D12PipelineState* _superiorPipeline[16] {};
+    bool _superiorAttempted[16] {};
+    ID3D12PipelineState* SuperiorPipeline(const DlssNr::Superior::DlssNrConstants&, ID3D12Resource*);
 
     // The shader reads five inputs and writes two, and not every mode uses all of them. Unused slots
     // still need a view bound -- an unbound descriptor is not an empty read, it is a read from
@@ -143,6 +171,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     void ReleaseLutTexture();
 
   public:
+    bool BuildSuperiorWarpCache(ID3D12GraphicsCommandList* cmd, unsigned width, unsigned height,
+                                ID3D12Resource* metadata, ID3D12Resource* output);
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
     ~DlssNr_Dx12();
 
@@ -169,7 +199,13 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                   // nothing reads it now and every caller passes nullptr. Kept only so the binding
                   // table keeps its shape -- not evidence that temporal accumulation exists.
                   ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
-                  ID3D12Resource* OutKeep);
+                  ID3D12Resource* OutKeep, ID3D12Resource* InLow = nullptr, ID3D12PipelineState* overridePipeline = nullptr);
+
+    // v59 shaders keep their ABI and share the existing descriptor/constant ring.
+    bool DispatchSuperiorPass(ID3D12GraphicsCommandList* cmd, const DlssNr::Superior::DlssNrConstants& constants,
+                              ID3D12Resource* source, ID3D12Resource* model, ID3D12Resource* original,
+                              ID3D12Resource* motion, ID3D12Resource* previous, ID3D12Resource* low,
+                              ID3D12Resource* target, ID3D12Resource* keep, uint32_t* immutableSlot = nullptr);
 
     // One compute pass of Finished Picture's shader (dlssnr_finished_color.hlsl). Same descriptor
     // table shape as DispatchPass; binds _finishedColorPipelineState instead of _pipelineState.

@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "DlssNr_SuperiorScaling.h"
 
 #include "DlssNrFeature_Vk.h"
 #include "DlssNrFeature_Dx12.h"
@@ -1623,6 +1624,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     encode.ModelWorkScale = (reduced && workScale < 1.0f) ? workScale : 1.0f;
     encode.MaxRatio = std::clamp(cfg.DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
     encode.Transfer = cfg.DlssNrTransfer.value_or_default();
+    // Superior Scaling is D3D12-only (its private DLSS and PSOs). Native Vulkan runs Matched residual instead, said once.
+    if (DlssNr::SuperiorScaling::Enabled(encode.Transfer))
+    {
+        static std::once_flag warned;
+        std::call_once(warned, []
+                       { LOG_WARN("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Vulkan uses Matched residual"); });
+        encode.Transfer = DlssNr::SuperiorScaling::FallbackTransfer;
+    }
     // Tone-mapped frames keep the Paper white scale; a linear HDR frame is shown at its base white point, or at the
     // white point in force when no exposure is known yet.
     encode.DebugScale = !linearHdr                ? cfg.DlssNrWhitePointScale.value_or_default()

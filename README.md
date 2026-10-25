@@ -14,6 +14,7 @@ This is an experimental community version of OptiScaler. Results and game suppor
 - Apply NR to the finished picture to help with green noise. Works with frame generation on or off in native DirectX 12 games, including HDR.
 - Apply it more than once, with different settings each time. Extra passes cost more performance.
 - Lower the model resolution to reduce the performance cost.
+- Use Superior Scaling (Upscale Mode) to enlarge reduced-resolution NR with a private DLSS that steadies it over time (DirectX 12, NVIDIA DLSS).
 
 ## What you need
 
@@ -37,10 +38,15 @@ See the [setup guide](INSTALL-DLSSNR.md) for game-specific steps and troubleshoo
 - The optional **hybrid mode** is for RTX 50 GPUs. Its files are included. Loading may pause the game and look like a freeze; please wait.
 - Avoid anti-cheat-protected multiplayer games.
 
-For frame generation, see the [setup notes](docs/DLSS-FRAME-GENERATION.md). For bugs, [open an issue](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/issues) with your game, GPU, settings and `OptiScaler.log`. For questions and help, join the [Discord server](https://discord.gg/xzkNNwxbZu).
+For frame generation, see the [setup notes](docs/DLSS-FRAME-GENERATION.md). More setup guides: [ReShade](docs/SETUP-RESHADE.md) · [Vulkan games and emulators](docs/SETUP-VULKAN.md) · [dxvk](docs/SETUP-DXVK.md) · [DirectX 11 games without DLSS](docs/SETUP-DX11.md). For bugs, [open an issue](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/issues) with your game, GPU, settings and `OptiScaler.log`. For questions and help, join the [Discord server](https://discord.gg/xzkNNwxbZu).
 
 ## Credits
 
 Built on [OptiScaler](https://github.com/optiscaler/OptiScaler) and [Dagherbou's Neural Rendering fork](https://github.com/Dagherbou/OptiScaler_DLSSNR), with colour processing from [RenoDX](https://github.com/clshortfuse/renodx).
 
 [Full credits](docs/CREDITS.md) · [Licence](LICENSE) · [OptiScaler documentation](https://github.com/optiscaler/OptiScaler/wiki)
+
+## Support
+
+This fork is made in my spare time. If it's useful to you and you'd like to say thanks,
+you can [buy me a coffee](https://buymeacoffee.com/janblade). Bug reports and logs help just as much.

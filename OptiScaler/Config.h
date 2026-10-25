@@ -5,6 +5,8 @@
 #include "native/NativeLowLatencyRule.h"
 #include "motion/MotionProfiles.h"
 #include "shaders/dlssnr/DlssNr_InputStyles.h"
+#include "framegen/mfgunlock/Mode.h"
+#include "dlssnr/DlssNr_Profiles.h"
 
 #include <optional>
 #include <filesystem>
@@ -238,6 +240,7 @@ class Config
     CustomOptional<bool, NoDefault> HDR;
     CustomOptional<bool, NoDefault> JitterCancellation;
     CustomOptional<bool, NoDefault> DisplayResolution;
+    CustomOptional<bool, NoDefault> DynamicResolution;
     CustomOptional<bool, NoDefault> DisableReactiveMask;
     CustomOptional<float> DlssReactiveMaskBias { 0.45f };
 
@@ -432,7 +435,8 @@ class Config
 
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual. Only has an effect when Model resolution is under 100%.
-    CustomOptional<uint32_t> DlssNrTransfer { 1 };
+    CustomOptional<uint32_t> DlssNrTransfer { 1 }; // 11: Superior Scaling
+    CustomOptional<uint32_t> DlssNrSuperiorScalingPreset { 1 }; // private SR A=1 / K=11
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the
     // game already tone mapped there is nothing to measure and this has no effect.
@@ -730,11 +734,12 @@ class Config
     // with NR on, NR runs on the game's picture in place, as in NativeInput (native/VirtualUpscalerMode.h). true: the
     // backend's pass, NR (when on) on its output. The menu's "Run the upscaler on the picture".
     CustomOptional<bool> DlssNrNativeUpscalerPass { false };
-    // NativeFrameGenerationOnly: a Vulkan game that calls DLSS, FSR or XeSS of its own gets OptiScaler's frame generation
-    // from that call. The Vulkan present bridge (native/VkPresentBridge.h) puts frame generation's D3D12 swapchain on the
-    // window, and the game's upscaler runs through a Vulkan-on-D3D12 backend (DLSS_on12, FFX_on12, FSR21_on12) on the
-    // bridge's device, whose evaluate hands frame generation the game's motion vectors, depth and output
-    // (upscalers/IFeature_VkwDx12.cpp). No Optical F5Low motion. The Optical F5Low page's "FG only (game's upscaler)" Mode.
+    // NativeFrameGenerationOnly: a Vulkan game that calls DLSS, FSR or XeSS of its own gets OptiScaler's frame
+    // generation from that call. The Vulkan present bridge (native/VkPresentBridge.h) puts frame generation's D3D12
+    // swapchain on the window, and the game's upscaler runs through a Vulkan-on-D3D12 backend (DLSS_on12, FFX_on12,
+    // FSR21_on12) on the bridge's device, whose evaluate hands frame generation the game's motion vectors, depth and
+    // output (upscalers/IFeature_VkwDx12.cpp). No Optical F5Low motion. The Frame Generation page's Vulkan route
+    // "Bridge, game's upscaler".
     CustomOptional<bool> DlssNrNativeFrameGenerationOnly { false };
     // NativeLowLatencyBoost: Reflex's Boost with it (the GPU keeps its clocks up between frames), also for DLSS frame
     // generation's Streamline Reflex on an Optical F5Low game. NVIDIA Reflex only: XeLL, Anti-Lag 2 and LatencyFlex
@@ -968,6 +973,7 @@ class Config
     CustomOptional<int> FpsShortcutKey { VK_PRIOR };
     CustomOptional<int> FpsCycleShortcutKey { VK_NEXT };
     CustomOptional<bool> FpsOverlayHorizontal { false };
+    CustomOptional<bool> FpsOverlayShowRatio { false };
     CustomOptional<float> FpsOverlayAlpha { 0.4f };
     CustomOptional<float, NoDefault> FpsScale; // No value means same as MenuScale
     CustomOptional<bool> UseHQFont { true };
@@ -1089,8 +1095,10 @@ class Config
     CustomOptional<float> FsrMinDisOccAcc { -0.333f };
 
     // FSR4
-    CustomOptional<FSR4Support> Fsr4ForceModel { FSR4Support::None };
+    // Overrides the FSR 4 support detected for the GPU
+    CustomOptional<FSR4Support> Fsr4GpuSupport { FSR4Support::None };
     CustomOptional<uint32_t, NoDefault> Fsr4Preset;
+    CustomOptional<FSR4Model, NoDefault> Fsr4Model;
     CustomOptional<bool> Fsr4EnableWatermark { false };
     CustomOptional<bool> Fsr4DoNotLoadAmdxc64 { false };
 
@@ -1140,12 +1148,16 @@ class Config
     CustomOptional<bool> LoadCustomAmdxc64OnRdna2 { false };
     CustomOptional<bool> LoadAsiPlugins { false };
     CustomOptional<int> LateAsiPluginsDelay { 30 };
+    CustomOptional<std::wstring, NoDefault> DisabledAsi; // comma separated file names, see plugins/PluginRegistry.h
 
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
     CustomOptional<bool> ExternalFrameGeneration { false };
-    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: the built-in MFG unlocks were removed in 0.1.32,
-    // and startup says so once. Read only, never saved.
+    CustomOptional<MfgUnlockMode> MfgUnlockXeFG { MfgUnlock::kDefaultMode };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX40 { MfgUnlock::kDefaultMode };
+    CustomOptional<MfgUnlockMode> MfgUnlockRTX2030 { MfgUnlock::kDefaultMode };
+    // [DLSSG] AdaMfgUnlock / AmpereMfgUnlock is still true in the ini: those keys were replaced by [MFGUnlock] RTX40 /
+    // RTX2030, and startup says so once. Read only, never saved.
     bool RemovedAdaMfgUnlockSet = false;
     bool RemovedAmpereMfgUnlockSet = false;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
@@ -1191,6 +1203,8 @@ class Config
     CustomOptional<bool> FGHUDFix { false };
     CustomOptional<int> FGHUDLimit { 1 };
     CustomOptional<bool> FGHUDFixExtended { false };
+    CustomOptional<bool> FGHUDFixUITexture { true };
+    CustomOptional<bool, NoDefault> FGHUDFixUIUnblend;
     CustomOptional<bool> FGImmediateCapture { false };
     CustomOptional<bool> FGHudfixPersistentBindings { true };
     CustomOptional<bool> FGDontUseSwapchainBuffers { false };
@@ -1226,6 +1240,7 @@ class Config
     CustomOptional<bool> FGFPTAllowHybridSpin { false };
     CustomOptional<int> FGFPTHybridSpinTime { 2 };
     CustomOptional<bool> FGFPTAllowWaitForSingleObjectOnFence { false };
+    CustomOptional<bool> FSRFGDisableFlipMetering { false };
 
     CustomOptional<bool> FSRFGSkipConfigForHudless { false };
     CustomOptional<bool> FSRFGSkipDispatchForHudless { false };
@@ -1233,6 +1248,7 @@ class Config
 
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
+    CustomOptional<int> FGXeFGMaxInterpolations { 5 };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
     CustomOptional<bool> FGXeFGDynamicMFG { false };          // Count picked per frame, up to the InterpolationCount
     CustomOptional<float> FGXeFGFramerateTargetDMFG { 0.0f }; // 0: the FPS limit, else just under the refresh rate
@@ -1321,6 +1337,15 @@ class Config
 
     bool LoadFromPath(const wchar_t* InPath);
     bool SaveIni();
+
+    // NR profiles (dlssnr/DlssNr_Profiles.h): the kept [DlssNr] settings to and from a profile file, and back to the
+    // saved ones (what OptiScaler.ini held at the last load or Save Settings).
+    bool SaveDlssNrProfile(const std::filesystem::path& path, std::string& error);
+    bool LoadDlssNrProfile(const std::filesystem::path& path, std::string& error, std::string& note);
+    void RevertDlssNrToSaved();
+    DlssNrProfiles::Section DlssNrSnapshot();
+    DlssNrProfiles::Section SavedDlssNrSection();
+    static std::optional<DlssNrProfiles::File> ReadDlssNrProfile(const std::filesystem::path& path);
     bool SaveXeFG();
 
     void CheckUpscalerFiles();
@@ -1344,6 +1369,9 @@ class Config
     std::wstring fileName = L"OptiScaler.ini";
 
     bool Reload(std::filesystem::path iniPath);
+    void ReadDlssNr();
+    size_t ApplyDlssNrSection(const DlssNrProfiles::Section& section);
+    DlssNrProfiles::Section savedDlssNr; // the kept [DlssNr] settings at the last load or Save Settings
 
     std::optional<std::string> readString(std::string section, std::string key, bool lowercase = false);
     std::optional<std::wstring> readWString(std::string section, std::string key, bool lowercase = false);

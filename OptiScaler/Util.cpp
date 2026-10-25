@@ -56,6 +56,13 @@ std::string Util::WhoIsTheCaller(void* returnAddress)
     return "";
 }
 
+std::filesystem::path Util::ModulePath(HMODULE module)
+{
+    wchar_t path[MAX_PATH] = { 0 };
+    GetModuleFileNameW(module, path, MAX_PATH);
+    return std::filesystem::path(path);
+}
+
 HMODULE Util::GetCallerModule(void* returnAddress)
 {
     HMODULE hModule = NULL;
@@ -726,6 +733,26 @@ bool Util::CheckForRealObject(std::string functionName, IUnknown* pObject, IUnkn
     return false;
 }
 
+IUnknown* Util::RealObjectIdentity(IUnknown* pObject)
+{
+    if (pObject == nullptr)
+        return nullptr;
+
+    if (streamlineRiid.Data1 == 0 &&
+        IIDFromString(L"{ADEC44E2-61F0-45C3-AD9F-1B37379284FF}", &streamlineRiid) != S_OK)
+        return pObject;
+
+    IUnknown* real = nullptr;
+
+    if (pObject->QueryInterface(streamlineRiid, (void**) &real) == S_OK && real != nullptr)
+    {
+        real->Release();
+        return real;
+    }
+
+    return pObject;
+}
+
 void Util::GetDeviceRemovedReason(ID3D11Device* pDevice)
 {
     auto reason = pDevice->GetDeviceRemovedReason();
@@ -1116,4 +1143,17 @@ std::map<Util::Luid, std::filesystem::path> Util::GetDriverStore()
         NtdllProxy::FreeLibrary_Ldr(hGdi32);
 
     return result;
+}
+
+void Util::SetFlagEnvVar(const wchar_t* name, bool enabled)
+{
+    const wchar_t* crtValue = enabled ? L"1" : L"";
+    _wputenv_s(name, crtValue);
+    SetEnvironmentVariableW(name, enabled ? L"1" : nullptr);
+
+    if (auto ucrt = GetModuleHandleW(L"ucrtbase.dll"))
+    {
+        if (auto ucrtPutenv = reinterpret_cast<decltype(&_wputenv_s)>(GetProcAddress(ucrt, "_wputenv_s")))
+            ucrtPutenv(name, crtValue);
+    }
 }

@@ -2,6 +2,7 @@
 #include <Config.h>
 #include "FFXFeature.h"
 #include <proxies/FfxApi_Proxy.h>
+#include <fsr4/FSR4DriverProviderVk.h>
 
 static void FfxLogCallback(uint32_t type, const wchar_t* message)
 {
@@ -26,14 +27,18 @@ void FFXFeature::QueryVersionsDx12(ID3D12Device* device)
     versionQuery.device = device;
     uint64_t versionCount = 0;
     versionQuery.outputCount = &versionCount;
-    FfxApiProxy::D3D12_Query(nullptr, &versionQuery.header);
+
+    // The driver upscaler is always offered in the menu, even when the FFX SDK has a newer one
+    constexpr auto driverListing = FSR4DriverProviderDx12::Listing::Always;
+
+    FfxApiProxy::D3D12_QueryUpscalerVersions(&versionQuery, driverListing);
 
     // Fill version ids and names arrays
     State::Instance().ffxUpscalerVersionIds.resize(versionCount);
     State::Instance().ffxUpscalerVersionNames.resize(versionCount);
     versionQuery.versionIds = State::Instance().ffxUpscalerVersionIds.data();
     versionQuery.versionNames = State::Instance().ffxUpscalerVersionNames.data();
-    FfxApiProxy::D3D12_Query(nullptr, &versionQuery.header);
+    FfxApiProxy::D3D12_QueryUpscalerVersions(&versionQuery, driverListing);
 }
 
 void FFXFeature::QueryVersionsVulkan()
@@ -45,14 +50,33 @@ void FFXFeature::QueryVersionsVulkan()
     // versionQuery.device = Device; // only for DirectX 12 applications
     uint64_t versionCount = 0;
     versionQuery.outputCount = &versionCount;
-    FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
 
-    // Fill version ids and names arrays
-    State::Instance().ffxUpscalerVersionIds.resize(versionCount);
-    State::Instance().ffxUpscalerVersionNames.resize(versionCount);
-    versionQuery.versionIds = State::Instance().ffxUpscalerVersionIds.data();
-    versionQuery.versionNames = State::Instance().ffxUpscalerVersionNames.data();
-    FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
+    auto& state = State::Instance();
+
+    // The driver provided FSR 4 works without amd_fidelityfx_vk.dll
+    if (FfxApiProxy::VULKAN_Query() != nullptr)
+    {
+        FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
+
+        // Fill version ids and names arrays
+        state.ffxUpscalerVersionIds.resize(versionCount);
+        state.ffxUpscalerVersionNames.resize(versionCount);
+        versionQuery.versionIds = state.ffxUpscalerVersionIds.data();
+        versionQuery.versionNames = state.ffxUpscalerVersionNames.data();
+        FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
+    }
+    else
+    {
+        state.ffxUpscalerVersionIds.clear();
+        state.ffxUpscalerVersionNames.clear();
+    }
+
+    // FSR 4 provided by the Vulkan driver
+    if (FSR4DriverProviderVk::Init())
+    {
+        state.ffxUpscalerVersionIds.push_back(FSR4DriverProviderVk::VersionId());
+        state.ffxUpscalerVersionNames.push_back(FSR4DriverProviderVk::VersionName());
+    }
 }
 
 void FFXFeature::InitFlags()
@@ -80,6 +104,10 @@ void FFXFeature::InitFlags()
 
     if (!LowResMV())
         _contextDesc.flags |= FFX_UPSCALE_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS;
+
+    // Without it FSR 4 recreates the network every time the upscale ratio moves to another preset
+    if (DynamicResolution())
+        _contextDesc.flags |= FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION;
 
     if (Config::Instance()->FsrDebugView.value_or_default())
     {

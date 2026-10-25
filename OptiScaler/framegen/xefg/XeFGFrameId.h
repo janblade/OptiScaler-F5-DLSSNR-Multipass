@@ -3,10 +3,13 @@
 // XeFG's frame IDs. No D3D, no Config: a host test can include it.
 //
 // Intel: XeLL's markers and xefgSwapChainSetPresentId carry the same frame ID, and XeFG tags the frame's resources and
-// constants with it too. XeFG follows XeLL: a frame takes the XeLL ID of the frame being rendered (0 when nobody feeds
-// XeLL), picked at the frame's first use and kept for all of its tags and its present. xefg_swapchain.h asks for an ID
-// unique among the frames XeFG holds, not a rising one (frames may even reach it out of order), so only an ID it gave
-// one of its newest frames is refused.
+// constants with it too. We keep that for our own XeLL, whose IDs rise by 1 a frame: a frame takes the ID of the frame
+// being rendered, picked at the frame's first use and kept for all of its tags and its present. The game's own Reflex
+// IDs are not followed: they skip (a tester's Forza Motorsport log: 42% of the steps are 2 or more) and are read from
+// the latest marker, not the frame's, and after a skip XeFG shows only the real frame. XeFG's IDs rise by exactly 1 a
+// frame whatever XeLL says, except where a pause or a restart of XeLL's IDs resets XeFG's history anyway: there our
+// XeLL is followed again. xefg_swapchain.h asks for an ID unique among the frames XeFG holds (frames may even reach it
+// out of order), so only an ID it gave one of its newest frames is refused.
 
 #include <cstdint>
 
@@ -42,31 +45,52 @@ struct FrameIdHistory
     }
 };
 
-// IDs for frames XeLL gives no new ID for (one it already gave, or one XeFG still holds): a range XeLL's IDs do not
-// reach, so XeLL's next IDs stay free (counting on from XeFG's last ID could stay just ahead of XeLL's for good)
-inline constexpr uint32_t kSpareFrameIdBase = 0x80000000u;
+// Whose XeLL an ID comes from
+enum class XellIdSource
+{
+    None,
+    Ours, // our low latency's markers: one ID a frame, rising by 1
+    Game  // the game's own Reflex markers
+};
+
+// Why a frame took XeFG's own counter although our XeLL gave an ID
+enum class OwnReason
+{
+    None,
+    Jumped, // the ID went up by more than 1
+    Unusable // the ID is not above XeFG's last (it repeats, or XeFG still holds it)
+};
 
 struct FrameIdPick
 {
     uint32_t id = 0;
     bool followsXell = false;
-    bool steppedBack = false; // below the last XeLL ID followed (the game restarted its IDs): XeFG's history is reset
-    bool picked = false;      // picked by this call (not the frame's cached ID)
+    bool resetHistory = false; // a followed ID that is not XeFG's last + 1: XeFG's history is reset
+    OwnReason ownReason = OwnReason::None;
+    bool picked = false; // picked by this call (not the frame's cached ID)
 };
 
 // Slots match IFGFeature's frame slots (frame number % kSlots)
 template <int kSlots> class FrameIds
 {
   public:
-    // The ID of FG frame `fgFrame`: the cached one when the frame already has one, else picked now with `xellId`
-    FrameIdPick For(uint64_t fgFrame, uint32_t xellId)
+    // The ID of FG frame `fgFrame`: the cached one when the frame already has one, else picked now with `xellId`.
+    // `resetFrame`: XeFG's history is reset on this frame anyway. `canReset`: a reset is honoured at all.
+    FrameIdPick For(uint64_t fgFrame, uint32_t xellId, XellIdSource source, bool resetFrame = false,
+                    bool canReset = true)
     {
         const auto slot = (int) (fgFrame % kSlots);
 
         if (_slotFrame[slot] == fgFrame && _slot[slot].id != 0)
             return _slot[slot];
 
-        auto pick = Pick(xellId);
+        // Frames passed without a pick (FG paused or skipped): our XeLL ran on without us
+        const bool gap = _lastPickedFrame != 0 && fgFrame > _lastPickedFrame + 1;
+        auto pick = Pick(xellId, source, canReset && (resetFrame || gap), canReset);
+
+        if (fgFrame > _lastPickedFrame)
+            _lastPickedFrame = fgFrame;
+
         _slotFrame[slot] = fgFrame;
         _slot[slot] = pick;
         _lastId = pick.id;
@@ -76,34 +100,51 @@ template <int kSlots> class FrameIds
     }
 
     uint32_t LastFollowedXell() const { return _lastFollowedXell; }
+    uint32_t LastId() const { return _lastId; }
 
   private:
-    FrameIdPick Pick(uint32_t xellId)
+    FrameIdPick Pick(uint32_t xellId, XellIdSource source, bool resync, bool canReset)
     {
-        // A new XeLL ID XeFG does not hold: followed. One that stays the same (XeLL's frame did not advance) is not
-        // a new frame of XeLL's and gets a spare.
-        if (xellId != 0 && xellId != _lastFollowedXell && !_recent.Contains(xellId))
+        // Only our XeLL is followed. Mid-stream that is only while its ID is XeFG's last + 1. Where XeFG's history is
+        // reset anyway (`resync`), after the first one, or on a step back (our XeLL restarted its IDs), any ID is
+        // followed, and the reset is marked. An ID XeFG holds, or one that stays the same, is not followed.
+        if (xellId == 0 || source != XellIdSource::Ours)
         {
-            const bool steppedBack = _lastFollowedXell != 0 && xellId < _lastFollowedXell;
-            _lastFollowedXell = xellId;
-            return { xellId, true, steppedBack };
+            _lastFollowedXell = 0;
+            return { Next(), false, false, OwnReason::None, false };
         }
 
+        const bool step = xellId == _lastId + 1;
+        const bool first = _lastFollowedXell == 0;
+        const bool back = !first && xellId < _lastFollowedXell;
+        const bool free = canReset ? (first || back || resync) : (first && _lastId == 0);
+
+        if (!_recent.Contains(xellId) && (step || free))
+        {
+            _lastFollowedXell = xellId;
+            return { xellId, true, _lastId != 0 && !step, OwnReason::None, false };
+        }
+
+        return { Next(), false, false, xellId > _lastId + 1 ? OwnReason::Jumped : OwnReason::Unusable, false };
+    }
+
+    uint32_t Next()
+    {
         uint32_t id = 0;
 
         do
         {
-            id = xellId == 0 ? ++_lastId : _spareId++;
+            id = ++_lastId;
         } while (id == 0 || _recent.Contains(id));
 
-        return { id, false, false };
+        return id;
     }
 
     uint64_t _slotFrame[kSlots] = {};
     FrameIdPick _slot[kSlots] = {};
     FrameIdHistory _recent;
+    uint64_t _lastPickedFrame = 0;
     uint32_t _lastId = 0;
     uint32_t _lastFollowedXell = 0;
-    uint32_t _spareId = kSpareFrameIdBase;
 };
 } // namespace xefg

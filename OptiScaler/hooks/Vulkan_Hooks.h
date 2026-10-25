@@ -18,8 +18,22 @@ class VulkanHooks
     static PFN_vkGetLatencyTimingsNV o_vkGetLatencyTimingsNV;
     static PFN_vkQueueNotifyOutOfBandNV o_vkQueueNotifyOutOfBandNV;
 
+    // Set while the FG output shows a surface the game created to its Streamline, whose vkCreateWin32SurfaceKHR gets
+    // this one instead of a new one
+    inline static thread_local VkSurfaceKHR existingSurface = VK_NULL_HANDLE;
+
+    // The window a surface was created for
+    static HWND SurfaceWindow(VkSurfaceKHR surface);
+
     // vkGetDeviceProcAddr past our hook
     static PFN_vkVoidFunction GetDeviceProcAddr(VkDevice device, const char* name);
+
+    // vkGetInstanceProcAddr without OptiScaler's hooks
+    static PFN_vkVoidFunction GetInstanceProcAddr(VkInstance instance, const char* pName);
+
+    // The driver's swapchain function behind OptiScaler's hook, below hooks others (overlays) put on the same function.
+    // vkQueuePresentKHR's also times the presented frames for the menu. nullptr when it isn't hooked.
+    static PFN_vkVoidFunction OriginalSwapchainFunction(const char* pName);
 
     // The device was created with VK_NV_low_latency2 and the timeline semaphore feature on (its sleep signals one), and
     // not by dxvk or vkd3d-proton for a D3D device (those run the D3D game's own Reflex themselves)

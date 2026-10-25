@@ -31,6 +31,61 @@ inline static PFN_NVSDK_NGX_D3D1X_GetFeatureRequirements Original_D3D11_GetFeatu
 inline static PFN_NVSDK_NGX_D3D1X_GetFeatureRequirements Original_D3D12_GetFeatureRequirements = nullptr;
 inline static PFN_NVSDK_NGX_VULKAN_GetFeatureRequirements Original_Vulkan_GetFeatureRequirements = nullptr;
 
+typedef NVSDK_NGX_Result (*PFN_NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements)(
+    const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo, uint32_t* OutExtensionCount,
+    VkExtensionProperties** OutExtensionProperties);
+typedef NVSDK_NGX_Result (*PFN_NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements)(
+    VkInstance Instance, VkPhysicalDevice PhysicalDevice, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
+    uint32_t* OutExtensionCount, VkExtensionProperties** OutExtensionProperties);
+
+inline static PFN_NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements
+    Original_Vulkan_GetFeatureInstanceExtensionRequirements = nullptr;
+inline static PFN_NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements
+    Original_Vulkan_GetFeatureDeviceExtensionRequirements = nullptr;
+
+// NGX returns arrays it owns and frees them when its snippets get reloaded (Streamline's NGX init does that),
+// but games keep pointing at the names for vkCreateInstance/vkCreateDevice and their own checks afterwards
+inline static NVSDK_NGX_Result CopyNgxExtensionProperties(NVSDK_NGX_Result result, const uint32_t* count,
+                                                          VkExtensionProperties** properties)
+{
+    if (result != NVSDK_NGX_Result_Success || count == nullptr || *count == 0 || properties == nullptr ||
+        *properties == nullptr)
+        return result;
+
+    // Never freed, callers don't say when they are done with the names
+    static std::list<std::vector<VkExtensionProperties>> copies;
+    static std::mutex copiesMutex;
+
+    std::scoped_lock lock(copiesMutex);
+    auto& copy = copies.emplace_back(*properties, *properties + *count);
+    *properties = copy.data();
+
+    return result;
+}
+
+inline static NVSDK_NGX_Result __stdcall
+Hooked_Vulkan_GetFeatureInstanceExtensionRequirements(const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
+                                                      uint32_t* OutExtensionCount,
+                                                      VkExtensionProperties** OutExtensionProperties)
+{
+    LOG_FUNC();
+
+    auto result = Original_Vulkan_GetFeatureInstanceExtensionRequirements(FeatureDiscoveryInfo, OutExtensionCount,
+                                                                          OutExtensionProperties);
+    return CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
+}
+
+inline static NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureDeviceExtensionRequirements(
+    VkInstance Instance, VkPhysicalDevice PhysicalDevice, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
+    uint32_t* OutExtensionCount, VkExtensionProperties** OutExtensionProperties)
+{
+    LOG_FUNC();
+
+    auto result = Original_Vulkan_GetFeatureDeviceExtensionRequirements(
+        Instance, PhysicalDevice, FeatureDiscoveryInfo, OutExtensionCount, OutExtensionProperties);
+    return CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
+}
+
 inline static NVSDK_NGX_Result __stdcall Hooked_Dx12_GetFeatureRequirements(
     IDXGIAdapter* Adapter, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
     NVSDK_NGX_FeatureRequirement* OutSupported)
@@ -104,6 +159,12 @@ inline static void HookNgxApi(HMODULE nvngx)
     Original_Vulkan_GetFeatureRequirements =
         (PFN_NVSDK_NGX_VULKAN_GetFeatureRequirements) KernelBaseProxy::GetProcAddress_()(
             nvngx, "NVSDK_NGX_VULKAN_GetFeatureRequirements");
+    Original_Vulkan_GetFeatureInstanceExtensionRequirements =
+        (PFN_NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements) KernelBaseProxy::GetProcAddress_()(
+            nvngx, "NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements");
+    Original_Vulkan_GetFeatureDeviceExtensionRequirements =
+        (PFN_NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements) KernelBaseProxy::GetProcAddress_()(
+            nvngx, "NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements");
 
     if (Original_D3D11_GetFeatureRequirements != nullptr || Original_D3D12_GetFeatureRequirements != nullptr ||
         Original_Vulkan_GetFeatureRequirements != nullptr)
@@ -122,6 +183,14 @@ inline static void HookNgxApi(HMODULE nvngx)
         if (Original_Vulkan_GetFeatureRequirements != nullptr)
             DetourAttach(&(PVOID&) Original_Vulkan_GetFeatureRequirements, Hooked_Vulkan_GetFeatureRequirements);
 
+        if (Original_Vulkan_GetFeatureInstanceExtensionRequirements != nullptr)
+            DetourAttach(&(PVOID&) Original_Vulkan_GetFeatureInstanceExtensionRequirements,
+                         Hooked_Vulkan_GetFeatureInstanceExtensionRequirements);
+
+        if (Original_Vulkan_GetFeatureDeviceExtensionRequirements != nullptr)
+            DetourAttach(&(PVOID&) Original_Vulkan_GetFeatureDeviceExtensionRequirements,
+                         Hooked_Vulkan_GetFeatureDeviceExtensionRequirements);
+
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
@@ -129,6 +198,8 @@ inline static void HookNgxApi(HMODULE nvngx)
             Original_D3D11_GetFeatureRequirements = nullptr;
             Original_D3D12_GetFeatureRequirements = nullptr;
             Original_Vulkan_GetFeatureRequirements = nullptr;
+            Original_Vulkan_GetFeatureInstanceExtensionRequirements = nullptr;
+            Original_Vulkan_GetFeatureDeviceExtensionRequirements = nullptr;
         }
     }
 }
@@ -151,6 +222,14 @@ inline static void UnhookApis()
         if (Original_Vulkan_GetFeatureRequirements != nullptr)
             DetourDetach(&(PVOID&) Original_Vulkan_GetFeatureRequirements, Hooked_Vulkan_GetFeatureRequirements);
 
+        if (Original_Vulkan_GetFeatureInstanceExtensionRequirements != nullptr)
+            DetourDetach(&(PVOID&) Original_Vulkan_GetFeatureInstanceExtensionRequirements,
+                         Hooked_Vulkan_GetFeatureInstanceExtensionRequirements);
+
+        if (Original_Vulkan_GetFeatureDeviceExtensionRequirements != nullptr)
+            DetourDetach(&(PVOID&) Original_Vulkan_GetFeatureDeviceExtensionRequirements,
+                         Hooked_Vulkan_GetFeatureDeviceExtensionRequirements);
+
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
@@ -161,6 +240,8 @@ inline static void UnhookApis()
             Original_D3D11_GetFeatureRequirements = nullptr;
             Original_D3D12_GetFeatureRequirements = nullptr;
             Original_Vulkan_GetFeatureRequirements = nullptr;
+            Original_Vulkan_GetFeatureInstanceExtensionRequirements = nullptr;
+            Original_Vulkan_GetFeatureDeviceExtensionRequirements = nullptr;
         }
     }
 }
@@ -418,6 +499,9 @@ class NVNGXProxy
     inline static bool _cudaInited = false;
     inline static bool _dx11Inited = false;
     inline static bool _dx12Inited = false;
+    // Bumped whenever the D3D12 NGX runtime starts or stops, so a handle created under an older runtime is known to
+    // be gone (NGX shutdown destroys every feature and parameter block) and is never released or evaluated again.
+    inline static std::atomic<uint64_t> _dx12Epoch = 0;
     inline static bool _vulkanInited = false;
 
     inline static void LogCallback(const char* message, NVSDK_NGX_Logging_Level loggingLevel,
@@ -795,10 +879,25 @@ class NVNGXProxy
         LOG_INFO("result: {0:X}", (UINT) nvResult);
 
         _dx12Inited = (nvResult == NVSDK_NGX_Result_Success);
+
+        if (_dx12Inited)
+            ++_dx12Epoch;
+
         return _dx12Inited;
     }
 
-    static void SetDx12Inited(bool value) { _dx12Inited = value; }
+    static void SetDx12Inited(bool value)
+    {
+        if (_dx12Inited != value)
+            ++_dx12Epoch;
+
+        _dx12Inited = value;
+    }
+
+    // NGX D3D12 shut down (or restarted) without the inited flag changing, e.g. DLSSFeatureDx12::Shutdown.
+    static void BumpDx12Epoch() { ++_dx12Epoch; }
+
+    static uint64_t Dx12Epoch() { return _dx12Epoch.load(); }
 
     static bool IsDx12Inited() { return _dx12Inited; }
 

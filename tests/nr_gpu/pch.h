@@ -1,0 +1,16 @@
+#pragma once
+#define NOMINMAX
+#include <windows.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>

@@ -30,6 +30,11 @@ bool DxvkThroughVulkan();
 // The game runs on dxvk, key or not (IdentifyGpu's usesDxvk), cached the same way: it is asked on every present.
 bool DxvkGame();
 
+// The frame generation chosen and the mode on are such that the bridge takes the game's swapchains. Asked where only the
+// settings are known (the device is made), a swapchain may still be refused later (format, window). The native Vulkan FG
+// output (FSRFG_Vk, DLSSG_Vk) is for the games it does not take.
+bool ModeWantsBridge();
+
 // The fullScreenExclusive mode of a VkSurfaceFullScreenExclusiveInfoEXT in a create info's chain, or null. The swapchain
 // made on the hidden surface is asked for DISALLOWED through it (and the game's value put back after the call): the hidden
 // window must never take the screen, and the D3D12 swapchain on the real window handles full screen as for a D3D12 game.
@@ -105,17 +110,17 @@ bool WindowResized();
 // True once per switching on of the mode.
 bool WantsNewSwapchain(VkSwapchainKHR swapchain);
 
-// The D3D12 swapchain is up on `device` (FG only: a Vulkan-on-D3D12 upscaler feeds frame generation only when it runs on
-// the bridge's device).
+// The D3D12 swapchain is up on `device` (Vulkan route: a Vulkan-on-D3D12 upscaler feeds frame generation only when it
+// runs on the bridge's device).
 bool OutputActiveOn(ID3D12Device* device);
 
 // Why the bridge was turned off for the rest of the session because its D3D12 swapchain could not present; empty while it
 // was not. For the menu.
 std::string FailureReason();
 
-// FG only: the game's upscaler call, run on a Vulkan-on-D3D12 feature, queued frame generation's copies of its motion
-// vectors and depth; they are done once `fence` reaches `value`. Frame generation's queue waits for it before the next
-// D3D12 present.
+// Vulkan route: the game's upscaler call, run on a Vulkan-on-D3D12 feature, queued frame generation's copies of its
+// motion vectors and depth; they are done once `fence` reaches `value`. Frame generation's queue waits for it before
+// the next D3D12 present.
 void FrameGenerationInputsQueued(ID3D12Fence* fence, uint64_t value);
 
 } // namespace VkPresentBridge

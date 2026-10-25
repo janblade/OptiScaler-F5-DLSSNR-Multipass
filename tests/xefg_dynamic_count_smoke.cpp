@@ -3,8 +3,12 @@
 #include "../OptiScaler/framegen/xefg/XeFG_DynamicCount.h"
 #include "../OptiScaler/framegen/xefg/XeFG_DynamicCap.h"
 #include "../OptiScaler/framegen/xefg/XeFG_DynamicTarget.h"
+#include "../OptiScaler/framegen/xefg/XeFG_ShownRate.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <vector>
 
 static int failures = 0;
 
@@ -89,6 +93,59 @@ static Result SimCount(const Game& g, double targetFps, int maxCount, int startC
 
     r.count = count;
     r.presented = (count + 1) * 1000.0 / Run(g, count).frameMs;
+    return r;
+}
+
+// The DLL's path with the shown frames measured (XeFG_Dx12::DynamicCount): each call reads the totals of the presents
+// made before it, `current` is the count of the last call's answer, and XeFG applies a count one frame later than
+// that and then shows exactly count + 1 frames per present.
+static Result SimMeasured(const Game& g, double targetFps, int maxCount, int startCount, int rounding, int minCount,
+                          int lateFrames = 1, double jitter = 0.0, double seconds = 120.0)
+{
+    unsigned int seed = 12345u;
+    XeFG_DynamicCount dc;
+    xefg::ShownPerFrame shownPerFrame;
+    std::atomic<uint64_t> totals { 0 };
+    int shownCount = -1;
+    std::vector<int> answers(lateFrames + 1, startCount); // the last answers, newest first
+    double now = 0.0;
+    Result r;
+
+    while (now < seconds * 1000.0)
+    {
+        const int current = answers[0];
+        const int applied = answers[lateFrames];
+        Game frameGame = g;
+
+        if (jitter > 0.0)
+        {
+            seed = seed * 1103515245u + 12345u;
+            frameGame.workMs *= 1.0 + jitter * (((seed >> 16) & 0x7fff) / 16383.5 - 1.0);
+        }
+
+        const auto f = Run(frameGame, applied);
+        now += f.frameMs;
+
+        if (current != shownCount)
+        {
+            shownPerFrame.Restart();
+            shownCount = current;
+        }
+
+        shownPerFrame.Update(totals.load());
+
+        const int next = dc.Update({ now, f.frameMs, f.waitMs, targetFps, 0.0, 0.0, maxCount, current, rounding, minCount,
+                                     shownPerFrame.Value(), shownPerFrame.Sample() });
+
+        if (next != current && now >= seconds * 500.0)
+            ++r.changesLate;
+
+        xefg::AddShownPresent(totals, (uint32_t) (applied + 1));
+        answers.insert(answers.begin(), next);
+        answers.pop_back();
+    }
+
+    r.count = answers[0];
     return r;
 }
 
@@ -230,6 +287,128 @@ int main()
         Check(clamped.count == 3 && clamped.presented >= 120.0 * 0.97,
               "clamped: 4X, the lowest that reaches the refresh rate");
         Check(clamped.changesLate <= 2, "clamped: settles");
+    }
+
+    std::printf("Measured shown frames:\n");
+    {
+        // A tester's Forza Motorsport log: 6X asked for, 1.4 frames shown per real frame. The estimate counts the shown
+        // frames, not count x real.
+        XeFG_DynamicCount dc;
+        dc.Update({ 1000.0, 10.0, 0.0, 168.0, 0.0, 0.0, 5, 5, 1, 0, 1.4 });
+        Check(std::abs(dc.PresentedFps() - 140.0) < 0.5, "Dynamic MFG: presented rate from the shown frames");
+
+        XeFG_DynamicCount nominal;
+        nominal.Update({ 1000.0, 10.0, 0.0, 168.0, 0.0, 0.0, 5, 5, 1, 0 });
+        Check(std::abs(nominal.PresentedFps() - 600.0) < 0.5, "Dynamic MFG: nothing measured, count x real");
+
+        XeFG_DynamicCount over;
+        over.Update({ 1000.0, 10.0, 0.0, 168.0, 0.0, 0.0, 5, 1, 1, 0, 9.0 });
+        Check(std::abs(over.PresentedFps() - 200.0) < 0.5, "Dynamic MFG: never above what the count asks for");
+
+        XeFG_DynamicCap cap;
+        cap.Update({ 1000.0, 10.0, 0.0, 168.0, 5, 5, 1.4 });
+        Check(std::abs(cap.PresentedFps() - 140.0) < 0.5, "cap: presented rate from the shown frames");
+
+        constexpr int kPresentBits = (int) xefg::kShownPresentBits;
+        const auto pack = [](uint64_t frames, uint64_t presents) { return (frames << kPresentBits) | presents; };
+
+        xefg::ShownPerFrame shown;
+        Check(shown.Value() == 0.0, "no present seen: not known");
+        shown.Update(pack(0, 0));
+        Check(shown.Value() == 0.0 && shown.Sample() < 0.0, "the first call only takes the baselines");
+        shown.Update(pack(0, 0));
+        Check(shown.Value() == 0.0, "no change: not known");
+        shown.Restart();
+        for (uint64_t frame = 1; frame <= 50; ++frame)
+            shown.Update(pack(frame * 6, frame));
+        Check(std::abs(shown.Value() - 6.0) < 1e-6, "6 shown per present");
+        for (uint64_t frame = 51; frame <= 250; ++frame)
+            shown.Update(pack(300 + (frame - 50) * 1, frame));
+        Check(std::abs(shown.Value() - 1.0) < 0.01, "follows the shown frames down to 1");
+
+        // The first samples after a restart are not used (XeFG applies a count a frame late)
+        shown.Restart();
+        Check(shown.Value() == 0.0, "restarted");
+        shown.Update(pack(500, 251));
+        shown.Update(pack(503, 252));
+        Check(shown.Value() == 0.0 && shown.Sample() < 0.0, "the first 2 samples after a restart are skipped");
+        shown.Update(pack(506, 253));
+        Check(shown.Value() == 3.0 && shown.Sample() == 3.0, "the next one is the value");
+
+        // A stall: presents that sent nothing pull the value down (they are counted, not dropped)
+        for (uint64_t frame = 254; frame < 274; ++frame)
+            shown.Update(pack(506, frame));
+        Check(shown.Value() > 0.0 && shown.Value() < 0.5, "a run of 0-frame presents lowers the value");
+
+        // New baselines after Dynamic was off: the totals moved on without us
+        shown.Rebase();
+        shown.Update(pack(900000, 90000));
+        Check(shown.Value() == 0.0 && shown.Sample() < 0.0, "rebased: the jump in the totals is not a sample");
+        shown.Update(pack(900000 + 4 * 3, 90003));
+        shown.Update(pack(900000 + 4 * 6, 90006));
+        shown.Update(pack(900000 + 4 * 7, 90007));
+        Check(shown.Value() == 4.0, "rebased: counts from the baselines");
+
+        // Both totals in one word, wrapping: presents past 24 bits, differences still right
+        std::atomic<uint64_t> totals { pack(77, xefg::kShownPresentMask) };
+        xefg::ShownPerFrame wrap;
+        wrap.Update(totals.load());
+        wrap.Restart();
+        xefg::AddShownPresent(totals, 5);
+        xefg::AddShownPresent(totals, 5);
+        xefg::AddShownPresent(totals, 5);
+        wrap.Update(totals.load());
+        Check(wrap.Value() == 0.0, "the wrap is not a sample");
+        xefg::AddShownPresent(totals, 7);
+        wrap.Update(totals.load());
+        Check(wrap.Value() == 0.0 && wrap.Sample() < 0.0, "skipped sample across the wrap");
+        xefg::AddShownPresent(totals, 7);
+        wrap.Update(totals.load());
+        Check(wrap.Value() == 7.0, "7 per present across the wrap of the presents");
+        Check((totals.load() >> kPresentBits) == 77 + 15 + 7 + 7 && (totals.load() & xefg::kShownPresentMask) == 4,
+              "the frames did not take the presents' carry");
+    }
+
+    std::printf("Dynamic MFG with measured shown frames, in the DLL's call order:\n");
+    {
+        // XeFG shows exactly count + 1 per present, 0 to 2 frames after the count was set. An up step must not be judged
+        // by the presents made at the old count (it read as no gain and was undone, flipping 5X/6X). Without noise
+        // the measured path must end exactly where the nominal one does; with noise a case near a band edge may tip
+        // either way (4 of 4050), where the stale first sample flipped 31.
+        int cases = 0;
+        int different = 0;
+        int differentSteady = 0;
+        const double works[] = { 12.0, 15.0, 20.0, 25.0, 30.0 };
+        const double gens[] = { 0.3, 0.5, 1.0 };
+        const double targets[] = { 72.0, 90.0, 116.0, 144.0, 240.0 };
+
+        for (const double work : works)
+            for (const double gen : gens)
+                for (const double target : targets)
+                    for (int rounding = 0; rounding <= 2; ++rounding)
+                        for (const int start : { 1, 3, 5 })
+                            for (const int late : { 0, 1, 2 })
+                                for (const double jitter : { 0.0, 0.1 })
+                            {
+                                const Game g { work, gen, 1.0, 0.0 };
+                                const auto nominal = SimCount(g, target, 5, start, rounding, 0, false, jitter);
+                                const auto measured = SimMeasured(g, target, 5, start, rounding, 0, late, jitter);
+                                ++cases;
+                                const bool differs =
+                                    nominal.count != measured.count || nominal.changesLate != measured.changesLate;
+                                different += differs;
+                                differentSteady += differs && jitter == 0.0;
+                            }
+
+        std::printf("    %d cases, %d where measured differs from nominal (%d without noise)\n", cases, different,
+                    differentSteady);
+        Check(differentSteady == 0, "measured shown frames reach the same count as the nominal, with the same changes");
+        Check(different <= 8, "with noise: no more than a few cases tip the other way");
+
+        // 40 fps real, 116 target: 3X is nearest; from 2X the up step to 3X has to stand
+        const Game g { 25.0, 0.5, 1.0, 0.0 };
+        const auto up = SimMeasured(g, 116.0, 5, 1, 1, 0);
+        Check(up.count == 2 && up.changesLate == 0, "an up step on measured values stands");
     }
 
     std::printf(failures == 0 ? "xefg_dynamic_count_smoke: PASS\n" : "xefg_dynamic_count_smoke: FAIL (%d)\n", failures);

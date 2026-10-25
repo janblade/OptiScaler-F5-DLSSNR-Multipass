@@ -49,7 +49,7 @@ NR runs only with Enable Neural Rendering on. Changes apply at once.
 
 Not for a game that calls an upscaler of its own: while it does, only Off can be chosen, and a mode already on stands aside.
 
-FG only (game's upscaler), Vulkan games only: the reverse, for a game that calls DLSS, FSR or XeSS of its own. Frame generation runs from that call, with the game's own motion and depth; no motion is estimated. The game's upscaler runs through a D3D12 copy of it (DLSS on D3D12 where DLSS can run, FSR otherwise), chosen for you; leaving the mode puts your upscaler back.
+A Vulkan game that calls DLSS, FSR or XeSS of its own is not an Optical F5Low mode: choose the Vulkan route "Bridge, game's upscaler" on the Frame Generation page instead. Frame generation runs from that call, with the game's own motion and depth; no motion is estimated. The game's upscaler runs through a D3D12 copy of it (DLSS on D3D12 where DLSS can run, FSR otherwise), chosen for you; switching back to "Native swapchain" puts your upscaler back. Choosing NR only or NR + frame generation on this page turns the route off; Off leaves it on.
 
 D3D11, D3D12 and Vulkan games. On Vulkan, frame generation needs the Frame Generation input (OptiFG, Upscaler) and an output set when the game starts; the mode itself can be switched on later.
 
@@ -106,6 +106,37 @@ Each sets Upscale Mode, Upscale Method, Model resolution and Final Image Composi
 It also sets NR Pass at: to Before Super Resolution. Anything not listed here is left as you have it.
 
 The green button is the tier currently in effect; changing NR Pass at:, Upscale Mode, Upscale Method, Model resolution or Final Image Composition clears it.
+
+A tier leaves Upscale Mode on Superior Scaling if you selected it, and still counts as in effect then.
+
+## NR Profiles
+
+Saves this game's Neural Rendering settings under a name and loads them back. The first card of Status & Presets,
+under Status.
+
+A profile is made to be shared for one game. It holds how NR looks and what it costs (everything the preset rows set,
+the passes and their overrides, colour, output, input style, detail reuse, the LUT) and the game's own settings: the
+exposure source and its trims and calibration points, Colour Encoding, NR Only (Finished Picture), Optical F5Low and
+Compress screen edges. It leaves out what is yours or only for this session: Enable Neural Rendering, the toggle key,
+the display's paper white, Compare and the debug views, and the diagnostic switches.
+
+- Files are `OptiScaler\NRProfiles\<name>.ini`. To share one, send the file; the other player puts it in the same
+  folder of their install and presses Rescan.
+- Load sets every setting the profile holds. One the file does not have goes to its default, so a profile gives the
+  same picture whatever was set before.
+- A profile records the game it was saved in. Picking one saved in another game shows that in amber: its exposure and
+  Optical F5Low settings are for that game.
+- The LUT is saved by its file name only and loaded only from this game's `OptiScaler\LUTs`. If the file is not there,
+  the LUT is turned off and the menu says so.
+- Some Optical F5Low settings take effect after a restart; after a load that changed them the menu links to the Optical
+  F5Low page, which says which.
+- Load is green when the profile's settings are the ones in effect; changing one of them clears it.
+- Overwrite (the picked profile) and Delete ask first. Names can use letters, digits, spaces, `-`, `_` and `.`; a
+  file whose name has other characters, that is not an NR profile, or that a newer build made, is not listed.
+- A profile is a separate file: Save Settings at the bottom of the menu still saves this game's OptiScaler.ini.
+
+Revert NR to saved shows when the NR settings a profile holds have changed since the game started or the last Save
+Settings, and puts them back. The settings a profile leaves out are not touched.
 
 ## Follow the game's exposure
 
@@ -218,6 +249,12 @@ The model averages its input 2x2 before its main network runs, so that network a
 When NR runs after SR -- Apply before SR off, or Ray Reconstruction, which always runs it after -- derive the working scale from the render:output ratio the upscaler itself already reconstructed detail at, instead of the slider above.
 
 That output already reconstructed detail at that ratio, so NR running at the same reduced scale costs nothing extra to tune for. No effect while NR runs before SR -- the slider applies as usual.
+
+## Upscale Mode: Superior Scaling
+
+An Upscale Mode of its own (NR Output). Below 100% Model resolution it shrinks the picture with an Area filter, shapes NR's change by frequency between passes and at the end, and runs a private NVIDIA DLSS (DLAA) on that change to keep it steady over time. Once selected it also works at 100% while Compress screen edges shrinks the model's input. **DLSS to temporally stabilize NR** picks that private DLSS's preset: A (faster) or K (steadier in motion); if the runtime does not offer it, its default preset is used.
+
+It needs DirectX 12 (or a DirectX 12 bridge), the game's depth and motion, and NVIDIA DLSS through NGX. Where any of these is missing (Vulkan, a non-NVIDIA card, the vendor-neutral port) Matched residual runs instead and the menu says why; select Superior Scaling again to retry. Upscale Method has no effect with it. Details: [Superior-Scaling-port.md](Superior-Scaling-port.md).
 
 ## Final Image Composition
 

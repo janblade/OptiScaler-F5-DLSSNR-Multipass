@@ -6,7 +6,8 @@
 #include "framegen/IFGFeature_Dx12.h"
 #include "framegen/FGFollowGameRule.h"
 #include "framegen/FGOutput.h"
-#include <inputs/FG/Streamline_Inputs_Dx12.h>
+#include "framegen/IFGFeature_Vk.h"
+#include <inputs/FG/Streamline_Inputs.h>
 #include <inputs/FG/Streamline_Inputs_Sl1_Dx12.h>
 
 #include <set>
@@ -156,6 +157,9 @@ class State
     // Reseting on creation of new feature
     std::optional<bool> autoExposure;
 
+    // Passed through from the game's FFX create flags
+    bool dynamicResolution = false;
+
     // FG
     uint64_t fgLastFrame = 0;
 
@@ -180,7 +184,7 @@ class State
     FGNvngxReplacement activeFgNvngx = FGNvngxReplacement::None;
 
     // Streamline FG inputs
-    Sl_Inputs_Dx12 slFGInputs = {};
+    Sl_Inputs slFGInputs = {};
     Sl1_Inputs_Dx12 s_sl1FGInputs {};
 
     // OptiFG
@@ -230,6 +234,14 @@ class State
     HMODULE optiSlPCL = nullptr;
     HMODULE optiDLSSG = nullptr;
 
+    // One of the modules of OptiScaler's own Streamline (DLSSG output)
+    bool IsOptiStreamlineModule(HMODULE module) const
+    {
+        return module != nullptr && optiSlInterposer != nullptr &&
+               (module == optiSlInterposer || module == optiSlCommon || module == optiSlDLSSG ||
+                module == optiSlReflex || module == optiSlPCL || module == optiDLSSG);
+    }
+
     // NGX OTA
     std::string NGX_OTA_Dlss;
     std::string NGX_OTA_Dlssd;
@@ -256,6 +268,10 @@ class State
     // Vulkan presents (the vkQueuePresentKHR hook, installed with the overlay). frameCount counts DXGI presents only.
     std::atomic<UINT64> vulkanPresentCount { 0 };
     bool vkAntiLagSupported = false;
+
+    // AMD driver flip metering
+    bool amdFlipMeterCreated = false;
+    uint32_t amdFlipMeterMode = 0;
 
     // for realtime changes
     ankerl::unordered_dense::map<unsigned int, bool> changeBackend;
@@ -342,6 +358,10 @@ class State
     // How long the last present to the FG swapchain waited: the present itself (V-Sync, a full queue) and OptiScaler's
     // limiter, not the low latency sleep after it (InputCommon::take_sleep_ms). For XeFG's Dynamic MFG.
     std::atomic<double> lastFGPresentMs = 0.0;
+    // Frames XeFG sent to be shown, and the game presents that sent them (xefgSwapChainGetLastPresentStatus), running
+    // totals packed in one word (framegen/xefg/XeFG_ShownRate.h). For XeFG's Dynamic MFG: the presented frame rate it
+    // follows is the one XeFG sends, not count x real.
+    std::atomic<uint64_t> xefgShown = 0;
     double presentFrameTime = 0.0;
     std::mutex frameTimeMutex;
 
@@ -377,6 +397,7 @@ class State
 
     std::atomic_bool isShuttingDown { false };
     std::set<PVOID> modulesToFree;
+    std::mutex modulesToFreeMutex;
 
     // menu warnings
     bool fgSettingsChanged = false;
@@ -389,6 +410,7 @@ class State
 
     IFeature* currentFeature = nullptr;
     IFGFeature_Dx12* currentFG = nullptr;
+    IFGFeature_Vk* currentVkFG = nullptr;
     IDXGISwapChain* currentSwapchain = nullptr;
     IDXGISwapChain* currentWrappedSwapchain = nullptr;
     IDXGISwapChain* currentRealSwapchain = nullptr;
@@ -401,6 +423,20 @@ class State
 
     std::vector<ID3D12Device*> d3d12Devices;
     std::vector<ID3D11Device*> d3d11Devices;
+
+    // The FG output of whichever API the game uses
+    IFGFeature* CurrentFG() const
+    {
+        if (currentFG != nullptr)
+            return currentFG;
+
+        return currentVkFG;
+    }
+
+    bool FGSwapchainExists() const
+    {
+        return currentFGSwapchain != nullptr || (currentVkFG != nullptr && currentVkFG->HasSwapchain());
+    }
 
     static UINT GetOwner()
     {

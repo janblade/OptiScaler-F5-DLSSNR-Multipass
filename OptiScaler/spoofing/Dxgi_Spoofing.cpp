@@ -160,7 +160,11 @@ HRESULT DxgiSpoofing::hkGetDesc1(IDXGIAdapter1* This, DXGI_ADAPTER_DESC1* pDesc)
         auto targetDeviceIdMatches = !Config::Instance()->TargetDeviceId.has_value() ||
                                      Config::Instance()->TargetDeviceId.value() == pDesc->DeviceId;
 
-        if (pDesc->VendorId != VendorId::Microsoft && targetVendorIdMatches && targetDeviceIdMatches &&
+        // amdxcffx64 needs to see the real AMD vendor id
+        const bool isFfxDriver = caller.starts_with("amdxcffx64");
+        const bool keepRealAmd = isFfxDriver && pDesc->VendorId == VendorId::AMD;
+
+        if (pDesc->VendorId != VendorId::Microsoft && targetVendorIdMatches && targetDeviceIdMatches && !keepRealAmd &&
             Config::Instance()->DxgiSpoofing.value_or_default() && !SkipSpoofing())
         {
             pDesc->VendorId = Config::Instance()->SpoofedVendorId.value_or_default();
@@ -175,11 +179,11 @@ HRESULT DxgiSpoofing::hkGetDesc1(IDXGIAdapter1* This, DXGI_ADAPTER_DESC1* pDesc)
 #endif
         }
 
-        if (caller.starts_with("amdxcffx64") || caller.starts_with("amd_fidelityfx_upscaler_dx12"))
+        if (isFfxDriver || caller.starts_with("amd_fidelityfx_upscaler_dx12"))
         {
             const auto primaryGpu = IdentifyGpu::getPrimaryGpu();
 
-            if (primaryGpu.fsr4ForcedSupport && primaryGpu.fsr4Support == FSR4Support::INT8)
+            if (primaryGpu.fsr4ForcedSupport && IsFsr4Int8(primaryGpu.fsr4Support))
             {
                 LOG_TRACE("Spoofing vendor AMD for {}", caller);
                 pDesc->VendorId = VendorId::AMD;

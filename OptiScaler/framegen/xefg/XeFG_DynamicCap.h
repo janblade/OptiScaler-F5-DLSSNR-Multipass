@@ -31,6 +31,8 @@ class XeFG_DynamicCap
         double targetFps = 0.0; // presented frames per second wanted
         int maxCount = 1;       // most interpolated frames allowed
         int currentCount = 1;   // interpolated frames in use
+        double shownPerFrame = 0.0; // frames shown per real frame, measured and smoothed; 0: not known (count + 1)
+        double rawShownPerFrame = -1.0; // this frame's own measure, for the check windows; < 0: none
     };
 
     enum class Reason
@@ -69,7 +71,10 @@ class XeFG_DynamicCap
             _workMs += kAlpha * (work - _workMs);
         }
 
-        const double presented = 1000.0 * (count + 1) / _frameMs;
+        // Shown per real frame: measured, never above what the count asks for
+        const double shown = s.shownPerFrame > 0.0 ? std::min(s.shownPerFrame, count + 1.0) : count + 1.0;
+        const double presented = 1000.0 * shown / _frameMs;
+        const double rawShown = s.rawShownPerFrame >= 0.0 ? std::min(s.rawShownPerFrame, count + 1.0) : shown;
         const double reachable = 1000.0 / _workMs; // real frames per second without the limiter's sleep
         const double sinceChange = s.nowMs - _lastChangeMs;
         _presented = presented;
@@ -83,11 +88,12 @@ class XeFG_DynamicCap
             if (++_checkFrames > kCheckSkipFrames)
             {
                 _checkSumMs += s.frameMs;
+                _checkShownSum += rawShown;
                 ++_checkCount;
             }
 
             if (_checkCount >= kCheckMinFrames && sinceChange >= kCheckMinMs &&
-                1000.0 * (count + 1) * _checkCount / _checkSumMs < s.targetFps * 0.93 && count < maxCount)
+                1000.0 * _checkShownSum / _checkSumMs < s.targetFps * 0.93 && count < maxCount)
             {
                 _backoffMs = std::min(_backoffMs * 2.0, kMaxBackoffMs);
                 _downBlockedUntilMs = s.nowMs + _backoffMs;
@@ -100,7 +106,7 @@ class XeFG_DynamicCap
 
             // At the end it has to hold the rate Up asks for, else the next Up takes it back and it is tried again
             // and again: undone, so the back-off grows.
-            if (_checkCount > 0 && 1000.0 * (count + 1) * _checkCount / _checkSumMs < s.targetFps * 0.97 &&
+            if (_checkCount > 0 && 1000.0 * _checkShownSum / _checkSumMs < s.targetFps * 0.97 &&
                 count < maxCount)
             {
                 _backoffMs = std::min(_backoffMs * 2.0, kMaxBackoffMs);
@@ -215,6 +221,7 @@ class XeFG_DynamicCap
         _checkFrames = 0;
         _checkCount = 0;
         _checkSumMs = 0.0;
+        _checkShownSum = 0.0;
 
         // The real frame time changes with the count, start the averages over.
         _frameMs = 0.0;
@@ -232,6 +239,7 @@ class XeFG_DynamicCap
     int _checkFrames = 0; // frames since a step down
     int _checkCount = 0;  // of them averaged
     double _checkSumMs = 0.0;
+    double _checkShownSum = 0.0; // frames shown over them
     double _downBlockedUntilMs = 0.0;
     double _backoffMs = kMinBackoffMs;
     double _downReachable = 0.0;   // reachable rate a step down was taken on

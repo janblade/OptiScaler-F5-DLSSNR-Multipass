@@ -14,7 +14,13 @@
 
 #include <magic_enum.hpp>
 
-static uint32_t XellFrameId();
+struct XellFrameIdAndSource
+{
+    uint32_t id = 0;
+    xefg::XellIdSource source = xefg::XellIdSource::None;
+};
+
+static XellFrameIdAndSource XellFrameId();
 
 #include <DirectXMath.h>
 
@@ -971,13 +977,13 @@ bool XeFG_Dx12::Dispatch()
     constData.motionVectorScaleX = _mvScaleX[fIndex];
     constData.motionVectorScaleY = _mvScaleY[fIndex];
 
-    // The frame's XeLL ID (FrameIdFor): Present Id and Present Start Id (XeLL's PRESENT_START) match while XeLL is fed
+    // The frame's ID (FrameIdFor): Present Id and Present Start Id (XeLL's PRESENT_START) match while our XeLL is followed
     const auto framePick = FrameIdFor(willDispatchFrame);
     const auto frameId = framePick.id;
 
-    // An XeLL ID below the last one followed (the game restarted its IDs): no interpolation across it
+    // A followed XeLL ID that is not XeFG's last + 1 (a pause, or our XeLL restarted its IDs): no interpolation across it
     if (!Config::Instance()->FGSkipReset.value_or_default())
-        constData.resetHistory = _reset[fIndex] || framePick.steppedBack;
+        constData.resetHistory = _reset[fIndex] || framePick.resetHistory;
     else
         constData.resetHistory = false;
 
@@ -999,7 +1005,7 @@ bool XeFG_Dx12::Dispatch()
     LOG_DEBUG("Reset: {}, Opti FT: {}, Source FT: {}, Set FT: {}, Opti Id: {}, Present Id: {}, Reflex Id: {}, XeLL Id "
               "now: {}, Present Start Id: {}",
               constData.resetHistory, constData.frameRenderTime, _ftDelta[fIndex], constData.frameRenderTime,
-              _frameCount, frameId, State::Instance().reflexFrameId, XellFrameId(),
+              _frameCount, frameId, State::Instance().reflexFrameId, XellFrameId().id,
               ReflexHooks::lastMarkerFrameId(PRESENT_START));
 
     auto result = XeFGProxy::TagFrameConstants()(_swapChainContext, frameId, &constData);
@@ -1105,6 +1111,17 @@ int XeFG_Dx12::DynamicCount(int maxCount)
     const int kept = _framesToInterpolate >= 1 ? std::min(_framesToInterpolate, maxCount) : maxCount;
     const int current = _generationOff ? 0 : kept;
 
+    // Shown per real frame, measured (the count asked for is not always what XeFG shows): started over at a new count
+    if (current != _shownCount)
+    {
+        _shownPerFrame.Restart();
+        _shownCount = current;
+    }
+
+    _shownPerFrame.Update(state.xefgShown.load());
+    const double shownPerFrame = _shownPerFrame.Value();
+    const double rawShownPerFrame = _shownPerFrame.Sample();
+
     // What the game waited in OptiScaler: its low latency sleep, the present and OptiScaler's limiter (inside the
     // present's time). The cap controller takes the sleeps alone, its probing covers a present held by V-Sync.
     double sleepMs = InputCommon::take_sleep_ms();
@@ -1136,7 +1153,7 @@ int XeFG_Dx12::DynamicCount(int maxCount)
         if (!_dynamicCapActive)
             _dynamicCap.Reset();
 
-        count = _dynamicCap.Update({ now, frameMs, sleepMs + limiterMs, target, maxCount, kept });
+        count = _dynamicCap.Update({ now, frameMs, sleepMs + limiterMs, target, maxCount, kept, shownPerFrame, rawShownPerFrame });
 
         if (count != current || now - _dynamicLogMs >= 5000.0)
         {
@@ -1165,7 +1182,7 @@ int XeFG_Dx12::DynamicCount(int maxCount)
             _dynamicCount.Restart();
 
         count = _dynamicCount.Update({ now, frameMs, waitMs, target, refresh, config->FramerateLimit.value_or_default(),
-                                       maxCount, current, rounding, minCount });
+                                       maxCount, current, rounding, minCount, shownPerFrame, rawShownPerFrame });
 
         if (count != current || now - _dynamicLogMs >= 5000.0)
         {
@@ -1205,6 +1222,8 @@ void XeFG_Dx12::StopDynamic()
     _dynamicCount.Reset();
     _dynamicCap.Reset();
     _dynamicCapActive = false;
+    _shownPerFrame.Rebase();
+    _shownCount = -1;
     State::Instance().xefgDynamicCapFps = 0.0f;
 
     if (_generationOff)
@@ -1598,14 +1617,17 @@ bool XeFG_Dx12::Present()
     return Dispatch();
 }
 
-// XeLL's frame ID of the frame being rendered: ours while Optical F5Low's low latency feeds XeFG's XeLL, else the
-// game's when its own Reflex feeds XeLL, else 0 (XeFG numbers frames itself)
-static uint32_t XellFrameId()
+// XeLL's frame ID of the frame being rendered and whose it is: ours while Optical F5Low's low latency feeds XeFG's XeLL,
+// else the game's when its own Reflex feeds XeLL, else 0 (XeFG numbers frames itself)
+static XellFrameIdAndSource XellFrameId()
 {
     if (const auto ours = native::lowlatency::FrameIdForFrameGeneration(); ours != 0)
-        return ours;
+        return { ours, xefg::XellIdSource::Ours };
 
-    return ReflexHooks::gameXellFrameId();
+    if (const auto game = ReflexHooks::gameXellFrameId(); game != 0)
+        return { game, xefg::XellIdSource::Game };
+
+    return {};
 }
 
 // Picked at the frame's first use (its first tagged resource, else its Dispatch) and kept for all of the frame's tags
@@ -1615,25 +1637,54 @@ xefg::FrameIdPick XeFG_Dx12::FrameIdFor(UINT64 fgFrame)
     std::scoped_lock lock(_frameIdMutex);
 
     const auto lastFollowed = _frameIds.LastFollowedXell();
-    const auto xellId = XellFrameId();
-    const auto pick = _frameIds.For(fgFrame, xellId);
+    const auto lastId = _frameIds.LastId();
+    const auto xell = XellFrameId();
+    const bool canReset = !Config::Instance()->FGSkipReset.value_or_default();
+    const auto pick = _frameIds.For(fgFrame, xell.id, xell.source, _reset[fgFrame % BUFFER_COUNT] != 0, canReset);
 
     if (!pick.picked)
         return pick;
 
-    if (_frameIdFollowsXell != pick.followsXell && (xellId != 0 || _frameIdFollowsXell.has_value()))
+    if (pick.followsXell)
     {
-        if (pick.followsXell)
-            LOG_INFO("XeFG frame IDs follow XeLL's (from {})", pick.id);
-        else
-            LOG_INFO("XeFG frame ID {} numbered on its own (XeLL's: {})", pick.id, xellId);
+        if (_frameIdMode != FrameIdMode::FollowsOurs)
+            LOG_INFO("XeFG frame IDs follow our XeLL's (from {})", pick.id);
+
+        _frameIdMode = FrameIdMode::FollowsOurs;
     }
-    else if (pick.steppedBack)
+    else if (pick.ownReason == xefg::OwnReason::Jumped)
     {
-        LOG_INFO("XeFG frame IDs step back to XeLL's {} (from {}), history reset", pick.id, lastFollowed);
+        if (_frameIdMode != FrameIdMode::OwnAfterJump)
+            LOG_INFO("XeFG frame IDs: own counter, XeLL ID jumped {} -> {} (XeFG last {})", lastFollowed, xell.id,
+                     lastId);
+
+        _frameIdMode = FrameIdMode::OwnAfterJump;
+    }
+    else if (pick.ownReason == xefg::OwnReason::Unusable)
+    {
+        if (_frameIdMode != FrameIdMode::OwnUnusable)
+            LOG_INFO("XeFG frame IDs: own counter, our XeLL ID {} not usable (XeFG last {})", xell.id, lastId);
+
+        _frameIdMode = FrameIdMode::OwnUnusable;
+    }
+    else if (xell.source == xefg::XellIdSource::Game)
+    {
+        if (_frameIdMode != FrameIdMode::OwnForGame)
+            LOG_INFO("XeFG frame IDs: own counter (game Reflex IDs not followed)");
+
+        _frameIdMode = FrameIdMode::OwnForGame;
+    }
+    else
+    {
+        if (_frameIdMode != FrameIdMode::Own)
+            LOG_INFO("XeFG frame IDs: own counter (no XeLL IDs)");
+
+        _frameIdMode = FrameIdMode::Own;
     }
 
-    _frameIdFollowsXell = pick.followsXell;
+    if (pick.resetHistory)
+        LOG_INFO("XeFG frame IDs: XeLL's {} is not XeFG's last {} + 1, history reset", pick.id, lastId);
+
     return pick;
 }
 

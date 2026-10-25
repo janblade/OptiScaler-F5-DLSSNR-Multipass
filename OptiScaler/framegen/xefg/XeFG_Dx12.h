@@ -10,6 +10,7 @@
 #include "XeFG_DynamicCount.h"
 #include "XeFG_DynamicCap.h"
 #include "XeFG_DynamicTarget.h"
+#include "XeFG_ShownRate.h"
 
 #include <xell.h>
 #include <xell_d3d12.h>
@@ -42,6 +43,8 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     bool _dynamicCapActive = false;
     bool _dynamicDrain = true; // the next frame's sleep times reach back before Dynamic ran: dropped
     double _dynamicLogMs = 0.0;
+    xefg::ShownPerFrame _shownPerFrame;
+    int _shownCount = -1; // the count it was measured at (-1: none yet)
     int _refreshRate = 0;
     double _refreshCheckedMs = 0.0;
 
@@ -52,10 +55,20 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     float DisplayRefreshFps(double nowMs);
     float DynamicTargetFps(double nowMs);
 
-    // XeFG's frame ID of each slot's frame (FrameIdFor): XeLL's ID for that frame where one is known
+    // XeFG's frame ID of each slot's frame (FrameIdFor): one more than the last, or our XeLL's ID for that frame while it
+    // rises by 1 too, and where XeFG's history is reset anyway
+    enum class FrameIdMode
+    {
+        Own, // no XeLL ID
+        OwnForGame,
+        OwnAfterJump,
+        OwnUnusable,
+        FollowsOurs
+    };
+
     std::mutex _frameIdMutex;
     xefg::FrameIds<BUFFER_COUNT> _frameIds;
-    std::optional<bool> _frameIdFollowsXell;
+    FrameIdMode _frameIdMode = FrameIdMode::Own;
 
     xefg::FrameIdPick FrameIdFor(UINT64 fgFrame);
 

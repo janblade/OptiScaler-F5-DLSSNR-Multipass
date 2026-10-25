@@ -342,6 +342,10 @@ class State
     // How long the last present to the FG swapchain waited: the present itself (V-Sync, a full queue) and OptiScaler's
     // limiter, not the low latency sleep after it (InputCommon::take_sleep_ms). For XeFG's Dynamic MFG.
     std::atomic<double> lastFGPresentMs = 0.0;
+    // Frames XeFG sent to be shown, and the game presents that sent them (xefgSwapChainGetLastPresentStatus), running
+    // totals packed in one word (framegen/xefg/XeFG_ShownRate.h). For XeFG's Dynamic MFG: the presented frame rate it
+    // follows is the one XeFG sends, not count x real.
+    std::atomic<uint64_t> xefgShown = 0;
     double presentFrameTime = 0.0;
     std::mutex frameTimeMutex;
 

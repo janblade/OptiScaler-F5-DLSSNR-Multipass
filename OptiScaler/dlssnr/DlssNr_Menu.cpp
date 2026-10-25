@@ -1685,20 +1685,28 @@ static std::vector<ProfileEntry> ScanProfileFolder()
     if (!std::filesystem::exists(folder, ec) || ec)
         return found;
 
-    for (const auto& entry : std::filesystem::directory_iterator(folder, ec))
+    // Files in this folder come from anyone: nothing here may throw on the render thread (error_code overloads, and
+    // names read wide in NameFromPath)
+    try
     {
-        if (ec)
-            break;
-        // A link could send a save somewhere else: only plain files are profiles
-        if (!entry.is_regular_file() || entry.is_symlink())
-            continue;
+        for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
+        {
+            // A link could send a save somewhere else: only plain files are profiles
+            std::error_code entryEc;
+            if (!it->is_regular_file(entryEc) || entryEc || DlssNrProfiles::IsLink(it->path()))
+                continue;
 
-        const auto name = DlssNrProfiles::NameFromPath(entry.path());
-        if (!name)
-            continue;
+            const auto name = DlssNrProfiles::NameFromPath(it->path());
+            if (!name)
+                continue;
 
-        if (auto file = Config::ReadDlssNrProfile(entry.path()))
-            found.push_back({ *name, entry.path(), std::move(*file) });
+            if (auto file = Config::ReadDlssNrProfile(it->path()))
+                found.push_back({ *name, it->path(), std::move(*file) });
+        }
+    }
+    catch (const std::exception& e)
+    {
+        LOG_WARN("NR profiles: could not list the folder: {}", e.what());
     }
 
     std::sort(found.begin(), found.end(),
@@ -1743,7 +1751,14 @@ static void RenderProfilesSection(Config* config)
     static ULONGLONG compared = 0;
     static Section now;
     static Section saved;
+    static Section resultSettings; // the settings when the result line was written: it goes once they change
+    static bool resultSettingsPending = false;
     const std::string& exeName = State::Instance().gameExe;
+
+    // A card like the rest of Status & Presets; the scoped header ends it when this function returns
+    auto card = ScopedCollapsingHeader("NR Profiles", ImGuiTreeNodeFlags_DefaultOpen);
+    if (!card.IsHeaderOpen())
+        return;
 
     // Compared at most 4 times a second: a snapshot writes every NR setting into a scratch ini
     if (GetTickCount64() - compared >= 250)
@@ -1751,16 +1766,28 @@ static void RenderProfilesSection(Config* config)
         now = config->DlssNrSnapshot();
         saved = config->SavedDlssNrSection();
         compared = GetTickCount64();
+
+        // "Loaded X ... some need a restart" is about the settings it was written for, not ones changed since
+        if (resultSettingsPending)
+        {
+            resultSettings = now;
+            resultSettingsPending = false;
+        }
+        else if (!result.empty() && !Same(now, resultSettings))
+        {
+            result.clear();
+        }
     }
 
     const auto refresh = [&] { compared = 0; };
-    const auto rescan = [&](const std::string& keep)
+    // By value: the list it may name a profile from is replaced here. NTFS names ignore case, so the match does too.
+    const auto rescan = [&](std::string keep)
     {
         profiles = ScanProfileFolder();
         selected = profiles.empty() ? -1 : 0;
         for (int i = 0; i < (int) profiles.size(); ++i)
         {
-            if (profiles[i].name == keep)
+            if (EqualNoCase(profiles[i].name, keep))
                 selected = i;
         }
     };
@@ -1769,6 +1796,8 @@ static void RenderProfilesSection(Config* config)
         result = std::move(text);
         resultIsError = error;
         resultNative = native;
+        resultSettingsPending = true;
+        refresh();
     };
 
     // Load and revert change many settings at once, like a preset: a drag in flight is dropped, and leaving Finished
@@ -1797,11 +1826,6 @@ static void RenderProfilesSection(Config* config)
         }
         refresh();
     };
-
-    // A card like the rest of Status & Presets; the scoped header ends it when this function returns
-    auto card = ScopedCollapsingHeader("NR Profiles", ImGuiTreeNodeFlags_DefaultOpen);
-    if (!card.IsHeaderOpen())
-        return;
 
     const auto picked = [&]() -> const ProfileEntry*
     { return selected >= 0 && selected < (int) profiles.size() ? &profiles[selected] : nullptr; };
@@ -1867,7 +1891,7 @@ static void RenderProfilesSection(Config* config)
     }
 
     ImGui::SameLine();
-    if (ImGui::Button("Save##nrprofile") && pick)
+    if (ImGui::Button("Overwrite##nrprofile") && pick)
     {
         ask = Ask::Replace;
         askPath = pick->path;
@@ -1918,7 +1942,7 @@ static void RenderProfilesSection(Config* config)
     const float slot = StatusSlotBegin();
     if (ask != Ask::None)
     {
-        ImGui::AlignTextToFramePadding();
+        // Text and SmallButtons only: a frame-padded line would be taller than the slot and move the cards below
         ImGui::Text(ask == Ask::Replace ? "Replace %s with the settings now in effect?" : "Delete %s?",
                     askName.c_str());
         ImGui::SameLine();
@@ -1973,7 +1997,6 @@ static void RenderProfilesSection(Config* config)
     const float unsavedSlot = StatusSlotBegin();
     if (!Same(now, saved))
     {
-        ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("NR settings changed since the game started or the last Save Settings.");
         ImGui::SameLine();
         if (ImGui::SmallButton("Revert NR to saved##nrprofile"))
@@ -2001,7 +2024,12 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
           config->DlssNrNativeFrameGenerationOnly.value_or_default() });
 
     // Each section is a card (ScopedCollapsingHeader, open by default), like the Plugins page
-    if (auto card = ScopedCollapsingHeader("Status", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
+    // Folded, the Status card still leaves the one-line status every other NR page has (Off ... Retry included)
+    if (auto card = ScopedCollapsingHeader("Status", ImGuiTreeNodeFlags_DefaultOpen); !card.IsHeaderOpen())
+    {
+        RenderStatusLine(nr);
+    }
+    else
     {
         RenderRunningStatus(config, nr);
 

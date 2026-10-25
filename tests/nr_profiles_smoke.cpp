@@ -48,6 +48,25 @@ static void Names()
     const auto name = NameFromPath(std::filesystem::path("C:\\x\\NRProfiles\\Soft v1.2.ini"));
     Check(name == std::optional<std::string>("Soft v1.2"), "name read back from a file name");
     Check(!NameFromPath(std::filesystem::path("C:\\x\\NRProfiles\\notes.txt")).has_value(), "non-ini file ignored");
+
+    // A shared file named outside the code page: skipped, never thrown on (path::string() would throw on MSVC)
+    for (const wchar_t* wide : { L"C:\\x\\NRProfiles\\\u041f\u0440\u043e\u0444\u0438\u043b\u044c.ini",
+                                 L"C:\\x\\NRProfiles\\\u65e5\u672c sharp.ini", L"C:\\x\\NRProfiles\\soft.\u0456ni" })
+    {
+        bool threw = false;
+        std::optional<std::string> got;
+        try
+        {
+            got = NameFromPath(std::filesystem::path(wide));
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        Check(!threw && !got.has_value(), "a non-ASCII file name is skipped without throwing");
+    }
+    Check(AsciiName(L"Soft v1") == std::optional<std::string>("Soft v1") && !AsciiName(L"caf\u00e9").has_value(),
+          "AsciiName keeps ASCII only");
 }
 
 static void Keys()
@@ -122,6 +141,35 @@ static void Coverage(const char* configCpp)
         Check(clearedKeys.count(std::string(key)) == 1, "kept key cleared before a load: " + std::string(key));
     for (const auto& key : clearedKeys)
         Check(IsKept(key), "cleared key is a kept key: " + key);
+
+    // Each clear-table key is paired with the field ReadDlssNr fills from that key, and ReadDlssNr reads every kept
+    // key: a mis-paired row would clear one setting and leave another to keep its old value.
+    const size_t readBegin = text.find("void Config::ReadDlssNr()");
+    const size_t readEnd = text.find("static void WriteDlssNr", readBegin);
+    Check(readBegin != std::string::npos && readEnd != std::string::npos, "found ReadDlssNr");
+    if (readBegin == std::string::npos || readEnd == std::string::npos)
+        return;
+    const std::string readBody = text.substr(readBegin, readEnd - readBegin);
+
+    // Read through a local first, then set (the input style card) or through readEnum
+    const std::set<std::string> viaLocal = { "InputFlatten", "InputFlattenStrength", "InputStructureHint",
+                                             "InputStructureStrength", "ScalingDownscaler" };
+
+    const std::regex pair(R"re(NR_PROFILE_FIELD\("([A-Za-z0-9]+)",\s*([A-Za-z0-9_]+)\))re");
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), pair); it != std::sregex_iterator(); ++it)
+    {
+        const std::string key = (*it)[1].str();
+        const std::string field = (*it)[2].str();
+        const std::string readsKey = R"(read\w*(<\w+>)?\("DlssNr",\s*")" + key + "\"";
+
+        Check(std::regex_search(readBody, std::regex(readsKey)), "ReadDlssNr reads kept key " + key);
+
+        const bool paired =
+            viaLocal.count(key)
+                ? readBody.find(field + ".set_from_config(") != std::string::npos
+                : std::regex_search(readBody, std::regex(field + R"(\.set_from_config\(\s*)" + readsKey));
+        Check(paired, "clear-table row " + key + " -> " + field + " is the field ReadDlssNr fills from it");
+    }
 }
 
 int main(int argc, char** argv)

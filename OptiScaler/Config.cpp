@@ -933,6 +933,8 @@ bool Config::Reload(std::filesystem::path iniPath)
         return true;
     }
 
+    // No ini: the saved NR settings are the defaults, else they read as changed until the first Save Settings
+    savedDlssNr = DlssNrSnapshot();
     return false;
 }
 
@@ -1544,18 +1546,28 @@ DlssNrProfiles::Section Config::DlssNrSnapshot()
 // writer gives for the same value (0.5 against 0.500000, a default written out), and would read as a change.
 DlssNrProfiles::Section Config::SavedDlssNrSection() { return savedDlssNr; }
 
-// A profile may come from someone else: one larger than any real profile is not read at all
+// A profile may come from someone else, so only a real one is read: not larger than any real profile, not a link, with
+// a [Profile] section of a version this build knows, and at least one kept setting. Anything else would silently put
+// every setting back to its default.
 std::optional<DlssNrProfiles::File> Config::ReadDlssNrProfile(const std::filesystem::path& path)
 {
     std::error_code ec;
     const auto size = std::filesystem::file_size(path, ec);
-    if (ec || size > DlssNrProfiles::kMaxFileBytes)
+    if (ec || size > DlssNrProfiles::kMaxFileBytes || DlssNrProfiles::IsLink(path))
         return std::nullopt;
 
     CSimpleIniA file;
     if (file.LoadFile(path.c_str()) != SI_OK)
         return std::nullopt;
-    return DlssNrProfiles::File { KeptSection(file), file.GetValue("Profile", "SavedFrom", "") };
+
+    const char* version = file.GetValue("Profile", "Version", nullptr);
+    if (version == nullptr || std::atoi(version) < 1 || std::atoi(version) > DlssNrProfiles::kFileVersion)
+        return std::nullopt;
+
+    DlssNrProfiles::File profile { KeptSection(file), file.GetValue("Profile", "SavedFrom", "") };
+    if (profile.settings.empty())
+        return std::nullopt;
+    return profile;
 }
 
 bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& error)
@@ -1585,6 +1597,13 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
         return false;
     }
 
+    // A link (or junction) as the folder or the file would send the save somewhere else
+    if (DlssNrProfiles::IsLink(path.parent_path()) || DlssNrProfiles::IsLink(path))
+    {
+        error = "NRProfiles or the file is a link; not saved.";
+        return false;
+    }
+
     if (out.SaveFile(path.c_str()) < 0)
     {
         error = "Could not write the file.";
@@ -1597,26 +1616,39 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
 
 // A profile's LUT is looked for by its file name in this game's OptiScaler\LUTs only, never at a folder the file names:
 // a shared profile could otherwise point the game at someone else's folders or a network path. Not there: LUT off.
+// The name is read wide: path::string() throws on a name the code page cannot hold.
 static std::string ProfileLut(Config& c, std::string& lut)
 {
-    const std::filesystem::path name = std::filesystem::path(lut).filename();
     if (lut.empty() || DlssNrProfiles::EqualNoCase(lut, "auto"))
         return {};
 
-    const std::filesystem::path here =
-        std::filesystem::path(c.MainDllPath.value_or(Util::DllPath().parent_path().wstring())) / L"LUTs" / name;
-    std::error_code ec;
+    std::string shown = "(a name with other characters)";
 
-    if (!name.empty() && name != "." && name != ".." && here.parent_path().filename() == L"LUTs" &&
-        std::filesystem::is_regular_file(here, ec))
+    try
     {
-        lut = here.string();
-        return {};
+        const std::filesystem::path name = std::filesystem::path(lut).filename();
+        const auto ascii = DlssNrProfiles::AsciiName(name.wstring());
+        if (ascii)
+            shown = *ascii;
+
+        const std::filesystem::path here =
+            std::filesystem::path(c.MainDllPath.value_or(Util::DllPath().parent_path().wstring())) / L"LUTs" / name;
+        std::error_code ec;
+
+        if (ascii && !ascii->empty() && *ascii != "." && *ascii != ".." && here.parent_path().filename() == L"LUTs" &&
+            std::filesystem::is_regular_file(here, ec) && !DlssNrProfiles::IsLink(here))
+        {
+            lut = here.string();
+            return {};
+        }
+    }
+    catch (const std::exception&)
+    {
+        // the LUTs folder's own path cannot be held as text here: LUT off, as for a missing file
     }
 
-    const std::string missing = name.string();
     lut.clear();
-    return "LUT " + missing + " is not in OptiScaler\\LUTs: LUT off.";
+    return "LUT " + shown + " is not in OptiScaler\\LUTs: LUT off.";
 }
 
 bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& error, std::string& note)
@@ -1624,7 +1656,7 @@ bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& e
     auto profile = ReadDlssNrProfile(path);
     if (!profile)
     {
-        error = "Could not read the file.";
+        error = "Not an NR profile this build can read (or made by a newer build).";
         return false;
     }
 
@@ -1767,21 +1799,54 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
     };
 #undef NR_PROFILE_FIELD
 
+    // Only a setting whose value changes is cleared and read again: the render thread reads these while the menu
+    // applies them, and a setting left alone is never seen empty (or as a string being replaced) for a moment.
+    const DlssNrProfiles::Section current = DlssNrSnapshot();
+    const auto valueIn = [](const DlssNrProfiles::Section& s, const std::string& key) -> std::string
+    {
+        const auto it = s.find(key);
+        return it == s.end() ? std::string("auto") : it->second;
+    };
+    const auto changes = [&](const std::string& key)
+    { return !DlssNrProfiles::EqualNoCase(valueIn(current, key), valueIn(section, key)); };
+
     CSimpleIniA source;
     size_t defaulted = 0;
 
     for (const auto& [key, clear] : fields)
     {
-        clear(*this);
-        const auto it = section.find(std::string(key));
-        if (it == section.end() || DlssNrProfiles::EqualNoCase(it->second, "auto"))
+        const std::string name(key);
+        const std::string value = valueIn(section, name);
+
+        // Every value goes to the reader, changed or not (some reads reset a setting whose key is missing, e.g.
+        // ScalingDownscaler); one that did not change still has its value, so set_from_config leaves it as it is
+        if (DlssNrProfiles::EqualNoCase(value, "auto"))
             ++defaulted;
         else
-            source.SetValue("DlssNr", std::string(key).c_str(), it->second.c_str());
+            source.SetValue("DlssNr", name.c_str(), value.c_str());
+
+        if (changes(name))
+            clear(*this);
     }
 
-    for (auto& pass : DlssNrExtraPasses)
+    // Pass 4..30: a pass whose keys change is cleared and read again as a whole
+    for (unsigned int i = 0; i < 27; ++i)
     {
+        static constexpr const char* suffixes[] = { "Style",     "Intensity",     "LocalStructure",
+                                                    "LocalTone", "SkinStructure", "AutoMask" };
+        bool passChanges = false;
+        for (const char* suffix : suffixes)
+        {
+            const std::string name = std::format("Pass{}{}", i + 4, suffix);
+            passChanges = passChanges || changes(name);
+            if (const std::string value = valueIn(section, name); !DlssNrProfiles::EqualNoCase(value, "auto"))
+                source.SetValue("DlssNr", name.c_str(), value.c_str());
+        }
+
+        if (!passChanges)
+            continue;
+
+        auto& pass = DlssNrExtraPasses[i];
         pass.style.reset();
         pass.intensity.reset();
         pass.structure.reset();
@@ -1790,16 +1855,15 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         pass.autoMask.reset();
     }
 
-    for (const auto& [key, value] : section)
+    // readSource goes back to the ini however ReadDlssNr leaves (it is one global: profiles are applied, like the ini
+    // is loaded, on one thread at a time -- the menu's)
+    struct ReadFrom
     {
-        if (DlssNrProfiles::IsExtraPassKey(key))
-            source.SetValue("DlssNr", key.c_str(), value.c_str());
-    }
+        explicit ReadFrom(CSimpleIniA& source) { readSource = &source; }
+        ~ReadFrom() { readSource = &ini; }
+    } readFrom(source);
 
-    readSource = &source;
     ReadDlssNr();
-    readSource = &ini;
-
     return defaulted;
 }
 

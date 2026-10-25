@@ -283,17 +283,50 @@ inline std::optional<std::filesystem::path> ProfilePath(const std::filesystem::p
     return path;
 }
 
+// A wide name as plain ASCII, or nothing when it has any other character. Profile names are ASCII (SanitiseName), and
+// path::string() would throw on a name the code page cannot hold (a shared "Профиль.ini"), so names are read wide.
+inline std::optional<std::string> AsciiName(const std::wstring& wide)
+{
+    std::string narrow;
+    for (const wchar_t c : wide)
+    {
+        if (c <= 0 || c > 127)
+            return std::nullopt;
+        narrow.push_back(static_cast<char>(c));
+    }
+    return narrow;
+}
+
 // The profile name of a file in the folder: its stem, for a .ini whose stem is a valid name
 inline std::optional<std::string> NameFromPath(const std::filesystem::path& path)
 {
-    if (!EqualNoCase(path.extension().string(), ".ini"))
+    const auto extension = AsciiName(path.extension().wstring());
+    if (!extension || !EqualNoCase(*extension, ".ini"))
         return std::nullopt;
 
-    const std::string stem = path.stem().string();
-    const auto clean = SanitiseName(stem);
-    if (!clean || *clean != stem)
+    const auto stem = AsciiName(path.stem().wstring());
+    if (!stem)
+        return std::nullopt;
+
+    const auto clean = SanitiseName(*stem);
+    if (!clean || *clean != *stem)
         return std::nullopt;
     return clean;
+}
+
+// Whether a path is a link (symlink or, on Windows, a junction), which could send a save or a read somewhere else.
+// Missing or unreadable counts as not a link.
+inline bool IsLink(const std::filesystem::path& path)
+{
+    std::error_code ec;
+    const auto type = std::filesystem::symlink_status(path, ec).type();
+    if (ec)
+        return false;
+#ifdef _MSC_VER
+    if (type == std::filesystem::file_type::junction)
+        return true;
+#endif
+    return type == std::filesystem::file_type::symlink;
 }
 
 // A [DlssNr] section as key -> value text, the way SaveIni writes it ("auto" for a default)

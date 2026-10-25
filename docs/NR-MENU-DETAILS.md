@@ -131,7 +131,8 @@ the display's paper white, Compare and the debug views, and the diagnostic switc
 - Some Optical F5Low settings take effect after a restart; after a load that changed them the menu links to the Optical
   F5Low page, which says which.
 - Load is green when the profile's settings are the ones in effect; changing one of them clears it.
-- Save over a profile and Delete ask first. Names can use letters, digits, spaces, `-`, `_` and `.`.
+- Overwrite (the picked profile) and Delete ask first. Names can use letters, digits, spaces, `-`, `_` and `.`; a
+  file whose name has other characters, that is not an NR profile, or that a newer build made, is not listed.
 - A profile is a separate file: Save Settings at the bottom of the menu still saves this game's OptiScaler.ini.
 
 Revert NR to saved shows when the NR settings a profile holds have changed since the game started or the last Save

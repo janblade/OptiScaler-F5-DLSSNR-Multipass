@@ -50,6 +50,7 @@ int main()
                             {
                                 HostConstants h {};
                                 h.Mode = 1;
+                                DlssNr::SuperiorScaling::SetGuidedRange(h, .5f);
                                 h.Width = dims.first;
                                 h.Height = dims.second;
                                 h.WhitePoint = .4f;

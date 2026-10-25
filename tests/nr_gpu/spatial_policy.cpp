@@ -2,11 +2,12 @@
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_Spatial.h"
 #include "../../OptiScaler/dlssnr/DlssNr_SuperiorScaling.h"
 
-void require(bool value)
+void require(bool value, int line)
 {
     if (!value)
-        throw std::runtime_error("Spatial metadata/gain policy failed");
+        throw std::runtime_error("Spatial metadata/gain policy failed at line " + std::to_string(line));
 }
+#define require(value) require(value, __LINE__)
 int main()
 {
     try
@@ -50,6 +51,48 @@ int main()
             }
         // Declaration controls vector units even when the available subrect is clipped.
         const auto native = Sp::Build(settings, 3840, 2160, 1.f, false);
+        const auto renderGuides = Sp::RenderGuideLayout(native, { 1920, 1080 });
+        require(renderGuides.modelW == 1728 && renderGuides.modelH == 976);
+        for (bool superior : { false, true })
+            for (bool requested : { false, true })
+                for (bool compressed : { false, true })
+                    for (unsigned ordinary : { 2496u, 3840u, 4800u })
+                        require(Sp::UseRenderGuides(superior, requested, compressed, 3840, 2160, ordinary, 2160,
+                                                    { 1920, 1080 }) ==
+                                (superior && requested && compressed && ordinary == 3840));
+        require(!Sp::UseRenderGuides(true, true, true, 3840, 2160, 3840, 2160, { 0, 1080 }));
+        unsigned renderChecks = 0;
+        for (auto render : { DlssNr::GuideExtent { 1920, 1080 }, { 1280, 720 }, { 1919, 1079 }, { 3840, 2160 } })
+            for (bool custom : { false, true })
+            {
+                auto s = settings;
+                if (custom)
+                {
+                    s.offsetX = 2;
+                    s.shiftY = -1;
+                    s.workY = 95;
+                }
+                const auto colour = Sp::Build(s, 3840, 2160, 1.f, false);
+                const auto guide = Sp::RenderGuideLayout(colour, render);
+                for (unsigned axis = 0; axis < 2; ++axis)
+                {
+                    const auto& a = axis ? colour.warp.y : colour.warp.x;
+                    const auto& b = axis ? guide.warp.y : guide.warp.x;
+                    const float ratio = b.workExtent / a.workExtent;
+                    for (float position : { -13.f, .5f, 400.f, 1600.f, 2159.f, 3849.f })
+                        for (float motion : { -100.f, -2.f, 0.f, 17.f, 300.f })
+                        {
+                            require(std::abs(pw::Pack(position, b) - pw::Pack(position, a) * ratio) < .002f);
+                            const float v = pw::Pack(position + motion, b) - pw::Pack(position, b);
+                            const float expected = (pw::Pack(position + motion, a) - pw::Pack(position, a)) * ratio;
+                            require(std::abs(v - expected) < .003f);
+                            require(std::abs(pw::Unpack(pw::Pack(position, b), b) - position) < .02f);
+                            ++renderChecks;
+                        }
+                }
+            }
+        std::cout << "Render-resolution guide geometry PASS: " << renderChecks
+                  << " normalized warp/end-point checks; native-only gating, odd sizes, offset/shift and overscan\n";
         require(Ss::NeedsTemporal(3840, 2160, 3840, 2160, true, native.modelW, native.modelH));
         require(!Ss::NeedsTemporal(3840, 2160, 3840, 2160, false, native.modelW, native.modelH));
         require(!Ss::NeedsTemporal(3840, 2160, 3840, 2160, true, 3840, 2160));
@@ -132,6 +175,92 @@ int main()
                             require(block.high == float(high) && block.low == float(low / (end - first)));
                         }
                 }
+        unsigned minifyChecks = 0;
+        for (auto dim : { DlssNr::GuideExtent { 320, 192 }, { 321, 193 }, { 3840, 2160 } })
+            for (float scale : { .25f, .4f, .5f, .65f, 1.f, 1.25f })
+                for (bool packed : { false, true })
+                    for (float density : { .25f, .5f, 1.f, 2.f })
+                    {
+                        auto layout = Sp::Build(settings, dim.width, dim.height, scale, false);
+                        if (packed && !layout.active)
+                            continue;
+                        if (!packed)
+                        {
+                            layout.modelW = layout.ordinaryW;
+                            layout.modelH = layout.ordinaryH;
+                            layout.warp.x = pw::BuildAxis(dim.width, dim.width, layout.modelW, 1, 0, 0);
+                            layout.warp.y = pw::BuildAxis(dim.height, dim.height, layout.modelH, 1, 0, 0);
+                        }
+                        const DlssNr::GuideRegions regions { { 3, 7, dim.width, dim.height },
+                                                             { 5, 11, uint32_t(dim.width * density),
+                                                               uint32_t(dim.height * density) } };
+                        auto c = Sp::MakeGuideConstants(layout, regions, { dim.width, dim.height }, -2, 3);
+                        c.mode = packed ? 101u : 104u;
+                        auto disabled = c;
+                        disabled.padding[0] = 0;
+                        require(!Sp::PrepareMinifiedMotion(disabled).pixels);
+                        c.padding[0] = 1;
+                        const auto plan = Sp::PrepareMinifiedMotion(c);
+                        require(plan.pixels <= c.width * c.height);
+                        const uint32_t left = uint32_t(c.padding[2]), right = uint32_t(c.padding[3]);
+                        const uint32_t top = uint32_t(c.padding[4]), bottom = uint32_t(c.padding[5]);
+                        require(left + right <= c.width && top + bottom <= c.height);
+                        if (plan.pixels)
+                        {
+                            require(plan.groupsX <= 65535 && plan.groupsY <= 65535);
+                            require(uint64_t(plan.groupsX) * plan.groupsY * 64 >= plan.pixels);
+                        }
+                        for (uint32_t x = 0; x < c.width; ++x)
+                        {
+                            const auto& a = layout.warp.x;
+                            const bool inCenter = packed && float(x) >= a.workCenter - a.halfBand * a.scale &&
+                                                  float(x + 1) <= a.workCenter + a.halfBand * a.scale;
+                            const float span = inCenter ? 1.f / a.scale
+                                               : packed ? pw::Unpack(float(x + 1), a) - pw::Unpack(float(x), a)
+                                                        : float(dim.width) / c.width;
+                            if (span * regions.motion.width / dim.width > 1.0001f)
+                                require(plan.pixels && (x < left || x >= c.width - right));
+                        }
+                        for (uint32_t y = 0; y < c.height; ++y)
+                        {
+                            const auto& a = layout.warp.y;
+                            const bool inCenter = packed && float(y) >= a.workCenter - a.halfBand * a.scale &&
+                                                  float(y + 1) <= a.workCenter + a.halfBand * a.scale;
+                            const float span = inCenter ? 1.f / a.scale
+                                               : packed ? pw::Unpack(float(y + 1), a) - pw::Unpack(float(y), a)
+                                                        : float(dim.height) / c.height;
+                            if (span * regions.motion.height / dim.height > 1.0001f)
+                                require(plan.pixels && (y < top || y >= c.height - bottom));
+                        }
+                        auto joint = c;
+                        const auto jointPlan = Sp::PrepareJointMinification(joint);
+                        require(jointPlan.pixels >= plan.pixels && jointPlan.pixels <= c.width * c.height);
+                        auto noDepth = joint;
+                        noDepth.padding[0] = 0;
+                        require(Sp::PrepareJointMinification(noDepth).pixels == 0);
+                        for (unsigned axis = 0; axis < 2; ++axis)
+                        {
+                            const auto& a = axis ? layout.warp.y : layout.warp.x;
+                            const auto length = axis ? c.height : c.width;
+                            const auto native = axis ? dim.height : dim.width;
+                            const float source = std::max(c.depthRect[axis + 2], c.motionRect[axis + 2]);
+                            const uint32_t lo = uint32_t(joint.padding[axis ? 4 : 2]),
+                                           hi = uint32_t(joint.padding[axis ? 5 : 3]);
+                            for (uint32_t i = 0; i < length; ++i)
+                            {
+                                const bool center = packed && float(i) >= a.workCenter - a.halfBand * a.scale &&
+                                                    float(i + 1) <= a.workCenter + a.halfBand * a.scale;
+                                const float span = center   ? 1.f / a.scale
+                                                   : packed ? pw::Unpack(float(i + 1), a) - pw::Unpack(float(i), a)
+                                                            : float(native) / length;
+                                if (span * source / native > 1.0001f)
+                                    require(jointPlan.pixels && (i < lo || i >= length - hi));
+                            }
+                        }
+                        ++minifyChecks;
+                    }
+        std::cout << "Minified MV dispatch coverage PASS: " << minifyChecks
+                  << " layouts; no-depth, 25/40/50/65/100/125%, offset MV rectangles and 4K\n";
         std::cout << "Spatial metadata and final-resolution gain policy PASS: " << checks << " cases; " << bandChecks
                   << " split high/low gain cases, mixed blocks and final tails; "
                   << "native/pre/post-SR, clipped/offset guides, exact Superior grid and both packed axes\n";

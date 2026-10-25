@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include "DlssNr_GuidedShaping.h"
 #include "DlssNr_InterPassSchedule.h"
@@ -24,6 +25,29 @@ constexpr uint32_t LowGroupHeight = 16u;
 inline bool Enabled(uint32_t transfer) { return transfer == Transfer; }
 template <class C> inline bool Enabled(const C& cfg) { return Enabled(cfg.DlssNrTransfer.value_or_default()); }
 inline unsigned Preset(unsigned preset) { return preset == 11u ? 11u : 1u; } // K or A; no default/latest ambiguity.
+// Preserve the saved CNN/Transformer preference. CNN switches from A to E only
+// below the range-sigma threshold; compression itself does not choose the model.
+inline unsigned PrivatePreset(unsigned saved, float rangeSigma)
+{
+    return Preset(saved) == 11u ? 11u : rangeSigma < .01f ? 5u : 1u;
+}
+inline float GuidedRange(float scale)
+{
+    const float t = std::isfinite(scale) ? std::clamp((scale - .5f) * 2.f, 0.f, 1.f) : 0.f;
+    return .015f - .012f * t * t * t;
+}
+// Final Superior composition does not use meter dimensions. Pass inverse range
+// variance as float bits without growing the 256-byte composition ABI.
+template <class P> inline void SetGuidedRange(P& p, float scale)
+{
+    const float sigma = GuidedRange(scale);
+    const float inverse = 1.f / (sigma * sigma);
+    std::memcpy(&p.ExposureSourceWidth, &inverse, sizeof(inverse));
+}
+inline bool CanSelectUpscaleMode(unsigned mode, float scale, bool nativeVulkan)
+{
+    return mode == Transfer ? !nativeVulkan : mode == 0u || (mode <= 2u && scale < .999f);
+}
 // -1 keeps the generic PSO. Specialization changes no user setting or colour calculation.
 inline int NormalResolveVariant(bool rawAnswer, bool packed, unsigned passthrough, unsigned mapping, unsigned debugView,
                                 unsigned compareMode, unsigned applyModel)
@@ -69,7 +93,7 @@ inline float High(unsigned style, unsigned nrPreset = 1u, bool mainOnly = false)
 {
     if (!Calibrated(style, nrPreset))
         return UncalibratedHigh;
-    constexpr float main[] { .8f, .75f, .95f }, smallModel[] { .950f, .925f, .955f };
+    constexpr float main[] { .8f, .75f, .95f }, smallModel[] { .950f, .900f, .955f };
     return (EffectiveNrPreset(nrPreset, mainOnly) == 2u ? smallModel : main)[style];
 }
 inline float Low(unsigned style, unsigned nrPreset = 1u, bool mainOnly = false)

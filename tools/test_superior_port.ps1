@@ -21,6 +21,8 @@ param(
     [switch]$GpuPackedTiming,
     [switch]$GpuHostOptTiming,
     [switch]$GpuCandidates,
+    [switch]$GpuGuides,
+    [switch]$GpuRefinementTiming,
     [switch]$GpuCandidateTiming
 )
 $ErrorActionPreference = 'Stop'
@@ -77,6 +79,11 @@ try {
         $GpuCandidates = $false; $GpuCandidateTiming = $false
     }
 
+    if ($GpuGuides -or $GpuRefinementTiming) {
+        if (!$python) { throw 'Refinement GPU tests need Python to prepare references' }
+        & python tools/prepare_superior_refinement_tests.py
+        if ($LASTEXITCODE -ne 0) { throw 'Refinement reference preparation failed' }
+    }
     $names = @($cpu)
     if ($GpuQuality) { $names += $quality }
     if ($GpuTiming) { $names += 'superior_tall_low_timing' }
@@ -89,6 +96,8 @@ try {
         $names += @('four_candidates_quality', 'fused_pack_experiment')
         if ($GpuCandidateTiming) { $names += 'four_candidates_timing' }
     }
+    if ($GpuGuides) { $names += @('surface_motion_quality', 'minified_motion_quality', 'joint_depth_quality', 'render_guides_quality', 'cubic_guided_quality') }
+    if ($GpuRefinementTiming) { $names += 'refinement_timing' }
     foreach ($name in $names) {
         $src = if ($name -like 'nr_*_smoke' -or $name -eq 'nr_spatial_dx12_gpu') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
         cmd /c "`"$VcVars`" >nul && cl /nologo /std:c++17 /EHsc /O2 `"$src`" /Fe:$out/$name.exe /Fo:$out/$name.obj /link d3d12.lib dxgi.lib"
@@ -155,6 +164,16 @@ try {
     if ($GpuTiming) {
         & "$out/superior_tall_low_timing.exe" $ReferenceShaderDirectory $candidate "$out/port-v59-timing.csv" normal full
         if ($LASTEXITCODE -ne 0) { throw 'GPU timing failed' }
+    }
+    if ($GpuGuides) {
+        foreach ($name in @('surface_motion_quality', 'minified_motion_quality', 'joint_depth_quality', 'render_guides_quality', 'cubic_guided_quality')) {
+            & "$out/$name.exe"
+            if ($LASTEXITCODE -ne 0) { throw "Guide/refinement GPU test failed: $name" }
+        }
+    }
+    if ($GpuRefinementTiming) {
+        & "$out/refinement_timing.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Refinement GPU timing failed' }
     }
     Write-Host 'Superior tests passed'
 }

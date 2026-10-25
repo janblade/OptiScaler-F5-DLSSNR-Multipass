@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "../../OptiScaler/dlssnr/DlssNr_SuperiorScaling.h"
 #define DlssNrConstants HostConstants
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_Common.h"
 #undef DlssNrConstants
@@ -32,6 +33,7 @@ int main()
                             const bool nativeGrid = path != 0u;
                             HostConstants h {};
                             h.Mode = 1;
+                            DlssNr::SuperiorScaling::SetGuidedRange(h, .5f);
                             h.Width = dims.first;
                             h.Height = dims.second;
                             h.WhitePoint = scenario % 2 ? 0.2f : 5.0f;

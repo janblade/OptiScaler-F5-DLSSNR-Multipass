@@ -70,6 +70,16 @@
 #include "precompile/dlssnr_edit_cache_Shader.h"
 #include "precompile/dlssnr_spatial_Shader.h"
 #include "precompile/dlssnr_spatial_guides_Shader.h"
+#include "superior/precompile/host_spatial_guides_Shader.h"
+#include "superior/precompile/host_surface_guides_Shader.h"
+#include "superior/precompile/host_uniform_guides_Shader.h"
+#include "superior/precompile/host_uniform_surface_guides_Shader.h"
+#include "superior/precompile/host_minified_surface_guides_Shader.h"
+#include "superior/precompile/host_uniform_minified_surface_guides_Shader.h"
+#include "superior/precompile/host_joint_guides_Shader.h"
+#include "superior/precompile/host_joint_minified_guides_Shader.h"
+#include "superior/precompile/host_uniform_joint_guides_Shader.h"
+#include "superior/precompile/host_uniform_joint_minified_guides_Shader.h"
 #include "precompile/dlssnr_exposure_adapt_Shader.h"
 #include "precompile/dlssnr_lut_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
@@ -2299,6 +2309,9 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _spatialPipelineState->Release();
     if (_spatialGuidesPipelineState)
         _spatialGuidesPipelineState->Release();
+    for (auto* pipeline : _superiorSpatialGuides)
+        if (pipeline)
+            pipeline->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -2819,14 +2832,63 @@ bool DlssNr_Dx12::SpatialReady()
 }
 
 bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Spatial::Constants& InConstants,
-                                  ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2,
-                                  ID3D12Resource* Out0, ID3D12Resource* Out1)
+                                  ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2, ID3D12Resource* Out0,
+                                  ID3D12Resource* Out1, uint32_t motionMethod)
 {
-    if (!SpatialReady() || InCmdList == nullptr || _device == nullptr || Out0 == nullptr || InConstants.width == 0 ||
-        InConstants.height == 0)
+    const bool uniform = InConstants.mode == 104u;
+    if ((!uniform && !SpatialReady()) || !_init || InCmdList == nullptr || _device == nullptr || Out0 == nullptr ||
+        InConstants.width == 0 || InConstants.height == 0)
         return false;
 
-    const bool guides = InConstants.mode == 101;
+    const bool guides = InConstants.mode == 101 || uniform;
+    auto constants = InConstants;
+    constants.unused = g_nr.guideDepthInverted ? 1.f : 0.f;
+    const bool joint = guides && motionMethod == 2u && constants.padding[0] > .5f;
+    const auto minified = joint                          ? DlssNr::Spatial::PrepareJointMinification(constants)
+                          : guides && motionMethod == 2u ? DlssNr::Spatial::PrepareMinifiedMotion(constants)
+                                                         : DlssNr::Spatial::MinifiedMotionDispatch {};
+    ID3D12PipelineState* correction = nullptr;
+    auto* pipeline = guides ? _spatialGuidesPipelineState : _spatialPipelineState;
+    if (guides && motionMethod != 0u)
+    {
+        const unsigned primary = joint ? (uniform ? 8u : 6u) : (uniform ? 2u : 0u) + (motionMethod == 2u ? 1u : 0u);
+        for (unsigned pass = 0; pass < (minified.pixels ? 2u : 1u); ++pass)
+        {
+            const unsigned index = pass ? (joint ? (uniform ? 9u : 7u) : (uniform ? 5u : 4u)) : primary;
+            if (!_superiorSpatialGuidesAttempted[index])
+            {
+                _superiorSpatialGuidesAttempted[index] = true;
+                const void* blobs[] { host_spatial_guides_cso,
+                                      host_surface_guides_cso,
+                                      host_uniform_guides_cso,
+                                      host_uniform_surface_guides_cso,
+                                      host_minified_surface_guides_cso,
+                                      host_uniform_minified_surface_guides_cso,
+                                      host_joint_guides_cso,
+                                      host_joint_minified_guides_cso,
+                                      host_uniform_joint_guides_cso,
+                                      host_uniform_joint_minified_guides_cso };
+                const size_t sizes[] { sizeof(host_spatial_guides_cso),
+                                       sizeof(host_surface_guides_cso),
+                                       sizeof(host_uniform_guides_cso),
+                                       sizeof(host_uniform_surface_guides_cso),
+                                       sizeof(host_minified_surface_guides_cso),
+                                       sizeof(host_uniform_minified_surface_guides_cso),
+                                       sizeof(host_joint_guides_cso),
+                                       sizeof(host_joint_minified_guides_cso),
+                                       sizeof(host_uniform_joint_guides_cso),
+                                       sizeof(host_uniform_joint_minified_guides_cso) };
+                CreateComputePipeline(_device, &_superiorSpatialGuides[index], blobs[index], sizes[index], nullptr);
+            }
+            if (!_superiorSpatialGuides[index])
+                return false;
+            if (pass)
+                correction = _superiorSpatialGuides[index];
+        }
+        pipeline = _superiorSpatialGuides[primary];
+    }
+    if (!pipeline)
+        return false;
     ID3D12Resource* const first = In0 != nullptr ? In0 : In1;
 
     if (first == nullptr)
@@ -2855,7 +2917,7 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const Dl
     for (uint32_t i = 0; i < kUavCount; ++i)
         CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
 
-    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
         return false;
@@ -2864,10 +2926,19 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const Dl
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
     InCmdList->SetComputeRootSignature(_rootSignature);
-    InCmdList->SetPipelineState(guides ? _spatialGuidesPipelineState : _spatialPipelineState);
+    InCmdList->SetPipelineState(pipeline);
     InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
     InCmdList->Dispatch((InConstants.width + _numThreadsX - 1) / _numThreadsX,
                         (InConstants.height + _numThreadsY - 1) / _numThreadsY, 1);
+    if (correction)
+    {
+        D3D12_RESOURCE_BARRIER barrier {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = joint ? nullptr : Out1 != nullptr ? Out1 : Out0;
+        InCmdList->ResourceBarrier(1, &barrier);
+        InCmdList->SetPipelineState(correction);
+        InCmdList->Dispatch(minified.groupsX, minified.groupsY, 1);
+    }
 
     return true;
 }
@@ -3204,10 +3275,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Compress screen edges (DlssNr_Spatial.inl): whether the model works on a packed picture this frame, and at what
     // size. Everything about the model below (its features, its surfaces, the guides it is handed) follows the packed
     // size; the encode, the resolve and the frame stay at the ordinary ones.
-    const uint64_t spatialSignature = EdgeCompression::SignatureOf(
+    uint64_t spatialSignature = EdgeCompression::SignatureOf(
         colourFormat, depth != nullptr ? guideDesc.Format : DXGI_FORMAT_UNKNOWN,
         depth != nullptr ? (unsigned int) guideDesc.Width : 0u, depth != nullptr ? guideDesc.Height : 0u,
         motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
+
+    if (superior && workScale == 1.f)
+    {
+        spatialSignature = DlssNr::Spatial::Mix(spatialSignature, frame.RenderSubrectWidth);
+        spatialSignature = DlssNr::Spatial::Mix(spatialSignature, frame.RenderSubrectHeight);
+    }
 
     bool spatialReset = false;
     bool spatial =
@@ -3222,8 +3299,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                EdgeCompression::Layout().modelW, EdgeCompression::Layout().modelH);
     // Exposure calibration alone still needs the original unpacked proxy. Normal Superior rendering bypasses it.
     const bool spatialNeedsUnpack = !superiorPacked || CalibrationWanted() || CalibrationActive();
+    const DlssNr::GuideExtent renderGuideSize { frame.RenderSubrectWidth, frame.RenderSubrectHeight };
+    const bool renderGuides = DlssNr::Spatial::UseRenderGuides(superior && workScale == 1.f, true, spatial, width,
+                                                               height, workWidth, workHeight, renderGuideSize);
+    const auto spatialGuideLayout = renderGuides
+                                        ? DlssNr::Spatial::RenderGuideLayout(EdgeCompression::Layout(), renderGuideSize)
+                                        : EdgeCompression::Layout();
     if (spatial && (!SpatialReady() ||
-                    !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f, spatialNeedsUnpack)))
+                    !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f, spatialNeedsUnpack,
+                                              { spatialGuideLayout.modelW, spatialGuideLayout.modelH })))
     {
         EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffResources);
         g_nr.reset = true;
@@ -3699,7 +3783,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // and from the next one the ordinary path runs with Matched residual.
         if (SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height,
                                superiorPacked ? modelWidth : workWidth, superiorPacked ? modelHeight : workHeight,
-                               frame, temporal, depth && guides.depth.valid(),
+                               workScale, frame, temporal, depth && guides.depth.valid(),
                                superiorPacked ? &EdgeCompression::Layout() : nullptr) != SuperiorRun::Began::Run)
         {
             device->Release();
@@ -4557,7 +4641,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 ? DlssNr::GuideExtent { frame.RenderSubrectWidth, frame.RenderSubrectHeight }
                 : DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
         auto guideConstants = DlssNr::Spatial::MakeEnlargementGuideConstants(
-            superior, spatialLayout, guides, motionReference, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
+            superior, spatialGuideLayout, guides, motionReference, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
+        guideConstants.padding[0] = guides.depth.valid() ? 1.f : 0.f;
 
         if (!guides.depth.valid())
         {
@@ -4568,9 +4653,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const bool packedColor =
             DispatchSpatial(cmdList, MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f), g_nr.colorCopy, nullptr,
                             nullptr, EdgeCompression::color);
-        const bool packedGuides = packedColor && DispatchSpatial(cmdList, guideConstants, g_nr.colorCopy, depthIn,
-                                                                 motionIn, EdgeCompression::depth,
-                                                                 EdgeCompression::motion);
+        const bool packedGuides =
+            packedColor && DispatchSpatial(cmdList, guideConstants, g_nr.colorCopy, depthIn, motionIn,
+                                           EdgeCompression::depth, EdgeCompression::motion, superior ? 2u : 0u);
 
         if (!packedGuides)
         {
@@ -4909,10 +4994,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // What the model is handed as its guides: the game's, at the game's sizes and scale; or packed, where all three are
     // the packed picture's own (motion in packed pixels, so a scale of 1).
-    unsigned int evalGuideW = spatial ? modelWidth : guideWidth;
-    unsigned int evalGuideH = spatial ? modelHeight : guideHeight;
-    unsigned int evalMotionW = spatial ? modelWidth : motionWidth;
-    unsigned int evalMotionH = spatial ? modelHeight : motionHeight;
+    unsigned int evalGuideW = spatial ? spatialGuideLayout.modelW : guideWidth;
+    unsigned int evalGuideH = spatial ? spatialGuideLayout.modelH : guideHeight;
+    unsigned int evalMotionW = spatial ? spatialGuideLayout.modelW : motionWidth;
+    unsigned int evalMotionH = spatial ? spatialGuideLayout.modelH : motionHeight;
     unsigned int evalDepthX = spatial ? 0u : depthBaseX;
     unsigned int evalDepthY = spatial ? 0u : depthBaseY;
     float evalMvScaleX = spatial ? 1.0f : g_nr.guideMvScaleX * mvToWorkX;
@@ -5039,7 +5124,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     unsigned int evalMotionBaseY = cachePlan.runs ? cachePlan.motionBaseY : reusePlan.motionBaseY;
 
     bool superiorMatched = false;
-    if (superiorGeneration && superiorGeneration->temporal && !superiorPacked && !cached)
+    if (superiorGeneration && !superiorPacked && !cached &&
+        (superiorGeneration->temporal || workWidth != width || workHeight != height))
     {
         auto matchedRegions = guides;
         matchedRegions.motion.x = evalMotionBaseX;
@@ -5662,6 +5748,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                             ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, g.temporal)
                             : nullptr;
             DlssNr::Superior::Fields::SetBandGains(resolveParams, gains.high, gains.low);
+            DlssNr::SuperiorScaling::SetGuidedRange(resolveParams, workScale);
             // A raw NR answer when temporal stabilization is inactive, else the decoded signed DLSS residual.
             DlssNr::Superior::Fields::SetResolveFlags(resolveParams, low != nullptr, !g.temporal);
             auto* pso = SuperiorResolvePipeline(resolveParams, !g.temporal, g.packed, g.warpCache.Get() != nullptr);

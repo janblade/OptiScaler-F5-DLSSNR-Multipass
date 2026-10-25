@@ -436,7 +436,9 @@ class Config
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual. Only has an effect when Model resolution is under 100%.
     CustomOptional<uint32_t> DlssNrTransfer { 1 }; // 11: Superior Scaling
-    CustomOptional<uint32_t> DlssNrSuperiorScalingPreset { 1 }; // private SR A=1 / K=11
+    CustomOptional<uint32_t> DlssNrSuperiorScalingPreset {
+        1
+    }; // private SR preference: CNN=1 (automatic A/E), Transformer=11 (K)
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the
     // game already tone mapped there is nothing to measure and this has no effect.

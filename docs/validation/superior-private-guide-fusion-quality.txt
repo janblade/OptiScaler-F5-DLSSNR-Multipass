@@ -1,0 +1,11 @@
+Superior policy PASS: Main/Small/Default/legacy presets on 310.8 and 310.9, mixed gain blocks and schedules, fixed settings, A/K, guides and PSO guards
+Render-resolution guide geometry PASS: 480 normalized warp/end-point checks; native-only gating, odd sizes, offset/shift and overscan
+Minified MV dispatch coverage PASS: 136 layouts; no-depth, 25/40/50/65/100/125%, offset MV rectangles and 4K
+Spatial metadata and final-resolution gain policy PASS: 48 cases; 11520 split high/low gain cases, mixed blocks and final tails; native/pre/post-SR, clipped/offset guides, exact Superior grid and both packed axes
+Inter-pass policy PASS: measured winners, aligned P40, rounded P42, all percentages, gain lookahead, scale/Structure/Intensity, multiplied Structure/Intensity, adjusted low means, strict gap and failure accounting, reference isolation, filters/radii and 37622 tile axes (21 guarded overflow axes)
+PASS: NR guide regions (pre/post SR, MVLowRes, offsets, clipping, missing/invalid metadata, no depth)
+PASS: nr_surface_formats_smoke
+Fused private guide/carrier bit parity PASS: 192 cases, 64688880 words; odd/partial groups, independent origins, layers, reversed Z, nonfinite guides/colour and Hold
+Superior tests passed
+All 51 blobs and headers match a rebuild byte for byte.
+All 50 existing blobs are bit-identical to 1077d416.

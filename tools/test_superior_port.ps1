@@ -22,6 +22,8 @@ param(
     [switch]$GpuHostOptTiming,
     [switch]$GpuCandidates,
     [switch]$GpuGuides,
+    [switch]$GpuPrivateGuides,
+    [switch]$GpuPrivateGuidesTiming,
     [switch]$GpuRefinementTiming,
     [switch]$GpuCandidateTiming
 )
@@ -84,6 +86,7 @@ try {
         & python tools/prepare_superior_refinement_tests.py
         if ($LASTEXITCODE -ne 0) { throw 'Refinement reference preparation failed' }
     }
+    if ($GpuPrivateGuidesTiming) { $GpuPrivateGuides = $true }
     $names = @($cpu)
     if ($GpuQuality) { $names += $quality }
     if ($GpuTiming) { $names += 'superior_tall_low_timing' }
@@ -98,6 +101,8 @@ try {
     }
     if ($GpuGuides) { $names += @('surface_motion_quality', 'minified_motion_quality', 'joint_depth_quality', 'render_guides_quality', 'cubic_guided_quality') }
     if ($GpuRefinementTiming) { $names += 'refinement_timing' }
+    if ($GpuPrivateGuides) { $names += 'private_guides_quality' }
+    if ($GpuPrivateGuidesTiming) { $names += 'private_guides_timing' }
     foreach ($name in $names) {
         $src = if ($name -like 'nr_*_smoke' -or $name -eq 'nr_spatial_dx12_gpu') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
         cmd /c "`"$VcVars`" >nul && cl /nologo /std:c++17 /EHsc /O2 `"$src`" /Fe:$out/$name.exe /Fo:$out/$name.obj /link d3d12.lib dxgi.lib"
@@ -174,6 +179,14 @@ try {
     if ($GpuRefinementTiming) {
         & "$out/refinement_timing.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Refinement GPU timing failed' }
+    }
+    if ($GpuPrivateGuides) {
+        & "$out/private_guides_quality.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Fused private guide/carrier bit parity failed' }
+    }
+    if ($GpuPrivateGuidesTiming) {
+        & "$out/private_guides_timing.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Fused private guide/carrier timing failed' }
     }
     Write-Host 'Superior tests passed'
 }

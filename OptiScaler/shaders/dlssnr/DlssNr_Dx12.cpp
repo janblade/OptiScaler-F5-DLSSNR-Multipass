@@ -2273,6 +2273,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 }
 
 #include "superior/Shader.inl"
+#include "superior/PrivateGuides.inl"
 
 DlssNr_Dx12::~DlssNr_Dx12()
 {
@@ -2309,6 +2310,12 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _spatialPipelineState->Release();
     if (_spatialGuidesPipelineState)
         _spatialGuidesPipelineState->Release();
+    if (_privateGuidesHeap)
+        _privateGuidesHeap->Release();
+    if (_privateGuidesPipeline)
+        _privateGuidesPipeline->Release();
+    if (_privateGuidesRoot)
+        _privateGuidesRoot->Release();
     for (auto* pipeline : _superiorSpatialGuides)
         if (pipeline)
             pipeline->Release();

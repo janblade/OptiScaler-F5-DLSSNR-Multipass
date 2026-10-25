@@ -429,6 +429,30 @@ bool InterPass(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cm
     return Dispatch(shader, cmd, c, originalBase, answer, nativeProxy, nullptr, nullptr, low, g.interWorking);
 }
 
+DlssNr::Spatial::Constants UniformGuideConstants(const Generation& g, const DlssNr::GuideRegions& regions,
+                                                 const DlssNrFrameInfo& frame, bool haveDepth)
+{
+    DlssNr::Spatial::Layout l {};
+    l.nativeW = g.width;
+    l.nativeH = g.height;
+    l.modelW = g.workWidth;
+    l.modelH = g.workHeight;
+    l.warp.x = pw::BuildAxis(g.width, g.width, g.workWidth, 1, 0, 0);
+    l.warp.y = pw::BuildAxis(g.height, g.height, g.workHeight, 1, 0, 0);
+    const DlssNr::GuideExtent reference =
+        frame.MotionVectorsLowResolution ? DlssNr::GuideExtent { frame.RenderSubrectWidth, frame.RenderSubrectHeight }
+                                         : DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
+    auto c = DlssNr::Spatial::MakeGuideConstants(l, regions, reference, frame.MvScaleX, frame.MvScaleY);
+    c.mode = 104u;
+    c.padding[0] = haveDepth && regions.depth.valid() ? 1.f : 0.f;
+    if (!haveDepth)
+    {
+        c.depthRect[0] = c.depthRect[1] = 0;
+        c.depthRect[2] = c.depthRect[3] = 1;
+    }
+    return c;
+}
+
 bool MatchGuides(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* depth,
                  ID3D12Resource* motion, const DlssNr::GuideRegions& regions, const DlssNrFrameInfo& frame);
 
@@ -443,6 +467,7 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
     encode.Mode = 39u; // v50: fixed carrier + motion; reuse this frame's exact NR depth.
     auto* motion = originalMotion;
     auto* temporalDepth = g.packed ? packedDepth : g.depth.Get();
+    bool prepared = false;
     if (g.packed)
     {
         if (!packedDepth || !packedMotion)
@@ -465,12 +490,32 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
             packedFrame.RenderSubrectWidth = packedFrame.OutputWidth = gw;
             packedFrame.RenderSubrectHeight = packedFrame.OutputHeight = gh;
             packedFrame.MvScaleX = packedFrame.MvScaleY = 1.f;
-            if (!MatchGuides(g, shader, cmd, packedDepth, packedMotion, packedRegions, packedFrame))
-                return nullptr;
-            motion = g.motion.Get();
-            temporalDepth = g.depth.Get();
             encode.MvScaleX = hold ? 0.f : float(g.workWidth) / gw;
             encode.MvScaleY = hold ? 0.f : float(g.workHeight) / gh;
+            if (!Ensure(g.depth, g.device.Get(), DXGI_FORMAT_R32_FLOAT, g.workWidth, g.workHeight))
+                return nullptr;
+            auto fused = UniformGuideConstants(g, packedRegions, packedFrame, true);
+            fused.padding[1] = encode.MvScaleX;
+            fused.padding[2] = encode.MvScaleY;
+            Record(cmd);
+            g.depth.To(cmd, Uav);
+            g.carrier.To(cmd, Uav);
+            g.temporalMotion.To(cmd, Uav);
+            prepared = shader.DispatchSuperiorPrivateGuides(cmd, fused, proxy, answer, packedDepth, packedMotion,
+                                                            g.depth.Get(), g.temporalMotion.Get(), g.carrier.Get());
+            if (prepared)
+            {
+                g.depth.To(cmd, Srv);
+                g.carrier.To(cmd, Srv);
+                g.temporalMotion.To(cmd, Srv);
+            }
+            else
+            {
+                if (!MatchGuides(g, shader, cmd, packedDepth, packedMotion, packedRegions, packedFrame))
+                    return nullptr;
+                motion = g.motion.Get();
+            }
+            temporalDepth = g.depth.Get();
         }
         // Carrier preparation converts vector units once and writes zero motion while held.
         // The default, colour-sized guide path needs no extra guide dispatch.
@@ -481,7 +526,8 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
         motion = g.motion.Get();
         Fields::SetMotionRegion(encode, 0, 0, g.workWidth, g.workHeight);
     }
-    if (!Dispatch(shader, cmd, encode, proxy, answer, motion, nullptr, nullptr, nullptr, g.carrier, &g.temporalMotion))
+    if (!prepared &&
+        !Dispatch(shader, cmd, encode, proxy, answer, motion, nullptr, nullptr, nullptr, g.carrier, &g.temporalMotion))
         return nullptr;
     g.temporalOutput.To(cmd, Uav);
     auto* p = g.parameters;
@@ -650,24 +696,7 @@ bool MatchGuides(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* 
         !Ensure(g.motion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, g.workWidth, g.workHeight))
         return false;
     constexpr unsigned method = 2u;
-    DlssNr::Spatial::Layout l {};
-    l.nativeW = g.width;
-    l.nativeH = g.height;
-    l.modelW = g.workWidth;
-    l.modelH = g.workHeight;
-    l.warp.x = pw::BuildAxis(g.width, g.width, g.workWidth, 1, 0, 0);
-    l.warp.y = pw::BuildAxis(g.height, g.height, g.workHeight, 1, 0, 0);
-    const DlssNr::GuideExtent reference =
-        frame.MotionVectorsLowResolution ? DlssNr::GuideExtent { frame.RenderSubrectWidth, frame.RenderSubrectHeight }
-                                         : DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
-    auto c = DlssNr::Spatial::MakeGuideConstants(l, regions, reference, frame.MvScaleX, frame.MvScaleY);
-    c.mode = 104u;
-    c.padding[0] = depth && regions.depth.valid() ? 1.f : 0.f;
-    if (!depth)
-    {
-        c.depthRect[0] = c.depthRect[1] = 0;
-        c.depthRect[2] = c.depthRect[3] = 1;
-    }
+    const auto c = UniformGuideConstants(g, regions, frame, depth != nullptr);
     Record(cmd);
     g.depth.To(cmd, Uav);
     g.motion.To(cmd, Uav);

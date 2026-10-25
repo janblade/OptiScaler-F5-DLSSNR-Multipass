@@ -142,3 +142,6 @@ at 65% / 1080p render and 0.12 ms at native 100% + Balanced, increasing to appro
 0.09 / 0.19 ms at 1440p render. These are intentional reconstruction changes, not a demonstrated
 performance optimization. CNN A/E inference cost is not covered and can change the full-frame result.
 Raw samples, summaries and quality results are retained in `validation/superior-refinement-*`.
+
+The subsequent quality-preserving [private guide/carrier fusion](Superior-private-guide-fusion.md)
+reduces native-compression preparation cost; its A/B baseline is this branch, not janblade.

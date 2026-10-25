@@ -131,6 +131,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12PipelineState* _spatialGuidesPipelineState = nullptr;
     ID3D12PipelineState* _superiorSpatialGuides[10] = {};
     bool _superiorSpatialGuidesAttempted[10] = {};
+    ID3D12RootSignature* _privateGuidesRoot = nullptr;
+    ID3D12PipelineState* _privateGuidesPipeline = nullptr;
+    ID3D12DescriptorHeap* _privateGuidesHeap = nullptr;
+    bool _privateGuidesAttempted = false;
+    bool PrivateGuidesReady();
     bool _spatialPipelineFailed = false;
 
     // The LUT pass (dlssnr_lut.hlsl, LUT-apply epic Story 2: dlssnr-lut-apply).
@@ -262,6 +267,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     bool DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Spatial::Constants& InConstants,
                          ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2, ID3D12Resource* Out0,
                          ID3D12Resource* Out1 = nullptr, uint32_t motionMethod = 0u);
+    bool DispatchSuperiorPrivateGuides(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
+                                       ID3D12Resource* proxy, ID3D12Resource* answer, ID3D12Resource* depth,
+                                       ID3D12Resource* motion, ID3D12Resource* outDepth, ID3D12Resource* outMotion,
+                                       ID3D12Resource* outCarrier);
 
     // The LUT pass (dlssnr_lut.hlsl, DlssNr_Lut.h, LUT-apply epic Story 2:
     // dlssnr-lut-apply). Grades InSource (Width x Height, already in the colour

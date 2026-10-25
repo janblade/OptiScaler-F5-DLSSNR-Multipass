@@ -125,6 +125,8 @@ try {
         }
     }
 
+    Build (Join-Path $shaders 'superior/PrivateGuides.hlsl') 'PrivateGuidesMain' @() 'host_private_guides'
+
     # The host resolve preserves janblade's exposure and composition and substitutes only the residual estimator.
     # raw: the non-temporal resolve; its SDR and HDR builds are identical bytecode, so there is one blob for both.
     $live = Join-Path $shaders "precompile/dlssnr.hlsl"

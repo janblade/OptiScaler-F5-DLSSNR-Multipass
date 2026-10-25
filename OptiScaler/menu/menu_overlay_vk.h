@@ -14,4 +14,7 @@ bool QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo);
 // renderer backend is there (menu_overlay_dx.cpp), and drawing under the Vulkan one crashed in the driver.
 void HandOverToBridge();
 void DestroyVulkanObjects(bool shutdown);
+
+// The menu stays on its window while that exists, games can have more than one
+bool OnOtherWindow(HWND hwnd);
 } // namespace MenuOverlayVk

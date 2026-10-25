@@ -4,10 +4,13 @@
 
 #include "vk/ffx_api_vk.h"
 #include <proxies/FfxApi_Proxy.h>
+#include <shaders/velocity_convert/VC_Vk.h>
 
 class FFXFeatureVk : public FFXFeature, public IFeature_Vk
 {
   private:
+    std::unique_ptr<VelocityConvert_Vk> _velocityConvert = nullptr;
+
   protected:
     bool InitFFX(const NVSDK_NGX_Parameter* InParameters);
 

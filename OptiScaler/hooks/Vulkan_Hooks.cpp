@@ -64,7 +64,9 @@ PFN_vkCreateSwapchainKHR o_CreateSwapchainKHR = nullptr;
 static PFN_vkDestroySwapchainKHR o_DestroySwapchainKHR = nullptr;
 static PFN_vkGetSwapchainImagesKHR o_GetSwapchainImagesKHR = nullptr;
 static PFN_vkAcquireNextImageKHR o_AcquireNextImageKHR = nullptr;
+static PFN_vkAcquireNextImage2KHR o_AcquireNextImage2KHR = nullptr;
 static PFN_vkSetHdrMetadataEXT o_SetHdrMetadataEXT = nullptr;
+static PFN_vkWaitForPresentKHR o_WaitForPresentKHR = nullptr;
 static PFN_vkDestroySurfaceKHR o_vkDestroySurfaceKHR = nullptr;
 static PFN_vkAcquireFullScreenExclusiveModeEXT o_AcquireFullScreenExclusiveModeEXT = nullptr;
 static PFN_vkReleaseFullScreenExclusiveModeEXT o_ReleaseFullScreenExclusiveModeEXT = nullptr;
@@ -91,8 +93,11 @@ static VkResult hkvkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapch
                                           VkImage* pSwapchainImages);
 static VkResult hkvkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
                                         VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex);
+static VkResult hkvkAcquireNextImage2KHR(VkDevice device, const VkAcquireNextImageInfoKHR* pAcquireInfo,
+                                         uint32_t* pImageIndex);
 static void hkvkSetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount, const VkSwapchainKHR* pSwapchains,
                                   const VkHdrMetadataEXT* pMetadata);
+static VkResult hkvkWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout);
 
 // FFX creates its real swapchain while creating the FG one
 static bool _creatingFGSwapchain = false;
@@ -275,9 +280,32 @@ PFN_vkVoidFunction VulkanHooks::OriginalSwapchainFunction(const char* pName)
     return nullptr;
 }
 
+// A promoted core function is missing on a device that only has its extension (RDR2's vkGetSemaphoreCounterValue and
+// vkCmdPushDescriptorSetWithTemplate are null), the extension's name then gives the same function. FFX and OptiScaler
+// ask for the core names.
 PFN_vkVoidFunction VulkanHooks::GetDeviceProcAddr(VkDevice device, const char* name)
 {
-    return o_vkGetDeviceProcAddr != nullptr ? o_vkGetDeviceProcAddr(device, name) : nullptr;
+    if (o_vkGetDeviceProcAddr == nullptr)
+        return nullptr;
+
+    if (auto function = o_vkGetDeviceProcAddr(device, name))
+        return function;
+
+    if (name == nullptr)
+        return nullptr;
+
+    for (auto suffix : { "KHR", "EXT" })
+    {
+        const auto extensionName = std::string(name) + suffix;
+
+        if (auto function = o_vkGetDeviceProcAddr(device, extensionName.c_str()))
+        {
+            LOG_DEBUG("{} is missing, using {}", name, extensionName);
+            return function;
+        }
+    }
+
+    return nullptr;
 }
 
 // A swapchain on a device with VK_NV_low_latency2 is made with its latency mode (low_latency/input/VkLatencyMode.h)
@@ -364,7 +392,9 @@ static void HookDevice(VkDevice InDevice)
     o_DestroySwapchainKHR = (PFN_vkDestroySwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkDestroySwapchainKHR"));
     o_GetSwapchainImagesKHR = (PFN_vkGetSwapchainImagesKHR) (vkGetDeviceProcAddr(InDevice, "vkGetSwapchainImagesKHR"));
     o_AcquireNextImageKHR = (PFN_vkAcquireNextImageKHR) (vkGetDeviceProcAddr(InDevice, "vkAcquireNextImageKHR"));
+    o_AcquireNextImage2KHR = (PFN_vkAcquireNextImage2KHR) (vkGetDeviceProcAddr(InDevice, "vkAcquireNextImage2KHR"));
     o_SetHdrMetadataEXT = (PFN_vkSetHdrMetadataEXT) (vkGetDeviceProcAddr(InDevice, "vkSetHdrMetadataEXT"));
+    o_WaitForPresentKHR = (PFN_vkWaitForPresentKHR) (vkGetDeviceProcAddr(InDevice, "vkWaitForPresentKHR"));
     o_AcquireFullScreenExclusiveModeEXT = (PFN_vkAcquireFullScreenExclusiveModeEXT) (vkGetDeviceProcAddr(
         InDevice, "vkAcquireFullScreenExclusiveModeEXT"));
     o_ReleaseFullScreenExclusiveModeEXT = (PFN_vkReleaseFullScreenExclusiveModeEXT) (vkGetDeviceProcAddr(
@@ -393,8 +423,14 @@ static void HookDevice(VkDevice InDevice)
         if (o_AcquireNextImageKHR != nullptr)
             DetourAttach(&(PVOID&) o_AcquireNextImageKHR, hkvkAcquireNextImageKHR);
 
+        if (o_AcquireNextImage2KHR != nullptr)
+            DetourAttach(&(PVOID&) o_AcquireNextImage2KHR, hkvkAcquireNextImage2KHR);
+
         if (o_SetHdrMetadataEXT != nullptr)
             DetourAttach(&(PVOID&) o_SetHdrMetadataEXT, hkvkSetHdrMetadataEXT);
+
+        if (o_WaitForPresentKHR != nullptr)
+            DetourAttach(&(PVOID&) o_WaitForPresentKHR, hkvkWaitForPresentKHR);
 
         if (o_AcquireFullScreenExclusiveModeEXT != nullptr)
             DetourAttach(&(PVOID&) o_AcquireFullScreenExclusiveModeEXT, hkvkAcquireFullScreenExclusiveModeEXT);
@@ -410,7 +446,9 @@ static void HookDevice(VkDevice InDevice)
             o_CreateSwapchainKHR = nullptr;
             o_GetSwapchainImagesKHR = nullptr;
             o_AcquireNextImageKHR = nullptr;
+            o_AcquireNextImage2KHR = nullptr;
             o_SetHdrMetadataEXT = nullptr;
+            o_WaitForPresentKHR = nullptr;
         }
     }
 }
@@ -446,13 +484,17 @@ static VkResult hkvkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Surf
 
     if (result == VK_SUCCESS && !ScopedSkipVulkanHooks::Active())
     {
-        MenuOverlayVk::DestroyVulkanObjects(false);
-
         _instance = instance;
         State::Instance().VulkanInstance = instance;
         LOG_DEBUG("_instance captured: {0:X}", (UINT64) _instance);
-        _hwnd = pCreateInfo->hwnd;
-        LOG_DEBUG("_hwnd captured: {0:X}", (UINT64) _hwnd);
+
+        if (!MenuOverlayVk::OnOtherWindow(pCreateInfo->hwnd))
+        {
+            MenuOverlayVk::DestroyVulkanObjects(false);
+
+            _hwnd = pCreateInfo->hwnd;
+            LOG_DEBUG("_hwnd captured: {0:X}", (UINT64) _hwnd);
+        }
     }
 
     if (result == VK_SUCCESS && pSurface != nullptr)
@@ -1577,6 +1619,33 @@ static VkResult hkvkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchai
     return o_AcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
 }
 
+// A game that acquires with this one (RDR2): the FG output's swapchain only has the plain acquire. The device mask is for
+// device groups, the FG output runs on one GPU.
+VALIDATE_HOOK(hkvkAcquireNextImage2KHR, PFN_vkAcquireNextImage2KHR)
+static VkResult hkvkAcquireNextImage2KHR(VkDevice device, const VkAcquireNextImageInfoKHR* pAcquireInfo,
+                                         uint32_t* pImageIndex)
+{
+    if (auto fg = State::Instance().currentVkFG;
+        fg != nullptr && pAcquireInfo != nullptr && fg->OwnsSwapchain(pAcquireInfo->swapchain))
+    {
+        return fg->AcquireNextImage(device, pAcquireInfo->swapchain, pAcquireInfo->timeout, pAcquireInfo->semaphore,
+                                    pAcquireInfo->fence, pImageIndex);
+    }
+
+    return o_AcquireNextImage2KHR(device, pAcquireInfo, pImageIndex);
+}
+
+// The FG output's swapchain isn't a driver one and the game's present ids don't reach the real presents, the output
+// paces the presents itself
+VALIDATE_HOOK(hkvkWaitForPresentKHR, PFN_vkWaitForPresentKHR)
+static VkResult hkvkWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)
+{
+    if (auto fg = State::Instance().currentVkFG; fg != nullptr && fg->OwnsSwapchain(swapchain))
+        return VK_SUCCESS;
+
+    return o_WaitForPresentKHR(device, swapchain, presentId, timeout);
+}
+
 VALIDATE_HOOK(hkvkSetHdrMetadataEXT, PFN_vkSetHdrMetadataEXT)
 static void hkvkSetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount, const VkSwapchainKHR* pSwapchains,
                                   const VkHdrMetadataEXT* pMetadata)
@@ -1855,8 +1924,14 @@ void VulkanHooks::Unhook()
     if (o_AcquireNextImageKHR != nullptr)
         DetourDetach(&(PVOID&) o_AcquireNextImageKHR, hkvkAcquireNextImageKHR);
 
+    if (o_AcquireNextImage2KHR != nullptr)
+        DetourDetach(&(PVOID&) o_AcquireNextImage2KHR, hkvkAcquireNextImage2KHR);
+
     if (o_SetHdrMetadataEXT != nullptr)
         DetourDetach(&(PVOID&) o_SetHdrMetadataEXT, hkvkSetHdrMetadataEXT);
+
+    if (o_WaitForPresentKHR != nullptr)
+        DetourDetach(&(PVOID&) o_WaitForPresentKHR, hkvkWaitForPresentKHR);
 
     if (o_AcquireFullScreenExclusiveModeEXT != nullptr)
         DetourDetach(&(PVOID&) o_AcquireFullScreenExclusiveModeEXT, hkvkAcquireFullScreenExclusiveModeEXT);
@@ -1894,7 +1969,9 @@ void VulkanHooks::Unhook()
         o_DestroySwapchainKHR = nullptr;
         o_GetSwapchainImagesKHR = nullptr;
         o_AcquireNextImageKHR = nullptr;
+        o_AcquireNextImage2KHR = nullptr;
         o_SetHdrMetadataEXT = nullptr;
+        o_WaitForPresentKHR = nullptr;
         o_AcquireFullScreenExclusiveModeEXT = nullptr;
         o_ReleaseFullScreenExclusiveModeEXT = nullptr;
         o_vkDestroySurfaceKHR = nullptr;

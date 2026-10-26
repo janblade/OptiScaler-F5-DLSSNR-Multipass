@@ -38,6 +38,7 @@ struct Generation
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool inverted = false, beforeSr = false, reset = true;
     bool temporal = false, packed = false;
+    bool disableIsHDR = false; // creation identity, independent of the game's HDR and AutoExposure
     bool guidesMatched = false;
     DlssNr::Spatial::Layout layout {};
     Texture warp, warpCache;
@@ -356,10 +357,12 @@ Created CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommand
     p->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
     p->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
     p->Set(NVSDK_NGX_Parameter_PerfQualityValue, (int) NVSDK_NGX_PerfQuality_Value_DLAA);
-    const unsigned flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
-                           NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+    const unsigned flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                           (g.disableIsHDR ? 0u : NVSDK_NGX_DLSS_Feature_Flags_IsHDR) |
                            (g.inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0u);
     p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
+    LOG_INFO("Superior Scaling: creating private DLSS preset {}, IsHDR {}, AutoExposure enabled", g.preset,
+             !g.disableIsHDR);
     Record(cmd);
     auto result = CreateFeature(g, cmd, g.preset);
     if (result != NVSDK_NGX_Result_Success || !g.feature)
@@ -599,6 +602,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         return Began::Unavailable;
     }
     const auto& cfg = *Config::Instance();
+    const bool disableIsHDR = cfg.DlssNrSuperiorScalingDisableIsHDR.value_or_default();
     static DlssNr::SuperiorScaling::PrivatePresetChoice presetChoice;
     const unsigned preset = presetChoice.Select(cfg.DlssNrSuperiorScalingPreset.value_or_default(),
                                                 cfg.DlssNrModelResolutionAuto.value_or_default(),
@@ -615,7 +619,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
             previous->workWidth != workWidth || previous->workHeight != workHeight || previous->format != format ||
             previous->inverted != frame.DepthInverted || previous->beforeSr != frame.BeforeUpscale ||
             previous->temporal != temporal || previous->packed != (layout != nullptr) ||
-            (layout && previous->layout != *layout) ||
+            (temporal && previous->disableIsHDR != disableIsHDR) || (layout && previous->layout != *layout) ||
             DlssNr::SuperiorScaling::PrivatePresetChanged(previous->preset, preset))
         {
             Drop();
@@ -635,6 +639,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         g.inverted = frame.DepthInverted;
         g.beforeSr = frame.BeforeUpscale;
         g.temporal = temporal;
+        g.disableIsHDR = disableIsHDR;
         g.packed = layout != nullptr;
         if (layout)
             g.layout = *layout;

@@ -3880,6 +3880,19 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "CNN automatically chooses its model from guided range sigma. Transformer keeps the same model. "
                        "Preset availability depends on the installed DLSS runtime.");
 
+            bool disableIsHDR = config->DlssNrSuperiorScalingDisableIsHDR.value_or_default();
+            bool changedIsHDR = ImGui::Checkbox("##SuperiorScalingDisableIsHDR", &disableIsHDR);
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextWrapped("Disable DLSS IsHDR flag (may reduce severe ghosting at the cost of less stable NR)");
+            if (ImGui::IsItemClicked())
+            {
+                disableIsHDR = !disableIsHDR;
+                changedIsHDR = true;
+            }
+            if (changedIsHDR)
+                config->DlssNrSuperiorScalingDisableIsHDR = disableIsHDR;
+
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
 
             if (nr.vulkan)

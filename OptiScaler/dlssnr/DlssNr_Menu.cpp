@@ -1330,13 +1330,32 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
 }
 
 // One line of the same status, for the other pages.
+// The views a multi-monitor layout draws (DlssNr_Views.h), as the menu words them. Direct3D 12 only.
+static std::string ViewText(const DlssNr::Views::Rect& r)
+{
+    char text[64];
+    std::snprintf(text, sizeof(text), "%ux%u at %u,%u", r.w, r.h, r.x, r.y);
+    return text;
+}
+
 static void RenderStatusLine(const NrCommon& nr)
 {
     const auto ms = nr.vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime();
     ScopedMonoFont monoFont {};
+    const auto views = nr.vulkan ? DlssNr::Views::Snapshot {} : DlssNr::MultiViewStatus();
 
     if (!nr.enabled)
         ImGui::TextDisabled("NR off.");
+    else if (views.active && !views.hasSelected)
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Stood down: the game draws %zu views at once.", views.count);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Pick a view##multiviewstatus"))
+            MenuPages::RequestPage(MenuPages::Page::NrInput);
+    }
+    else if (views.active && ms.has_value())
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running on one of %zu views (%s) - %.2f ms elapsed", views.count,
+                           ViewText(views.selected).c_str(), ms.value());
     else if (!DlssNr::IsRunning() && !nr.vulkan)
         ImGui::TextDisabled("NR is not running. See Status & Presets.");
     else if (ms.has_value())
@@ -3597,6 +3616,90 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
 }
 
 // NR Input.
+// "Several views": shown only while the game draws several views into one picture (a triple-screen rig), so it is not a
+// control everyone scrolls past. NR keeps one model, so it works on one view at a time; which one is the user's call,
+// and until it is made NR stands down (the picture stays as the game made it).
+static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr)
+{
+    using DlssNr::Views::Pick;
+    const auto views = DlssNr::MultiViewStatus();
+
+    if (!views.active)
+        return;
+
+    NrCard card("Several views##card", menuResScale);
+    if (!card.IsOpen())
+        return;
+
+    ImGui::TextWrapped("The game draws %zu views into one %ux%u picture (a multi-monitor layout). NR works on one view at a "
+                       "time. Pick the one it runs on; the others stay as the game made them.",
+                       views.count, views.allocW, views.allocH);
+
+    // The views that start at the origin are the ones NR can work on; name the biggest and the smallest of them.
+    const DlssNr::Views::Rect* largest = nullptr;
+    const DlssNr::Views::Rect* smallest = nullptr;
+    for (size_t i = 0; i < views.count; ++i)
+    {
+        const auto& r = views.rects[i];
+        if (!r.AtOrigin())
+            continue;
+        if (largest == nullptr || r.Area() > largest->Area())
+            largest = &r;
+        if (smallest == nullptr || r.Area() < smallest->Area())
+            smallest = &r;
+    }
+
+    const bool sameView = largest != nullptr && smallest != nullptr && *largest == *smallest;
+    int pick = (int) DlssNr::Views::PickFrom(config->DlssNrMultiViewTarget.value_or_default());
+    // One view at the origin: both choices land on it, shown as one.
+    if (sameView && pick == (int) Pick::Largest)
+        pick = (int) Pick::Smallest;
+
+    bool changed = false;
+    changed |= ImGui::RadioButton("Nothing (NR stands down)##multiviewpick", &pick, (int) Pick::Off);
+
+    if (largest != nullptr && !sameView)
+    {
+        const std::string label = "The largest view: " + ViewText(*largest) + "##multiviewpicklargest";
+        changed |= ImGui::RadioButton(label.c_str(), &pick, (int) Pick::Largest);
+    }
+
+    if (smallest != nullptr)
+    {
+        const std::string label =
+            std::string(sameView ? "The view at the left: " : "The first screen: ") + ViewText(*smallest) +
+            "##multiviewpicksmallest";
+        changed |= ImGui::RadioButton(label.c_str(), &pick, (int) Pick::Smallest);
+    }
+
+    if (changed)
+        config->DlssNrMultiViewTarget = (uint32_t) pick;
+
+    HelpMarker("The game gives the upscaler one call per monitor, and often one for the whole picture. NR keeps a single "
+               "model and a single history, so it cannot follow all of them at once; it runs on the view you pick and "
+               "leaves the rest alone. Only views that start at the left edge of the picture can be picked for now.");
+
+    // What was found, so a wrong guess is visible (recognition over recall).
+    for (size_t i = 0; i < views.count; ++i)
+    {
+        const auto& r = views.rects[i];
+        const bool picked = views.hasSelected && r == views.selected;
+        const std::string line = ViewText(r) + (picked ? "  - NR runs here" : r.AtOrigin() ? "" : "  - cannot be picked yet");
+        picked ? ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "%s", line.c_str()) : ImGui::TextDisabled("%s", line.c_str());
+    }
+
+    // A single screen of a shared picture has to be handled before SR; after it the model would run on every screen.
+    if (views.hasSelected && views.selectedNeedsBeforeSr && !beforeSr)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+        ImGui::TextWrapped("One screen needs \"Run before SR\": after SR the model would run on every screen, so NR does "
+                           "not run until it is on.");
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("Set in NR Options##multiviewbeforesr"))
+            MenuPages::RequestPage(MenuPages::Page::NrOptions);
+    }
+}
+
 static void RenderInputPage(Config* config, float menuResScale, const NrCommon& nr)
 {
     ImGui::PushItemWidth(220.0f * menuResScale);
@@ -3607,6 +3710,9 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
                           (finishedPicture && config->DlssNrDeferredDlss.value_or_default());
     const auto activeFeature = State::Instance().currentFeature;
     const bool rayReconstruction = activeFeature && activeFeature->GetUpscalerType() == Upscaler::DLSSD;
+
+    if (!nr.vulkan)
+        RenderSeveralViews(config, menuResScale, beforeSr);
 
     if (NrCard card("Size", menuResScale); card.IsOpen())
     {
@@ -4584,6 +4690,24 @@ void UpdateF5LowHint(Config* config)
     ImGui::InsertNotification({ ImGuiToastType::Info, 15000,
                                 "No upscaler call from this game so far.\nOptical F5Low can run NR without one: open "
                                 "the menu, Neural Rendering, Optical F5Low." });
+}
+
+void UpdateMultiViewHint(Config* config)
+{
+    static bool shown = false;
+
+    if (shown || !config->DlssNrEnabled.value_or_default())
+        return;
+
+    const auto views = MultiViewStatus();
+    if (!views.active || views.hasSelected)
+        return;
+
+    shown = true;
+    ImGui::InsertNotification({ ImGuiToastType::Warning, 15000,
+                                "Neural Rendering stood down: this game draws %zu views at once (a multi-monitor "
+                                "layout).\nPick the view it works on: open the menu, Neural Rendering, Input.",
+                                views.count });
 }
 
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)

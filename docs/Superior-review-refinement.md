@@ -1,6 +1,6 @@
 # Superior Scaling review refinements â€” validation branch
 
-This branch is for manual validation before updating PR #249. Its PR head remains 7362c5f6. Do not push this branch to the PR ref until the user confirms the dynamic-resolution game test.
+These refinements address the review of PR #249 at 7362c5f6. The author confirmed successful visual testing with DLSS dynamic resolution in a real game on 2026-10-26 and authorized publishing the fixes to the PR.
 
 ## Runtime changes
 
@@ -47,7 +47,7 @@ The native-capacity timing variant uses full packed-colour allocation for the ca
 
 Actual model DLL SHA256: `cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed`.
 
-Persistent guide capacity adds approximately 57.9 MiB at 4K/Balanced with 1080p guides compared with the old tight allocation; it eliminates repeated packed-guide reallocations while the active extent changes. Existing typeless source-copy resize work is separate and remains unchanged. Synthetic guide correspondence alone does not prove the behavior of the closed NR model. The separate actual-NR sequence compares persistent histories under fixed and changing guide extents, with an every-frame-reset positive control. A game test remains necessary for real disocclusion, jitter and engine-specific dynamic-resolution metadata.
+Persistent guide capacity adds approximately 57.9 MiB at 4K/Balanced with 1080p guides compared with the old tight allocation; it eliminates repeated packed-guide reallocations while the active extent changes. Existing typeless source-copy resize work is separate and remains unchanged. Synthetic guide correspondence alone does not prove the behavior of the closed NR model. The separate actual-NR sequence compares persistent histories under fixed and changing guide extents, with an every-frame-reset positive control. These controlled sequences do not cover every disocclusion, jitter pattern or engine-specific metadata path; the manual in-game confirmation below supplies additional real-world validation.
 
 
 ## GPU timing
@@ -75,9 +75,13 @@ The measured resident route includes colour packing, actual joint guides/correct
 | SDR-render1440-depth16 | 100 | 1.047552 | 0.990208 | -0.057984 | 0.001510 |
 | HDR0-render1440-depth16 | 100 | 0.946688 | 0.889600 | -0.057088 | 0.019969 |
 
-Raw samples and variability including P05/P95 are in [CSV](validation/superior-review-timing.csv) and [JSON](validation/superior-review-timing.json). These are stage measurements, not a full-game speedup. R32F remains close to its previous GPU cost; quantized-depth cases avoid much of the unnecessary surface search triggered by mistaking quantization for layer boundaries. History preservation / allocation savings under real dynamic resolution require the user's game validation; resets on genuine NR colour-grid changes (for example Auto model-resolution bucket changes) are deliberately retained.
+Raw samples and variability including P05/P95 are in [CSV](validation/superior-review-timing.csv) and [JSON](validation/superior-review-timing.json). These are stage measurements, not a full-game speedup. R32F remains close to its previous GPU cost; quantized-depth cases avoid much of the unnecessary surface search triggered by mistaking quantization for layer boundaries. The author has additionally completed a visual in-game DLSS dynamic-resolution test without observing problems. This is qualitative validation, not a measured in-game performance claim. Resets on genuine NR colour-grid changes (for example Auto model-resolution bucket changes) are deliberately retained.
 
-PR #249 has not been updated. Manual validation should first use fixed Model resolution 100%, Superior + Compress, and vary the game's rendering resolution. Separately test Auto to confirm CNN identity does not change; Auto may still resize the NR colour grid and require legitimate model/history recreation.
+## Manual in-game validation
+
+On 2026-10-26, the author reported testing DLSS with dynamic resolution in a real game and observing no visual problems. This supplements the synthetic GPU correspondence checks and actual-NR history comparisons. It is not a claim that every engine, scene or dynamic-resolution configuration has been tested.
+
+Following this result, the author approved updating PR #249. Auto can still resize the NR colour grid and require legitimate model/history recreation; changes to guide extents alone do not force a reset, and dynamic effective scale changes do not switch CNN A/E.
 
 
 ## DLL / publication status
@@ -86,4 +90,4 @@ Build (No Signing) succeeded for runtime commit `45d55eb75b3f0e40385810e5f6cff61
 
 The subsequent source readability edits rebuild all 52 shaders to the identical committed bytes; no C++ runtime or generated-bytecode change followed this DLL build. CPU and shader rebuild CI passed. Janblade's restored whole-tree formatting check still fails; its policy has not been replaced or weakened in this branch.
 
-The production R32F path adds approximately 0.0002–0.0036 ms in the paired stage measurements. Quantized fixtures improve by approximately 0.0035–0.0915 ms. One R32F/HDR P65 measurement has a large timing outlier (paired SD .106 ms); use the raw samples/P05/P95 rather than treating the sub-microsecond median difference as a proven gain.
+The production R32F path adds approximately 0.0002â€“0.0036 ms in the paired stage measurements. Quantized fixtures improve by approximately 0.0035â€“0.0915 ms. One R32F/HDR P65 measurement has a large timing outlier (paired SD .106 ms); use the raw samples/P05/P95 rather than treating the sub-microsecond median difference as a proven gain.

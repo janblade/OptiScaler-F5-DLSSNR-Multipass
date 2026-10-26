@@ -234,7 +234,20 @@ int main()
         Check(r.verdict == Verdict::Run && r.slot == 2, "the new right screen runs on slot 2");
     }
 
+    std::printf("The frame's last view (one picture after SR, frame generation's inputs):\n");
+    {
+        Detector d;
+        Check(d.FeedSlot() == -1, "no layout, no last view");
+        Frame(d, 1, 0);
+        Frame(d, 2, 0);
+        Check(d.FeedSlot() == 2, "the right screen without the whole picture");
+        Frame(d, 3, 0, true);
+        Check(d.FeedSlot() == (int) kWholeBit, "the whole picture when it is drawn");
+    }
+
     std::printf("Mask helpers:\n");
+    Check(OnePicture(1u << kOnePictureBit | kLeft) && !OnePicture(kLeft | kWhole) && CountRuns(1u << kOnePictureBit) == 0,
+          "one picture is a mode bit, not a view");
     Check(CountRuns(kLeft | kRight | kWhole) == 3 && Runs(kWhole, kWholeBit) && !Runs(kLeft, 1), "bits");
 
     std::printf("%s (%d failed)\n", g_fail ? "FAILED" : "PASSED", g_fail);

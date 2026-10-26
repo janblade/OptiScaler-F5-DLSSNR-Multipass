@@ -6369,6 +6369,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // every placement and mode below, since all of them keep one model feature and one history.
     bool viewNeedsBeforeSr = false;
     bool viewLatched = false;
+    bool onePicture = false; // all screens as one picture: once per frame, after SR, on the whole shared output
     unsigned long long viewEpoch = 0;
     if (cfg.DlssNrEnabled.value_or_default() && cmdList != nullptr && params != nullptr && !rayReconstruction)
     {
@@ -6381,7 +6382,19 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             EnterMultiView(view.recalled);
         ParkIdleViews();
 
-        if (view.verdict != Views::Verdict::Run)
+        const uint32_t mask = cfg.DlssNrMultiViewScreens.value_or_default();
+        onePicture = view.slot >= 0 && Views::OnePicture(mask);
+
+        // After SR the views are side by side in the shared output; once the frame's last view is upscaled it holds
+        // the whole picture. Every other seam of the frame stands aside.
+        if (onePicture && (beforeUpscale || view.slot != g_views.FeedSlot()))
+        {
+            DeferredSr::Cancel();
+            Late::Cancel();
+            return;
+        }
+
+        if (!onePicture && view.verdict != Views::Verdict::Run)
         {
             DeferredSr::Cancel();
             Late::Cancel();
@@ -6398,10 +6411,11 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             return;
         }
 
-        UseViewSlot(view.slot);
-        viewNeedsBeforeSr = view.needsBeforeSr;
-        viewLatched = view.slot >= 0;
-        g_multiRun = viewLatched && Views::CountRuns(cfg.DlssNrMultiViewScreens.value_or_default()) >= 2;
+        // One picture keeps its model in the whole picture's slot: the same size whichever view comes last.
+        UseViewSlot(onePicture ? (int) Views::kWholeBit : view.slot);
+        viewNeedsBeforeSr = !onePicture && view.needsBeforeSr;
+        viewLatched = !onePicture && view.slot >= 0;
+        g_multiRun = viewLatched && Views::CountRuns(mask) >= 2;
     }
 
     const unsigned finishedMode = !cfg.DlssNrFinishedPicture.value_or_default() ? 0u :
@@ -6568,7 +6582,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // edit from noise it is trained to remove unless the edit is motion-consistent across frames
     // the way real scene detail is. Running NR after RR sidesteps that entirely: RR active forces
     // post-SR placement unconditionally, regardless of the RunBeforeSR setting.
-    const bool configuredBefore = beforeSrSet && preSrCompatible && !rayReconstruction;
+    const bool configuredBefore = beforeSrSet && preSrCompatible && !rayReconstruction && !onePicture;
 
     // Where NR would run without a Tune, for the run's wait (CalibrationSituation): kept from before the Tune moved it.
     if (!tuneAfterSr)
@@ -6681,6 +6695,32 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &frame.MotionSubrectBaseY);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &frame.ColorSubrectBaseX);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &frame.ColorSubrectBaseY);
+
+    // All screens as one picture: this evaluate is the frame's last view, but the picture is every view. The whole
+    // output allocation (each view wrote its rectangle of it) and the whole depth and motion allocations, which hold
+    // every view side by side at the same scale.
+    if (onePicture)
+    {
+        if (output != nullptr)
+        {
+            frame.OutputWidth = (unsigned int) output->GetDesc().Width;
+            frame.OutputHeight = output->GetDesc().Height;
+        }
+        const D3D12_RESOURCE_DESC guideDesc = (depth != nullptr ? depth : motion)->GetDesc();
+        frame.RenderSubrectWidth = (unsigned int) guideDesc.Width;
+        frame.RenderSubrectHeight = guideDesc.Height;
+        frame.DepthSubrectBaseX = frame.DepthSubrectBaseY = 0;
+        frame.MotionSubrectBaseX = frame.MotionSubrectBaseY = 0;
+        frame.ColorSubrectBaseX = frame.ColorSubrectBaseY = 0;
+
+        static bool said = false;
+        if (!said)
+        {
+            said = true;
+            LOG_INFO("DLSS-NR: all screens as one picture: once per frame after SR on the {}x{} output, guides {}x{}",
+                     frame.OutputWidth, frame.OutputHeight, frame.RenderSubrectWidth, frame.RenderSubrectHeight);
+        }
+    }
 
     params->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, &frame.FrameTimeMs);
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)

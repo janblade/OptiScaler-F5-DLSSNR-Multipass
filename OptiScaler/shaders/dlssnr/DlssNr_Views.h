@@ -22,6 +22,12 @@ constexpr unsigned int kSlots = kMaxViews + 1;
 // NR stands down while several views are drawn, so an untested layout never runs the model on the wrong picture.
 inline bool Runs(uint32_t mask, unsigned int slot) { return slot < kSlots && (mask >> slot) & 1u; }
 
+// Bit kOnePictureBit: all screens as one picture. After SR the views are side by side in the one shared output, so NR
+// runs once there, on the frame's last view (FeedSlot), with the whole depth and motion allocations. Overrides the
+// other bits.
+constexpr unsigned int kOnePictureBit = 9;
+inline bool OnePicture(uint32_t mask) { return (mask >> kOnePictureBit) & 1u; }
+
 inline unsigned int CountRuns(uint32_t mask)
 {
     unsigned int n = 0;
@@ -243,6 +249,23 @@ class Detector
             }
 
         return s;
+    }
+
+    // The view whose evaluate comes last in a frame while the layout is drawn: the whole picture when the game draws it,
+    // else the rightmost screen. By then every view's input and output of the frame are written. -1: no layout.
+    int FeedSlot() const
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        if (!_latched)
+            return -1;
+
+        for (size_t i = 0; i < _candidateCount; ++i)
+            if (!Stale(_candidates[i]) && _candidates[i].seen.Whole())
+                return (int) kWholeBit;
+
+        Seen screens[kMaxViews];
+        const size_t n = Screens(screens);
+        return n == 0 ? -1 : (int) n - 1;
     }
 
     void Reset()

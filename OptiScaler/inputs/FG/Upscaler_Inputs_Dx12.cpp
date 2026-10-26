@@ -74,14 +74,9 @@ MultiViewFeed JudgeFgViews(NVSDK_NGX_Parameter* params)
 
     feed.active = true;
 
-    // The combined picture when the game draws it, else the rightmost screen: the last of the frame, so the depth and
-    // motion of every screen are written by then, and one per game frame whenever the game presents.
-    bool whole = false;
-    for (size_t i = 0; i < status.count; ++i)
-        whole = whole || status.views[i].slot == Views::kWholeBit;
-
-    const int feedSlot = whole ? (int) Views::kWholeBit : (int) status.screens - 1;
-    feed.skip = result.slot < 0 || result.slot != feedSlot;
+    // The frame's last view (the combined picture when the game draws it, else the rightmost screen): the depth and
+    // motion of every screen are written by then, and it comes once per game frame whenever the game presents.
+    feed.skip = result.slot < 0 || result.slot != FgViews.FeedSlot();
 
     if (ID3D12Resource* output = GetParamResource(params, NVSDK_NGX_Parameter_Output))
     {

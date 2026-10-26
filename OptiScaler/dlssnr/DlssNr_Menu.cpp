@@ -1346,7 +1346,10 @@ static void RenderStatusLine(const NrCommon& nr)
 
     if (!nr.enabled)
         ImGui::TextDisabled("NR off.");
-    else if (views.active && DlssNr::Views::CountRuns(views.mask) == 0)
+    else if (views.active && DlssNr::Views::OnePicture(views.mask) && ms.has_value())
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running on all %zu screens as one picture - %.2f ms elapsed",
+                           views.screens, ms.value());
+    else if (views.active && DlssNr::Views::CountRuns(views.mask) == 0 && !DlssNr::Views::OnePicture(views.mask))
     {
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Stood down: the game draws %zu views at once.", views.count);
         ImGui::SameLine();
@@ -3642,12 +3645,34 @@ static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr
     if (!card.IsOpen())
         return;
 
-    ImGui::TextWrapped("The game draws %zu views into one %ux%u picture (a multi-monitor layout). Tick the views NR works on: "
-                       "each gets its own model. Unticked views stay as the game made them.",
-                       views.count, views.allocW, views.allocH);
+    ImGui::TextWrapped("The game draws %zu views into one %ux%u picture (a multi-monitor layout).", views.count,
+                       views.allocW, views.allocH);
 
     uint32_t mask = config->DlssNrMultiViewScreens.value_or_default();
     bool screenTicked = false;
+
+    // Two ways: one model per ticked view (before SR), or one pass over the finished picture after SR, where the views are
+    // side by side in the game's output. The ticks are kept while one picture is chosen.
+    const uint32_t oneBit = 1u << DlssNr::Views::kOnePictureBit;
+    bool onePicture = DlssNr::Views::OnePicture(mask);
+    if (ImGui::RadioButton("Each ticked view on its own##multiviewmode", !onePicture))
+        config->DlssNrMultiViewScreens = mask = mask & ~oneBit;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("All screens as one picture (after SR)##multiviewmode", onePicture))
+        config->DlssNrMultiViewScreens = mask = mask | oneBit;
+    HelpMarker("Each ticked view on its own: a model and a history per view, before SR, nothing crosses the edge between "
+               "two screens.\nAll screens as one picture: once per frame, after SR, on the game's whole output (the "
+               "screens side by side), with one model. Superior Scaling and Reuse detail stay on. The model may smear a "
+               "thin strip where two screens meet: they are different cameras. Costs NR at the whole output size.");
+    onePicture = DlssNr::Views::OnePicture(mask);
+
+    if (onePicture)
+    {
+        ImGui::TextDisabled("NR runs once per frame after SR, on all %zu screens together.", views.screens);
+        return;
+    }
+
+    ImGui::TextDisabled("Tick the views NR works on: each gets its own model. Unticked views stay as the game made them.");
 
     for (size_t i = 0; i < views.count; ++i)
     {
@@ -4685,7 +4710,7 @@ void UpdateMultiViewHint(Config* config)
         return;
 
     const auto views = MultiViewStatus();
-    if (!views.active || Views::CountRuns(views.mask) != 0)
+    if (!views.active || Views::CountRuns(views.mask) != 0 || Views::OnePicture(views.mask))
         return;
 
     shown = true;

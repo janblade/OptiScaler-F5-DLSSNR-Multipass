@@ -982,6 +982,7 @@ static bool NativeNrOnlyRunning(NativeApi api)
 // API::DX12: its upscaler type is what says so.)
 static bool VulkanFeatureIsOn12()
 {
+    if (VkPresentBridge::FeederInputsLive()) return true;
     const auto feature = State::Instance().currentFeature;
     return feature != nullptr && FeatureProvider_Vk::IsOn12(feature->GetUpscalerType());
 }
@@ -1002,6 +1003,8 @@ static void SwitchVulkanBackend(Config* config, Upscaler backend)
 
 static void EnterGameUpscalerRoute(Config* config)
 {
+    // Feeder already supplies a D3D12 NGX feature; rebuilding it as a Vulkan game backend is incorrect.
+    if (VkPresentBridge::FeederInputsLive()) return;
     const Upscaler current = config->VulkanUpscaler.value_or_default();
 
     // The same DLSS on D3D12 where the game's DLSS could run, FSR otherwise (FeatureProvider_Vk::On12For). Already a
@@ -4468,7 +4471,7 @@ void RenderVulkanRoute(Config* config)
 
     ImGui::SameLine();
 
-    if (ImGui::RadioButton("Bridge, game's upscaler##vkroute", routeOn) && !routeOn)
+    if (ImGui::RadioButton("Bridge, game / Feeder inputs##vkroute", routeOn) && !routeOn)
     {
         // Frame generation reads the game's upscaler call: the motion modes stand down, and NR, if on, runs on that
         // call's output (after SR), not on the finished picture.
@@ -4479,7 +4482,7 @@ void RenderVulkanRoute(Config* config)
         config->DlssNrNativeUpscaler = keys.upscaler;
         config->DlssNrNativeFrameGenerationOnly = true;
 
-        if (config->DlssNrFinishedPicture.value_or_default())
+        if (config->DlssNrFinishedPicture.value_or_default() && !VkPresentBridge::FeederInputsLive())
         {
             config->DlssNrFinishedPicture = false;
             RetryNr();
@@ -4489,7 +4492,7 @@ void RenderVulkanRoute(Config* config)
     }
 
     HelpMarker("Native swapchain: FSR FG or DLSS-G on the game's own swapchain. No XeFG.\n"
-               "Bridge: reads the game's upscaler call. XeFG, FSR FG and DLSS-G.\n"
+               "Bridge: reads the game's upscaler or Feeder inputs. NR + XeFG, FSR FG and DLSS-G.\n"
                "Choose before the game starts; leaving the bridge needs a restart.");
 
     if (f5lowFg)
@@ -4509,7 +4512,7 @@ void RenderVulkanRoute(Config* config)
     }
 
     const RouteWarning warning =
-        RouteWarningFor(NativeGameCallsUpscaler(api), VulkanFeatureIsOn12(), api == NativeApi::Vulkan && !bridgeUp);
+        RouteWarningFor(NativeGameCallsUpscaler(api) || VkPresentBridge::FeederInputsLive(), VulkanFeatureIsOn12(), api == NativeApi::Vulkan && !bridgeUp);
 
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.25f, 1.0f));
 
@@ -4538,8 +4541,11 @@ void RenderVulkanRoute(Config* config)
     if (warning == RouteWarning::None)
     {
         const auto feature = State::Instance().currentFeature;
-        ImGui::TextDisabled("Frame generation from the game's upscaler (%s on D3D12).",
-                            feature != nullptr ? feature->Name().c_str() : "upscaler");
+        if (VkPresentBridge::FeederInputsLive())
+            ImGui::TextDisabled("Feeder inputs active: NR and frame generation share the final ReShade picture.");
+        else
+            ImGui::TextDisabled("Frame generation from the game's upscaler (%s on D3D12).",
+                                feature != nullptr ? feature->Name().c_str() : "upscaler");
     }
 }
 

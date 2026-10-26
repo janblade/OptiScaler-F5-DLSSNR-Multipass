@@ -13,6 +13,7 @@
 // OptiScaler in: the surface-to-window map, frame generation, the menu, State.
 
 #include <windows.h>
+#include "FeederPresentContract.h"
 #include <d3d12.h>
 #include <vulkan/vulkan.h>
 
@@ -34,6 +35,11 @@ bool DxvkGame();
 // settings are known (the device is made), a swapchain may still be refused later (format, window). The native Vulkan FG
 // output (FSRFG_Vk, DLSSG_Vk) is for the games it does not take.
 bool ModeWantsBridge();
+
+// Post-ReShade final-picture transport for a Feeder-owned Vulkan scene.
+bool FeederPresent(FeederPresentV1& frame);
+bool FeederInputsLive();
+void NoteFeederInputs();
 
 // The fullScreenExclusive mode of a VkSurfaceFullScreenExclusiveInfoEXT in a create info's chain, or null. The swapchain
 // made on the hidden surface is asked for DISALLOWED through it (and the game's value put back after the call): the hidden

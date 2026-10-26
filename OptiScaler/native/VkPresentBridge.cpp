@@ -75,6 +75,16 @@ struct Bridge
     native::VkCopyFailureRule copyRule;
     native::VkOutputFailureRule outputRule; // this output's presents only, under g_mutex
     uint64_t presents = 0;
+    // Final post-effect picture, imported from Feeder. No cross-device resource pointers.
+    ComPtr<ID3D12Resource> feedBuffer;
+    ComPtr<ID3D12Fence> feedReady, feedDone;
+    HANDLE feedDoneHandle = nullptr;
+    uint64_t feedDoneValue = 0, feedGeneration = 0;
+    ~Bridge()
+    {
+        core.WaitIdle(); // Imports/allocators must outlive every queued read.
+        if (feedDoneHandle) CloseHandle(feedDoneHandle);
+    }
 };
 
 std::mutex g_mutex;
@@ -819,6 +829,99 @@ HWND OutputWindow() { return g_outputWindow.load(std::memory_order_acquire); }
 uint32_t OutputGeneration() { return g_outputGeneration.load(std::memory_order_acquire); }
 
 bool MenuOnGamePresents() { return g_menuOnGamePresents.load(std::memory_order_relaxed); }
+
+namespace
+{
+std::atomic<ULONGLONG> g_feederHeartbeat { 0 };
+}
+
+void NoteFeederInputs()
+{
+    g_feederHeartbeat.store(GetTickCount64(), std::memory_order_relaxed);
+}
+
+bool FeederInputsLive()
+{
+    const auto last = g_feederHeartbeat.load(std::memory_order_relaxed);
+    return last != 0 && GetTickCount64() - last < 2500;
+}
+
+bool FeederPresent(FeederPresentV1& f)
+{
+    if (f.size != sizeof(f) || f.version != 1 || f.swapchain == 0)
+        return false;
+    std::lock_guard lock(g_mutex);
+    if (!g_bridge || !g_bridge->outputUp ||
+        !g_bridge->swapchains.contains((VkSwapchainKHR)f.swapchain))
+        return false;
+    auto& b = *g_bridge;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    if (!native::BridgeSwapchainFormat(b.core.Format(), &format)) return false;
+    const uint32_t generation = g_outputGeneration.load(std::memory_order_relaxed);
+    if (f.buffer && f.bridgeGeneration != generation) return false;
+    if (!b.feedDone)
+    {
+        if (FAILED(b.device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&b.feedDone))) ||
+            FAILED(b.device12->CreateSharedHandle(b.feedDone.Get(), nullptr, GENERIC_ALL, nullptr,
+                                                 &b.feedDoneHandle)))
+        { b.feedDone.Reset(); return false; }
+    }
+    f.bridgeGeneration = generation;
+    f.doneFence = b.feedDoneHandle;
+    f.doneValue = 0;
+    f.displayed = 0;
+    g_feederHeartbeat.store(GetTickCount64(), std::memory_order_relaxed);
+    if (!f.buffer) return true;
+    const uint32_t bytes = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+    if (!f.readyFence || f.readyValue == 0 || f.width != b.core.Width() || f.height != b.core.Height() ||
+        f.format != (uint32_t)format || f.rowPitch < uint64_t(f.width) * bytes ||
+        f.rowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0)
+        return false;
+    if (!b.feedBuffer || b.feedGeneration != f.producerGeneration)
+    {
+        // Rebuild/resize is exceptional. Drain once before releasing imported storage.
+        b.core.WaitIdle();
+        b.feedBuffer.Reset(); b.feedReady.Reset();
+        if (FAILED(b.device12->OpenSharedHandle(f.buffer, IID_PPV_ARGS(&b.feedBuffer))) ||
+            FAILED(b.device12->OpenSharedHandle(f.readyFence, IID_PPV_ARGS(&b.feedReady)))) return false;
+        const auto bd = b.feedBuffer->GetDesc();
+        if (bd.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || bd.Width < uint64_t(f.rowPitch) * f.height)
+        { b.feedBuffer.Reset(); return false; }
+        b.feedGeneration = f.producerGeneration;
+        LOG_INFO("Vulkan bridge: final ReShade/Feeder picture bound {}x{}, format {}, generation {}",
+                 f.width, f.height, f.format, f.producerGeneration);
+    }
+    if (!b.feedBuffer || !b.feedReady) return false;
+    const auto done = b.feedDoneValue + 1;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+    footprint.Footprint = { format, f.width, f.height, 1, f.rowPitch };
+    std::string why;
+    // One GPU copy straight from the shared linear buffer into the displayed back buffer.
+    // No per-frame import, intermediate texture or second command-list/allocator ring.
+    if (!b.core.CopyFrame(b.feedBuffer.Get(), b.feedReady.Get(), f.readyValue, nullptr, 0,
+                          nullptr, 0, why, &footprint))
+    {
+        LogOnce("final ReShade picture copy failed: " + why);
+        return false;
+    }
+    if (FAILED(b.queue12->Signal(b.feedDone.Get(), done)))
+    {
+        f.doneValue = UINT64_MAX; // Submitted read with no reachable completion: stop producer.
+        return true;
+    }
+    b.feedDoneValue = done;
+    const bool copied = true;
+    f.doneValue = done;
+    f.displayed = copied ? 1 : 0;
+    if (copied)
+    {
+        b.copied = true; b.outcome = native::VkCopyOutcome::Copied;
+        if (done == 1 || done % 600 == 0)
+            LOG_INFO("Vulkan bridge: post-ReShade final picture forwarded, frame {} (NR/effects preserved)", done);
+    }
+    else LogOnce("final ReShade picture copy failed: " + why);
+    return true;
+}
 
 bool CopyToOutput(ID3D12Resource* picture, ID3D12Fence* fence, uint64_t copied, ID3D12Fence* doneFence,
                   uint64_t doneValue, uint64_t signalValue)

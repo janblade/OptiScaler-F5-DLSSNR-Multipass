@@ -9,6 +9,14 @@
 #include "dlssnr/DlssNr.h"
 #include "dlssnr/DlssNr_ExposureScan.h"
 #include "dlssnr/DlssNr_SuperiorScaling.h"
+#include "FeederFinishedPicture_Dx12.h"
+#include <native/VkPresentBridge.h>
+
+extern "C" __declspec(dllexport) BOOL WINAPI OptiScalerFeederPresentV1(FeederPresentV1* frame)
+{
+    return frame && VkPresentBridge::FeederPresent(*frame) ? TRUE : FALSE;
+}
+
 #include <upscalers/dlss/DLSSFeature_Dx12.h>
 #include <shaders/output_scaling/OS_Dx12.h>
 
@@ -1203,6 +1211,28 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
             State::Instance().dlssgDetectedInterpolationCount = 0;
             ReflexHooks::setDlssgFrameCount(0);
         }
+    }
+
+    // Feeder's already rendered picture is not an engine DLAA input. Honor its
+    // explicit native-size NR carrier contract before either backend route.
+    if (nrUpscale && !rayReconstruction && FeederFinishedPicture::Requested(InParameters))
+    {
+        IFeature_Dx12* feederFeature = nullptr;
+        if (auto it = Dx12Contexts.find(handleId); it != Dx12Contexts.end() && it->second.feature)
+        {
+            feederFeature = it->second.feature.get();
+            State::Instance().currentFeature = feederFeature;
+        }
+        const auto result = FeederFinishedPicture::Evaluate(InCmdList, InParameters, feederFeature);
+        if (result == NVSDK_NGX_Result_Success)
+        {
+            if (auto it = Dx12Contexts.find(handleId); it != Dx12Contexts.end() && it->second.feature)
+            {
+                State::Instance().currentFeature = it->second.feature.get();
+                it->second.feature->CountFrame();
+            }
+        }
+        return result;
     }
 
     // Native DLSS passthrough

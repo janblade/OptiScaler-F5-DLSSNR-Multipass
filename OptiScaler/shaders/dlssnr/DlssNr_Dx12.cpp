@@ -5974,7 +5974,35 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         lastPrecision = precision;
     }
     DlssNrNative::SetPrecision(precision);
-    const unsigned finishedMode = !cfg.DlssNrFinishedPicture.value_or_default() ? 0u :
+    // Feeder's explicit contract already gives us the finished native picture
+    // and owns its submission/return. Do not defer this private interop list to
+    // the game's unrelated present queue, or run a second deferred DLSS carrier.
+    unsigned int feederContract = 0;
+    const bool feederPicture = params &&
+        params->Get("OptiScaler.Feeder.FinishedPicture", &feederContract) == NVSDK_NGX_Result_Success &&
+        feederContract == 1;
+    if (feederPicture)
+    {
+        void* producerQueue = nullptr;
+        unsigned long long producerEpoch = 0;
+        if (params->Get("OptiScaler.Feeder.Queue", &producerQueue) == NVSDK_NGX_Result_Success &&
+            params->Get("OptiScaler.Feeder.SubmissionEpoch", &producerEpoch) == NVSDK_NGX_Result_Success &&
+            producerQueue && producerEpoch)
+        {
+            // A Vulkan game without FG, or a headless Host64, need not advance
+            // the D3D12 overlay/present counter. Waiting on that counter leaves
+            // a newly created NR feature pending forever. The producer supplies
+            // its actual recording/submission epoch, shared by before/after and
+            // by repeated evaluates on that same command list.
+            timingQueue = static_cast<ID3D12CommandQueue*>(producerQueue);
+            submissionEpoch = producerEpoch;
+            static std::once_flag reported;
+            std::call_once(reported, [] {
+                LOG_INFO("Feeder NR uses the producer queue and submission clock; independent of the menu and frame generation");
+            });
+        }
+    }
+    const unsigned finishedMode = feederPicture || !cfg.DlssNrFinishedPicture.value_or_default() ? 0u :
         (cfg.DlssNrRunBeforeSr.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default()) ? 2u : 1u;
     static unsigned lastFinishedMode = 0;
     if (lastFinishedMode != finishedMode)
@@ -6022,7 +6050,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         return;
     }
     Late::Cancel();
-    if (!cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() || rayReconstruction)
+    if (feederPicture || !cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() || rayReconstruction)
     {
         DeferredSr::Cancel();
         if (rayReconstruction && cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrDeferredDlss.value_or_default())

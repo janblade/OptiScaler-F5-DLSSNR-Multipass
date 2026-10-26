@@ -485,7 +485,8 @@ bool VkPresentBridgeCore::Resize(const VkSwapchainCreateInfoKHR& game, std::stri
 
 bool VkPresentBridgeCore::CopyFrame(ID3D12Resource* source, ID3D12Fence* waitFence, uint64_t waitValue,
                                     ID3D12Fence* afterFence, uint64_t afterValue, ID3D12Fence* signalFence,
-                                    uint64_t signalValue, std::string& why)
+                                    uint64_t signalValue, std::string& why,
+                                    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT* bufferFootprint)
 {
     if (_output == nullptr || source == nullptr || _list == nullptr)
     {
@@ -512,7 +513,24 @@ bool VkPresentBridgeCore::CopyFrame(ID3D12Resource* source, ID3D12Fence* waitFen
     const D3D12_RESOURCE_DESC from = source->GetDesc();
     const D3D12_RESOURCE_DESC to = back->GetDesc();
 
-    if (from.Width != to.Width || from.Height != to.Height)
+    if (bufferFootprint != nullptr)
+    {
+        const auto& f = bufferFootprint->Footprint;
+        const uint32_t bytes = f.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+        if (from.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || f.Width != to.Width || f.Height != to.Height ||
+            f.Format != to.Format || f.Depth != 1 || f.Width == 0 || f.Height == 0 ||
+            f.RowPitch < uint64_t(f.Width) * bytes ||
+            f.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 ||
+            bufferFootprint->Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 ||
+            bufferFootprint->Offset > from.Width ||
+            uint64_t(f.RowPitch) * (f.Height - 1) + uint64_t(f.Width) * bytes >
+                from.Width - bufferFootprint->Offset)
+        {
+            why = "the final-picture buffer does not match the D3D12 back buffer";
+            return false;
+        }
+    }
+    else if (from.Width != to.Width || from.Height != to.Height)
     {
         why = std::format("the picture is {}x{}, the D3D12 swapchain {}x{}", (unsigned) from.Width, from.Height,
                           (unsigned) to.Width, to.Height);
@@ -536,7 +554,16 @@ bool VkPresentBridgeCore::CopyFrame(ID3D12Resource* source, ID3D12Fence* waitFen
     barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     _list->ResourceBarrier(2, barriers);
 
-    _list->CopyResource(back.Get(), source);
+    if (bufferFootprint != nullptr)
+    {
+        D3D12_TEXTURE_COPY_LOCATION input = {}, output = {};
+        input.pResource = source; input.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        input.PlacedFootprint = *bufferFootprint;
+        output.pResource = back.Get(); output.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        _list->CopyTextureRegion(&output, 0, 0, 0, &input, nullptr);
+    }
+    else
+        _list->CopyResource(back.Get(), source);
 
     std::swap(barriers[0].Transition.StateBefore, barriers[0].Transition.StateAfter);
     std::swap(barriers[1].Transition.StateBefore, barriers[1].Transition.StateAfter);

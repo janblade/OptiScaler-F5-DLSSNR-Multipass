@@ -182,19 +182,27 @@ int main()
         const auto r = d.Note(e, Whole(), kLeft | kMiddle | kRight);
         Check(r.verdict == Verdict::Run && r.slot == -1, "the wide view runs on the single view's state");
 
-        // Back to the cockpit at once: the game switches back and forth, so quick releases stop.
-        bool latched = false, off = false;
-        for (int i = 0; i < 3; ++i)
-        {
-            const auto s = d.Note(e + 1, Screen(i), kLeft | kMiddle | kRight);
-            latched = latched || s.latchedNow;
-            off = off || s.quickReleaseOff;
-        }
-        Check(latched && off, "the views coming back soon after switch quick releases off");
-        bool stillLatched = true;
-        for (unsigned long long k = e + 2; k < e + 2 + kWholeOnlyEpochs * 3; ++k)
-            stillLatched = stillLatched && !d.Note(k, Whole(), kLeft | kMiddle | kRight).unlatchedNow;
-        Check(stillLatched && d.Status().active, "then the whole picture alone waits the long quiet time");
+        // Back to the cockpit: the left screen alone is recognised as the layout seen before, on its first evaluate.
+        const auto first = d.Note(e + 1, Screen(0), kLeft | kMiddle | kRight);
+        Check(first.latchedNow && first.recalled, "the first screen back brings the layout back");
+        Check(first.verdict == Verdict::Run && first.slot == 0, "and runs on its own slot at once");
+        const auto right = d.Note(e + 1, Screen(2), kLeft | kMiddle | kRight);
+        Check(right.slot == 2 && !right.latchedNow, "the other screens keep their numbers");
+
+        // Out again and back again: every switch is quick.
+        bool releasedAgain = false;
+        for (unsigned long long k = e + 2; k < e + 2 + kWholeOnlyEpochs + 2 && !releasedAgain; ++k)
+            releasedAgain = d.Note(k, Whole(), kLeft | kMiddle | kRight).quickRelease;
+        Check(releasedAgain, "the next outside camera is quick too");
+    }
+
+    std::printf("A single-view game is never recalled into a layout:\n");
+    {
+        Detector d;
+        bool never = true;
+        for (unsigned long long e = 1; e < 50; ++e)
+            never = never && !d.Note(e, Screen(0), kLeft).latchedNow;
+        Check(never, "nothing remembered, nothing recalled");
     }
 
     std::printf("Cockpit frames where a present falls between the screens do not count as the whole picture alone:\n");

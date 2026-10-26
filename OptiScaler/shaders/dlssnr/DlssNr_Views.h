@@ -67,10 +67,8 @@ enum class Verdict
 constexpr unsigned int kQuietEpochs = 300;
 // ... unless only the whole picture is drawn: AC EVO draws one view per screen from the cockpit and one wide view from
 // the outside cameras, and the wide view should not wait seconds for NR. A camera switch is held for this many epochs.
+// Switching back is cheap: the caller keeps each view's model for a while, and the layout is remembered (Recalls).
 constexpr unsigned int kWholeOnlyEpochs = 10;
-// A layout found again this soon after a quick release means the game switches back and forth: from then on it waits
-// kQuietEpochs, so the models are not rebuilt on every switch.
-constexpr unsigned int kFlapEpochs = 600;
 // A view not seen for this many epochs no longer counts (a drifting render size leaves old rectangles).
 constexpr unsigned int kStaleEpochs = 60;
 
@@ -105,7 +103,7 @@ class Detector
         bool latchedNow = false;     // the layout was found by this evaluate
         bool unlatchedNow = false;   // ... or went away
         bool quickRelease = false;   // ... because only the whole picture was drawn (unlatchedNow)
-        bool quickReleaseOff = false; // the layout came back right after a quick release: no more of them (latchedNow)
+        bool recalled = false;       // latchedNow on a screen of the layout seen before, from its first evaluate
         unsigned int viewInEpoch = 0;
     };
 
@@ -152,6 +150,18 @@ class Detector
         for (size_t i = 0; i < _epochCount; ++i)
             sameAllocation += _epochViews[i].SameAllocation(seen) ? 1 : 0;
 
+        // A screen of the layout seen before: the layout is back (the cockpit camera again), found on its first view
+        // instead of after one evaluate run as a single view.
+        if (!_latched && !seen.Whole() && Recalls(seen))
+        {
+            _latched = true;
+            result.latchedNow = result.recalled = true;
+            _quiet = 0;
+            _candidateCount = 0;
+            for (size_t i = 0; i < _knownCount; ++i)
+                _candidates[_candidateCount++] = { _known[i], _epoch };
+        }
+
         if (sameAllocation >= 2)
         {
             _epochMulti = true;
@@ -162,12 +172,6 @@ class Detector
                 _latched = true;
                 result.latchedNow = true;
                 _candidateCount = 0;
-
-                if (_releasedQuick && _quickAllowed && _epoch - _releasedAt < kFlapEpochs)
-                {
-                    _quickAllowed = false;
-                    result.quickReleaseOff = true;
-                }
             }
 
             for (size_t i = 0; i < _epochCount; ++i)
@@ -256,8 +260,7 @@ class Detector
         _epochWhole = _epochScreen = false;
         _wholeOnly = 0;
         _releasedQuick = false;
-        _releasedAt = 0;
-        _quickAllowed = true;
+        _knownCount = 0;
     }
 
   private:
@@ -280,17 +283,22 @@ class Detector
         }
 
         _wholeOnly = _epochWhole && !_epochScreen ? _wholeOnly + 1 : 0;
-        const bool quick = _quickAllowed && _wholeOnly >= kWholeOnlyEpochs;
+        const bool quick = _wholeOnly >= kWholeOnlyEpochs;
 
         if (++_quiet < kQuietEpochs && !quick)
             return false;
+
+        // Left for the whole picture alone (a camera switch): the screens are remembered for when they come back. Left
+        // because one view was drawn for a long time: forgotten, or that view would bring the layout straight back.
+        Seen screens[kMaxViews];
+        _knownCount = quick ? Screens(screens) : 0;
+        std::copy(screens, screens + _knownCount, _known);
 
         _latched = false;
         _candidateCount = 0;
         _quiet = 0;
         _wholeOnly = 0;
         _releasedQuick = quick;
-        _releasedAt = _epoch;
         return true;
     }
 
@@ -358,8 +366,16 @@ class Detector
     bool _latched = false;
     unsigned int _wholeOnly = 0; // epochs in a row with only the whole picture
     bool _releasedQuick = false; // the last release was for the whole picture alone
-    unsigned long long _releasedAt = 0;
-    bool _quickAllowed = true;
+    Seen _known[kMaxViews];      // the screens of the last layout, for when it comes back
+    size_t _knownCount = 0;
+
+    bool Recalls(const Seen& seen) const
+    {
+        for (size_t i = 0; i < _knownCount; ++i)
+            if (_known[i].Same(seen))
+                return true;
+        return false;
+    }
     unsigned int _quiet = 0;
     Candidate _candidates[kSlots];
     size_t _candidateCount = 0;

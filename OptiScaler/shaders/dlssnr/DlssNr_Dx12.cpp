@@ -2232,11 +2232,6 @@ Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* param
                  result.quickRelease ? " (only the whole picture is drawn, e.g. an outside camera)" : "");
     }
 
-    if (result.quickReleaseOff)
-        LOG_INFO("DLSS-NR: the views came back right after the whole picture alone; from now on the layout is kept "
-                 "for {} frames without several views, so the models are not rebuilt on every switch",
-                 Views::kQuietEpochs);
-
     if (result.verdict != Views::Verdict::Run && (++skipped == 1 || skipped % 3600 == 0))
         LOG_INFO("DLSS-NR: {} evaluates skipped so far for the other views of a multi-view frame", skipped);
 
@@ -2363,14 +2358,30 @@ void SwapView(ViewState& v)
 
 ViewState& SlotState(int slot) { return slot < 0 ? g_mainView : g_viewSlots[slot]; }
 
+// When each view last ran (index slot + 1). A view's model is kept while the game switches layouts (AC EVO: the cockpit
+// camera draws one view per screen, the outside cameras one wide view) and released after kKeepIdle without a run.
+constexpr auto kKeepIdle = std::chrono::minutes(2);
+std::chrono::steady_clock::time_point g_viewLastUsed[Views::kSlots + 1] {};
+
 void UseViewSlot(int slot)
 {
-    if (slot == g_loadedSlot || slot >= (int) Views::kSlots)
+    if (slot >= (int) Views::kSlots)
+        return;
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto lastRun = g_viewLastUsed[slot + 1];
+    g_viewLastUsed[slot + 1] = now;
+
+    if (slot == g_loadedSlot)
         return;
 
     SwapView(SlotState(g_loadedSlot));
     SwapView(SlotState(slot));
     g_loadedSlot = slot;
+
+    // A kept model coming back after a layout switch: its history is of another moment.
+    if (now - lastRun > std::chrono::milliseconds(500))
+        g_nr.reset = true;
 }
 
 // Parks the loaded view's features and surfaces (released 32 frames later, as every other) and puts its part of the
@@ -2419,24 +2430,30 @@ void ParkSlot(int slot)
     SwapView(loaded);          // g_nr: the loaded view's part back
 }
 
-// Several views found: the single view's model and surfaces are not needed while they are drawn.
-void EnterMultiView()
+bool SlotHolds(int slot)
 {
-    ParkSlot(-1);
-    LOG_INFO("DLSS-NR: one model per ticked view from now on; the single view's model is released");
+    if (slot == g_loadedSlot)
+        return g_nr.feature != nullptr || g_nr.output != nullptr || EdgeCompression::color != nullptr;
+    const ViewState& v = SlotState(slot);
+    return v.nr.feature != nullptr || v.nr.output != nullptr || v.color != nullptr;
 }
 
-// The layout went away (or NR shuts down): back to the single view's part, every view's model released.
-void LeaveMultiView()
+// Several views found. The single view's model is kept: the game may switch back (an outside camera).
+void EnterMultiView(bool recalled)
+{
+    LOG_INFO("DLSS-NR: one model per ticked view {}", recalled ? "again (the layout seen before)" : "from now on");
+}
+
+// The layout went away: back to the single view's part. The views' models are kept for a switch back; at shutdown
+// (release) every one goes.
+void LeaveMultiView(bool release)
 {
     UseViewSlot(-1);
 
     unsigned int parked = 0;
-    for (int slot = 0; slot < (int) Views::kSlots; ++slot)
+    for (int slot = 0; release && slot < (int) Views::kSlots; ++slot)
     {
-        if (g_viewSlots[slot].nr.feature != nullptr || g_viewSlots[slot].nr.output != nullptr ||
-            g_viewSlots[slot].color != nullptr)
-            ++parked;
+        parked += SlotHolds(slot) ? 1 : 0;
         ParkSlot(slot);
     }
 
@@ -2445,6 +2462,30 @@ void LeaveMultiView()
 
     if (parked != 0)
         LOG_INFO("DLSS-NR: {} view models released", parked);
+}
+
+// Models of views that have not run for kKeepIdle (a layout the game no longer draws, an unticked view). Checked once a
+// second; the loaded view is never idle.
+void ParkIdleViews()
+{
+    static std::chrono::steady_clock::time_point checked {};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - checked < std::chrono::seconds(1))
+        return;
+    checked = now;
+
+    unsigned int parked = 0;
+    for (int slot = -1; slot < (int) Views::kSlots; ++slot)
+    {
+        if (slot == g_loadedSlot || !SlotHolds(slot) || now - g_viewLastUsed[slot + 1] < kKeepIdle)
+            continue;
+        ParkSlot(slot);
+        ++parked;
+    }
+
+    if (parked != 0)
+        LOG_INFO("DLSS-NR: {} view model(s) not used for {} minutes released", parked,
+                 std::chrono::duration_cast<std::chrono::minutes>(kKeepIdle).count());
 }
 
 } // namespace
@@ -6335,9 +6376,10 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         const auto view = JudgeViews(cfg, params, viewEpoch);
 
         if (view.unlatchedNow)
-            LeaveMultiView();
+            LeaveMultiView(false);
         if (view.latchedNow)
-            EnterMultiView();
+            EnterMultiView(view.recalled);
+        ParkIdleViews();
 
         if (view.verdict != Views::Verdict::Run)
         {
@@ -7021,7 +7063,7 @@ void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     // Every view's model into the retired list, which is emptied below
-    LeaveMultiView();
+    LeaveMultiView(true);
     g_views.Reset();
     DeferredSr::Shutdown();
     if (SuperiorRun::g_used)

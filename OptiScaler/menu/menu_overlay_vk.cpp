@@ -400,7 +400,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
             }
 
 #ifdef VULKAN_DEBUG_LAYER
-            SetVkObjectName(device, instance, VK_OBJECT_TYPE_SEMAPHORE, (UINT64) fsd, "ImGui Backbuffer Semaphore");
+            SetVkObjectName(device, instance, VK_OBJECT_TYPE_SEMAPHORE, (UINT64) *fsd, "ImGui Backbuffer Semaphore");
 #endif
         }
     }
@@ -635,7 +635,12 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 uint32_t idx = pPresentInfo->pImageIndices[0];
                 ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[idx];
 
-                vkWaitForFences(_ImVulkan_Info.Device, 1, &fd->Fence, VK_TRUE, UINT64_MAX);
+                if (auto wResult = vkWaitForFences(_ImVulkan_Info.Device, 1, &fd->Fence, VK_TRUE, UINT64_MAX);
+                    wResult != VK_SUCCESS)
+                {
+                    LOG_ERROR("vkWaitForFences error: {}", (int32_t) wResult);
+                    return true;
+                }
                 vkResetFences(_ImVulkan_Info.Device, 1, &fd->Fence);
 
                 {

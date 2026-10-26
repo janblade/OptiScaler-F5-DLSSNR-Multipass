@@ -1337,12 +1337,19 @@ void FSRFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
         if (_fgContext != nullptr && State::Instance().activeFgInput == FGInput::Upscaler && !IsPaused() && !IsActive())
             Activate();
     }
-    else if (IsActive())
+    else
     {
-        Deactivate();
+        if (IsActive())
+        {
+            Deactivate();
 
-        State::Instance().clearCapturedHudlesses = true;
-        Hudfix_Dx12::ResetCounters();
+            State::Instance().clearCapturedHudlesses = true;
+            Hudfix_Dx12::ResetCounters();
+        }
+
+        // The change flags are cleared below, so a pending recreation (e.g. FFX FG version) must happen now
+        if (State::Instance().scChanged)
+            DestroyFGContext();
     }
 
     if (State::Instance().fgChanged)

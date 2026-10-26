@@ -1571,8 +1571,6 @@ void MenuCommon::FGOutputPresent() { fgOutputPresentRate.Present(Util::Milliseco
 
 void MenuCommon::FGOutputPresents(bool presents) { fgOutputPresentRate.SetEnabled(presents); }
 
-static double FGOutputFrameTime(double now) { return fgOutputPresentRate.FrameTime(now); }
-
 struct MenuCommon::RenderMenuContext
 {
     State& state;
@@ -1644,7 +1642,7 @@ void MenuCommon::UpdateRenderTiming(RenderMenuContext& ctx)
         frameRate = 1000.0 / frameTime;
     }
 
-    ctx.fgOutputFrameTimeMs = FGOutputFrameTime(now);
+    ctx.fgOutputFrameTimeMs = fgOutputPresentRate.FrameTime(now);
     if (ctx.fgOutputFrameTimeMs > 0.0)
     {
         frameTime = ctx.fgOutputFrameTimeMs;
@@ -2059,7 +2057,10 @@ void MenuCommon::UpdateFrameTimeAverages(RenderMenuContext& ctx)
 
         float lastFT = static_cast<float>(state.frameTimes.empty() ? 0.0f : state.frameTimes.back());
         float lastUT = static_cast<float>(state.upscaleTimes.empty() ? 0.0f : state.upscaleTimes.back());
-        gFrameTimes.Push(lastFT);
+
+        if (!fgOutputPresentRate.TakeIntervals([](double ms) { gFrameTimes.Push(static_cast<float>(ms)); }))
+            gFrameTimes.Push(lastFT);
+
         gUpscalerTimes.Push(lastUT);
 
         averageFrameTime = gFrameTimes.Average();

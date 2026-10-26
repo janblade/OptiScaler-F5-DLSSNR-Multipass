@@ -1,6 +1,6 @@
 # Private residual DLSS IsHDR test
 
-Base: PR #249 head `34a1504e`, on separate personal test branch `codex/superior-private-dlss-ishdr-test`. Do not advance the PR branch until the author completes the in-game comparison. This branch excludes the later Finished Picture/native-FG experiments.
+Originally prepared from PR #249 head `34a1504e` on personal test branch `codex/superior-private-dlss-ishdr-test`; published to PR #249 at the author's request on 2026-10-27. The update excludes the later Finished Picture/native-FG experiments. The Release DLL at runtime commit `9fccd6f7` built successfully; subsequent publication changes are documentation only.
 
 Below the CNN/Transformer private DLSS choice, the unchecked-by-default checkbox reads:
 

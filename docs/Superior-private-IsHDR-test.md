@@ -1,10 +1,10 @@
 # Private residual DLSS IsHDR test
 
-Originally prepared from PR #249 head `34a1504e` on personal test branch `codex/superior-private-dlss-ishdr-test`; published to PR #249 at the author's request on 2026-10-27. The update excludes the later Finished Picture/native-FG experiments. The Release DLL at runtime commit `9fccd6f7` built successfully; subsequent publication changes are documentation only.
+Originally prepared from PR #249 head `34a1504e` on personal test branch `codex/superior-private-dlss-ishdr-test`; published to PR #249 at the author's request on 2026-10-27. The update excludes the later Finished Picture/native-FG experiments. The Release DLL at runtime commit `9fccd6f7` built successfully; later edits change only the checkbox wording and publication documentation.
 
 Below the CNN/Transformer private DLSS choice, the unchecked-by-default checkbox reads:
 
-> Disable DLSS IsHDR flag (enable only if experiencing severe ghosting; may help, but could reduce NR stability)
+> Disable DLSS IsHDR flag (try only if experiencing severe ghosting; may help, but could reduce NR stability)
 
 `[DlssNr] SuperiorScalingDisableIsHDR=false` preserves the original private DLSS creation flags exactly. Setting it to true removes only `NVSDK_NGX_DLSS_Feature_Flags_IsHDR`; `AutoExposure`, MVLowRes and the applicable DepthInverted flag remain unchanged. This applies to CNN A/E, Transformer K and the existing runtime-default preset fallback. It does not change the game's DLSS/HDR settings, carrier encoding/range, NR input or composition.
 

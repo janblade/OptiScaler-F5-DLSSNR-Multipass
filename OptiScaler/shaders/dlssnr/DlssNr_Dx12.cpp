@@ -70,16 +70,16 @@
 #include "precompile/dlssnr_edit_cache_Shader.h"
 #include "precompile/dlssnr_spatial_Shader.h"
 #include "precompile/dlssnr_spatial_guides_Shader.h"
-#include "superior/precompile/host_spatial_guides_Shader.h"
 #include "superior/precompile/host_surface_guides_Shader.h"
-#include "superior/precompile/host_uniform_guides_Shader.h"
 #include "superior/precompile/host_uniform_surface_guides_Shader.h"
-#include "superior/precompile/host_minified_surface_guides_Shader.h"
-#include "superior/precompile/host_uniform_minified_surface_guides_Shader.h"
 #include "superior/precompile/host_joint_guides_Shader.h"
 #include "superior/precompile/host_joint_minified_guides_Shader.h"
 #include "superior/precompile/host_uniform_joint_guides_Shader.h"
 #include "superior/precompile/host_uniform_joint_minified_guides_Shader.h"
+#include "superior/precompile/host_joint_guides_quantized_Shader.h"
+#include "superior/precompile/host_joint_minified_guides_quantized_Shader.h"
+#include "superior/precompile/host_uniform_joint_guides_quantized_Shader.h"
+#include "superior/precompile/host_uniform_joint_minified_guides_quantized_Shader.h"
 #include "precompile/dlssnr_exposure_adapt_Shader.h"
 #include "precompile/dlssnr_lut_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
@@ -1837,6 +1837,23 @@ void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESO
     cmdList->ResourceBarrier(1, &b);
 }
 
+float SuperiorDepthPrecision(DXGI_FORMAT f)
+{
+    switch (f)
+    {
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_D16_UNORM:
+    case DXGI_FORMAT_R16_UNORM:
+        return 2.f / 65535.f;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+        return 2.f / 16777215.f;
+    default:
+        return 0.f;
+    }
+}
+
 // A typeless resource cannot be viewed, and NGX builds its own views with nothing to tell it which
 // format to use. Depth is very often declared typeless, so the typed member of the same family is
 // substituted; CopyResource accepts that as a destination for the typeless original.
@@ -2312,8 +2329,9 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _spatialGuidesPipelineState->Release();
     if (_privateGuidesHeap)
         _privateGuidesHeap->Release();
-    if (_privateGuidesPipeline)
-        _privateGuidesPipeline->Release();
+    for (auto* pipeline : _privateGuidesPipeline)
+        if (pipeline)
+            pipeline->Release();
     if (_privateGuidesRoot)
         _privateGuidesRoot->Release();
     for (auto* pipeline : _superiorSpatialGuides)
@@ -2850,41 +2868,43 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const Dl
     const bool guides = InConstants.mode == 101 || uniform;
     auto constants = InConstants;
     constants.unused = g_nr.guideDepthInverted ? 1.f : 0.f;
+    if (guides && motionMethod == 2u && In1 && !constants.warp.reserved)
+        DlssNr::Spatial::SetDepthPrecision(constants, SuperiorDepthPrecision(In1->GetDesc().Format));
     const bool joint = guides && motionMethod == 2u && constants.padding[0] > .5f;
-    const auto minified = joint                          ? DlssNr::Spatial::PrepareJointMinification(constants)
-                          : guides && motionMethod == 2u ? DlssNr::Spatial::PrepareMinifiedMotion(constants)
-                                                         : DlssNr::Spatial::MinifiedMotionDispatch {};
+    const auto minified =
+        joint ? DlssNr::Spatial::PrepareJointMinification(constants) : DlssNr::Spatial::MinifiedMotionDispatch {};
     ID3D12PipelineState* correction = nullptr;
     auto* pipeline = guides ? _spatialGuidesPipelineState : _spatialPipelineState;
     if (guides && motionMethod != 0u)
     {
-        const unsigned primary = joint ? (uniform ? 8u : 6u) : (uniform ? 2u : 0u) + (motionMethod == 2u ? 1u : 0u);
+        const unsigned primary =
+            joint ? (uniform ? 4u : 2u) + (constants.warp.reserved ? 4u : 0u) : (uniform ? 1u : 0u);
         for (unsigned pass = 0; pass < (minified.pixels ? 2u : 1u); ++pass)
         {
-            const unsigned index = pass ? (joint ? (uniform ? 9u : 7u) : (uniform ? 5u : 4u)) : primary;
+            const unsigned index = pass ? primary + 1u : primary;
             if (!_superiorSpatialGuidesAttempted[index])
             {
                 _superiorSpatialGuidesAttempted[index] = true;
-                const void* blobs[] { host_spatial_guides_cso,
-                                      host_surface_guides_cso,
-                                      host_uniform_guides_cso,
+                const void* blobs[] { host_surface_guides_cso,
                                       host_uniform_surface_guides_cso,
-                                      host_minified_surface_guides_cso,
-                                      host_uniform_minified_surface_guides_cso,
                                       host_joint_guides_cso,
                                       host_joint_minified_guides_cso,
                                       host_uniform_joint_guides_cso,
-                                      host_uniform_joint_minified_guides_cso };
-                const size_t sizes[] { sizeof(host_spatial_guides_cso),
-                                       sizeof(host_surface_guides_cso),
-                                       sizeof(host_uniform_guides_cso),
+                                      host_uniform_joint_minified_guides_cso,
+                                      host_joint_guides_quantized_cso,
+                                      host_joint_minified_guides_quantized_cso,
+                                      host_uniform_joint_guides_quantized_cso,
+                                      host_uniform_joint_minified_guides_quantized_cso };
+                const size_t sizes[] { sizeof(host_surface_guides_cso),
                                        sizeof(host_uniform_surface_guides_cso),
-                                       sizeof(host_minified_surface_guides_cso),
-                                       sizeof(host_uniform_minified_surface_guides_cso),
                                        sizeof(host_joint_guides_cso),
                                        sizeof(host_joint_minified_guides_cso),
                                        sizeof(host_uniform_joint_guides_cso),
-                                       sizeof(host_uniform_joint_minified_guides_cso) };
+                                       sizeof(host_uniform_joint_minified_guides_cso),
+                                       sizeof(host_joint_guides_quantized_cso),
+                                       sizeof(host_joint_minified_guides_quantized_cso),
+                                       sizeof(host_uniform_joint_guides_quantized_cso),
+                                       sizeof(host_uniform_joint_minified_guides_quantized_cso) };
                 CreateComputePipeline(_device, &_superiorSpatialGuides[index], blobs[index], sizes[index], nullptr);
             }
             if (!_superiorSpatialGuides[index])
@@ -3287,11 +3307,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         depth != nullptr ? (unsigned int) guideDesc.Width : 0u, depth != nullptr ? guideDesc.Height : 0u,
         motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
 
-    if (superior && workScale == 1.f)
-    {
-        spatialSignature = DlssNr::Spatial::Mix(spatialSignature, frame.RenderSubrectWidth);
-        spatialSignature = DlssNr::Spatial::Mix(spatialSignature, frame.RenderSubrectHeight);
-    }
+    // Superior supplies the current guide subrect/units on every evaluate. A
+    // changing source allocation or render subrect does not change NR's colour history grid.
+    if (superior)
+        spatialSignature = DlssNr::Spatial::SuperiorSignature(
+            colourFormat, depth ? guideDesc.Format : DXGI_FORMAT_UNKNOWN, motionDesc.Format);
 
     bool spatialReset = false;
     bool spatial =
@@ -3314,7 +3334,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                         : EdgeCompression::Layout();
     if (spatial && (!SpatialReady() ||
                     !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f, spatialNeedsUnpack,
-                                              { spatialGuideLayout.modelW, spatialGuideLayout.modelH })))
+                                              { spatialGuideLayout.modelW, spatialGuideLayout.modelH }, renderGuides)))
     {
         EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffResources);
         g_nr.reset = true;
@@ -5743,12 +5763,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             auto& g = *superiorGeneration;
             auto* shapingProxy = g.packed ? modelInput : g.temporal ? ordinaryProxy : resolveProxy;
-            auto* residual = g.temporal ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy,
-                                                                 g.packed ? finalAnswer : ordinaryAnswer, motionIn,
-                                                                 guides, frame, superiorReset, g_nr.heldActive,
-                                                                 g.packed ? EdgeCompression::depth : nullptr,
-                                                                 g.packed ? EdgeCompression::motion : nullptr)
-                                        : resolveAnswer;
+            auto* residual =
+                g.temporal
+                    ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, g.packed ? finalAnswer : ordinaryAnswer,
+                                             motionIn, guides, frame, superiorReset, g_nr.heldActive,
+                                             g.packed ? EdgeCompression::depth : nullptr,
+                                             g.packed ? EdgeCompression::motion : nullptr,
+                                             { spatialGuideLayout.modelW, spatialGuideLayout.modelH },
+                                             SuperiorDepthPrecision(guideDesc.Format))
+                    : resolveAnswer;
             const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
                                                                    superiorGainScales, g_nr.superiorMainOnlyGains);
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)

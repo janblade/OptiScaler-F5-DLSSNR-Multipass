@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 
 namespace DlssNr::Spatial {
@@ -393,11 +394,26 @@ struct alignas(16) Constants {
     float unused = 0;
     uint32_t width = 0, height = 0;
     pw::ShaderConstants warp{};
-    // padding[0] is the depth-valid flag for Superior's new guide PSOs; original shaders ignore it.
+    // Superior-only ABI (original Compress shaders ignore padding):
+    // padding[0]: depth valid. padding[1]: correction dispatch row stride OR private MV scale X.
+    // padding[2..5]: correction left/right/top/bottom bands; private pass uses [2] as MV scale Y.
+    // warp.reserved: float bits of source-depth quantization error floor (Superior only).
+    // unused: reversed-Z flag. No padding word is shared with the precision floor.
     float depthRect[4] = {}, motionRect[4] = {}, motionScale[2] = {}, padding[6] = {};
 };
 static_assert(sizeof(Constants) == 256);
 static_assert(offsetof(Constants, warp) == 16);
+inline void SetDepthPrecision(Constants& c, float floor)
+{
+    floor = std::isfinite(floor) && floor > 0.f ? floor : 0.f;
+    std::memcpy(&c.warp.reserved, &floor, sizeof(floor));
+}
+// Source allocation size is not part of Superior's temporal coordinate system:
+// its valid rectangles and vector units are supplied afresh for every evaluation.
+inline uint64_t SuperiorSignature(uint32_t colour, uint32_t depth, uint32_t motion)
+{
+    return Mix(Mix(Mix(0, colour), depth), motion);
+}
 
 // An optional NR guide lattice, independent of the colour lattice. Preserve the
 // exact normalized warp (including offsets, shifts and native-centre rounding):
@@ -407,7 +423,8 @@ inline Layout RenderGuideLayout(const Layout& colour, GuideExtent render)
     auto result = colour;
     const auto extent = [](uint32_t source, uint32_t packed, uint32_t native)
     { return uint32_t(std::max<uint64_t>(1, (uint64_t(source) * packed + native / 2) / native)); };
-    if (!colour.active || !render.width || !render.height || !colour.nativeW || !colour.nativeH)
+    if (!colour.active || !render.width || !render.height || !colour.nativeW || !colour.nativeH ||
+        render.width > colour.nativeW || render.height > colour.nativeH)
         return result;
     result.modelW = extent(render.width, colour.modelW, colour.nativeW);
     result.modelH = extent(render.height, colour.modelH, colour.nativeH);
@@ -426,7 +443,7 @@ inline bool UseRenderGuides(bool superior, bool requested, bool compressed, uint
                             uint32_t ordinaryW, uint32_t ordinaryH, GuideExtent render)
 {
     return superior && requested && compressed && nativeW == ordinaryW && nativeH == ordinaryH && render.width &&
-           render.height;
+           render.height && render.width <= nativeW && render.height <= nativeH;
 }
 
 // Modes: 100 packs the encoded colour, 101 packs depth (point-sampled) and motion (by its end points), 102 unpacks the

@@ -3,46 +3,59 @@
 namespace DlssNr::Superior::PrivateBytecode
 {
 #include "precompile/host_private_guides_Shader.h"
-}
+#include "precompile/host_private_guides_quantized_Shader.h"
+} // namespace DlssNr::Superior::PrivateBytecode
 
-bool DlssNr_Dx12::PrivateGuidesReady()
+bool DlssNr_Dx12::PrivateGuidesReady(bool quantized)
 {
-    if (_privateGuidesAttempted)
-        return _privateGuidesRoot && _privateGuidesPipeline && _privateGuidesHeap;
-    _privateGuidesAttempted = true;
-    D3D12_DESCRIPTOR_RANGE ranges[2] {};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = kSrvCount;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 3;
-    ranges[1].OffsetInDescriptorsFromTableStart = kSrvCount;
-    D3D12_ROOT_PARAMETER parameters[2] {};
-    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[0].DescriptorTable = { 2, ranges };
-    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    D3D12_STATIC_SAMPLER_DESC sampler {};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.MaxLOD = D3D12_FLOAT32_MAX;
-    D3D12_ROOT_SIGNATURE_DESC description { 2, parameters, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE };
-    Microsoft::WRL::ComPtr<ID3DBlob> bytes, errors;
-    if (FAILED(D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1, &bytes, &errors)) ||
-        FAILED(_device->CreateRootSignature(0, bytes->GetBufferPointer(), bytes->GetBufferSize(),
-                                            IID_PPV_ARGS(&_privateGuidesRoot))))
+    const unsigned variant = quantized ? 1u : 0u;
+    if (!_privateGuidesAttempted)
+    {
+        _privateGuidesAttempted = true;
+        D3D12_DESCRIPTOR_RANGE ranges[2] {};
+        ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[0].NumDescriptors = kSrvCount;
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        ranges[1].NumDescriptors = 3;
+        ranges[1].OffsetInDescriptorsFromTableStart = kSrvCount;
+        D3D12_ROOT_PARAMETER parameters[2] {};
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[0].DescriptorTable = { 2, ranges };
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        D3D12_STATIC_SAMPLER_DESC sampler {};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        D3D12_ROOT_SIGNATURE_DESC description { 2, parameters, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE };
+        Microsoft::WRL::ComPtr<ID3DBlob> bytes, errors;
+        if (FAILED(D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1, &bytes, &errors)) ||
+            FAILED(_device->CreateRootSignature(0, bytes->GetBufferPointer(), bytes->GetBufferSize(),
+                                                IID_PPV_ARGS(&_privateGuidesRoot))))
+            return false;
+        D3D12_DESCRIPTOR_HEAP_DESC heap {};
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        // Six SRVs, three UAVs and one CBV per existing shared-ring slot. The CBV
+        // descriptor is populated by CreateConstantsBuffer; b0 is bound directly.
+        heap.NumDescriptors = DLSSNR_NUM_OF_HEAPS * 10;
+        heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&_privateGuidesHeap))))
+            return false;
+    }
+    if (!_privateGuidesRoot || !_privateGuidesHeap)
         return false;
-    D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline {};
-    pipeline.pRootSignature = _privateGuidesRoot;
-    pipeline.CS = { DlssNr::Superior::PrivateBytecode::host_private_guides_cso,
-                    sizeof(DlssNr::Superior::PrivateBytecode::host_private_guides_cso) };
-    if (FAILED(_device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&_privateGuidesPipeline))))
-        return false;
-    D3D12_DESCRIPTOR_HEAP_DESC heap {};
-    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    // Six SRVs, three UAVs and one CBV per existing shared-ring slot. The CBV
-    // descriptor is populated by CreateConstantsBuffer; b0 is bound directly.
-    heap.NumDescriptors = DLSSNR_NUM_OF_HEAPS * 10;
-    heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    return SUCCEEDED(_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&_privateGuidesHeap)));
+    if (!_privateGuidesPipelineAttempted[variant])
+    {
+        _privateGuidesPipelineAttempted[variant] = true;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline {};
+        pipeline.pRootSignature = _privateGuidesRoot;
+        using namespace DlssNr::Superior::PrivateBytecode;
+        pipeline.CS = quantized ? D3D12_SHADER_BYTECODE { host_private_guides_quantized_cso,
+                                                          sizeof(host_private_guides_quantized_cso) }
+                                : D3D12_SHADER_BYTECODE { host_private_guides_cso, sizeof(host_private_guides_cso) };
+        if (FAILED(_device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&_privateGuidesPipeline[variant]))))
+            return false;
+    }
+    return _privateGuidesPipeline[variant] != nullptr;
 }
 
 bool DlssNr_Dx12::DispatchSuperiorPrivateGuides(ID3D12GraphicsCommandList* cmd,
@@ -54,7 +67,7 @@ bool DlssNr_Dx12::DispatchSuperiorPrivateGuides(ID3D12GraphicsCommandList* cmd,
     // A minifying private guide pass still needs the separate sparse correction.
     if (!_init || !cmd || !proxy || !answer || !depth || !motion || !outDepth || !outMotion || !outCarrier ||
         constants.mode != 104u || !constants.width || !constants.height || constants.padding[0] <= .5f ||
-        DlssNr::Spatial::NeedsJointMinification(constants) || !PrivateGuidesReady())
+        DlssNr::Spatial::NeedsJointMinification(constants) || !PrivateGuidesReady(constants.warp.reserved != 0))
         return false;
     const uint32_t slot = _heapIndex;
     _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
@@ -77,7 +90,7 @@ bool DlssNr_Dx12::DispatchSuperiorPrivateGuides(ID3D12GraphicsCommandList* cmd,
     ID3D12DescriptorHeap* heaps[] { _privateGuidesHeap };
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetComputeRootSignature(_privateGuidesRoot);
-    cmd->SetPipelineState(_privateGuidesPipeline);
+    cmd->SetPipelineState(_privateGuidesPipeline[constants.warp.reserved ? 1u : 0u]);
     auto gpu = _privateGuidesHeap->GetGPUDescriptorHandleForHeapStart();
     gpu.ptr += UINT64(slot) * 10 * stride;
     cmd->SetComputeRootDescriptorTable(0, gpu);

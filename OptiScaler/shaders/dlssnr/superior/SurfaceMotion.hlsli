@@ -18,10 +18,16 @@ int2 MotionDepthPixel(int2 motionPixel)
     return clamp(int2(gDepthRect.xy + uv * gDepthRect.zw), int2(gDepthRect.xy),
                  int2(gDepthRect.xy + gDepthRect.zw) - 1);
 }
-float MotionDepthTolerance(float a, float b)
+float MotionDepthTolerance(float a, float b, float2 projectionOffset = 0.0)
 {
-    // Device depth stays device depth. The comparison is invariant under reversed Z.
+    // Device-depth residual, not an eye-space distance. The relative FP32 floor
+    // depends on the Z encoding; the UNORM quantization floor is format-specific.
+#if defined(DLSSNR_QUANTIZED_DEPTH)
+    const float quantization = asfloat(gOptions.w) * (1.0 + abs(projectionOffset.x) + abs(projectionOffset.y));
+    return max(quantization, max(1e-6, max(abs(a), abs(b)) * 3.814697265625e-6));
+#else
     return max(1e-6, max(abs(a), abs(b)) * 3.814697265625e-6);
+#endif
 }
 #ifndef DLSSNR_DEPTH_QUERY_TYPE
 #define DLSSNR_DEPTH_QUERY_TYPE int2
@@ -68,7 +74,7 @@ float2 SuperiorSurfaceMotion(float2 nativePixel, int2 nearestPixel, DLSSNR_DEPTH
                                            (z[4]-z[0]) / max(dp[4].y-dp[0].y, 1));
             const float2 gradient = float2(zx, zy);
             const float prediction = z[0] + dot(gradient, float2(queryDepthPixel - dp[0]));
-            if (!valid[0] || abs(prediction - queryDepth) > MotionDepthTolerance(prediction, queryDepth))
+            if (!valid[0] || abs(prediction - queryDepth) > MotionDepthTolerance(prediction, queryDepth, float2(queryDepthPixel-dp[0])))
             {
                 // The query can belong to another surface when depth has more samples than
                 // motion. Select an existing depth-matching vector; never average the layers.
@@ -85,7 +91,7 @@ float2 SuperiorSurfaceMotion(float2 nativePixel, int2 nearestPixel, DLSSNR_DEPTH
             [unroll] for (uint t = 1; t < 5; ++t)
             {
                 const float expected = z[0] + dot(gradient, float2(dp[t] - dp[0]));
-                compatible[t] = valid[t] && abs(expected - z[t]) <= MotionDepthTolerance(expected, z[t]);
+                compatible[t] = valid[t] && abs(expected - z[t]) <= MotionDepthTolerance(expected, z[t], float2(dp[t]-dp[0]));
             }
         }
         // Invalid depth is not evidence of another surface: retain the motion-only limiter.

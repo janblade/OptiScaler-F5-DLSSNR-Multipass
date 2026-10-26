@@ -13,7 +13,7 @@ void PrivateGuideAt(uint2 id, out float depth, out float2 raw)
     const int2 lo=int2(gMotionRect.xy),hi=int2(gMotionRect.xy+gMotionRect.zw)-1;
     const int2 mp=clamp(int2(gMotionRect.xy+(nativePixel/gNativeWorkSize.xy)*gMotionRect.zw),lo,hi);
     raw=SuperiorSurfaceMotion(nativePixel,mp,query,validDepth?depth:asfloat(0x7fc00000u));
-    depth=validDepth&&isfinite(depth)?depth:0.0;
+    depth=validDepth&&isfinite(depth)?depth:(gUnused>0.5?0.0:1.0);
     raw=all(isfinite(raw))?raw:0.0;
 }
 float3 PrivateFinite(float3 value,float3 fallback)

@@ -108,12 +108,8 @@ try {
     }
     Build (Join-Path $shaders "superior/RawLow.hlsl") "RawLowMain" @() "host_low_raw"
 
-    Build (Join-Path $shaders "superior/SpatialGuides.hlsl") "SuperiorSpatialGuidesMain" @() "host_spatial_guides"
     Build (Join-Path $shaders "superior/SpatialGuides.hlsl") "SuperiorSurfaceGuidesMain" @() "host_surface_guides"
-    Build (Join-Path $shaders "superior/SpatialGuides.hlsl") "SuperiorUniformGuidesMain" @() "host_uniform_guides"
     Build (Join-Path $shaders "superior/SpatialGuides.hlsl") "SuperiorUniformSurfaceGuidesMain" @() "host_uniform_surface_guides"
-    Build (Join-Path $shaders "superior/MinifiedMotion.hlsl") "SuperiorMinifiedGuidesMain" @() "host_minified_surface_guides"
-    Build (Join-Path $shaders "superior/MinifiedMotion.hlsl") "SuperiorUniformMinifiedGuidesMain" @() "host_uniform_minified_surface_guides"
 
     foreach ($packed in @($true,$false)) {
         foreach ($minified in @($false,$true)) {
@@ -122,10 +118,12 @@ try {
             $entry=if ($packed) { $(if ($minified) { 'SuperiorJointMinifiedGuidesMain' } else { 'SuperiorJointGuidesMain' }) } else { $(if ($minified) { 'SuperiorUniformJointMinifiedGuidesMain' } else { 'SuperiorUniformJointGuidesMain' }) }
             $stem='host_'+$(if (!$packed) {'uniform_'})+'joint_'+$(if ($minified) {'minified_'})+'guides'
             Build (Join-Path $shaders 'superior/JointGuides.hlsl') $entry $defines $stem
+            Build (Join-Path $shaders 'superior/JointGuides.hlsl') $entry ($defines+@('-D','DLSSNR_QUANTIZED_DEPTH=1')) ($stem+'_quantized')
         }
     }
 
     Build (Join-Path $shaders 'superior/PrivateGuides.hlsl') 'PrivateGuidesMain' @() 'host_private_guides'
+    Build (Join-Path $shaders 'superior/PrivateGuides.hlsl') 'PrivateGuidesMain' @('-D','DLSSNR_QUANTIZED_DEPTH=1') 'host_private_guides_quantized'
 
     # The host resolve preserves janblade's exposure and composition and substitutes only the residual estimator.
     # raw: the non-temporal resolve; its SDR and HDR builds are identical bytecode, so there is one blob for both.

@@ -138,9 +138,14 @@ bool PrepareUnpack(ID3D12Device* device, const Sp::Layout& l)
 }
 
 // The textures for this layout, made again when the sizes change. False if one could not be made.
-bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample, bool unpack, DlssNr::GuideExtent guides = {})
+bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample, bool unpack, DlssNr::GuideExtent guides = {},
+             bool stableGuideCapacity = false)
 {
     if (!guides.width || !guides.height)
+        guides = { l.modelW, l.modelH };
+    // With dynamic render-resolution guides reserve the maximum packed extent.
+    // Only the active subrect is written/read; shrinking it adds no GPU work.
+    if (stableGuideCapacity)
         guides = { l.modelW, l.modelH };
     const unsigned int want[8] = { l.modelW,  l.modelH,  l.ordinaryW,  l.ordinaryH,
                                    l.nativeW, l.nativeH, guides.width, guides.height };
@@ -151,6 +156,21 @@ bool Prepare(ID3D12Device* device, const Sp::Layout& l, bool supersample, bool u
         madeSuper == supersample)
         return madeUnpack || !unpack || PrepareUnpack(device, l);
 
+    // A guide-only extent change must not discard the packed colour or unpack pair.
+    if (color && std::equal(want, want + 6, std::begin(madeFor)) && madeSuper == supersample)
+    {
+        ParkNrResource(depth);
+        ParkNrResource(motion);
+        if (!Make(depth, device, DXGI_FORMAT_R32_FLOAT, guides.width, guides.height) ||
+            !Make(motion, device, DXGI_FORMAT_R32G32_FLOAT, guides.width, guides.height))
+        {
+            Release();
+            return false;
+        }
+        madeFor[6] = guides.width;
+        madeFor[7] = guides.height;
+        return madeUnpack || !unpack || PrepareUnpack(device, l);
+    }
     Release();
 
     bool ok = Make(color, device, kFormat, l.modelW, l.modelH) &&

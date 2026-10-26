@@ -1,4 +1,4 @@
-// Joint depth/MV reconstruction. Legacy point-depth PSOs remain available for A/B.
+// Joint depth/MV reconstruction used by Superior with valid depth.
 #define DLSSNR_DEPTH_QUERY_TYPE float2
 #include "MinifiedMotion.hlsl"
 
@@ -46,7 +46,7 @@ bool JointReducedDepth(float2 workPixel, bool packed, float2 query, float2 gradi
             const int2 p=first+min(int2((float2(x,y)+0.5)*float2(extent)/float2(taps)),extent-1);
             const float z=gSource1.Load(int3(p,0)).x;
             const float projected=z+dot(gradient,query-float2(p));
-            const float tolerance=MotionDepthTolerance(projected,closest);
+            const float tolerance=MotionDepthTolerance(projected,closest,query-float2(p));
             const bool nearer=gUnused>0.5?projected>closest+tolerance:projected<closest-tolerance;
             if (isfinite(z)&&isfinite(projected)&&nearer)
             {
@@ -75,7 +75,7 @@ bool JointReducedDepth(float2 workPixel, bool packed, float2 query, float2 gradi
                         const float mz=gSource1.Load(int3(d,0)).x;
                         const float predicted=mz+dot(g,float2(p-d));
                         // Only supporting depth texels may confirm which surface owns an MV.
-                        if (weight>1e-4 && (!isfinite(mz)||abs(predicted-z)>MotionDepthTolerance(predicted,z))) sameSurface=false;
+                        if (weight>1e-4 && (!isfinite(mz)||abs(predicted-z)>MotionDepthTolerance(predicted,z,float2(p-d)))) sameSurface=false;
                     }
                     const float2 mv=gSource2.Load(int3(m,0)).xy;
                     if (!represented && sameSurface && all(isfinite(mv))) { represented=true; pairMotion=mv; }
@@ -106,14 +106,16 @@ void JointGuides(uint3 id, bool packed)
     const int2 lo=int2(gMotionRect.xy),hi=int2(gMotionRect.xy+gMotionRect.zw)-1;
     const int2 mp=clamp(int2(gMotionRect.xy+(nativePixel/gNativeWorkSize.xy)*gMotionRect.zw),lo,hi);
     const float2 raw=SuperiorSurfaceMotion(nativePixel,mp,query,validDepth?depth:asfloat(0x7fc00000u));
-    gTarget0[id.xy]=validDepth&&isfinite(depth)?depth:0.0;
+    gTarget0[id.xy]=validDepth&&isfinite(depth)?depth:(gUnused>0.5?0.0:1.0);
     StoreJointMotion(id.xy,nativePixel,raw,packed);
 }
 #if defined(DLSSNR_JOINT_MINIFY)
 void CorrectJointGuides(uint3 thread, bool packed)
 {
+    if (!gWidth || !gHeight || gPadding0.y < 1.0) return;
     const uint index=thread.x+thread.y*uint(gPadding0.y);
     const uint left=uint(gPadding1.x),right=uint(gPadding1.y),top=uint(gPadding1.z),bottom=uint(gPadding1.w);
+    if (left > gWidth || right > gWidth-left || top > gHeight || bottom > gHeight-top) return;
     const uint topArea=top*gWidth,bottomArea=bottom*gWidth;
     const uint count=topArea+bottomArea+(gHeight-top-bottom)*(left+right);
     if (index>=count) return;
@@ -128,6 +130,7 @@ void CorrectJointGuides(uint3 thread, bool packed)
         const uint j=index-topArea-bottomArea,row=j/(left+right),col=j%(left+right);
         id=uint2(col<left?col:gWidth-right+col-left,top+row);
     }
+    if (any(id >= uint2(gWidth,gHeight))) return;
     const float2 workPixel=float2(id)+0.5;
     const float2 nativePixel=packed?PwUnpack(workPixel):workPixel*(gNativeWorkSize.xy/float2(gWidth,gHeight));
     float2 query,gradient;
@@ -147,7 +150,7 @@ void CorrectJointGuides(uint3 thread, bool packed)
     const int2 dp=MotionDepthPixel(mp);
     const float z=gSource1.Load(int3(dp,0)).x;
     const float predicted=z+dot(gradient,query-float2(dp));
-    [branch] if (isfinite(z)&&abs(predicted-depth)>MotionDepthTolerance(predicted,depth))
+    [branch] if (isfinite(z)&&abs(predicted-depth)>MotionDepthTolerance(predicted,depth,query-float2(dp)))
     {
         if (MotionMinifiedSurface(workPixel,packed,query,depth,gradient,raw)) StoreJointMotion(id,nativePixel,raw,packed);
     }

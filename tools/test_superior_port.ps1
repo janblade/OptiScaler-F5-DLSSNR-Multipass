@@ -12,6 +12,7 @@
 param(
     [string]$ReferenceShaderDirectory,
     [string]$VcVars,
+    [string]$NrModelPath,
     [switch]$GpuQuality,
     [switch]$GpuTiming,
     [switch]$GpuHost,
@@ -25,6 +26,7 @@ param(
     [switch]$GpuPrivateGuides,
     [switch]$GpuPrivateGuidesTiming,
     [switch]$GpuRefinementTiming,
+    [switch]$GpuReviewTiming,
     [switch]$GpuCandidateTiming
 )
 $ErrorActionPreference = 'Stop'
@@ -81,7 +83,7 @@ try {
         $GpuCandidates = $false; $GpuCandidateTiming = $false
     }
 
-    if ($GpuGuides -or $GpuRefinementTiming) {
+    if ($GpuGuides -or $GpuRefinementTiming -or $GpuReviewTiming) {
         if (!$python) { throw 'Refinement GPU tests need Python to prepare references' }
         & python tools/prepare_superior_refinement_tests.py
         if ($LASTEXITCODE -ne 0) { throw 'Refinement reference preparation failed' }
@@ -99,10 +101,12 @@ try {
         $names += @('four_candidates_quality', 'fused_pack_experiment')
         if ($GpuCandidateTiming) { $names += 'four_candidates_timing' }
     }
-    if ($GpuGuides) { $names += @('surface_motion_quality', 'minified_motion_quality', 'joint_depth_quality', 'render_guides_quality', 'cubic_guided_quality') }
+    if ($GpuGuides) { $names += @('joint_depth_quality', 'render_guides_quality', 'dynamic_guides_quality', 'cubic_guided_quality') }
     if ($GpuRefinementTiming) { $names += 'refinement_timing' }
+    if ($GpuReviewTiming) { $names += 'review_timing' }
     if ($GpuPrivateGuides) { $names += 'private_guides_quality' }
     if ($GpuPrivateGuidesTiming) { $names += 'private_guides_timing' }
+    if ($NrModelPath) { $names += 'nr_dynamic_history' }
     foreach ($name in $names) {
         $src = if ($name -like 'nr_*_smoke' -or $name -eq 'nr_spatial_dx12_gpu') { "tests/$name.cpp" } else { "tests/nr_gpu/$name.cpp" }
         cmd /c "`"$VcVars`" >nul && cl /nologo /std:c++17 /EHsc /O2 `"$src`" /Fe:$out/$name.exe /Fo:$out/$name.obj /link d3d12.lib dxgi.lib"
@@ -171,7 +175,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'GPU timing failed' }
     }
     if ($GpuGuides) {
-        foreach ($name in @('surface_motion_quality', 'minified_motion_quality', 'joint_depth_quality', 'render_guides_quality', 'cubic_guided_quality')) {
+        foreach ($name in @('joint_depth_quality', 'render_guides_quality', 'dynamic_guides_quality', 'cubic_guided_quality')) {
             & "$out/$name.exe"
             if ($LASTEXITCODE -ne 0) { throw "Guide/refinement GPU test failed: $name" }
         }
@@ -187,6 +191,20 @@ try {
     if ($GpuPrivateGuidesTiming) {
         & "$out/private_guides_timing.exe"
         if ($LASTEXITCODE -ne 0) { throw 'Fused private guide/carrier timing failed' }
+    }
+    if ($GpuReviewTiming) {
+        & "$out/review_timing.exe"
+        if ($LASTEXITCODE -ne 0) { throw 'Review GPU timing failed' }
+    }
+    if ($NrModelPath) {
+        if (!(Test-Path -LiteralPath $NrModelPath -PathType Leaf)) { throw 'NR model DLL not found' }
+        $driver = (Get-ItemProperty 'HKLM:/SOFTWARE/NVIDIA Corporation/Global/NGXCore').FullPath
+        $core = Join-Path $driver '_nvngx.dll'
+        $forwarder = Join-Path $repo "$out/nvngx.dll_history_probe.dll"
+        cmd /c "`"$VcVars`" >nul && cl /nologo /std:c++17 /EHsc /O2 /LD OptiScaler/dlssnr/forwarder/dlssnr_forwarder.cpp /Fe:$out/nvngx.dll_history_probe.dll /Fo:$out/history_forwarder.obj /link /IMPLIB:$out/history_forwarder.lib"
+        if ($LASTEXITCODE -ne 0) { throw 'NR history test forwarder build failed' }
+        & "$out/nr_dynamic_history.exe" $core (Resolve-Path -LiteralPath $NrModelPath).Path $forwarder
+        if ($LASTEXITCODE -ne 0) { throw 'Actual NR history test failed' }
     }
     Write-Host 'Superior tests passed'
 }

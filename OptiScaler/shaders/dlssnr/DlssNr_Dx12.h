@@ -132,10 +132,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12PipelineState* _superiorSpatialGuides[10] = {};
     bool _superiorSpatialGuidesAttempted[10] = {};
     ID3D12RootSignature* _privateGuidesRoot = nullptr;
-    ID3D12PipelineState* _privateGuidesPipeline = nullptr;
+    ID3D12PipelineState* _privateGuidesPipeline[2] = {};
+    bool _privateGuidesPipelineAttempted[2] = {};
     ID3D12DescriptorHeap* _privateGuidesHeap = nullptr;
     bool _privateGuidesAttempted = false;
-    bool PrivateGuidesReady();
+    bool PrivateGuidesReady(bool quantized);
     bool _spatialPipelineFailed = false;
 
     // The LUT pass (dlssnr_lut.hlsl, LUT-apply epic Story 2: dlssnr-lut-apply).

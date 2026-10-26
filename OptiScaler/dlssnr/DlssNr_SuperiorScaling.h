@@ -36,6 +36,30 @@ inline float GuidedRange(float scale)
     const float t = std::isfinite(scale) ? std::clamp((scale - .5f) * 2.f, 0.f, 1.f) : 0.f;
     return .015f - .012f * t * t * t;
 }
+// Auto follows dynamic render size, but CNN's identity is latched until an
+// explicit user setting changes. Recreating resources must not unlatch it.
+struct PrivatePresetChoice
+{
+    unsigned preference = 0, selected = 1;
+    float manualScale = 0.f;
+    bool automatic = false, valid = false;
+    unsigned Select(unsigned saved, bool isAuto, float configuredScale, float effectiveScale)
+    {
+        configuredScale = std::isfinite(configuredScale) ? configuredScale : 1.f;
+        const unsigned wanted = Preset(saved);
+        if (!valid || preference != wanted || automatic != isAuto || manualScale != configuredScale)
+        {
+            preference = wanted;
+            automatic = isAuto;
+            manualScale = configuredScale;
+            selected = PrivatePreset(wanted, GuidedRange(effectiveScale));
+            valid = true;
+        }
+        return selected;
+    }
+};
+inline bool PrivatePresetChanged(unsigned previous, unsigned requested) { return previous != requested; }
+
 // Final Superior composition does not use meter dimensions. Pass inverse range
 // variance as float bits without growing the 256-byte composition ABI.
 template <class P> inline void SetGuidedRange(P& p, float scale)

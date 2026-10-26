@@ -61,6 +61,32 @@ int main()
                                                     { 1920, 1080 }) ==
                                 (superior && requested && compressed && ordinary == 3840));
         require(!Sp::UseRenderGuides(true, true, true, 3840, 2160, 3840, 2160, { 0, 1080 }));
+        require(!Sp::UseRenderGuides(true, true, true, 3840, 2160, 3840, 2160, { 4000, 2160 }));
+        require(!Sp::UseRenderGuides(true, true, true, 3840, 2160, 3840, 2160, { 3840, 2161 }));
+        require(Sp::RenderGuideLayout(native, { 7680, 4320 }).modelW == native.modelW);
+        Sp::Tracker tracker;
+        const auto signature = Sp::SuperiorSignature(10, 41, 16);
+        for (unsigned frame = 0; frame < 1000; ++frame)
+        {
+            const auto tracked = tracker.Begin(settings, 3840, 2160, 1.f, false, false, signature);
+            require(tracked.active && !tracked.resetHistory);
+            const auto active = Sp::RenderGuideLayout(tracker.layout(), { 1280 + frame % 641, 720 + frame % 361 });
+            require(active.modelW <= tracker.layout().modelW && active.modelH <= tracker.layout().modelH);
+        }
+        require(tracker.Begin(settings, 3840, 2160, 1.f, false, false, Sp::SuperiorSignature(10, 56, 16)).resetHistory);
+        require(tracker.Begin(settings, 3840, 2160, .65f, false, false, signature).resetHistory);
+        Ss::PrivatePresetChoice choice;
+        for (float start : { .65f, 1.f })
+        {
+            choice = {};
+            const auto selected = choice.Select(1, true, 1.f, start);
+            for (unsigned frame = 0; frame < 1000; ++frame)
+                require(choice.Select(1, true, 1.f, frame % 2 ? .5f : 1.f) == selected);
+            require(choice.Select(11, true, 1.f, start) == 11);
+            require(choice.Select(1, false, .65f, .65f) == 1);
+            require(choice.Select(1, false, 1.f, 1.f) == 5);
+            require(Ss::PrivatePresetChanged(1, 5) && !Ss::PrivatePresetChanged(5, 5));
+        }
         unsigned renderChecks = 0;
         for (auto render : { DlssNr::GuideExtent { 1920, 1080 }, { 1280, 720 }, { 1919, 1079 }, { 3840, 2160 } })
             for (bool custom : { false, true })

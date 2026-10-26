@@ -1,23 +1,14 @@
 name: clang-format Check
 on: [push, pull_request]
-permissions:
-  contents: read
 jobs:
   formatting-check:
     name: Formatting Check
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Run clang-format style check for C/C++/Protobuf programs.
+      uses: jidicula/clang-format-action@v4.15.0
       with:
-        fetch-depth: 0
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Install the pinned formatter
-      run: python -m pip install clang-format==20.1.8
-    - name: Check changed C/C++ lines
-      env:
-        FORMAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-      run: python tools/check_changed_format.py --base "$FORMAT_BASE"
-    - name: Check the format-check policy
-      run: python -m unittest discover -s tests -p test_changed_format.py
+        clang-format-version: '20'
+        check-path: 'OptiScaler'
+        exclude-regex: 'external/|OptiScaler/include/|OptiScaler/framegen/mfgunlock/hde/'

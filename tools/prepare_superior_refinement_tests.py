@@ -14,6 +14,14 @@ def original(path):
 
 def prepare():
     OUT.mkdir(parents=True, exist_ok=True)
+    review = ROOT / "artifacts/validation/review-reference"
+    review.mkdir(parents=True, exist_ok=True)
+    baseline_paths = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", "7362c5f6",
+                                             SHADERS + "superior/precompile"], cwd=ROOT,text=True).splitlines()
+    for stem in [Path(path).name.removesuffix("_Shader.cso") for path in baseline_paths if path.endswith("_Shader.cso")]:
+        data = subprocess.check_output(["git", "show", "7362c5f6:" + SHADERS +
+                                        "superior/precompile/" + stem + "_Shader.cso"], cwd=ROOT)
+        (review / (stem + "_Shader.cso")).write_bytes(data)
     paths = subprocess.check_output(
         ["git", "ls-tree", "-r", "--name-only", BASE, SHADERS + "superior/precompile"], cwd=ROOT, text=True
     ).splitlines()
@@ -31,6 +39,7 @@ def prepare():
         path.write_bytes(original(SHADERS + name))
     host = original(SHADERS + "superior/HostResolve.hlsli").decode("utf-8")
     dxc = ROOT / "OptiScaler/shaders/shader_tools/dxc.exe"
+    assert host.count("max(abs(0.015), 1e-5)") == 1, "Literal-sigma reference pattern changed"
     for percent in [50, 65, 70, 88, 100]:
         t = max(0.0, min(1.0, (percent - 50) / 50))
         sigma = 0.015 - 0.012 * t ** 3

@@ -454,12 +454,14 @@ DlssNr::Spatial::Constants UniformGuideConstants(const Generation& g, const Dlss
 }
 
 bool MatchGuides(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* depth,
-                 ID3D12Resource* motion, const DlssNr::GuideRegions& regions, const DlssNrFrameInfo& frame);
+                 ID3D12Resource* motion, const DlssNr::GuideRegions& regions, const DlssNrFrameInfo& frame,
+                 float depthPrecision = 0.f);
 
 ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy,
                           ID3D12Resource* answer, ID3D12Resource* originalMotion, const DlssNr::GuideRegions& regions,
                           const DlssNrFrameInfo& frame, bool reset, bool hold, ID3D12Resource* packedDepth,
-                          ID3D12Resource* packedMotion)
+                          ID3D12Resource* packedMotion, DlssNr::GuideExtent packedGuideExtent,
+                          float packedDepthPrecision)
 {
     if (!g.feature || !g.parameters || !NgxAlive(g.ngxEpoch))
         return nullptr;
@@ -476,14 +478,14 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
         motion = packedMotion;
         Fields::SetMotionRegion(encode, 0, 0, g.workWidth, g.workHeight);
         encode.MvScaleX = encode.MvScaleY = hold ? 0.f : 1.f;
-        const auto guide = packedMotion->GetDesc();
-        if (guide.Width != g.workWidth || guide.Height != g.workHeight)
+        // The allocation may exceed the active subrect under dynamic resolution.
+        if (packedGuideExtent.width != g.workWidth || packedGuideExtent.height != g.workHeight)
         {
             // NR accepts an independent guide subrect. Private DLAA has no independent
             // depth-size parameter: reconstruct its guides on the carrier's raster.
             // These source vectors already contain the non-linear endpoint warp, in
             // the smaller guide lattice's pixels; never apply PwPack a second time.
-            const unsigned gw = unsigned(guide.Width), gh = guide.Height;
+            const unsigned gw = packedGuideExtent.width, gh = packedGuideExtent.height;
             const DlssNr::GuideRegions packedRegions { { 0, 0, gw, gh }, { 0, 0, gw, gh } };
             auto packedFrame = frame;
             packedFrame.MotionVectorsLowResolution = true;
@@ -495,6 +497,7 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
             if (!Ensure(g.depth, g.device.Get(), DXGI_FORMAT_R32_FLOAT, g.workWidth, g.workHeight))
                 return nullptr;
             auto fused = UniformGuideConstants(g, packedRegions, packedFrame, true);
+            DlssNr::Spatial::SetDepthPrecision(fused, packedDepthPrecision);
             fused.padding[1] = encode.MvScaleX;
             fused.padding[2] = encode.MvScaleY;
             Record(cmd);
@@ -511,7 +514,8 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
             }
             else
             {
-                if (!MatchGuides(g, shader, cmd, packedDepth, packedMotion, packedRegions, packedFrame))
+                if (!MatchGuides(g, shader, cmd, packedDepth, packedMotion, packedRegions, packedFrame,
+                                 packedDepthPrecision))
                     return nullptr;
                 motion = g.motion.Get();
             }
@@ -594,9 +598,11 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         GiveUp("its packed layout does not match the frame size", false);
         return Began::Unavailable;
     }
-    const unsigned preset =
-        DlssNr::SuperiorScaling::PrivatePreset(Config::Instance()->DlssNrSuperiorScalingPreset.value_or_default(),
-                                               DlssNr::SuperiorScaling::GuidedRange(modelScale));
+    const auto& cfg = *Config::Instance();
+    static DlssNr::SuperiorScaling::PrivatePresetChoice presetChoice;
+    const unsigned preset = presetChoice.Select(cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                                cfg.DlssNrModelResolutionAuto.value_or_default(),
+                                                cfg.DlssNrWorkingScale.value_or_default(), modelScale);
     if (auto* previous = state.current.get())
     {
         // Handles from a runtime NGX has since shut down are gone already: never evaluate or release them.
@@ -609,7 +615,8 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
             previous->workWidth != workWidth || previous->workHeight != workHeight || previous->format != format ||
             previous->inverted != frame.DepthInverted || previous->beforeSr != frame.BeforeUpscale ||
             previous->temporal != temporal || previous->packed != (layout != nullptr) ||
-            (layout && previous->layout != *layout) || previous->preset != preset)
+            (layout && previous->layout != *layout) ||
+            DlssNr::SuperiorScaling::PrivatePresetChanged(previous->preset, preset))
         {
             Drop();
             g_nr.reset = true;
@@ -690,13 +697,15 @@ void Shutdown()
 }
 
 bool MatchGuides(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* depth,
-                 ID3D12Resource* motion, const DlssNr::GuideRegions& regions, const DlssNrFrameInfo& frame)
+                 ID3D12Resource* motion, const DlssNr::GuideRegions& regions, const DlssNrFrameInfo& frame,
+                 float depthPrecision)
 {
     if (!Ensure(g.depth, g.device.Get(), DXGI_FORMAT_R32_FLOAT, g.workWidth, g.workHeight) ||
         !Ensure(g.motion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, g.workWidth, g.workHeight))
         return false;
     constexpr unsigned method = 2u;
-    const auto c = UniformGuideConstants(g, regions, frame, depth != nullptr);
+    auto c = UniformGuideConstants(g, regions, frame, depth != nullptr);
+    DlssNr::Spatial::SetDepthPrecision(c, depthPrecision);
     Record(cmd);
     g.depth.To(cmd, Uav);
     g.motion.To(cmd, Uav);

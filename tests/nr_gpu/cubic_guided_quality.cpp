@@ -96,6 +96,17 @@ int main()
                                                 std::to_string(percent) + " curve " + std::to_string(curve));
                                         ++components;
                                     }
+                                if (percent == 50)
+                                {
+                                    const auto saved = h.ExposureSourceWidth;
+                                    for (uint32_t bad : { 0u, 0xbf800000u, 0x7f800000u, 0xff800000u, 0x7fc00000u })
+                                    {
+                                        h.ExposureSourceWidth = bad;
+                                        if (run(candidate.Get(), packed ? warp.Get() : nullptr) != b)
+                                            throw std::runtime_error("Invalid sigma fallback differs from .015");
+                                    }
+                                    h.ExposureSourceWidth = saved;
+                                }
                                 ++cases;
                             }
         std::cout << "Cubic guided PASS: " << cases << " cases / " << components << " components; maximum error "

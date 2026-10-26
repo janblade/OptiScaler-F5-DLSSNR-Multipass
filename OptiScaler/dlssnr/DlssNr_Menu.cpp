@@ -1346,16 +1346,16 @@ static void RenderStatusLine(const NrCommon& nr)
 
     if (!nr.enabled)
         ImGui::TextDisabled("NR off.");
-    else if (views.active && !views.hasSelected)
+    else if (views.active && DlssNr::Views::CountRuns(views.mask) == 0)
     {
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Stood down: the game draws %zu views at once.", views.count);
         ImGui::SameLine();
-        if (ImGui::SmallButton("Pick a view##multiviewstatus"))
+        if (ImGui::SmallButton("Pick views##multiviewstatus"))
             MenuPages::RequestPage(MenuPages::Page::NrInput);
     }
     else if (views.active && ms.has_value())
-        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running on one of %zu views (%s) - %.2f ms elapsed", views.count,
-                           ViewText(views.selected).c_str(), ms.value());
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running on %u of %zu views - %.2f ms elapsed (last view)",
+                           DlssNr::Views::CountRuns(views.mask), views.count, ms.value());
     else if (!DlssNr::IsRunning() && !nr.vulkan)
         ImGui::TextDisabled("NR is not running. See Status & Presets.");
     else if (ms.has_value())
@@ -3616,12 +3616,23 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
 }
 
 // NR Input.
+// What the menu calls a view: Left / Middle / Right for three screens, Left / Right for two, else Screen N.
+static std::string ViewName(const DlssNr::Views::ViewInfo& v, size_t screens)
+{
+    if (v.slot == DlssNr::Views::kWholeBit)
+        return "The whole picture";
+    if (screens == 3)
+        return v.slot == 0 ? "Left screen" : v.slot == 1 ? "Middle screen" : "Right screen";
+    if (screens == 2)
+        return v.slot == 0 ? "Left screen" : "Right screen";
+    return "Screen " + std::to_string(v.slot + 1);
+}
+
 // "Several views": shown only while the game draws several views into one picture (a triple-screen rig), so it is not a
-// control everyone scrolls past. NR keeps one model, so it works on one view at a time; which one is the user's call,
-// and until it is made NR stands down (the picture stays as the game made it).
+// control everyone scrolls past. Each ticked view gets its own model and history; until one is ticked NR stands down
+// (the picture stays as the game made it).
 static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr)
 {
-    using DlssNr::Views::Pick;
     const auto views = DlssNr::MultiViewStatus();
 
     if (!views.active)
@@ -3631,69 +3642,43 @@ static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr
     if (!card.IsOpen())
         return;
 
-    ImGui::TextWrapped("The game draws %zu views into one %ux%u picture (a multi-monitor layout). NR works on one view at a "
-                       "time. Pick the one it runs on; the others stay as the game made them.",
+    ImGui::TextWrapped("The game draws %zu views into one %ux%u picture (a multi-monitor layout). Tick the views NR works on: "
+                       "each gets its own model. Unticked views stay as the game made them.",
                        views.count, views.allocW, views.allocH);
 
-    // The views that start at the origin are the ones NR can work on; name the biggest and the smallest of them.
-    const DlssNr::Views::Rect* largest = nullptr;
-    const DlssNr::Views::Rect* smallest = nullptr;
+    uint32_t mask = config->DlssNrMultiViewScreens.value_or_default();
+    bool screenTicked = false;
+
     for (size_t i = 0; i < views.count; ++i)
     {
-        const auto& r = views.rects[i];
-        if (!r.AtOrigin())
-            continue;
-        if (largest == nullptr || r.Area() > largest->Area())
-            largest = &r;
-        if (smallest == nullptr || r.Area() < smallest->Area())
-            smallest = &r;
+        const auto& v = views.views[i];
+        const uint32_t bit = 1u << v.slot;
+        bool on = (mask & bit) != 0;
+        const std::string label = ViewName(v, views.screens) + "  " + ViewText(v.rect) + "##multiviewslot" +
+                                  std::to_string(v.slot);
+
+        if (ImGui::Checkbox(label.c_str(), &on))
+        {
+            mask = on ? (mask | bit) : (mask & ~bit);
+            config->DlssNrMultiViewScreens = mask;
+        }
+
+        screenTicked |= on && v.slot != DlssNr::Views::kWholeBit;
     }
 
-    const bool sameView = largest != nullptr && smallest != nullptr && *largest == *smallest;
-    int pick = (int) DlssNr::Views::PickFrom(config->DlssNrMultiViewTarget.value_or_default());
-    // One view at the origin: both choices land on it, shown as one.
-    if (sameView && pick == (int) Pick::Largest)
-        pick = (int) Pick::Smallest;
+    HelpMarker("The game gives the upscaler one call per monitor, and often one for the whole picture. Each view you tick "
+               "runs NR with a model and a history of its own, so it costs about what NR costs at that view's size, per "
+               "view, in GPU time and memory. Nothing ticked: NR stands down while the game draws several views.");
 
-    bool changed = false;
-    changed |= ImGui::RadioButton("Nothing (NR stands down)##multiviewpick", &pick, (int) Pick::Off);
-
-    if (largest != nullptr && !sameView)
-    {
-        const std::string label = "The largest view: " + ViewText(*largest) + "##multiviewpicklargest";
-        changed |= ImGui::RadioButton(label.c_str(), &pick, (int) Pick::Largest);
-    }
-
-    if (smallest != nullptr)
-    {
-        const std::string label =
-            std::string(sameView ? "The view at the left: " : "The first screen: ") + ViewText(*smallest) +
-            "##multiviewpicksmallest";
-        changed |= ImGui::RadioButton(label.c_str(), &pick, (int) Pick::Smallest);
-    }
-
-    if (changed)
-        config->DlssNrMultiViewTarget = (uint32_t) pick;
-
-    HelpMarker("The game gives the upscaler one call per monitor, and often one for the whole picture. NR keeps a single "
-               "model and a single history, so it cannot follow all of them at once; it runs on the view you pick and "
-               "leaves the rest alone. Only views that start at the left edge of the picture can be picked for now.");
-
-    // What was found, so a wrong guess is visible (recognition over recall).
-    for (size_t i = 0; i < views.count; ++i)
-    {
-        const auto& r = views.rects[i];
-        const bool picked = views.hasSelected && r == views.selected;
-        const std::string line = ViewText(r) + (picked ? "  - NR runs here" : r.AtOrigin() ? "" : "  - cannot be picked yet");
-        picked ? ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "%s", line.c_str()) : ImGui::TextDisabled("%s", line.c_str());
-    }
+    if (DlssNr::Views::CountRuns(mask) >= 2)
+        ImGui::TextDisabled("With several views ticked, Superior Scaling, Reuse detail and the edit cache stand aside.");
 
     // A single screen of a shared picture has to be handled before SR; after it the model would run on every screen.
-    if (views.hasSelected && views.selectedNeedsBeforeSr && !beforeSr)
+    if (screenTicked && !beforeSr)
     {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
-        ImGui::TextWrapped("One screen needs \"Run before SR\": after SR the model would run on every screen, so NR does "
-                           "not run until it is on.");
+        ImGui::TextWrapped("A screen needs \"Run before SR\": after SR the model would run on every screen, so NR does "
+                           "not run on the ticked screens until it is on.");
         ImGui::PopStyleColor();
         if (ImGui::SmallButton("Set in NR Options##multiviewbeforesr"))
             MenuPages::RequestPage(MenuPages::Page::NrOptions);
@@ -4700,13 +4685,13 @@ void UpdateMultiViewHint(Config* config)
         return;
 
     const auto views = MultiViewStatus();
-    if (!views.active || views.hasSelected)
+    if (!views.active || Views::CountRuns(views.mask) != 0)
         return;
 
     shown = true;
     ImGui::InsertNotification({ ImGuiToastType::Warning, 15000,
                                 "Neural Rendering stood down: this game draws %zu views at once (a multi-monitor "
-                                "layout).\nPick the view it works on: open the menu, Neural Rendering, Input.",
+                                "layout).\nTick the views it works on: open the menu, Neural Rendering, Input.",
                                 views.count });
 }
 

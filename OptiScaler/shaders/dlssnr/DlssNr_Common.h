@@ -177,6 +177,10 @@ struct DlssNrFrameInfo
     unsigned int DepthSubrectBaseY = 0;
     unsigned int MotionSubrectBaseX = 0;
     unsigned int MotionSubrectBaseY = 0;
+    // Where the active colour rectangle starts (before SR): one view of a multi-monitor layout shares its texture with
+    // the others (DlssNr_Views.h). Zero for every other game.
+    unsigned int ColorSubrectBaseX = 0;
+    unsigned int ColorSubrectBaseY = 0;
 
     // DLSS permits motion vectors at either render or output resolution. This flag comes from the
     // feature-create flags and decides which valid-region dimensions apply to the motion texture.

@@ -5,12 +5,14 @@
 #include "four_candidates_fixture.h"
 #include "packed_stage_fixture.h"
 
-int main()
+int main(int argc, char** argv)
 {
     try
     {
+        const bool nativeOnly = argc == 2 && std::string(argv[1]) == "--native-only";
         Runner r(true, 256, 3);
-        std::ofstream out("artifacts/validation/review-timing.csv");
+        std::ofstream out(nativeOnly ? "artifacts/validation/review-native-capacity-timing.csv"
+                                     : "artifacts/validation/review-timing.csv");
         out << std::setprecision(9) << "stage,scale,variant,block,quartet,position,gpu_ms\n";
         const std::string dir = "OptiScaler/shaders/dlssnr/superior/precompile";
         const std::string baseline = "artifacts/validation/review-reference";
@@ -19,6 +21,8 @@ int main()
                 for (unsigned modelPercent : { 65u, 100u })
                     for (int mapping : { -1, 0 })
                     {
+                        if (nativeOnly && modelPercent != 100)
+                            continue;
                         const UINT renderH = renderW == 1920 ? 1080 : 1440;
                         PackedStages f(r, modelPercent, mapping);
                         const bool privateDlss = true;
@@ -83,8 +87,9 @@ int main()
                         for (unsigned variant = 0; variant < 2; ++variant)
                         {
                             const auto& layout = renderLayout;
-                            depth[variant] = f.texture(layout.modelW, layout.modelH, DXGI_FORMAT_R32_FLOAT);
-                            motion[variant] = f.texture(layout.modelW, layout.modelH, DXGI_FORMAT_R32G32_FLOAT);
+                            const auto& capacity = variant && modelPercent == 100 ? f.layout : layout;
+                            depth[variant] = f.texture(capacity.modelW, capacity.modelH, DXGI_FORMAT_R32_FLOAT);
+                            motion[variant] = f.texture(capacity.modelW, capacity.modelH, DXGI_FORMAT_R32G32_FLOAT);
                             const DlssNr::GuideRegions regions { { 0, 0, renderW, renderH },
                                                                  { 0, 0, renderW, renderH } };
                             auto c = DlssNr::Spatial::MakeGuideConstants(layout, regions, { renderW, renderH }, 1, 1);

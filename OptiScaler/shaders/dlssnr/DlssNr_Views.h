@@ -65,6 +65,12 @@ enum class Verdict
 // Epochs (presented frames) without two views in one of them before the layout counts as gone: the game's menu or a mode
 // switch is not enough to forget it.
 constexpr unsigned int kQuietEpochs = 300;
+// ... unless only the whole picture is drawn: AC EVO draws one view per screen from the cockpit and one wide view from
+// the outside cameras, and the wide view should not wait seconds for NR. A camera switch is held for this many epochs.
+constexpr unsigned int kWholeOnlyEpochs = 10;
+// A layout found again this soon after a quick release means the game switches back and forth: from then on it waits
+// kQuietEpochs, so the models are not rebuilt on every switch.
+constexpr unsigned int kFlapEpochs = 600;
 // A view not seen for this many epochs no longer counts (a drifting render size leaves old rectangles).
 constexpr unsigned int kStaleEpochs = 60;
 
@@ -98,6 +104,8 @@ class Detector
         bool addedCandidate = false; // a view just became a candidate: the caller logs its numbers
         bool latchedNow = false;     // the layout was found by this evaluate
         bool unlatchedNow = false;   // ... or went away
+        bool quickRelease = false;   // ... because only the whole picture was drawn (unlatchedNow)
+        bool quickReleaseOff = false; // the layout came back right after a quick release: no more of them (latchedNow)
         unsigned int viewInEpoch = 0;
     };
 
@@ -107,7 +115,10 @@ class Detector
         Result result;
 
         if (_haveEpoch && epoch != _epoch)
+        {
             result.unlatchedNow = EndEpoch();
+            result.quickRelease = result.unlatchedNow && _releasedQuick;
+        }
 
         if (!_haveEpoch || epoch != _epoch)
         {
@@ -115,7 +126,14 @@ class Detector
             _haveEpoch = true;
             _epochCount = 0;
             _epochMulti = false;
+            _epochWhole = false;
+            _epochScreen = false;
         }
+
+        if (seen.Whole())
+            _epochWhole = true;
+        else
+            _epochScreen = true;
 
         // This epoch's distinct views.
         bool known = false;
@@ -144,6 +162,12 @@ class Detector
                 _latched = true;
                 result.latchedNow = true;
                 _candidateCount = 0;
+
+                if (_releasedQuick && _quickAllowed && _epoch - _releasedAt < kFlapEpochs)
+                {
+                    _quickAllowed = false;
+                    result.quickReleaseOff = true;
+                }
             }
 
             for (size_t i = 0; i < _epochCount; ++i)
@@ -229,6 +253,11 @@ class Detector
         _candidateCount = 0;
         _mask = 0;
         _skipped = 0;
+        _epochWhole = _epochScreen = false;
+        _wholeOnly = 0;
+        _releasedQuick = false;
+        _releasedAt = 0;
+        _quickAllowed = true;
     }
 
   private:
@@ -244,14 +273,24 @@ class Detector
     bool EndEpoch()
     {
         if (!_latched || _epochMulti)
+        {
+            _quiet = _epochMulti ? 0 : _quiet;
+            _wholeOnly = 0;
             return false;
+        }
 
-        if (++_quiet < kQuietEpochs)
+        _wholeOnly = _epochWhole && !_epochScreen ? _wholeOnly + 1 : 0;
+        const bool quick = _quickAllowed && _wholeOnly >= kWholeOnlyEpochs;
+
+        if (++_quiet < kQuietEpochs && !quick)
             return false;
 
         _latched = false;
         _candidateCount = 0;
         _quiet = 0;
+        _wholeOnly = 0;
+        _releasedQuick = quick;
+        _releasedAt = _epoch;
         return true;
     }
 
@@ -313,8 +352,14 @@ class Detector
     Seen _epochViews[kSlots];
     size_t _epochCount = 0;
     bool _epochMulti = false;
+    bool _epochWhole = false;  // the whole picture was drawn in this epoch
+    bool _epochScreen = false; // ... or a view that is not the whole picture
 
     bool _latched = false;
+    unsigned int _wholeOnly = 0; // epochs in a row with only the whole picture
+    bool _releasedQuick = false; // the last release was for the whole picture alone
+    unsigned long long _releasedAt = 0;
+    bool _quickAllowed = true;
     unsigned int _quiet = 0;
     Candidate _candidates[kSlots];
     size_t _candidateCount = 0;

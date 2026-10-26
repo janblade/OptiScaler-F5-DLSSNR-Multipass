@@ -2228,8 +2228,14 @@ Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* param
     if (result.unlatchedNow)
     {
         skipped = 0;
-        LOG_INFO("DLSS-NR: one view per frame again; NR runs as usual");
+        LOG_INFO("DLSS-NR: one view per frame again{}; NR runs as usual",
+                 result.quickRelease ? " (only the whole picture is drawn, e.g. an outside camera)" : "");
     }
+
+    if (result.quickReleaseOff)
+        LOG_INFO("DLSS-NR: the views came back right after the whole picture alone; from now on the layout is kept "
+                 "for {} frames without several views, so the models are not rebuilt on every switch",
+                 Views::kQuietEpochs);
 
     if (result.verdict != Views::Verdict::Run && (++skipped == 1 || skipped % 3600 == 0))
         LOG_INFO("DLSS-NR: {} evaluates skipped so far for the other views of a multi-view frame", skipped);

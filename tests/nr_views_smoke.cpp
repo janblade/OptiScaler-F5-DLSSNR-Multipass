@@ -166,6 +166,50 @@ int main()
         Check(r.verdict == Verdict::Run && r.slot == -1, "the single view runs again on its own state");
     }
 
+    std::printf("An outside camera (the whole picture alone) releases the layout quickly:\n");
+    {
+        Detector d;
+        Frame(d, 1, kLeft | kMiddle | kRight);
+        Frame(d, 2, kLeft | kMiddle | kRight);
+        bool released = false;
+        unsigned long long e = 3;
+        for (; e < 3 + kWholeOnlyEpochs + 2 && !released; ++e)
+        {
+            const auto r = d.Note(e, Whole(), kLeft | kMiddle | kRight);
+            released = r.unlatchedNow && r.quickRelease;
+        }
+        Check(released && !d.Status().active, "released within kWholeOnlyEpochs frames");
+        const auto r = d.Note(e, Whole(), kLeft | kMiddle | kRight);
+        Check(r.verdict == Verdict::Run && r.slot == -1, "the wide view runs on the single view's state");
+
+        // Back to the cockpit at once: the game switches back and forth, so quick releases stop.
+        bool latched = false, off = false;
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto s = d.Note(e + 1, Screen(i), kLeft | kMiddle | kRight);
+            latched = latched || s.latchedNow;
+            off = off || s.quickReleaseOff;
+        }
+        Check(latched && off, "the views coming back soon after switch quick releases off");
+        bool stillLatched = true;
+        for (unsigned long long k = e + 2; k < e + 2 + kWholeOnlyEpochs * 3; ++k)
+            stillLatched = stillLatched && !d.Note(k, Whole(), kLeft | kMiddle | kRight).unlatchedNow;
+        Check(stillLatched && d.Status().active, "then the whole picture alone waits the long quiet time");
+    }
+
+    std::printf("Cockpit frames where a present falls between the screens do not count as the whole picture alone:\n");
+    {
+        Detector d;
+        Frame(d, 1, kLeft);
+        bool kept = true;
+        for (unsigned long long e = 2; e < 2 + kWholeOnlyEpochs * 3; ++e)
+        {
+            kept = kept && !d.Note(e * 2, Screen(0), kLeft).unlatchedNow;
+            kept = kept && !d.Note(e * 2 + 1, Screen(1), kLeft).unlatchedNow;
+        }
+        Check(kept && d.Status().active, "one screen per present keeps the layout");
+    }
+
     std::printf("A resolution change leaves no stale view:\n");
     {
         Detector d;

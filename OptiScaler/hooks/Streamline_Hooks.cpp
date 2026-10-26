@@ -574,6 +574,16 @@ sl::Result StreamlineHooks::hkslGetFeatureFunction(sl::Feature feature, const ch
     return o_slGetFeatureFunction(feature, functionName, function);
 }
 
+// With the DLSSG input slInit leaves DLSS-G out of featuresToLoad, so a game that loads DLSS-G at device setup
+// (Doom: The Dark Ages) would get eErrorFeatureFailedToLoad and grey out its frame generation option
+sl::Result StreamlineHooks::hkslSetFeatureLoaded(sl::Feature feature, bool loaded)
+{
+    if (feature == sl::kFeatureDLSS_G)
+        return sl::Result::eOk;
+
+    return o_slSetFeatureLoaded(feature, loaded);
+}
+
 sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
                                        uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
@@ -2166,6 +2176,8 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 KernelBaseProxy::GetProcAddress_()(slInterposer, "slGetFeatureVersion"));
             o_slGetFeatureFunction = reinterpret_cast<decltype(&slGetFeatureFunction)>(
                 KernelBaseProxy::GetProcAddress_()(slInterposer, "slGetFeatureFunction"));
+            o_slSetFeatureLoaded = reinterpret_cast<decltype(&slSetFeatureLoaded)>(
+                KernelBaseProxy::GetProcAddress_()(slInterposer, "slSetFeatureLoaded"));
 
             if (o_slInit != nullptr)
             {
@@ -2208,6 +2220,9 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 
                     if (o_slGetFeatureFunction != nullptr)
                         DetourAttach(&(PVOID&) o_slGetFeatureFunction, hkslGetFeatureFunction);
+
+                    if (o_slSetFeatureLoaded != nullptr)
+                        DetourAttach(&(PVOID&) o_slSetFeatureLoaded, hkslSetFeatureLoaded);
                 }
 
                 // if (o_slAllocateResources != nullptr)
@@ -2236,6 +2251,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                     o_slGetFeatureRequirements = nullptr;
                     o_slGetFeatureVersion = nullptr;
                     o_slGetFeatureFunction = nullptr;
+                    o_slSetFeatureLoaded = nullptr;
                 }
             }
         }

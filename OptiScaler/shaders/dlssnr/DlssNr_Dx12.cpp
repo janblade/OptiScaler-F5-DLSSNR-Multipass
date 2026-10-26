@@ -2179,6 +2179,7 @@ Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* param
     {
         ++loggedViews;
         unsigned int outW = 0, outH = 0, depthX = 0, depthY = 0, motionX = 0, motionY = 0;
+        unsigned int outBaseX = 0, outBaseY = 0, transBaseX = 0, transBaseY = 0;
         if (ID3D12Resource* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output"))
         {
             const auto outDesc = output->GetDesc();
@@ -2189,10 +2190,15 @@ Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* param
         params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &depthY);
         params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &motionX);
         params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &motionY);
-        LOG_INFO("DLSS-NR view: Color allocation {}x{}, active {}x{} at {},{}; Output allocation {}x{}; depth base {},{} "
-                 "motion base {},{}; view {} seen in epoch {}",
-                 seen.allocW, seen.allocH, width, height, baseX, baseY, outW, outH, depthX, depthY, motionX, motionY,
-                 result.viewInEpoch, epoch);
+        // Where the game wants this view's result in the shared output. Nothing else in this module reads it on D3D12.
+        params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, &outBaseX);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, &outBaseY);
+        params->Get("DLSS.Input.Translucency.Subrect.Base.X", &transBaseX);
+        params->Get("DLSS.Input.Translucency.Subrect.Base.Y", &transBaseY);
+        LOG_INFO("DLSS-NR view: Color allocation {}x{}, active {}x{} at {},{}; Output allocation {}x{}, output base {},{}; "
+                 "depth base {},{} motion base {},{} translucency base {},{}; view {} seen in epoch {}",
+                 seen.allocW, seen.allocH, width, height, baseX, baseY, outW, outH, outBaseX, outBaseY, depthX, depthY,
+                 motionX, motionY, transBaseX, transBaseY, result.viewInEpoch, epoch);
     }
 
     if (result.unlatchedNow)

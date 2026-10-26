@@ -2144,7 +2144,23 @@ Views::Detector g_views;
 // scene cut, the scan, frame statistics) are taken on the first view NR runs on in the frame only.
 bool g_multiRun = false;
 bool g_viewSecondary = false;
-unsigned long long g_sceneCutEpoch = ~0ull; // the epoch the first view found a scene cut in: the others reset too
+unsigned long long g_sceneCuts = 0;                     // cuts the first view found; each other view resets once per cut
+unsigned long long g_viewSceneCuts[Views::kSlots] = {}; // ... and remembers the last one it took
+
+// The first view is the leftmost ticked view that is still being drawn, picked by slot, not by the present count: AC EVO
+// records its views on a render thread while presents go on elsewhere, so a present can fall between two views of one
+// frame, and "the first view of this present" was then the middle screen, measured against the left one.
+unsigned long long g_viewRuns = 0;
+unsigned long long g_viewLastRun[Views::kSlots] = {};
+
+bool IsSecondaryView(int slot, uint32_t mask)
+{
+    g_viewLastRun[slot] = ++g_viewRuns;
+    for (unsigned int s = 0; s < Views::kSlots; ++s)
+        if (Views::Runs(mask, s) && g_viewLastRun[s] != 0 && g_viewRuns - g_viewLastRun[s] <= 2 * Views::kSlots)
+            return (int) s != slot;
+    return false;
+}
 
 // What the game's parameter block says about this evaluate, handed to the detector. Called once per NR seam, so twice per
 // game evaluate; the detector counts a view once.
@@ -3393,14 +3409,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // views the first view of the frame looks, and a cut it finds resets the others too.
     if (g_viewSecondary)
     {
-        if (g_sceneCutEpoch == frame.SubmissionEpoch)
+        if (g_viewSceneCuts[g_loadedSlot] != g_sceneCuts)
             g_nr.reset = true;
     }
     else if (SceneCut::BeginFrame(cfg, frame.Reset))
     {
         g_nr.reset = true;
-        g_sceneCutEpoch = frame.SubmissionEpoch;
+        ++g_sceneCuts;
     }
+    if (g_loadedSlot >= 0)
+        g_viewSceneCuts[g_loadedSlot] = g_sceneCuts;
 
     // Logged whenever it changes, not once per session.
     //
@@ -3423,7 +3441,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DXGI_FORMAT motionFormat;
     };
 
-    static GuideReport loggedGuides {};
+    // One per view: two views of different sizes would otherwise log every evaluate.
+    static GuideReport loggedPerView[Views::kSlots + 1] {};
+    GuideReport& loggedGuides = loggedPerView[g_loadedSlot + 1];
 
     const GuideReport guidesNow { true,
                                   g_nr.guideDepthInverted,
@@ -6517,13 +6537,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     if (configuredBefore != beforeUpscale)
         return;
 
-    // The first view NR runs on in a frame takes the frame's measurements; the others read them.
-    {
-        static unsigned long long primaryEpoch = ~0ull;
-        g_viewSecondary = viewLatched && primaryEpoch == viewEpoch;
-        if (viewLatched && !g_viewSecondary)
-            primaryEpoch = viewEpoch;
-    }
+    // The first view takes the frame's measurements; the others read them.
+    g_viewSecondary = viewLatched && IsSecondaryView(g_loadedSlot, cfg.DlssNrMultiViewScreens.value_or_default());
 
     // Which of the game's APIs this evaluate arrived through.
     //

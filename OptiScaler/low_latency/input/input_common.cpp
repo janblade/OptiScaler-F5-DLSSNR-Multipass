@@ -1227,6 +1227,8 @@ struct XeFGBatch
 std::mutex xefg_batch_mutex;
 std::deque<XeFGBatch> xefg_batches; // Marked, not presented yet
 XeFGBatch xefg_batch;               // Presenting
+uint32_t xefg_types_logged = 0;     // AntiLag 2 frame types logged since FG started
+constexpr uint32_t xefg_types_log_limit = 16;
 constexpr size_t xefg_max_batches = 8;
 
 void reset_xefg_batches()
@@ -1234,6 +1236,7 @@ void reset_xefg_batches()
     std::scoped_lock lock(xefg_batch_mutex);
     xefg_batches.clear();
     xefg_batch = {};
+    xefg_types_logged = 0;
 }
 } // namespace
 
@@ -1259,6 +1262,10 @@ void InputCommon::fg_output_present(ID3D12CommandQueue* presentQueue, bool prese
     }
 
     uint64_t frame_id = 0;
+    std::optional<bool> interpolated;
+    uint32_t position = 0;
+    uint32_t frames = 0;
+    bool logType = false;
 
     {
         std::scoped_lock lock(xefg_batch_mutex);
@@ -1275,12 +1282,38 @@ void InputCommon::fg_output_present(ID3D12CommandQueue* presentQueue, bool prese
         }
 
         frame_id = xefg_batch.frame_id;
+
+        // XeFG presents a batch's generated frames first and its real frame last: AntiLag 2 takes the frame type of
+        // each present from its position in the batch
+        if (!presented && frame_id != 0 && tech->get_mode() == LowLatencyMode::AntiLag2)
+        {
+            position = xefg_batch.presented;
+            frames = xefg_batch.frames;
+
+            if (position < frames)
+                interpolated = position + 1 < frames;
+
+            if (xefg_types_logged < xefg_types_log_limit)
+            {
+                xefg_types_logged++;
+                logType = true;
+            }
+        }
     }
 
     if (frame_id != 0)
     {
-        tech->set_async_marker(presentQueue, { frame_id, presented ? MarkerType::OUT_OF_BAND_PRESENT_END
-                                                                   : MarkerType::OUT_OF_BAND_PRESENT_START });
+        MarkerParams params { frame_id, presented ? MarkerType::OUT_OF_BAND_PRESENT_END
+                                                  : MarkerType::OUT_OF_BAND_PRESENT_START };
+        params.interpolated = interpolated;
+
+        if (logType)
+        {
+            LOG_INFO("XeFG AntiLag 2 frame type: frame id {}, position {} of {} frames, interpolated {}", frame_id,
+                     position, frames, interpolated.has_value() ? (*interpolated ? "true" : "false") : "inferred");
+        }
+
+        tech->set_async_marker(presentQueue, params);
     }
 }
 

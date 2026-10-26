@@ -36,6 +36,10 @@ struct Frame
     double waitMs = 0.0;
 };
 
+// A try of one step less and the step back after it: the controllers do this now and then at a cap the waits don't
+// show, it is not flipping. Bounded below by the probes' own back-off.
+template <typename R> static bool IsProbe(R reason) { return reason == R::Probe || reason == R::Undo; }
+
 static Frame Run(const Game& g, int count)
 {
     const double work = g.workMs + (count > 0 ? g.onMs + (count - 1) * g.genMs : 0.0);
@@ -50,7 +54,8 @@ static Frame Run(const Game& g, int count)
 struct Result
 {
     int count = 0;
-    int changesLate = 0; // count changes in the second half
+    int changesLate = 0; // count changes in the second half, a probe (one step less now and then) and its undo apart
+    int probeChanges = 0; // the probes of the second half and their undo
     double presented = 0.0;
     double lateMs[9] = {}; // time at each count in the second half
 };
@@ -86,7 +91,7 @@ static Result SimCount(const Game& g, double targetFps, int maxCount, int startC
             r.lateMs[std::clamp(count, 0, 8)] += f.frameMs;
 
         if (next != count && now >= seconds * 500.0)
-            ++r.changesLate;
+            ++(IsProbe(dc.LastReason()) ? r.probeChanges : r.changesLate);
 
         count = next;
     }
@@ -138,7 +143,7 @@ static Result SimMeasured(const Game& g, double targetFps, int maxCount, int sta
                                      shownPerFrame.Value(), shownPerFrame.Sample() });
 
         if (next != current && now >= seconds * 500.0)
-            ++r.changesLate;
+            ++(IsProbe(dc.LastReason()) ? r.probeChanges : r.changesLate);
 
         xefg::AddShownPresent(totals, (uint32_t) (applied + 1));
         answers.insert(answers.begin(), next);
@@ -168,7 +173,7 @@ static Result SimCap(const Game& g, double targetFps, int maxCount, int startCou
         const int next = dc.Update({ now, f.frameMs, f.waitMs, targetFps, maxCount, count });
 
         if (next != count && now >= seconds * 500.0)
-            ++r.changesLate;
+            ++(IsProbe(dc.LastReason()) ? r.probeChanges : r.changesLate);
 
         count = next;
     }
@@ -190,6 +195,7 @@ int main()
                     from2.count + 1, from2.presented);
         Check(from6.count == 2 && from2.count == 2, "settles at 3X, nearest the target, from above and below");
         Check(from6.changesLate == 0 && from2.changesLate == 0, "holds still once settled");
+        Check(from6.probeChanges <= 4 && from2.probeChanges <= 4, "probes of one step less stay rare: 2 tries at most in a minute");
     }
     {
         // "at least" counts the target reached from 97% of it: at 120, 3X (about 113, 94%) isn't, 4X is the lowest

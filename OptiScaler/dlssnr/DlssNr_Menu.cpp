@@ -3884,7 +3884,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             bool changedIsHDR = ImGui::Checkbox("##SuperiorScalingDisableIsHDR", &disableIsHDR);
             ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextWrapped("Disable DLSS IsHDR flag (may reduce severe ghosting at the cost of less stable NR)");
+            ImGui::TextWrapped("Disable DLSS IsHDR flag (enable only if experiencing severe ghosting; may help, "
+                              "but could reduce NR stability)");
             if (ImGui::IsItemClicked())
             {
                 disableIsHDR = !disableIsHDR;

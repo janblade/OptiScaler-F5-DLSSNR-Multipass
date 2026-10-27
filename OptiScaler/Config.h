@@ -277,10 +277,10 @@ class Config
     // Generate NR before SR, upscale its signed contribution with a private DLSS feature,
     // and apply it after the game's upscaler. Takes precedence over RunBeforeSR; opt-in.
     CustomOptional<bool> DlssNrDeferredDlss { false };
-    // A game that draws several views into one colour allocation (a triple-screen rig) calls the upscaler once per view.
-    // The views NR works on, each with its own model: bit i = screen i + 1 from the left, bit 8 = the whole picture
-    // (shaders/dlssnr/DlssNr_Views.h). 0: NR stands down while that happens (default). Not part of an NR profile: it
-    // describes the rig.
+    // A game that draws several views into one colour allocation (a triple-screen rig) calls the upscaler once per
+    // view. The views NR works on, each with its own model: bit i = screen i + 1 from the left, bit 8 = the whole
+    // picture (shaders/dlssnr/DlssNr_Views.h). 0: NR stands down while that happens (default). Not part of an NR
+    // profile: it describes the rig.
     CustomOptional<uint32_t> DlssNrMultiViewScreens { 0 };
     CustomOptional<bool> DlssNrResidualFg { false }; // forced off: not read from the ini, not in the menu
     CustomOptional<uint32_t> DlssNrPrecision { 0 }; // 0 NVIDIA FP8 (default), 4 Experimental NVFP4 hybrid

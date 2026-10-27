@@ -2131,12 +2131,12 @@ void ReportSkipOnce(const char* reason)
 
 namespace Views = DlssNr::Views;
 
-// A game that draws several views into one colour allocation (a triple-screen rig) calls the upscaler once per view, each
-// with its own active rectangle, and often once more for the combined picture. This module has one model feature and one
-// history: those calls rebuild it against each other (it never gets to evaluate), a view off the origin cannot be
-// staged, and the fallback after SR runs the model over the whole output. So NR stands down while it happens, unless the
-// user ticked views (DlssNrMultiViewScreens), and then it runs on those, each with a model of its own (the view slots
-// below). See DlssNr_Views.h.
+// A game that draws several views into one colour allocation (a triple-screen rig) calls the upscaler once per view,
+// each with its own active rectangle, and often once more for the combined picture. This module has one model feature
+// and one history: those calls rebuild it against each other (it never gets to evaluate), a view off the origin cannot
+// be staged, and the fallback after SR runs the model over the whole output. So NR stands down while it happens, unless
+// the user ticked views (DlssNrMultiViewScreens), and then it runs on those, each with a model of its own (the view
+// slots below). See DlssNr_Views.h.
 Views::Detector g_views;
 
 // While several views are drawn and more than one is ticked: what keeps one picture's state across frames and is not
@@ -2144,12 +2144,12 @@ Views::Detector g_views;
 // scene cut, the scan, frame statistics) are taken on the first view NR runs on in the frame only.
 bool g_multiRun = false;
 bool g_viewSecondary = false;
-unsigned long long g_sceneCuts = 0;                     // cuts the first view found; each other view resets once per cut
+unsigned long long g_sceneCuts = 0; // cuts the first view found; each other view resets once per cut
 unsigned long long g_viewSceneCuts[Views::kSlots] = {}; // ... and remembers the last one it took
 
-// The first view is the leftmost ticked view that is still being drawn, picked by slot, not by the present count: AC EVO
-// records its views on a render thread while presents go on elsewhere, so a present can fall between two views of one
-// frame, and "the first view of this present" was then the middle screen, measured against the left one.
+// The first view is the leftmost ticked view that is still being drawn, picked by slot, not by the present count: AC
+// EVO records its views on a render thread while presents go on elsewhere, so a present can fall between two views of
+// one frame, and "the first view of this present" was then the middle screen, measured against the left one.
 unsigned long long g_viewRuns = 0;
 unsigned long long g_viewLastRun[Views::kSlots] = {};
 
@@ -2219,10 +2219,11 @@ Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* param
         params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, &outBaseY);
         params->Get("DLSS.Input.Translucency.Subrect.Base.X", &transBaseX);
         params->Get("DLSS.Input.Translucency.Subrect.Base.Y", &transBaseY);
-        LOG_INFO("DLSS-NR view: Color allocation {}x{}, active {}x{} at {},{}; Output allocation {}x{}, output base {},{}; "
-                 "depth base {},{} motion base {},{} translucency base {},{}; view {} seen in epoch {}, slot {}",
-                 seen.allocW, seen.allocH, width, height, baseX, baseY, outW, outH, outBaseX, outBaseY, depthX, depthY,
-                 motionX, motionY, transBaseX, transBaseY, result.viewInEpoch, epoch, result.slot);
+        LOG_INFO(
+            "DLSS-NR view: Color allocation {}x{}, active {}x{} at {},{}; Output allocation {}x{}, output base {},{}; "
+            "depth base {},{} motion base {},{} translucency base {},{}; view {} seen in epoch {}, slot {}",
+            seen.allocW, seen.allocH, width, height, baseX, baseY, outW, outH, outBaseX, outBaseY, depthX, depthY,
+            motionX, motionY, transBaseX, transBaseY, result.viewInEpoch, epoch, result.slot);
     }
 
     if (result.unlatchedNow)
@@ -2244,10 +2245,10 @@ Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* param
 #include "DlssNr_Spatial.inl"
 
 // One model, one history and one set of surfaces per view NR works on while several views are drawn (DlssNr_Views.h):
-// the views have different sizes and cameras, so one set rebuilt for each would never get to evaluate. The pass works on
-// g_nr and EdgeCompression as always; before a view's turn its own part is swapped in. g_nr holds the loaded view's part,
-// its slot holds a default-constructed one, so swapping back puts each where it belongs. Slot -1 is the single view's
-// own part (every game that draws one view never leaves it).
+// the views have different sizes and cameras, so one set rebuilt for each would never get to evaluate. The pass works
+// on g_nr and EdgeCompression as always; before a view's turn its own part is swapped in. g_nr holds the loaded view's
+// part, its slot holds a default-constructed one, so swapping back puts each where it belongs. Slot -1 is the single
+// view's own part (every game that draws one view never leaves it).
 struct ViewState
 {
     NrState nr; // only the members SwapView names are used
@@ -2424,7 +2425,7 @@ void ParkSlot(int slot)
     }
 
     ViewState loaded;
-    SwapView(loaded);         // g_nr: a fresh part; loaded: the loaded view's
+    SwapView(loaded);          // g_nr: a fresh part; loaded: the loaded view's
     SwapView(SlotState(slot)); // g_nr: the slot's part; the slot: a fresh one
     ParkLoadedView();          // g_nr: a fresh part again
     SwapView(loaded);          // g_nr: the loaded view's part back
@@ -3392,10 +3393,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         lastGameFormat = desc.Format;
     }
-    const auto active = frame.BeforeUpscale
-        ? DlssNr::PreSrColorExtent(desc, frame.RenderSubrectWidth, frame.RenderSubrectHeight, frame.ColorSubrectBaseX,
-                                   frame.ColorSubrectBaseY)
-        : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { (unsigned int) desc.Width, desc.Height } };
+    const auto active =
+        frame.BeforeUpscale
+            ? DlssNr::PreSrColorExtent(desc, frame.RenderSubrectWidth, frame.RenderSubrectHeight,
+                                       frame.ColorSubrectBaseX, frame.ColorSubrectBaseY)
+            : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { (unsigned int) desc.Width, desc.Height } };
     if (!active)
     {
         ReportSkipOnce("the pre-SR active colour size is invalid");
@@ -4299,7 +4301,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool automaticApplies =
         whitePointSource == 3 && !frame.FinishedPicture && isHdrBuffer && frame.WhitePointOverride <= 0.0f;
 
-    // A later view of a multi-monitor frame reads the exposure the first one measured this frame (the texture holds it).
+    // A later view of a multi-monitor frame reads the exposure the first one measured this frame (the texture holds
+    // it).
     if (automaticApplies && g_viewSecondary && g_nr.autoExposure != nullptr && g_nr.autoExposureReadable)
         usingAutoExposure = true;
     else if (automaticApplies && g_nr.meter != nullptr && g_nr.autoExposure != nullptr)
@@ -4626,8 +4629,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // and after the blocks above have finished with the meter, so it can overwrite anything in it: the
     // next frame's own dispatch writes it all again. The grid is copied out before the courier touches
     // tile 0. Read eight frames later, below, once the white point in force is known.
-    if (cfg.DlssNrFrameStats.value_or_default() && !g_viewSecondary && g_nr.meter != nullptr && g_nr.diagGridReadback != nullptr &&
-        g_nr.diagExposureReadback != nullptr && g_nr.diagQueuedAt == 0 && (g_frames % 120) == 0)
+    if (cfg.DlssNrFrameStats.value_or_default() && !g_viewSecondary && g_nr.meter != nullptr &&
+        g_nr.diagGridReadback != nullptr && g_nr.diagExposureReadback != nullptr && g_nr.diagQueuedAt == 0 &&
+        (g_frames % 120) == 0)
     {
         const D3D12_RESOURCE_STATES priorTargetState = targetState;
         const D3D12_RESOURCE_DESC gameDesc = gameColor->GetDesc();
@@ -6402,7 +6406,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         }
 
         // The finished-picture and deferred modes keep one picture of their own and stage from the origin.
-        const bool ownPictureModes = cfg.DlssNrFinishedPicture.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default();
+        const bool ownPictureModes =
+            cfg.DlssNrFinishedPicture.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default();
         if (view.slot >= 0 && ownPictureModes)
         {
             ReportSkipOnce("several views are drawn: Finished picture and Deferred DLSS work on one picture only");
@@ -6570,8 +6575,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
                     LOG_WARN("DLSS-NR before SR requires a valid active rectangle inside a "
                              "single-sample 2D Color texture; got allocation {}x{}, active {}x{} at {},{}. "
                              "Falling back after SR.",
-                             allocationWidth, allocationHeight, renderWidth, renderHeight, colorBaseX,
-                             colorBaseY);
+                             allocationWidth, allocationHeight, renderWidth, renderHeight, colorBaseX, colorBaseY);
                 }
             }
         }

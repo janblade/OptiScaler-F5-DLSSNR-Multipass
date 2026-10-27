@@ -21,10 +21,10 @@ inline std::optional<ColorExtent> PreSrColorExtent(const D3D12_RESOURCE_DESC& al
                                                   unsigned int renderWidth, unsigned int renderHeight,
                                                   unsigned int baseX = 0, unsigned int baseY = 0)
 {
-    if (allocation.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        allocation.SampleDesc.Count != 1 || allocation.DepthOrArraySize != 1 ||
-        allocation.Width == 0 || allocation.Width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
-        allocation.Height == 0 || allocation.Height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+    if (allocation.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || allocation.SampleDesc.Count != 1 ||
+        allocation.DepthOrArraySize != 1 || allocation.Width == 0 ||
+        allocation.Width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || allocation.Height == 0 ||
+        allocation.Height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION)
         return std::nullopt;
 
     if (renderWidth == 0 && renderHeight == 0)

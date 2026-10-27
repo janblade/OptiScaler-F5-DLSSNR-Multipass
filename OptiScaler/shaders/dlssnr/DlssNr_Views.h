@@ -10,11 +10,11 @@
 //
 // This decides whether a frame is like that, gives each view a stable role (screen 1, 2, 3 from the left, or the whole
 // picture), and says whether NR works on it. Each view NR works on keeps its own model and history (DlssNr_Dx12.cpp,
-// the view slots), so the views never rebuild one model against each other. Nothing here touches D3D12: the caller hands
-// in what it read from the NGX parameter block. Host-testable (tests/nr_views_smoke.cpp).
+// the view slots), so the views never rebuild one model against each other. Nothing here touches D3D12: the caller
+// hands in what it read from the NGX parameter block. Host-testable (tests/nr_views_smoke.cpp).
 namespace DlssNr::Views
 {
-constexpr size_t kMaxViews = 8;    // screens, left to right
+constexpr size_t kMaxViews = 8;       // screens, left to right
 constexpr unsigned int kWholeBit = 8; // the view that covers the whole allocation (the game's combined picture)
 constexpr unsigned int kSlots = kMaxViews + 1;
 
@@ -102,8 +102,8 @@ class Detector
     struct Result
     {
         Verdict verdict = Verdict::Run;
-        int slot = -1;               // the view's state slot while several views are drawn; -1: the single view's
-        bool needsBeforeSr = false;  // one screen of a shared output: only the pre-SR placement keeps to its rectangle
+        int slot = -1;              // the view's state slot while several views are drawn; -1: the single view's
+        bool needsBeforeSr = false; // one screen of a shared output: only the pre-SR placement keeps to its rectangle
         bool offOrigin = false;
         bool addedCandidate = false; // a view just became a candidate: the caller logs its numbers
         bool latchedNow = false;     // the layout was found by this evaluate
@@ -251,8 +251,8 @@ class Detector
         return s;
     }
 
-    // The view whose evaluate comes last in a frame while the layout is drawn: the whole picture when the game draws it,
-    // else the rightmost screen. By then every view's input and output of the frame are written. -1: no layout.
+    // The view whose evaluate comes last in a frame while the layout is drawn: the whole picture when the game draws
+    // it, else the rightmost screen. By then every view's input and output of the frame are written. -1: no layout.
     int FeedSlot() const
     {
         std::lock_guard<std::mutex> lock(_lock);

@@ -14,8 +14,8 @@ namespace
 {
 namespace Views = DlssNr::Views;
 
-// Games that draw several views into one allocation (a triple-screen rig: one evaluate per screen, sometimes one more for
-// the combined picture) call the upscaler several times per frame. Frame generation works on the one stitched back
+// Games that draw several views into one allocation (a triple-screen rig: one evaluate per screen, sometimes one more
+// for the combined picture) call the upscaler several times per frame. Frame generation works on the one stitched back
 // buffer, so it takes one evaluate per game frame and the whole depth and motion allocations, which hold every screen
 // side by side. Without this, every evaluate started a frame of its own and handed one screen's corner as the picture.
 Views::Detector FgViews;
@@ -58,13 +58,16 @@ MultiViewFeed JudgeFgViews(NVSDK_NGX_Parameter* params)
         height = desc.Height;
     }
 
-    const Views::Seen seen { (unsigned int) desc.Width, desc.Height, (int) desc.Format, { baseX, baseY, width, height } };
+    const Views::Seen seen {
+        (unsigned int) desc.Width, desc.Height, (int) desc.Format, { baseX, baseY, width, height }
+    };
     const auto result = FgViews.Note(State::Instance().frameCount, seen, 0);
 
     if (result.latchedNow)
-        LOG_INFO("(FG) the game draws several views into one {}x{} Color allocation; frame generation takes one evaluate "
-                 "per frame and the whole depth and motion allocations",
-                 seen.allocW, seen.allocH);
+        LOG_INFO(
+            "(FG) the game draws several views into one {}x{} Color allocation; frame generation takes one evaluate "
+            "per frame and the whole depth and motion allocations",
+            seen.allocW, seen.allocH);
     if (result.unlatchedNow)
         LOG_INFO("(FG) one view per frame again");
 
@@ -363,8 +366,7 @@ void UpscalerInputsDx12::UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_
 
     auto fg = State::Instance().currentFG;
 
-    if (fg == nullptr || State::Instance().activeFgInput != FGInput::Upscaler || _device == nullptr ||
-        ViewFeedSkipped)
+    if (fg == nullptr || State::Instance().activeFgInput != FGInput::Upscaler || _device == nullptr || ViewFeedSkipped)
         return;
 
     // FG Dispatch

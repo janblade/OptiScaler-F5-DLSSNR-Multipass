@@ -1347,8 +1347,8 @@ static void RenderStatusLine(const NrCommon& nr)
     if (!nr.enabled)
         ImGui::TextDisabled("NR off.");
     else if (views.active && DlssNr::Views::OnePicture(views.mask) && ms.has_value())
-        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running on all %zu screens as one picture - %.2f ms elapsed",
-                           views.screens, ms.value());
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                           "Running on all %zu screens as one picture - %.2f ms elapsed", views.screens, ms.value());
     else if (views.active && DlssNr::Views::CountRuns(views.mask) == 0 && !DlssNr::Views::OnePicture(views.mask))
     {
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Stood down: the game draws %zu views at once.", views.count);
@@ -3651,8 +3651,8 @@ static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr
     uint32_t mask = config->DlssNrMultiViewScreens.value_or_default();
     bool screenTicked = false;
 
-    // Two ways: one model per ticked view (before SR), or one pass over the finished picture after SR, where the views are
-    // side by side in the game's output. The ticks are kept while one picture is chosen.
+    // Two ways: one model per ticked view (before SR), or one pass over the finished picture after SR, where the views
+    // are side by side in the game's output. The ticks are kept while one picture is chosen.
     const uint32_t oneBit = 1u << DlssNr::Views::kOnePictureBit;
     bool onePicture = DlssNr::Views::OnePicture(mask);
     if (ImGui::RadioButton("Each ticked view on its own##multiviewmode", !onePicture))
@@ -3660,10 +3660,11 @@ static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr
     ImGui::SameLine();
     if (ImGui::RadioButton("All screens as one picture (after SR)##multiviewmode", onePicture))
         config->DlssNrMultiViewScreens = mask = mask | oneBit;
-    HelpMarker("Each ticked view on its own: a model and a history per view, before SR, nothing crosses the edge between "
-               "two screens.\nAll screens as one picture: once per frame, after SR, on the game's whole output (the "
-               "screens side by side), with one model. Superior Scaling and Reuse detail stay on. The model may smear a "
-               "thin strip where two screens meet: they are different cameras. Costs NR at the whole output size.");
+    HelpMarker(
+        "Each ticked view on its own: a model and a history per view, before SR, nothing crosses the edge between "
+        "two screens.\nAll screens as one picture: once per frame, after SR, on the game's whole output (the "
+        "screens side by side), with one model. Superior Scaling and Reuse detail stay on. The model may smear a "
+        "thin strip where two screens meet: they are different cameras. Costs NR at the whole output size.");
     onePicture = DlssNr::Views::OnePicture(mask);
 
     if (onePicture)
@@ -3672,15 +3673,16 @@ static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr
         return;
     }
 
-    ImGui::TextDisabled("Tick the views NR works on: each gets its own model. Unticked views stay as the game made them.");
+    ImGui::TextDisabled(
+        "Tick the views NR works on: each gets its own model. Unticked views stay as the game made them.");
 
     for (size_t i = 0; i < views.count; ++i)
     {
         const auto& v = views.views[i];
         const uint32_t bit = 1u << v.slot;
         bool on = (mask & bit) != 0;
-        const std::string label = ViewName(v, views.screens) + "  " + ViewText(v.rect) + "##multiviewslot" +
-                                  std::to_string(v.slot);
+        const std::string label =
+            ViewName(v, views.screens) + "  " + ViewText(v.rect) + "##multiviewslot" + std::to_string(v.slot);
 
         if (ImGui::Checkbox(label.c_str(), &on))
         {
@@ -3691,12 +3693,14 @@ static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr
         screenTicked |= on && v.slot != DlssNr::Views::kWholeBit;
     }
 
-    HelpMarker("The game gives the upscaler one call per monitor, and often one for the whole picture. Each view you tick "
-               "runs NR with a model and a history of its own, so it costs about what NR costs at that view's size, per "
-               "view, in GPU time and memory. Nothing ticked: NR stands down while the game draws several views.");
+    HelpMarker(
+        "The game gives the upscaler one call per monitor, and often one for the whole picture. Each view you tick "
+        "runs NR with a model and a history of its own, so it costs about what NR costs at that view's size, per "
+        "view, in GPU time and memory. Nothing ticked: NR stands down while the game draws several views.");
 
     if (DlssNr::Views::CountRuns(mask) >= 2)
-        ImGui::TextDisabled("With several views ticked, Superior Scaling, Reuse detail and the edit cache stand aside.");
+        ImGui::TextDisabled(
+            "With several views ticked, Superior Scaling, Reuse detail and the edit cache stand aside.");
 
     // A single screen of a shared picture has to be handled before SR; after it the model would run on every screen.
     if (screenTicked && !beforeSr)

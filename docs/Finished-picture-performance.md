@@ -129,5 +129,8 @@ faster shader. Do not port the old specialized paths solely because they helped 
 
 **No runtime, shader/blob, dispatch, build-script or test-source changes from these experiments
 are retained.** All prototype runtime changes were discarded before publication; the existing
-DLL at `e649420f` remains current. The measured tiny encode improvement was not enabled.
+DLL at `e649420f` remained current at the end of that audit. The measured tiny compute encode improvement was not enabled.
 No new whole-game speedup, whole-path gain or additional in-game quality result is claimed.
+
+The later [HDR10 render-target writeback](Finished-picture-raster-HDR10.md) separately addresses
+removing the final copy on eligible non-UAV pictures; it does not enable those rejected PSOs.

@@ -377,12 +377,18 @@ static bool RecordPqDecode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* color
 // `linear` (NR's result) -> PQ over `color`, through `encoded` (the picture's own format). The original picture is the
 // second input of the pass (what the encode keeps of it). `linear` is left in UNORDERED_ACCESS.
 static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linear, ID3D12Resource* color,
-                           D3D12_RESOURCE_STATES pictureState, ID3D12Resource* encoded, const DlssNrConstants& decoded)
+                           D3D12_RESOURCE_STATES pictureState, ID3D12Resource* encoded, const DlssNrConstants& decoded,
+                           bool privateGraphicsList = false)
 {
+    // The native/virtual-input callers share the game's list: leave all graphics state alone there.
+    const auto pictureDesc = color->GetDesc();
+    if (privateGraphicsList && pictureDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM &&
+        (pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 &&
+        (pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0 &&
+        g_compose->RecordFinishedPqRaster(cmd, linear, color, pictureState)) return;
     DlssNrConstants conversion = decoded;
     conversion.Mode = 1;
     Barrier(cmd, linear, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    const auto pictureDesc = color->GetDesc();
     if ((pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 &&
         g_compose->FinishedPqDirectReady(pictureDesc.Format))
     {
@@ -595,7 +601,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
         if (pq && colorReady && g_nr.successfulDispatches > before && Config::Instance()->DlssNrApplyModel.value_or_default())
         {
             RecordPqEncode(cmd, slot.linear.Get(), color.Get(), D3D12_RESOURCE_STATE_PRESENT, slot.encoded.Get(),
-                           conversion);
+                           conversion, true);
         }
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         if (slot.depth) Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);

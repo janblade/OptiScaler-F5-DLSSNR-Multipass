@@ -14,6 +14,7 @@ using Microsoft::WRL::ComPtr;
 #include <d3d12sdklayers.h>
 #include <iomanip>
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_FinishedCopy.h"
+#include "../../OptiScaler/shaders/dlssnr/DlssNr_FinishedRaster.h"
 #include "../../OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_color_Shader.h"
 #include "../../OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_direct_Shader.h"
 
@@ -35,6 +36,12 @@ static void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* resource, D3
 struct ComposeBridge
 {
     bool ready = true;
+    std::function<bool(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*, D3D12_RESOURCE_STATES)> raster;
+    bool RecordFinishedPqRaster(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linear, ID3D12Resource* picture,
+                                D3D12_RESOURCE_STATES state)
+    {
+        return raster && raster(cmd, linear, picture, state);
+    }
     bool FinishedPqDirectReady(DXGI_FORMAT) const { return ready; }
     std::function<bool(const ::DlssNrConstants&, ID3D12Resource*)> dispatch;
     bool DispatchResidualPass(ID3D12GraphicsCommandList*, const ::DlssNrConstants& constants, ID3D12Resource*,
@@ -265,25 +272,90 @@ static ComPtr<ID3D12PipelineState> pipeline(Runner& r, const void* data, size_t 
     return p;
 }
 
-static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bool uav = true)
+enum class PqPattern
+{
+    Stress,
+    Finite,
+    HalfSweep
+};
+static void rasterGuards()
+{
+    const auto source = texture(67, 41, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    const auto picture = texture(67, 41, DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    const auto allowed = [&](const D3D12_RESOURCE_DESC& s, const D3D12_RESOURCE_DESC& p)
+    { return DlssNr::CanRasterFinishedPq(D3D12_COMMAND_LIST_TYPE_DIRECT, s, p); };
+    expect(allowed(source, picture), "Eligible HDR10 render target rejected");
+    expect(!DlssNr::CanRasterFinishedPq(D3D12_COMMAND_LIST_TYPE_COMPUTE, source, picture), "Compute list can draw");
+    expect(!DlssNr::CanRasterFinishedPq(D3D12_COMMAND_LIST_TYPE_COPY, source, picture), "Copy list can draw");
+    for (unsigned test = 0; test < 8; ++test)
+    {
+        auto d = picture;
+        if (test == 0)
+            d.Flags = D3D12_RESOURCE_FLAG_NONE;
+        if (test == 1)
+            d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (test == 2)
+            d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        if (test == 3)
+            d.Width += 1;
+        if (test == 4)
+            d.Height += 1;
+        if (test == 5)
+            d.MipLevels = 2;
+        if (test == 6)
+            d.SampleDesc.Count = 2;
+        if (test == 7)
+            d.DepthOrArraySize = 2;
+        expect(!allowed(source, d), "Unsupported target accepted by raster path");
+    }
+    for (unsigned test = 0; test < 4; ++test)
+    {
+        auto d = source;
+        if (test == 0)
+            d.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        if (test == 1)
+            d.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+        if (test == 2)
+            d.Flags = D3D12_RESOURCE_FLAG_NONE;
+        if (test == 3)
+            d.Width = 0;
+        expect(!allowed(d, picture), "Unsupported source accepted by raster path");
+    }
+    std::cout << "PASS: raster format, flags, dimensions, mip/array/MSAA and command-list guards\n";
+}
+static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bool uav = true, bool raster = false,
+               bool privateList = true, DlssNr::FinishedPqRaster* sharedRaster = nullptr,
+               PqPattern pattern = PqPattern::Stress)
 {
     std::cout << "Checking PQ format " << format << std::endl;
     const UINT stride = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
     Image linear(r, texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
-    Image picture(r,
-                  texture(w, h, format, uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE));
+    Image picture(r, texture(w, h, format,
+                             raster ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
+                             : uav  ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                                    : D3D12_RESOURCE_FLAG_NONE));
     Image encoded(r, texture(w, h, format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
     linear.fill(
-        [](char* p, UINT x, UINT y)
+        [&](char* p, UINT x, UINT y)
         {
             uint16_t v[4];
             for (UINT c = 0; c < 4; ++c)
                 v[c] = DirectX::PackedVector::XMConvertFloatToHalf(float(int((x * 31 + y * 17 + c * 11) % 4096) - 64) /
                                                                    32);
-            if (x % 29 == 0)
+            if (raster)
+                for (UINT c = 0; c < 3; ++c)
+                {
+                    const uint32_t hash =
+                        ((x * 1664525u + y * 1013904223u + c * 2246822519u) ^ (x << 17)) * 3266489917u;
+                    float light = float(int(hash % 65536) - 4096) / ((x + y) % 3 == 0 ? 32768.0f : 512.0f);
+                    v[c] = DirectX::PackedVector::XMConvertFloatToHalf(light);
+                }
+            if (pattern == PqPattern::Stress && x % 29 == 0)
                 v[0] = 0x7E00; // NaN fallback must preserve original RGB/alpha.
-            if (x % 31 == 0)
+            if (pattern == PqPattern::Stress && x % 31 == 0)
                 v[1] = 0x7C00;
+            if (pattern == PqPattern::HalfSweep)
+                v[0] = v[1] = v[2] = uint16_t(x + y * w);
             std::memcpy(p, v, 8);
         },
         8);
@@ -361,8 +433,20 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
     {
         if (changed)
         {
-            RecordPqEncode(r.list.Get(), linear.gpu.Get(), picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT,
-                           encoded.gpu.Get(), c);
+            if (raster && privateList && !timing)
+            {
+                const D3D12_VIEWPORT wrong { float(w + 4), float(h + 4), 1, 1, 0, 1 };
+                const D3D12_RECT outside { LONG(w + 4), LONG(h + 4), LONG(w + 5), LONG(h + 5) };
+                r.list->RSSetViewports(1, &wrong);
+                r.list->RSSetScissorRects(1, &outside);
+                r.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+            }
+            if (privateList)
+                RecordPqEncode(r.list.Get(), linear.gpu.Get(), picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT,
+                               encoded.gpu.Get(), c, raster);
+            else
+                RecordPqEncode(r.list.Get(), linear.gpu.Get(), picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT,
+                               encoded.gpu.Get(), c); // Native/virtual default must never change graphics state.
             return;
         }
         r.barrier(linear.gpu.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -386,6 +470,24 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
     };
     bool forceFallback = false;
     ComposeBridge bridge;
+    DlssNr::FinishedPqRaster localRaster(4);
+    auto& rasterPass = sharedRaster ? *sharedRaster : localRaster;
+    unsigned rasterRequests = 0, rasterSuccesses = 0;
+    bridge.raster =
+        [&](ID3D12GraphicsCommandList* cmd, ID3D12Resource* input, ID3D12Resource* target, D3D12_RESOURCE_STATES state)
+    {
+        ++rasterRequests;
+        if (forceFallback)
+            return false;
+        const UINT offset = 8 + rasterRequests % 4;
+        const bool recorded = rasterPass.Record(
+            r.device.Get(), cmd, input, target, state, r.heap.Get(),
+            { r.heap->GetCPUDescriptorHandleForHeapStart().ptr + offset * r.stride },
+            { r.heap->GetGPUDescriptorHandleForHeapStart().ptr + offset * r.stride }, rasterRequests % 4);
+        if (recorded)
+            ++rasterSuccesses;
+        return recorded;
+    };
     bridge.dispatch = [&](const ::DlssNrConstants& constants, ID3D12Resource* output)
     {
         expect(constants.Mode == 1 || constants.Mode == 6, "Unexpected production PQ mode");
@@ -415,6 +517,21 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
     record(true);
     r.finish();
     const auto candidate = picture.read(D3D12_RESOURCE_STATE_PRESENT);
+    if (raster && format == DXGI_FORMAT_R10G10B10A2_UNORM)
+    {
+        unsigned alphaValues = 0;
+        for (UINT y = 0; y < h; ++y)
+            for (UINT x = 0; x < w; ++x)
+            {
+                uint32_t pixel;
+                std::memcpy(&pixel, candidate.data() + y * picture.footprint.Footprint.RowPitch + x * 4, 4);
+                const uint32_t original = 0x13579BDFu * (x + 1) + y * 17;
+                expect((pixel >> 30) == (original >> 30), "Raster changed original HDR10 alpha bits");
+                alphaValues |= 1u << (original >> 30);
+            }
+        if (w >= 67)
+            expect(alphaValues == 15, "Alpha fixture missed an R10G10B10A2 alpha value");
+    }
     for (UINT y = 0; y < h; ++y)
         expect(std::memcmp(reference.data() + y * picture.footprint.Footprint.RowPitch,
                            candidate.data() + y * picture.footprint.Footprint.RowPitch, w * stride) == 0,
@@ -439,7 +556,9 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
     std::cout << "PASS: bit-exact PQ format " << format << " at " << w << 'x' << h << ", UAV=" << uav << '\n';
     if (timing)
     {
-        timing->run("pq_encode_" + std::to_string(format), record);
+        const auto suffix =
+            std::to_string(w) + "x" + std::to_string(h) + (pattern == PqPattern::Finite ? "_finite" : "_stress");
+        timing->run(raster ? "pq_raster_encode_" + suffix : "pq_encode_" + std::to_string(format), record);
         c.Mode = 0;
         auto decodeCb = r.buffer(sizeof(c), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         check(decodeCb->Map(0, nullptr, &memory));
@@ -461,14 +580,14 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
         // Changed overhead: full depth capture, active MV capture, decode PQ and encode/write it back.
         // Does not execute NR/DLSS or model-dependent dispatches; never label it full game timing.
         timing->run(
-            "finished_overhead_no_models_4k_drs1080",
+            raster ? "finished_raster_no_models_" + suffix : "finished_overhead_no_models_4k_drs1080",
             [&](bool changed)
             {
                 for (auto* saved : { savedDepth.gpu.Get(), savedMotion.gpu.Get() })
                 {
                     r.barrier(guides.gpu.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                               D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    if (changed && saved == savedMotion.gpu.Get())
+                    if ((changed || raster) && saved == savedMotion.gpu.Get())
                         DlssNr::CopyFinishedGuide(r.list.Get(), saved, guides.gpu.Get(), guides.desc,
                                                   { 0, 0, 1920, 1080 });
                     else
@@ -494,6 +613,11 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
             });
     }
     g_compose = nullptr;
+    const bool rasterEligible = raster && privateList && format == DXGI_FORMAT_R10G10B10A2_UNORM;
+    expect(rasterEligible ? rasterRequests != 0 : rasterRequests == 0, "Raster escaped its private-list/format opt-in");
+    expect(raster && privateList && format == DXGI_FORMAT_R10G10B10A2_UNORM ? rasterSuccesses != 0
+                                                                            : rasterSuccesses == 0,
+           "Raster test did not execute its expected production path");
 }
 
 int main(int argc, char** argv)
@@ -504,14 +628,31 @@ try
     if (!hardware && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
         debug->EnableDebugLayer();
     Runner r(hardware, 24);
+    rasterGuards();
     guideQuality(r);
     for (auto format : { DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT })
         pq(r, 67, 41, format, nullptr);
     pq(r, 67, 41, DXGI_FORMAT_R10G10B10A2_UNORM, nullptr, false);
+    DlssNr::FinishedPqRaster reusedRaster(4);
+    for (const auto extent : { std::pair { 67u, 41u }, { 129u, 73u }, { 1u, 1u }, { 67u, 41u } })
+        pq(r, extent.first, extent.second, DXGI_FORMAT_R10G10B10A2_UNORM, nullptr, false, true, true, &reusedRaster);
+    pq(r, 256, 256, DXGI_FORMAT_R10G10B10A2_UNORM, nullptr, false, true, true, &reusedRaster, PqPattern::HalfSweep);
+    pq(r, 67, 41, DXGI_FORMAT_R10G10B10A2_UNORM, nullptr, false, true, false);
+    pq(r, 67, 41, DXGI_FORMAT_R16G16B16A16_FLOAT, nullptr, false, true);
+    pq(r, 67, 41, DXGI_FORMAT_R8G8B8A8_UNORM, nullptr, false, true);
     if (argc > 2)
     {
         Timing timing(r, argv[2]);
-        pq(r, 3840, 2160, DXGI_FORMAT_R10G10B10A2_UNORM, &timing);
+        if (argc > 3)
+        {
+            expect(hardware && std::string(argv[3]) == "--raster", "Unknown timing mode");
+            for (const auto extent : { std::pair { 1920u, 1080u }, { 2560u, 1440u }, { 3840u, 2160u } })
+                for (const auto pattern : { PqPattern::Finite, PqPattern::Stress })
+                    pq(r, extent.first, extent.second, DXGI_FORMAT_R10G10B10A2_UNORM, &timing, false, true, true,
+                       nullptr, pattern);
+            return 0;
+        }
+        pq(r, 3840, 2160, DXGI_FORMAT_R10G10B10A2_UNORM, &timing, false, true);
         for (auto active : { DlssNr::GuideRegion { 0, 0, 1920, 1080 },
                              { 8, 4, 1280, 720 },
                              { 0, 0, 2558, 1439 },

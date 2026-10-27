@@ -69,6 +69,7 @@
 #include "precompile/dlssnr_finished_color_Shader.h"
 #include "precompile/dlssnr_finished_pq_direct_Shader.h"
 #include "DlssNr_FinishedCopy.h"
+#include "DlssNr_FinishedRaster.h"
 #include "precompile/dlssnr_detail_stats_Shader.h"
 #include "precompile/dlssnr_detail_reuse_Shader.h"
 #include "precompile/dlssnr_edit_cache_Shader.h"
@@ -3328,6 +3329,26 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const Dl
         InCmdList->Dispatch(minified.groupsX, minified.groupsY, 1);
     }
 
+    return true;
+}
+
+bool DlssNr_Dx12::RecordFinishedPqRaster(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linear,
+                                         ID3D12Resource* picture, D3D12_RESOURCE_STATES pictureState)
+{
+    if (!_init || !_device || !cmd || !linear || !picture)
+        return false;
+    if (!_finishedPqRaster)
+    {
+        if (!DlssNr::CanRasterFinishedPq(cmd->GetType(), linear->GetDesc(), picture->GetDesc()))
+            return false;
+        _finishedPqRaster = std::make_unique<DlssNr::FinishedPqRaster>(DLSSNR_NUM_OF_HEAPS);
+    }
+    const auto slot = _heapIndex;
+    auto& heap = _frameHeaps[slot];
+    if (!_finishedPqRaster->Record(_device, cmd, linear, picture, pictureState, heap.GetHeapCSU(), heap.GetSrvCPU(0),
+                                   heap.GetTableGPUStart(), slot))
+        return false;
+    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
     return true;
 }
 

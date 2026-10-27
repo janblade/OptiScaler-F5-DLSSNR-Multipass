@@ -1,6 +1,7 @@
 # Run from a Developer PowerShell, or let this script locate vcvars64 automatically.
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
+& (Join-Path $repo 'tools/compile_nr_finished_pq.ps1') -Check
 $validation = Join-Path $repo 'artifacts/validation/finished-fg'
 New-Item -ItemType Directory -Force -Path $validation | Out-Null
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
@@ -19,10 +20,15 @@ $start = $late.IndexOf('DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(')
 $end = $late.IndexOf('// The body of ApplyNativeInput', $start)
 if ($start -lt 0 -or $end -le $start) { throw 'Finished Picture routing source markers changed.' }
 [IO.File]::WriteAllText((Join-Path $validation 'FinishedRouting.inl'), $late.Substring($start, $end - $start), [Text.UTF8Encoding]::new($false))
+$start = $late.IndexOf('static void RecordPqEncode(')
+$end = $late.IndexOf('// The caller holds g_nrMutex.', $start)
+if ($start -lt 0 -or $end -le $start) { throw 'Finished Picture PQ encoder source markers changed.' }
+[IO.File]::WriteAllText((Join-Path $validation 'FinishedPqEncode.inl'), $late.Substring($start, $end - $start), [Text.UTF8Encoding]::new($false))
 $cases = @(
     @{ Source = 'tests/nr_gpu/nr_streamline_hooks.cpp'; Libs = 'd3d12.lib dxgi.lib' },
     @{ Source = 'tests/nr_gpu/nr_streamline_picture_smoke.cpp'; Libs = 'd3d12.lib dxgi.lib' },
     @{ Source = 'tests/nr_gpu/nr_finished_routing.cpp'; Libs = 'd3d12.lib dxgi.lib' },
+    @{ Source = 'tests/nr_gpu/nr_finished_performance.cpp'; Libs = 'd3d12.lib dxgi.lib' },
     @{ Source = 'tests/nr_finished_queue_smoke.cpp'; Libs = 'd3d12.lib dxgi.lib' },
     @{ Source = 'tests/nr_finished_color_smoke.cpp'; Libs = 'd3d11.lib d3dcompiler.lib dxgi.lib' },
     @{ Source = 'tests/nr_profiles_smoke.cpp'; Libs = ''; Args = @('OptiScaler/Config.cpp') },

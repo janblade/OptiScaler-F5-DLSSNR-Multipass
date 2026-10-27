@@ -105,9 +105,8 @@ void Cancel()
     reset = true;
 }
 
-bool Clone(ComPtr<ID3D12Resource>& copy, ID3D12Resource* source)
+bool Clone(ComPtr<ID3D12Resource>& copy, ID3D12Resource* source, const D3D12_RESOURCE_DESC& want)
 {
-    const auto want = source->GetDesc();
     if (want.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || want.SampleDesc.Count != 1 ||
         want.DepthOrArraySize != 1 || want.MipLevels != 1)
         return false;
@@ -194,20 +193,12 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     auto* next = Acquire(cmd);
     if (!next) return;
     auto& slot = *next;
+    const auto depthDesc = depth ? depth->GetDesc() : D3D12_RESOURCE_DESC {};
+    const auto motionDesc = motion->GetDesc();
     if (!depth) slot.depth.Reset(); // no stale depth from an earlier frame
-    if ((depth && !Clone(slot.depth, depth)) || !Clone(slot.motion, motion))
+    if ((depth && !Clone(slot.depth, depth, depthDesc)) || !Clone(slot.motion, motion, motionDesc))
     { Say("The game's depth or movement data is not supported."); return; }
     slot.residualOnly = false;
-    // Copy at the NGX seam, where guide states and lifetimes are defined. Keep typed,
-    // shader-readable copies until both the producing queue and NR have finished.
-    for (auto pair : { std::pair { depth, slot.depth.Get() }, std::pair { motion, slot.motion.Get() } })
-    {
-        if (!pair.first) continue;
-        Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cmd->CopyResource(pair.second, pair.first);
-        Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        // The copy returns to COPY_DEST after the late dispatch.
-    }
     slot.frame = {};
     auto& frame = slot.frame;
     unsigned flags = 0, gameReset = 0;
@@ -217,8 +208,9 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     frame.DepthInverted = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     frame.MotionVectorsLowResolution = (flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
     frame.RayReconstruction = rr;
-    frame.OutputWidth = (unsigned) output->GetDesc().Width;
-    frame.OutputHeight = output->GetDesc().Height;
+    const auto outputDesc = output->GetDesc();
+    frame.OutputWidth = (unsigned) outputDesc.Width;
+    frame.OutputHeight = outputDesc.Height;
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &frame.DepthSubrectBaseX);
@@ -232,6 +224,24 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     frame.FinishedPicture = true;
     frame.OutputArrivalState = D3D12_RESOURCE_STATE_PRESENT;
     frame.SubmissionEpoch = State::Instance().frameCount;
+    // Resolve exactly the regions Dispatch will read, independently for depth and motion.
+    // Preserve the allocation, offsets, formats and units, including output-resolution MV.
+    const auto regions = ResolveGuideRegions(
+        { (unsigned) depthDesc.Width, depthDesc.Height }, { (unsigned) motionDesc.Width, motionDesc.Height },
+        { frame.RenderSubrectWidth, frame.RenderSubrectHeight }, { frame.OutputWidth, frame.OutputHeight },
+        frame.MotionVectorsLowResolution, frame.DepthSubrectBaseX, frame.DepthSubrectBaseY,
+        frame.MotionSubrectBaseX, frame.MotionSubrectBaseY);
+    const auto copy = [&](ID3D12Resource* source, ID3D12Resource* destination,
+                          const D3D12_RESOURCE_DESC& desc, GuideRegion region)
+    {
+        if (!source) return;
+        Barrier(cmd, source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        CopyFinishedGuide(cmd, destination, source, desc, region);
+        Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        // The copy returns to COPY_DEST after the late dispatch.
+    };
+    copy(depth, slot.depth.Get(), depthDesc, regions.depth);
+    copy(motion, slot.motion.Get(), motionDesc, regions.motion);
     Arm(slot, cmd);
 }
 
@@ -241,7 +251,7 @@ bool CaptureResidual(ID3D12GraphicsCommandList* cmd, ID3D12Resource* clean, ID3D
     auto* next = Acquire(cmd);
     if (!next) return false;
     auto& slot = *next;
-    if (!Clone(slot.residual, residual))
+    if (!Clone(slot.residual, residual, residual->GetDesc()))
     { Say("The upscaled changes could not be saved."); return false; }
     Barrier(cmd, residual, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     cmd->CopyResource(slot.residual.Get(), residual);
@@ -372,6 +382,23 @@ static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linea
     DlssNrConstants conversion = decoded;
     conversion.Mode = 1;
     Barrier(cmd, linear, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    const auto pictureDesc = color->GetDesc();
+    if ((pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 &&
+        g_compose->FinishedPqDirectReady(pictureDesc.Format))
+    {
+        // Same per-pixel math, alpha and invalid-value fallback; retain the separate path
+        // when typed UAV loads/stores or PSO creation are unavailable.
+        conversion.Mode = 6;
+        Barrier(cmd, color, pictureState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const bool direct = g_compose->DispatchResidualPass(cmd, conversion, linear, nullptr, nullptr, nullptr, color);
+        Barrier(cmd, color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, pictureState);
+        if (direct)
+        {
+            Barrier(cmd, linear, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            return;
+        }
+        conversion.Mode = 1;
+    }
     Barrier(cmd, color, pictureState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if (g_compose->DispatchResidualPass(cmd, conversion, linear, nullptr, color, nullptr, encoded))
     {
@@ -388,7 +415,7 @@ static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linea
 // The caller holds g_nrMutex. Handoff callers read all swapchain metadata before entering
 // this lock: Streamline can hold its own lock while submitting commands that take g_nrMutex.
 static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
-                               bool gameFrameHandoff)
+                               bool gameFrameHandoff, const D3D12_RESOURCE_DESC& desc)
 {
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
         !Config::Instance()->DlssNrEnabled.value_or_default())
@@ -402,7 +429,6 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
     Late::ComPtr<ID3D12Device> currentDevice;
     if (FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != Late::device)
         return;
-    const auto desc = color->GetDesc();
     const bool screenPq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
     const bool screenScrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
     const bool screenSdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
@@ -480,7 +506,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
         if (other.submitted && other.serial <= slot.serial)
             other.pending = false;
     // Same queue: orders after the producer's signal. Another queue: already complete, so this never blocks.
-    if ((!gameFrameHandoff && FAILED(queue->Wait(slot.fence.Get(), slot.ready))) || FAILED(slot.allocator->Reset()) ||
+    if (FAILED(slot.allocator->Reset()) ||
         FAILED(slot.commands->Reset(slot.allocator.Get(), nullptr)))
     {
         Late::reset = true;
@@ -624,6 +650,7 @@ static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue
     const auto& cfg = *Config::Instance();
     Late::ComPtr<IDXGISwapChain3> sc;
     Late::ComPtr<ID3D12Resource> color;
+    D3D12_RESOURCE_DESC desc {};
     auto space = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     if (cfg.DlssNrFinishedPicture.value_or_default() && cfg.DlssNrEnabled.value_or_default())
     {
@@ -634,10 +661,11 @@ static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue
         if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
             FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))))
             return;
-        space = NativeInputColourSpace(swapchain, color->GetDesc().Format);
+        desc = color->GetDesc();
+        space = NativeInputColourSpace(swapchain, desc.Format);
     }
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
-    ApplyFinishedColor(color.Get(), queue, space, false);
+    ApplyFinishedColor(color.Get(), queue, space, false, desc);
 }
 
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
@@ -649,9 +677,10 @@ void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture
 {
     if (State::Instance().isShuttingDown || !swapchain || !picture || !queue)
         return;
-    const auto space = NativeInputColourSpace(swapchain, picture->GetDesc().Format);
+    const auto desc = picture->GetDesc();
+    const auto space = NativeInputColourSpace(swapchain, desc.Format);
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
-    ApplyFinishedColor(picture, queue, space, true);
+    ApplyFinishedColor(picture, queue, space, true, desc);
 }
 
 void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)

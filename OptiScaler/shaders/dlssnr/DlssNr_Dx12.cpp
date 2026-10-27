@@ -67,6 +67,8 @@
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
 #include "precompile/dlssnr_finished_color_Shader.h"
+#include "precompile/dlssnr_finished_pq_direct_Shader.h"
+#include "DlssNr_FinishedCopy.h"
 #include "precompile/dlssnr_detail_stats_Shader.h"
 #include "precompile/dlssnr_detail_reuse_Shader.h"
 #include "precompile/dlssnr_edit_cache_Shader.h"
@@ -2672,6 +2674,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
             pipeline->Release();
     if (_finishedColorPipelineState)
         _finishedColorPipelineState->Release();
+    if (_finishedPqDirectPipelineState)
+        _finishedPqDirectPipelineState->Release();
     if (_detailStatsPipelineState)
         _detailStatsPipelineState->Release();
     if (_exposureAdaptPipelineState)
@@ -3327,15 +3331,57 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const Dl
     return true;
 }
 
+bool DlssNr_Dx12::FinishedPqDirectReady(DXGI_FORMAT format)
+{
+    if (!_init || !_device)
+        return false;
+    const unsigned formatIndex = format == DXGI_FORMAT_R10G10B10A2_UNORM    ? 0u
+                                 : format == DXGI_FORMAT_R8G8B8A8_UNORM     ? 1u
+                                 : format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 2u
+                                                                            : 3u;
+    if (formatIndex == _finishedPqDirectSupport.size())
+        return false;
+    // Immutable per device/format, including views that alternate formats every frame.
+    auto& state = _finishedPqDirectSupport[formatIndex];
+    if (state == 0)
+    {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support { format };
+        const bool supported =
+            SUCCEEDED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
+            (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 &&
+            (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0 &&
+            (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
+        state = supported ? 2 : 1;
+    }
+    if (state != 2)
+        return false;
+    if (!_finishedPqDirectPipelineState && !_finishedPqDirectPipelineFailed)
+    {
+        CreateComputePipeline(_device, &_finishedPqDirectPipelineState, dlssnr_finished_pq_direct_cso,
+                              sizeof(dlssnr_finished_pq_direct_cso), nullptr);
+        _finishedPqDirectPipelineFailed = !_finishedPqDirectPipelineState;
+    }
+    return _finishedPqDirectPipelineState != nullptr;
+}
+
 bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList,
                                        const DlssNrConstants& InConstants, ID3D12Resource* InSource,
                                        ID3D12Resource* InModel, ID3D12Resource* InOriginal,
                                        ID3D12Resource* InMotion, ID3D12Resource* OutTarget)
 {
-    if (!_finishedColorPipelineState && _init)
+    if (!_init || !InCmdList || !_device || !InSource || !OutTarget)
+        return false;
+    const bool directPq = InConstants.Mode == 6;
+    if (directPq)
+    {
+        const auto desc = OutTarget->GetDesc();
+        if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0 || !FinishedPqDirectReady(desc.Format))
+            return false;
+    }
+    else if (!_finishedColorPipelineState)
         CreateComputePipeline(_device, &_finishedColorPipelineState, dlssnr_finished_color_cso,
                               sizeof(dlssnr_finished_color_cso), nullptr);
-    auto* pipeline = _finishedColorPipelineState;
+    auto* pipeline = directPq ? _finishedPqDirectPipelineState : _finishedColorPipelineState;
     if (!_init || pipeline == nullptr || InCmdList == nullptr || _device == nullptr ||
         InSource == nullptr || OutTarget == nullptr)
         return false;

@@ -83,11 +83,14 @@ inline constexpr GUID colorSpaceKey = {
 };
 } // namespace Late
 static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
-                               bool handoff)
+                               bool handoff, const D3D12_RESOURCE_DESC& desc)
 {
     Expect(NrLockIsHeld(), "Composition request lost the shared NR lock");
     Expect(picture == expectedPicture && queue == expectedQueue, "Routing selected the wrong picture or queue");
     Expect(space == expectedSpace && handoff == expectedHandoff, "Routing lost colour metadata or input policy");
+    if (picture)
+        Expect(desc.Width == picture->GetDesc().Width && desc.Format == picture->GetDesc().Format,
+               "Routing lost the current picture description after resize");
     ++composeRequests;
 }
 // Generated from the live Late.inl by the runner, without duplicating the implementation.

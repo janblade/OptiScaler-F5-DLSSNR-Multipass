@@ -37,7 +37,7 @@ No private DLSS, Superior gain, carrier, depth/MV, exposure or frame-generation 
 - real WARP queue readiness with a present-gated producer, same-queue ordering, newest/newest-ready slot policies, device removal and resize wait classification;
 - existing SDR/scRGB/HDR10 colour/residual conversion, alpha/invalid data, NR profile key completeness, multi-view routing and active/offset colour staging.
 
-The Finished Picture WARP suite is also available in `.github/workflows/finished_picture_checks.yml`. The current upstream changed-lines format check and a full Release x64 build are required before delivery. No HLSL/blob is changed. These checks do not execute proprietary game frame generation or prove motion/depth alignment in every game. No new GPU-time result is claimed; whole-game cost/pacing remains an in-game measurement.
+The Finished Picture WARP suite is also available in `.github/workflows/finished_picture_checks.yml`. The current upstream changed-lines format check and a full Release x64 build are required before delivery. The initial before-FG port changed no HLSL/blob. The subsequent [performance follow-up](Finished-picture-performance.md) adds an optional direct PQ encoder, active guide copies and GPU-stage measurements, with the original shaders and compatible fallbacks preserved. These checks do not execute proprietary game frame generation or prove motion/depth alignment in every game; whole-game cost/pacing remains an in-game measurement.
 
 ### Author's Crimson Desert report (2026-10-27)
 

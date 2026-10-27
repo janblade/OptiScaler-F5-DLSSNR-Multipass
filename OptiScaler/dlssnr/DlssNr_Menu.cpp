@@ -3880,21 +3880,16 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "CNN automatically chooses its model from guided range sigma. Transformer keeps the same model. "
                        "Preset availability depends on the installed DLSS runtime.");
 
-            bool disableIsHDR = config->DlssNrSuperiorScalingDisableIsHDR.value_or_default();
-            bool changedIsHDR = ImGui::Checkbox("##SuperiorScalingDisableIsHDR", &disableIsHDR);
-            ImGui::SameLine();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextWrapped("Disable DLSS IsHDR flag (try only if experiencing severe ghosting; may help, "
-                              "but could reduce NR stability)");
-            if (ImGui::IsItemClicked())
-            {
-                disableIsHDR = !disableIsHDR;
-                changedIsHDR = true;
-            }
-            if (changedIsHDR)
-                config->DlssNrSuperiorScalingDisableIsHDR = disableIsHDR;
-
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
+            ImGui::BeginDisabled(nr.vulkan || !unavailable.empty());
+            bool disableIsHDR = config->DlssNrSuperiorScalingDisableIsHDR.value_or_default();
+            if (ImGui::Checkbox("Disable DLSS IsHDR flag", &disableIsHDR))
+                config->DlssNrSuperiorScalingDisableIsHDR = disableIsHDR;
+            ImGui::EndDisabled();
+
+            HelpMarker("Experimental: try only if experiencing severe ghosting. Disabling IsHDR may help, but "
+                       "could reduce NR stability. Changing this option recreates Superior Scaling's private "
+                       "DLSS feature and resets NR history once.");
 
             if (nr.vulkan)
                 ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "

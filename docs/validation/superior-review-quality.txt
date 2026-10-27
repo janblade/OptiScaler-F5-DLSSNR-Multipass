@@ -1,0 +1,22 @@
+Superior policy PASS: Main/Small/Default/legacy presets on 310.8 and 310.9, mixed gain blocks and schedules, fixed settings, A/K, guides and PSO guards
+Render-resolution guide geometry PASS: 480 normalized warp/end-point checks; native-only gating, odd sizes, offset/shift and overscan
+Minified MV dispatch coverage PASS: 136 layouts; no-depth, 25/40/50/65/100/125%, offset MV rectangles and 4K
+Spatial metadata and final-resolution gain policy PASS: 48 cases; 11520 split high/low gain cases, mixed blocks and final tails; native/pre/post-SR, clipped/offset guides, exact Superior grid and both packed axes
+Inter-pass policy PASS: measured winners, aligned P40, rounded P42, all percentages, gain lookahead, scale/Structure/Intensity, multiplied Structure/Intensity, adjusted low means, strict gap and failure accounting, reference isolation, filters/radii and 37622 tile axes (21 guarded overflow axes)
+PASS: NR guide regions (pre/post SR, MVLowRes, offsets, clipping, missing/invalid metadata, no depth)
+PASS: nr_surface_formats_smoke
+Joint render-resolution guide cases: 180
+Joint 2D correction dispatches: 132
+Joint depth/MV: 2340 cases, 22037760 pixels; D16/R16_UNORM, D24-quantized/R32F, FP16/FP32 MV, reversed Z, padded/independent regions, uniform/packed 25/65/100/125%, invalid/missing depth
+Plane depth RMS 0.000032517269 -> 0.000003030203; working MV RMS 0.037317641 -> 0.000638489 (3445056 pixels)
+Depth/MV layer mismatches 2928 -> 2928 of 13222656; same-grid pair checks 8895744; recovered foreground coverage 0
+Render-resolution guides PASS: 559104 NR pixels, 6488064 private MV components; original point/shipped joint, odd render sizes, offset/shift, source subrects, reversed Z, private unit conversion and hold
+Dynamic guide correspondence PASS: 32 frames, 745824 points, maximum 0.000061035 colour pixels; stable allocation, alternating subrect/units, center/edges/crossings, no tracker resets, fixed CNN E
+Cubic guided PASS: 360 cases / 18018720 components; maximum error 0.000488281; literal 50/65/70/88/100%, SDR/HDR, game/automatic exposure, packed/uniform/cached, FP16/FP32
+Fused private guide/carrier bit parity PASS: 384 cases, 129377760 words; odd/partial groups, independent origins, layers, reversed Z, nonfinite guides/colour and Hold
+Actual NR history preset 1 style 0: 3010560 components, varying-guide RMS 0 max 0, differing 0, reset-control RMS 0.00439445254722, model-changed 2982601
+Actual NR history preset 1 style 1: 3010560 components, varying-guide RMS 0 max 0, differing 0, reset-control RMS 0.00395526965809, model-changed 3001205
+Actual NR history preset 1 style 2: 3010560 components, varying-guide RMS 0 max 0, differing 0, reset-control RMS 0.00718516035171, model-changed 3008371
+Actual NR history preset 2 style 0: 3010560 components, varying-guide RMS 0 max 0, differing 0, reset-control RMS 0.00573073650732, model-changed 2998013
+Actual NR history preset 2 style 1: 3010560 components, varying-guide RMS 0 max 0, differing 0, reset-control RMS 0.00280687588705, model-changed 3004121
+Actual NR history preset 2 style 2: 3010560 components, varying-guide RMS 0 max 0, differing 0, reset-control RMS 0.0054036974019, model-changed 2988688

@@ -3947,23 +3947,23 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
     if (NrCard card("Upscale", menuResScale); card.IsOpen())
     {
         // The applied scale, not the slider: with Auto after SR the slider can say 100% while NR runs smaller.
-        const bool reduced = AppliedModelScale(config, nr) < 0.999f;
+        const float modelScale = AppliedModelScale(config, nr);
+        const bool reduced = modelScale < 0.999f;
         const bool superior = DlssNr::SuperiorScaling::Enabled(*config);
 
         // Superior needs D3D12 (or a D3D12 bridge) and NVIDIA's DLSS SR through NGX for its temporal part.
-        const bool superiorBlocked = nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable();
-
-        if (!reduced && !superior)
-            ImGui::BeginDisabled();
-
         static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
         const int enlarge = superior ? 3 : (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
 
-        if (ImGui::BeginCombo("Upscale Mode", enlargeNames[enlarge]))
+        const char* preview = !reduced && !superior && enlarge == 1   ? "Classic (saved: Matched residual)"
+                              : !reduced && !superior && enlarge == 2 ? "Classic (saved: NVIDIA residual)"
+                                                                      : enlargeNames[enlarge];
+        if (ImGui::BeginCombo("Upscale Mode", preview))
         {
             for (int i = 0; i < IM_ARRAYSIZE(enlargeNames); ++i)
             {
-                const bool blocked = i == 3 && superiorBlocked && !superior;
+                const unsigned mode = i == 3 ? DlssNr::SuperiorScaling::Transfer : unsigned(i);
+                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale, nr.vulkan);
 
                 if (ImGui::Selectable(enlargeNames[i], i == enlarge,
                                       blocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None))
@@ -3976,20 +3976,19 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             ImGui::EndCombo();
         }
 
-        if (!reduced && !superior)
-            ImGui::EndDisabled();
-
         HelpMarker("Below 100% Model resolution, how NR's result is enlarged.\n"
                    "Classic: the whole output.\n"
                    "Matched residual: only NR's changes; less blur and colour shift.\n"
                    "NVIDIA residual: only the changes, NVIDIA's way.\n"
                    "Superior Scaling: its own Area downsample, frequency shaping and a private DLSS that steadies NR "
-                   "over time. Once selected it also works at 100% with Compress screen edges. Needs DirectX 12 and "
-                   "NVIDIA DLSS; where it cannot run, Matched residual is used.");
+                   "over time, including at 100% with Compress screen edges. Needs DirectX 12 and NVIDIA DLSS; "
+                   "where it cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
+                   "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
 
         if (superior)
         {
-            static const char* presets[] = { "A - higher performance", "K - slower, more stable NR in motion" };
+            static const char* presets[] = { "CNN - higher performance",
+                                             "Transformer - slower, more stable NR in motion" };
             int preset =
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
 
@@ -3997,9 +3996,19 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 config->DlssNrSuperiorScalingPreset = preset == 1 ? 11u : 1u;
 
             HelpMarker("Superior Scaling: a private DLSS in DLAA mode, applied to NR's change at its working "
-                       "resolution. Independent of the NR model preset and the game's own DLSS preset.");
+                       "resolution. Independent of the NR model preset and the game's own DLSS preset. "
+                       "CNN automatically chooses its model from guided range sigma. Transformer keeps the same model. "
+                       "Preset availability depends on the installed DLSS runtime.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
+            ImGui::BeginDisabled(nr.vulkan || !unavailable.empty());
+            bool disableIsHDR = config->DlssNrSuperiorScalingDisableIsHDR.value_or_default();
+            if (ImGui::Checkbox("Disable DLSS IsHDR flag", &disableIsHDR))
+                config->DlssNrSuperiorScalingDisableIsHDR = disableIsHDR;
+            ImGui::EndDisabled();
+
+            HelpMarker("Experimental: try only if experiencing severe ghosting. Disabling IsHDR may help, but "
+                       "could reduce NR stability.");
 
             if (nr.vulkan)
                 ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "

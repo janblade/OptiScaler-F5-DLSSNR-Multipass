@@ -1,0 +1,85 @@
+{
+  "baseline": "1077d416ff785014f3df87091993c33b5b4febc9",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "driver": "616.56",
+  "output": [
+    3840,
+    2160
+  ],
+  "compression": "Balanced",
+  "preflight": "3% GPU utilization, 33.31 W, 480 MHz",
+  "results": [
+    {
+      "stage": "SDR-render1080",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.637184,
+      "candidate_median_ms": 0.637184,
+      "paired_delta_median_ms": -6.40000000000085e-05,
+      "paired_delta_stddev_ms": 0.08348171444430512
+    },
+    {
+      "stage": "HDR0-render1080",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.57024,
+      "candidate_median_ms": 0.5717760000000001,
+      "paired_delta_median_ms": -0.00038400000000005097,
+      "paired_delta_stddev_ms": 0.03167962276840729
+    },
+    {
+      "stage": "SDR-render1080",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 1.004288,
+      "candidate_median_ms": 0.88832,
+      "paired_delta_median_ms": -0.11583999999999994,
+      "paired_delta_stddev_ms": 0.001895444056953611
+    },
+    {
+      "stage": "HDR0-render1080",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.8888320000000001,
+      "candidate_median_ms": 0.77056,
+      "paired_delta_median_ms": -0.11724800000000002,
+      "paired_delta_stddev_ms": 0.04924321877793211
+    },
+    {
+      "stage": "SDR-render1440",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.706688,
+      "candidate_median_ms": 0.707584,
+      "paired_delta_median_ms": -0.00031999999999998696,
+      "paired_delta_stddev_ms": 0.04647125682166968
+    },
+    {
+      "stage": "HDR0-render1440",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.624896,
+      "candidate_median_ms": 0.62464,
+      "paired_delta_median_ms": 0.0,
+      "paired_delta_stddev_ms": 0.5996824381179129
+    },
+    {
+      "stage": "SDR-render1440",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 1.10528,
+      "candidate_median_ms": 0.99328,
+      "paired_delta_median_ms": -0.10982399999999992,
+      "paired_delta_stddev_ms": 0.034351335431954025
+    },
+    {
+      "stage": "HDR0-render1440",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.983552,
+      "candidate_median_ms": 0.872448,
+      "paired_delta_median_ms": -0.11174399999999995,
+      "paired_delta_stddev_ms": 0.011428352860032671
+    }
+  ]
+}

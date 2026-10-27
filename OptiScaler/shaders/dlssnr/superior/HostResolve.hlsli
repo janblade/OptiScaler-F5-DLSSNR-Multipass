@@ -39,9 +39,12 @@ float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
     uvq = SuperiorPackedUv(uvq);
 #endif
     const float3 fallback = SanitizeFinite3(gModel.SampleLevel(gLinear, saturate(uvq), 0).rgb, 0.0);
-    const float rangeSigma = max(abs(0.015), 1e-5);
     const float spatialSigma = max(abs(3.0), 1e-4);
-    const float invRange2 = 1.0 / (rangeSigma * rangeSigma);
+    // CPU computes the cubic Model-resolution policy once per frame. Exposure
+    // meter dimensions are unused by this final Superior composition stage.
+    const float suppliedRange2 = asfloat(gExposureSourceWidth);
+    const float invRange2 = isfinite(suppliedRange2) && suppliedRange2 > 0.0
+        ? suppliedRange2 : 1.0 / (0.015 * 0.015);
     const float invSpatial2 = 1.0 / (spatialSigma * spatialSigma);
     const float gaussianExp2 = 0.7213475204444817;
     const float2 sourcePos = uvq * float2(srcW, srcH) - 0.5;

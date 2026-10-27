@@ -1109,6 +1109,7 @@ void Config::ReadDlssNr()
     DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
     DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
     DlssNrSuperiorScalingPreset.set_from_config(readUInt("DlssNr", "SuperiorScalingPreset"));
+    DlssNrSuperiorScalingDisableIsHDR.set_from_config(readBool("DlssNr", "SuperiorScalingDisableIsHDR"));
 
     DlssNrWhitePointFromExposure.set_from_config(readBool("DlssNr", "WhitePointFromExposure"));
     DlssNrProbeD3D11.set_from_config(readBool("DlssNr", "ProbeD3D11"));
@@ -1339,6 +1340,8 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "Transfer", GetIntValue(c.DlssNrTransfer.value_for_config()).c_str());
     out.SetValue("DlssNr", "SuperiorScalingPreset",
                  GetIntValue(c.DlssNrSuperiorScalingPreset.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorScalingDisableIsHDR",
+                 GetBoolValue(c.DlssNrSuperiorScalingDisableIsHDR.value_for_config()).c_str());
 
     out.SetValue("DlssNr", "ProbeD3D11",
                  GetBoolValue(c.DlssNrProbeD3D11.value_for_config()).c_str());
@@ -1699,6 +1702,7 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("ReducedUpscaleMethod", DlssNrReducedUpscaleMethod),
         NR_PROFILE_FIELD("Transfer", DlssNrTransfer),
         NR_PROFILE_FIELD("SuperiorScalingPreset", DlssNrSuperiorScalingPreset),
+        NR_PROFILE_FIELD("SuperiorScalingDisableIsHDR", DlssNrSuperiorScalingDisableIsHDR),
         NR_PROFILE_FIELD("ScalingDownscaler", DlssNrScalingDownscaler),
         NR_PROFILE_FIELD("VitEvery", DlssNrVitEvery),
         NR_PROFILE_FIELD("VitEveryPlain", DlssNrVitEveryPlain),

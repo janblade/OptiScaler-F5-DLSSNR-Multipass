@@ -1,0 +1,90 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "driver": "616.56",
+  "code_commit": "3f3e1046",
+  "baseline": "b276cbb48053b001b1018d7ea170f263f54bd060",
+  "output": [
+    3840,
+    2160
+  ],
+  "compression": "Balanced",
+  "source_depth": "R32_FLOAT",
+  "source_motion": "R32G32_FLOAT",
+  "scene": "Sloped depth and affine render-resolution motion; fixed proxy/model-answer fixture",
+  "preflight": "2% GPU utilization, 27.57 W, 210 MHz",
+  "settled_after": "2% GPU utilization, 27.50 W, 210 MHz",
+  "results": [
+    {
+      "stage": "SDR-render1080",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.595328,
+      "candidate_median_ms": 0.646144,
+      "paired_delta_median_ms": 0.049919999999999964,
+      "paired_delta_stddev_ms": 0.04722718711195742
+    },
+    {
+      "stage": "HDR0-render1080",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.51456,
+      "candidate_median_ms": 0.56832,
+      "paired_delta_median_ms": 0.05318400000000001,
+      "paired_delta_stddev_ms": 0.04576894884810896
+    },
+    {
+      "stage": "SDR-render1080",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.868352,
+      "candidate_median_ms": 0.990336,
+      "paired_delta_median_ms": 0.12044800000000011,
+      "paired_delta_stddev_ms": 0.06509374147408237
+    },
+    {
+      "stage": "HDR0-render1080",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.753664,
+      "candidate_median_ms": 0.87296,
+      "paired_delta_median_ms": 0.11750400000000005,
+      "paired_delta_stddev_ms": 0.062192723682574426
+    },
+    {
+      "stage": "SDR-render1440",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.607872,
+      "candidate_median_ms": 0.704256,
+      "paired_delta_median_ms": 0.09439999999999998,
+      "paired_delta_stddev_ms": 0.053016549012135004
+    },
+    {
+      "stage": "HDR0-render1440",
+      "model_percent": 65,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.527872,
+      "candidate_median_ms": 0.62464,
+      "paired_delta_median_ms": 0.09401599999999999,
+      "paired_delta_stddev_ms": 0.0621214531038527
+    },
+    {
+      "stage": "SDR-render1440",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.89216,
+      "candidate_median_ms": 1.085952,
+      "paired_delta_median_ms": 0.1918080000000001,
+      "paired_delta_stddev_ms": 0.0640346490670368
+    },
+    {
+      "stage": "HDR0-render1440",
+      "model_percent": 100,
+      "samples_per_variant": 640,
+      "base_median_ms": 0.778368,
+      "candidate_median_ms": 0.9706239999999999,
+      "paired_delta_median_ms": 0.18956800000000001,
+      "paired_delta_stddev_ms": 0.059409194306018674
+    }
+  ]
+}

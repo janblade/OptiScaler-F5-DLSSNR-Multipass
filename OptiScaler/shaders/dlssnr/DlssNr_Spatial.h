@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 
 namespace DlssNr::Spatial {
@@ -393,10 +394,57 @@ struct alignas(16) Constants {
     float unused = 0;
     uint32_t width = 0, height = 0;
     pw::ShaderConstants warp{};
+    // Superior-only ABI (original Compress shaders ignore padding):
+    // padding[0]: depth valid. padding[1]: correction dispatch row stride OR private MV scale X.
+    // padding[2..5]: correction left/right/top/bottom bands; private pass uses [2] as MV scale Y.
+    // warp.reserved: float bits of source-depth quantization error floor (Superior only).
+    // unused: reversed-Z flag. No padding word is shared with the precision floor.
     float depthRect[4] = {}, motionRect[4] = {}, motionScale[2] = {}, padding[6] = {};
 };
 static_assert(sizeof(Constants) == 256);
 static_assert(offsetof(Constants, warp) == 16);
+inline void SetDepthPrecision(Constants& c, float floor)
+{
+    floor = std::isfinite(floor) && floor > 0.f ? floor : 0.f;
+    std::memcpy(&c.warp.reserved, &floor, sizeof(floor));
+}
+// Source allocation size is not part of Superior's temporal coordinate system:
+// its valid rectangles and vector units are supplied afresh for every evaluation.
+inline uint64_t SuperiorSignature(uint32_t colour, uint32_t depth, uint32_t motion)
+{
+    return Mix(Mix(Mix(0, colour), depth), motion);
+}
+
+// An optional NR guide lattice, independent of the colour lattice. Preserve the
+// exact normalized warp (including offsets, shifts and native-centre rounding):
+// rebuilding a layout at render resolution would round its centre differently.
+inline Layout RenderGuideLayout(const Layout& colour, GuideExtent render)
+{
+    auto result = colour;
+    const auto extent = [](uint32_t source, uint32_t packed, uint32_t native)
+    { return uint32_t(std::max<uint64_t>(1, (uint64_t(source) * packed + native / 2) / native)); };
+    if (!colour.active || !render.width || !render.height || !colour.nativeW || !colour.nativeH ||
+        render.width > colour.nativeW || render.height > colour.nativeH)
+        return result;
+    result.modelW = extent(render.width, colour.modelW, colour.nativeW);
+    result.modelH = extent(render.height, colour.modelH, colour.nativeH);
+    const auto rescale = [](pw::Axis& a, uint32_t size)
+    {
+        const float ratio = float(size) / a.workExtent;
+        a.workExtent = float(size);
+        a.workCenter *= ratio;
+        a.scale *= ratio;
+    };
+    rescale(result.warp.x, result.modelW);
+    rescale(result.warp.y, result.modelH);
+    return result;
+}
+inline bool UseRenderGuides(bool superior, bool requested, bool compressed, uint32_t nativeW, uint32_t nativeH,
+                            uint32_t ordinaryW, uint32_t ordinaryH, GuideExtent render)
+{
+    return superior && requested && compressed && nativeW == ordinaryW && nativeH == ordinaryH && render.width &&
+           render.height && render.width <= nativeW && render.height <= nativeH;
+}
 
 // Modes: 100 packs the encoded colour, 101 packs depth (point-sampled) and motion (by its end points), 102 unpacks the
 // packed model input and the model's answer back to the ordinary grid, and 103 does that and adds what the round trip
@@ -420,6 +468,131 @@ inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideR
     c.motionScale[0] = mvX;
     c.motionScale[1] = mvY;
     return c;
+}
+
+// Conservative derivative bound: if false, not even the most compressed edge can
+// shrink the source MV lattice. The minification shader checks actual pixel edges.
+// Keep this independent of vector units and the source allocation's padding.
+inline bool NeedsMinifiedMotion(const Constants& c)
+{
+    if (c.padding[0] <= .5f || !c.width || !c.height)
+        return false;
+    if (c.mode == 104u)
+        return c.motionRect[2] > float(c.width) * 1.0001f || c.motionRect[3] > float(c.height) * 1.0001f;
+    const auto& w = c.warp;
+    const float minX = w.workScaleX * std::min(1.f, std::min(w.sideEdgeSlopeNegX, w.sideEdgeSlopePosX));
+    const float minY = w.workScaleY * std::min(1.f, std::min(w.sideEdgeSlopeNegY, w.sideEdgeSlopePosY));
+    return c.motionRect[2] > w.nativeWidth * minX * 1.0001f || c.motionRect[3] > w.nativeHeight * minY * 1.0001f;
+}
+
+inline bool NeedsJointMinification(Constants c)
+{
+    c.motionRect[2] = std::max(c.motionRect[2], c.depthRect[2]);
+    c.motionRect[3] = std::max(c.motionRect[3], c.depthRect[3]);
+    return NeedsMinifiedMotion(c);
+}
+
+struct MinifiedMotionDispatch
+{
+    uint32_t groupsX = 0, groupsY = 0, pixels = 0;
+};
+
+// Compact four disjoint edge bands into one dispatch. The center is not launched
+// unless it also shrinks MV. No allocation or texture is needed for this work list.
+inline MinifiedMotionDispatch PrepareMinifiedMotion(Constants& c)
+{
+    if (!NeedsMinifiedMotion(c))
+        return {};
+    const auto& w = c.warp;
+    const auto axis = [&](bool y)
+    {
+        pw::Axis a {};
+        a.nativeExtent = y ? w.nativeHeight : w.nativeWidth;
+        a.workExtent = y ? float(c.height) : float(c.width);
+        a.bandCenter = y ? w.bandCenterY : w.bandCenterX;
+        a.workCenter = y ? w.workCenterY : w.workCenterX;
+        a.scale = y ? w.workScaleY : w.workScaleX;
+        a.halfSpan[0] = y ? w.halfSpanNegY : w.halfSpanNegX;
+        a.halfSpan[1] = y ? w.halfSpanPosY : w.halfSpanPosX;
+        a.center[0] = y ? w.sideCenterNegY : w.sideCenterNegX;
+        a.center[1] = y ? w.sideCenterPosY : w.sideCenterPosX;
+        a.work[0] = y ? w.sideWorkNegY : w.sideWorkNegX;
+        a.work[1] = y ? w.sideWorkPosY : w.sideWorkPosX;
+        a.compression[0] = y ? w.sideCompressionNegY : w.sideCompressionNegX;
+        a.compression[1] = y ? w.sideCompressionPosY : w.sideCompressionPosX;
+        a.edgeSlope[0] = y ? w.sideEdgeSlopeNegY : w.sideEdgeSlopeNegX;
+        a.edgeSlope[1] = y ? w.sideEdgeSlopePosY : w.sideEdgeSlopePosX;
+        return a;
+    };
+    const auto bands = [&](bool y) -> std::pair<uint32_t, uint32_t>
+    {
+        const uint32_t size = y ? c.height : c.width;
+        const float source = c.motionRect[y ? 3 : 2];
+        if (c.mode == 104u)
+            return source > float(size) * 1.0001f ? std::make_pair(size, 0u) : std::make_pair(0u, 0u);
+        const auto a = axis(y);
+        const auto shrinking = [&](uint32_t i)
+        {
+            const float halfBand = a.center[0] * a.halfSpan[0] * a.scale;
+            if (float(i) >= a.workCenter - halfBand && float(i + 1) <= a.workCenter + halfBand)
+                return source > a.nativeExtent * a.scale * 1.0001f;
+            return (pw::Unpack(float(i + 1), a) - pw::Unpack(float(i), a)) * source / a.nativeExtent > 1.f;
+        };
+        const uint32_t center = std::min(size - 1, uint32_t(std::max(0.f, std::floor(a.workCenter))));
+        if (shrinking(center))
+            return { size, 0 };
+        uint32_t first = 0, last = 0;
+        if (shrinking(0))
+        {
+            uint32_t lo = 0, hi = center;
+            while (lo < hi)
+            {
+                const uint32_t mid = (lo + hi + 1) / 2;
+                if (shrinking(mid))
+                    lo = mid;
+                else
+                    hi = mid - 1;
+            }
+            first = std::min(size, lo + 3); // guard two texels against CPU/GPU mapping roundoff
+        }
+        if (shrinking(size - 1))
+        {
+            uint32_t lo = center, hi = size - 1;
+            while (lo < hi)
+            {
+                const uint32_t mid = (lo + hi) / 2;
+                if (shrinking(mid))
+                    hi = mid;
+                else
+                    lo = mid + 1;
+            }
+            last = std::min(size - first, size - lo + 2);
+        }
+        return { first, last };
+    };
+    const auto x = bands(false), y = bands(true);
+    const uint32_t pixels = (y.first + y.second) * c.width + (c.height - y.first - y.second) * (x.first + x.second);
+    if (!pixels)
+        return {};
+    const uint32_t groups = (pixels + 63) / 64;
+    const uint32_t groupsX = std::min(groups, 65535u), groupsY = (groups + groupsX - 1) / groupsX;
+    c.padding[1] = float(groupsX * 64);
+    c.padding[2] = float(x.first);
+    c.padding[3] = float(x.second);
+    c.padding[4] = float(y.first);
+    c.padding[5] = float(y.second);
+    return { groupsX, groupsY, pixels };
+}
+
+inline MinifiedMotionDispatch PrepareJointMinification(Constants& c)
+{
+    auto coverage = c;
+    coverage.motionRect[2] = std::max(c.motionRect[2], c.depthRect[2]);
+    coverage.motionRect[3] = std::max(c.motionRect[3], c.depthRect[3]);
+    const auto plan = PrepareMinifiedMotion(coverage);
+    for (unsigned i = 1; i < 6; ++i)
+        c.padding[i] = coverage.padding[i];
+    return plan;
 }
 
 inline Constants MakeGuideConstants(const Layout& layout, const GuideRegions& regions, GuideExtent motionReference,

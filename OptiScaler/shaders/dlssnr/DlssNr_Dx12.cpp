@@ -29,6 +29,7 @@
 #include "DlssNr_Dx12.h"
 #include "DlssNr_SurfaceFormats.h"
 #include "DlssNr_ActiveColor.h"
+#include "DlssNr_Views.h"
 #include "DlssNr_Guides.h"
 #include "DlssNr_SeamClock.h"
 #include "DlssNr_GameScale.h"
@@ -2128,6 +2129,84 @@ void ReportSkipOnce(const char* reason)
         LOG_INFO("DLSS-NR did not run: {}", reason);
 }
 
+namespace Views = DlssNr::Views;
+
+// A game that draws several views into one colour allocation (a triple-screen rig) calls the upscaler once per view, each
+// with its own active rectangle, and often once more for the combined picture. This module has one model feature and one
+// history: those calls rebuild it against each other (it never gets to evaluate), a view off the origin cannot be
+// staged, and the fallback after SR runs the model over the whole output. So NR stands down while it happens, unless the
+// user picked one view (DlssNrMultiViewTarget), and then it runs on that view only. See DlssNr_Views.h.
+Views::Detector g_views;
+
+// What the game's parameter block says about this evaluate, handed to the detector. Called once per NR seam, so twice per
+// game evaluate; the detector counts a view once.
+Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* params, unsigned long long epoch)
+{
+    ID3D12Resource* color = GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color");
+    if (color == nullptr)
+        return {};
+
+    const D3D12_RESOURCE_DESC desc = color->GetDesc();
+    unsigned int width = 0, height = 0, baseX = 0, baseY = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &width);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &baseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &baseY);
+
+    // No rectangle given: the whole allocation, as PreSrColorExtent reads it.
+    if (width == 0 && height == 0)
+    {
+        width = (unsigned int) desc.Width;
+        height = desc.Height;
+    }
+
+    const Views::Seen seen { (unsigned int) desc.Width, desc.Height, (int) desc.Format, { baseX, baseY, width, height } };
+    const auto pick = Views::PickFrom(cfg.DlssNrMultiViewTarget.value_or_default());
+    const auto result = g_views.Note(epoch, seen, pick);
+
+    static unsigned int loggedViews = 0;
+    static unsigned long long skipped = 0;
+
+    if (result.latchedNow)
+    {
+        LOG_WARN("DLSS-NR: the game draws several views into one {}x{} Color allocation (a multi-monitor layout); {}",
+                 seen.allocW, seen.allocH,
+                 pick == Views::Pick::Off ? "NR stands down until a view is picked (Neural Rendering > Input > Several views)"
+                                          : "NR works on the picked view only");
+    }
+
+    if (result.addedCandidate && loggedViews < 40)
+    {
+        ++loggedViews;
+        unsigned int outW = 0, outH = 0, depthX = 0, depthY = 0, motionX = 0, motionY = 0;
+        if (ID3D12Resource* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output"))
+        {
+            const auto outDesc = output->GetDesc();
+            outW = (unsigned int) outDesc.Width;
+            outH = outDesc.Height;
+        }
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &depthX);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &depthY);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &motionX);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &motionY);
+        LOG_INFO("DLSS-NR view: Color allocation {}x{}, active {}x{} at {},{}; Output allocation {}x{}; depth base {},{} "
+                 "motion base {},{}; view {} seen in epoch {}",
+                 seen.allocW, seen.allocH, width, height, baseX, baseY, outW, outH, depthX, depthY, motionX, motionY,
+                 result.viewInEpoch, epoch);
+    }
+
+    if (result.unlatchedNow)
+    {
+        skipped = 0;
+        LOG_INFO("DLSS-NR: one view per frame again; NR runs as usual");
+    }
+
+    if (result.verdict != Views::Verdict::Run && (++skipped == 1 || skipped % 3600 == 0))
+        LOG_INFO("DLSS-NR: {} evaluates skipped so far for the other views of a multi-view frame", skipped);
+
+    return result;
+}
+
 #include "DlssNr_DetailReuse.inl"
 #include "DlssNr_EditCache.inl"
 #include "DlssNr_SceneCut.inl"
@@ -2936,6 +3015,20 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
+
+    // Parked features and scratch textures are released 32 frames after they were parked. This used to tick only where an
+    // evaluate completed, after the return for a feature just created and the one for a feature still waiting for its first
+    // submission: a game that makes the model build again on every call (views of different sizes alternating) never reached
+    // it, and each build's resources piled up. One tick per submission epoch, before any return.
+    {
+        static unsigned long long lastRetiredEpoch = ~0ull;
+        if (frame.SubmissionEpoch != lastRetiredEpoch)
+        {
+            lastRetiredEpoch = frame.SubmissionEpoch;
+            TickNrRetired();
+        }
+    }
+
     // Superior Scaling (superior/Pipeline.inl) runs only while selected and not given up on this session; otherwise the
     // ordinary path runs, with Matched residual in its place. Selecting it again retries.
     const bool superiorSelected = DlssNr::SuperiorScaling::Enabled(cfg);
@@ -3759,7 +3852,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // of the game's exposure rather than a number worth asking anyone to guess: measured means of 0.065,
     // 1.8 and 185 have all been seen in this one game.
     ++g_frames;
-    TickNrRetired();
     CheckCaptureTrigger();
 
     if (g_captureWriteAtFrame != 0 && g_frames >= g_captureWriteAtFrame)
@@ -5974,6 +6066,22 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         lastPrecision = precision;
     }
     DlssNrNative::SetPrecision(precision);
+
+    // Several views in one allocation: only the picked one goes on. Before every placement and mode below, since all of them
+    // keep one model feature and one history.
+    bool viewNeedsBeforeSr = false;
+    if (cfg.DlssNrEnabled.value_or_default() && cmdList != nullptr && params != nullptr && !rayReconstruction)
+    {
+        const auto view = JudgeViews(cfg, params, timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount);
+        if (view.verdict != Views::Verdict::Run)
+        {
+            DeferredSr::Cancel();
+            Late::Cancel();
+            return;
+        }
+        viewNeedsBeforeSr = view.needsBeforeSr;
+    }
+
     const unsigned finishedMode = !cfg.DlssNrFinishedPicture.value_or_default() ? 0u :
         (cfg.DlssNrRunBeforeSr.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default()) ? 2u : 1u;
     static unsigned lastFinishedMode = 0;
@@ -6143,6 +6251,14 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // Where NR would run without a Tune, for the run's wait (CalibrationSituation): kept from before the Tune moved it.
     if (!tuneAfterSr)
         g_nr.beforeSrPlacement = configuredBefore;
+
+    // One screen of a shared output cannot be processed after SR: the output is every screen, and the model would run on all
+    // of it. It needs the pre-SR placement (a Color rectangle at the origin) or it does not run.
+    if (viewNeedsBeforeSr && !configuredBefore)
+    {
+        ReportSkipOnce("the picked screen needs Run before SR (Neural Rendering > Options); after SR the model would run on every screen");
+        return;
+    }
 
     if (configuredBefore != beforeUpscale)
         return;
@@ -6578,6 +6694,8 @@ EditCacheInfo EditCacheStatus() { return { EditCache::Running(), EditCache::Mode
 SceneCutInfo SceneCutStatus() { return SceneCut::Status(); }
 
 int CurrentModelResolutionPercent() { return (int) lroundf(g_nr.appliedWorkScale * 100.0f); }
+
+Views::Snapshot MultiViewStatus() { return g_views.Status(); }
 
 Spatial::Published EdgeCompressionStatus()
 {

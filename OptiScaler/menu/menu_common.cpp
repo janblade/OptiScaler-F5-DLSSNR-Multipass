@@ -2003,6 +2003,7 @@ void MenuCommon::RenderNotifications(RenderMenuContext& ctx)
     // No fallback font, SetWindowFontScale needs to be called after Begin()
 
     DlssNr::UpdateF5LowHint(config);
+    DlssNr::UpdateMultiViewHint(config);
 
     ImGui::RenderNotifications(ImGuiToastPos::TopCenter, notificationScale, tonemapRequired);
 

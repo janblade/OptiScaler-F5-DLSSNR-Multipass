@@ -3,3 +3,4 @@ OptiScaler/include/**
 OptiScaler/framegen/mfgunlock/hde/**
 OptiScaler/shaders/**/precompile/*
 external/**
+OptiScaler/native/F5LowShaderBytecode.h

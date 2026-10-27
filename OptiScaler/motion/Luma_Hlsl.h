@@ -34,7 +34,15 @@ float LumaOf(float3 c)
     const float l = dot(c, float3(0.299, 0.587, 0.114));
     return l / (1.0 + l);
 #elif LUMA_MODE == 1
-    return dot(min(c, 4.0), float3(0.299, 0.587, 0.114));
+    // Explicit rounding order prevents cross-backend dot-product contraction
+    // from injecting different matching evidence into an otherwise identical frame.
+    c=min(c,4.0);
+    precise float red=c.r*0.299;
+    precise float green=c.g*0.587;
+    precise float blue=c.b*0.114;
+    precise float first=red+green;
+    precise float result=first+blue;
+    return result;
 #else
 #if LUMA_MODE == 2
     const float y = dot(c, float3(0.2126, 0.7152, 0.0722)) * (80.0 / whiteNits);

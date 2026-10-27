@@ -18,6 +18,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -283,6 +284,61 @@ struct Gpu
                         v += (Hash((int) x * 3 + c, (int) y, 1000 + noiseSeed) * 2.0f - 1.0f) * noise;
                     px[c] = (uint8_t) std::clamp(v + 0.5f, 0.0f, 255.0f);
                 }
+                px[3] = 255;
+            }
+
+        upload->Unmap(0, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+        dst.pResource = tex.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource = upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        D3D12_RESOURCE_BARRIER b {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = tex.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1, &b);
+        Submit();
+        return tex;
+    }
+
+    // An R8G8B8A8_UNORM picture whose channel c at (x, y) is value(x, y, c) in 0..1, left in the non-pixel shader resource
+    // state.
+    template <typename Value> ComPtr<ID3D12Resource> FromFunction(const Value& value)
+    {
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = kWidth;
+        desc.Height = kHeight;
+        desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(&tex));
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+        auto upload = Buffer(total, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+        uint8_t* data = nullptr;
+        upload->Map(0, nullptr, (void**) &data);
+
+        for (uint32_t y = 0; y < kHeight; ++y)
+            for (uint32_t x = 0; x < kWidth; ++x)
+            {
+                uint8_t* px = data + (size_t) y * fp.Footprint.RowPitch + x * 4;
+                for (int c = 0; c < 3; ++c)
+                    px[c] = (uint8_t) std::clamp(value((float) x, (float) y, c) * 255.0f + 0.5f, 0.0f, 255.0f);
                 px[3] = 255;
             }
 
@@ -909,6 +965,157 @@ int main(int argc, char** argv)
         printf("  %s\n", pass ? "ok" : "FAIL");
     }
 
+    // The same pan by a part of a pixel, with the whole-picture candidate: a flat part has nothing for the sub-pixel
+    // steps to go on, so its fraction can only come from the camera prior in the smoothing (the match leaves the whole
+    // pixel there, see the shader's Match). As set it must be well under a quarter of a pixel off (about half a pixel
+    // without the fraction). The match alone (no camera prior, no smoothing) is reported: there it is the whole pixel.
+    const SparseCase fractionCases[] = { { 12.4f, 5.3f, 4 }, { 6.5f, -3.5f, 4 } };
+    const double kFractionMaxMean = 0.25;
+
+    for (const SparseCase& c : fractionCases)
+        for (int run = 0; run < 2; ++run)
+        {
+            flow.Reset();
+            flow.Tuning() = tuning;
+            flow.Tuning().globalCandidate = true;
+            if (run == 1)
+            {
+                flow.Tuning().cameraPrior = false;
+                flow.Tuning().smoothRadius = 0;
+            }
+
+            for (int k = 0; k < c.frames; ++k)
+            {
+                auto picture = gpu.Picture(c.dx * k, c.dy * k, 1.0f, 0.0f, k, 0.0f, 0.0f, 0.0f, 1);
+                flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, nullptr, DXGI_FORMAT_UNKNOWN,
+                              true);
+                gpu.Submit();
+            }
+
+            const auto desc = flow.Flow()->GetDesc();
+            const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+            const int margin = (int) std::ceil(std::max(std::fabs(c.dx), std::fabs(c.dy)) / 2.0f) + 24;
+            uint64_t n = 0, quarter = 0;
+            double sum = 0;
+
+            for (uint32_t y = margin; y + margin < desc.Height; ++y)
+                for (uint32_t x = margin; x + margin < desc.Width; ++x)
+                {
+                    const size_t i = ((size_t) y * desc.Width + x) * 2;
+                    const float err = std::hypot(field[i] + c.dx, field[i + 1] + c.dy);
+                    sum += err;
+                    quarter += err <= 0.25f;
+                    ++n;
+                }
+
+            const bool pass = sum / n <= kFractionMaxMean;
+            ok = ok && (pass || run == 1);
+            printf("sparse blobs on a flat picture, shift (%5.1f, %5.1f) by a part of a pixel, %d pictures, %-11s mean "
+                   "error %6.3f px, within 0.25 px %5.1f%%   %s\n",
+                   c.dx, c.dy, c.frames, run == 0 ? "as set:" : "match only:", sum / n, 100.0 * quarter / n,
+                   run == 1 ? "(reported)" : pass ? "ok" : "FAIL");
+        }
+
+    // A camera that turns, zooms, or both while panning, over the layout scene (a weakly textured sky above textured
+    // ground) and over the plain texture, with and without the still HUD panel. The flow is checked against the true
+    // warp, after the first five pictures, in three parts: the sky (above 0.3 of the height, in the scene's own
+    // coordinates), the ground (below 0.5) and the HUD's inside. A sky's weak texture gives the match little to go on: the
+    // camera prior must carry the camera's motion there (the match alone is about 0.6 px off). The ground must not get
+    // worse for it, and the still HUD must stay still (the camera prior must not pull it along).
+    struct Warp
+    {
+        const char* what;
+        float angle, zoom, dx, dy; // per picture: radians, log scale, pixels
+    };
+    const Warp warps[] = { { "turning", 0.004f, 0.0f, 0.0f, 0.0f },
+                           { "zooming", 0.0f, 0.004f, 0.0f, 0.0f },
+                           { "turning, zooming and panning", 0.003f, 0.002f, 0.7f, 0.3f } };
+    const double kWarpSkyMean = 0.15, kWarpGroundMean = 0.1, kWarpHudOff = 0.01;
+
+    for (const Warp& w : warps)
+        for (int scene : { 0, 3 })
+            for (bool hud : { false, true })
+            {
+                // Where the scene point at picture position (x, y) of picture k is in the scene, and back.
+                auto toScene = [&](float x, float y, int k)
+                {
+                    const float a = w.angle * k, z = std::exp(w.zoom * k), c = std::cos(a), s = std::sin(a);
+                    x -= kWidth * 0.5f + w.dx * k;
+                    y -= kHeight * 0.5f + w.dy * k;
+                    return std::array<float, 2> { (c * x + s * y) / z + kWidth * 0.5f, (-s * x + c * y) / z + kHeight * 0.5f };
+                };
+                auto toPicture = [&](float x, float y, int k)
+                {
+                    const float a = w.angle * k, z = std::exp(w.zoom * k), c = std::cos(a), s = std::sin(a);
+                    x -= kWidth * 0.5f;
+                    y -= kHeight * 0.5f;
+                    return std::array<float, 2> { z * (c * x - s * y) + kWidth * 0.5f + w.dx * k,
+                                                  z * (s * x + c * y) + kHeight * 0.5f + w.dy * k };
+                };
+
+                flow.Reset();
+                flow.Tuning() = tuning;
+                double sum[3] = {};
+                uint64_t count[3] = {}, off[3] = {};
+
+                for (int k = 0; k < 22; ++k)
+                {
+                    auto picture = gpu.FromFunction(
+                        [&](float x, float y, int c)
+                        {
+                            if (hud && InHud(x, y))
+                                return InHudFill(x, y) ? 0.55f : 0.15f;
+                            const auto p = toScene(x, y, k);
+                            return scene == 3 ? LayoutScene(p[0], p[1], c, false) : Scene(p[0], p[1], c);
+                        });
+                    flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, nullptr,
+                                  DXGI_FORMAT_UNKNOWN, true);
+                    gpu.Submit();
+                    if (k < 5 || !flow.FlowValid())
+                        continue;
+
+                    const auto desc = flow.Flow()->GetDesc();
+                    const std::vector<float> field = ReadFlow(gpu, flow.Flow());
+
+                    for (uint32_t y = 10; y + 10 < desc.Height; ++y)
+                        for (uint32_t x = 10; x + 10 < desc.Width; ++x)
+                        {
+                            const float px = (x + 0.5f) * kWidth / desc.Width, py = (y + 0.5f) * kHeight / desc.Height;
+                            const bool inside = hud && InHud(px, py);
+                            // Not near the panel's edge, inside or out (a window there sees both).
+                            if ((hud && !inside && InHud(px + 5, py + 5)) ||
+                                (inside && (!InHudFill(px - 5, py - 5) || !InHudFill(px + 5, py + 5))))
+                                continue;
+                            const auto at = toScene(px, py, k);
+                            const auto before = toPicture(at[0], at[1], k - 1);
+                            if (before[0] < 10 || before[1] < 10 || before[0] > kWidth - 10 || before[1] > kHeight - 10 ||
+                                (hud && !inside && InHud(before[0], before[1])))
+                                continue;
+                            const int part = inside ? 2 : at[1] < 0.3f * kHeight ? 0 : at[1] > 0.5f * kHeight ? 1 : -1;
+                            if (part < 0)
+                                continue;
+                            const float tx = inside ? 0.0f : before[0] - px, ty = inside ? 0.0f : before[1] - py;
+                            const size_t i = ((size_t) y * desc.Width + x) * 2;
+                            const double err = std::hypot(field[i] - tx, field[i + 1] - ty);
+                            sum[part] += std::isfinite(err) ? err : 1e6;
+                            off[part] += !(err <= 1.0);
+                            ++count[part];
+                        }
+                }
+
+                const double sky = sum[0] / std::max<uint64_t>(count[0], 1), ground = sum[1] / std::max<uint64_t>(count[1], 1);
+                const double hudOff = (double) off[2] / std::max<uint64_t>(count[2], 1);
+                // The sky's limit only for the layout scene (it has the weak sky); the plain texture's top is ground too.
+                const bool pass = (scene != 3 || sky <= kWarpSkyMean) && (scene == 3 || sky <= kWarpGroundMean) &&
+                                  ground <= kWarpGroundMean && (!hud || hudOff <= kWarpHudOff);
+                ok = ok && pass;
+                printf("camera %-28s %-7s %-8s: top mean error %5.3f px, ground %5.3f px", w.what,
+                       scene == 3 ? "sky" : "texture", hud ? "and HUD" : "", sky, ground);
+                if (hud)
+                    printf(", still HUD off by over 1 px %5.1f%%", 100.0 * hudOff);
+                printf("   %s\n", pass ? "ok" : "FAIL");
+            }
+
     // Where the whole-picture candidate must not win: the flat inside of a still HUD panel while the picture behind it pans,
     // and a still flat wall while one textured thing moves across it. Without and with the candidate; the share of those
     // pixels whose flow is within 1 px of no motion.
@@ -1340,7 +1547,9 @@ int main(int argc, char** argv)
 
         flow.Tuning() = tuning;
         // 9 cells no worse than 4; depth matching well above none, and no worse than none with misaligned or wrong depth.
-        const bool pass = share[1] >= share[0] - 0.01 && share[2] >= share[1] + 0.25 && share[2] >= 0.85 &&
+        // "Well above" is 20 points: it was 25 until the estimator changes of PR #232 (2026-10) lifted plain 9-cell matching
+        // from 73.0% to 75.9% here while depth matching stayed at 99.7%, so the gap shrank from below.
+        const bool pass = share[1] >= share[0] - 0.01 && share[2] >= share[1] + 0.20 && share[2] >= 0.85 &&
                           share[3] >= share[1] && share[4] >= share[1] && share[5] >= share[2] - 0.01 &&
                           share[6] >= share[1] - 0.03;
         // Misaligned or wrong depth against what the flow does with no depth at all as set (with the brightness

@@ -1,30 +1,34 @@
 #pragma once
 
-// Dense optical flow on the GPU for the native input producer (DLSS-NR in a game that makes no upscaler call, so there are no
-// motion vectors to take from one). Our own implementation of the standard method: a luma pyramid, block matching from the
-// coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade gradient steps for the
-// sub-pixel part, and a 3x3 median over the result. At each level the candidates are the coarser level's answer at the
-// nearest cells, the last frame's flow at the same place, what the whole picture moved by last frame (when it moved as one)
-// and no motion; the best of them is refined by a small search. The match compares windows with their mean brightness taken
-// out (a fade or eye adaptation does not move anything), and with depth it counts only the window's samples on the pixel's
-// own surface (a nearer thing's edge does not drag its motion onto what lies beside it: adaptive support weights). The
-// result is smoothed where the matching is not sure (flat or grainy areas) without crossing the edges of moving things: each
-// neighbour counts by how much picture structure its match had, how close its motion is and how close its brightness is.
-// Nothing is taken from any shader of another project; some ideas are credited in docs/CREDITS.md.
+// Dense optical flow on the GPU for the native input producer (DLSS-NR in a game that makes no upscaler call, so there
+// are no motion vectors to take from one). Our own implementation of the standard method: a luma pyramid, block
+// matching from the coarsest level down with a small search around the coarser level's answer, a few Lucas-Kanade
+// gradient steps for the sub-pixel part, and a 3x3 median over the result. At each level the candidates are the coarser
+// level's answer at the nearest cells, the last frame's flow at the same place, what the whole picture moved by last
+// frame (when it moved as one) and no motion; the best of them is refined by a small search. The match compares windows
+// with their mean brightness taken out (a fade or eye adaptation does not move anything), and with depth it counts only
+// the window's samples on the pixel's own surface (a nearer thing's edge does not drag its motion onto what lies beside
+// it: adaptive support weights). The result is smoothed where the matching is not sure (flat or grainy areas) without
+// crossing the edges of moving things: each neighbour counts by how much picture structure its match had, how close its
+// motion is and how close its brightness is. Nothing is taken from any shader of another project; some ideas are
+// credited in docs/CREDITS.md.
 //
 // A hard cut is also found on the same frame, on the GPU, by the scene-cut detector (motion/SceneCut_Dx12.h) run on the
 // first luma level: its flag is read by the match and the trust mask in that same frame, with no wait for the CPU.
 //
-// Self-contained: it needs only D3D12 and the HLSL compiler, so tests/nr_optical_flow_gpu.cpp drives it with synthetic images
-// and known motion, with no game.
+// Self-contained: it needs only D3D12 and the HLSL compiler, so tests/nr_optical_flow_gpu.cpp drives it with synthetic
+// images and known motion, with no game.
 //
 // Convention: for each pixel of the current frame the flow is the offset, in full-resolution pixels, to where the same
-// content was in the previous frame (the usual game motion-vector direction, "from here to where it came from"). The flow
-// texture is half the colour's resolution (R16G16B16A16_FLOAT, x and y in .xy, the match's confidence 0..1 in .z); a
-// consumer samples it bilinearly.
+// content was in the previous frame (the usual game motion-vector direction, "from here to where it came from"). The
+// flow texture is half the colour's resolution (R16G16B16A16_FLOAT, x and y in .xy, two-axis local texture confidence
+// 0..1 in .z). Confidence is the original depth-weighted Lucas-Kanade structure score. It is not a correspondence-error
+// or history-rejection score. .w separately carries support for the selected motion, including a validated weak-texture
+// solve or camera/region proposal; it is not a calibrated probability or a history mask. A consumer samples the field
+// bilinearly.
 //
-// Dispatch() records onto a command list the caller owns and changes the descriptor heaps bound on it, so it belongs on a
-// list of our own (the finished-picture seam), not on a game's list.
+// Dispatch() records onto a command list the caller owns and changes the descriptor heaps bound on it, so it belongs on
+// a list of our own (the finished-picture seam), not on a game's list.
 
 #include "SceneCut_Dx12.h"
 
@@ -32,6 +36,8 @@
 #include <dxgiformat.h>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 class OpticalFlowDx12
 {
@@ -56,7 +62,7 @@ class OpticalFlowDx12
     // Compiles the shaders and makes the pipelines. False with a reason in Error().
     bool Init(ID3D12Device* device);
 
-    // Records the flow from the previous Dispatch's frame to this one. `color` must be in a shader-readable state
+    // Records current-to-previous flow between this frame and the previous Dispatch. `color` must be shader-readable
     // (NON_PIXEL_SHADER_RESOURCE) and stays so. After it returns, Flow() is readable and FlowValid() says whether it
     // holds a flow (false on the first frame, after Reset() and after a size change). depth (optional, any size,
     // readable as depthFormat, NON_PIXEL_SHADER_RESOURCE) shows the match where one surface ends and another begins, so
@@ -70,6 +76,9 @@ class OpticalFlowDx12
     void Reset()
     {
         _havePrevious = false;
+        _flowValid = false;
+        _usedDepth = false;
+        _sceneCutRan = false;
         _globalReady = false;
         _sceneCut.Reset();
         _ageValid = false;
@@ -87,6 +96,11 @@ class OpticalFlowDx12
 
     // The flow, in the NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE state between Dispatches.
     ID3D12Resource* Flow() const { return _flow.resource; }
+    // The camera model this frame's flow was fitted to (4x1, R16G16B16A16_FLOAT, NON_PIXEL_SHADER_RESOURCE): texel 0
+    // and 1 the x and y rows of an affine fit over the picture in -1..1 (texel 0's .w is 1 when the fit holds, texel
+    // 1's .w how well it fits, 0..1), texel 2 its rms, agreement, coverage and inlier count, texel 3 the whole-picture
+    // motion it started from. Only when Tuning().cameraPrior.
+    ID3D12Resource* CameraModel() const { return _cameraFlow.resource; }
     bool FlowValid() const { return _flowValid; }
     bool UsedDepth() const { return _usedDepth; } // the last Dispatch matched with depth
 
@@ -103,13 +117,16 @@ class OpticalFlowDx12
     // Penalty added per pixel of distance from that answer, which keeps flat areas from picking noise.
     struct Settings
     {
+        // The camera prior: an affine fit of this frame's motion over the picture (CameraModel()), which the smoothing
+        // gives to pixels whose own match is weak where it fits their own picture about as well. Needs globalCandidate.
+        bool cameraPrior = true;
         int radius = 1;
         int coarseRadius = 4;
         float lambda = 0.03f;
         bool useHistory = true;         // last frame's flow as a candidate
         int coarseCells = 9;            // how many of the coarser level's nearest cells are candidates (1..9: the 3x3)
         int smoothRadius = 4;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
-        float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
+        float confidenceKnee = 0.004f;  // how much depth-weighted two-axis picture structure gives confidence
         bool depthMatching = true;      // with depth: the block match counts the window's samples on this pixel's surface
         bool globalCandidate = true;    // the last frame's whole-picture motion is a candidate everywhere
         bool inverseRefinement = false; // the sub-pixel steps use the current frame's gradients (found once, cheaper)
@@ -206,7 +223,9 @@ class OpticalFlowDx12
         float stillMargin;    // Match: what the camera must win by where the age is at least stillFrames
         uint32_t lookWeights; // Match, finest level, no depth: the brightness weights (see Settings)
         float lookRange, lookDistance;
-        uint32_t padding[4];
+        float photoTolerance; // Match: see the shader's cbuffer
+        float evidenceNoise;
+        uint32_t padding[2];
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
@@ -240,6 +259,20 @@ class OpticalFlowDx12
     ID3D12PipelineState* _smooth = nullptr;
     ID3D12PipelineState* _visualise = nullptr;
     ID3D12PipelineState* _global = nullptr;
+    ID3D12PipelineState* _cameraModel = nullptr;
+
+    // The descriptors last written in each heap slot. A slot is rewritten only when what it shows changed, and only
+    // views of our own textures are kept: the game's colour and depth are written every pass (a pointer the game
+    // recycled is not the same texture). Releasing or resizing our textures clears the record.
+    struct CachedView
+    {
+        ID3D12Resource* resource = nullptr;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        bool unordered = false;
+        bool valid = false;
+    };
+    std::vector<CachedView> _cachedViews;
+    std::unordered_set<ID3D12Resource*> _ownedResources;
     ID3D12DescriptorHeap* _heap = nullptr;
     UINT _descriptorSize = 0;
     UINT _heapCursor = 0;
@@ -247,6 +280,7 @@ class OpticalFlowDx12
     Tex _pyramid[2][kLevels]; // luma, 1/2 .. 1/64 of the colour; one set is the current frame, the other the previous
     Tex _levelFlow[2][kLevels]; // this frame's flow at each level, and the last frame's (a candidate for this one)
     Tex _flowMedian; // the median's result, which the smoothing reads
+    Tex _cameraFlow; // see CameraModel()
     Tex _globalFlow; // 1x1: the whole picture's motion in full-resolution pixels, z = 1 when there was enough to say
     Tex _flow;
     Tex _preview;

@@ -22,16 +22,35 @@ static Seen Screen(int i)
 static Seen Whole() { return { 5120, 960, 28, { 0, 0, 5120, 960 } }; }
 static Seen Single(unsigned int w, unsigned int h) { return { 2560, 1440, 28, { 0, 0, w, h } }; }
 
-// One frame of the three screens (each evaluate twice: the before-SR and the after-SR seam).
-static void ThreeScreens(Detector& d, unsigned long long epoch, Pick pick, Verdict out[3], bool withWhole = false)
+constexpr uint32_t kLeft = 1u << 0, kMiddle = 1u << 1, kRight = 1u << 2, kWhole = 1u << kWholeBit;
+
+struct FrameResult
 {
+    Detector::Result screen[3];
+    Detector::Result whole;
+};
+
+// One frame: the three screens (each evaluate twice: the before-SR and the after-SR seam), the combined feature if asked.
+static FrameResult Frame(Detector& d, unsigned long long epoch, uint32_t mask, bool withWhole = false,
+                         bool screensFirst = true)
+{
+    FrameResult r;
+    if (withWhole && !screensFirst)
+    {
+        d.Note(epoch, Whole(), mask);
+        r.whole = d.Note(epoch, Whole(), mask);
+    }
     for (int i = 0; i < 3; ++i)
     {
-        d.Note(epoch, Screen(i), pick);
-        out[i] = d.Note(epoch, Screen(i), pick).verdict;
+        d.Note(epoch, Screen(i), mask);
+        r.screen[i] = d.Note(epoch, Screen(i), mask);
     }
-    if (withWhole)
-        d.Note(epoch, Whole(), pick);
+    if (withWhole && screensFirst)
+    {
+        d.Note(epoch, Whole(), mask);
+        r.whole = d.Note(epoch, Whole(), mask);
+    }
+    return r;
 }
 
 int main()
@@ -39,14 +58,16 @@ int main()
     std::printf("A single view is left alone:\n");
     {
         Detector d;
-        bool allRun = true;
+        bool allRun = true, mainSlot = true;
         for (unsigned long long e = 1; e <= 200; ++e)
         {
             // Dynamic resolution moves the one rectangle from frame to frame.
-            const auto r = d.Note(e, Single(1700 + (unsigned int) (e % 7) * 10, 950), Pick::Off);
+            const auto r = d.Note(e, Single(1700 + (unsigned int) (e % 7) * 10, 950), 0);
             allRun = allRun && r.verdict == Verdict::Run;
+            mainSlot = mainSlot && r.slot == -1;
         }
         Check(allRun, "every evaluate runs");
+        Check(mainSlot, "on the single view's own state (slot -1)");
         Check(!d.Status().active, "never latches (drifting size is not several views)");
     }
 
@@ -58,109 +79,176 @@ int main()
         bool run = true;
         for (unsigned long long e = 1; e <= 50; ++e)
         {
-            run = run && d.Note(e, main, Pick::Off).verdict == Verdict::Run;
-            run = run && d.Note(e, mirror, Pick::Off).verdict == Verdict::Run;
+            run = run && d.Note(e, main, 0).verdict == Verdict::Run;
+            run = run && d.Note(e, mirror, 0).verdict == Verdict::Run;
         }
         Check(run && !d.Status().active, "a mirror or portrait texture does not stand NR down");
     }
 
-    std::printf("Three screens in one allocation, nothing picked:\n");
+    std::printf("Three screens, nothing ticked:\n");
     {
         Detector d;
-        Verdict v[3];
-        ThreeScreens(d, 1, Pick::Off, v);
+        auto f = Frame(d, 1, 0);
         Check(d.Status().active, "found within the first frame");
-        Check(v[1] == Verdict::StandDown && v[2] == Verdict::StandDown, "the later screens stand down");
-        ThreeScreens(d, 2, Pick::Off, v);
-        Check(v[0] == Verdict::StandDown && v[1] == Verdict::StandDown && v[2] == Verdict::StandDown,
+        Check(f.screen[1].verdict == Verdict::StandDown && f.screen[2].verdict == Verdict::StandDown,
+              "the later screens stand down");
+        f = Frame(d, 2, 0);
+        Check(f.screen[0].verdict == Verdict::StandDown && f.screen[1].verdict == Verdict::StandDown &&
+                  f.screen[2].verdict == Verdict::StandDown,
               "from the next frame on, all of them");
-        Check(d.Status().count == 3, "three candidates");
-        Check(d.Status().rects[0].w == 1706 && d.Status().rects[1].x == 1706 && d.Status().rects[2].x == 3413,
-              "listed left to right");
-        Check(!d.Status().hasSelected, "nothing selected");
-        Check(d.Status().standDownEvaluates > 0, "the stood-down evaluates are counted");
-    }
-
-    std::printf("Pick the smallest (the first screen):\n");
-    {
-        Detector d;
-        Verdict v[3];
-        ThreeScreens(d, 1, Pick::Smallest, v, true);
-        ThreeScreens(d, 2, Pick::Smallest, v, true);
-        Check(v[0] == Verdict::Run, "screen 1 (at the origin) runs");
-        Check(v[1] == Verdict::OtherView && v[2] == Verdict::OtherView, "screens 2 and 3 do not");
-        Check(d.Note(2, Whole(), Pick::Smallest).verdict == Verdict::OtherView, "the combined feature does not");
         const auto s = d.Status();
-        Check(s.hasSelected && s.selected.w == 1706 && s.selected.x == 0, "selected = 1706x960 at 0,0");
-        Check(s.selectedNeedsBeforeSr, "a single screen of a shared output must run before SR");
-        Check(s.count == 4, "the combined feature is listed too");
+        Check(s.count == 3 && s.screens == 3, "three screens listed");
+        Check(s.views[0].rect.x == 0 && s.views[1].rect.x == 1706 && s.views[2].rect.x == 3413, "left to right");
+        Check(s.views[0].slot == 0 && s.views[1].slot == 1 && s.views[2].slot == 2, "numbered 1, 2, 3 (slots 0, 1, 2)");
+        Check(s.skippedEvaluates > 0, "the skipped evaluates are counted");
     }
 
-    std::printf("Pick the largest (the whole picture):\n");
+    std::printf("All three screens ticked: each runs on its own slot:\n");
     {
         Detector d;
-        Verdict v[3];
-        ThreeScreens(d, 1, Pick::Largest, v, true);
-        ThreeScreens(d, 2, Pick::Largest, v, true);
-        Check(d.Note(2, Whole(), Pick::Largest).verdict == Verdict::Run, "the combined feature runs");
-        Check(v[0] == Verdict::OtherView && v[1] == Verdict::OtherView, "the screens do not");
-        Check(!d.Status().selectedNeedsBeforeSr, "the whole picture may run after SR too");
+        Frame(d, 1, kLeft | kMiddle | kRight);
+        const auto f = Frame(d, 2, kLeft | kMiddle | kRight);
+        bool run = true;
+        for (int i = 0; i < 3; ++i)
+            run = run && f.screen[i].verdict == Verdict::Run && f.screen[i].slot == i;
+        Check(run, "screen i runs on slot i");
+        Check(f.screen[0].needsBeforeSr && f.screen[2].needsBeforeSr, "one screen of a shared output needs before SR");
+        Check(!f.screen[0].offOrigin && f.screen[1].offOrigin && f.screen[2].offOrigin, "off the origin: screens 2, 3");
     }
 
-    std::printf("Largest without a combined feature falls on the first screen, never on one off the origin:\n");
+    std::printf("Middle and right only:\n");
     {
         Detector d;
-        Verdict v[3];
-        ThreeScreens(d, 1, Pick::Largest, v);
-        ThreeScreens(d, 2, Pick::Largest, v);
-        Check(v[0] == Verdict::Run && v[1] == Verdict::OtherView && v[2] == Verdict::OtherView,
-              "screen 1 (1707 wide screens start off the origin and are not chosen)");
+        Frame(d, 1, kMiddle | kRight);
+        const auto f = Frame(d, 2, kMiddle | kRight);
+        Check(f.screen[0].verdict == Verdict::OtherView, "the left screen stays as the game made it");
+        Check(f.screen[1].verdict == Verdict::Run && f.screen[2].verdict == Verdict::Run, "the middle and right run");
+        const auto s = d.Status();
+        Check(!s.views[0].runs && s.views[1].runs && s.views[2].runs, "the menu shows which run");
     }
 
-    std::printf("Only views that start away from the origin: nothing can be picked:\n");
+    std::printf("The whole picture:\n");
     {
         Detector d;
-        for (unsigned long long e = 1; e <= 3; ++e)
-        {
-            d.Note(e, Screen(1), Pick::Largest);
-            d.Note(e, Screen(2), Pick::Largest);
-        }
-        Check(d.Note(4, Screen(1), Pick::Largest).verdict == Verdict::StandDown, "stands down");
-        Check(!d.Status().hasSelected, "no selection");
+        Frame(d, 1, kWhole, true);
+        const auto f = Frame(d, 2, kWhole, true);
+        Check(f.whole.verdict == Verdict::Run && f.whole.slot == (int) kWholeBit, "the combined feature runs on its slot");
+        Check(!f.whole.needsBeforeSr, "the whole picture may run after SR too");
+        Check(f.screen[0].verdict == Verdict::OtherView && f.screen[1].verdict == Verdict::OtherView, "the screens do not");
+        const auto s = d.Status();
+        Check(s.screens == 3 && s.count == 4 && s.views[3].slot == kWholeBit, "listed after the screens");
+    }
+
+    std::printf("The screens keep their numbers whether or not the whole picture is drawn too:\n");
+    {
+        Detector d;
+        Frame(d, 1, kRight, true, false);
+        const auto withWhole = Frame(d, 2, kRight, true, false);
+        Check(withWhole.screen[2].verdict == Verdict::Run && withWhole.screen[2].slot == 2, "right = slot 2 with the whole");
+        // Some stretches evaluate only the screens.
+        const auto without = Frame(d, 3, kRight);
+        Check(without.screen[2].verdict == Verdict::Run && without.screen[2].slot == 2, "right = slot 2 without it");
     }
 
     std::printf("The layout goes away only after a long quiet time:\n");
     {
         Detector d;
-        Verdict v[3];
-        ThreeScreens(d, 1, Pick::Off, v);
+        Frame(d, 1, 0);
         bool stood = true;
         for (unsigned long long e = 2; e < 2 + kQuietEpochs - 2; ++e)
-            stood = stood && d.Note(e, Screen(0), Pick::Off).verdict == Verdict::StandDown;
+            stood = stood && d.Note(e, Screen(0), 0).verdict == Verdict::StandDown;
         Check(stood && d.Status().active, "one view per frame for a while (a menu, a loading screen) does not release it");
         bool released = false;
         for (unsigned long long e = 2 + kQuietEpochs - 2; e < 2 + kQuietEpochs + 5; ++e)
-            released = released || d.Note(e, Screen(0), Pick::Off).unlatchedNow;
+            released = released || d.Note(e, Screen(0), 0).unlatchedNow;
         Check(released && !d.Status().active, "released after kQuietEpochs frames with one view");
-        Check(d.Note(1000, Screen(0), Pick::Off).verdict == Verdict::Run, "the single view runs again");
+        const auto r = d.Note(1000, Screen(0), 0);
+        Check(r.verdict == Verdict::Run && r.slot == -1, "the single view runs again on its own state");
     }
 
-    std::printf("A resolution change leaves no stale candidate:\n");
+    std::printf("An outside camera (the whole picture alone) releases the layout quickly:\n");
     {
         Detector d;
-        Verdict v[3];
-        ThreeScreens(d, 1, Pick::Smallest, v);
-        // The rig is switched to a smaller size: new rectangles, the old ones stop being drawn.
+        Frame(d, 1, kLeft | kMiddle | kRight);
+        Frame(d, 2, kLeft | kMiddle | kRight);
+        bool released = false;
+        unsigned long long e = 3;
+        for (; e < 3 + kWholeOnlyEpochs + 2 && !released; ++e)
+        {
+            const auto r = d.Note(e, Whole(), kLeft | kMiddle | kRight);
+            released = r.unlatchedNow && r.quickRelease;
+        }
+        Check(released && !d.Status().active, "released within kWholeOnlyEpochs frames");
+        const auto r = d.Note(e, Whole(), kLeft | kMiddle | kRight);
+        Check(r.verdict == Verdict::Run && r.slot == -1, "the wide view runs on the single view's state");
+
+        // Back to the cockpit: the left screen alone is recognised as the layout seen before, on its first evaluate.
+        const auto first = d.Note(e + 1, Screen(0), kLeft | kMiddle | kRight);
+        Check(first.latchedNow && first.recalled, "the first screen back brings the layout back");
+        Check(first.verdict == Verdict::Run && first.slot == 0, "and runs on its own slot at once");
+        const auto right = d.Note(e + 1, Screen(2), kLeft | kMiddle | kRight);
+        Check(right.slot == 2 && !right.latchedNow, "the other screens keep their numbers");
+
+        // Out again and back again: every switch is quick.
+        bool releasedAgain = false;
+        for (unsigned long long k = e + 2; k < e + 2 + kWholeOnlyEpochs + 2 && !releasedAgain; ++k)
+            releasedAgain = d.Note(k, Whole(), kLeft | kMiddle | kRight).quickRelease;
+        Check(releasedAgain, "the next outside camera is quick too");
+    }
+
+    std::printf("A single-view game is never recalled into a layout:\n");
+    {
+        Detector d;
+        bool never = true;
+        for (unsigned long long e = 1; e < 50; ++e)
+            never = never && !d.Note(e, Screen(0), kLeft).latchedNow;
+        Check(never, "nothing remembered, nothing recalled");
+    }
+
+    std::printf("Cockpit frames where a present falls between the screens do not count as the whole picture alone:\n");
+    {
+        Detector d;
+        Frame(d, 1, kLeft);
+        bool kept = true;
+        for (unsigned long long e = 2; e < 2 + kWholeOnlyEpochs * 3; ++e)
+        {
+            kept = kept && !d.Note(e * 2, Screen(0), kLeft).unlatchedNow;
+            kept = kept && !d.Note(e * 2 + 1, Screen(1), kLeft).unlatchedNow;
+        }
+        Check(kept && d.Status().active, "one screen per present keeps the layout");
+    }
+
+    std::printf("A resolution change leaves no stale view:\n");
+    {
+        Detector d;
+        Frame(d, 1, kLeft | kRight);
         for (unsigned long long e = 100; e < 110; ++e)
         {
-            d.Note(e, { 3840, 720, 28, { 0, 0, 1280, 720 } }, Pick::Smallest);
-            d.Note(e, { 3840, 720, 28, { 1280, 0, 1280, 720 } }, Pick::Smallest);
-            d.Note(e, { 3840, 720, 28, { 2560, 0, 1280, 720 } }, Pick::Smallest);
+            d.Note(e, { 3840, 720, 28, { 0, 0, 1280, 720 } }, kLeft | kRight);
+            d.Note(e, { 3840, 720, 28, { 1280, 0, 1280, 720 } }, kLeft | kRight);
+            d.Note(e, { 3840, 720, 28, { 2560, 0, 1280, 720 } }, kLeft | kRight);
         }
         const auto s = d.Status();
-        Check(s.hasSelected && s.selected.w == 1280, "the selected view is the new first screen");
-        Check(s.count == 3, "only the new rectangles are listed");
+        Check(s.screens == 3 && s.views[2].rect.x == 2560, "only the new rectangles are listed, still three screens");
+        const auto r = d.Note(110, { 3840, 720, 28, { 2560, 0, 1280, 720 } }, kLeft | kRight);
+        Check(r.verdict == Verdict::Run && r.slot == 2, "the new right screen runs on slot 2");
     }
+
+    std::printf("The frame's last view (one picture after SR, frame generation's inputs):\n");
+    {
+        Detector d;
+        Check(d.FeedSlot() == -1, "no layout, no last view");
+        Frame(d, 1, 0);
+        Frame(d, 2, 0);
+        Check(d.FeedSlot() == 2, "the right screen without the whole picture");
+        Frame(d, 3, 0, true);
+        Check(d.FeedSlot() == (int) kWholeBit, "the whole picture when it is drawn");
+    }
+
+    std::printf("Mask helpers:\n");
+    Check(OnePicture(1u << kOnePictureBit | kLeft) && !OnePicture(kLeft | kWhole) && CountRuns(1u << kOnePictureBit) == 0,
+          "one picture is a mode bit, not a view");
+    Check(CountRuns(kLeft | kRight | kWhole) == 3 && Runs(kWhole, kWholeBit) && !Runs(kLeft, 1), "bits");
 
     std::printf("%s (%d failed)\n", g_fail ? "FAILED" : "PASSED", g_fail);
     return g_fail ? 1 : 0;

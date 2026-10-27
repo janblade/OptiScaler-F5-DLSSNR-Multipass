@@ -5,8 +5,96 @@
 #include "shaders/depth_scale/DS_Dx12.h"
 #include "MathUtils.h"
 
+#include "shaders/dlssnr/DlssNr_Views.h"
+
 using namespace OptiMath;
 static DS_Dx12* DepthScale = nullptr;
+
+namespace
+{
+namespace Views = DlssNr::Views;
+
+// Games that draw several views into one allocation (a triple-screen rig: one evaluate per screen, sometimes one more
+// for the combined picture) call the upscaler several times per frame. Frame generation works on the one stitched back
+// buffer, so it takes one evaluate per game frame and the whole depth and motion allocations, which hold every screen
+// side by side. Without this, every evaluate started a frame of its own and handed one screen's corner as the picture.
+Views::Detector FgViews;
+bool ViewFeedSkipped = false;
+
+struct MultiViewFeed
+{
+    bool active = false; // several views are drawn
+    bool skip = false;   // ... and this evaluate is not the one frame generation takes
+    UINT outputWidth = 0;
+    UINT outputHeight = 0;
+};
+
+ID3D12Resource* GetParamResource(NVSDK_NGX_Parameter* params, const char* name)
+{
+    ID3D12Resource* resource = nullptr;
+    if (params->Get(name, &resource) != NVSDK_NGX_Result_Success)
+        params->Get(name, (void**) &resource);
+    return resource;
+}
+
+MultiViewFeed JudgeFgViews(NVSDK_NGX_Parameter* params)
+{
+    MultiViewFeed feed;
+
+    ID3D12Resource* color = GetParamResource(params, NVSDK_NGX_Parameter_Color);
+    if (color == nullptr)
+        return feed;
+
+    const D3D12_RESOURCE_DESC desc = color->GetDesc();
+    unsigned int width = 0, height = 0, baseX = 0, baseY = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &width);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &baseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &baseY);
+
+    if (width == 0 && height == 0)
+    {
+        width = (unsigned int) desc.Width;
+        height = desc.Height;
+    }
+
+    const Views::Seen seen {
+        (unsigned int) desc.Width, desc.Height, (int) desc.Format, { baseX, baseY, width, height }
+    };
+    const auto result = FgViews.Note(State::Instance().frameCount, seen, 0);
+
+    if (result.latchedNow)
+        LOG_INFO(
+            "(FG) the game draws several views into one {}x{} Color allocation; frame generation takes one evaluate "
+            "per frame and the whole depth and motion allocations",
+            seen.allocW, seen.allocH);
+    if (result.unlatchedNow)
+        LOG_INFO("(FG) one view per frame again");
+
+    const Views::Snapshot status = FgViews.Status();
+    if (!status.active)
+        return feed;
+
+    feed.active = true;
+
+    // The frame's last view (the combined picture when the game draws it, else the rightmost screen): the depth and
+    // motion of every screen are written by then, and it comes once per game frame whenever the game presents.
+    feed.skip = result.slot < 0 || result.slot != FgViews.FeedSlot();
+
+    if (ID3D12Resource* output = GetParamResource(params, NVSDK_NGX_Parameter_Output))
+    {
+        const auto outDesc = output->GetDesc();
+        feed.outputWidth = (UINT) outDesc.Width;
+        feed.outputHeight = outDesc.Height;
+    }
+
+    // No output to size the picture by: leave this frame to the single-view path rather than guess.
+    if (feed.outputWidth == 0 || feed.outputHeight == 0)
+        feed = {};
+
+    return feed;
+}
+} // namespace
 
 void UpscalerInputsDx12::Init(ID3D12Device* device)
 {
@@ -93,12 +181,23 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
 
     auto fg = State::Instance().currentFG;
 
+    ViewFeedSkipped = false;
+
     if (fg == nullptr || State::Instance().activeFgInput != FGInput::Upscaler || _device == nullptr)
         return;
 
+    const MultiViewFeed multi = JudgeFgViews(InParameters);
+    ViewFeedSkipped = multi.skip;
+    if (multi.skip)
+        return;
+
+    // With several views the picture is the shared output, not this feature's view of it.
+    const UINT pictureWidth = multi.active ? multi.outputWidth : feature->DisplayWidth();
+    const UINT pictureHeight = multi.active ? multi.outputHeight : feature->DisplayHeight();
+
     FG_Constants fgConstants {};
-    fgConstants.displayWidth = feature->DisplayWidth();
-    fgConstants.displayHeight = feature->DisplayHeight();
+    fgConstants.displayWidth = pictureWidth;
+    fgConstants.displayHeight = pictureHeight;
 
     if (feature->IsHdr())
         fgConstants.flags |= FG_Flags::Hdr;
@@ -127,13 +226,13 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
 
     fg->StartNewFrame();
 
-    auto aspectRatio = (float) feature->DisplayWidth() / (float) feature->DisplayHeight();
+    auto aspectRatio = (float) pictureWidth / (float) pictureHeight;
     fg->SetCameraValues(cameraNear, cameraFar, cameraVFov, aspectRatio, meterFactor);
     fg->SetFrameTimeDelta(State::Instance().lastFGFrameTime);
     fg->SetMVScale(mvScaleX, mvScaleY);
     fg->SetJitter(jitterX, jitterY);
     fg->SetReset(reset);
-    fg->SetInterpolationRect(feature->DisplayWidth(), feature->DisplayHeight());
+    fg->SetInterpolationRect(pictureWidth, pictureHeight);
 
     Hudfix_Dx12::UpscaleStart();
 
@@ -172,7 +271,14 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             setResource.validity = FG_ResourceValidity::ValidNow;
 
-            if (feature->LowResMV())
+            if (multi.active)
+            {
+                // Every screen's motion, side by side as the game packed them.
+                const auto mvDesc = paramVelocity->GetDesc();
+                setResource.width = (UINT) mvDesc.Width;
+                setResource.height = mvDesc.Height;
+            }
+            else if (feature->LowResMV())
             {
                 setResource.width = feature->RenderWidth();
                 setResource.height = feature->RenderHeight();
@@ -194,7 +300,8 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
         {
             auto done = false;
 
-            if (Config::Instance()->FGEnableDepthScale.value_or_default())
+            // Depth Scale sizes its buffer by one view; with several views the game's depth goes as it is.
+            if (Config::Instance()->FGEnableDepthScale.value_or_default() && !multi.active)
             {
                 if (DepthScale == nullptr)
                     DepthScale = new DS_Dx12("Depth Scale", _device);
@@ -229,8 +336,17 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
                 setResource.type = FG_ResourceType::Depth;
                 setResource.cmdList = commandList;
                 setResource.resource = paramDepth;
-                setResource.width = feature->RenderWidth();
-                setResource.height = feature->RenderHeight();
+                if (multi.active)
+                {
+                    const auto depthDesc = paramDepth->GetDesc();
+                    setResource.width = (UINT) depthDesc.Width;
+                    setResource.height = depthDesc.Height;
+                }
+                else
+                {
+                    setResource.width = feature->RenderWidth();
+                    setResource.height = feature->RenderHeight();
+                }
                 setResource.state = (D3D12_RESOURCE_STATES) Config::Instance()->DepthResourceBarrier.value_or(
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 setResource.validity = FG_ResourceValidity::ValidNow;
@@ -250,7 +366,7 @@ void UpscalerInputsDx12::UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_
 
     auto fg = State::Instance().currentFG;
 
-    if (fg == nullptr || State::Instance().activeFgInput != FGInput::Upscaler || _device == nullptr)
+    if (fg == nullptr || State::Instance().activeFgInput != FGInput::Upscaler || _device == nullptr || ViewFeedSkipped)
         return;
 
     // FG Dispatch

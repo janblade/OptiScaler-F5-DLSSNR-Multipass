@@ -77,7 +77,7 @@ static void Keys()
     Check(IsKept("WhitePointSource") && IsKept("NativeMotion") && IsKept("ColourEncoding") &&
               IsKept("FinishedPicture") && IsKept("SpatialCenterX"),
           "the game's own settings kept (a profile is shared for one game)");
-    Check(!IsKept("Enabled") && !IsKept("MultiViewTarget") && !IsKept("ToggleKey") && !IsKept("DisplayPaperWhiteNits") && !IsKept("HoldFrame") &&
+    Check(!IsKept("Enabled") && !IsKept("MultiViewScreens") && !IsKept("ToggleKey") && !IsKept("DisplayPaperWhiteNits") && !IsKept("HoldFrame") &&
               !IsKept("NativeDebugView") && !IsKept("Compare"),
           "the player's own and session keys left out");
     Check(!IsKept("Unknown"), "unknown key left out");

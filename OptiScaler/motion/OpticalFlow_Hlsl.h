@@ -524,6 +524,8 @@ void Match(uint3 id : SV_DispatchThreadID)
     // the window is taken out first, so a brightness change does not read as a shift (the gradients are not centred).
     bool underconstrained = false;
     float2 sub = 0.0;
+    bool stepped = false;   // a sub-pixel step was solved here
+    bool checkedSub = false; // ... by a weak solve or taken from a candidate on the finest level (tested below)
     float confidence = 0.0;
     float weakSupport=0.0;
 
@@ -601,8 +603,10 @@ void Match(uint3 id : SV_DispatchThreadID)
                 float explained=saturate(dot(float2(e,f),step)/max(residual,sw*1e-10));
                 weakSupport=max(weakSupport,explained*saturate((beforeCost-afterCost)/max(0.25*beforeCost,1e-12)));
                 underconstrained=false;
+                checkedSub = true;
             }
             sub = proposal;
+            stepped = true;
 
             if (max(abs(step.x), abs(step.y)) < 0.01)
                 break;
@@ -686,7 +690,11 @@ void Match(uint3 id : SV_DispatchThreadID)
                 if(weakSolve)underconstrained=false;
             }
             if (det > 1e-9 || weakSolve)
+            {
                 sub = proposal;
+                stepped = true;
+                checkedSub = checkedSub || weakSolve;
+            }
         }
 
         // The weaker direction of the picture's structure in the window: a match along an edge, or in a flat area, is not sure
@@ -701,11 +709,19 @@ void Match(uint3 id : SV_DispatchThreadID)
     }
 
     // A window with no structure across it (a flat one, or one straight edge) gives the steps nothing to go on, so they
-    // leave the whole-pixel offset. The winning candidate's part of a pixel is not carried over (it was until 2026-10):
-    // in a still, flat HUD panel a pan candidate wins the tie with no motion until the still age counts it as still, and
-    // with its fraction the smoothing's camera prior then pulls the panel along with the camera. A flat fill gets its
-    // part of a pixel from that camera prior instead (Smooth, CameraFuse). Only on the finest level, the candidate's or the
-    // last frame's fraction inside the same whole-pixel offset is taken, where it lowers the matching cost.
+    // leave the whole-pixel offset; there the part of a pixel the winning candidate had (when the search kept it) is kept,
+    // at every level, which carries a camera's or a neighbour's fraction along a line or edge. On the finest level only
+    // where the window changed since the last frame at the same place: one that did not (a still HUD panel early in a
+    // pan, before the still age counts it as still) is explained by no motion, and with a pan's fraction the smoothing's
+    // camera prior would pull the panel along with the camera. A flat fill gets its part of a pixel from that camera
+    // prior instead (Smooth, CameraFuse). The clamp is the rounding's own range, and keeps a non-finite candidate
+    // (history, the camera) out of the output.
+    const bool windowChanged = scale != 0.5 || stillFrames == 0 || largest >= stillEpsilon;
+    if (!stepped && all(bestD == centre) && windowChanged)
+        sub = clamp(inheritedPrediction - float2(centre), -0.5, 0.5);
+
+    // On the finest level, where no step could be solved, the candidate's or the last frame's fraction inside the same
+    // whole-pixel offset is also taken where it lowers the matching cost.
     if (underconstrained && scale == 0.5)
     {
         float2 prior=inheritedPrediction;
@@ -714,13 +730,19 @@ void Match(uint3 id : SV_DispatchThreadID)
             float integerCost=RefinementIntegerCost(p,bestD,w,cur,weightTotal,all(bestD==0)?zeroCost:bestCost);
             float priorCost=FractionalCost(p,prior,w,cur, weightTotal);
             if (priorCost + photoTolerance < integerCost)
+            {
                 sub = prior - float2(bestD);
+                checkedSub = true;
+            }
         }
     }
     float2 motion = float2(bestD) + sub;
     float reliability = weakSupport;
     const bool inspect = scale == 0.5;
-    const bool accept = scale == 0.5 && any(sub != 0.0);
+    // The weak solve's and the taken fraction must match no worse than the whole pixel. Not a solved step's or the
+    // carried one: the filtered reads of a thin, sharp line at a part of a pixel always match worse than the whole pixel
+    // (the filter blurs it), so that test would round a slow pan's true motion away there.
+    const bool accept = scale == 0.5 && any(sub != 0.0) && checkedSub;
     if (inspect || accept)
     {
         // zeroMargin may have replaced the winning integer candidate. Its old

@@ -6,6 +6,17 @@ Base: janblade `release/0.1.35` at `789f8820` (the newest upstream branch when w
 
 [PR #69](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/pull/69) protected Crimson Desert from a suspected present/render-queue deadlock and paused Finished Picture while the game's native DLSS-G was active. Its lower presentation hook sits below Streamline and may see generated frames rather than the real application picture. Merely removing the pause can leave NR skipping nearly every presentation because the guides are still being rendered.
 
+The old dependency could be circular: the presentation queue waited for the render queue's
+capture fence, while render work could itself depend on that presentation progressing. #69
+removed future cross-queue waits and retained a conservative FG pause because that lower hook
+still did not own a reliable application frame before interpolation. This change preserves those
+readiness/resize protections and adds the missing app-facing handoff. On the registered game's
+render queue, capture and NR composition are ordered before the original Streamline Present
+starts interpolation. FG therefore receives the NR-edited application frame; lower/generated
+presents cannot apply it again. Explicit FG-off recovery also covers Crimson Desert's menu
+transitions. That is why this is expected to work where removing only the pause was insufficient;
+it is not proof that unrelated GPU timeouts or every runtime/queue topology have been resolved.
+
 This change carries over the application-frame handoff and FG-off recovery from the author's tested Wilsjo2 experiment (`b63fee7b`), without that experiment's mode selector or configuration changes:
 
 1. A compatible native Streamline plugin's swapchain-creation hook registers the **application render queue** as COM private data on its chain. The game's and OptiScaler's local plugin keep separate atomic hook pointers. The source integration's local-runtime exception remains limited to KCD2 without replacement NGX FG.

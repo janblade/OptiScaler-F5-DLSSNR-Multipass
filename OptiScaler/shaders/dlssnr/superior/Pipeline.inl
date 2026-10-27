@@ -572,6 +572,14 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
     return g.carrier.Get();
 }
 
+// The private preset Begin picks (PrivatePresetChoice): kept for the session so a moving Auto scale does not recreate
+// the private DLSS and reset history; NR and NGX shutdown clear it, so a new device or runtime picks again.
+DlssNr::SuperiorScaling::PrivatePresetChoice& PresetChoice()
+{
+    static DlssNr::SuperiorScaling::PrivatePresetChoice choice;
+    return choice;
+}
+
 enum class Began
 {
     Run,        // record Superior this frame
@@ -603,10 +611,9 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
     }
     const auto& cfg = *Config::Instance();
     const bool disableIsHDR = cfg.DlssNrSuperiorScalingDisableIsHDR.value_or_default();
-    static DlssNr::SuperiorScaling::PrivatePresetChoice presetChoice;
-    const unsigned preset = presetChoice.Select(cfg.DlssNrSuperiorScalingPreset.value_or_default(),
-                                                cfg.DlssNrModelResolutionAuto.value_or_default(),
-                                                cfg.DlssNrWorkingScale.value_or_default(), modelScale);
+    const unsigned preset = PresetChoice().Select(cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                                  cfg.DlssNrModelResolutionAuto.value_or_default(),
+                                                  cfg.DlssNrWorkingScale.value_or_default(), modelScale);
     if (auto* previous = state.current.get())
     {
         // Handles from a runtime NGX has since shut down are gone already: never evaluate or release them.
@@ -690,6 +697,7 @@ void NgxShutdown()
     if (s.current)
         s.current->DropNgx();
     Drop();
+    PresetChoice() = {};
 }
 
 // NR shutdown: retire the current generation and run what has already completed; anything still in flight keeps its
@@ -699,6 +707,7 @@ void Shutdown()
     auto& s = GetState();
     Drop();
     s.lifetime.Collect();
+    PresetChoice() = {};
 }
 
 bool MatchGuides(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Resource* depth,

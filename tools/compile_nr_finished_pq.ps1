@@ -11,6 +11,9 @@ try {
         (Join-Path $dir 'dlssnr_finished_pq_direct.hlsl') -Fo (Join-Path $temp "$stem.cso") `
         -Fh (Join-Path $temp "$stem.h") -Vn dlssnr_finished_pq_direct_cso
     if ($LASTEXITCODE -ne 0) { throw 'PQ encoder compilation failed.' }
+    $header = Join-Path $temp "$stem.h"
+    [string[]]$lines = [IO.File]::ReadAllLines($header) | ForEach-Object { $_.TrimEnd() }
+    [IO.File]::WriteAllLines($header, $lines, [Text.UTF8Encoding]::new($false))
     foreach ($ext in @('cso', 'h')) {
         $built = Join-Path $temp "$stem.$ext"
         $target = Join-Path $dir "$stem.$ext"

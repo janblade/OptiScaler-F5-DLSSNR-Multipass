@@ -17,7 +17,7 @@
 ; no parameters
 ; shader hash: 85849048708a5b1be9fa6bc6d82251fe
 ;
-; Pipeline Runtime Information: 
+; Pipeline Runtime Information:
 ;
 ;PSVRuntimeInfo:
 ; Compute Shader
@@ -38,7 +38,7 @@
 ;
 ; Buffer Definitions:
 ;
-; cbuffer 
+; cbuffer
 ; {
 ;
 ;   [32 x i8] (type annotation not present)

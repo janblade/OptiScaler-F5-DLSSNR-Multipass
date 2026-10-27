@@ -1,0 +1,45 @@
+name: Finished Picture native FG checks
+
+on:
+  push:
+    paths:
+      - 'OptiScaler/dlssnr/DlssNr_StreamlinePicture.*'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Late.inl'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
+      - 'OptiScaler/dlssnr/DlssNrFeature_Dx12.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedReady.h'
+      - 'OptiScaler/hooks/Streamline_Hooks.cpp'
+      - 'tests/nr_gpu/nr_streamline_*.cpp'
+      - 'tests/nr_gpu/nr_finished_routing.cpp'
+      - 'tests/nr_finished_*_smoke.cpp'
+      - 'tests/run_nr_finished_fg_tests.ps1'
+      - '.github/workflows/finished_picture_checks.yml'
+  pull_request:
+    paths:
+      - 'OptiScaler/dlssnr/DlssNr_StreamlinePicture.*'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Late.inl'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
+      - 'OptiScaler/dlssnr/DlssNrFeature_Dx12.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedReady.h'
+      - 'OptiScaler/hooks/Streamline_Hooks.cpp'
+      - 'tests/nr_gpu/nr_streamline_*.cpp'
+      - 'tests/nr_gpu/nr_finished_routing.cpp'
+      - 'tests/nr_finished_*_smoke.cpp'
+      - 'tests/run_nr_finished_fg_tests.ps1'
+      - '.github/workflows/finished_picture_checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  finished-picture:
+    name: Finished Picture routing, queues and colour (WARP)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Build and run production wrapper and regression tests
+        shell: pwsh
+        run: ./tests/run_nr_finished_fg_tests.ps1

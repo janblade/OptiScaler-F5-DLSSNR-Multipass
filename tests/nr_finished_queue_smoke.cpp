@@ -63,6 +63,10 @@ int main() try
     FinishedInput stale[3] { { true, 5, false, 5, 5 }, { true, 6, false, 5, 6 }, { false, 7, true, 0, 7 } };
     Expect(DlssNr::PickFinishedInput(stale, 3, index) == FinishedPick::NotReady && index == 1,
            "Fell back to the previous frame's finished guides");
+    Expect(DlssNr::PickReadyFinishedInput(stale, 3, index) == FinishedPick::Ready && index == 0,
+           "Wilsjo2 did not select the newest ready capture");
+    Expect(DlssNr::PickReadyFinishedInput(none, 2, index) == FinishedPick::None,
+           "Wilsjo2 selected an ineligible capture");
     FinishedInput sameQueue[2] { { true, 5, true, 0, 5 }, { true, 6, true, 0, 6 } };
     Expect(DlssNr::PickFinishedInput(sameQueue, 2, index) == FinishedPick::Ready && index == 1,
            "Rejected the newest same-queue slot");
@@ -72,7 +76,12 @@ int main() try
     FinishedInput removed[1] { { true, 6, true, UINT64_MAX, 6 } };
     Expect(DlssNr::PickFinishedInput(removed, 1, index) == FinishedPick::NotReady, "Composed after device removal");
 
-    // Finished picture pauses only for the game's own DLSS-G, and only while it is running.
+    Expect(DlssNr::PickReadyFinishedInput(removed, 1, index) == FinishedPick::NotReady,
+           "Wilsjo2 composed after device removal");
+    Expect(DlssNr::PickReadyFinishedInput(sameQueue, 2, index) == FinishedPick::Ready && index == 1,
+           "Wilsjo2 rejected same-queue order");
+
+    // The existing native FG detector remains available for conservative fallback decisions.
     const uint64_t never = UINT64_MAX;
     Expect(DlssNr::GameFrameGenerationOn(false, false, false, true, never), "Missed the game's DLSS-G mode");
     Expect(DlssNr::GameFrameGenerationOn(false, false, false, false, 3), "Missed recent DLSS-G evaluates without a mode call");
@@ -94,7 +103,7 @@ int main() try
     Expect(DlssNr::TouchedBackBuffer(5, 6), "Skipped a composed slot");
     Expect(!DlssNr::TouchedBackBuffer(5, 4), "Waited for a discarded recording");
     puts("PASS finished-picture queue readiness: presentation dependency, same-queue order, completed input, device "
-         "removal, newest-slot pick, game DLSS-G pause, resize wait");
+         "removal, newest-slot pick, game DLSS-G detection, resize wait");
     return 0;
 }
 catch (const std::exception& e) { puts(e.what()); return 1; }

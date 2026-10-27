@@ -18,7 +18,6 @@ std::array<Slot, 4> slots;
 ComPtr<ID3D12Device> device;
 uint64_t serial = 0, successes = 0, stillRendering = 0;
 bool loggedCrossQueue = false;
-inline constexpr const char* pausedForGameFg = "Paused while the game's own frame generation is on.";
 std::string status = "Waiting for a finished picture.";
 bool reset = true;
 // Native input's own history reset (ApplyNativeInput, ApplyVirtualUpscalerInput), apart from `reset` above: the swap chain
@@ -97,18 +96,6 @@ ID3D12CommandQueue* RealQueue(ID3D12CommandQueue* queue)
     return Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &real) ? real : queue;
 }
 
-// Both callers already split on OptiScaler's FG (the swapchain Present when it is off, FG_Hooks when it
-// runs); the check is repeated so capture, which has no such caller, decides the same way.
-bool PausedForGameFrameGeneration()
-{
-    auto& state = State::Instance();
-    auto* fg = state.currentFG;
-    return GameFrameGenerationOn(fg && fg->IsActive() && !fg->IsPaused(),
-                                 state.activeFgInput == FGInput::DLSSG, state.activeFgOutput == FGOutput::DLSSG,
-                                 state.dlssgLastSetMode != sl::DLSSGMode::eOff,
-                                 PresentsSince(state.frameCount, state.dlssgLastEvaluateFrame));
-}
-
 void Cancel()
 {
     // Submitted copies may still be in flight; their fences still protect reuse.
@@ -140,8 +127,6 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
 {
     if (!cmd || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
     { Say("This option needs a native DirectX 12 game."); return nullptr; }
-    if (PausedForGameFrameGeneration())
-    { Say(pausedForGameFg); return nullptr; } // no guide copies nothing will compose
     ComPtr<ID3D12Device> currentDevice;
     if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&currentDevice))))
         return nullptr;
@@ -400,38 +385,24 @@ static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linea
     Barrier(cmd, linear, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
 
-void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
+// The caller holds g_nrMutex. Handoff callers read all swapchain metadata before entering
+// this lock: Streamline can hold its own lock while submitting commands that take g_nrMutex.
+static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
+                               bool gameFrameHandoff)
 {
-    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
         !Config::Instance()->DlssNrEnabled.value_or_default())
     {
         Late::Cancel();
         return;
     }
-    if (!swapchain || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+    if (!picture || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         return;
-    if (Late::PausedForGameFrameGeneration())
-    {
-        Late::Cancel();
-        Late::stillRendering = 0;
-        Late::Say(Late::pausedForGameFg);
-        return;
-    }
-    Late::ComPtr<IDXGISwapChain3> sc;
-    Late::ComPtr<ID3D12Resource> color;
+    Late::ComPtr<ID3D12Resource> color = picture;
     Late::ComPtr<ID3D12Device> currentDevice;
-    if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
-        // The game's picture: its proxy back buffer while HDR output converts the chain (SDR, before the pass), else the
-        // chain's own
-        FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))) ||
-        FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != Late::device)
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != Late::device)
         return;
     const auto desc = color->GetDesc();
-    auto colorSpace = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
-        ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-    UINT colorSpaceSize = sizeof(colorSpace);
-    swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
     const bool screenPq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
     const bool screenScrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
     const bool screenSdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
@@ -462,7 +433,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         auto& slot = Late::slots[i];
         if (!slot.pending || !slot.submitted)
             continue;
-        if (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1)
+        if (!gameFrameHandoff && (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1))
         {
             slot.pending = false;
             Late::reset = true;
@@ -475,13 +446,21 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     }
     // Never queue a cross-queue wait here: the producer's signal can depend on this present.
     size_t index = 0;
-    const auto pick = PickFinishedInput(inputs.data(), inputs.size(), index);
+    const auto pick = gameFrameHandoff ? PickReadyFinishedInput(inputs.data(), inputs.size(), index)
+                                       : PickFinishedInput(inputs.data(), inputs.size(), index);
     if (pick == FinishedPick::None)
         return; // loading screen, another swapchain, or this real frame was already consumed
     if (pick == FinishedPick::NotReady)
     {
         // Stays pending in case another present of this frame follows; history skips a frame.
         Late::reset = true;
+        if (gameFrameHandoff)
+            for (size_t i = 0; i < inputs.size(); ++i)
+                if (inputs[i].eligible)
+                {
+                    index = i;
+                    break;
+                }
         const auto& input = inputs[index];
         if (!input.sameQueue && input.completed != UINT64_MAX && !Late::loggedCrossQueue)
         {
@@ -501,7 +480,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         if (other.submitted && other.serial <= slot.serial)
             other.pending = false;
     // Same queue: orders after the producer's signal. Another queue: already complete, so this never blocks.
-    if (FAILED(queue->Wait(slot.fence.Get(), slot.ready)) || FAILED(slot.allocator->Reset()) ||
+    if ((!gameFrameHandoff && FAILED(queue->Wait(slot.fence.Get(), slot.ready))) || FAILED(slot.allocator->Reset()) ||
         FAILED(slot.commands->Reset(slot.allocator.Get(), nullptr)))
     {
         Late::reset = true;
@@ -612,9 +591,11 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     }
     const bool ran = slot.residualOnly ? appliedResidual : g_nr.successfulDispatches > before;
     Late::reset = !ran;
-    Late::Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden." :
-        ran ? (slot.residualOnly ? "Applying the pre-SR changes to the finished picture." :
-        "Applying NR to the finished picture.") : "Preparing NR for the finished picture.");
+    Late::Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden."
+              : ran ? (slot.residualOnly  ? "Applying the pre-SR changes to the finished picture."
+                       : gameFrameHandoff ? "Applying NR before Streamline interpolation."
+                                          : "Applying NR to the finished picture.")
+                    : "Preparing NR for the finished picture.");
     if (ran && (++Late::successes == 1 || Late::successes % 300 == 0))
         LOG_INFO("DLSS-NR finished picture: {} frames, {}x{}, FG {}", Late::successes,
                  desc.Width, desc.Height, State::Instance().currentFG &&
@@ -631,6 +612,53 @@ DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FOR
         swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
 
     return colorSpace;
+}
+
+// Ordinary picture lookup, shared by the unregistered-chain path and Streamline's FG-off
+// pass-through. Swapchain calls precede g_nrMutex: the runtime can hold its presentation lock
+// while submitting commands that take the NR lock, so querying it under that lock can deadlock.
+static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, bool passThrough)
+{
+    if (State::Instance().isShuttingDown)
+        return;
+    const auto& cfg = *Config::Instance();
+    Late::ComPtr<IDXGISwapChain3> sc;
+    Late::ComPtr<ID3D12Resource> color;
+    auto space = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    if (cfg.DlssNrFinishedPicture.value_or_default() && cfg.DlssNrEnabled.value_or_default())
+    {
+        if (!swapchain || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+            return;
+        if (!passThrough && StreamlinePicture::RenderQueue(swapchain))
+            return; // registered app-facing Present owns this chain; exclude all lower/generated presents
+        if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
+            FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))))
+            return;
+        space = NativeInputColourSpace(swapchain, color->GetDesc().Format);
+    }
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    ApplyFinishedColor(color.Get(), queue, space, false);
+}
+
+void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
+{
+    ApplyFinishedSwapchain(swapchain, queue, false);
+}
+
+void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue)
+{
+    if (State::Instance().isShuttingDown || !swapchain || !picture || !queue)
+        return;
+    const auto space = NativeInputColourSpace(swapchain, picture->GetDesc().Format);
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    ApplyFinishedColor(picture, queue, space, true);
+}
+
+void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
+{
+    // Only the real app-facing Present calls this with FG off. Keep registration intact so
+    // asynchronous/generated presents remain excluded when FG restarts.
+    ApplyFinishedSwapchain(swapchain, queue, true);
 }
 
 // The body of ApplyNativeInput and ApplyVirtualUpscalerInput. `fromVirtualUpscaler` skips the Finished Picture setting,
@@ -655,11 +683,6 @@ static bool ApplyFinishedPictureInput(ID3D12CommandQueue* queue, ID3D12GraphicsC
     // Depth is optional: NR runs without it.
     if (!queue || !cmd || !color || !motion)
         return false;
-    if (Late::PausedForGameFrameGeneration())
-    {
-        Late::Say(Late::pausedForGameFg);
-        return false;
-    }
     Late::ComPtr<ID3D12Device> currentDevice;
     if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&currentDevice))))
         return false;

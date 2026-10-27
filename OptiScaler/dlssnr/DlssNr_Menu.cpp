@@ -3888,8 +3888,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             ImGui::EndDisabled();
 
             HelpMarker("Experimental: try only if experiencing severe ghosting. Disabling IsHDR may help, but "
-                       "could reduce NR stability. Changing this option recreates Superior Scaling's private "
-                       "DLSS feature and resets NR history once.");
+                       "could reduce NR stability.");
 
             if (nr.vulkan)
                 ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "

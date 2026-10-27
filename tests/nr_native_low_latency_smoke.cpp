@@ -434,6 +434,23 @@ int main()
         CHECK(PlanCap(cap).owner == CapOwner::LowLatency);
         CHECK(PlanCap(cap).minimumIntervalUs == 8333);
 
+        // ... a library that does not tell XeLL about its frames (xefg_cuda, XL23): XeLL counts the game's own frames,
+        // the cap goes per rendered frame (6x: 20 fps); generating none, the same interval
+        {
+            const uint32_t shown = cap.shownPerRendered;
+            // Intel's library tells XeLL about its frames: the shown cap, generating or not (6x: still 8333)
+            cap.shownPerRendered = 6;
+            CHECK(PlanCap(cap).minimumIntervalUs == 8333);
+            cap.xellCountsShown = false;
+            cap.shownPerRendered = 6;
+            CHECK(PlanCap(cap).owner == CapOwner::LowLatency);
+            CHECK(PlanCap(cap).minimumIntervalUs == 50000);
+            cap.shownPerRendered = 1;
+            CHECK(PlanCap(cap).minimumIntervalUs == 8333);
+            cap.xellCountsShown = true;
+            cap.shownPerRendered = shown;
+        }
+
         // XeFG paused or off on NVIDIA/AMD: XeLL does nothing, the limiter keeps the cap and XeLL gets no interval
         cap.xefgGenerating = false;
         cap.intelGpu = false;

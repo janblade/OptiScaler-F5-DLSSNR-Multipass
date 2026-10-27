@@ -17,6 +17,7 @@
 #include <misc/IdentifyGpu.h>
 #include <nvapi/NvApiHooks.h>
 #include <nvapi/fakenvapi.h>
+#include <proxies/XeFG_Proxy.h>
 
 #include <magic_enum.hpp>
 
@@ -327,6 +328,7 @@ CapInputs FrameCapInputs(Api api)
     in.fsrFgActive = state.activeFgOutput == FGOutput::FSRFG && fgGenerating;
     in.xefgGenerating = XefgGenerating();
     in.shownPerRendered = XefgShownPerRendered();
+    in.xellCountsShown = XellCountsShown();
     in.xefgVsync = state.fgPresentVsync.load(std::memory_order_relaxed);
     in.fakenvapiXell = in.method == Method::Fakenvapi && InputCommon::current_mode() == LowLatencyMode::XeLL;
 
@@ -1025,6 +1027,8 @@ XefgLatency XefgSide()
     const bool forceReflexSet = Config::Instance()->FN_ForceReflex.value_or_default() != ForceReflex::InGame;
     return xefgreflex::EffectiveXefgLatency(CurrentOutputInputs(), GameLowLatencyBlocked(), forceReflexSet);
 }
+
+bool XellCountsShown() { return XeFGProxy::XellCountsShownFrames(); }
 
 uint32_t XefgShownPerRendered()
 {

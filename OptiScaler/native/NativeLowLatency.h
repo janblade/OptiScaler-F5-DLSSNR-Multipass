@@ -143,6 +143,8 @@ OutputInputs CurrentOutputInputs();
 
 // Frames XeFG shows per frame the game renders: 1 plus the ones it generates, 1 while it generates none. Any thread.
 uint32_t XefgShownPerRendered();
+// XeFG's XeLL counts shown frames (false with a library behind XeFG's API that does not tell XeLL about its frames)
+bool XellCountsShown();
 
 // The menu's line. Cheap; GetLatency is asked at most twice a second.
 Status GetStatus();

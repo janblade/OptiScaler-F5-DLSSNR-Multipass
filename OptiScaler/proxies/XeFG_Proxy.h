@@ -64,6 +64,8 @@ class XeFGProxy
     inline static PFN_xefgSwapChainSetLoggingCallback _xefgSwapChainSetLoggingCallback = nullptr;
     inline static PFN_xefgSwapChainDestroy _xefgSwapChainDestroy = nullptr;
     inline static PFN_xefgSwapChainSetLatencyReduction _xefgSwapChainSetLatencyReduction = nullptr;
+    using PFN_XellCountsRenderedOnly = uint32_t (*)();
+    inline static PFN_XellCountsRenderedOnly _xellCountsRenderedOnly = nullptr;
     inline static PFN_xefgSwapChainSetSceneChangeThreshold _xefgSwapChainSetSceneChangeThreshold = nullptr;
     inline static PFN_xefgSwapChainGetPipelineBuildStatus _xefgSwapChainGetPipelineBuildStatus = nullptr;
     inline static PFN_xefgSwapChainSetNumInterpolatedFrames _xefgSwapChainSetNumInterpolatedFrames = nullptr;
@@ -205,6 +207,12 @@ class XeFGProxy
                 _xefgSwapChainSetLatencyReduction =
                     (PFN_xefgSwapChainSetLatencyReduction) KernelBaseProxy::GetProcAddress_()(
                         _dll, "xefgSwapChainSetLatencyReduction");
+                // Not Intel's: a frame generation library behind XeFG's API that does not tell XeLL about its frames
+                _xellCountsRenderedOnly = (PFN_XellCountsRenderedOnly) KernelBaseProxy::GetProcAddress_()(
+                    _dll, "xefgCudaXellCountsRenderedOnly");
+                if (_xellCountsRenderedOnly != nullptr)
+                    LOG_INFO("XeFG library does not tell XeLL about its generated frames while it runs its own: a cap "
+                             "XeLL keeps then goes per rendered frame");
                 _xefgSwapChainSetSceneChangeThreshold =
                     (PFN_xefgSwapChainSetSceneChangeThreshold) KernelBaseProxy::GetProcAddress_()(
                         _dll, "xefgSwapChainSetSceneChangeThreshold");
@@ -296,6 +304,11 @@ class XeFGProxy
     static PFN_xefgSwapChainSetLoggingCallback SetLoggingCallback() { return _xefgSwapChainSetLoggingCallback; }
     static PFN_xefgSwapChainDestroy Destroy() { return _xefgSwapChainDestroy; }
     static PFN_xefgSwapChainSetLatencyReduction SetLatencyReduction() { return _xefgSwapChainSetLatencyReduction; }
+
+    // Intel's library tells XeLL about the frames it generates, and XeLL's cap counts shown frames (Intel: "XeSS-FG
+    // Support"). A replacement such as xefg_cuda that does not says so (xefgCudaXellCountsRenderedOnly, while its own
+    // context runs): XeLL then caps the game's own frames.
+    static bool XellCountsShownFrames() { return _xellCountsRenderedOnly == nullptr || _xellCountsRenderedOnly() == 0; }
     static PFN_xefgSwapChainSetSceneChangeThreshold SetSceneChangeThreshold()
     {
         return _xefgSwapChainSetSceneChangeThreshold;

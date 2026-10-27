@@ -94,3 +94,40 @@ artifacts/validation/finished-fg/nr_finished_performance.exe --hardware measurem
 ```
 
 The CSV contains every retained GPU timestamp sample, variant, block and ABBA position.
+
+## Wilsjo2 specialization audit — not enabled (2026-10-27)
+
+Compared the supplied suggestions with Wilsjo2 commits `84ea5987`, `96a80350` and `e1b67ad1`
+and this branch's runtime at `e649420f`. Janblade's common Finished Colour shader already
+contains only modes 0–5; it does not carry Wilsjo2's advanced HDR Transfer/response/brightness
+modes 6–9. Our local Finished Colour mode 6 is an independent direct-PQ PSO, not that old
+advanced mode. The previous UAV-capable direct write optimization remains enabled.
+
+Prototyped constant-mode decode, encode and SDR/scRGB/PQ residual-apply PSOs, preserving
+the current shared PQ functions, matrices, formats, alpha, invalid-value guards and 8x8 groups.
+All five prototypes matched the independent committed common shader bit-for-bit at 67x41 and
+3840x2160, including limits 1/2/8, neutral/invalid carriers, signed HDR and FP16 storage.
+
+RTX 4090, driver 616.56, resident synthetic 4K textures; 8 ABBA/BAAB blocks, separate warm-up,
+640 retained GPU timestamp samples per variant, 4 repetitions per window. Encode and apply
+measurements include the unchanged output copy/barriers; decode includes an output UAV barrier.
+Two independent runs gave the same conclusion. Example second-run results:
+
+| Prototype | Common median (ms) | Specialized median (ms) | Delta (ms) | Common p10–p90 | Specialized p10–p90 |
+|---|---:|---:|---:|---:|---:|
+| PQ decode | 0.112128 | 0.118784 | +0.006656 | 0.109312–0.118272 | 0.115200–0.125184 |
+| PQ encode + copy | 0.152576 | 0.151296 | -0.001280 | 0.151808–0.154112 | 0.150528–0.152832 |
+| SDR residual apply + copy | 0.186368 | 0.186112 | -0.000256 | 0.184576–0.193536 | 0.184320–0.192768 |
+| scRGB residual apply + copy | 0.334592 | 0.334592 | 0.000000 | 0.330496–0.341248 | 0.330752–0.341760 |
+| PQ residual apply + copy | 0.186624 | 0.186112 | -0.000512 | 0.184576–0.193536 | 0.184320–0.193792 |
+
+Encode's paired-block savings were 0.001024–0.001280 ms in that run; the author explicitly
+declined enabling this 0.001–0.002 ms optimization. The other specializations were slower or
+too close to noise. Additional 16x8/16x16/32x2 PQ group-shape prototypes found no compelling
+gain; 32x2 regressed encode by about 0.0133 ms. Smaller PSO bytecode is not itself proof of a
+faster shader. Do not port the old specialized paths solely because they helped a larger old PSO.
+
+**No runtime, shader/blob, dispatch, build-script or test-source changes from these experiments
+are retained.** All prototype runtime changes were discarded before publication; the existing
+DLL at `e649420f` remains current. The measured tiny encode improvement was not enabled.
+No new whole-game speedup, whole-path gain or additional in-game quality result is claimed.

@@ -36,8 +36,9 @@ inline float GuidedRange(float scale)
     const float t = std::isfinite(scale) ? std::clamp((scale - .5f) * 2.f, 0.f, 1.f) : 0.f;
     return .015f - .012f * t * t * t;
 }
-// Auto follows dynamic render size, but CNN's identity is latched until an
-// explicit user setting changes. Recreating resources must not unlatch it.
+// CNN's A or E is picked once from the scale it starts at, also under Auto: following a moving render size would
+// recreate the private DLSS and reset history. A changed setting picks again, and so does NR or NGX shutdown (a new
+// device or runtime). Recreating resources must not unlatch it.
 struct PrivatePresetChoice
 {
     unsigned preference = 0, selected = 1;

@@ -41,6 +41,14 @@ The Finished Picture WARP suite is also available in `.github/workflows/finished
 
 ### Author's Crimson Desert report (2026-10-27)
 
-The author tested the preceding experimental **before-FG implementation** in Crimson Desert for several hours with the game's native frame generation and Finished Picture NR. They repeatedly enabled/disabled NR while native FG was on, and enabled/disabled FG while Finished Picture NR was on. Crimson Desert automatically turns FG off when entering the game menu; repeated menu entry/exit exercised those transitions. **No crashes were observed.**
+The author tested the preceding experimental **before-FG implementation** in Crimson Desert for several hours. They also manually tested the current branch's DLL (`b7d9ae00`) with native game frame generation, including repeated NR-before-SR / apply-to-Finished-Picture On/Off transitions.
 
-This directly targets the game/scenario that motivated #69. It is a user-reported in-game stability result for the preceding experiment, not a claim that this latest-upstream integration has already received the same hours of game testing, nor a timing/quality guarantee for every game. A future PR should cite #69 and distinguish this report from the automated WARP/build results above. No PR has been created for this branch yet.
+Their report, translated into English:
+
+> I tested turning NR off and on with the game's native frame generation enabled, and turning FG off and on with NR Finished Picture enabled. Crimson Desert automatically disables FG when entering the game menu. I repeatedly entered and left the menu to trigger this, and no crashes occurred during those repeated transition tests.
+
+They additionally report repeatedly toggling NR before SR with its changes applied to Finished Picture while native FG was enabled, without a crash in that dedicated test.
+
+**Separate crashes were also observed in other test sessions.** The captured logs and Windows events identify GPU timeouts (LiveKernelEvent 141); one session explicitly logged that NR was switched off and contains no NR/Superior processing. The available kernel triage dump was inconclusive. These observations suggest the crashes are not specific to Finished Picture + native FG, but they do not establish a root cause or rule out the broader OptiScaler/Streamline/overlay integration. Do not describe the entire testing period as crash-free or the crashes as proven unrelated.
+
+This targets the game/scenario that motivated #69. The manual observations are author-reported game results, separate from the automated WARP/build results; they are not a stability or performance guarantee for every game. No speculative resource-lifetime fix or forced native-D3D12 DRED diagnostic was added to this branch. See the accompanying performance documents for the measured optional writeback paths and their limits.

@@ -1591,6 +1591,7 @@ void InputCommon::update()
         in.fgActive = state.CurrentFG() != nullptr && state.CurrentFG()->IsGenerating();
         in.blocked = blocked;
         in.xefgShownPerRendered = native::lowlatency::XefgShownPerRendered();
+        in.xellCountsShown = native::lowlatency::XellCountsShown();
         in.dlssgFramesToGenerate = ReflexHooks::dlssgFrameCountToGenerate();
         in.outputIsXell = activeOutput == LowLatencyMode::XeLL;
         in.outputIsFrameCap = frameCapOutput;

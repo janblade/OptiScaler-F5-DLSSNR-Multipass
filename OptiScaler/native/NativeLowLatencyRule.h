@@ -820,6 +820,7 @@ struct CapInputs
     bool fakenvapiXell = false;      // Method::Fakenvapi has picked XeLL (Anti-Lag 2 missing: fakenvapi falls back)
     uint32_t shownPerRendered = 1;   // frames XeFG shows per frame the game renders (1 + generated); 1 when it generates none
     bool xefgVsync = false;          // frame generation presents with V-Sync (State::fgPresentVsync)
+    bool xellCountsShown = true;     // XeLL counts shown frames: the XeFG library tells it about its own (XeFGProxy)
 };
 
 // Frames shown per frame the game renders: 1 + the generated ones, but only while frame generation generates. Stood
@@ -920,9 +921,11 @@ inline CapPlan PlanCap(const CapInputs& in)
         return { CapOwner::LowLatency, 0 };
 
     // XeLL counts shown frames (rendered + generated) while XeFG generates; with XeFG paused on an Intel GPU shown
-    // frames are the rendered ones, so the same interval holds
+    // frames are the rendered ones, so the same interval holds. A library that does not tell XeLL about its frames
+    // (xefg_cuda): XeLL counts the game's own, as Reflex does in the split (XL23)
     if (in.method == Method::XellWithXefg)
-        return { CapOwner::LowLatency, IntervalUs(in.capFps) };
+        return { CapOwner::LowLatency,
+                 IntervalUs(in.xellCountsShown ? in.capFps : CapPerRenderedFrame(in.capFps, in.shownPerRendered)) };
 
     // Reflex, Anti-Lag 2 and LatencyFlex pace the game's own frames: FSR frame generation doubles them
     return { CapOwner::LowLatency, IntervalUs(in.fsrFgActive ? in.capFps / 2.0f : in.capFps) };

@@ -1018,10 +1018,13 @@ int main(int argc, char** argv)
 
     // A camera that turns, zooms, or both while panning, over the layout scene (a weakly textured sky above textured
     // ground) and over the plain texture, with and without the still HUD panel. The flow is checked against the true
-    // warp, after the first five pictures, in three parts: the sky (above 0.3 of the height, in the scene's own
-    // coordinates), the ground (below 0.5) and the HUD's inside. A sky's weak texture gives the match little to go on: the
-    // camera prior must carry the camera's motion there (the match alone is about 0.6 px off). The ground must not get
-    // worse for it, and the still HUD must stay still (the camera prior must not pull it along).
+    // warp in three parts: the sky (above 0.3 of the height, in the scene's own coordinates) and the ground (below 0.5)
+    // after the first five pictures, and the HUD's inside from the first flow on. A sky's weak texture gives the match
+    // little to go on: the camera prior must carry the camera's motion there (the match alone is about 0.6 px off). The
+    // ground must not get worse for it, and the still HUD must stay still, also in the pan's first pictures before the
+    // still age counts it as still (the camera prior must not pull it along). The panel sits near the picture's middle,
+    // where the turn and the zoom move a point by under a pixel, so its check is in tenths of a pixel: pulled along, it
+    // is about 0.3 px off on average.
     struct Warp
     {
         const char* what;
@@ -1030,7 +1033,7 @@ int main(int argc, char** argv)
     const Warp warps[] = { { "turning", 0.004f, 0.0f, 0.0f, 0.0f },
                            { "zooming", 0.0f, 0.004f, 0.0f, 0.0f },
                            { "turning, zooming and panning", 0.003f, 0.002f, 0.7f, 0.3f } };
-    const double kWarpSkyMean = 0.15, kWarpGroundMean = 0.1, kWarpHudOff = 0.01;
+    const double kWarpSkyMean = 0.15, kWarpGroundMean = 0.1, kWarpHudMean = 0.02, kWarpHudOff = 0.01;
 
     for (const Warp& w : warps)
         for (int scene : { 0, 3 })
@@ -1071,7 +1074,7 @@ int main(int argc, char** argv)
                     flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, nullptr,
                                   DXGI_FORMAT_UNKNOWN, true);
                     gpu.Submit();
-                    if (k < 5 || !flow.FlowValid())
+                    if (!flow.FlowValid())
                         continue;
 
                     const auto desc = flow.Flow()->GetDesc();
@@ -1092,27 +1095,28 @@ int main(int argc, char** argv)
                                 (hud && !inside && InHud(before[0], before[1])))
                                 continue;
                             const int part = inside ? 2 : at[1] < 0.3f * kHeight ? 0 : at[1] > 0.5f * kHeight ? 1 : -1;
-                            if (part < 0)
+                            if (part < 0 || (part != 2 && k < 5))
                                 continue;
                             const float tx = inside ? 0.0f : before[0] - px, ty = inside ? 0.0f : before[1] - py;
                             const size_t i = ((size_t) y * desc.Width + x) * 2;
                             const double err = std::hypot(field[i] - tx, field[i + 1] - ty);
                             sum[part] += std::isfinite(err) ? err : 1e6;
-                            off[part] += !(err <= 1.0);
+                            off[part] += !(err <= 0.25);
                             ++count[part];
                         }
                 }
 
                 const double sky = sum[0] / std::max<uint64_t>(count[0], 1), ground = sum[1] / std::max<uint64_t>(count[1], 1);
+                const double hudMean = sum[2] / std::max<uint64_t>(count[2], 1);
                 const double hudOff = (double) off[2] / std::max<uint64_t>(count[2], 1);
                 // The sky's limit only for the layout scene (it has the weak sky); the plain texture's top is ground too.
                 const bool pass = (scene != 3 || sky <= kWarpSkyMean) && (scene == 3 || sky <= kWarpGroundMean) &&
-                                  ground <= kWarpGroundMean && (!hud || hudOff <= kWarpHudOff);
+                                  ground <= kWarpGroundMean && (!hud || (hudMean <= kWarpHudMean && hudOff <= kWarpHudOff));
                 ok = ok && pass;
                 printf("camera %-28s %-7s %-8s: top mean error %5.3f px, ground %5.3f px", w.what,
                        scene == 3 ? "sky" : "texture", hud ? "and HUD" : "", sky, ground);
                 if (hud)
-                    printf(", still HUD off by over 1 px %5.1f%%", 100.0 * hudOff);
+                    printf(", still HUD mean %5.3f px, off by over 0.25 px %5.1f%%", hudMean, 100.0 * hudOff);
                 printf("   %s\n", pass ? "ok" : "FAIL");
             }
 
@@ -1412,16 +1416,19 @@ int main(int argc, char** argv)
     {
         float squareDx, squareDy, backgroundDx, backgroundDy;
         const char* what;
+        // Depth matching's least share within 1 px, about two points under what it gets (2026-10): the gap to plain
+        // matching (20 points, below) alone would let it slide while plain matching gets better.
+        float minDepth = 0.85f;
         float size = 256.0f; // smaller ones are scored only (score mode): a thing smaller than the smoothing's reach
     };
 
     const EdgeCase edgeCases[] = {
-        { 24, 10, 0, 0, "square over a still background" },
-        { -30, 0, 8, -4, "square against a panning background" },
-        { 60, 30, 0, 0, "fast square over a still background" },
-        { 8, 0, 0, 0, "slow square over a still background" },
-        { 20, 8, 0, 0, "small square (24 px) over a still background", 24.0f },
-        { 20, 8, 0, 0, "small square (12 px) over a still background", 12.0f },
+        { 24, 10, 0, 0, "square over a still background", 0.97f },
+        { -30, 0, 8, -4, "square against a panning background", 0.91f },
+        { 60, 30, 0, 0, "fast square over a still background", 0.97f },
+        { 8, 0, 0, 0, "slow square over a still background", 0.97f },
+        { 20, 8, 0, 0, "small square (24 px) over a still background", 0.85f, 24.0f },
+        { 20, 8, 0, 0, "small square (12 px) over a still background", 0.85f, 12.0f },
     };
 
     struct Variant
@@ -1555,7 +1562,7 @@ int main(int argc, char** argv)
         // 9 cells no worse than 4; depth matching well above none, and no worse than none with misaligned or wrong depth.
         // "Well above" is 20 points: it was 25 until the estimator changes of PR #232 (2026-10) lifted plain 9-cell matching
         // from 73.0% to 75.9% here while depth matching stayed at 99.7%, so the gap shrank from below.
-        const bool pass = share[1] >= share[0] - 0.01 && share[2] >= share[1] + 0.20 && share[2] >= 0.85 &&
+        const bool pass = share[1] >= share[0] - 0.01 && share[2] >= share[1] + 0.20 && share[2] >= e.minDepth &&
                           share[3] >= share[1] && share[4] >= share[1] && share[5] >= share[2] - 0.01 &&
                           share[6] >= share[1] - 0.03;
         // Misaligned or wrong depth against what the flow does with no depth at all as set (with the brightness
@@ -1663,7 +1670,9 @@ int main(int argc, char** argv)
             // carry only where the window changed (2026-10) legacy's PQ pan went from 0.051 to 0.043 px while
             // perceptual's stayed at 0.048, both well under the 0.055 to 0.058 they had before.
             constexpr double kGrainErrCeiling = 0.40, kPanErrCeiling = 0.06;
-            const bool improves = perceptual.panErr <= legacy.panErr + 0.01 && perceptual.panErr <= kPanErrCeiling &&
+            // Perceptual is no longer better than legacy on the PQ pan (0.048 against 0.043 px): no worse by a
+            // hundredth of a pixel is what is checked.
+            const bool noWorse = perceptual.panErr <= legacy.panErr + 0.01 && perceptual.panErr <= kPanErrCeiling &&
                                   perceptual.grainOne >= legacy.grainOne - 0.01 && perceptual.grainErr <= kGrainErrCeiling;
             printf(
                 "  %-6s legacy: pan error %.4f px, worst within 0.5 px %5.1f%%, grain within 1 px %5.1f%%, grain error "
@@ -1672,8 +1681,8 @@ int main(int argc, char** argv)
                 "error %.3f px   %s\n",
                 pq ? "PQ" : "scRGB", legacy.panErr, 100.0 * legacy.panHalf, 100.0 * legacy.grainOne, legacy.grainErr,
                 perceptual.panErr, 100.0 * perceptual.panHalf, 100.0 * perceptual.grainOne, perceptual.grainErr,
-                improves ? "ok" : "FAIL");
-            ok = ok && (improves || !tuning.perceptualLuma);
+                noWorse ? "ok" : "FAIL");
+            ok = ok && (noWorse || !tuning.perceptualLuma);
 
             if (!pq)
                 hdrNow = tuning.perceptualLuma ? perceptual : legacy;

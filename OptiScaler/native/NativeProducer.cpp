@@ -36,6 +36,8 @@ bool NativeProducer::WaitFor(UINT64 value)
     if (completed >= value)
         return true;
 
+    // A wait that timed out before leaves its completion registered on the event, which may have fired since.
+    ResetEvent(_event);
     if (FAILED(_fence->SetEventOnCompletion(value, _event)) || WaitForSingleObject(_event, 1000) != WAIT_OBJECT_0)
         return false;
 
@@ -148,8 +150,8 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         if (!WaitFor(_signalled))
         {
             result.stoppedAt = "waiting for the last frame before a size change";
-            result.stoppedHr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
             result.deviceRemoved = _device->GetDeviceRemovedReason();
+            result.stoppedHr = FAILED(result.deviceRemoved) ? result.deviceRemoved : HRESULT_FROM_WIN32(WAIT_TIMEOUT);
             return result;
         }
 
@@ -168,8 +170,8 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     if (!WaitFor(_values[slot]))
     {
         result.stoppedAt = "waiting for the allocator's last list";
-        result.stoppedHr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         result.deviceRemoved = _device->GetDeviceRemovedReason();
+        result.stoppedHr = FAILED(result.deviceRemoved) ? result.deviceRemoved : HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         return result;
     }
 

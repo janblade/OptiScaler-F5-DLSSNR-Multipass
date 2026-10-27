@@ -71,8 +71,8 @@ float2 CameraFuse(int2 p,float2 motion,float structure,float vectorEvidence,bool
         }
     if(foregroundEdge)return motion;
     float2 measured=cached?gTile[local.y*24+local.x].xy:FlowIn.Load(int3(p,0)).xy;
-    // A window identical to the last frame's at no offset, still last frame too, and measured as (about) no motion: no
-    // motion, exactly.
+    // A window identical to the last frame's at no offset, unchanged this frame by the still age (the age this frame's
+    // Match wrote), and measured as (about) no motion: no motion, exactly.
     if(hasAge!=0u && stillFrames!=0u && LastAge.Load(int3(p,0))>=1u &&
        dot(measured,measured)<0.01 && CameraExactStatic(p,cur)) {
         support=1.0;return float2(0.0,0.0);

@@ -95,6 +95,7 @@ void CameraModel(uint t : SV_GroupIndex) {
         float2 uv=float2((t%16u+(s%8u+0.5)/8.0)/16.0,(t/16u+(s/8u+0.5)/8.0)/8.0);
         int2 at=min(int2(uv*float2(aux)),int2(aux)-1);
         float4 f=FlowIn.Load(int3(at,0));
+        if(any(!isfinite(f.xyz)))continue; // one bad sample must not void the whole frame's fit
         float w=f.z;
         // Texture is evidence of a correspondence, not permission for a small
         // highly textured foreground to own the camera fit's spatial votes.

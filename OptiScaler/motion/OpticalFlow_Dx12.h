@@ -99,7 +99,8 @@ class OpticalFlowDx12
     // The camera model this frame's flow was fitted to (4x1, R16G16B16A16_FLOAT, NON_PIXEL_SHADER_RESOURCE): texel 0
     // and 1 the x and y rows of an affine fit over the picture in -1..1 (texel 0's .w is 1 when the fit holds, texel
     // 1's .w how well it fits, 0..1), texel 2 its rms, agreement, coverage and inlier count, texel 3 the whole-picture
-    // motion it started from. Only when Tuning().cameraPrior.
+    // motion it started from. Fitted only when the camera prior runs (see Settings::cameraPrior); otherwise it holds
+    // an earlier frame's.
     ID3D12Resource* CameraModel() const { return _cameraFlow.resource; }
     bool FlowValid() const { return _flowValid; }
     bool UsedDepth() const { return _usedDepth; } // the last Dispatch matched with depth
@@ -118,7 +119,8 @@ class OpticalFlowDx12
     struct Settings
     {
         // The camera prior: an affine fit of this frame's motion over the picture (CameraModel()), which the smoothing
-        // gives to pixels whose own match is weak where it fits their own picture about as well. Needs globalCandidate.
+        // gives to pixels whose own match is weak where it fits their own picture about as well. Needs globalCandidate
+        // and smoothing (smoothRadius 0 is the match's own answer, without the prior).
         bool cameraPrior = true;
         int radius = 1;
         int coarseRadius = 4;

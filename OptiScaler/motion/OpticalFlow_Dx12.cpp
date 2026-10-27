@@ -10,7 +10,8 @@ namespace
 {
 
 constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs and two UAVs
-// luma, the scene-cut pair, the downsampling, a match per level, median, camera model, smoothing, global, visualise
+// luma, the downsampling, a match per level, median, camera model, smoothing, global, visualise; and 2 to spare (the
+// scene-cut pair counted here has its own heap, in SceneCut_Dx12)
 constexpr uint32_t kPassesPerFrame =
     1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
@@ -587,7 +588,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
         // The camera model: an affine fit of this frame's median flow, which the smoothing then offers to the pixels
         // whose own match is weak (see Settings::cameraPrior).
-        const bool cameraModel = _settings.cameraPrior && _settings.globalCandidate;
+        const bool cameraModel = _settings.cameraPrior && _settings.globalCandidate && _settings.smoothRadius > 0;
 
         if (cameraModel)
         {

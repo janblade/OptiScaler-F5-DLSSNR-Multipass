@@ -3,6 +3,7 @@
 #include "NativeDriverDx12.h"
 
 #include <native/Dx12FrameSource.h>
+#include <native/FlowDiagnosticUi.h>
 #include <native/NativeDriver.h>
 
 #include <Config.h>
@@ -35,7 +36,7 @@ std::atomic<bool> g_fgDriven { false };
 // generation's presenter, which must never wait on the game thread.
 std::mutex g_runMutex;
 
-bool g_previewWanted = false; // the menu node is open
+native::FlowDiagnosticUi g_ui; // the debug view; it asks for the picture while it is shown
 
 // The menu's descriptors for the two preview pictures.
 struct PreviewView
@@ -50,17 +51,16 @@ ID3D12DescriptorHeap* g_srvHeap = nullptr;
 PreviewView g_flowView;
 PreviewView g_maskView;
 
-// Shows a texture in the menu: a descriptor in the menu's heap (made once, and again if the heap or the texture changes).
-// `grayFromRed` shows a one-channel texture as gray.
-bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format, bool grayFromRed, float width,
-                 float height)
+// A texture for the menu: a descriptor in the menu's heap (made once, and again if the heap or the texture changes).
+// `grayFromRed` shows a one-channel texture as gray. 0 when there is no heap or descriptor yet.
+ImTextureID TextureId(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format, bool grayFromRed)
 {
     ID3D12DescriptorHeap* heap = MenuOverlayDx::SrvHeap();
 
     ID3D12Device* device = g_driver.Producer() != nullptr ? g_driver.Producer()->Device() : nullptr;
 
     if (heap == nullptr || texture == nullptr || device == nullptr)
-        return false;
+        return 0;
 
     if (heap != g_srvHeap)
     {
@@ -73,7 +73,7 @@ bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format,
         view.allocated = true;
 
     if (!view.allocated)
-        return false;
+        return 0;
 
     if (texture != view.resource)
     {
@@ -92,8 +92,24 @@ bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format,
         view.resource = texture;
     }
 
-    ImGui::Image((ImTextureID) view.gpu.ptr, ImVec2(width, height));
-    return true;
+    return (ImTextureID) view.gpu.ptr;
+}
+
+bool ShowTexture(PreviewView& view, ID3D12Resource* texture, DXGI_FORMAT format, bool grayFromRed, float width,
+                 float height)
+{
+    const ImTextureID id = TextureId(view, texture, format, grayFromRed);
+
+    if (id != 0)
+        ImGui::Image(id, ImVec2(width, height));
+
+    return id != 0;
+}
+
+// The debug view's picture (RGBA8), for the shared controls.
+ImTextureID FlowTexture(ID3D12Resource* texture)
+{
+    return TextureId(g_flowView, texture, DXGI_FORMAT_R8G8B8A8_UNORM, false);
 }
 
 void RunFrame(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device* device)
@@ -106,8 +122,7 @@ void RunFrame(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device
 
     g_source.SetPresent(swapChain, queue, device);
 
-    if (g_driver.RunFrame(g_source, g_previewWanted).ran)
-        g_previewWanted = false;
+    g_driver.RunFrame(g_source, g_ui.TakeRequest(), g_ui.View());
 }
 
 } // namespace
@@ -163,24 +178,15 @@ void DrawAdvancedUi()
 
     // The pictures and their controls are debugging aids: off by default, nothing is recorded for them while they are hidden.
     if (!debugView)
+    {
+        g_ui.Reset();
         return;
+    }
+
+    g_ui.DrawAdvanced(g_driver, FlowTexture);
 
     const float boxWidth = 360.0f;
     const float boxHeight = boxWidth * 9.0f / 16.0f;
-    bool drawn = false;
-
-    ImGui::TextDisabled("Motion: hue is the direction, brightness the speed.");
-
-    if (g_driver.GetStatus() == native::NativeDriver::Status::Running)
-    {
-        g_previewWanted = true;
-
-        if (g_driver.Producer() && g_driver.Producer()->PreviewReady())
-            drawn = ShowTexture(g_flowView, g_driver.Producer()->Flow()->Preview(), DXGI_FORMAT_R8G8B8A8_UNORM, false, boxWidth, boxHeight);
-    }
-
-    if (!drawn)
-        ImGui::Dummy(ImVec2(boxWidth, boxHeight));
 
     // A frame can have no mask (no motion estimate yet); the picture then keeps the last one rather than going black.
     const bool trustRecent = g_driver.TrustRecent();
@@ -206,5 +212,9 @@ void DrawAdvancedUi()
     if (!maskDrawn)
         ImGui::Dummy(ImVec2(boxWidth, boxHeight));
 }
+
+bool ExpandedPreviewVisible() { return g_ui.Expanded(); }
+
+void DrawExpandedPreview() { g_ui.DrawExpanded(g_driver, FlowTexture); }
 
 } // namespace NativeMotionDx12

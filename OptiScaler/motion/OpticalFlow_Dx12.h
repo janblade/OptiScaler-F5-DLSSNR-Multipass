@@ -84,10 +84,44 @@ class OpticalFlowDx12
         _ageValid = false;
     }
 
-    // A picture of the flow for a menu: hue is the direction, brightness the speed up to maxSpeed pixels, black is still.
-    // R8G8B8A8_UNORM at the flow's size, left in the PIXEL_SHADER_RESOURCE state. Call after Dispatch() when FlowValid().
-    bool Visualise(ID3D12GraphicsCommandList* list, float maxSpeed);
-    ID3D12Resource* Preview() const { return _preview.resource; }
+    // How the debug views draw (see motion/FlowDebug_Hlsl.h); the menu changes these, the estimator never reads them.
+    struct DebugSettings
+    {
+        float spacing = 32.0f; // the arrow grid, in the game's pixels
+        float gain = 2.5f;     // arrow length per pixel of motion
+        float minimumMotion = 0.4f;
+        float thickness = 1.25f;
+        float opacity = 1.0f;
+        float gridOpacity = 0.18f;
+        bool background = true; // the picture behind the arrows and the confidence colours
+        // The depth view only: the raw depth shown times this, linearized against this far plane.
+        bool depthLinearize = true;
+        float depthMultiplier = 1.0f;
+        float depthFarPlane = 1000.0f;
+    };
+    DebugSettings& DebugTuning() { return _debugSettings; }
+
+    // What a debug view draws from, besides the flow's own textures. Each resource must be readable by a compute shader
+    // (NON_PIXEL_SHADER_RESOURCE); any can be null and the view draws without it.
+    struct PreviewInputs
+    {
+        int view = 0;                      // native/FlowDebugViews.h: 0 arrows .. 6 still age
+        float maxSpeed = 24.0f;            // pixels per frame that show as full colour
+        ID3D12Resource* picture = nullptr; // behind the arrows and the confidence colours
+        DXGI_FORMAT pictureFormat = DXGI_FORMAT_UNKNOWN;
+        ID3D12Resource* depth = nullptr; // the game's raw depth, before the alignment (the depth view applies it)
+        DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN;
+        bool depthReversed = false;
+        const float* depthTransform = nullptr; // the alignment: XY scale, XY offset in pixels (null = none)
+        ID3D12Resource* guideMotion = nullptr; // the trust mask's guide motion (arrows, final flow)
+        ID3D12Resource* mask = nullptr;        // the trust mask (the confidence and rejection views)
+    };
+
+    // A debug view for the menu (FlowDebug_Hlsl.h), R8G8B8A8_UNORM, left in the PIXEL_SHADER_RESOURCE state: the depth
+    // view at the picture's size, the others at the flow's. Its texture is made on the first call, so nothing is spent
+    // while no view is shown. Call after Dispatch() when FlowValid().
+    bool Visualise(ID3D12GraphicsCommandList* list, const PreviewInputs& inputs);
+    ID3D12Resource* Preview() const { return _previewShown != nullptr ? _previewShown->resource : nullptr; }
 
     // The half-resolution luma (R32_FLOAT, NON_PIXEL_SHADER_RESOURCE) of the frame last passed to Dispatch() and of the one
     // before it; the trust mask compares them. The previous one is only meaningful when FlowValid().
@@ -285,9 +319,13 @@ class OpticalFlowDx12
     Tex _cameraFlow; // see CameraModel()
     Tex _globalFlow; // 1x1: the whole picture's motion in full-resolution pixels, z = 1 when there was enough to say
     Tex _flow;
-    Tex _preview;
+    Tex _preview;      // the debug views at the flow's size, made on first use
+    Tex _depthPreview; // the depth view, at the picture's size, made on first use
+    Tex* _previewShown = nullptr;
+    DebugSettings _debugSettings;
     Tex _age[2]; // R8_UINT, half resolution: the still age (see Settings::stillFrames), this frame's and the last one's
     bool _ageValid = false; // the last frame's ages are there (not after a Reset or a size change)
+    bool _cameraModelRan = false; // the last Dispatch fitted the camera model (the confidence view reads it)
     int _current = 0;
     bool _havePrevious = false;
     bool _flowValid = false;

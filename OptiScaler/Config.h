@@ -704,10 +704,24 @@ class Config
     CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
     CustomOptional<bool> DlssNrNativeDepthOverlay { false };
     // NativeDebugView: show the pictures of the depth finder and the motion estimate on the menu's Optical F5Low page
-    // (the depth preview, the motion and trust pictures, the trust view chooser; D3D12 only), set by "Show the motion
-    // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
-    // overlay's copy is not made (read at the start for that).
+    // (the depth preview and the trust pictures on D3D12; the debug views, native/FlowDebugViews.h, on D3D12, D3D11 and
+    // Vulkan), set by "Show the motion and trust pictures" there. The controls (flow tuning, the depth overlay switch)
+    // show either way. Off, the depth overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
+    // NativeDepthWidth/Height: the depth finder takes only a buffer of this size (0 = either size; both 0 = its own
+    // shape test), for a game whose scene depth it does not find. NativeDepthScaleX/Y, NativeDepthOffsetX/Y: the depth
+    // alignment (native/DepthAlign_Dx12.h), for a depth buffer that does not line up with the picture; it changes the
+    // depth the motion estimate, the trust mask and the consumer get (1/1/0/0 = none, no pass). NativeDepthLinearize,
+    // NativeDepthMultiplier, NativeDepthFarPlane: how the Normals / depth debug view shows the depth (that view only).
+    CustomOptional<uint32_t> DlssNrNativeDepthWidth { 0 };
+    CustomOptional<uint32_t> DlssNrNativeDepthHeight { 0 };
+    CustomOptional<float> DlssNrNativeDepthScaleX { 1.0f };
+    CustomOptional<float> DlssNrNativeDepthScaleY { 1.0f };
+    CustomOptional<float> DlssNrNativeDepthOffsetX { 0.0f };
+    CustomOptional<float> DlssNrNativeDepthOffsetY { 0.0f };
+    CustomOptional<bool> DlssNrNativeDepthLinearize { true };
+    CustomOptional<float> DlssNrNativeDepthMultiplier { 1.0f };
+    CustomOptional<float> DlssNrNativeDepthFarPlane { 1000.0f };
     // NativeMotionProfile: the Optical F5Low page's "Motion profile", a named set of the motion estimate's knobs for a
     // kind of game (motion/MotionProfiles.h): default, anime, realistic, sportswide, sportspan or custom. Custom is
     // NativeMotionProfileCustom, the Flow tuning menu's values as a key=value list (written when a Flow tuning control

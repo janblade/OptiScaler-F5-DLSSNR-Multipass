@@ -864,22 +864,6 @@ void Global(uint3 id : SV_DispatchThreadID)
     }
 }
 
-// Hue for the direction, brightness for the speed (scale is the speed that is full brightness).
-[numthreads(8, 8, 1)]
-void Visualise(uint3 id : SV_DispatchThreadID)
-{
-    if (id.x >= size.x || id.y >= size.y)
-        return;
-
-    float2 f = FlowIn.Load(int3(id.xy, 0)).xy;
-    float hue = atan2(f.y, f.x) / 6.2831853 + 0.5;
-    float3 rgb = saturate(abs(frac(hue + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
-    float level = saturate(length(f) / scale);
-
-    OutFlow[id.xy] = float4(rgb * level, 1.0);
-}
-
-
 [numthreads(8, 8, 1)]
 void Median(uint3 id : SV_DispatchThreadID)
 {

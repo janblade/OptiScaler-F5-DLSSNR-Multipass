@@ -52,7 +52,7 @@ void NativeDriver::LogDiagnostics()
              _diagNative, _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
 }
 
-NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview)
+NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView)
 {
     RunResult out;
 
@@ -134,6 +134,18 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
     options.flowPreview = flowPreview;
     options.previewMaxSpeed = kPreviewMaxSpeed;
+    options.previewView = flowPreviewView;
+
+    // The depth alignment changes what the estimate runs on; the depth view's look is the view's alone.
+    auto* config = Config::Instance();
+    options.depthTransform[0] = config->DlssNrNativeDepthScaleX.value_or_default();
+    options.depthTransform[1] = config->DlssNrNativeDepthScaleY.value_or_default();
+    options.depthTransform[2] = config->DlssNrNativeDepthOffsetX.value_or_default();
+    options.depthTransform[3] = config->DlssNrNativeDepthOffsetY.value_or_default();
+    auto& look = _producer->Flow()->DebugTuning();
+    look.depthLinearize = config->DlssNrNativeDepthLinearize.value_or_default();
+    look.depthMultiplier = config->DlssNrNativeDepthMultiplier.value_or_default();
+    look.depthFarPlane = config->DlssNrNativeDepthFarPlane.value_or_default();
 
     const auto apply = [this, &source, useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, const NativeFrame& frame)
     {
@@ -316,6 +328,71 @@ void NativeDriver::DrawFlowTuning()
         }
 
         ImGui::EndCombo();
+    }
+
+    // The depth finder's size and the alignment: for a game whose depth is not found, or does not line up.
+    if (ImGui::TreeNode("Depth selection and alignment##nativedepthalign"))
+    {
+        int size[2] = { (int) config->DlssNrNativeDepthWidth.value_or_default(),
+                        (int) config->DlssNrNativeDepthHeight.value_or_default() };
+
+        if (ImGui::InputInt2("Depth size (0 = automatic)##depthsize", size))
+        {
+            config->DlssNrNativeDepthWidth = (uint32_t) (std::max) (0, size[0]);
+            config->DlssNrNativeDepthHeight = (uint32_t) (std::max) (0, size[1]);
+        }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", "Only a depth buffer of this size is picked (0 = any width or height). For a game "
+                                    "whose scene depth is not found; pick the scene's, not a shadow map's.");
+
+        float scale[2] = { config->DlssNrNativeDepthScaleX.value_or_default(),
+                           config->DlssNrNativeDepthScaleY.value_or_default() };
+
+        if (ImGui::DragFloat2("Depth scale X/Y##depthscale", scale, 0.001f, 0.01f, 10.0f, "%.4f"))
+        {
+            config->DlssNrNativeDepthScaleX = std::clamp(scale[0], 0.01f, 10.0f);
+            config->DlssNrNativeDepthScaleY = std::clamp(scale[1], 0.01f, 10.0f);
+        }
+
+        float offset[2] = { config->DlssNrNativeDepthOffsetX.value_or_default(),
+                            config->DlssNrNativeDepthOffsetY.value_or_default() };
+
+        if (ImGui::DragFloat2("Depth offset X/Y (pixels)##depthoffset", offset, 1.0f, -10000.0f, 10000.0f, "%.1f"))
+        {
+            config->DlssNrNativeDepthOffsetX = std::clamp(offset[0], -10000.0f, 10000.0f);
+            config->DlssNrNativeDepthOffsetY = std::clamp(offset[1], -10000.0f, 10000.0f);
+        }
+
+        if (ImGui::Button("Reset alignment##depthalignreset"))
+        {
+            config->DlssNrNativeDepthScaleX = 1.0f;
+            config->DlssNrNativeDepthScaleY = 1.0f;
+            config->DlssNrNativeDepthOffsetX = 0.0f;
+            config->DlssNrNativeDepthOffsetY = 0.0f;
+        }
+
+        ImGui::TextWrapped(
+            "The alignment moves the depth the motion estimate and Neural Rendering get (none at 1, 1, 0, "
+            "0). Check it in the \"Normals / depth\" view.");
+
+        bool linearize = config->DlssNrNativeDepthLinearize.value_or_default();
+
+        if (ImGui::Checkbox("Linearized depth in the view##depthlinear", &linearize))
+            config->DlssNrNativeDepthLinearize = linearize;
+
+        float multiplier = config->DlssNrNativeDepthMultiplier.value_or_default();
+
+        if (ImGui::DragFloat("View multiplier##depthmultiply", &multiplier, 0.1f, 0.0f, 1000000.0f, "%.3f"))
+            config->DlssNrNativeDepthMultiplier = (std::max) (0.0f, multiplier);
+
+        float farPlane = config->DlssNrNativeDepthFarPlane.value_or_default();
+
+        if (ImGui::DragFloat("View far plane##depthfar", &farPlane, 1.0f, 1.001f, 1000000.0f, "%.3f"))
+            config->DlssNrNativeDepthFarPlane = (std::max) (1.001f, farPlane);
+
+        ImGui::TextDisabled("The view settings change only the \"Normals / depth\" view, not the depth used.");
+        ImGui::TreePop();
     }
 
     if (ImGui::IsItemHovered())

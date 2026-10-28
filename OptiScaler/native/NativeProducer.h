@@ -9,6 +9,7 @@
 // upscaler backend through native::VirtualUpscalerDriver, in the game; a stand-in in tests/nr_native_producer_gpu.cpp), so
 // this class and everything it uses build and run without either.
 
+#include "DepthAlign_Dx12.h"
 #include "FrameContract.h"
 
 #include "../motion/OpticalFlow_Dx12.h"
@@ -76,6 +77,10 @@ class NativeProducer
         bool apply = false;           // run the consumer (needs flow; depth is optional); off: flow and trust mask only
         bool flowPreview = false;     // also draw the flow picture for the menu
         float previewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
+        int previewView = 0;           // which debug view (native/FlowDebugViews.h)
+        // The depth alignment (DepthAlign_Dx12.h): XY scale, XY offset in the picture's pixels. Anything but the
+        // identity changes the depth the flow, the trust mask and the consumer get; a change resets the histories.
+        float depthTransform[4] = { 1.0f, 1.0f, 0.0f, 0.0f };
     };
 
     struct Result
@@ -105,7 +110,7 @@ class NativeProducer
 
     // One frame. `queue` is a direct queue of Device(); the work goes onto it after waiting for input.ready, and output.done is
     // the point it finishes at. The picture is processed in place.
-    Result Run(ID3D12CommandQueue* queue, const FrameInput& input, const Options& options, const ApplyFn& apply,
+    Result Run(ID3D12CommandQueue* queue, const FrameInput& sourceInput, const Options& options, const ApplyFn& apply,
                FrameOutput& output);
 
     // Forget the previous frames (the game calls an upscaler, a resolution change, a scene cut).
@@ -142,6 +147,8 @@ class NativeProducer
     uint32_t _width = 0;
     uint32_t _height = 0;
     bool _previewReady = false;
+    DepthAlignDx12 _depthAlign;
+    float _depthTransform[4] = { 1.0f, 1.0f, 0.0f, 0.0f }; // the alignment in effect
     std::string _error;
 };
 

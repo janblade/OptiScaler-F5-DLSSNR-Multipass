@@ -6,7 +6,10 @@
 //     when apply is off,
 //   - the picture is left exactly as it was (bit for bit) when NR does nothing, whatever state it came in,
 //   - the output's fence point completes, and a hard cut is reported and makes the next NR call a reset,
-//   - a cut hint from the adapter restarts the flow.
+//   - a cut hint from the adapter restarts the flow,
+//   - the debug views (PR #232): nothing is made for them until one is asked for; each of the seven draws a picture;
+//     the depth view's look (multiplier, linearization) leaves the depth the consumer gets alone, and the depth
+//     alignment moves that depth the way the menu says (DepthAlign_Dx12.h).
 //
 //   vcvars64, then from the repo root:
 //   cl /std:c++20 /EHsc /O2 tests\nr_native_producer_gpu.cpp OptiScaler\native\NativeProducer.cpp
@@ -313,6 +316,37 @@ std::vector<uint8_t> ReadRgba(Gpu& gpu, ID3D12Resource* tex, D3D12_RESOURCE_STAT
     return out;
 }
 
+// An R32_FLOAT texture in the given state as floats, tightly packed.
+std::vector<float> ReadFloats(Gpu& gpu, ID3D12Resource* tex, D3D12_RESOURCE_STATES state)
+{
+    const auto desc = tex->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+    UINT64 total = 0;
+    gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+    auto readback = gpu.Buffer(total, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    Change(gpu, tex, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+    dst.pResource = readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = tex;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    Change(gpu, tex, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+    gpu.Submit();
+
+    std::vector<float> out((size_t) desc.Width * desc.Height);
+    uint8_t* data = nullptr;
+    readback->Map(0, nullptr, (void**) &data);
+    for (uint32_t y = 0; y < desc.Height; ++y)
+        memcpy(&out[(size_t) y * desc.Width], data + (size_t) y * fp.Footprint.RowPitch, (size_t) desc.Width * 4);
+    readback->Unmap(0, nullptr);
+    return out;
+}
+
 bool Check(const char* what, bool value)
 {
     printf("  %-80s %s\n", what, value ? "ok" : "FAIL");
@@ -354,6 +388,7 @@ int main()
     }
 
     NrCalls nr;
+    constexpr D3D12_RESOURCE_STATES kReadState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     const native::NativeProducer::ApplyFn applyNr = [&](ID3D12GraphicsCommandList*, const native::NativeFrame& f)
     {
         ++nr.count;
@@ -372,6 +407,10 @@ int main()
     int extraCopies = 0; // more copies of the depth than the one: a game that splits the scene over several lists
 
     // One frame through the contract: a picture of the scene (in the state given), with or without depth.
+    native::NativeProducer::Options extra; // the debug view and the depth alignment, for the frames below
+    std::vector<float> guideDepth;          // the consumer's depth guide of the last frame, when asked for
+    bool readGuideDepth = false;
+
     auto frame = [&](const Scene& s, D3D12_RESOURCE_STATES state, bool withDepth, bool applyOn, bool cutHint,
                      native::FrameOutput& output, std::vector<uint8_t>* before, std::vector<uint8_t>* after)
     {
@@ -409,7 +448,7 @@ int main()
             input.depthReversed = true;
         }
 
-        native::NativeProducer::Options options;
+        native::NativeProducer::Options options = extra;
         options.apply = applyOn;
 
         const auto result = producer.Run(gpu.queue.Get(), input, options, applyNr, output);
@@ -424,10 +463,15 @@ int main()
         if (after)
             *after = ReadRgba(gpu, picture.Get(), state);
 
+        if (readGuideDepth)
+            guideDepth = producer.Trust()->GuideDepth() != nullptr
+                             ? ReadFloats(gpu, producer.Trust()->GuideDepth(), kReadState)
+                             : std::vector<float> {};
+
         return result;
     };
 
-    const D3D12_RESOURCE_STATES kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const D3D12_RESOURCE_STATES kRead = kReadState;
     const D3D12_RESOURCE_STATES kPresent = D3D12_RESOURCE_STATE_PRESENT;
     native::FrameOutput output;
 
@@ -449,6 +493,8 @@ int main()
         ok &= Check("... and the picture's typed format", nr.format == DXGI_FORMAT_R8G8B8A8_UNORM);
         ok &= Check("the output reports it was processed", output.processed && output.done.fence != nullptr);
         ok &= Check("the picture is bit-identical after (NR did nothing)", before == after);
+        ok &= Check("no debug view asked for: no picture made for one",
+                    producer.Flow()->Preview() == nullptr && !producer.PreviewReady());
     }
 
     printf("picture in the present state (a back buffer)\n");
@@ -570,6 +616,92 @@ int main()
 
         const auto r = frame(Scene { 7, 330, 20.0f, 5.0f }, kRead, true, true, true, output, nullptr, nullptr);
         ok &= Check("the flow restarts: no flow on that frame", !r.flowValid);
+    }
+
+    printf("the debug views\n");
+    {
+        static const char* names[] = { "arrows", "normals / depth", "final flow", "confidence", "channels",
+                                       "history rejection", "still age" };
+        extra.flowPreview = true;
+
+        for (int view = 0; view < 7; ++view)
+        {
+            extra.previewView = view;
+            native::FrameOutput viewOutput;
+            frame(Scene { 7, 300.0f + 8.0f * view, 20.0f, 5.0f }, kRead, true, true, false, viewOutput, nullptr,
+                  nullptr);
+            ID3D12Resource* picture = producer.Flow()->Preview();
+            bool drawn = picture != nullptr && producer.PreviewReady();
+            int spread = 0;
+
+            if (drawn)
+            {
+                const auto desc = picture->GetDesc();
+                const bool full = desc.Width == kWidth && desc.Height == kHeight;
+                drawn = view == 1 ? full : (desc.Width == (kWidth + 1) / 2 && desc.Height == (kHeight + 1) / 2);
+                const auto rgba = ReadRgba(gpu, picture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                int lo = 255, hi = 0;
+
+                // Below the key's two lines: the view itself.
+                for (size_t i = (size_t) desc.Width * 40 * 4; i + 3 < rgba.size(); i += 4 * 7)
+                {
+                    const int value = (int) rgba[i] + rgba[i + 1] + rgba[i + 2];
+                    lo = (std::min)(lo, value);
+                    hi = (std::max)(hi, value);
+                }
+
+                spread = hi - lo;
+            }
+
+            char line[128];
+            snprintf(line, sizeof(line), "view %d (%s): drawn at its size, not one flat colour (spread %d)", view,
+                     names[view], spread);
+            ok &= Check(line, drawn && spread >= 20);
+        }
+
+        extra.flowPreview = false;
+    }
+
+    printf("the depth view's look and the depth alignment\n");
+    {
+        readGuideDepth = true;
+        Scene shifted { 7, 300, 20.0f, 5.0f };
+        shifted.depthShift = 40.0f; // the depth's square is 40 pixels right of the picture's
+
+        // The look of the depth view is the view's alone.
+        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        const auto plain = guideDepth;
+        auto& look = producer.Flow()->DebugTuning();
+        look.depthMultiplier = 50.0f;
+        look.depthLinearize = false;
+        extra.flowPreview = true;
+        extra.previewView = 1;
+        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        ok &= Check("the depth view's multiplier and linearization leave the consumer's depth as it was",
+                    !plain.empty() && guideDepth == plain);
+        look = OpticalFlowDx12::DebugSettings {};
+        extra.flowPreview = false;
+
+        // Inside the picture's square but left of the depth's, and right of the picture's square but inside the
+        // depth's: without the alignment the first is background and the second the square; moved 40 pixels back,
+        // the other way round.
+        const size_t inPicture = (size_t) 360 * kWidth + 300 + 20;
+        const size_t pastPicture = (size_t) 360 * kWidth + 300 + 220;
+        ok &= Check("without the alignment the depth's square is off the picture's",
+                    !plain.empty() && plain[pastPicture] > plain[inPicture]);
+
+        // A new alignment resets the histories: the frame after it is the first with flow (and guides) again.
+        extra.depthTransform[2] = -40.0f; // the depth is read 40 pixels to the right
+        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        ok &= Check("with an X offset of -40 the consumer's depth lines up with the picture",
+                    !guideDepth.empty() && guideDepth[inPicture] > guideDepth[pastPicture]);
+
+        extra.depthTransform[2] = 0.0f;
+        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        ok &= Check("back to no alignment: the depth as the game gave it", guideDepth == plain);
+        readGuideDepth = false;
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

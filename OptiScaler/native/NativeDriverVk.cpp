@@ -2,6 +2,8 @@
 
 #include "NativeDriverVk.h"
 
+#include <native/DebugPreviewVk.h>
+#include <native/FlowDiagnosticUi.h>
 #include <native/NativeDriver.h>
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
@@ -11,12 +13,16 @@
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <imgui/imgui.h>
+#include <imgui/imgui_impl_vulkan.h>
 
+#include <cstring>
 #include <mutex>
 
 // The Vulkan counterpart of native/NativeDriverDx11.cpp: the same shared frame step (native::NativeDriver), a different
-// adapter (native::VkFrameSource). No flow/trust pictures: they are D3D12 textures and the Vulkan menu renders with
-// ImGui_ImplVulkan. The status line and the flow tuning work the same as on the other APIs.
+// adapter (native::VkFrameSource). The debug view is a D3D12 texture; the Vulkan menu (ImGui_ImplVulkan) shows a copy
+// of it (native/DebugPreviewVk.h), made in the menu's present (menu/menu_overlay_vk.cpp), which runs after this
+// driver's OnPresent. Under the bridge's D3D12 swap chain the menu draws with D3D12 on another device: no picture
+// there.
 
 namespace
 {
@@ -24,6 +30,23 @@ namespace
 native::NativeDriver g_driver("Native motion (Vulkan)", ", on a private D3D12 device on the Vulkan device's adapter");
 native::VkFrameSource g_source;
 std::mutex g_runMutex;
+native::FlowDiagnosticUi g_ui;
+native::DebugPreviewVk g_preview;
+
+bool VulkanMenu()
+{
+    const char* renderer = ImGui::GetIO().BackendRendererName;
+    return renderer != nullptr && std::strcmp(renderer, "imgui_impl_vulkan") == 0;
+}
+
+// The debug view's picture for the Vulkan menu, or 0 (another API draws the menu, or the copy could not be made).
+ImTextureID FlowTexture(ID3D12Resource* texture)
+{
+    if (!VulkanMenu())
+        return 0;
+
+    return (ImTextureID) g_preview.Export(g_source.Queue12(), texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
 
 // What the present waits on once the frame was processed: VkPresentInfoKHR keeps a pointer to it.
 VkSemaphore g_presentWait = VK_NULL_HANDLE;
@@ -101,7 +124,7 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
 
     if (producing)
     {
-        g_driver.RunFrame(g_source, false);
+        g_driver.RunFrame(g_source, g_ui.TakeRequest(), g_ui.View());
     }
     else
     {
@@ -245,6 +268,13 @@ void DrawAdvancedUi()
 {
     g_driver.DrawFlowTuning();
 
+    g_ui.DrawAdvanced(g_driver, FlowTexture,
+                      VulkanMenu() ? nullptr
+                                   : "The debug view's picture is not shown while frame generation draws the menu.");
+
+    if (VulkanMenu() && !g_preview.Error().empty())
+        ImGui::TextDisabled("%s", g_preview.Error().c_str());
+
     if (!Config::Instance()->DlssNrNativeDebugView.value_or_default() ||
         g_driver.GetStatus() != native::NativeDriver::Status::Running)
         return;
@@ -253,5 +283,30 @@ void DrawAdvancedUi()
                         g_driver.TrustRecent() ? "running" : "waiting for the motion estimate",
                         (unsigned long long) g_driver.Cuts());
 }
+
+bool ExpandedPreviewVisible() { return g_ui.Expanded(); }
+
+void DrawExpandedPreview() { g_ui.DrawExpanded(g_driver, FlowTexture); }
+
+bool DebugViewOn()
+{
+    return Config::Instance()->DlssNrNativeMotion.value_or_default() &&
+           Config::Instance()->DlssNrNativeDebugView.value_or_default();
+}
+
+void BeginDebugFrame(VkDevice device, VkPhysicalDevice physical, uint32_t family, uint32_t slot)
+{
+    g_preview.BeginFrame(device, physical, family, slot, ImGui_ImplVulkan_AddTexture, ImGui_ImplVulkan_RemoveTexture);
+}
+
+void RecordDebugTransfers(VkCommandBuffer commands) { g_preview.RecordTransfers(commands); }
+
+VkSemaphore DebugWaitSemaphore() { return g_preview.WaitSemaphore(); }
+
+uint64_t DebugWaitValue() { return g_preview.WaitValue(); }
+
+void EndDebugFrame() { g_preview.EndFrame(); }
+
+void ReleaseDebugViews(bool backendUp) { g_preview.Reset(backendUp); }
 
 } // namespace NativeMotionVk

@@ -575,9 +575,10 @@ void OnPresent(IDXGISwapChain* swapChain)
     }
 
     g_core.BeginPresent(desc.BufferDesc.Width, desc.BufferDesc.Height);
-    const bool stoodDown =
-        g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height,
-                          Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default());
+    const bool stoodDown = g_core.EndPresent(desc.BufferDesc.Width, desc.BufferDesc.Height,
+                                             Config::Instance()->DlssNrNativeDepthWarmupFrames.value_or_default(),
+                                             Config::Instance()->DlssNrNativeDepthWidth.value_or_default(),
+                                             Config::Instance()->DlssNrNativeDepthHeight.value_or_default());
 
     // Self-diagnosis: a pick that never gets a copy despite wanting one is otherwise invisible until someone asks why the trust
     // mask never runs.

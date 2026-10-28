@@ -38,4 +38,14 @@ bool NrOnlyRunning();
 // are set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();
 
+// The debug view's enlarged or full screen picture (see NativeMotionDx12's): whether it is up, and its window.
+bool ExpandedPreviewVisible();
+void DrawExpandedPreview();
+
+// The D3D11 menu's frame (menu/menu_overlay_dx.cpp): before it is drawn, after its draw was submitted, and when its
+// device goes away (the debug view's shared copies are let go).
+void BeginDebugFrame(ID3D11Device* device);
+void EndDebugFrame();
+void ReleaseDebugViews();
+
 } // namespace NativeMotionDx11

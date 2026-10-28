@@ -2,6 +2,7 @@
 #include "NativeProducer.h"
 
 #include <algorithm>
+#include <iterator>
 
 namespace native
 {
@@ -129,9 +130,11 @@ void NativeProducer::Reset()
         _trust->Reset();
 }
 
-NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const FrameInput& input, const Options& options,
-                                           const ApplyFn& apply, FrameOutput& output)
+NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const FrameInput& sourceInput,
+                                           const Options& options, const ApplyFn& apply, FrameOutput& output)
 {
+    // `input` is what the frame runs on: the adapter's, with the depth replaced when the alignment moves it.
+    FrameInput input = sourceInput;
     Result result;
     output = FrameOutput {};
 
@@ -163,6 +166,17 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     // The adapter knows this frame does not continue the last one (a loading screen, a resolution change).
     if (input.cutHint)
         Reset();
+
+    // A new depth alignment: the trust mask's history was built on the old depth, so it starts over (its first mask
+    // distrusts the whole picture, which the consumer takes as a soft reset). The flow's history is motion, not depth:
+    // it carries on, so dragging the alignment in the menu neither drops Neural Rendering nor blanks the depth view.
+    if (!std::equal(std::begin(_depthTransform), std::end(_depthTransform), std::begin(options.depthTransform)))
+    {
+        std::copy(std::begin(options.depthTransform), std::end(options.depthTransform), std::begin(_depthTransform));
+
+        if (_trust)
+            _trust->Reset();
+    }
 
     // The slot's allocator is reset below: while the GPU may still run its last list that would break that list, so a
     // wait that does not finish skips this frame.
@@ -227,6 +241,26 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     if (needsBarrier)
         list->ResourceBarrier(1, &barrier);
 
+    // The depth alignment, on the one copy of the whole scene (several copies each hold part of it): from here on the
+    // frame's depth is the aligned one. Should it fail, the frame runs without depth rather than misaligned.
+    bool depthAligned = false;
+
+    if (DepthAlignDx12::Moves(options.depthTransform) && input.depthCount == 1 && input.depth[0] != nullptr &&
+        input.depthView != DXGI_FORMAT_UNKNOWN)
+    {
+        if (ID3D12Resource* aligned = _depthAlign.Run(_device, list, input.depth[0], input.depthView, input.width,
+                                                      input.height, slot, options.depthTransform))
+        {
+            depthAligned = true;
+            input.depth[0] = aligned;
+            input.depthView = DXGI_FORMAT_R32_FLOAT;
+            input.depthWidth = input.width;
+            input.depthHeight = input.height;
+        }
+        else
+            input.depthCount = 0;
+    }
+
     // The flow's match sees where surfaces end through the depth, when it is one copy of the whole scene (several
     // copies each hold part of it, and one alone would show edges that are not there).
     const bool flowDepth = input.depthCount == 1 && input.depth[0] != nullptr && input.depthView != DXGI_FORMAT_UNKNOWN;
@@ -273,9 +307,6 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     if (recorded && _flow->FlowValid())
     {
         result.flowValid = true;
-
-        if (options.flowPreview)
-            _previewReady = _flow->Visualise(list, options.previewMaxSpeed) || _previewReady;
 
         // The trust mask uses the scene's depth as the adapter copied it this frame; without any it runs on flow and luma.
         TrustMaskDx12::Inputs in;
@@ -327,6 +358,40 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         }
     }
 
+    // The consumer's guides; also for the debug views that show the guide motion (arrows, final flow), with the
+    // consumer off too, so they show what it would get.
+    const bool guideView = options.flowPreview && (options.previewView == 0 || options.previewView == 2);
+    const bool guidesBuilt = nativeReady && ((options.apply && apply) || guideView) &&
+                             _trust->BuildGuides(list, nativeInputs, input.width, input.height);
+
+    // The menu's debug view, while the picture is still readable by a compute shader. The depth view shows the game's
+    // depth through the alignment, the others what this frame ran on.
+    // The depth view reads no flow: it draws on a frame without one too (the first, or after a reset).
+    if ((result.flowValid || (recorded && options.previewView == 1)) && options.flowPreview)
+    {
+        OpticalFlowDx12::PreviewInputs view;
+        view.view = options.previewView;
+        view.maxSpeed = options.previewMaxSpeed;
+        view.picture = input.picture;
+        view.pictureFormat = input.pictureFormat;
+        const bool rawDepth = options.previewView == 1;
+        const FrameInput& depthFrom = rawDepth ? sourceInput : input;
+
+        if (depthFrom.depthCount > 0 && depthFrom.depth[0] != nullptr)
+        {
+            view.depth = depthFrom.depth[0];
+            view.depthFormat = depthFrom.depthView;
+        }
+
+        view.depthReversed = input.depthReversed;
+        // The alignment as the estimate got it: none where the pass did not run (several depth copies, or it failed).
+        view.depthTransform = rawDepth && depthAligned ? options.depthTransform : nullptr;
+        view.guideMotion = guidesBuilt ? _trust->GuideMotion() : nullptr;
+        view.mask = result.trustRan ? _trust->Mask() : nullptr;
+        result.previewDrawn = _flow->Visualise(list, view);
+        _previewReady = result.previewDrawn || _previewReady;
+    }
+
     // Back to the state the adapter expects the picture in, then the consumer on it with the guides, on this same list.
     if (needsBarrier)
     {
@@ -336,7 +401,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     if (nativeReady && options.apply && apply)
     {
-        if (_trust->BuildGuides(list, nativeInputs, input.width, input.height))
+        if (guidesBuilt)
         {
             NativeFrame frame;
             frame.color = input.picture;

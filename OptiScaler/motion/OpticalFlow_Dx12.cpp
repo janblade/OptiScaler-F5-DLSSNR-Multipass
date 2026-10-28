@@ -2,8 +2,10 @@
 #include "OpticalFlow_Dx12.h"
 
 #include "../native/F5LowShaderBytecode.h"
+#include "../native/FlowDebugViews.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace
@@ -130,7 +132,10 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
            Entry { "Smooth", &_smooth }, Entry { "Visualise", &_visualise }, Entry { "Global", &_global },
            Entry { "CameraModel", &_cameraModel } })
     {
-        const auto* code = Compile(entry.name, &_error);
+        // The debug views are their own source (FlowDebug_Hlsl.h), with their own constants, on the same root
+        // signature.
+        const bool debugView = entry.target == &_visualise;
+        const auto* code = Compile(entry.name, &_error, debugView ? "FlowDebug" : "OpticalFlow");
 
         if (code == nullptr)
             return false;
@@ -255,6 +260,8 @@ void OpticalFlowDx12::ReleaseTextures()
     release(_cameraFlow);
     release(_flow);
     release(_preview);
+    release(_depthPreview);
+    _previewShown = nullptr;
 
     for (Tex& age : _age)
         release(age);
@@ -301,9 +308,7 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
     return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
            CreateTexture(_globalFlow, 1, 1, kFlowFormat, L"OpticalFlow_Global") &&
            CreateTexture(_cameraFlow, 4, 1, kFlowFormat, L"OpticalFlow_CameraModel") &&
-           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
-           CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM,
-                         L"OpticalFlow_Preview");
+           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow");
 }
 
 void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state)
@@ -589,6 +594,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         // The camera model: an affine fit of this frame's median flow, which the smoothing then offers to the pixels
         // whose own match is weak (see Settings::cameraPrior).
         const bool cameraModel = _settings.cameraPrior && _settings.globalCandidate && _settings.smoothRadius > 0;
+        _cameraModelRan = cameraModel;
 
         if (cameraModel)
         {
@@ -668,23 +674,107 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     return true;
 }
 
-bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, float maxSpeed)
+bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, const PreviewInputs& inputs)
 {
-    if (!_flowValid || _preview.resource == nullptr || list == nullptr)
+    const int view = std::clamp(inputs.view, 0, native::FlowDebugViews::kCount - 1);
+
+    // The depth view reads no flow; the others need this frame's. All need the textures a Dispatch made.
+    if ((!_flowValid && view != 1) || _flow.resource == nullptr || list == nullptr || _visualise == nullptr)
+        return false;
+
+    // The FlowDebug cbuffer (FlowDebug_Hlsl.h), passed through the flow's 32 root constants: eight rows of four.
+    struct ViewConstants
+    {
+        uint32_t sizeX, sizeY, frameX, frameY;
+        uint32_t view, hasPicture, hasGuide, hasCameraModel;
+        uint32_t hasAge, stillFrames, hasDepth, reversed;
+        float maxSpeed, arrowSpacing, arrowGain, arrowMinimum;
+        float arrowThickness, arrowOpacity, gridOpacity;
+        uint32_t depthLinearize;
+        float depthScale[2], depthOffset[2];
+        float depthMultiplier, depthFarPlane;
+        uint32_t padding[6];
+    };
+    static_assert(sizeof(ViewConstants) == sizeof(Constants), "the views use the flow's root constants");
+
+    const bool depthView = view == 1;
+    Tex& preview = depthView ? _depthPreview : _preview;
+
+    if (preview.resource == nullptr &&
+        !CreateTexture(preview, depthView ? _width : _flow.width, depthView ? _height : _flow.height,
+                       DXGI_FORMAT_R8G8B8A8_UNORM, depthView ? L"OpticalFlow_DepthPreview" : L"OpticalFlow_Preview"))
         return false;
 
     // The flow rests in the combined read state; the pass wants the non-pixel one it was written to.
     Transition(list, _flow, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-    Constants constants {};
-    constants.sizeX = _preview.width;
-    constants.sizeY = _preview.height;
-    constants.scale = maxSpeed;
-    Pass(list, _visualise, _flow.resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN,
-         _preview, DXGI_FORMAT_R8G8B8A8_UNORM, constants);
+    ViewConstants v {};
+    v.sizeX = preview.width;
+    v.sizeY = preview.height;
+    v.frameX = _width;
+    v.frameY = _height;
+    v.view = (uint32_t) view;
+    v.maxSpeed = inputs.maxSpeed;
+    v.arrowSpacing = std::clamp(_debugSettings.spacing, 16.0f, 128.0f);
+    v.arrowGain = std::clamp(_debugSettings.gain, 0.25f, 8.0f);
+    v.arrowMinimum = std::clamp(_debugSettings.minimumMotion, 0.05f, 4.0f);
+    v.arrowThickness = std::clamp(_debugSettings.thickness, 0.5f, 3.0f);
+    v.arrowOpacity = std::clamp(_debugSettings.opacity, 0.0f, 1.0f);
+    v.gridOpacity = std::clamp(_debugSettings.gridOpacity, 0.0f, 0.5f);
+    v.stillFrames = (uint32_t) std::clamp(_settings.stillFrames, 0, 255);
+
+    // The picture behind the arrows (view 0) and the confidence colours (view 3).
+    const bool picture = (view == 0 || view == 3) && _debugSettings.background && inputs.picture != nullptr &&
+                         inputs.pictureFormat != DXGI_FORMAT_UNKNOWN;
+    v.hasPicture = picture ? 1 : 0;
+
+    // Views 0 and 2 show the guide motion, 3 to 5 read the trust mask; without one they draw from the flow alone.
+    ID3D12Resource* guide = (view == 0 || view == 2)   ? inputs.guideMotion
+                            : (view >= 3 && view <= 5) ? inputs.mask
+                                                       : nullptr;
+    const DXGI_FORMAT guideFormat = (view == 0 || view == 2) ? kFlowFormat : DXGI_FORMAT_R8_UNORM;
+    v.hasGuide = guide != nullptr ? 1 : 0;
+    v.hasCameraModel = (view == 3 && _cameraModelRan) ? 1 : 0;
+
+    // The still age this frame wrote is the one Dispatch just made the last (see the end of Dispatch).
+    const bool age = view == 6 && _ageValid;
+    v.hasAge = age ? 1 : 0;
+
+    const bool depth = depthView && inputs.depth != nullptr && inputs.depthFormat != DXGI_FORMAT_UNKNOWN;
+    v.hasDepth = depth ? 1 : 0;
+    v.reversed = inputs.depthReversed ? 1 : 0;
+    v.depthScale[0] = v.depthScale[1] = 1.0f;
+    v.depthMultiplier = _debugSettings.depthMultiplier;
+    v.depthFarPlane = (std::max) (_debugSettings.depthFarPlane, 1.001f);
+    v.depthLinearize = _debugSettings.depthLinearize ? 1 : 0;
+
+    // The alignment as the producer's pass applies it (native/DepthAlign_Dx12.h): the depth's uv is uv / scale +
+    // offset.
+    if (inputs.depthTransform != nullptr)
+    {
+        for (int i = 0; i < 2; ++i)
+            v.depthScale[i] =
+                std::isfinite(inputs.depthTransform[i]) ? (std::max) (inputs.depthTransform[i], 0.01f) : 1.0f;
+
+        v.depthOffset[0] = std::isfinite(inputs.depthTransform[2]) ? -inputs.depthTransform[2] / (float) _width : 0.0f;
+        v.depthOffset[1] = std::isfinite(inputs.depthTransform[3]) ? inputs.depthTransform[3] / (float) _height : 0.0f;
+    }
+
+    Constants constants;
+    std::memcpy(&constants, &v, sizeof(constants));
+
+    _passAgeIn = age ? _age[1 - _current].resource : nullptr;
+    Pass(list, _visualise, _flow.resource, kFlowFormat, picture ? inputs.picture : nullptr,
+         picture ? inputs.pictureFormat : DXGI_FORMAT_UNKNOWN, _pyramid[1 - _current][0].resource, kLumaFormat, preview,
+         DXGI_FORMAT_R8G8B8A8_UNORM, constants, depth ? inputs.depth : nullptr,
+         depth ? inputs.depthFormat : DXGI_FORMAT_UNKNOWN, _pyramid[_current][0].resource, kLumaFormat, guide,
+         guide != nullptr ? guideFormat : DXGI_FORMAT_UNKNOWN, v.hasCameraModel != 0 ? _cameraFlow.resource : nullptr,
+         kFlowFormat);
+    _passAgeIn = nullptr;
 
     Transition(list, _flow,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Transition(list, _preview, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Transition(list, preview, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    _previewShown = &preview;
     return true;
 }

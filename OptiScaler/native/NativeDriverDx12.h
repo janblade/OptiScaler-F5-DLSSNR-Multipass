@@ -36,4 +36,9 @@ bool NrOnlyRunning();
 // the menu's mode selector (dlssnr/DlssNr_NativeMode.h). Call inside the menu's Advanced section.
 void DrawAdvancedUi();
 
+// The debug view's enlarged or full screen picture (native/FlowDiagnosticUi.h): whether it is up, so the menu draws a
+// frame for it while hidden, and its window, drawn once per menu frame after the main menu window.
+bool ExpandedPreviewVisible();
+void DrawExpandedPreview();
+
 } // namespace NativeMotionDx12

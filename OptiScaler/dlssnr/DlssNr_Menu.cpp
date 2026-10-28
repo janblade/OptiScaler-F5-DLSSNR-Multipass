@@ -1672,8 +1672,10 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
             config->DlssNrNativeDebugView = pictures;
 
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Shows the motion estimate and trust mask on this page (small GPU cost, D3D12). "
-                                    "The depth picture also needs \"Show the picked depth here\" and a restart.");
+            ImGui::SetTooltip("%s", "Shows the debug views (motion arrows, depth, final flow, confidence, history "
+                                    "rejection, still age) on this page, on D3D12, D3D11 and Vulkan; on D3D12 also the "
+                                    "trust mask and the picked depth (which needs \"Show the picked depth here\" and "
+                                    "a restart). Small GPU cost while shown.");
 
         switch (CurrentNativeApi())
         {

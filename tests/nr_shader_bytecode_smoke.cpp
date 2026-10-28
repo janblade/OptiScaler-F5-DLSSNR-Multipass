@@ -49,6 +49,7 @@ const Item kItems[] = {
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Smooth", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Visualise", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Global", "" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "CameraModel", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "1" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "2" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "3" },

@@ -119,7 +119,9 @@ class NativeProducer
   private:
     static constexpr uint32_t kRing = 3;
 
-    void WaitFor(UINT64 value);
+    // Waits (at most a second) until the GPU has passed `value`. False when it has not: timed out, or the device is
+    // gone (a removed device's fence reads UINT64_MAX, which is not the work finishing).
+    bool WaitFor(UINT64 value);
 
     std::unique_ptr<OpticalFlowDx12> _flow;
     std::unique_ptr<TrustMaskDx12> _trust;

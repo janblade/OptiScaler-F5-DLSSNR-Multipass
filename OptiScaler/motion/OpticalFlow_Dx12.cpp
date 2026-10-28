@@ -10,7 +10,10 @@ namespace
 {
 
 constexpr uint32_t kDescriptorsPerPass = 10; // eight SRVs and two UAVs
-constexpr uint32_t kPassesPerFrame = 1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1;
+// luma, the downsampling, a match per level, median, camera model, smoothing, global, visualise; and 2 to spare (the
+// scene-cut pair counted here has its own heap, in SceneCut_Dx12)
+constexpr uint32_t kPassesPerFrame =
+    1 + 2 + (OpticalFlowDx12::kLevels - 1) + OpticalFlowDx12::kLevels + 1 + 1 + 1 + 1 + 1;
 constexpr uint32_t kFramesInFlight = 8;
 constexpr DXGI_FORMAT kLumaFormat = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFlowFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; // typed UAV stores of this are required of every device
@@ -37,7 +40,7 @@ OpticalFlowDx12::~OpticalFlowDx12()
     ReleaseTextures();
 
     for (ID3D12PipelineState** pso : { &_luma, &_lumaSdr, &_lumaScRgb, &_lumaPq, &_down, &_match, &_median, &_smooth,
-                                       &_visualise, &_global })
+                                       &_visualise, &_global, &_cameraModel })
         if (*pso != nullptr)
             (*pso)->Release();
 
@@ -122,9 +125,10 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
         ID3D12PipelineState** target;
     };
 
-    for (const Entry& entry : { Entry { "Luma", &_luma }, Entry { "Down", &_down }, Entry { "Match", &_match },
-                                Entry { "Median", &_median }, Entry { "Smooth", &_smooth },
-                                Entry { "Visualise", &_visualise }, Entry { "Global", &_global } })
+    for (const Entry& entry :
+         { Entry { "Luma", &_luma }, Entry { "Down", &_down }, Entry { "Match", &_match }, Entry { "Median", &_median },
+           Entry { "Smooth", &_smooth }, Entry { "Visualise", &_visualise }, Entry { "Global", &_global },
+           Entry { "CameraModel", &_cameraModel } })
     {
         const auto* code = Compile(entry.name, &_error);
 
@@ -193,6 +197,7 @@ bool OpticalFlowDx12::Init(ID3D12Device* device)
         return false;
     }
 
+    _cachedViews.assign(heap.NumDescriptors, CachedView {});
     _descriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     return true;
 }
@@ -219,6 +224,7 @@ bool OpticalFlowDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, D
                                                 IID_PPV_ARGS(&tex.resource))))
         return false;
 
+    _ownedResources.insert(tex.resource);
     tex.resource->SetName(name);
     tex.width = width;
     tex.height = height;
@@ -227,6 +233,8 @@ bool OpticalFlowDx12::CreateTexture(Tex& tex, uint32_t width, uint32_t height, D
 
 void OpticalFlowDx12::ReleaseTextures()
 {
+    std::fill(_cachedViews.begin(), _cachedViews.end(), CachedView {});
+    _ownedResources.clear();
     auto release = [](Tex& tex)
     {
         if (tex.resource != nullptr)
@@ -244,6 +252,7 @@ void OpticalFlowDx12::ReleaseTextures()
 
     release(_flowMedian);
     release(_globalFlow);
+    release(_cameraFlow);
     release(_flow);
     release(_preview);
 
@@ -291,6 +300,7 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
 
     return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
            CreateTexture(_globalFlow, 1, 1, kFlowFormat, L"OpticalFlow_Global") &&
+           CreateTexture(_cameraFlow, 4, 1, kFlowFormat, L"OpticalFlow_CameraModel") &&
            CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
            CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM,
                          L"OpticalFlow_Preview");
@@ -346,6 +356,17 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
                                      src6 != nullptr ? format6 : format0,
                                      _passAgeIn != nullptr ? kAgeFormat : format0 };
 
+    // A hit skips only writing the descriptor, never a read, transition or dispatch.
+    auto needsView = [&](UINT slot, ID3D12Resource* resource, DXGI_FORMAT format, bool unordered)
+    {
+        auto& cached = _cachedViews[slot];
+        const bool owned = resource == nullptr || _ownedResources.count(resource) != 0;
+        if (owned && cached.valid && cached.resource == resource && cached.format == format &&
+            cached.unordered == unordered)
+            return false;
+        cached = { resource, format, unordered, owned };
+        return true;
+    };
     for (int i = 0; i < 8; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
@@ -353,21 +374,24 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = 1;
-        _device->CreateShaderResourceView(sources[i], &srv, cpu);
+        if (needsView(first + i, sources[i], formats[i], false))
+            _device->CreateShaderResourceView(sources[i], &srv, cpu);
         cpu.ptr += _descriptorSize;
     }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav {};
     uav.Format = dstFormat;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
+    if (needsView(first + 8, dst.resource, dstFormat, true))
+        _device->CreateUnorderedAccessView(dst.resource, nullptr, &uav, cpu);
     cpu.ptr += _descriptorSize;
 
     // The second UAV is the still age the finest match writes; every other pass gets a view of nothing.
     D3D12_UNORDERED_ACCESS_VIEW_DESC ageUav {};
     ageUav.Format = kAgeFormat;
     ageUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
+    if (needsView(first + 9, _passAgeOut, kAgeFormat, true))
+        _device->CreateUnorderedAccessView(_passAgeOut, nullptr, &ageUav, cpu);
 
     ID3D12DescriptorHeap* heaps[] = { _heap };
     list->SetDescriptorHeaps(1, heaps);
@@ -375,7 +399,8 @@ void OpticalFlowDx12::Pass(ID3D12GraphicsCommandList* list, ID3D12PipelineState*
     list->SetPipelineState(pso);
     list->SetComputeRootDescriptorTable(0, gpu);
     list->SetComputeRoot32BitConstants(1, sizeof(Constants) / 4, &constants, 0);
-    list->Dispatch((dst.width + 7) / 8, (dst.height + 7) / 8, 1);
+    const uint32_t groupSize = pso == _smooth ? 16u : 8u; // the smoothing's 16x16 groups share a 24x24 tile
+    list->Dispatch((dst.width + groupSize - 1) / groupSize, (dst.height + groupSize - 1) / groupSize, 1);
 
     // Anything that reads it next reads it as a texture.
     Transition(list, dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -400,14 +425,15 @@ void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineSt
         return;
 
     list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
-    _timeNames[_timeCount++] = name != nullptr ? name
+    _timeNames[_timeCount++] = name != nullptr                                                          ? name
                                : pso == _luma || pso == _lumaSdr || pso == _lumaScRgb || pso == _lumaPq ? "luma"
-                               : pso == _down                                                         ? "down"
-                               : pso == _match                                                        ? "match"
-                               : pso == _median                                                       ? "median"
-                               : pso == _smooth                                                       ? "smooth"
-                               : pso == _global                                                       ? "global"
-                                                                                                      : "other";
+                               : pso == _down                                                           ? "down"
+                               : pso == _match                                                          ? "match"
+                               : pso == _median                                                         ? "median"
+                               : pso == _smooth                                                         ? "smooth"
+                               : pso == _cameraModel                                                    ? "camera_model"
+                               : pso == _global                                                         ? "global"
+                                                                                                        : "other";
 }
 
 bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
@@ -415,6 +441,12 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 {
     if (_device == nullptr || _match == nullptr || list == nullptr || color == nullptr)
         return false;
+
+    // Each frame starts on its own bank of the ring, so a pass that runs on some frames only (the camera model, the
+    // preview) does not move every later pass to other slots, whose kept descriptors would then not match. Rounded
+    // forward from the last slot used, never back into the last frame's.
+    const UINT frameSpan = kDescriptorsPerPass * kPassesPerFrame;
+    _heapCursor = ((_heapCursor + frameSpan - 1) / frameSpan * frameSpan) % (frameSpan * kFramesInFlight);
 
     const D3D12_RESOURCE_DESC colorDesc = color->GetDesc();
 
@@ -512,6 +544,11 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.lookRange = (std::max)(_settings.lookRange, 1e-4f);
             constants.lookDistance = (std::max)(_settings.lookDistance, 0.5f);
 
+            // The finest level's sub-pixel answer is kept only where it matches no worse than the whole-pixel one,
+            // within this rounding allowance; the vector's support (.w) is measured against this luma noise floor.
+            constants.photoTolerance = 1e-6f;
+            constants.evidenceNoise = 1.0f / 255.0f;
+
             if (!coarsest)
             {
                 constants.auxX = current[level + 1].width;
@@ -549,12 +586,53 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         Pass(list, _median, levelNow[0].resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
              DXGI_FORMAT_UNKNOWN, _flowMedian, kFlowFormat, constants);
 
+        // The camera model: an affine fit of this frame's median flow, which the smoothing then offers to the pixels
+        // whose own match is weak (see Settings::cameraPrior).
+        const bool cameraModel = _settings.cameraPrior && _settings.globalCandidate && _settings.smoothRadius > 0;
+
+        if (cameraModel)
+        {
+            constants = Constants {};
+            constants.sizeX = 4;
+            constants.sizeY = 1;
+            constants.auxX = _flowMedian.width;
+            constants.auxY = _flowMedian.height;
+            constants.scale = 1.0f; // the median is in full-resolution pixels already
+            constants.hasGlobal = _globalReady ? 1 : 0;
+            constants.depthMatching = depthMatching ? 1 : 0;
+            constants.depthX = depthMatching ? (uint32_t) depthDesc.Width : 1;
+            constants.depthY = depthMatching ? depthDesc.Height : 1;
+            constants.reversed = depthReversed ? 1 : 0;
+            Pass(list, _cameraModel, _flowMedian.resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
+                 DXGI_FORMAT_UNKNOWN, _cameraFlow, kFlowFormat, constants, nullptr, DXGI_FORMAT_UNKNOWN,
+                 depthMatching ? depth : nullptr, depthFormat, _globalReady ? _globalFlow.resource : nullptr,
+                 kFlowFormat);
+        }
+
+        // The smoothing, which also weighs the camera model and the neighbourhood's motion against each pixel's own
+        // window: it reads both frames' luma, the last frame's flow, the depth and this frame's ages for that.
         constants = Constants {};
         constants.sizeX = _flow.width;
         constants.sizeY = _flow.height;
         constants.radius = std::clamp(_settings.smoothRadius, 0, 4); // the shader's tile holds at most four pixels around a group
-        Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, nullptr,
-             DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
+        constants.depthMatching = depthMatching ? 1 : 0;
+        constants.depthX = depthMatching ? (uint32_t) depthDesc.Width : 1;
+        constants.depthY = depthMatching ? depthDesc.Height : 1;
+        constants.reversed = depthReversed ? 1 : 0;
+        constants.hasGlobal = cameraModel ? 2 : 0; // 2: GlobalFlow holds the camera model, not the whole-picture motion
+        constants.lookWeights = _settings.lookWeights ? 1 : 0;
+        constants.lookRange = (std::max) (_settings.lookRange, 1e-4f);
+        constants.lookDistance = (std::max) (_settings.lookDistance, 0.5f);
+        constants.stillFrames = (uint32_t) std::clamp(_settings.stillFrames, 0, 255);
+        constants.stillMargin = _settings.stillMargin;
+        constants.hasAge = wroteAge ? 1 : 0;
+        constants.hasHistory = (history && _settings.useHistory) ? 1 : 0;
+        _passAgeIn = wroteAge ? _age[_current].resource : nullptr;
+        Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, previous[0].resource,
+             kLumaFormat, _flow, kFlowFormat, constants,
+             (history && _settings.useHistory) ? levelBefore[0].resource : nullptr, kFlowFormat,
+             depthMatching ? depth : nullptr, depthFormat, cameraModel ? _cameraFlow.resource : nullptr, kFlowFormat);
+        _passAgeIn = nullptr;
 
         if (_settings.globalCandidate)
         {

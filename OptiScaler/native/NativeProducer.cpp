@@ -25,13 +25,24 @@ NativeProducer::~NativeProducer()
         CloseHandle(_event);
 }
 
-void NativeProducer::WaitFor(UINT64 value)
+bool NativeProducer::WaitFor(UINT64 value)
 {
-    if (_fence == nullptr || value == 0 || _fence->GetCompletedValue() >= value)
-        return;
+    if (_fence == nullptr || value == 0)
+        return true;
 
-    _fence->SetEventOnCompletion(value, _event);
-    WaitForSingleObject(_event, 1000);
+    const UINT64 completed = _fence->GetCompletedValue();
+    if (completed == UINT64_MAX)
+        return false;
+    if (completed >= value)
+        return true;
+
+    // A wait that timed out before leaves its completion registered on the event, which may have fired since.
+    ResetEvent(_event);
+    if (FAILED(_fence->SetEventOnCompletion(value, _event)) || WaitForSingleObject(_event, 1000) != WAIT_OBJECT_0)
+        return false;
+
+    const UINT64 after = _fence->GetCompletedValue();
+    return after != UINT64_MAX && after >= value;
 }
 
 bool NativeProducer::Init(ID3D12Device* device)
@@ -99,12 +110,19 @@ bool NativeProducer::Init(ID3D12Device* device)
         }
 
     _event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (_event == nullptr)
+    {
+        _error = "creating the fence event";
+        return false;
+    }
+
     _device = device;
     return true;
 }
 
 void NativeProducer::Reset()
 {
+    _previewReady = false;
     if (_flow)
         _flow->Reset();
     if (_trust)
@@ -129,7 +147,14 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     // The previous work may still be reading the textures a new size replaces.
     if (input.width != _width || input.height != _height)
     {
-        WaitFor(_signalled);
+        if (!WaitFor(_signalled))
+        {
+            result.stoppedAt = "waiting for the last frame before a size change";
+            result.deviceRemoved = _device->GetDeviceRemovedReason();
+            result.stoppedHr = FAILED(result.deviceRemoved) ? result.deviceRemoved : HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            return result;
+        }
+
         _width = input.width;
         _height = input.height;
         Reset();
@@ -139,8 +164,16 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     if (input.cutHint)
         Reset();
 
+    // The slot's allocator is reset below: while the GPU may still run its last list that would break that list, so a
+    // wait that does not finish skips this frame.
     const UINT slot = (UINT) (_frame % kRing);
-    WaitFor(_values[slot]);
+    if (!WaitFor(_values[slot]))
+    {
+        result.stoppedAt = "waiting for the allocator's last list";
+        result.deviceRemoved = _device->GetDeviceRemovedReason();
+        result.stoppedHr = FAILED(result.deviceRemoved) ? result.deviceRemoved : HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+        return result;
+    }
 
     // The flow's own cut flag of the frames the GPU has finished since (usually the last one): a cut found there resets
     // the consumer's history now, a couple of frames before the trust mask's count could say so. Until the consumer has

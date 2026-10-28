@@ -203,12 +203,14 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     {
         VkDescriptorPoolSize sampler_pool_size = {};
         sampler_pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sampler_pool_size.descriptorCount = 8; // required by ImGui 1.92
+        // 8 required by ImGui 1.92, plus one per swap chain image for the Optical F5Low debug view's copy
+        // (native/DebugPreviewVk.h, at most 16)
+        sampler_pool_size.descriptorCount = 8 + 16;
 
         VkDescriptorPoolCreateInfo desc_pool_info = {};
         desc_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         desc_pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        desc_pool_info.maxSets = 8;
+        desc_pool_info.maxSets = 8 + 16;
         desc_pool_info.poolSizeCount = 1;
         desc_pool_info.pPoolSizes = &sampler_pool_size;
 
@@ -656,6 +658,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                     wResult != VK_SUCCESS)
                 {
                     LOG_ERROR("vkWaitForFences error: {}", (int32_t) wResult);
+                    NativeMotionVk::EndDebugFrame();
                     return true;
                 }
                 vkResetFences(_ImVulkan_Info.Device, 1, &fd->Fence);
@@ -689,6 +692,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 if (ecbResult != VK_SUCCESS)
                 {
                     LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) ecbResult);
+                    NativeMotionVk::EndDebugFrame();
                     return false;
                 }
 
@@ -732,7 +736,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
                 LogMenuSubmitThread("menu draw submit", menuQueue);
                 auto qResult = vkQueueSubmit(menuQueue, 1, &submit_info, fd->Fence);
-                NativeMotionVk::EndDebugFrame();
+                NativeMotionVk::EndDebugFrame(qResult == VK_SUCCESS);
                 if (qResult != VK_SUCCESS)
                 {
                     LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) qResult);

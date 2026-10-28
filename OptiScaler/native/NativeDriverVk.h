@@ -53,14 +53,15 @@ void DrawExpandedPreview();
 // The Vulkan menu's frame (menu/menu_overlay_vk.cpp): DebugViewOn says whether the debug view can be shown at all;
 // BeginDebugFrame before the menu is drawn, for swap chain image `slot` whose last submit is done; RecordDebugTransfers
 // into the menu's command buffer before its render pass; the submit waits on DebugWaitSemaphore at DebugWaitValue
-// (transfer stage) when it is not VK_NULL_HANDLE; EndDebugFrame after the submit. ReleaseDebugViews when the menu's
+// (transfer stage) when it is not VK_NULL_HANDLE; EndDebugFrame after the submit (`submitted`: it reached the queue)
+// and on every way out without one. ReleaseDebugViews when the menu's
 // swap chain or device goes away (`backendUp`: ImGui_ImplVulkan still runs, so its descriptor sets can be freed).
 bool DebugViewOn();
 void BeginDebugFrame(VkDevice device, VkPhysicalDevice physical, uint32_t family, uint32_t slot);
 void RecordDebugTransfers(VkCommandBuffer commands);
 VkSemaphore DebugWaitSemaphore();
 uint64_t DebugWaitValue();
-void EndDebugFrame();
+void EndDebugFrame(bool submitted = false);
 void ReleaseDebugViews(bool backendUp = true);
 
 } // namespace NativeMotionVk

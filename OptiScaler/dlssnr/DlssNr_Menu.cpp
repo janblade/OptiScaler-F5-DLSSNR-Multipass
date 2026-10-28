@@ -1673,9 +1673,9 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
 
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", "Shows the debug views (motion arrows, depth, final flow, confidence, history "
-                                    "rejection, still age) and the trust mask on this page (D3D12, D3D11 and Vulkan; "
-                                    "small GPU cost while shown). The depth picture also needs \"Show the picked depth "
-                                    "here\" and a restart.");
+                                    "rejection, still age) on this page, on D3D12, D3D11 and Vulkan; on D3D12 also the "
+                                    "trust mask and the picked depth (which needs \"Show the picked depth here\" and "
+                                    "a restart). Small GPU cost while shown.");
 
         switch (CurrentNativeApi())
         {

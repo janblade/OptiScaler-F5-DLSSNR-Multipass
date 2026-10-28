@@ -8,6 +8,8 @@
 
 #include <imgui/imgui.h>
 
+#include <cmath>
+
 namespace native
 {
 
@@ -138,10 +140,13 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
 
     // The depth alignment changes what the estimate runs on; the depth view's look is the view's alone.
     auto* config = Config::Instance();
-    options.depthTransform[0] = config->DlssNrNativeDepthScaleX.value_or_default();
-    options.depthTransform[1] = config->DlssNrNativeDepthScaleY.value_or_default();
-    options.depthTransform[2] = config->DlssNrNativeDepthOffsetX.value_or_default();
-    options.depthTransform[3] = config->DlssNrNativeDepthOffsetY.value_or_default();
+    // A value the ini cannot give as a number is no alignment (a NaN would also never compare equal, and reset the
+    // trust mask every frame).
+    const auto finite = [](float value, float none) { return std::isfinite(value) ? value : none; };
+    options.depthTransform[0] = finite(config->DlssNrNativeDepthScaleX.value_or_default(), 1.0f);
+    options.depthTransform[1] = finite(config->DlssNrNativeDepthScaleY.value_or_default(), 1.0f);
+    options.depthTransform[2] = finite(config->DlssNrNativeDepthOffsetX.value_or_default(), 0.0f);
+    options.depthTransform[3] = finite(config->DlssNrNativeDepthOffsetY.value_or_default(), 0.0f);
     auto& look = _producer->Flow()->DebugTuning();
     look.depthLinearize = config->DlssNrNativeDepthLinearize.value_or_default();
     look.depthMultiplier = config->DlssNrNativeDepthMultiplier.value_or_default();
@@ -330,13 +335,18 @@ void NativeDriver::DrawFlowTuning()
         ImGui::EndCombo();
     }
 
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Settings of the motion estimate for a kind of game. Default suits most games. "
+                                "Moving a control under Flow tuning saves your values as Custom, kept for this game.");
+
     // The depth finder's size and the alignment: for a game whose depth is not found, or does not line up.
     if (ImGui::TreeNode("Depth selection and alignment##nativedepthalign"))
     {
         int size[2] = { (int) config->DlssNrNativeDepthWidth.value_or_default(),
                         (int) config->DlssNrNativeDepthHeight.value_or_default() };
 
-        if (ImGui::InputInt2("Depth size (0 = automatic)##depthsize", size))
+        // Applied on Enter: every new size starts the pick over, which typing digit by digit would do four times.
+        if (ImGui::InputInt2("Depth size (0 = automatic)##depthsize", size, ImGuiInputTextFlags_EnterReturnsTrue))
         {
             config->DlssNrNativeDepthWidth = (uint32_t) (std::max) (0, size[0]);
             config->DlssNrNativeDepthHeight = (uint32_t) (std::max) (0, size[1]);
@@ -373,8 +383,8 @@ void NativeDriver::DrawFlowTuning()
         }
 
         ImGui::TextWrapped(
-            "The alignment moves the depth the motion estimate and Neural Rendering get (none at 1, 1, 0, "
-            "0). Check it in the \"Normals / depth\" view.");
+            "The alignment moves the depth the motion estimate and Neural Rendering get (none at 1, 1, 0, 0; a "
+            "positive X offset moves it right, a positive Y offset up). Check it in the \"Normals / depth\" view.");
 
         bool linearize = config->DlssNrNativeDepthLinearize.value_or_default();
 
@@ -394,10 +404,6 @@ void NativeDriver::DrawFlowTuning()
         ImGui::TextDisabled("The view settings change only the \"Normals / depth\" view, not the depth used.");
         ImGui::TreePop();
     }
-
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Settings of the motion estimate for a kind of game. Default suits most games. "
-                                "Moving a control under Flow tuning saves your values as Custom, kept for this game.");
 
     // Always shown and open on Optical F5Low's page; the settings live in the running motion estimate, so there is
     // nothing to tune until a mode runs.

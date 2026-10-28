@@ -2,6 +2,7 @@
 #include "OpticalFlow_Dx12.h"
 
 #include "../native/F5LowShaderBytecode.h"
+#include "../native/FlowDebugViews.h"
 
 #include <algorithm>
 #include <cmath>
@@ -675,7 +676,10 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
 bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, const PreviewInputs& inputs)
 {
-    if (!_flowValid || list == nullptr || _visualise == nullptr)
+    const int view = std::clamp(inputs.view, 0, native::FlowDebugViews::kCount - 1);
+
+    // The depth view reads no flow; the others need this frame's. All need the textures a Dispatch made.
+    if ((!_flowValid && view != 1) || _flow.resource == nullptr || list == nullptr || _visualise == nullptr)
         return false;
 
     // The FlowDebug cbuffer (FlowDebug_Hlsl.h), passed through the flow's 32 root constants: eight rows of four.
@@ -693,7 +697,6 @@ bool OpticalFlowDx12::Visualise(ID3D12GraphicsCommandList* list, const PreviewIn
     };
     static_assert(sizeof(ViewConstants) == sizeof(Constants), "the views use the flow's root constants");
 
-    const int view = std::clamp(inputs.view, 0, 6);
     const bool depthView = view == 1;
     Tex& preview = depthView ? _depthPreview : _preview;
 

@@ -91,6 +91,7 @@ class NativeProducer
         bool sceneCut = false;   // the mask saw a hard cut: the histories were reset
         float distrustedShare = 0.0f;
         bool nativeRan = false;  // the consumer ran on the picture
+        bool previewDrawn = false;       // the debug view was drawn this frame (Options::flowPreview)
         const char* stoppedAt = nullptr; // when nothing was submitted: the step that gave up (for the log)
         long stoppedHr = 0;              // and the HRESULT it got, when it had one
         long deviceRemoved = 0;          // the device's removed reason at that moment (0: not removed)
@@ -123,6 +124,7 @@ class NativeProducer
 
   private:
     static constexpr uint32_t kRing = 3;
+    static_assert(DepthAlignDx12::kSlots >= kRing, "a depth alignment descriptor pair per ring slot");
 
     // Waits (at most a second) until the GPU has passed `value`. False when it has not: timed out, or the device is
     // gone (a removed device's fence reads UINT64_MAX, which is not the work finishing).

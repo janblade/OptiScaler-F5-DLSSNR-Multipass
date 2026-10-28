@@ -63,6 +63,14 @@ class FlowDiagnosticUi
 
         ImGui::TextWrapped("%s", FlowDebugViews::Legend(view));
 
+        // Where this menu cannot show the picture it is not asked for, and there is nothing to enlarge.
+        if (unavailable != nullptr)
+        {
+            Reset();
+            ImGui::TextDisabled("%s", unavailable);
+            return;
+        }
+
         if (ImGui::Button("Enlarge##f5flowenlarge"))
             _display.store(Display::Enlarged, std::memory_order_release);
 
@@ -101,12 +109,6 @@ class FlowDiagnosticUi
             ImGui::TreePop();
         }
 
-        if (unavailable != nullptr)
-        {
-            ImGui::TextDisabled("%s", unavailable);
-            return;
-        }
-
         _wanted.store(true, std::memory_order_release);
         constexpr float width = 360.0f;
         ImTextureID id = 0;
@@ -128,10 +130,11 @@ class FlowDiagnosticUi
         }
     }
 
-    // Once per menu frame, after the main menu window, whether the menu is visible or not (see Expanded).
-    template <class Texture> void DrawExpanded(NativeDriver& driver, Texture&& texture)
+    // Once per menu frame, after the main menu window, whether the menu is visible or not (see Expanded). `available`:
+    // this menu can show the picture at all (as DrawAdvanced's `unavailable`).
+    template <class Texture> void DrawExpanded(NativeDriver& driver, Texture&& texture, bool available = true)
     {
-        if (!Expanded())
+        if (!available || !Expanded())
         {
             _display.store(Display::Inline, std::memory_order_release);
             return;

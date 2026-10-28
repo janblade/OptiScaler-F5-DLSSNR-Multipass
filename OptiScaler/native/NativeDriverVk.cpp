@@ -21,8 +21,8 @@
 // The Vulkan counterpart of native/NativeDriverDx11.cpp: the same shared frame step (native::NativeDriver), a different
 // adapter (native::VkFrameSource). The debug view is a D3D12 texture; the Vulkan menu (ImGui_ImplVulkan) shows a copy
 // of it (native/DebugPreviewVk.h), made in the menu's present (menu/menu_overlay_vk.cpp), which runs after this
-// driver's OnPresent. Under the bridge's D3D12 swap chain the menu draws with D3D12 on another device: no picture
-// there.
+// driver's OnPresent. Under the bridge's D3D12 swap chain the menu draws with D3D12 (on the producer's own device, so
+// the D3D12 menu's descriptor could show it directly; not done yet): no picture there for now.
 
 namespace
 {
@@ -272,7 +272,7 @@ void DrawAdvancedUi()
                       VulkanMenu() ? nullptr
                                    : "The debug view's picture is not shown while frame generation draws the menu.");
 
-    if (VulkanMenu() && !g_preview.Error().empty())
+    if (VulkanMenu() && DebugViewOn() && !g_preview.Error().empty())
         ImGui::TextDisabled("%s", g_preview.Error().c_str());
 
     if (!Config::Instance()->DlssNrNativeDebugView.value_or_default() ||
@@ -286,7 +286,7 @@ void DrawAdvancedUi()
 
 bool ExpandedPreviewVisible() { return g_ui.Expanded(); }
 
-void DrawExpandedPreview() { g_ui.DrawExpanded(g_driver, FlowTexture); }
+void DrawExpandedPreview() { g_ui.DrawExpanded(g_driver, FlowTexture, VulkanMenu()); }
 
 bool DebugViewOn()
 {
@@ -305,7 +305,7 @@ VkSemaphore DebugWaitSemaphore() { return g_preview.WaitSemaphore(); }
 
 uint64_t DebugWaitValue() { return g_preview.WaitValue(); }
 
-void EndDebugFrame() { g_preview.EndFrame(); }
+void EndDebugFrame(bool submitted) { g_preview.EndFrame(submitted); }
 
 void ReleaseDebugViews(bool backendUp) { g_preview.Reset(backendUp); }
 

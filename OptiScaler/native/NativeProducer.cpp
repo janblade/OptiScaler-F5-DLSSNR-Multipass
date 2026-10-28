@@ -167,11 +167,15 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     if (input.cutHint)
         Reset();
 
-    // A new depth alignment: the histories were built on the old depth.
+    // A new depth alignment: the trust mask's history was built on the old depth, so it starts over (its first mask
+    // distrusts the whole picture, which the consumer takes as a soft reset). The flow's history is motion, not depth:
+    // it carries on, so dragging the alignment in the menu neither drops Neural Rendering nor blanks the depth view.
     if (!std::equal(std::begin(_depthTransform), std::end(_depthTransform), std::begin(options.depthTransform)))
     {
         std::copy(std::begin(options.depthTransform), std::end(options.depthTransform), std::begin(_depthTransform));
-        Reset();
+
+        if (_trust)
+            _trust->Reset();
     }
 
     // The slot's allocator is reset below: while the GPU may still run its last list that would break that list, so a
@@ -239,12 +243,15 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     // The depth alignment, on the one copy of the whole scene (several copies each hold part of it): from here on the
     // frame's depth is the aligned one. Should it fail, the frame runs without depth rather than misaligned.
+    bool depthAligned = false;
+
     if (DepthAlignDx12::Moves(options.depthTransform) && input.depthCount == 1 && input.depth[0] != nullptr &&
         input.depthView != DXGI_FORMAT_UNKNOWN)
     {
         if (ID3D12Resource* aligned = _depthAlign.Run(_device, list, input.depth[0], input.depthView, input.width,
                                                       input.height, slot, options.depthTransform))
         {
+            depthAligned = true;
             input.depth[0] = aligned;
             input.depthView = DXGI_FORMAT_R32_FLOAT;
             input.depthWidth = input.width;
@@ -359,7 +366,8 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     // The menu's debug view, while the picture is still readable by a compute shader. The depth view shows the game's
     // depth through the alignment, the others what this frame ran on.
-    if (result.flowValid && options.flowPreview)
+    // The depth view reads no flow: it draws on a frame without one too (the first, or after a reset).
+    if ((result.flowValid || (recorded && options.previewView == 1)) && options.flowPreview)
     {
         OpticalFlowDx12::PreviewInputs view;
         view.view = options.previewView;
@@ -376,10 +384,12 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         }
 
         view.depthReversed = input.depthReversed;
-        view.depthTransform = rawDepth ? options.depthTransform : nullptr;
+        // The alignment as the estimate got it: none where the pass did not run (several depth copies, or it failed).
+        view.depthTransform = rawDepth && depthAligned ? options.depthTransform : nullptr;
         view.guideMotion = guidesBuilt ? _trust->GuideMotion() : nullptr;
         view.mask = result.trustRan ? _trust->Mask() : nullptr;
-        _previewReady = _flow->Visualise(list, view) || _previewReady;
+        result.previewDrawn = _flow->Visualise(list, view);
+        _previewReady = result.previewDrawn || _previewReady;
     }
 
     // Back to the state the adapter expects the picture in, then the consumer on it with the guides, on this same list.

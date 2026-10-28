@@ -118,8 +118,9 @@ class OpticalFlowDx12
     };
 
     // A debug view for the menu (FlowDebug_Hlsl.h), R8G8B8A8_UNORM, left in the PIXEL_SHADER_RESOURCE state: the depth
-    // view at the picture's size, the others at the flow's. Its texture is made on the first call, so nothing is spent
-    // while no view is shown. Call after Dispatch() when FlowValid().
+    // view at the picture's size, the others at the flow's. Its texture is made on the first call (nothing is spent
+    // until a view is shown) and kept until a size change. Call after Dispatch(): the depth view draws without a flow,
+    // the others only when FlowValid().
     bool Visualise(ID3D12GraphicsCommandList* list, const PreviewInputs& inputs);
     ID3D12Resource* Preview() const { return _previewShown != nullptr ? _previewShown->resource : nullptr; }
 

@@ -212,16 +212,20 @@ class DebugPreviewVk
         image.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
                              nullptr, 1, &buffer, 1, &image);
-        slot.initialized = true;
+        _recorded = true; // the image is in SHADER_READ_ONLY once this command buffer was submitted (EndFrame)
     }
 
     // What the menu's submit waits on at VK_PIPELINE_STAGE_TRANSFER_BIT this frame (VK_NULL_HANDLE: nothing).
     VkSemaphore WaitSemaphore() const { return _wait != 0 ? _fence.Semaphore() : VK_NULL_HANDLE; }
     uint64_t WaitValue() const { return _wait; }
 
-    // After the menu's submit (or when it drew nothing).
-    void EndFrame()
+    // After the menu's submit (`submitted`: it went to the queue), or when it drew nothing or gave up.
+    void EndFrame(bool submitted = false)
     {
+        if (submitted && _recorded && _current != nullptr)
+            _current->initialized = true;
+
+        _recorded = false;
         _began = false;
         _current = nullptr;
         _wait = 0;
@@ -381,6 +385,7 @@ class DebugPreviewVk
     uint32_t _slot = 0, _family = 0;
     uint64_t _wait = 0;
     bool _began = false;
+    bool _recorded = false; // RecordTransfers ran into this frame's command buffer
     VkInterop _vk;
     VkSampler _sampler = VK_NULL_HANDLE;
     ComPtr<ID3D12Device> _device12;

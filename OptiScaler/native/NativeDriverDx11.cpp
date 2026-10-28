@@ -110,7 +110,7 @@ void DrawAdvancedUi()
                       dx11Menu ? nullptr
                                : "The debug view's picture is not shown while frame generation draws the menu.");
 
-    if (dx11Menu && !g_preview.Error().empty())
+    if (dx11Menu && Config::Instance()->DlssNrNativeDebugView.value_or_default() && !g_preview.Error().empty())
         ImGui::TextDisabled("%s", g_preview.Error().c_str());
 
     if (!Config::Instance()->DlssNrNativeDebugView.value_or_default() ||
@@ -124,7 +124,11 @@ void DrawAdvancedUi()
 
 bool ExpandedPreviewVisible() { return g_ui.Expanded(); }
 
-void DrawExpandedPreview() { g_ui.DrawExpanded(g_driver, FlowTexture); }
+void DrawExpandedPreview()
+{
+    const char* renderer = ImGui::GetIO().BackendRendererName;
+    g_ui.DrawExpanded(g_driver, FlowTexture, renderer != nullptr && std::strcmp(renderer, "imgui_impl_dx11") == 0);
+}
 
 void BeginDebugFrame(ID3D11Device* device) { g_preview.BeginFrame(device); }
 

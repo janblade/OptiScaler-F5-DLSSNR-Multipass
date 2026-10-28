@@ -316,6 +316,37 @@ std::vector<uint8_t> ReadRgba(Gpu& gpu, ID3D12Resource* tex, D3D12_RESOURCE_STAT
     return out;
 }
 
+// An R8 texture in the given state as bytes, tightly packed.
+std::vector<uint8_t> ReadR8(Gpu& gpu, ID3D12Resource* tex, D3D12_RESOURCE_STATES state)
+{
+    const auto desc = tex->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+    UINT64 total = 0;
+    gpu.device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+    auto readback = gpu.Buffer(total, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    Change(gpu, tex, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+    dst.pResource = readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = tex;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    Change(gpu, tex, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+    gpu.Submit();
+
+    std::vector<uint8_t> out((size_t) desc.Width * desc.Height);
+    uint8_t* data = nullptr;
+    readback->Map(0, nullptr, (void**) &data);
+    for (uint32_t y = 0; y < desc.Height; ++y)
+        memcpy(&out[(size_t) y * desc.Width], data + (size_t) y * fp.Footprint.RowPitch, desc.Width);
+    readback->Unmap(0, nullptr);
+    return out;
+}
+
 // An R32_FLOAT texture in the given state as floats, tightly packed.
 std::vector<float> ReadFloats(Gpu& gpu, ID3D12Resource* tex, D3D12_RESOURCE_STATES state)
 {
@@ -622,16 +653,27 @@ int main()
     {
         static const char* names[] = { "arrows", "normals / depth", "final flow", "confidence", "channels",
                                        "history rejection", "still age" };
+        constexpr D3D12_RESOURCE_STATES kShown = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        constexpr D3D12_RESOURCE_STATES kMaskState =
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        std::vector<std::vector<uint8_t>> pictures(7);
         extra.flowPreview = true;
+
+        // A square moving 8 pixels a frame, from before the first view on (a still scene would leave the motion views
+        // black).
+        for (int k = 0; k < 3; ++k)
+            frame(Scene { 7, 300.0f + 8.0f * k, 20.0f, 5.0f }, kRead, true, true, false, output, nullptr, nullptr);
 
         for (int view = 0; view < 7; ++view)
         {
             extra.previewView = view;
-            native::FrameOutput viewOutput;
-            frame(Scene { 7, 300.0f + 8.0f * view, 20.0f, 5.0f }, kRead, true, true, false, viewOutput, nullptr,
-                  nullptr);
+            // The views of the guide motion (0, 2) with the consumer off: they build the guides themselves.
+            const bool consumer = view != 0 && view != 2;
+            const auto r =
+                frame(Scene { 7, 324.0f + 8.0f * view, 20.0f, 5.0f }, kRead, true, consumer, false, output, nullptr,
+                      nullptr);
             ID3D12Resource* picture = producer.Flow()->Preview();
-            bool drawn = picture != nullptr && producer.PreviewReady();
+            bool drawn = r.previewDrawn && picture != nullptr;
             int spread = 0;
 
             if (drawn)
@@ -639,13 +681,13 @@ int main()
                 const auto desc = picture->GetDesc();
                 const bool full = desc.Width == kWidth && desc.Height == kHeight;
                 drawn = view == 1 ? full : (desc.Width == (kWidth + 1) / 2 && desc.Height == (kHeight + 1) / 2);
-                const auto rgba = ReadRgba(gpu, picture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                int lo = 255, hi = 0;
+                pictures[view] = ReadRgba(gpu, picture, kShown);
+                int lo = 765, hi = 0;
 
                 // Below the key's two lines: the view itself.
-                for (size_t i = (size_t) desc.Width * 40 * 4; i + 3 < rgba.size(); i += 4 * 7)
+                for (size_t i = (size_t) desc.Width * 40 * 4; i + 3 < pictures[view].size(); i += 4 * 7)
                 {
-                    const int value = (int) rgba[i] + rgba[i + 1] + rgba[i + 2];
+                    const int value = (int) pictures[view][i] + pictures[view][i + 1] + pictures[view][i + 2];
                     lo = (std::min)(lo, value);
                     hi = (std::max)(hi, value);
                 }
@@ -654,11 +696,35 @@ int main()
             }
 
             char line[128];
-            snprintf(line, sizeof(line), "view %d (%s): drawn at its size, not one flat colour (spread %d)", view,
+            snprintf(line, sizeof(line), "view %d (%s): drawn this frame at its size, not flat (spread %d)", view,
                      names[view], spread);
             ok &= Check(line, drawn && spread >= 20);
+
+            // History rejection is the trust mask itself, grey for grey (the same size, sampled at its texel centres).
+            if (view == 5 && drawn)
+            {
+                const auto mask = ReadR8(gpu, producer.Trust()->Mask(), kMaskState);
+                const auto desc = picture->GetDesc();
+                int worst = 0;
+
+                for (uint32_t y = 40; y < desc.Height; ++y)
+                    for (uint32_t x = 0; x < desc.Width; ++x)
+                        worst = (std::max)(worst, std::abs((int) pictures[5][((size_t) y * desc.Width + x) * 4] -
+                                                           (int) mask[(size_t) y * desc.Width + x]));
+
+                snprintf(line, sizeof(line), "history rejection shows the trust mask (largest difference %d)", worst);
+                ok &= Check(line, mask.size() == (size_t) desc.Width * desc.Height && worst <= 1);
+            }
         }
 
+        // Each view draws its own picture (one drawn in place of another, or without its input, would match).
+        int same = 0;
+
+        for (int i = 0; i < 7; ++i)
+            for (int j = i + 1; j < 7; ++j)
+                same += !pictures[i].empty() && pictures[i] == pictures[j] ? 1 : 0;
+
+        ok &= Check("no two views draw the same picture", same == 0);
         extra.flowPreview = false;
     }
 
@@ -668,17 +734,20 @@ int main()
         Scene shifted { 7, 300, 20.0f, 5.0f };
         shifted.depthShift = 40.0f; // the depth's square is 40 pixels right of the picture's
 
-        // The look of the depth view is the view's alone.
-        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
-        const auto plain = guideDepth;
-        auto& look = producer.Flow()->DebugTuning();
-        look.depthMultiplier = 50.0f;
-        look.depthLinearize = false;
+        // The look of the depth view is the view's alone: it changes the view, not the consumer's depth.
         extra.flowPreview = true;
         extra.previewView = 1;
         frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
-        ok &= Check("the depth view's multiplier and linearization leave the consumer's depth as it was",
-                    !plain.empty() && guideDepth == plain);
+        const auto plain = guideDepth;
+        const auto plainView = ReadRgba(gpu, producer.Flow()->Preview(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        auto& look = producer.Flow()->DebugTuning();
+        look.depthMultiplier = 50.0f;
+        look.depthLinearize = false;
+        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        const auto lookView = ReadRgba(gpu, producer.Flow()->Preview(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        ok &= Check("the depth view's multiplier and linearization change the view",
+                    !plainView.empty() && lookView != plainView);
+        ok &= Check("... and leave the consumer's depth as it was", !plain.empty() && guideDepth == plain);
         look = OpticalFlowDx12::DebugSettings {};
         extra.flowPreview = false;
 
@@ -690,15 +759,22 @@ int main()
         ok &= Check("without the alignment the depth's square is off the picture's",
                     !plain.empty() && plain[pastPicture] > plain[inPicture]);
 
-        // A new alignment resets the histories: the frame after it is the first with flow (and guides) again.
-        extra.depthTransform[2] = -40.0f; // the depth is read 40 pixels to the right
-        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
-        frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        // A new alignment starts the trust mask over, not the flow: the frame keeps its motion and the consumer.
+        extra.depthTransform[2] = -40.0f; // read the depth 40 pixels to the right: it moves left
+        auto r = frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        ok &= Check("an alignment change keeps the flow and the consumer running", r.flowValid && r.nativeRan);
         ok &= Check("with an X offset of -40 the consumer's depth lines up with the picture",
                     !guideDepth.empty() && guideDepth[inPicture] > guideDepth[pastPicture]);
 
+        // Y the other way up: an offset of +30 reads the depth 30 rows lower (uv + 30 / height), so it moves up.
         extra.depthTransform[2] = 0.0f;
+        extra.depthTransform[3] = 30.0f;
         frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
+        const size_t row240 = (size_t) 240 * kWidth + 520, row270 = (size_t) 270 * kWidth + 520; // the depth's square
+        ok &= Check("with a Y offset of +30 the depth moves up 30 rows",
+                    !guideDepth.empty() && guideDepth[row240] == plain[row270] && guideDepth[row240] != plain[row240]);
+
+        extra.depthTransform[3] = 0.0f;
         frame(shifted, kRead, true, true, false, output, nullptr, nullptr);
         ok &= Check("back to no alignment: the depth as the game gave it", guideDepth == plain);
         readGuideDepth = false;

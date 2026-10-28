@@ -131,8 +131,9 @@ class DebugPreviewDx11
         if (FAILED(slot.list->Close()))
             return nullptr;
 
-        // D3D11's read of this texture three frames ago is done before the copy overwrites it.
-        if (slot.read != 0 && FAILED(queue->Wait(_fence.Fence12(), slot.read)))
+        // D3D11's last read (of the last frame's copy) is signalled before this copy signals: one fence, two queues,
+        // its value may only grow. That read covers this slot's older read too.
+        if (_lastRead != 0 && FAILED(queue->Wait(_fence.Fence12(), _lastRead)))
             return nullptr;
 
         ID3D12CommandList* lists[] = { slot.list.Get() };
@@ -161,13 +162,13 @@ class DebugPreviewDx11
             const uint64_t read = _fence.Next();
 
             if (SUCCEEDED(_context->Signal(_fence.Fence11(), read)))
-                _exported->read = read;
+                _lastRead = read;
             else
                 _exported->copied = UINT64_MAX; // the read's end is unknown: never reused
         }
 
-        if (_exported != nullptr)
-            ++_frame;
+        // On to the next slot every menu frame, so one slot that cannot be used again blanks only every third frame.
+        ++_frame;
 
         _exported = nullptr;
         _menuDevice = nullptr;
@@ -198,7 +199,6 @@ class DebugPreviewDx11
             slot.allocator.Reset();
             slot.source.Reset();
             slot.copied = 0;
-            slot.read = 0;
         }
 
         _fence.Reset();
@@ -209,6 +209,7 @@ class DebugPreviewDx11
         _exported = nullptr;
         _menuDevice = nullptr;
         _frame = 0;
+        _lastRead = 0;
     }
 
   private:
@@ -220,12 +221,12 @@ class DebugPreviewDx11
         ComPtr<ID3D12GraphicsCommandList> list;
         ComPtr<ID3D12Resource> source;
         uint64_t copied = 0; // the fence value its last copy signalled
-        uint64_t read = 0;   // the fence value D3D11 signalled after its last read
     };
 
     std::array<Slot, 3> _slots;
     Slot* _exported = nullptr; // this menu frame's copy
     uint64_t _frame = 0;
+    uint64_t _lastRead = 0;              // the fence value D3D11 signalled after its last read
     ID3D11Device* _menuDevice = nullptr; // this menu frame's (BeginFrame)
     ComPtr<ID3D11Device> _device11;
     ComPtr<ID3D11DeviceContext4> _context;

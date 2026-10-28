@@ -12,11 +12,11 @@ struct Slot
     ID3D12CommandList* producer = nullptr; // identity only; never dereferenced
     DlssNrFrameInfo frame {};
     uint64_t ready = 0, done = 0, serial = 0;
-    bool pending = false, submitted = false, residualOnly = false, sceneLinear = true;
+    bool pending = false, submitted = false, expired = false, residualOnly = false, sceneLinear = true;
 };
 std::array<Slot, 4> slots;
 ComPtr<ID3D12Device> device;
-uint64_t serial = 0, successes = 0, stillRendering = 0;
+uint64_t serial = 0, successes = 0, stillRendering = 0, lastApplicationSuccesses = 0;
 bool loggedCrossQueue = false;
 std::string status = "Waiting for a finished picture.";
 bool reset = true;
@@ -100,8 +100,11 @@ void Cancel()
 {
     // Submitted copies may still be in flight; their fences still protect reuse.
     for (auto& slot : slots)
+    {
+        slot.expired = true;
         if (slot.submitted)
             slot.pending = false;
+    }
     reset = true;
 }
 
@@ -178,6 +181,7 @@ void Arm(Slot& slot, ID3D12GraphicsCommandList* cmd)
     slot.ready = slot.done + 1;
     slot.done = slot.ready;
     slot.submitted = false;
+    slot.expired = false;
     slot.pending = true;
 }
 
@@ -267,6 +271,30 @@ bool CaptureResidual(ID3D12GraphicsCommandList* cmd, ID3D12Resource* clean, ID3D
     return true;
 }
 
+// Publish copied guides only after the producer list executes. Expired recordings still need
+// their fence signal, otherwise an unsubmitted capture could never safely be reused.
+void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+{
+    for (auto& slot : slots)
+        if (slot.pending && !slot.submitted)
+            for (UINT i = 0; i < count; ++i)
+                if (lists[i] == slot.producer)
+                {
+                    // Signal after ExecuteCommandLists, never when merely recording the copy.
+                    slot.submitted = true;
+                    if (slot.expired) slot.pending = false; // still signal: protect an unsubmitted expired capture
+                    slot.producerQueue = RealQueue(queue);
+                    if (FAILED(queue->Signal(slot.fence.Get(), slot.ready)))
+                    {
+                        // The copy already executed. Keep its unsignalled fence protecting
+                        // the slot instead of treating this as a discarded recording.
+                        slot.pending = false;
+                        Say("The graphics queue stopped. Restart the game to retry.");
+                    }
+                    break;
+                }
+}
+
 } // namespace Late
 
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
@@ -336,23 +364,7 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     DetailReuse::Submitted(queue, count, lists);
     SceneCut::Submitted(queue, count, lists); // the scene-cut flag's readbacks, the same way
     if (!Late::tracking.load()) return;
-    for (auto& slot : Late::slots)
-        if (slot.pending && !slot.submitted)
-            for (UINT i = 0; i < count; ++i)
-                if (lists[i] == slot.producer)
-                {
-                    // Signal after ExecuteCommandLists, never when merely recording the copy.
-                    slot.submitted = true;
-                    slot.producerQueue = Late::RealQueue(queue);
-                    if (FAILED(queue->Signal(slot.fence.Get(), slot.ready)))
-                    {
-                        // The copy already executed. Keep its unsignalled fence protecting
-                        // the slot instead of treating this as a discarded recording.
-                        slot.pending = false;
-                        Late::Say("The graphics queue stopped. Restart the game to retry.");
-                    }
-                    break;
-                }
+    Late::Submitted(queue, count, lists);
 }
 
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace)
@@ -392,12 +404,19 @@ static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linea
     if ((pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 &&
         g_compose->FinishedPqDirectReady(pictureDesc.Format))
     {
-        // Same per-pixel math, alpha and invalid-value fallback; retain the separate path
+        // Same per-pixel PQ math and alpha preservation; retain the separate path
         // when typed UAV loads/stores or PSO creation are unavailable.
         conversion.Mode = 6;
         Barrier(cmd, color, pictureState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const bool direct = g_compose->DispatchResidualPass(cmd, conversion, linear, nullptr, nullptr, nullptr, color);
         Barrier(cmd, color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, pictureState);
+        if (direct && pictureState == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            D3D12_RESOURCE_BARRIER order {};
+            order.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            order.UAV.pResource = color;
+            cmd->ResourceBarrier(1, &order);
+        }
         if (direct)
         {
             Barrier(cmd, linear, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -416,6 +435,35 @@ static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linea
     }
     Barrier(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, pictureState);
     Barrier(cmd, linear, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+// Shared production slot selection; application captures expire at the app Present boundary,
+// ordinary lower presents retain their short presentation-epoch window.
+static FinishedPick SelectFinishedInput(ID3D12CommandQueue* queue, const D3D12_RESOURCE_DESC& desc,
+                                       bool residualOnly, bool gameFrameHandoff, size_t& index,
+                                       std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>>& inputs)
+{
+    const auto epoch = State::Instance().frameCount;
+    auto* presentQueue = Late::RealQueue(queue);
+    for (size_t i = 0; i < Late::slots.size(); ++i)
+    {
+        auto& slot = Late::slots[i];
+        if (!slot.pending || slot.expired)
+            continue;
+        if (!gameFrameHandoff && (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1))
+        {
+            slot.expired = true;
+            if (slot.submitted) slot.pending = false;
+            Late::reset = true;
+            continue;
+        }
+        inputs[i] = { slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width &&
+                          slot.frame.OutputHeight == desc.Height,
+                      slot.serial, slot.submitted && slot.producerQueue.Get() == presentQueue,
+                      slot.submitted ? slot.fence->GetCompletedValue() : 0, slot.ready };
+    }
+    // Never queue a cross-queue wait here: the producer's signal can depend on this present.
+    return PickFinishedInput(inputs.data(), inputs.size(), index);
 }
 
 // The caller holds g_nrMutex. Handoff callers read all swapchain metadata before entering
@@ -458,41 +506,15 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
     const auto epoch = State::Instance().frameCount;
     const bool residualOnly = Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
                               Config::Instance()->DlssNrDeferredDlss.value_or_default();
-    auto* presentQueue = Late::RealQueue(queue);
     std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>> inputs {};
-    for (size_t i = 0; i < Late::slots.size(); ++i)
-    {
-        auto& slot = Late::slots[i];
-        if (!slot.pending || !slot.submitted)
-            continue;
-        if (!gameFrameHandoff && (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1))
-        {
-            slot.pending = false;
-            Late::reset = true;
-            continue;
-        }
-        inputs[i] = { slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width &&
-                          slot.frame.OutputHeight == desc.Height,
-                      slot.serial, slot.producerQueue.Get() == presentQueue, slot.fence->GetCompletedValue(),
-                      slot.ready };
-    }
-    // Never queue a cross-queue wait here: the producer's signal can depend on this present.
     size_t index = 0;
-    const auto pick = gameFrameHandoff ? PickReadyFinishedInput(inputs.data(), inputs.size(), index)
-                                       : PickFinishedInput(inputs.data(), inputs.size(), index);
+    const auto pick = SelectFinishedInput(queue, desc, residualOnly, gameFrameHandoff, index, inputs);
     if (pick == FinishedPick::None)
         return; // loading screen, another swapchain, or this real frame was already consumed
     if (pick == FinishedPick::NotReady)
     {
-        // Stays pending in case another present of this frame follows; history skips a frame.
+        // Ordinary presents may retry within their epoch window. App handoffs expire at EndStreamlinePicture.
         Late::reset = true;
-        if (gameFrameHandoff)
-            for (size_t i = 0; i < inputs.size(); ++i)
-                if (inputs[i].eligible)
-                {
-                    index = i;
-                    break;
-                }
         const auto& input = inputs[index];
         if (!input.sameQueue && input.completed != UINT64_MAX && !Late::loggedCrossQueue)
         {
@@ -662,8 +684,13 @@ static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue
     {
         if (!swapchain || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
             return;
-        if (!passThrough && StreamlinePicture::RenderQueue(swapchain))
+        if (!passThrough && StreamlinePicture::Owns(swapchain))
             return; // registered app-facing Present owns this chain; exclude all lower/generated presents
+        if (StreamlinePicture::NativeFgRunning())
+        {
+            FinishedPictureUnavailable("Paused: native frame generation has no application-picture handoff.");
+            return;
+        }
         if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
             FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))))
             return;
@@ -672,6 +699,32 @@ static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue
     }
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     ApplyFinishedColor(color.Get(), queue, space, false, desc);
+}
+
+void FinishedPictureUnavailable(const char* message)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    Late::Cancel();
+    Late::Say(message);
+}
+
+void EndStreamlinePicture(const char* unavailable)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    // Discard eligibility, never in-flight resources. Unsubmitted copies still get their fence
+    // signalled when their producer is submitted; command-list reset keeps its original cleanup.
+    for (auto& slot : Late::slots)
+    {
+        slot.expired = true;
+        if (slot.submitted) slot.pending = false;
+    }
+    Late::reset |= Late::successes == Late::lastApplicationSuccesses;
+    Late::lastApplicationSuccesses = Late::successes;
+    if (unavailable)
+    {
+        Late::reset = true;
+        Late::Say(unavailable);
+    }
 }
 
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
@@ -718,6 +771,11 @@ static bool ApplyFinishedPictureInput(ID3D12CommandQueue* queue, ID3D12GraphicsC
     // Depth is optional: NR runs without it.
     if (!queue || !cmd || !color || !motion)
         return false;
+    if (StreamlinePicture::NativeFgRunning())
+    {
+        Late::Say("Paused: native frame generation requires an application-picture handoff.");
+        return false;
+    }
     Late::ComPtr<ID3D12Device> currentDevice;
     if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&currentDevice))))
         return false;

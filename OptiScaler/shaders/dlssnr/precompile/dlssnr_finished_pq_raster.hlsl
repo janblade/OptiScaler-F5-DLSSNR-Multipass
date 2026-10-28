@@ -1,5 +1,5 @@
 // Direct HDR10 write for a render target without UAV support. No original SRV:
-// RGB-only writes preserve alpha; discard retains the original invalid-result pixel.
+// RGB-only writes preserve alpha. EncodePQ saturates NaN/Inf like the compute reference.
 Texture2D<float4> source : register(t0);
 #include "dlssnr_pq.hlsli"
 

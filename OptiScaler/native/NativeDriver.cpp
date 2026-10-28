@@ -42,6 +42,17 @@ bool NativeDriver::Enabled()
     return true;
 }
 
+void NativeDriver::PauseForNativeFg()
+{
+    if (_status == Status::PausedForNativeFg)
+        return;
+    if (_producer)
+        _producer->Reset();
+    PauseVirtualUpscaler();
+    _nativeRan = false;
+    _status = Status::PausedForNativeFg;
+}
+
 void NativeDriver::LogDiagnostics()
 {
     if (_diagPresents % 300 != 0)
@@ -249,6 +260,9 @@ void NativeDriver::DrawStatus()
         return;
     case Status::Waiting:
         ImGui::TextDisabled("Standing aside: the game is calling an upscaler.");
+        return;
+    case Status::PausedForNativeFg:
+        ImGui::TextDisabled("Paused: native frame generation does not provide a native-input application picture.");
         return;
     case Status::Failed:
         ImGui::TextDisabled("Could not start: %s", _failure.c_str());

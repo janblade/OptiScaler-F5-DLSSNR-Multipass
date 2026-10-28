@@ -4,7 +4,9 @@
 
 namespace DlssNr
 {
-// Preserve the allocation and offsets: every consumer clamps reads to ResolveGuideRegions.
+// Preserve allocation and offsets. The NR spatial pack and NGX inputs use ResolveGuideRegions;
+// texels outside that active rectangle are undefined/stale, including in full-allocation debug dumps.
+// Any new consumer must use the active rectangle, or request a full copy.
 // Depth/stencil copies must cover the complete subresource; retain CopyResource for them
 // and for unknown formats (including multi-plane formats).
 inline bool CanCopyFinishedGuideRegion(const D3D12_RESOURCE_DESC& desc, GuideRegion region)

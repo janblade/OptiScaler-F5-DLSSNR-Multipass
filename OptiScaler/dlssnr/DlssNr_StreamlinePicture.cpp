@@ -19,7 +19,7 @@ using CreateHwnd = HRESULT (*)(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_
                                const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**, bool&);
 using Create = HRESULT (*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, bool&);
 
-void RegisterQueue(HRESULT result, bool handled, IUnknown* device, IDXGISwapChain* swapchain)
+void RegisterQueue(HRESULT result, bool handled, IUnknown* device, IDXGISwapChain* swapchain, bool local)
 {
     if (State::Instance().isShuttingDown)
         return;
@@ -32,7 +32,7 @@ void RegisterQueue(HRESULT result, bool handled, IUnknown* device, IDXGISwapChai
         ID3D12CommandQueue* real = nullptr;
         if (Util::CheckForRealObject(__FUNCTION__, queue.Get(), (IUnknown**) &real))
             queue = real;
-        if (SUCCEEDED(swapchain->SetPrivateDataInterface(renderQueueKey, queue.Get())))
+        if (SUCCEEDED(swapchain->SetPrivateDataInterface(local ? localRenderQueueKey : renderQueueKey, queue.Get())))
             LOG_INFO("DLSS-NR: Streamline finished-picture handoff registered on the game render queue");
     }
 }
@@ -54,6 +54,15 @@ bool GameFgMayBeRunning()
                                  PresentsSince(state.frameCount, state.dlssgLastEvaluateFrame));
 }
 
+bool Supported(bool local)
+{
+    const auto& state = State::Instance();
+    // The bundled local plugin uses the SL2 before-hook ABI. For a game's runtime, reject
+    // unknown/SL1/future major ABIs rather than calling an export with an assumed signature.
+    return state.activeFgNvngx == FGNvngxReplacement::None &&
+           (local ? state.gameQuirks[GameQuirk::Kcd2NrBeforeFg] : state.streamlineVersion.major == 2);
+}
+
 // The game's and OptiScaler's plugins can coexist. Never call one runtime's hooks on the other's buffers.
 template <bool Local> struct Hooks
 {
@@ -66,20 +75,26 @@ template <bool Local> struct Hooks
 
     static void Apply(IDXGISwapChain* swapchain, UINT flags, bool skip)
     {
-        if (State::Instance().isShuttingDown)
+        if (State::Instance().isShuttingDown || skip || (flags & DXGI_PRESENT_TEST))
+            return;
+        auto queue = RenderQueue(swapchain, Local);
+        if (!queue || !Supported(Local))
             return;
         const auto& cfg = *Config::Instance();
-        if (skip || (flags & DXGI_PRESENT_TEST) || !cfg.DlssNrEnabled.value_or_default() ||
-            !cfg.DlssNrFinishedPicture.value_or_default())
-            return;
-        auto queue = RenderQueue(swapchain);
-        if (!queue)
-            return;
-        auto picture = Read(swapchain, getIndex.load(), getBuffer.load());
-        if (picture)
-            ApplyToStreamlinePicture(swapchain, picture.Get(), queue.Get());
-        else if (!GameFgMayBeRunning())
-            ApplyToStreamlinePassthrough(swapchain, queue.Get());
+        const char* unavailable = nullptr;
+        if (cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrFinishedPicture.value_or_default())
+        {
+            auto picture = Read(swapchain, getIndex.load(), getBuffer.load());
+            if (picture)
+                ApplyToStreamlinePicture(swapchain, picture.Get(), queue.Get());
+            else if (!GameFgMayBeRunning())
+                ApplyToStreamlinePassthrough(swapchain, queue.Get());
+            else
+                unavailable = "Waiting for Streamline's application picture; native frame generation may be active.";
+        }
+        // Every real app Present is a capture boundary, including menus/declined buffers/NR Off.
+        // Never carry this picture's guides into a later application frame.
+        EndStreamlinePicture(unavailable);
     }
 
     static HRESULT BeforePresent(IDXGISwapChain* swapchain, UINT interval, UINT flags, bool& skip)
@@ -100,7 +115,7 @@ template <bool Local> struct Hooks
         const auto result =
             originalCreateHwnd.load()(factory, device, window, desc, fullscreen, output, swapchain, skip);
         if (SUCCEEDED(result) && skip && swapchain)
-            RegisterQueue(result, skip, device, *swapchain);
+            RegisterQueue(result, skip, device, *swapchain, Local);
         return result;
     }
     static HRESULT CreateSwapChain(IDXGIFactory* factory, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc,
@@ -108,7 +123,7 @@ template <bool Local> struct Hooks
     {
         const auto result = originalCreate.load()(factory, device, desc, swapchain, skip);
         if (SUCCEEDED(result) && skip && swapchain)
-            RegisterQueue(result, skip, device, *swapchain);
+            RegisterQueue(result, skip, device, *swapchain, Local);
         return result;
     }
 
@@ -150,10 +165,25 @@ template <bool Local> struct Hooks
 };
 } // namespace
 
+bool Owns(IDXGISwapChain* swapchain)
+{
+    return (Supported(false) && RenderQueue(swapchain) != nullptr) ||
+           (Supported(true) && RenderQueue(swapchain, true) != nullptr);
+}
+
+bool NativeFgRunning()
+{
+    const auto& state = State::Instance();
+    auto* fg = state.currentFG;
+    const bool replaced = state.activeFgNvngx != FGNvngxReplacement::None;
+    return !replaced &&
+           GameFrameGenerationOn(fg && fg->IsActive() && !fg->IsPaused(), state.activeFgInput == FGInput::DLSSG,
+                                 state.activeFgOutput == FGOutput::DLSSG, GameFgMayBeRunning(), UINT64_MAX);
+}
+
 void* Wrap(const char* name, GetFunction getFunction, bool local)
 {
-    if (local && (!State::Instance().gameQuirks[GameQuirk::Kcd2NrBeforeFg] ||
-                  State::Instance().activeFgNvngx != FGNvngxReplacement::None))
+    if (!Supported(local))
         return nullptr;
     return local ? Hooks<true>::Wrap(name, getFunction) : Hooks<false>::Wrap(name, getFunction);
 }

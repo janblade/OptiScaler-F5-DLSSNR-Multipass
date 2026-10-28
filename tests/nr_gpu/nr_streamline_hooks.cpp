@@ -55,11 +55,20 @@ namespace sl
 enum class DLSSGMode
 {
     eOff,
-    eOn
+    eOn,
+    eAuto,
+    eDynamic
 };
 }
+enum class FGInput { Other, DLSSG };
+enum class FGOutput { Other, DLSSG };
+struct FakeFg { bool active = true, paused = false; bool IsActive() { return active; } bool IsPaused() { return paused; } };
 struct State
 {
+    struct Version { unsigned major = 2; } streamlineVersion;
+    FakeFg* currentFG = nullptr;
+    FGInput activeFgInput = FGInput::Other;
+    FGOutput activeFgOutput = FGOutput::Other;
     uint64_t frameCount = 100, dlssgLastEvaluateFrame = UINT64_MAX;
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     bool isShuttingDown = false;
@@ -84,8 +93,15 @@ static bool expectPq = false;
 static constexpr GUID colorSpaceKey = {
     0x34a31e7b, 0x84c5, 0x44ef, { 0xa7, 0x4d, 0x6b, 0xd3, 0x60, 0x8c, 0xe5, 0x22 }
 };
+static unsigned appBoundaries = 0;
+static std::string lastUnavailable;
 namespace DlssNr
 {
+void EndStreamlinePicture(const char* unavailable)
+{
+    ++appBoundaries;
+    lastUnavailable = unavailable ? unavailable : "";
+}
 void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue)
 {
     Expect(picture == expectedPicture, "Mixed local and game plugin buffers");
@@ -109,6 +125,7 @@ void ApplyToStreamlinePassthrough(IDXGISwapChain*, ID3D12CommandQueue* queue)
 } // namespace DlssNr
 // The runner copies the production body unchanged, replacing only application includes with these seams.
 #include "StreamlinePicture.cpp"
+#include "FinishedPluginLookup.inl"
 
 template <unsigned Runtime> struct Plugin
 {
@@ -205,13 +222,29 @@ try
     Expect(!Wrap("slHookPresent", MissingBuffer) && !Wrap("slHookPresent", MissingPresent1),
            "Wrapped an incompatible plugin missing required exports");
     Expect(!Wrap("slUnrelatedFunction", Plugin<0>::Get), "Wrapped an unrelated plugin function");
+    for (unsigned major : { 0u, 1u, 3u })
+    {
+        State::Instance().streamlineVersion.major = major;
+        Expect(!Wrap("slHookPresent", Plugin<0>::Get), "Assumed an unknown before-hook ABI");
+        Expect(FinishedPicturePluginFunction("slHookPresent", Plugin<0>::Get, false) == &Plugin<0>::Present,
+               "Streamline_Hooks fallback lost the original export for an unsupported ABI");
+    }
+    State::Instance().streamlineVersion.major = 2;
+    State::Instance().activeFgNvngx = FGNvngxReplacement::Other;
+    Expect(FinishedPicturePluginFunction("slHookPresent", Plugin<0>::Get, false) == &Plugin<0>::Present,
+           "Native handoff remained enabled for replacement FG");
+    State::Instance().activeFgNvngx = FGNvngxReplacement::None;
+    Expect(FinishedPicturePluginFunction("slHookPresent", MissingBuffer, false) == &Plugin<0>::Present,
+           "Missing required buffer export did not fall back at the production lookup");
+    Expect(!FinishedPicturePluginFunction("slHookPresent", nullptr, false), "Called a null original lookup");
     Expect(!Wrap("slHookPresent", Plugin<1>::Get, true), "Local wrapping enabled without KCD2 quirk");
     State::Instance().gameQuirks.enabled = true;
     State::Instance().activeFgNvngx = FGNvngxReplacement::Other;
     Expect(!Wrap("slHookPresent", Plugin<1>::Get, true), "Local wrapping enabled for replacement FG");
     State::Instance().activeFgNvngx = FGNvngxReplacement::None;
     Expect(!Wrap("slHookCreateSwapChain", Plugin<0>::Get), "Native legacy path changed outside KCD2");
-    auto nativePresent = reinterpret_cast<decltype(&Plugin<0>::Present)>(Wrap("slHookPresent", Plugin<0>::Get));
+    auto nativePresent = reinterpret_cast<decltype(&Plugin<0>::Present)>(
+        FinishedPicturePluginFunction("slHookPresent", Plugin<0>::Get, false));
     auto localPresent = reinterpret_cast<decltype(&Plugin<1>::Present1)>(Wrap("slHookPresent1", Plugin<1>::Get, true));
     auto localPresentLegacy =
         reinterpret_cast<decltype(&Plugin<1>::Present)>(Wrap("slHookPresent", Plugin<1>::Get, true));
@@ -235,7 +268,12 @@ try
     skip = false;
     Check(localCreate(nullptr, queue.Get(), nullptr, &localChain, skip));
     Expect(RenderQueue(nativeChain.Get()).Get() == queue.Get(), "Hwnd create lost the render queue");
-    Expect(RenderQueue(localChain.Get()).Get() == queue.Get(), "Legacy create lost the render queue");
+    Expect(RenderQueue(localChain.Get(), true).Get() == queue.Get(), "Legacy create lost the render queue");
+    Expect(!RenderQueue(localChain.Get()) && !RenderQueue(nativeChain.Get(), true),
+           "Native/local queue registration mixed runtime ownership");
+    State::Instance().streamlineVersion.major = 1;
+    Expect(!Owns(nativeChain.Get()) && Owns(localChain.Get()), "Runtime ABI change reused the wrong registration");
+    State::Instance().streamlineVersion.major = 2;
     const auto pq = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
     Check(localChain->SetPrivateData(colorSpaceKey, sizeof(pq), &pq));
     // Finished Picture uses the app-frame handoff by default, including when FG starts off.
@@ -295,6 +333,17 @@ try
     Check(nativePresent(nativeChain.Get(), 0, 0, skip));
     Expect(passthroughEdits == 1, "FG Off left NR blocked by stale registration");
     Expect(RenderQueue(nativeChain.Get()).Get() == queue.Get(), "FG Off discarded render-queue registration");
+    // Auto/Dynamic may not hand over a buffer. Report that skip instead of stale success.
+    for (auto mode : { sl::DLSSGMode::eAuto, sl::DLSSGMode::eDynamic })
+    {
+        State::Instance().dlssgLastSetMode = mode;
+        Plugin<0>::expectedEdits = edits;
+        const auto before = appBoundaries;
+        Check(nativePresent(nativeChain.Get(), 0, 0, skip));
+        Expect(appBoundaries == before + 1 && lastUnavailable.find("Waiting for Streamline") != std::string::npos,
+               "Declined Auto/Dynamic app frame did not expire guides/report a skip");
+    }
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOff;
     // Start without any FG options/evaluates, as some games load the plugin but leave FG unused.
     DlssgTelemetry::g_counts.optionsSeen.store(false);
     State::Instance().dlssgLastEvaluateFrame = UINT64_MAX;
@@ -347,6 +396,22 @@ try
     State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOn;
     Check(nativePresent(nativeChain.Get(), 0, 0, skip));
     State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOff;
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOn;
+    Expect(NativeFgRunning(), "Running native FG was not detected");
+    FakeFg replacement;
+    State::Instance().currentFG = &replacement;
+    Expect(!NativeFgRunning(), "Paused OptiScaler's own FG");
+    State::Instance().currentFG = nullptr;
+    State::Instance().activeFgInput = FGInput::DLSSG;
+    Expect(!NativeFgRunning(), "Paused managed DLSS-G input");
+    State::Instance().activeFgInput = FGInput::Other;
+    State::Instance().activeFgOutput = FGOutput::DLSSG;
+    Expect(!NativeFgRunning(), "Paused managed DLSS-G output");
+    State::Instance().activeFgOutput = FGOutput::Other;
+    State::Instance().activeFgNvngx = FGNvngxReplacement::Other;
+    Expect(!NativeFgRunning(), "Misidentified nvngx replacement as native DLSS-G");
+    State::Instance().activeFgNvngx = FGNvngxReplacement::None;
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOff;
     // Some plugins handle the index but decline GetBuffer after FG is disabled.
     Plugin<0>::handled = true;
     Plugin<0>::bufferHandled = false;
@@ -387,7 +452,7 @@ try
     Check(localChain->ResizeBuffers(2, 16, 12, DXGI_FORMAT_UNKNOWN, 0));
     Check(nativeChain->GetBuffer(0, IID_PPV_ARGS(&Plugin<0>::picture)));
     Check(localChain->GetBuffer(1, IID_PPV_ARGS(&Plugin<1>::picture)));
-    Expect(RenderQueue(nativeChain.Get()).Get() == queue.Get() && RenderQueue(localChain.Get()).Get() == queue.Get(),
+    Expect(RenderQueue(nativeChain.Get()).Get() == queue.Get() && RenderQueue(localChain.Get(), true).Get() == queue.Get(),
            "Resize lost application render-queue registration");
     expectPq = false;
     expectedPicture = Plugin<0>::picture.Get();

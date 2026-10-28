@@ -98,6 +98,9 @@ bool WaitForFinishedPicture();
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd);
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
+// Called once at each real app Present, also when the plugin declines its buffer.
+void EndStreamlinePicture(const char* unavailable = nullptr);
+void FinishedPictureUnavailable(const char* message);
 // Streamline app-facing buffer, still PRESENT, on its original render queue before interpolation.
 void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue);
 // A registered runtime stopped exposing app buffers with FG off. Compose once before pass-through Present.

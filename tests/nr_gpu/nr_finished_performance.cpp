@@ -325,7 +325,8 @@ static void rasterGuards()
 }
 static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bool uav = true, bool raster = false,
                bool privateList = true, DlssNr::FinishedPqRaster* sharedRaster = nullptr,
-               PqPattern pattern = PqPattern::Stress)
+               PqPattern pattern = PqPattern::Stress,
+               D3D12_RESOURCE_STATES pictureState = D3D12_RESOURCE_STATE_PRESENT)
 {
     std::cout << "Checking PQ format " << format << std::endl;
     const UINT stride = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
@@ -351,7 +352,7 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
                     v[c] = DirectX::PackedVector::XMConvertFloatToHalf(light);
                 }
             if (pattern == PqPattern::Stress && x % 29 == 0)
-                v[0] = 0x7E00; // NaN fallback must preserve original RGB/alpha.
+                v[0] = 0x7E00; // Match the reference EncodePQ saturation semantics for NaN/Inf.
             if (pattern == PqPattern::Stress && x % 31 == 0)
                 v[1] = 0x7C00;
             if (pattern == PqPattern::HalfSweep)
@@ -426,7 +427,7 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
     linear.reset();
     picture.reset();
     r.barrier(linear.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, pictureState);
     r.barrier(encoded.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     r.finish();
     const auto record = [&](bool changed)
@@ -442,16 +443,16 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
                 r.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
             }
             if (privateList)
-                RecordPqEncode(r.list.Get(), linear.gpu.Get(), picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT,
+                RecordPqEncode(r.list.Get(), linear.gpu.Get(), picture.gpu.Get(), pictureState,
                                encoded.gpu.Get(), c, raster);
             else
-                RecordPqEncode(r.list.Get(), linear.gpu.Get(), picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT,
+                RecordPqEncode(r.list.Get(), linear.gpu.Get(), picture.gpu.Get(), pictureState,
                                encoded.gpu.Get(), c); // Native/virtual default must never change graphics state.
             return;
         }
         r.barrier(linear.gpu.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        r.barrier(picture.gpu.Get(), pictureState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         r.list->SetComputeRootSignature(r.root.Get());
         ID3D12DescriptorHeap* heaps[] = { r.heap.Get() };
         r.list->SetDescriptorHeaps(1, heaps);
@@ -463,7 +464,7 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
         r.barrier(encoded.gpu.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         r.list->CopyResource(picture.gpu.Get(), encoded.gpu.Get());
-        r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, pictureState);
         r.barrier(encoded.gpu.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         r.barrier(linear.gpu.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -509,14 +510,14 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
     r.begin();
     record(false);
     r.finish();
-    const auto reference = picture.read(D3D12_RESOURCE_STATE_PRESENT);
+    const auto reference = picture.read(pictureState);
     r.begin();
-    r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+    r.barrier(picture.gpu.Get(), pictureState, D3D12_RESOURCE_STATE_COPY_DEST);
     picture.reset();
-    r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, pictureState);
     record(true);
     r.finish();
-    const auto candidate = picture.read(D3D12_RESOURCE_STATE_PRESENT);
+    const auto candidate = picture.read(pictureState);
     if (raster && format == DXGI_FORMAT_R10G10B10A2_UNORM)
     {
         unsigned alphaValues = 0;
@@ -541,12 +542,12 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
         bridge.ready = ready;
         forceFallback = true;
         r.begin();
-        r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+        r.barrier(picture.gpu.Get(), pictureState, D3D12_RESOURCE_STATE_COPY_DEST);
         picture.reset();
-        r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_COPY_DEST, pictureState);
         record(true);
         r.finish();
-        const auto fallback = picture.read(D3D12_RESOURCE_STATE_PRESENT);
+        const auto fallback = picture.read(pictureState);
         for (UINT y = 0; y < h; ++y)
             expect(std::memcmp(reference.data() + y * picture.footprint.Footprint.RowPitch,
                                fallback.data() + y * picture.footprint.Footprint.RowPitch, w * stride) == 0,
@@ -558,7 +559,7 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
     {
         const auto suffix =
             std::to_string(w) + "x" + std::to_string(h) + (pattern == PqPattern::Finite ? "_finite" : "_stress");
-        timing->run(raster ? "pq_raster_encode_" + suffix : "pq_encode_" + std::to_string(format), record);
+        timing->run(raster ? "pq_raster_encode_" + suffix : "pq_encode_" + std::to_string(format) + "_state_" + std::to_string(pictureState), record);
         c.Mode = 0;
         auto decodeCb = r.buffer(sizeof(c), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         check(decodeCb->Map(0, nullptr, &memory));
@@ -597,7 +598,7 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
                     r.barrier(saved, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     r.barrier(saved, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
                 }
-                r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_PRESENT,
+                r.barrier(picture.gpu.Get(), pictureState,
                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 r.list->SetComputeRootSignature(r.root.Get());
                 ID3D12DescriptorHeap* heaps[] = { r.heap.Get() };
@@ -608,7 +609,7 @@ static void pq(Runner& r, UINT w, UINT h, DXGI_FORMAT format, Timing* timing, bo
                 r.list->SetComputeRootConstantBufferView(1, decodeCb->GetGPUVirtualAddress());
                 r.list->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                 r.barrier(picture.gpu.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                          D3D12_RESOURCE_STATE_PRESENT);
+                          pictureState);
                 record(changed);
             });
     }
@@ -645,6 +646,12 @@ try
         Timing timing(r, argv[2]);
         if (argc > 3)
         {
+            if (hardware && std::string(argv[3]) == "--uav")
+            {
+                pq(r, 3840, 2160, DXGI_FORMAT_R10G10B10A2_UNORM, &timing, true, false, false,
+                   nullptr, PqPattern::Finite, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                return 0;
+            }
             expect(hardware && std::string(argv[3]) == "--raster", "Unknown timing mode");
             for (const auto extent : { std::pair { 1920u, 1080u }, { 2560u, 1440u }, { 3840u, 2160u } })
                 for (const auto pattern : { PqPattern::Finite, PqPattern::Stress })

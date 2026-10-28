@@ -67,7 +67,8 @@ enum class GameQuirk : uint64_t
     CreateSLOnThe2ndDevice,
     Kcd2DlssgHdr10,
     REFrameworkCompat, // misc/REFrameworkCompat.h, resolved with [Hotfix] REFrameworkCompat
-                       // Local native Streamline Finished Picture handoff (wilsjo2 integration).
+
+    // Local Streamline Finished Picture handoff.
     Kcd2NrBeforeFg,
     // Don't forget to add the new entry to printQuirks
     _

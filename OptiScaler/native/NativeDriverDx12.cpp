@@ -7,6 +7,8 @@
 #include <native/NativeDriver.h>
 
 #include <Config.h>
+#include <dlssnr/DlssNr_StreamlinePicture.h>
+#include <dlssnr/DlssNrFeature_Dx12.h>
 
 #include <menu/menu_overlay_dx.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
@@ -119,6 +121,18 @@ void RunFrame(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, ID3D12Device
 
     if (swapChain == nullptr || queue == nullptr || device == nullptr || g_driver.Failed())
         return;
+
+    // This producer reads the lower display picture, not Streamline's application buffer.
+    // Native FG can supply generated frames even with a registered app hook. With FG Off,
+    // keep the ordinary native-input path (the upscaler-source takeover check still applies).
+    if (DlssNr::StreamlinePicture::NativeFgRunning())
+    {
+        g_driver.PauseForNativeFg();
+        DlssNr::NativeInputSkipped();
+        if (!DlssNr::StreamlinePicture::Owns(swapChain))
+            DlssNr::FinishedPictureUnavailable("Paused: native input cannot use generated display frames.");
+        return;
+    }
 
     g_source.SetPresent(swapChain, queue, device);
 

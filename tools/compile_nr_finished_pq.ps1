@@ -25,7 +25,16 @@ try {
             $built = Join-Path $temp "$stem.$ext"
             $target = Join-Path $dir "$stem.$ext"
             if ($Check) {
-                if (!(Test-Path $target) -or (Get-FileHash $built).Hash -ne (Get-FileHash $target).Hash) {
+                $same = $false
+                if (Test-Path -LiteralPath $target) {
+                    if ($ext -eq 'h') {
+                        # Header text is identical in LF and CRLF checkouts. CSO bytes remain exact.
+                        $builtText = [IO.File]::ReadAllText($built).Replace("`r`n", "`n")
+                        $targetText = [IO.File]::ReadAllText($target).Replace("`r`n", "`n")
+                        $same = $builtText -ceq $targetText
+                    } else { $same = (Get-FileHash $built).Hash -eq (Get-FileHash $target).Hash }
+                }
+                if (!$same) {
                     throw "Stale PQ encoder: $target"
                 }
             } else { Copy-Item -LiteralPath $built -Destination $target }

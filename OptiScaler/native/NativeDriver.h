@@ -56,8 +56,8 @@ class NativeDriver
     bool Failed() const { return _status == Status::Failed; }
 
     // One frame: Acquire on `source` (its SetPresent is done), the producer, Return. `flowPreview` asks the producer
-    // for the flow picture the menu shows.
-    RunResult RunFrame(IFrameSource& source, bool flowPreview);
+    // for the debug view the menu shows, `flowPreviewView` which (native/FlowDebugViews.h).
+    RunResult RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView = 0);
 
     // ImGui: one line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
     void DrawStatus();

@@ -129,9 +129,11 @@ class DepthFinderCore
     // ---- once per presented frame, in two parts around the adapter's own end-of-frame work -----------------------------------
     // Part one: closes the frame's counts and finds the stretch floor. Returns the present count before this frame.
     uint64_t BeginPresent(uint32_t pictureWidth, uint32_t pictureHeight);
-    // Part two: counts the present, stands down or wakes, and (after warm-up) picks. True when it stood down this frame (the
-    // adapter then drops its copies).
-    bool EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, uint32_t warmupFrames);
+    // Part two: counts the present, stands down or wakes, and (after warm-up) picks. True when it stood down this frame
+    // (the adapter then drops its copies). `selectedWidth`/`selectedHeight`: only a buffer of that size can win (0/0 =
+    // the shape test); a change starts the pick over.
+    bool EndPresent(uint32_t pictureWidth, uint32_t pictureHeight, uint32_t warmupFrames, uint32_t selectedWidth = 0,
+                    uint32_t selectedHeight = 0);
 
     // The pick as of the last present.
     GenericDepthSelect::Pick CurrentPick() const;

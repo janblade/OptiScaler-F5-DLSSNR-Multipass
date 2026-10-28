@@ -59,6 +59,9 @@ struct Rules
     uint32_t quietDrawcalls = 8;     // a frame whose only buffer drew this little is not a real frame (emulators present more)
     float keepFraction = 0.75f;      // the previous pick stays unless something beats it by more than this (1/keep)
     uint32_t holdFrames = 90;        // a pick is kept this many frames in a row while nothing qualifies, then dropped
+    // Only a buffer of this size can win (0 = any width / height; both 0 = the shape test above), from PR #232.
+    uint32_t selectedWidth = 0;
+    uint32_t selectedHeight = 0;
 };
 
 // More than a third of the draws indirect: the vertex count is then not accurate, so draw calls are compared instead.
@@ -91,6 +94,11 @@ inline bool Eligible(const Candidate& c, uint32_t pictureWidth, uint32_t picture
     // Unused, or only a fullscreen pass or two.
     if (c.drawcalls == 0 || (c.vertices <= 3 && c.drawcallsIndirect == 0))
         return false;
+
+    // A size the user gave (DlssNr NativeDepthWidth/Height) replaces the shape test: only that size, any shape.
+    if (rules.selectedWidth != 0 || rules.selectedHeight != 0)
+        return (rules.selectedWidth == 0 || c.width == rules.selectedWidth) &&
+               (rules.selectedHeight == 0 || c.height == rules.selectedHeight);
 
     return SimilarAspect((float) c.width, (float) c.height, (float) pictureWidth, (float) pictureHeight, rules);
 }

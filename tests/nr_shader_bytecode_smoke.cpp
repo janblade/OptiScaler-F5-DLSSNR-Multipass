@@ -11,9 +11,11 @@
 #include <windows.h>
 #include <d3dcompiler.h>
 
+#include "../OptiScaler/motion/FlowDebug_Hlsl.h"
 #include "../OptiScaler/motion/OpticalFlow_Hlsl.h"
 #include "../OptiScaler/motion/SceneCut_Hlsl.h"
 #include "../OptiScaler/motion/TrustMask_Hlsl.h"
+#include "../OptiScaler/native/DepthAlign_Hlsl.h"
 #include "../OptiScaler/native/DepthCopyDx11_Hlsl.h"
 #include "../OptiScaler/native/DepthResolve_Hlsl.h"
 #include "../OptiScaler/native/MsaaPicture_Hlsl.h"
@@ -47,11 +49,13 @@ const Item kItems[] = {
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Match", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Median", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Smooth", "" },
-    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Visualise", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Global", "" },
+    { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "CameraModel", "" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "1" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "2" },
     { "OpticalFlow", "OpticalFlow", OpticalFlowHlsl::kSource, "Luma", "3" },
+    { "FlowDebug", "FlowDebug", FlowDebugHlsl::kSource, "Visualise", "" },
+    { "DepthAlign", "DepthAlign", DepthAlignHlsl::kSource, "Align", "" },
     { "SceneCut", "SceneCut", SceneCutHlsl::kSource, "SceneHist", "" },
     { "SceneCut", "SceneCut", SceneCutHlsl::kSource, "SceneDiverge", "" },
     { "SceneCut", "SceneCut", SceneCutHlsl::kSource, "SceneLuma", "1" },

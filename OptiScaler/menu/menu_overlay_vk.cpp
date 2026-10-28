@@ -7,6 +7,7 @@
 #include <SysUtils.h>
 
 #include <imgui/imgui_impl_vulkan.h>
+#include <native/NativeDriverVk.h>
 #include <imgui/imgui_impl_win32.h>
 
 // Diagnostic: the menu submits on the game's queue from the present thread. Says which thread, once per change, to compare with
@@ -95,6 +96,8 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     if (_vulkanObjectsCreated)
     {
         LOG_DEBUG("_vulkanObjectsCreated, releasing objects");
+
+        NativeMotionVk::ReleaseDebugViews(); // its textures are the backend's descriptor sets
 
         if (VulkanBackendIsUp())
             ImGui_ImplVulkan_Shutdown(false);
@@ -200,12 +203,14 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     {
         VkDescriptorPoolSize sampler_pool_size = {};
         sampler_pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sampler_pool_size.descriptorCount = 8; // required by ImGui 1.92
+        // 8 required by ImGui 1.92, plus one per swap chain image for the Optical F5Low debug view's copy
+        // (native/DebugPreviewVk.h, at most 16)
+        sampler_pool_size.descriptorCount = 8 + 16;
 
         VkDescriptorPoolCreateInfo desc_pool_info = {};
         desc_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         desc_pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        desc_pool_info.maxSets = 8;
+        desc_pool_info.maxSets = 8 + 16;
         desc_pool_info.poolSizeCount = 1;
         desc_pool_info.pPoolSizes = &sampler_pool_size;
 
@@ -497,6 +502,9 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
     if (_ImVulkan_Info.Device == VK_NULL_HANDLE)
         return;
 
+    // The Optical F5Low debug view's images go with the menu's; their descriptor sets only through a live backend.
+    NativeMotionVk::ReleaseDebugViews(VulkanBackendIsUp());
+
     if (!shutdown)
         LOG_FUNC();
 
@@ -625,6 +633,17 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         ImGui_ImplVulkan_SetQueue(menuQueue);
         ImGui_ImplVulkan_NewFrame();
 
+        // The Optical F5Low debug view's copy goes into this swap chain image's slot: its last submit must be done
+        // before the copy is handed out again (only while the view can be shown; the fence is waited below anyway).
+        const uint32_t imageIndex = pPresentInfo->pImageIndices[0];
+
+        if (NativeMotionVk::DebugViewOn() && imageIndex < _scImageCount)
+        {
+            vkWaitForFences(_ImVulkan_Info.Device, 1, &_ImVulkan_Frames[imageIndex].Fence, VK_TRUE, UINT64_MAX);
+            NativeMotionVk::BeginDebugFrame(_ImVulkan_Info.Device, _ImVulkan_Info.PhysicalDevice,
+                                            _ImVulkan_Info.QueueFamily, imageIndex);
+        }
+
         if (State::Instance().delayMenuRenderBy > 0)
             State::Instance().delayMenuRenderBy--;
 
@@ -639,6 +658,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                     wResult != VK_SUCCESS)
                 {
                     LOG_ERROR("vkWaitForFences error: {}", (int32_t) wResult);
+                    NativeMotionVk::EndDebugFrame();
                     return true;
                 }
                 vkResetFences(_ImVulkan_Info.Device, 1, &fd->Fence);
@@ -650,6 +670,8 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                     info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                     vkBeginCommandBuffer(fd->CommandBuffer, &info);
                 }
+
+                NativeMotionVk::RecordDebugTransfers(fd->CommandBuffer);
 
                 {
                     VkRenderPassBeginInfo info = {};
@@ -670,6 +692,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 if (ecbResult != VK_SUCCESS)
                 {
                     LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) ecbResult);
+                    NativeMotionVk::EndDebugFrame();
                     return false;
                 }
 
@@ -687,8 +710,33 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 submit_info.signalSemaphoreCount = 1;
                 submit_info.pSignalSemaphores = &_ImVulkan_Semaphores[semaphoreIndex];
 
+                // With the debug view's copy this frame the submit also waits for it (a timeline semaphore, at the
+                // transfer that reads it); every wait then gets its own stage and value.
+                std::vector<VkSemaphore> debugWaits;
+                std::vector<VkPipelineStageFlags> debugStages;
+                std::vector<uint64_t> debugValues;
+                VkTimelineSemaphoreSubmitInfo debugTimeline { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+
+                if (const VkSemaphore copied = NativeMotionVk::DebugWaitSemaphore(); copied != VK_NULL_HANDLE)
+                {
+                    debugWaits.assign(pPresentInfo->pWaitSemaphores,
+                                      pPresentInfo->pWaitSemaphores + pPresentInfo->waitSemaphoreCount);
+                    debugStages.assign(debugWaits.size(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                    debugValues.assign(debugWaits.size(), 0);
+                    debugWaits.push_back(copied);
+                    debugStages.push_back(VK_PIPELINE_STAGE_TRANSFER_BIT);
+                    debugValues.push_back(NativeMotionVk::DebugWaitValue());
+                    debugTimeline.waitSemaphoreValueCount = (uint32_t) debugValues.size();
+                    debugTimeline.pWaitSemaphoreValues = debugValues.data();
+                    submit_info.pNext = &debugTimeline;
+                    submit_info.waitSemaphoreCount = (uint32_t) debugWaits.size();
+                    submit_info.pWaitSemaphores = debugWaits.data();
+                    submit_info.pWaitDstStageMask = debugStages.data();
+                }
+
                 LogMenuSubmitThread("menu draw submit", menuQueue);
                 auto qResult = vkQueueSubmit(menuQueue, 1, &submit_info, fd->Fence);
+                NativeMotionVk::EndDebugFrame(qResult == VK_SUCCESS);
                 if (qResult != VK_SUCCESS)
                 {
                     LOG_ERROR("vkQueueSubmit error: {0:X}", (UINT) qResult);
@@ -704,6 +752,8 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 ImGui::Render();
             }
         }
+
+        NativeMotionVk::EndDebugFrame();
     }
 
     return true;
@@ -723,6 +773,8 @@ void MenuOverlayVk::HandOverToBridge()
     // The backend frees its textures' descriptor sets from our pool, so it goes first; nothing of it may be in flight
     if (_ImVulkan_Info.Device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(_ImVulkan_Info.Device);
+
+    NativeMotionVk::ReleaseDebugViews(); // its textures are the backend's descriptor sets
 
     if (VulkanBackendIsUp())
         ImGui_ImplVulkan_Shutdown(false); // the font texture is made again by the D3D12 backend
@@ -760,6 +812,7 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
 
         if (MenuOverlayBase::IsInited())
         {
+            NativeMotionVk::ReleaseDebugViews(); // its textures are the backend's descriptor sets
             if (VulkanBackendIsUp())
                 ImGui_ImplVulkan_Shutdown(false);
 

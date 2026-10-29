@@ -111,5 +111,7 @@ The author tested the before-FG implementation in **Crimson Desert**, including 
 On/Off, native FG On/Off and game-menu transitions (the menu disables FG automatically), with
 no crashes in those dedicated transition tests. Separate sessions had GPU timeouts, including
 with NR off; the available kernel dump was inconclusive. This does not establish the cause or
-rule out the wider integration. These game observations precede the review corrections;
-automated tests are not a substitute for testing the corrected DLL in a game.
+rule out the wider integration. Those detailed transition observations precede the review
+corrections. On 2026-10-29 the author additionally tested the corrected DLL (`d0e138ac`)
+and reported that it works. The author has not tested it in any Unreal Engine title; the
+parallel-recording regression is covered by the isolated tests, not by a UE game run.

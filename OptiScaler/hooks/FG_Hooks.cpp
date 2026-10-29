@@ -29,6 +29,9 @@
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
+#include <framegen/GameFsrFgRule.h>
+
+#include <magic_enum.hpp>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -109,13 +112,34 @@ static bool CreatedByGameFsrFg()
     return false;
 }
 
-static bool RefuseUnderGameFsrFg()
+// Some games make their swapchain through AMD's FG library even while the player picked DLSS-G: with FG Input DLSSG
+// XeFG takes it and only stands aside while the game's FSR FG is really on (framegen/GameFsrFgRule.h,
+// XeFG_Dx12::Activate, NoteGameFsrFg). Other FG inputs can't tell the two apart, so they leave the swapchain to the
+// game.
+static bool RefuseUnderGameFsrFg(HWND hwnd)
 {
-    if (State::Instance().activeFgOutput != FGOutput::XeFG || !CreatedByGameFsrFg())
+    auto& state = State::Instance();
+
+    const auto decision = GameFsrFg::Decide(
+        state.activeFgOutput == FGOutput::XeFG, state.activeFgOutput == FGOutput::XeFG && CreatedByGameFsrFg(),
+        state.activeFgInput == FGInput::DLSSG, state.gameFsrFgSeen, state.gameFsrFgOn);
+
+    state.xefgUnderGameFsrFg = decision == GameFsrFg::Swapchain::Take;
+
+    if (decision == GameFsrFg::Swapchain::NotUnder)
         return false;
 
-    LOG_WARN("The game's FSR Frame Generation creates this swapchain, leaving it to the game: turn the game's frame "
-             "generation off or set FG Input to FSR-FG for XeFG");
+    if (decision == GameFsrFg::Swapchain::Take)
+    {
+        LOG_INFO("The game creates its swapchain through its FSR Frame Generation library, its FSR FG is off: XeFG "
+                 "takes it and stands aside while the game's FSR FG is on");
+        return false;
+    }
+
+    LOG_WARN("The game creates its swapchain through its FSR Frame Generation library, leaving it to the game (FG "
+             "Input {}, the game's FSR FG {}, its FFX calls {}seen)",
+             magic_enum::enum_name(state.activeFgInput), state.gameFsrFgOn ? "on" : "off",
+             state.gameFsrFgSeen ? "" : "not ");
 
     static bool shown = false;
 
@@ -123,11 +147,53 @@ static bool RefuseUnderGameFsrFg()
     {
         shown = true;
         ImGui::InsertNotification({ ImGuiToastType::Warning, 15000,
-                                    "The game's FSR Frame Generation is on: XeFG can't run under it.\n"
-                                    "Turn the game's frame generation off, or set FG Input to FSR-FG." });
+                                    "The game makes its swapchain through its FSR Frame Generation: XeFG can't run "
+                                    "under it now.\n"
+                                    "Set FG Input to FSR-FG, or to DLSSG with the game's FSR frame generation off." });
+    }
+
+    // XeFG's swapchain from before (the game's first one, made before it went through its FSR FG library) still owns
+    // this window: the game's new one would fail with E_ACCESSDENIED and the game crash (Cyberpunk 2077 started with
+    // its FSR FG on). Released as XeFG releases a same-window swapchain when it makes a new one, also with
+    // PreserveSwapChain on (the game's chain can't share the window). As there, none stays current, so the game's own
+    // Release of the old one goes through to the end; State's game swapchain pointers follow with the game's new one.
+    if (state.currentFGSwapchain != nullptr && state.currentFG != nullptr && state.currentFG->Hwnd() == hwnd)
+    {
+        if (state.currentCommandQueue != nullptr && resizeFence != nullptr && resizeFenceEvent != nullptr)
+        {
+            resizeFenceValue++;
+            WaitForQueueIdle(state.currentCommandQueue, resizeFence, resizeFenceEvent, resizeFenceValue);
+        }
+
+        if (state.currentFG->ReleaseSwapchain(hwnd))
+        {
+            state.currentFGSwapchain = nullptr;
+            oldSwapChain = nullptr;
+            LOG_INFO("Released XeFG's swapchain on this window so the game's own can be made");
+        }
     }
 
     return true;
+}
+
+void FGHooks::NoteGameFsrFgSeen() { State::Instance().gameFsrFgSeen = true; }
+
+void FGHooks::NoteGameFsrFg(bool on)
+{
+    auto& state = State::Instance();
+
+    if (state.gameFsrFgOn == on)
+        return;
+
+    state.gameFsrFgOn = on;
+    LOG_INFO("The game's FSR Frame Generation is {}", on ? "on" : "off");
+
+    if (GameFsrFg::StandsAside(state.xefgUnderGameFsrFg, on) && state.currentFG != nullptr &&
+        state.currentFG->IsActive())
+    {
+        state.currentFG->Deactivate();
+        state.currentFG->ResetCounters();
+    }
 }
 
 static bool CheckForFGStatus()
@@ -193,7 +259,7 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
         return E_NOINTERFACE;
     }
 
-    if (RefuseUnderGameFsrFg())
+    if (RefuseUnderGameFsrFg(pDesc->OutputWindow))
         return E_NOINTERFACE;
 
     // Check if it's Dx12
@@ -307,7 +373,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
         return E_NOINTERFACE;
     }
 
-    if (RefuseUnderGameFsrFg())
+    if (RefuseUnderGameFsrFg(hWnd))
         return E_NOINTERFACE;
 
     // Check if it's Dx12

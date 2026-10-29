@@ -26,6 +26,12 @@ class FGHooks
 
     // Removes the window-thread hook the borderless restyle is applied through (when OptiScaler is unloaded).
     static void ReleaseRestyleHook();
+
+    // The game's own FFX frame generation, seen by the FFX input hooks while another FG input feeds OptiScaler
+    // (framegen/GameFsrFgRule.h): it made an FG or FG swapchain context (seen), switched its FSR FG on or off in
+    // ffxConfigure, or destroyed its FG context (off). XeFG under that swapchain stands aside while it is on.
+    static void NoteGameFsrFgSeen();
+    static void NoteGameFsrFg(bool on);
     static bool IsDx12InteropPresentSC(IUnknown* pSwapChain);
 
   private:

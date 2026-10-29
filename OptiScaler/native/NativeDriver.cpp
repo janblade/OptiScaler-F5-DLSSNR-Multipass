@@ -68,6 +68,9 @@ void NativeDriver::LogDiagnostics()
 NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView)
 {
     RunResult out;
+    // FG has stopped. Do not keep the FG pause label while waiting for a new native frame.
+    if (_status == Status::PausedForNativeFg)
+        _status = Status::Off;
 
     FrameInput input;
     const auto acquired = source.Acquire(input);

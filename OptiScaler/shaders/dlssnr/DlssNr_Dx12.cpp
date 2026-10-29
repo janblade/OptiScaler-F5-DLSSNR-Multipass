@@ -6634,6 +6634,14 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             Late::Say("This option needs a native DirectX 12 game.");
             return;
         }
+        // Refuse before capture, pre-SR NR and private DLSS, not only when Present discards output.
+        if (StreamlinePicture::PauseEvaluation())
+        {
+            DeferredSr::Cancel();
+            Late::Cancel();
+            Late::Say("Paused: native frame generation has no application-picture handoff.");
+            return;
+        }
         if (finishedMode == 2)
         {
             if (rayReconstruction)

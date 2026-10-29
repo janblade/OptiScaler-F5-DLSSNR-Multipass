@@ -26,6 +26,7 @@ $cases = @(
     @{ Source = 'tests/nr_gpu/nr_streamline_hooks.cpp'; Libs = 'd3d12.lib dxgi.lib' },
     @{ Source = 'tests/nr_gpu/nr_streamline_picture_smoke.cpp'; Libs = 'd3d12.lib dxgi.lib' },
     @{ Source = 'tests/nr_gpu/nr_finished_routing.cpp'; Libs = 'd3d12.lib dxgi.lib' },
+    @{ Source = 'tests/nr_gpu/nr_finished_evaluate.cpp'; Libs = '' },
     @{ Source = 'tests/nr_gpu/nr_finished_native.cpp'; Libs = 'd3d12.lib dxgi.lib' },
     @{ Source = 'tests/nr_gpu/nr_finished_production.cpp'; Libs = 'd3d12.lib dxgi.lib d3dcompiler.lib' },
     @{ Source = 'tests/nr_gpu/nr_finished_performance.cpp'; Libs = 'd3d12.lib dxgi.lib' },

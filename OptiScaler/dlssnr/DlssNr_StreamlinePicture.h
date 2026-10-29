@@ -44,5 +44,7 @@ using GetFunction = void* (*) (const char*);
 // Only supported app-facing hooks own a chain. Native-input/lower presents must not edit it again.
 bool Owns(IDXGISwapChain* swapchain);
 bool NativeFgRunning();
+// Lock-free registration availability for evaluate, which already holds the NR mutex.
+bool PauseEvaluation();
 void* Wrap(const char* name, GetFunction getFunction, bool local = false);
 } // namespace DlssNr::StreamlinePicture

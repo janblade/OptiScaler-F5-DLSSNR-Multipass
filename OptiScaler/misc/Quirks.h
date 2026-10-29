@@ -214,8 +214,7 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("onimushawots.exe", GameQuirk::RestoreComputeSigOnNonNvidia, GameQuirk::DisableDxgiSpoofing,
                 GameQuirk::RestoreComputeSigOnNvidia),
 
-    // Capcom RE Engine games: [Hotfix] REFrameworkCompat=auto turns misc/REFrameworkCompat.h on in these when
-    // dinput8.dll
+    // Capcom RE Engine: [Hotfix] REFrameworkCompat=auto turns misc/REFrameworkCompat.h on in these when dinput8.dll
     // is the REFramework fork that draws on XeFG (onehoon). Entries add up with the ones above and below.
     QUIRK_ENTRY("re2.exe", GameQuirk::REFrameworkCompat),
     QUIRK_ENTRY("re3.exe", GameQuirk::REFrameworkCompat),

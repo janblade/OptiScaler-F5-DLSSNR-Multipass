@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include <cstdint>
 #include <dxgi1_4.h>
 #include <string>
 #include <vector>
@@ -98,13 +99,15 @@ bool WaitForFinishedPicture();
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd);
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
-// Called once at each real app Present, also when the plugin declines its buffer.
-void EndStreamlinePicture(const char* unavailable = nullptr);
+// Freeze submitted capture eligibility before querying the app buffer; expire only that interval.
+uint64_t BeginStreamlinePicture();
+void EndStreamlinePicture(uint64_t snapshot, const char* unavailable = nullptr);
 void FinishedPictureUnavailable(const char* message);
 // Streamline app-facing buffer, still PRESENT, on its original render queue before interpolation.
-void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue);
+void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue,
+                              uint64_t snapshot);
 // A registered runtime stopped exposing app buffers with FG off. Compose once before pass-through Present.
-void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
+void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, uint64_t snapshot);
 
 // The native input producer's entry: runs DLSS-NR on the picture `color` (a back buffer in the PRESENT state, or any resource) with a depth and a motion
 // texture of the picture's size made from the depth finder and the optical flow (both NON_PIXEL_SHADER_RESOURCE, motion in

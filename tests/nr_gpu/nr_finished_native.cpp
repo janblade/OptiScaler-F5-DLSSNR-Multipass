@@ -29,13 +29,15 @@ struct Driver
     Producer* _producer = &producer;
     void PauseVirtualUpscaler() { ++virtualPauses; }
     void PauseForNativeFg();
+    void ResumeForTest();
     bool Enabled() { return true; }
     bool Failed() { return false; }
-    template<class S> void RunFrame(S&, int, int) { ++runs; }
+    template<class S> void RunFrame(S&, int, int) { ResumeForTest(); ++runs; }
 } g_driver;
 struct Source { void SetPresent(IDXGISwapChain*, ID3D12CommandQueue*, ID3D12Device*) { ++sets; } } g_source;
 struct Ui { int TakeRequest() { return 0; } int View() { return 0; } } g_ui;
 #include "FinishedNativePause.inl"
+#include "FinishedNativeResume.inl"
 #include "FinishedNativeDriver.inl"
 std::recursive_mutex g_nrMutex;
 namespace DlssNr
@@ -61,6 +63,7 @@ int main() try
     running = false; registered = true;
     RunFrame(chain, queue, device);
     Expect(runs == 1 && sets == 1 && skips == 2, "FG-off registered chain did not recover ordinary native input");
+    Expect(g_driver._status == Driver::Status::Off, "FG-off frame waiting left the native-FG pause label stale");
     registered = false;
     RunFrame(chain, queue, device);
     Expect(runs == 2 && sets == 2, "Ordinary FG-off native input did not recover");

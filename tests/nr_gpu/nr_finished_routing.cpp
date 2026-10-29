@@ -108,7 +108,7 @@ inline constexpr GUID colorSpaceKey = {
 };
 } // namespace Late
 static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
-                               bool handoff, const D3D12_RESOURCE_DESC& desc)
+                               bool handoff, const D3D12_RESOURCE_DESC& desc, uint64_t snapshot)
 {
     Expect(NrLockIsHeld(), "Composition request lost the shared NR lock");
     Expect(picture == expectedPicture && queue == expectedQueue, "Routing selected the wrong picture or queue");
@@ -172,16 +172,17 @@ try
     Expect(composeRequests == 1 && gameBufferQueries == 1, "Registered lower/generated presents applied NR again");
     expectedPicture = application.Get();
     expectedHandoff = true;
-    DlssNr::ApplyToStreamlinePicture(chain.Get(), application.Get(), queue.Get());
+    DlssNr::ApplyToStreamlinePicture(chain.Get(), application.Get(), queue.Get(), UINT64_MAX);
     Expect(composeRequests == 2 && gameBufferQueries == 1, "App handoff replaced the supplied picture");
     expectedPicture = ordinary.Get();
-    expectedHandoff = false;
-    DlssNr::ApplyToStreamlinePassthrough(chain.Get(), queue.Get());
+    expectedHandoff = true; // FG-off app Present uses the same frozen capture boundary.
+    DlssNr::ApplyToStreamlinePassthrough(chain.Get(), queue.Get(), UINT64_MAX);
     Expect(composeRequests == 3 && gameBufferQueries == 2, "Registered FG-off passthrough did not compose once");
     DlssNr::ApplyToFinishedPicture(chain.Get(), queue.Get());
     Expect(composeRequests == 3 && gameBufferQueries == 2, "Lower present duplicated FG-off passthrough");
     // Disabling NR lets the shared composition entry cancel pending work, without swapchain reads.
     Config::Instance()->DlssNrEnabled.value = false;
+    expectedHandoff = false;
     expectedPicture = nullptr;
     expectedSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     DlssNr::ApplyToFinishedPicture(chain.Get(), queue.Get());
@@ -190,8 +191,8 @@ try
     Config::Instance()->DlssNrEnabled.value = true;
     State::Instance().isShuttingDown = true;
     DlssNr::ApplyToFinishedPicture(chain.Get(), queue.Get());
-    DlssNr::ApplyToStreamlinePicture(chain.Get(), application.Get(), queue.Get());
-    DlssNr::ApplyToStreamlinePassthrough(chain.Get(), queue.Get());
+    DlssNr::ApplyToStreamlinePicture(chain.Get(), application.Get(), queue.Get(), UINT64_MAX);
+    DlssNr::ApplyToStreamlinePassthrough(chain.Get(), queue.Get(), UINT64_MAX);
     Expect(composeRequests == 4 && gameBufferQueries == 2, "Shutdown guard allowed presentation work");
     // Exercise the actual slot-building loop, expiration and boundary functions too.
     State::Instance().isShuttingDown = false;
@@ -211,13 +212,15 @@ try
     auto select = [&](bool handoff)
     {
         inputs = {};
-        return DlssNr::SelectFinishedInput(queue.Get(), d, false, handoff, index, inputs);
+        return DlssNr::SelectFinishedInput(queue.Get(), d, false, handoff, UINT64_MAX, index, inputs);
     };
     Expect(select(true) == DlssNr::FinishedPick::NotReady && index == 3,
            "App handoff fell back from newest in-flight capture to previous frame's guides");
     slots[3].submitted = false;
-    Expect(select(true) == DlssNr::FinishedPick::NotReady && index == 3,
-           "Unsubmitted newest capture allowed previous guides");
+    Expect(select(true) == DlssNr::FinishedPick::Ready && index == 2,
+           "Unsubmitted worker capture blocked submitted app input");
+    Expect(select(false) == DlssNr::FinishedPick::Ready && index == 2,
+           "Ordinary FG-off path changed its ignore-unsubmitted rule");
     slots[3].submitted = true;
     slots[3].producerQueue = queue;
     Expect(select(true) == DlssNr::FinishedPick::Ready && index == 3,
@@ -227,7 +230,8 @@ try
     Expect(select(true) == DlssNr::FinishedPick::Ready && index == 3,
            "Newest completed capture not accepted across queues");
     slots[2].submitted = false; // recorded, but not submitted by this app Present
-    DlssNr::EndStreamlinePicture("Waiting for app picture");
+    const auto snapshot = DlssNr::BeginStreamlinePicture();
+    DlssNr::EndStreamlinePicture(snapshot, "Waiting for app picture");
     Expect(select(true) == DlssNr::FinishedPick::None,
            "Menu/declined Present left old guides eligible for the next app frame");
     Expect(slots[2].pending && slots[2].expired,
@@ -252,6 +256,43 @@ try
     slots[0].frame.SubmissionEpoch = 100;
     Expect(select(true) == DlssNr::FinishedPick::Ready,
            "New capture after menu did not recover app-frame composition");
+    // N+1 can be armed before Present N, then submitted while N's DXGI buffer is queried.
+    for (auto& slot : slots) { slot.pending = false; slot.expired = false; }
+    slots[0].pending = slots[0].submitted = true;
+    slots[0].serial = 20;
+    slots[0].frame.SubmissionEpoch = 100;
+    slots[1].pending = true; slots[1].submitted = false; slots[1].serial = 21;
+    slots[1].frame.SubmissionEpoch = 100;
+    const auto boundary = DlssNr::BeginStreamlinePicture();
+    Expect(boundary == 20, "Pre-armed unsubmitted N+1 changed the app boundary");
+    std::thread worker([&]
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+        slots[1].submitted = true; slots[1].producerQueue = queue;
+    });
+    worker.join();
+    inputs = {};
+    Expect(DlssNr::SelectFinishedInput(queue.Get(), d, false, true, boundary, index, inputs) ==
+               DlssNr::FinishedPick::Ready && index == 0,
+           "N+1 submitted during Present replaced N's selected guides");
+    // A second worker can also arm N+2 between composition and End (separate lock scopes).
+    std::thread nextWorker([&]
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+        slots[2].pending = true; slots[2].submitted = false; slots[2].serial = 22;
+    });
+    nextWorker.join();
+    DlssNr::EndStreamlinePicture(boundary, nullptr);
+    Expect(!slots[0].pending && slots[0].expired && slots[1].pending && !slots[1].expired &&
+               slots[2].pending && !slots[2].expired,
+           "End Present N expired a worker's later capture");
+    const auto nextBoundary = DlssNr::BeginStreamlinePicture();
+    inputs = {};
+    Expect(nextBoundary == 21 && DlssNr::SelectFinishedInput(queue.Get(), d, false, true, nextBoundary, index, inputs) ==
+               DlssNr::FinishedPick::Ready && index == 1,
+           "Preserved N+1 capture did not run at the next Present");
+    DlssNr::EndStreamlinePicture(nextBoundary, nullptr);
+    Expect(slots[2].pending && !slots[2].expired, "N+2 recording was not preserved across Present N+1");
     std::cout << "PASS: production slot building/newest-only readiness, menu expiry, late submission and recovery\n";
     puts("PASS: production routing, 64 generated presents excluded, app/passthrough exactly once, PQ metadata, lock "
          "order, NR off, shutdown");

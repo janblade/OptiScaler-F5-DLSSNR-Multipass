@@ -6,6 +6,7 @@
 #include <Util.h>
 #include <cstring>
 #include <atomic>
+#include <new>
 #include <framegen/dlssg/DlssgTelemetry.h>
 #include <shaders/dlssnr/DlssNr_FinishedReady.h>
 
@@ -18,6 +19,47 @@ using Present1 = HRESULT (*)(IDXGISwapChain*, UINT, UINT, const DXGI_PRESENT_PAR
 using CreateHwnd = HRESULT (*)(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*,
                                const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**, bool&);
 using Create = HRESULT (*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, bool&);
+
+// A swapchain-owned COM token keeps the availability count exact across destruction and
+// re-registration without querying DXGI while the evaluate path holds the NR mutex.
+std::atomic<unsigned> registrations[2] {};
+inline constexpr GUID registrationKey = {
+    0xe975f055, 0xc073, 0x4548, { 0xb6, 0xc2, 0x11, 0xa7, 0xc6, 0xef, 0x45, 0x1d }
+};
+inline constexpr GUID localRegistrationKey = {
+    0x1295ab84, 0x6b71, 0x4359, { 0x9f, 0xe0, 0x69, 0x2e, 0xee, 0x5b, 0x20, 0x83 }
+};
+class Registration final : public IUnknown
+{
+    std::atomic<ULONG> refs { 1 };
+    const unsigned runtime;
+    ~Registration() { registrations[runtime].fetch_sub(1, std::memory_order_release); }
+
+  public:
+    explicit Registration(bool local) : runtime(local ? 1u : 0u)
+    {
+        registrations[runtime].fetch_add(1, std::memory_order_release);
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override
+    {
+        if (!out)
+            return E_POINTER;
+        *out = nullptr;
+        if (iid != __uuidof(IUnknown))
+            return E_NOINTERFACE;
+        *out = static_cast<IUnknown*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return refs.fetch_add(1, std::memory_order_relaxed) + 1; }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const auto left = refs.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (!left)
+            delete this;
+        return left;
+    }
+};
 
 void RegisterQueue(HRESULT result, bool handled, IUnknown* device, IDXGISwapChain* swapchain, bool local)
 {
@@ -32,8 +74,21 @@ void RegisterQueue(HRESULT result, bool handled, IUnknown* device, IDXGISwapChai
         ID3D12CommandQueue* real = nullptr;
         if (Util::CheckForRealObject(__FUNCTION__, queue.Get(), (IUnknown**) &real))
             queue = real;
-        if (SUCCEEDED(swapchain->SetPrivateDataInterface(local ? localRenderQueueKey : renderQueueKey, queue.Get())))
-            LOG_INFO("DLSS-NR: Streamline finished-picture handoff registered on the game render queue");
+        const auto& queueKey = local ? localRenderQueueKey : renderQueueKey;
+        if (FAILED(swapchain->SetPrivateDataInterface(queueKey, queue.Get())))
+            return;
+        const auto& tokenKey = local ? localRegistrationKey : registrationKey;
+        auto* token = new (std::nothrow) Registration(local);
+        if (!token || FAILED(swapchain->SetPrivateDataInterface(tokenKey, token)))
+        {
+            swapchain->SetPrivateDataInterface(queueKey, nullptr);
+            swapchain->SetPrivateDataInterface(tokenKey, nullptr); // also clear an older registration on retry
+            if (token)
+                token->Release();
+            return;
+        }
+        token->Release(); // now owned exclusively by the swapchain, no raw-pointer registry
+        LOG_INFO("DLSS-NR: Streamline finished-picture handoff registered on the game render queue");
     }
 }
 
@@ -80,21 +135,22 @@ template <bool Local> struct Hooks
         auto queue = RenderQueue(swapchain, Local);
         if (!queue || !Supported(Local))
             return;
+        const auto snapshot = BeginStreamlinePicture();
         const auto& cfg = *Config::Instance();
         const char* unavailable = nullptr;
         if (cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrFinishedPicture.value_or_default())
         {
             auto picture = Read(swapchain, getIndex.load(), getBuffer.load());
             if (picture)
-                ApplyToStreamlinePicture(swapchain, picture.Get(), queue.Get());
+                ApplyToStreamlinePicture(swapchain, picture.Get(), queue.Get(), snapshot);
             else if (!GameFgMayBeRunning())
-                ApplyToStreamlinePassthrough(swapchain, queue.Get());
+                ApplyToStreamlinePassthrough(swapchain, queue.Get(), snapshot);
             else
                 unavailable = "Waiting for Streamline's application picture; native frame generation may be active.";
         }
         // Every real app Present is a capture boundary, including menus/declined buffers/NR Off.
         // Never carry this picture's guides into a later application frame.
-        EndStreamlinePicture(unavailable);
+        EndStreamlinePicture(snapshot, unavailable);
     }
 
     static HRESULT BeforePresent(IDXGISwapChain* swapchain, UINT interval, UINT flags, bool& skip)
@@ -179,6 +235,12 @@ bool NativeFgRunning()
     return !replaced &&
            GameFrameGenerationOn(fg && fg->IsActive() && !fg->IsPaused(), state.activeFgInput == FGInput::DLSSG,
                                  state.activeFgOutput == FGOutput::DLSSG, GameFgMayBeRunning(), UINT64_MAX);
+}
+
+bool PauseEvaluation()
+{
+    return NativeFgRunning() && !(Supported(false) && registrations[0].load(std::memory_order_acquire)) &&
+           !(Supported(true) && registrations[1].load(std::memory_order_acquire));
 }
 
 void* Wrap(const char* name, GetFunction getFunction, bool local)

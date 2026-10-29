@@ -129,6 +129,12 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
 {
     if (!cmd || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
     { Say("This option needs a native DirectX 12 game."); return nullptr; }
+    if (StreamlinePicture::PauseEvaluation())
+    {
+        Cancel();
+        Say("Paused: native frame generation has no application-picture handoff.");
+        return nullptr;
+    }
     ComPtr<ID3D12Device> currentDevice;
     if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&currentDevice))))
         return nullptr;
@@ -440,7 +446,7 @@ static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linea
 // Shared production slot selection; application captures expire at the app Present boundary,
 // ordinary lower presents retain their short presentation-epoch window.
 static FinishedPick SelectFinishedInput(ID3D12CommandQueue* queue, const D3D12_RESOURCE_DESC& desc,
-                                       bool residualOnly, bool gameFrameHandoff, size_t& index,
+                                       bool residualOnly, bool gameFrameHandoff, uint64_t snapshot, size_t& index,
                                        std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>>& inputs)
 {
     const auto epoch = State::Instance().frameCount;
@@ -448,7 +454,7 @@ static FinishedPick SelectFinishedInput(ID3D12CommandQueue* queue, const D3D12_R
     for (size_t i = 0; i < Late::slots.size(); ++i)
     {
         auto& slot = Late::slots[i];
-        if (!slot.pending || slot.expired)
+        if (!slot.pending || slot.expired || !slot.submitted || (gameFrameHandoff && slot.serial > snapshot))
             continue;
         if (!gameFrameHandoff && (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1))
         {
@@ -469,7 +475,7 @@ static FinishedPick SelectFinishedInput(ID3D12CommandQueue* queue, const D3D12_R
 // The caller holds g_nrMutex. Handoff callers read all swapchain metadata before entering
 // this lock: Streamline can hold its own lock while submitting commands that take g_nrMutex.
 static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
-                               bool gameFrameHandoff, const D3D12_RESOURCE_DESC& desc)
+                               bool gameFrameHandoff, const D3D12_RESOURCE_DESC& desc, uint64_t snapshot)
 {
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
         !Config::Instance()->DlssNrEnabled.value_or_default())
@@ -508,7 +514,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
                               Config::Instance()->DlssNrDeferredDlss.value_or_default();
     std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>> inputs {};
     size_t index = 0;
-    const auto pick = SelectFinishedInput(queue, desc, residualOnly, gameFrameHandoff, index, inputs);
+    const auto pick = SelectFinishedInput(queue, desc, residualOnly, gameFrameHandoff, snapshot, index, inputs);
     if (pick == FinishedPick::None)
         return; // loading screen, another swapchain, or this real frame was already consumed
     if (pick == FinishedPick::NotReady)
@@ -671,7 +677,8 @@ DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FOR
 // Ordinary picture lookup, shared by the unregistered-chain path and Streamline's FG-off
 // pass-through. Swapchain calls precede g_nrMutex: the runtime can hold its presentation lock
 // while submitting commands that take the NR lock, so querying it under that lock can deadlock.
-static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, bool passThrough)
+static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, bool passThrough,
+                                  uint64_t snapshot = UINT64_MAX)
 {
     if (State::Instance().isShuttingDown)
         return;
@@ -698,7 +705,7 @@ static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue
         space = NativeInputColourSpace(swapchain, desc.Format);
     }
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
-    ApplyFinishedColor(color.Get(), queue, space, false, desc);
+    ApplyFinishedColor(color.Get(), queue, space, passThrough, desc, snapshot);
 }
 
 void FinishedPictureUnavailable(const char* message)
@@ -708,16 +715,29 @@ void FinishedPictureUnavailable(const char* message)
     Late::Say(message);
 }
 
-void EndStreamlinePicture(const char* unavailable)
+uint64_t BeginStreamlinePicture()
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
-    // Discard eligibility, never in-flight resources. Unsubmitted copies still get their fence
-    // signalled when their producer is submitted; command-list reset keeps its original cleanup.
+    // Only captures already submitted at this boundary belong to the presented picture.
+    // A worker may have armed the next frame before Present; leave it for the next boundary.
+    uint64_t snapshot = 0;
+    for (const auto& slot : Late::slots)
+        if (slot.pending && slot.submitted && !slot.expired)
+            snapshot = std::max(snapshot, slot.serial);
+    return snapshot;
+}
+
+void EndStreamlinePicture(uint64_t snapshot, const char* unavailable)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    // Newer worker recordings/submissions are for a later app picture. Only expire the
+    // interval selected at Begin, even if another capture arrived while DXGI was queried.
     for (auto& slot : Late::slots)
-    {
-        slot.expired = true;
-        if (slot.submitted) slot.pending = false;
-    }
+        if (slot.serial <= snapshot)
+        {
+            slot.expired = true;
+            if (slot.submitted) slot.pending = false;
+        }
     Late::reset |= Late::successes == Late::lastApplicationSuccesses;
     Late::lastApplicationSuccesses = Late::successes;
     if (unavailable)
@@ -732,21 +752,22 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     ApplyFinishedSwapchain(swapchain, queue, false);
 }
 
-void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue)
+void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue,
+                              uint64_t snapshot)
 {
     if (State::Instance().isShuttingDown || !swapchain || !picture || !queue)
         return;
     const auto desc = picture->GetDesc();
     const auto space = NativeInputColourSpace(swapchain, desc.Format);
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
-    ApplyFinishedColor(picture, queue, space, true, desc);
+    ApplyFinishedColor(picture, queue, space, true, desc, snapshot);
 }
 
-void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
+void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, uint64_t snapshot)
 {
     // Only the real app-facing Present calls this with FG off. Keep registration intact so
     // asynchronous/generated presents remain excluded when FG restarts.
-    ApplyFinishedSwapchain(swapchain, queue, true);
+    ApplyFinishedSwapchain(swapchain, queue, true, snapshot);
 }
 
 // The body of ApplyNativeInput and ApplyVirtualUpscalerInput. `fromVirtualUpscaler` skips the Finished Picture setting,

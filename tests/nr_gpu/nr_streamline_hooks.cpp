@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <cstring>
 #include <atomic>
+#include <new>
 #include <cstdio>
 #include <stdexcept>
 #include "../../OptiScaler/dlssnr/DlssNr_StreamlinePicture.h"
@@ -97,13 +98,16 @@ static unsigned appBoundaries = 0;
 static std::string lastUnavailable;
 namespace DlssNr
 {
-void EndStreamlinePicture(const char* unavailable)
+uint64_t BeginStreamlinePicture() { return 1; }
+void EndStreamlinePicture(uint64_t snapshot, const char* unavailable)
 {
+    Expect(snapshot == 1, "App capture snapshot was not carried through the wrapper");
     ++appBoundaries;
     lastUnavailable = unavailable ? unavailable : "";
 }
-void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue)
+void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue, uint64_t snapshot)
 {
+    Expect(snapshot == 1, "App composition did not receive the frozen capture boundary");
     Expect(picture == expectedPicture, "Mixed local and game plugin buffers");
     Expect(queue == expectedQueue, "Used the presentation queue instead of the render queue");
     if (expectPq)
@@ -116,8 +120,9 @@ void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture
     }
     ++edits;
 }
-void ApplyToStreamlinePassthrough(IDXGISwapChain*, ID3D12CommandQueue* queue)
+void ApplyToStreamlinePassthrough(IDXGISwapChain*, ID3D12CommandQueue* queue, uint64_t snapshot)
 {
+    Expect(snapshot == 1, "FG-off composition did not receive the frozen capture boundary");
     Expect(queue == expectedQueue, "Passthrough used the asynchronous presentation queue");
     ++edits;
     ++passthroughEdits;
@@ -218,6 +223,9 @@ try
     Check(Plugin<1>::chain->GetBuffer(1, IID_PPV_ARGS(&Plugin<1>::picture)));
 
     using namespace DlssNr::StreamlinePicture;
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOn;
+    Expect(PauseEvaluation(), "Unregistered native FG did not pause expensive evaluate");
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOff;
     Expect(!Wrap(nullptr, Plugin<0>::Get) && !Wrap("slHookPresent", nullptr), "Accepted incomplete hook lookup");
     Expect(!Wrap("slHookPresent", MissingBuffer) && !Wrap("slHookPresent", MissingPresent1),
            "Wrapped an incompatible plugin missing required exports");
@@ -269,6 +277,9 @@ try
     Check(localCreate(nullptr, queue.Get(), nullptr, &localChain, skip));
     Expect(RenderQueue(nativeChain.Get()).Get() == queue.Get(), "Hwnd create lost the render queue");
     Expect(RenderQueue(localChain.Get(), true).Get() == queue.Get(), "Legacy create lost the render queue");
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOn;
+    Expect(!PauseEvaluation(), "Registered app handoff remained paused at evaluate");
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOff;
     Expect(!RenderQueue(localChain.Get()) && !RenderQueue(nativeChain.Get(), true),
            "Native/local queue registration mixed runtime ownership");
     State::Instance().streamlineVersion.major = 1;
@@ -465,6 +476,29 @@ try
     Expect(Plugin<0>::picture->GetDesc().Width == 16 && Plugin<1>::picture->GetDesc().Height == 12,
            "Resize used stale app buffers");
     Expect(passthroughEdits == 3 + toggleCycles, "Resize duplicated composition via passthrough");
+    // Registration is lifetime-bound to the chain, not a forever-set global flag.
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOn;
+    State::Instance().streamlineVersion.major = 1;
+    State::Instance().gameQuirks.enabled = false;
+    Expect(PauseEvaluation(), "Unsupported runtime kept evaluate available via stale registrations");
+    State::Instance().streamlineVersion.major = 2;
+    // Re-registering the same chain replaces its token without leaking a count.
+    skip = false;
+    ComPtr<IDXGISwapChain1> sameNative;
+    Check(nativeCreate(nullptr, queue.Get(), nullptr, nullptr, nullptr, nullptr, &sameNative, skip));
+    sameNative.Reset();
+    Expect(registrations[0].load() == 1, "Re-registration leaked an availability count");
+    Plugin<0>::picture.Reset();
+    Plugin<0>::chain.Reset();
+    nativeChain.Reset();
+    Expect(PauseEvaluation() && registrations[0].load() == 0, "Destroyed swapchain left evaluate enabled");
+    State::Instance().gameQuirks.enabled = true;
+    Expect(!PauseEvaluation(), "Independent live local registration was lost");
+    Plugin<1>::picture.Reset(); Plugin<1>::chain.Reset(); localChain.Reset();
+    Expect(PauseEvaluation() && registrations[1].load() == 0, "Destroyed local chain leaked availability");
+    State::Instance().dlssgLastSetMode = sl::DLSSGMode::eOff;
+    DlssgTelemetry::RecordSetOptions(1, 1, false, 0);
+    Expect(!PauseEvaluation(), "FG Off did not resume evaluate without registration");
     puts("PASS: actual DXGI resize/reacquire, queue registration retained, no stale app buffers");
     puts("PASS: FG Off recovery, no-FG startup, 64 FG and NR Off/On cycles, native/local separation, no duplicate "
          "edits");

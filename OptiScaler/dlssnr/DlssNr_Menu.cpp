@@ -3119,7 +3119,8 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
                    "After Super Resolution (default): on the upscaled picture.\n"
                    "Before Super Resolution: on the smaller picture; cheaper.\n"
                    "Finished Picture: after the game's effects; may help green noise, but also changes HUD and menus "
-                   "(DirectX 12). With native Streamline frame generation, NR runs before interpolation.\n"
+                   "(DirectX 12). With native Streamline 2 frame generation and a registered application-picture "
+                   "handoff, NR runs before interpolation; otherwise it pauses.\n"
                    "With Ray Reconstruction, NR always runs after.");
 
         if (finishedPicture && enabled)

@@ -19,6 +19,9 @@ its protection against circular render/present queue waits. No new setting is re
   including on registered chains, with an explicit status and a one-time flow-history reset.
   With FG Off its ordinary path resumes. Native FG without
   a usable handoff keeps the conservative pause; generated frames must never enter NR history.
+  Evaluate and guide acquisition check a lock-free live-registration count before recording
+  copies, pre-SR NR or private DLSS. Swapchain-owned COM tokens decrement the count on
+  destruction/re-registration; evaluate never queries DXGI while holding the NR mutex.
 - A successful explicit FG Off permits ordinary-picture composition on the registered render
   queue if the plugin declines its app buffer. Failed/uncertain Off and Auto/Dynamic without
   an app buffer skip NR with a waiting status. A valid app buffer takes priority even with FG Off.
@@ -33,11 +36,15 @@ completed depth/MV for a newer unfinished capture. Same-queue submission order i
 another queue must already have completed its capture. Presentation never waits for a future
 cross-queue signal. Device removal is not readiness.
 
-Every real app Present ends the capture interval, including menus, disabled NR and declined
-app buffers. Captures from that interval cannot be applied to the next app picture. Recorded
-but unsubmitted captures remain tracked until submission/reset so their resources and fences
-are not reused prematurely. Skipped app pictures break NR history. Ordinary lower presentation
-keeps its existing short epoch window. Generated-present counts are not used as app-frame age.
+At the start of each real app Present, snapshot the newest submitted, non-expired capture
+serial under the NR mutex. Selection and interval expiry both use that same watermark.
+A worker's newer capture recorded/submitted while the picture is queried or composed stays
+pending for the next boundary. An already armed but unsubmitted next-frame capture does not
+advance the watermark or block current submitted guides. This also applies to FG-off app
+pass-through, menus, disabled NR and declined buffers. Expiry discards eligibility, not
+in-flight resources; submission/reset and fences continue protecting reuse. Skipped app
+pictures break NR history. Ordinary lower presentation still ignores unsubmitted recordings
+and keeps its short epoch window. Generated-present counts are not used as app-frame age.
 
 Swapchain/buffer/colour-space queries happen outside the NR mutex. Captures, selection and
 composition use that mutex; GPU fences still protect slot reuse. Resize waits only for work
@@ -72,7 +79,8 @@ invalid-result fallback.
 ## Verification and limits
 
 Run `tests/run_nr_finished_fg_tests.ps1` for production hook lookup/wrappers, native-input
-guards, real slot selection and capture expiry, WARP queue/resize/toggle tests, colour,
+guards, evaluate/acquisition early pause, live registration lifetime, real slot selection
+and bounded capture expiry with parallel next-frame recording, WARP queue/resize/toggle tests, colour,
 profiles and views. Production PQ tests execute the actual compositor methods, shader helper
 methods, root-signature/constant/descriptor setup, format capability checks and compute/raster
 PSOs, including ring wrap and same-state UAV ordering. NR/optical-flow inference and the

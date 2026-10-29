@@ -206,6 +206,14 @@ class State
     bool fsrfgFramePaceTuningChanged = false;
     bool fsrfgInputActive = false;
 
+    // XeFG's swapchain was created from inside the game's own FSR FG library (FG Input DLSSG: the game drives DLSS-G
+    // and makes its swapchain through AMD's library anyway). XeFG stands aside while the game's FSR FG is on, which the
+    // game says in each ffxConfigure(FRAMEGENERATION) call and ends with its FG context (gameFsrFgOn; FGHooks::
+    // NoteGameFsrFg). gameFsrFgSeen: the game's FFX FG calls pass OptiScaler's hooks (framegen/GameFsrFgRule.h).
+    bool xefgUnderGameFsrFg = false;
+    bool gameFsrFgOn = false;
+    bool gameFsrFgSeen = false;
+
     ankerl::unordered_dense::map<void*, CapturedHudlessInfo> capturedHudlesses;
     bool clearCapturedHudlesses = false;
 

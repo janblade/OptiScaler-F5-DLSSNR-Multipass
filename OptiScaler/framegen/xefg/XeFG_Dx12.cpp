@@ -11,6 +11,8 @@
 #include <low_latency/input/input_common.h>
 #include <misc/FrameLimit.h>
 #include <framegen/mfgunlock/MfgUnlock.h>
+#include <imgui/ImGuiNotify.hpp>
+#include <framegen/GameFsrFgRule.h>
 
 #include <magic_enum.hpp>
 
@@ -686,6 +688,23 @@ void XeFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
 void XeFG_Dx12::Activate()
 {
     LOG_DEBUG("");
+
+    // Our swapchain sits under the game's FSR FG one (FG_Hooks RefuseUnderGameFsrFg): both generating crashes
+    if (GameFsrFg::StandsAside(State::Instance().xefgUnderGameFsrFg, State::Instance().gameFsrFgOn))
+    {
+        static bool shown = false;
+
+        if (!shown)
+        {
+            shown = true;
+            LOG_WARN("The game's FSR Frame Generation is on: XeFG stands aside until it is off");
+            ImGui::InsertNotification({ ImGuiToastType::Warning, 15000,
+                                        "The game's FSR Frame Generation is on: XeFG can't run under it.\n"
+                                        "Turn the game's FSR frame generation off, or set FG Input to FSR-FG." });
+        }
+
+        return;
+    }
 
     auto currentFeature = State::Instance().currentFeature;
     bool nativeAA = false;

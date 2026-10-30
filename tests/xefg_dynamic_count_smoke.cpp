@@ -28,6 +28,7 @@ struct Game
     double onMs = 1.0;
     double limitFps = 0.0;
     double dropsOverFps = 0.0; // V-Sync that drops generated frames over this rate instead of holding the game
+    double floorMs = 0.0; // a GPU bound game: no real frame is shorter, the CPU waits out the rest (seen as waits)
 };
 
 struct Frame
@@ -36,13 +37,17 @@ struct Frame
     double waitMs = 0.0;
 };
 
+// A try of one step less and the step back after it: the controllers do this now and then at a cap the waits don't
+// show, it is not flipping. Bounded below by the probes' own back-off.
+template <typename R> static bool IsProbe(R reason) { return reason == R::Probe || reason == R::Undo; }
+
 static Frame Run(const Game& g, int count)
 {
     const double work = g.workMs + (count > 0 ? g.onMs + (count - 1) * g.genMs : 0.0);
-    double frame = work;
+    double frame = std::max(work, g.floorMs);
 
     if (g.limitFps > 0.0)
-        frame = std::max(work, (count + 1) * 1000.0 / g.limitFps);
+        frame = std::max(frame, (count + 1) * 1000.0 / g.limitFps);
 
     return { frame, frame - work };
 }
@@ -50,7 +55,9 @@ static Frame Run(const Game& g, int count)
 struct Result
 {
     int count = 0;
-    int changesLate = 0; // count changes in the second half
+    int changesLate = 0; // count changes in the second half, a probe (one step less now and then) and its undo apart
+    int probeChanges = 0; // the probes of the second half and their undo
+    int undos = 0;        // steps down of the second half that did not hold and were taken back
     double presented = 0.0;
     double lateMs[9] = {}; // time at each count in the second half
 };
@@ -86,7 +93,10 @@ static Result SimCount(const Game& g, double targetFps, int maxCount, int startC
             r.lateMs[std::clamp(count, 0, 8)] += f.frameMs;
 
         if (next != count && now >= seconds * 500.0)
-            ++r.changesLate;
+        {
+            ++(IsProbe(dc.LastReason()) ? r.probeChanges : r.changesLate);
+            r.undos += dc.LastReason() == XeFG_DynamicCount::Reason::Undo;
+        }
 
         count = next;
     }
@@ -138,7 +148,7 @@ static Result SimMeasured(const Game& g, double targetFps, int maxCount, int sta
                                      shownPerFrame.Value(), shownPerFrame.Sample() });
 
         if (next != current && now >= seconds * 500.0)
-            ++r.changesLate;
+            ++(IsProbe(dc.LastReason()) ? r.probeChanges : r.changesLate);
 
         xefg::AddShownPresent(totals, (uint32_t) (applied + 1));
         answers.insert(answers.begin(), next);
@@ -168,7 +178,10 @@ static Result SimCap(const Game& g, double targetFps, int maxCount, int startCou
         const int next = dc.Update({ now, f.frameMs, f.waitMs, targetFps, maxCount, count });
 
         if (next != count && now >= seconds * 500.0)
-            ++r.changesLate;
+        {
+            ++(IsProbe(dc.LastReason()) ? r.probeChanges : r.changesLate);
+            r.undos += dc.LastReason() == XeFG_DynamicCap::Reason::Undo;
+        }
 
         count = next;
     }
@@ -190,6 +203,7 @@ int main()
                     from2.count + 1, from2.presented);
         Check(from6.count == 2 && from2.count == 2, "settles at 3X, nearest the target, from above and below");
         Check(from6.changesLate == 0 && from2.changesLate == 0, "holds still once settled");
+        Check(from6.probeChanges <= 4 && from2.probeChanges <= 4, "probes of one step less stay rare: 2 tries at most in a minute");
     }
     {
         // "at least" counts the target reached from 97% of it: at 120, 3X (about 113, 94%) isn't, 4X is the lowest
@@ -249,6 +263,21 @@ int main()
         Check(r.changesLate <= 2 && share3x >= 0.95, "noise doesn't make it flip: 95% or more of the time at 3X");
     }
 
+    std::printf("A step down that does not hold is not tried again every minute (GPU bound game, its waits look like idle time):\n");
+    {
+        // 5 ms of CPU work then 18 ms until the GPU is done; the limiter holds 140 fps. 3X reaches 140, 2X only 111.
+        Game g;
+        g.workMs = 5.0;
+        g.floorMs = 18.0;
+        g.limitFps = 140.0;
+        const auto r = SimCount(g, 140.0, 5, 5, 1, 1, false, 0.0, 1200.0);
+        std::printf("    %dX at %.1f fps, %d undone steps down in the second 10 minutes\n", r.count + 1, r.presented, r.undos);
+        Check(r.presented >= 138.0, "stays at the rate it holds");
+        Check(r.undos <= 3, "a step down that failed is tried again rarely: 3 times at most in 10 minutes");
+        const auto c = SimCap(g, 140.0, 5, 5, 1200.0);
+        std::printf("    cap controller: %dX at %.1f fps, %d undone steps down\n", c.count + 1, c.presented, c.undos);
+        Check(c.undos <= 3, "the cap controller too");
+    }
     std::printf("Use target as cap:\n");
     {
         // 50 fps real, cap 120: 3X is the lowest that reaches it

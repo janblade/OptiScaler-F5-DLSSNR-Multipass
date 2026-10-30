@@ -1330,13 +1330,35 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
 }
 
 // One line of the same status, for the other pages.
+// The views a multi-monitor layout draws (DlssNr_Views.h), as the menu words them. Direct3D 12 only.
+static std::string ViewText(const DlssNr::Views::Rect& r)
+{
+    char text[64];
+    std::snprintf(text, sizeof(text), "%ux%u at %u,%u", r.w, r.h, r.x, r.y);
+    return text;
+}
+
 static void RenderStatusLine(const NrCommon& nr)
 {
     const auto ms = nr.vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime();
     ScopedMonoFont monoFont {};
+    const auto views = nr.vulkan ? DlssNr::Views::Snapshot {} : DlssNr::MultiViewStatus();
 
     if (!nr.enabled)
         ImGui::TextDisabled("NR off.");
+    else if (views.active && DlssNr::Views::OnePicture(views.mask) && ms.has_value())
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                           "Running on all %zu screens as one picture - %.2f ms elapsed", views.screens, ms.value());
+    else if (views.active && DlssNr::Views::CountRuns(views.mask) == 0 && !DlssNr::Views::OnePicture(views.mask))
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Stood down: the game draws %zu views at once.", views.count);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Pick views##multiviewstatus"))
+            MenuPages::RequestPage(MenuPages::Page::NrInput);
+    }
+    else if (views.active && ms.has_value())
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running on %u of %zu views - %.2f ms elapsed (last view)",
+                           DlssNr::Views::CountRuns(views.mask), views.count, ms.value());
     else if (!DlssNr::IsRunning() && !nr.vulkan)
         ImGui::TextDisabled("NR is not running. See Status & Presets.");
     else if (ms.has_value())
@@ -1650,8 +1672,10 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
             config->DlssNrNativeDebugView = pictures;
 
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Shows the motion estimate and trust mask on this page (small GPU cost, D3D12). "
-                                    "The depth picture also needs \"Show the picked depth here\" and a restart.");
+            ImGui::SetTooltip("%s", "Shows the debug views (motion arrows, depth, final flow, confidence, history "
+                                    "rejection, still age) on this page, on D3D12, D3D11 and Vulkan; on D3D12 also the "
+                                    "trust mask and the picked depth (which needs \"Show the picked depth here\" and "
+                                    "a restart). Small GPU cost while shown.");
 
         switch (CurrentNativeApi())
         {
@@ -3095,7 +3119,8 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
                    "After Super Resolution (default): on the upscaled picture.\n"
                    "Before Super Resolution: on the smaller picture; cheaper.\n"
                    "Finished Picture: after the game's effects; may help green noise, but also changes HUD and menus "
-                   "(DirectX 12).\n"
+                   "(DirectX 12). With native Streamline 2 frame generation and a registered application-picture "
+                   "handoff, NR runs before interpolation; otherwise it pauses.\n"
                    "With Ray Reconstruction, NR always runs after.");
 
         if (finishedPicture && enabled)
@@ -3597,6 +3622,101 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
 }
 
 // NR Input.
+// What the menu calls a view: Left / Middle / Right for three screens, Left / Right for two, else Screen N.
+static std::string ViewName(const DlssNr::Views::ViewInfo& v, size_t screens)
+{
+    if (v.slot == DlssNr::Views::kWholeBit)
+        return "The whole picture";
+    if (screens == 3)
+        return v.slot == 0 ? "Left screen" : v.slot == 1 ? "Middle screen" : "Right screen";
+    if (screens == 2)
+        return v.slot == 0 ? "Left screen" : "Right screen";
+    return "Screen " + std::to_string(v.slot + 1);
+}
+
+// "Several views": shown only while the game draws several views into one picture (a triple-screen rig), so it is not a
+// control everyone scrolls past. Each ticked view gets its own model and history; until one is ticked NR stands down
+// (the picture stays as the game made it).
+static void RenderSeveralViews(Config* config, float menuResScale, bool beforeSr)
+{
+    const auto views = DlssNr::MultiViewStatus();
+
+    if (!views.active)
+        return;
+
+    NrCard card("Several views##card", menuResScale);
+    if (!card.IsOpen())
+        return;
+
+    ImGui::TextWrapped("The game draws %zu views into one %ux%u picture (a multi-monitor layout).", views.count,
+                       views.allocW, views.allocH);
+
+    uint32_t mask = config->DlssNrMultiViewScreens.value_or_default();
+    bool screenTicked = false;
+
+    // Two ways: one model per ticked view (before SR), or one pass over the finished picture after SR, where the views
+    // are side by side in the game's output. The ticks are kept while one picture is chosen.
+    const uint32_t oneBit = 1u << DlssNr::Views::kOnePictureBit;
+    bool onePicture = DlssNr::Views::OnePicture(mask);
+    if (ImGui::RadioButton("Each ticked view on its own##multiviewmode", !onePicture))
+        config->DlssNrMultiViewScreens = mask = mask & ~oneBit;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("All screens as one picture (after SR)##multiviewmode", onePicture))
+        config->DlssNrMultiViewScreens = mask = mask | oneBit;
+    HelpMarker(
+        "Each ticked view on its own: a model and a history per view, before SR, nothing crosses the edge between "
+        "two screens.\nAll screens as one picture: once per frame, after SR, on the game's whole output (the "
+        "screens side by side), with one model. Superior Scaling and Reuse detail stay on. The model may smear a "
+        "thin strip where two screens meet: they are different cameras. Costs NR at the whole output size.");
+    onePicture = DlssNr::Views::OnePicture(mask);
+
+    if (onePicture)
+    {
+        ImGui::TextDisabled("NR runs once per frame after SR, on all %zu screens together.", views.screens);
+        return;
+    }
+
+    ImGui::TextDisabled(
+        "Tick the views NR works on: each gets its own model. Unticked views stay as the game made them.");
+
+    for (size_t i = 0; i < views.count; ++i)
+    {
+        const auto& v = views.views[i];
+        const uint32_t bit = 1u << v.slot;
+        bool on = (mask & bit) != 0;
+        const std::string label =
+            ViewName(v, views.screens) + "  " + ViewText(v.rect) + "##multiviewslot" + std::to_string(v.slot);
+
+        if (ImGui::Checkbox(label.c_str(), &on))
+        {
+            mask = on ? (mask | bit) : (mask & ~bit);
+            config->DlssNrMultiViewScreens = mask;
+        }
+
+        screenTicked |= on && v.slot != DlssNr::Views::kWholeBit;
+    }
+
+    HelpMarker(
+        "The game gives the upscaler one call per monitor, and often one for the whole picture. Each view you tick "
+        "runs NR with a model and a history of its own, so it costs about what NR costs at that view's size, per "
+        "view, in GPU time and memory. Nothing ticked: NR stands down while the game draws several views.");
+
+    if (DlssNr::Views::CountRuns(mask) >= 2)
+        ImGui::TextDisabled(
+            "With several views ticked, Superior Scaling, Reuse detail and the edit cache stand aside.");
+
+    // A single screen of a shared picture has to be handled before SR; after it the model would run on every screen.
+    if (screenTicked && !beforeSr)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+        ImGui::TextWrapped("A screen needs \"Run before SR\": after SR the model would run on every screen, so NR does "
+                           "not run on the ticked screens until it is on.");
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("Set in NR Options##multiviewbeforesr"))
+            MenuPages::RequestPage(MenuPages::Page::NrOptions);
+    }
+}
+
 static void RenderInputPage(Config* config, float menuResScale, const NrCommon& nr)
 {
     ImGui::PushItemWidth(220.0f * menuResScale);
@@ -3607,6 +3727,9 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
                           (finishedPicture && config->DlssNrDeferredDlss.value_or_default());
     const auto activeFeature = State::Instance().currentFeature;
     const bool rayReconstruction = activeFeature && activeFeature->GetUpscalerType() == Upscaler::DLSSD;
+
+    if (!nr.vulkan)
+        RenderSeveralViews(config, menuResScale, beforeSr);
 
     if (NrCard card("Size", menuResScale); card.IsOpen())
     {
@@ -3827,23 +3950,23 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
     if (NrCard card("Upscale", menuResScale); card.IsOpen())
     {
         // The applied scale, not the slider: with Auto after SR the slider can say 100% while NR runs smaller.
-        const bool reduced = AppliedModelScale(config, nr) < 0.999f;
+        const float modelScale = AppliedModelScale(config, nr);
+        const bool reduced = modelScale < 0.999f;
         const bool superior = DlssNr::SuperiorScaling::Enabled(*config);
 
         // Superior needs D3D12 (or a D3D12 bridge) and NVIDIA's DLSS SR through NGX for its temporal part.
-        const bool superiorBlocked = nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable();
-
-        if (!reduced && !superior)
-            ImGui::BeginDisabled();
-
         static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
         const int enlarge = superior ? 3 : (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
 
-        if (ImGui::BeginCombo("Upscale Mode", enlargeNames[enlarge]))
+        const char* preview = !reduced && !superior && enlarge == 1   ? "Classic (saved: Matched residual)"
+                              : !reduced && !superior && enlarge == 2 ? "Classic (saved: NVIDIA residual)"
+                                                                      : enlargeNames[enlarge];
+        if (ImGui::BeginCombo("Upscale Mode", preview))
         {
             for (int i = 0; i < IM_ARRAYSIZE(enlargeNames); ++i)
             {
-                const bool blocked = i == 3 && superiorBlocked && !superior;
+                const unsigned mode = i == 3 ? DlssNr::SuperiorScaling::Transfer : unsigned(i);
+                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale, nr.vulkan);
 
                 if (ImGui::Selectable(enlargeNames[i], i == enlarge,
                                       blocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None))
@@ -3856,20 +3979,19 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             ImGui::EndCombo();
         }
 
-        if (!reduced && !superior)
-            ImGui::EndDisabled();
-
         HelpMarker("Below 100% Model resolution, how NR's result is enlarged.\n"
                    "Classic: the whole output.\n"
                    "Matched residual: only NR's changes; less blur and colour shift.\n"
                    "NVIDIA residual: only the changes, NVIDIA's way.\n"
                    "Superior Scaling: its own Area downsample, frequency shaping and a private DLSS that steadies NR "
-                   "over time. Once selected it also works at 100% with Compress screen edges. Needs DirectX 12 and "
-                   "NVIDIA DLSS; where it cannot run, Matched residual is used.");
+                   "over time, including at 100% with Compress screen edges. Needs DirectX 12 and NVIDIA DLSS; "
+                   "where it cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
+                   "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
 
         if (superior)
         {
-            static const char* presets[] = { "A - higher performance", "K - slower, more stable NR in motion" };
+            static const char* presets[] = { "CNN - higher performance",
+                                             "Transformer - slower, more stable NR in motion" };
             int preset =
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
 
@@ -3877,9 +3999,19 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 config->DlssNrSuperiorScalingPreset = preset == 1 ? 11u : 1u;
 
             HelpMarker("Superior Scaling: a private DLSS in DLAA mode, applied to NR's change at its working "
-                       "resolution. Independent of the NR model preset and the game's own DLSS preset.");
+                       "resolution. Independent of the NR model preset and the game's own DLSS preset. "
+                       "CNN automatically chooses its model from guided range sigma. Transformer keeps the same model. "
+                       "Preset availability depends on the installed DLSS runtime.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
+            ImGui::BeginDisabled(nr.vulkan || !unavailable.empty());
+            bool disableIsHDR = config->DlssNrSuperiorScalingDisableIsHDR.value_or_default();
+            if (ImGui::Checkbox("Disable DLSS IsHDR flag", &disableIsHDR))
+                config->DlssNrSuperiorScalingDisableIsHDR = disableIsHDR;
+            ImGui::EndDisabled();
+
+            HelpMarker("Experimental: try only if experiencing severe ghosting. Disabling IsHDR may help, but "
+                       "could reduce NR stability.");
 
             if (nr.vulkan)
                 ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "
@@ -4584,6 +4716,24 @@ void UpdateF5LowHint(Config* config)
     ImGui::InsertNotification({ ImGuiToastType::Info, 15000,
                                 "No upscaler call from this game so far.\nOptical F5Low can run NR without one: open "
                                 "the menu, Neural Rendering, Optical F5Low." });
+}
+
+void UpdateMultiViewHint(Config* config)
+{
+    static bool shown = false;
+
+    if (shown || !config->DlssNrEnabled.value_or_default())
+        return;
+
+    const auto views = MultiViewStatus();
+    if (!views.active || Views::CountRuns(views.mask) != 0 || Views::OnePicture(views.mask))
+        return;
+
+    shown = true;
+    ImGui::InsertNotification({ ImGuiToastType::Warning, 15000,
+                                "Neural Rendering stood down: this game draws %zu views at once (a multi-monitor "
+                                "layout).\nTick the views it works on: open the menu, Neural Rendering, Input.",
+                                views.count });
 }
 
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)

@@ -12,8 +12,10 @@
 
 #include "ffx_api.h"
 #include "ffx_upscale.h"
+#include "ffx_framegeneration.h"
 #include "dx12/ffx_api_dx12.h"
 #include "FfxApiExe_Dx12.h"
+#include "hooks/FG_Hooks.h"
 
 inline static PfnFfxCreateContext _D3D12_CreateContext = nullptr;
 inline static PfnFfxDestroyContext _D3D12_DestroyContext = nullptr;
@@ -27,6 +29,16 @@ static std::unordered_map<ffxContext, NVSDK_NGX_Handle*> _contexts;
 static ID3D12Device* _d3d12Device = nullptr;
 static bool _nvnxgInited = false;
 static float qualityRatios[] = { 1.0f, 1.5f, 1.7f, 2.0f, 3.0f };
+// The game's own FSR FG contexts (FGHooks::NoteGameFsrFg), as in FfxApi_Dx12.cpp
+static std::unordered_set<ffxContext> _gameFgContexts;
+
+static bool IsGameFgType(uint64_t type)
+{
+    return type == FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION ||
+           type == FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_NEW_DX12 ||
+           type == FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12 ||
+           type == FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WRAP_DX12;
+}
 
 static bool CreateDLSSContext(ffxContext handle, const ffxDispatchDescUpscale* pExecParams)
 {
@@ -170,6 +182,11 @@ static ffxReturnCode_t ffxCreateContext_Dx12(ffxContext* context, ffxCreateConte
 
     LOG_DEBUG("type: {:X}", desc->type);
 
+    // The game's own FFX FG: from here on its FSR FG turning on is seen (before the create, which makes the
+    // swapchain through the FG library: FG_Hooks RefuseUnderGameFsrFg)
+    if (IsGameFgType(desc->type) && State::Instance().activeFgInput != FGInput::FSRFG)
+        FGHooks::NoteGameFsrFgSeen();
+
     auto ffxApiResult = _D3D12_CreateContext(context, desc, memCb);
 
     if (ffxApiResult != FFX_API_RETURN_OK)
@@ -177,6 +194,10 @@ static ffxReturnCode_t ffxCreateContext_Dx12(ffxContext* context, ffxCreateConte
         LOG_ERROR("D3D12_CreateContext error: {:X}", (UINT) ffxApiResult);
         return ffxApiResult;
     }
+
+    if (desc->type == FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION &&
+        State::Instance().activeFgInput != FGInput::FSRFG)
+        _gameFgContexts.insert(*context);
 
     bool upscaleContext = false;
     ffxApiHeader* header = desc;
@@ -242,6 +263,10 @@ static ffxReturnCode_t ffxDestroyContext_Dx12(ffxContext* context, const ffxAllo
 
     LOG_DEBUG("context: {:X}", (size_t) *context);
 
+    // The game ends its FSR FG with its context, often without configuring it off first
+    if (_gameFgContexts.erase(*context) > 0)
+        FGHooks::NoteGameFsrFg(false);
+
     auto cdResult = _D3D12_DestroyContext(context, memCb);
     LOG_INFO("result: {:X}", (UINT) cdResult);
 
@@ -264,6 +289,10 @@ static ffxReturnCode_t ffxConfigure_Dx12(ffxContext* context, ffxConfigureDescHe
 
     if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE)
         return FFX_API_RETURN_OK;
+
+    // The game's own FSR FG switched on or off (FGHooks::NoteGameFsrFg)
+    if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION && State::Instance().activeFgInput != FGInput::FSRFG)
+        FGHooks::NoteGameFsrFg(((ffxConfigureDescFrameGeneration*) desc)->frameGenerationEnabled);
 
     return _D3D12_Configure(context, desc);
 }

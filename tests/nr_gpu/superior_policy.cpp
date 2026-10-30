@@ -20,7 +20,12 @@ struct GainSelections
 struct SavedSettings {
     Setting<uint32_t> DlssNrTransfer {11};
 };
-void require(bool condition) { if(!condition)throw std::runtime_error("Superior policy check failed"); }
+void require(bool condition, int line)
+{
+    if (!condition)
+        throw std::runtime_error("Superior policy check failed at line " + std::to_string(line));
+}
+#define require(condition) require(condition, __LINE__)
 int main() {
     try {
         using namespace DlssNr::SuperiorScaling;
@@ -46,12 +51,12 @@ int main() {
         require(High(0)==.8f && Low(0)==.661f && High(1)==.75f && Low(1)==.787f);
         require(High(2) == .95f && Low(2) == .784f && High(99) == .950f && Low(99) == .850f);
         require(High(0,2)==.950f && Low(0,2)==.861f);
-        require(High(1,2)==.925f && Low(1,2)==.838f);
+        require(High(1, 2) == .900f && Low(1, 2) == .838f);
         require(High(2,2)==.955f && Low(2,2)==.861f);
         require(MainOnlyRuntime(310, 8) && !MainOnlyRuntime(310, 9));
         require(!MainOnlyRuntime(310, 10) && !MainOnlyRuntime(311, 0) && !MainOnlyRuntime(0, 0));
         const float mainHigh[] { .8f, .75f, .95f }, mainLow[] { .661f, .787f, .784f };
-        const float smallHigh[] { .950f, .925f, .955f }, smallLow[] { .861f, .838f, .861f };
+        const float smallHigh[] { .950f, .900f, .955f }, smallLow[] { .861f, .838f, .861f };
         for (unsigned requested : { 0u, 1u, 2u, 3u })
             for (unsigned style = 0; style < 3; ++style)
             {
@@ -91,7 +96,7 @@ int main() {
         // Out-of-range ini values are clamped exactly like PassPreset/PassStyle, so the gains follow the running model.
         require(GainPresetSelection(future, 0) == 3 && GainStyleSelection(future, 0) == 2);
         require(GainPresetSelection(future, 1) == 0 && GainStyleSelection(future, 1) == 1);
-        require(High(GainStyleSelection(future, 1), GainPresetSelection(future, 1)) == .925f);
+        require(High(GainStyleSelection(future, 1), GainPresetSelection(future, 1)) == .900f);
         require(GainPresetSelection(future, 2) == 1 && GainStyleSelection(future, 2) == 2);
         require(GainStyleSelection(future, 3) == 2 && GainPresetSelection(future, 3) == 3);
         require(GainStyleSelection(future, 29) == 2 && GainStyleSelection(future, 30) == 2);
@@ -103,7 +108,7 @@ int main() {
                                                                preset = GainPresetSelection(future, pass);
                                                     return { High(style, preset), Low(style, preset) };
                                                 });
-        require(std::abs(futureSchedule.Block(0, 3).high - .955f * .925f * .95f) < 1e-6f);
+        require(std::abs(futureSchedule.Block(0, 3).high - .955f * .900f * .95f) < 1e-6f);
         require(std::abs(futureSchedule.Block(0, 3).low - (.861f + .838f + .784f) / 3) < 1e-6f);
         require(EffectiveBand(.8f,.5f,1,1)==.8f);
         require(EffectiveBand(.8f,1,1,1)==1 && EffectiveBand(.8f,.5f,.75f,0)==1);
@@ -117,9 +122,9 @@ int main() {
                 return { EffectiveBand(High(style,model),.5f,1,1),
                          EffectiveBand(Low(style,model),.5f,1,1) };
             });
-        require(std::abs(mixed.Block(0,2).high - .75f*.925f)<1e-6f);
+        require(std::abs(mixed.Block(0, 2).high - .75f * .900f) < 1e-6f);
         require(std::abs(mixed.Block(0,2).low - (.787f+.838f)/2)<1e-6f);
-        require(mixed.expectedMask == 0u); // both next-pass gaps stay below .15
+        require(mixed.expectedMask == 2u); // .900 Small Natural crosses .15 before the third mixed-model pass
         const auto mainNatural = DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
             [](unsigned) -> DlssNr::InterPass::ScheduleGains { return { High(1),Low(1) }; });
         require(mainNatural.expectedMask == 3u); // .787 - .75*.75 > .15 before either next pass
@@ -130,7 +135,7 @@ int main() {
                                                     return { High(1, 0), Low(1, 0) };
                                                 });
         require(defaultNatural.expectedMask == 0u); // 310.9 Default runs Small, not Main
-        require(std::abs(defaultNatural.Block(0, 3).high - .925f * .925f * .925f) < 1e-6f);
+        require(std::abs(defaultNatural.Block(0, 3).high - .900f * .900f * .900f) < 1e-6f);
         require(std::abs(defaultNatural.Block(0, 3).low - .838f) < 1e-6f);
         const auto oldDefaultNatural =
             DlssNr::InterPass::MakeGainSchedule(3, true, true, false,
@@ -162,6 +167,32 @@ int main() {
         require(MotionScale(1,1274,0)==1); // unspecified game reference
         for(unsigned i=0;i<30;++i)require(Preset(i)==(i==11u?11u:1u));
         require(Preset(UINT32_MAX)==1u);
+        require(std::abs(GuidedRange(.25f) - .015f) < 1e-9f);
+        require(std::abs(GuidedRange(.5f) - .015f) < 1e-9f);
+        require(std::abs(GuidedRange(.7f) - .014232f) < 1e-9f);
+        require(std::abs(GuidedRange(1.f) - .003f) < 2e-9f);
+        require(GuidedRange(1.5f) == GuidedRange(1.f));
+        require(GuidedRange(NAN) == .015f);
+        float previousSigma = .015f;
+        for (unsigned percent = 25; percent <= 200; ++percent)
+        {
+            const float sigma = GuidedRange(percent / 100.f);
+            require(sigma <= previousSigma && sigma > 0.f);
+            previousSigma = sigma;
+            require(PrivatePreset(1, sigma) == (sigma < .01f ? 5u : 1u));
+            require(PrivatePreset(11, sigma) == 11u);
+            for (unsigned mode : { 0u, 1u, 2u, 11u })
+                for (bool vulkan : { false, true })
+                    require(CanSelectUpscaleMode(mode, percent / 100.f, vulkan) ==
+                            (mode == 11u ? !vulkan : mode == 0u || percent < 100));
+            DlssNrConstants resolve {};
+            SetGuidedRange(resolve, percent / 100.f);
+            float inverse;
+            std::memcpy(&inverse, &resolve.ExposureSourceWidth, 4);
+            require(inverse == 1.f / (sigma * sigma));
+        }
+        require(PrivatePreset(1, .01f) == 1 && PrivatePreset(1, std::nextafter(.01f, 0.f)) == 5);
+
         // Native-scale fallback is tested by the host integration contract.
         DlssNrConstants input{};input.Mode=0;input.Width=1920;input.Height=1080;input.DirectResolveFlags=ShaderFlag;
         for(uint32_t pass : {0u,1u})for(uint32_t mode=0;mode<5;++mode) {

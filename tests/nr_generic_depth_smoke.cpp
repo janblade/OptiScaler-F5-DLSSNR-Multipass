@@ -263,6 +263,26 @@ int main()
         CHECK(!s.Update({}, W, H).valid);
     }
 
+    // A size the user gave (NativeDepthWidth/Height) replaces the shape test: the square buffer it names wins over the
+    // scene-shaped one, and a size nothing has finds nothing; 0 leaves that side free.
+    {
+        const std::vector<Candidate> frame = { Make(1, 2560, 1440, 90000), Make(2, 2048, 2048, 300000) };
+        Selector s;
+        s.Settings().selectedWidth = 2048;
+        s.Settings().selectedHeight = 2048;
+        CHECK(Settle(s, frame, W, H).id == 2);
+
+        s.Reset();
+        s.Settings().selectedWidth = 1280;
+        s.Settings().selectedHeight = 720;
+        CHECK(!Settle(s, frame, W, H).valid);
+
+        s.Reset();
+        s.Settings().selectedWidth = 2560;
+        s.Settings().selectedHeight = 0;
+        CHECK(Settle(s, frame, W, H).id == 1);
+    }
+
     printf(fails == 0 ? "generic depth: ok\n" : "generic depth: %d FAILED\n", fails);
     return fails == 0 ? 0 : 1;
 }

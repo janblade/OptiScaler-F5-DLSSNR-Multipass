@@ -29,7 +29,8 @@ class NativeDriver
     enum class Status
     {
         Off,
-        Waiting, // the game calls an upscaler
+        Waiting,           // the game calls an upscaler
+        PausedForNativeFg, // lower display buffers may contain generated frames
         Failed,
         Running
     };
@@ -52,12 +53,15 @@ class NativeDriver
     // the status goes back to Off).
     bool Enabled();
 
+    // Break native flow/NR history before standing aside for the game's native DLSS-G.
+    void PauseForNativeFg();
+
     // Once the producer could not start nothing more is tried (the status line says why).
     bool Failed() const { return _status == Status::Failed; }
 
     // One frame: Acquire on `source` (its SetPresent is done), the producer, Return. `flowPreview` asks the producer
-    // for the flow picture the menu shows.
-    RunResult RunFrame(IFrameSource& source, bool flowPreview);
+    // for the debug view the menu shows, `flowPreviewView` which (native/FlowDebugViews.h).
+    RunResult RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView = 0);
 
     // ImGui: one line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
     void DrawStatus();

@@ -12,13 +12,12 @@ struct Slot
     ID3D12CommandList* producer = nullptr; // identity only; never dereferenced
     DlssNrFrameInfo frame {};
     uint64_t ready = 0, done = 0, serial = 0;
-    bool pending = false, submitted = false, residualOnly = false, sceneLinear = true;
+    bool pending = false, submitted = false, expired = false, residualOnly = false, sceneLinear = true;
 };
 std::array<Slot, 4> slots;
 ComPtr<ID3D12Device> device;
-uint64_t serial = 0, successes = 0, stillRendering = 0;
+uint64_t serial = 0, successes = 0, stillRendering = 0, lastApplicationSuccesses = 0;
 bool loggedCrossQueue = false;
-inline constexpr const char* pausedForGameFg = "Paused while the game's own frame generation is on.";
 std::string status = "Waiting for a finished picture.";
 bool reset = true;
 // Native input's own history reset (ApplyNativeInput, ApplyVirtualUpscalerInput), apart from `reset` above: the swap chain
@@ -97,30 +96,20 @@ ID3D12CommandQueue* RealQueue(ID3D12CommandQueue* queue)
     return Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &real) ? real : queue;
 }
 
-// Both callers already split on OptiScaler's FG (the swapchain Present when it is off, FG_Hooks when it
-// runs); the check is repeated so capture, which has no such caller, decides the same way.
-bool PausedForGameFrameGeneration()
-{
-    auto& state = State::Instance();
-    auto* fg = state.currentFG;
-    return GameFrameGenerationOn(fg && fg->IsActive() && !fg->IsPaused(),
-                                 state.activeFgInput == FGInput::DLSSG, state.activeFgOutput == FGOutput::DLSSG,
-                                 state.dlssgLastSetMode != sl::DLSSGMode::eOff,
-                                 PresentsSince(state.frameCount, state.dlssgLastEvaluateFrame));
-}
-
 void Cancel()
 {
     // Submitted copies may still be in flight; their fences still protect reuse.
     for (auto& slot : slots)
+    {
+        slot.expired = true;
         if (slot.submitted)
             slot.pending = false;
+    }
     reset = true;
 }
 
-bool Clone(ComPtr<ID3D12Resource>& copy, ID3D12Resource* source)
+bool Clone(ComPtr<ID3D12Resource>& copy, ID3D12Resource* source, const D3D12_RESOURCE_DESC& want)
 {
-    const auto want = source->GetDesc();
     if (want.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || want.SampleDesc.Count != 1 ||
         want.DepthOrArraySize != 1 || want.MipLevels != 1)
         return false;
@@ -140,8 +129,12 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
 {
     if (!cmd || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
     { Say("This option needs a native DirectX 12 game."); return nullptr; }
-    if (PausedForGameFrameGeneration())
-    { Say(pausedForGameFg); return nullptr; } // no guide copies nothing will compose
+    if (StreamlinePicture::PauseEvaluation())
+    {
+        Cancel();
+        Say("Paused: native frame generation has no application-picture handoff.");
+        return nullptr;
+    }
     ComPtr<ID3D12Device> currentDevice;
     if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&currentDevice))))
         return nullptr;
@@ -194,6 +187,7 @@ void Arm(Slot& slot, ID3D12GraphicsCommandList* cmd)
     slot.ready = slot.done + 1;
     slot.done = slot.ready;
     slot.submitted = false;
+    slot.expired = false;
     slot.pending = true;
 }
 
@@ -209,20 +203,12 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     auto* next = Acquire(cmd);
     if (!next) return;
     auto& slot = *next;
+    const auto depthDesc = depth ? depth->GetDesc() : D3D12_RESOURCE_DESC {};
+    const auto motionDesc = motion->GetDesc();
     if (!depth) slot.depth.Reset(); // no stale depth from an earlier frame
-    if ((depth && !Clone(slot.depth, depth)) || !Clone(slot.motion, motion))
+    if ((depth && !Clone(slot.depth, depth, depthDesc)) || !Clone(slot.motion, motion, motionDesc))
     { Say("The game's depth or movement data is not supported."); return; }
     slot.residualOnly = false;
-    // Copy at the NGX seam, where guide states and lifetimes are defined. Keep typed,
-    // shader-readable copies until both the producing queue and NR have finished.
-    for (auto pair : { std::pair { depth, slot.depth.Get() }, std::pair { motion, slot.motion.Get() } })
-    {
-        if (!pair.first) continue;
-        Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cmd->CopyResource(pair.second, pair.first);
-        Barrier(cmd, pair.first, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        // The copy returns to COPY_DEST after the late dispatch.
-    }
     slot.frame = {};
     auto& frame = slot.frame;
     unsigned flags = 0, gameReset = 0;
@@ -232,8 +218,9 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     frame.DepthInverted = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     frame.MotionVectorsLowResolution = (flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
     frame.RayReconstruction = rr;
-    frame.OutputWidth = (unsigned) output->GetDesc().Width;
-    frame.OutputHeight = output->GetDesc().Height;
+    const auto outputDesc = output->GetDesc();
+    frame.OutputWidth = (unsigned) outputDesc.Width;
+    frame.OutputHeight = outputDesc.Height;
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &frame.DepthSubrectBaseX);
@@ -247,6 +234,24 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
     frame.FinishedPicture = true;
     frame.OutputArrivalState = D3D12_RESOURCE_STATE_PRESENT;
     frame.SubmissionEpoch = State::Instance().frameCount;
+    // Resolve exactly the regions Dispatch will read, independently for depth and motion.
+    // Preserve the allocation, offsets, formats and units, including output-resolution MV.
+    const auto regions = ResolveGuideRegions(
+        { (unsigned) depthDesc.Width, depthDesc.Height }, { (unsigned) motionDesc.Width, motionDesc.Height },
+        { frame.RenderSubrectWidth, frame.RenderSubrectHeight }, { frame.OutputWidth, frame.OutputHeight },
+        frame.MotionVectorsLowResolution, frame.DepthSubrectBaseX, frame.DepthSubrectBaseY,
+        frame.MotionSubrectBaseX, frame.MotionSubrectBaseY);
+    const auto copy = [&](ID3D12Resource* source, ID3D12Resource* destination,
+                          const D3D12_RESOURCE_DESC& desc, GuideRegion region)
+    {
+        if (!source) return;
+        Barrier(cmd, source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        CopyFinishedGuide(cmd, destination, source, desc, region);
+        Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        // The copy returns to COPY_DEST after the late dispatch.
+    };
+    copy(depth, slot.depth.Get(), depthDesc, regions.depth);
+    copy(motion, slot.motion.Get(), motionDesc, regions.motion);
     Arm(slot, cmd);
 }
 
@@ -256,7 +261,7 @@ bool CaptureResidual(ID3D12GraphicsCommandList* cmd, ID3D12Resource* clean, ID3D
     auto* next = Acquire(cmd);
     if (!next) return false;
     auto& slot = *next;
-    if (!Clone(slot.residual, residual))
+    if (!Clone(slot.residual, residual, residual->GetDesc()))
     { Say("The upscaled changes could not be saved."); return false; }
     Barrier(cmd, residual, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     cmd->CopyResource(slot.residual.Get(), residual);
@@ -270,6 +275,30 @@ bool CaptureResidual(ID3D12GraphicsCommandList* cmd, ID3D12Resource* clean, ID3D
     slot.sceneLinear = sceneLinear;
     Arm(slot, cmd);
     return true;
+}
+
+// Publish copied guides only after the producer list executes. Expired recordings still need
+// their fence signal, otherwise an unsubmitted capture could never safely be reused.
+void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+{
+    for (auto& slot : slots)
+        if (slot.pending && !slot.submitted)
+            for (UINT i = 0; i < count; ++i)
+                if (lists[i] == slot.producer)
+                {
+                    // Signal after ExecuteCommandLists, never when merely recording the copy.
+                    slot.submitted = true;
+                    if (slot.expired) slot.pending = false; // still signal: protect an unsubmitted expired capture
+                    slot.producerQueue = RealQueue(queue);
+                    if (FAILED(queue->Signal(slot.fence.Get(), slot.ready)))
+                    {
+                        // The copy already executed. Keep its unsignalled fence protecting
+                        // the slot instead of treating this as a discarded recording.
+                        slot.pending = false;
+                        Say("The graphics queue stopped. Restart the game to retry.");
+                    }
+                    break;
+                }
 }
 
 } // namespace Late
@@ -341,23 +370,7 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     DetailReuse::Submitted(queue, count, lists);
     SceneCut::Submitted(queue, count, lists); // the scene-cut flag's readbacks, the same way
     if (!Late::tracking.load()) return;
-    for (auto& slot : Late::slots)
-        if (slot.pending && !slot.submitted)
-            for (UINT i = 0; i < count; ++i)
-                if (lists[i] == slot.producer)
-                {
-                    // Signal after ExecuteCommandLists, never when merely recording the copy.
-                    slot.submitted = true;
-                    slot.producerQueue = Late::RealQueue(queue);
-                    if (FAILED(queue->Signal(slot.fence.Get(), slot.ready)))
-                    {
-                        // The copy already executed. Keep its unsignalled fence protecting
-                        // the slot instead of treating this as a discarded recording.
-                        slot.pending = false;
-                        Late::Say("The graphics queue stopped. Restart the game to retry.");
-                    }
-                    break;
-                }
+    Late::Submitted(queue, count, lists);
 }
 
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace)
@@ -382,11 +395,41 @@ static bool RecordPqDecode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* color
 // `linear` (NR's result) -> PQ over `color`, through `encoded` (the picture's own format). The original picture is the
 // second input of the pass (what the encode keeps of it). `linear` is left in UNORDERED_ACCESS.
 static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linear, ID3D12Resource* color,
-                           D3D12_RESOURCE_STATES pictureState, ID3D12Resource* encoded, const DlssNrConstants& decoded)
+                           D3D12_RESOURCE_STATES pictureState, ID3D12Resource* encoded, const DlssNrConstants& decoded,
+                           bool privateGraphicsList = false)
 {
+    // The native/virtual-input callers share the game's list: leave all graphics state alone there.
+    const auto pictureDesc = color->GetDesc();
+    if (privateGraphicsList && pictureDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM &&
+        (pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 &&
+        (pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0 &&
+        g_compose->RecordFinishedPqRaster(cmd, linear, color, pictureState)) return;
     DlssNrConstants conversion = decoded;
     conversion.Mode = 1;
     Barrier(cmd, linear, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if ((pictureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 &&
+        g_compose->FinishedPqDirectReady(pictureDesc.Format))
+    {
+        // Same per-pixel PQ math and alpha preservation; retain the separate path
+        // when typed UAV loads/stores or PSO creation are unavailable.
+        conversion.Mode = 6;
+        Barrier(cmd, color, pictureState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const bool direct = g_compose->DispatchResidualPass(cmd, conversion, linear, nullptr, nullptr, nullptr, color);
+        Barrier(cmd, color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, pictureState);
+        if (direct && pictureState == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            D3D12_RESOURCE_BARRIER order {};
+            order.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            order.UAV.pResource = color;
+            cmd->ResourceBarrier(1, &order);
+        }
+        if (direct)
+        {
+            Barrier(cmd, linear, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            return;
+        }
+        conversion.Mode = 1;
+    }
     Barrier(cmd, color, pictureState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if (g_compose->DispatchResidualPass(cmd, conversion, linear, nullptr, color, nullptr, encoded))
     {
@@ -400,38 +443,52 @@ static void RecordPqEncode(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linea
     Barrier(cmd, linear, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
 
-void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
+// Shared production slot selection; application captures expire at the app Present boundary,
+// ordinary lower presents retain their short presentation-epoch window.
+static FinishedPick SelectFinishedInput(ID3D12CommandQueue* queue, const D3D12_RESOURCE_DESC& desc,
+                                       bool residualOnly, bool gameFrameHandoff, uint64_t snapshot, size_t& index,
+                                       std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>>& inputs)
 {
-    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    const auto epoch = State::Instance().frameCount;
+    auto* presentQueue = Late::RealQueue(queue);
+    for (size_t i = 0; i < Late::slots.size(); ++i)
+    {
+        auto& slot = Late::slots[i];
+        if (!slot.pending || slot.expired || !slot.submitted || (gameFrameHandoff && slot.serial > snapshot))
+            continue;
+        if (!gameFrameHandoff && (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1))
+        {
+            slot.expired = true;
+            if (slot.submitted) slot.pending = false;
+            Late::reset = true;
+            continue;
+        }
+        inputs[i] = { slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width &&
+                          slot.frame.OutputHeight == desc.Height,
+                      slot.serial, slot.submitted && slot.producerQueue.Get() == presentQueue,
+                      slot.submitted ? slot.fence->GetCompletedValue() : 0, slot.ready };
+    }
+    // Never queue a cross-queue wait here: the producer's signal can depend on this present.
+    return PickFinishedInput(inputs.data(), inputs.size(), index);
+}
+
+// The caller holds g_nrMutex. Handoff callers read all swapchain metadata before entering
+// this lock: Streamline can hold its own lock while submitting commands that take g_nrMutex.
+static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
+                               bool gameFrameHandoff, const D3D12_RESOURCE_DESC& desc, uint64_t snapshot)
+{
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
         !Config::Instance()->DlssNrEnabled.value_or_default())
     {
         Late::Cancel();
         return;
     }
-    if (!swapchain || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+    if (!picture || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         return;
-    if (Late::PausedForGameFrameGeneration())
-    {
-        Late::Cancel();
-        Late::stillRendering = 0;
-        Late::Say(Late::pausedForGameFg);
-        return;
-    }
-    Late::ComPtr<IDXGISwapChain3> sc;
-    Late::ComPtr<ID3D12Resource> color;
+    Late::ComPtr<ID3D12Resource> color = picture;
     Late::ComPtr<ID3D12Device> currentDevice;
-    if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
-        // The game's picture: its proxy back buffer while HDR output converts the chain (SDR, before the pass), else the
-        // chain's own
-        FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))) ||
-        FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != Late::device)
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != Late::device)
         return;
-    const auto desc = color->GetDesc();
-    auto colorSpace = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
-        ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-    UINT colorSpaceSize = sizeof(colorSpace);
-    swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
     const bool screenPq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
     const bool screenScrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
     const bool screenSdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
@@ -455,32 +512,14 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     const auto epoch = State::Instance().frameCount;
     const bool residualOnly = Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
                               Config::Instance()->DlssNrDeferredDlss.value_or_default();
-    auto* presentQueue = Late::RealQueue(queue);
     std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>> inputs {};
-    for (size_t i = 0; i < Late::slots.size(); ++i)
-    {
-        auto& slot = Late::slots[i];
-        if (!slot.pending || !slot.submitted)
-            continue;
-        if (epoch < slot.frame.SubmissionEpoch || epoch - slot.frame.SubmissionEpoch > 1)
-        {
-            slot.pending = false;
-            Late::reset = true;
-            continue;
-        }
-        inputs[i] = { slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width &&
-                          slot.frame.OutputHeight == desc.Height,
-                      slot.serial, slot.producerQueue.Get() == presentQueue, slot.fence->GetCompletedValue(),
-                      slot.ready };
-    }
-    // Never queue a cross-queue wait here: the producer's signal can depend on this present.
     size_t index = 0;
-    const auto pick = PickFinishedInput(inputs.data(), inputs.size(), index);
+    const auto pick = SelectFinishedInput(queue, desc, residualOnly, gameFrameHandoff, snapshot, index, inputs);
     if (pick == FinishedPick::None)
         return; // loading screen, another swapchain, or this real frame was already consumed
     if (pick == FinishedPick::NotReady)
     {
-        // Stays pending in case another present of this frame follows; history skips a frame.
+        // Ordinary presents may retry within their epoch window. App handoffs expire at EndStreamlinePicture.
         Late::reset = true;
         const auto& input = inputs[index];
         if (!input.sameQueue && input.completed != UINT64_MAX && !Late::loggedCrossQueue)
@@ -501,7 +540,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         if (other.submitted && other.serial <= slot.serial)
             other.pending = false;
     // Same queue: orders after the producer's signal. Another queue: already complete, so this never blocks.
-    if (FAILED(queue->Wait(slot.fence.Get(), slot.ready)) || FAILED(slot.allocator->Reset()) ||
+    if (FAILED(slot.allocator->Reset()) ||
         FAILED(slot.commands->Reset(slot.allocator.Get(), nullptr)))
     {
         Late::reset = true;
@@ -590,7 +629,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         if (pq && colorReady && g_nr.successfulDispatches > before && Config::Instance()->DlssNrApplyModel.value_or_default())
         {
             RecordPqEncode(cmd, slot.linear.Get(), color.Get(), D3D12_RESOURCE_STATE_PRESENT, slot.encoded.Get(),
-                           conversion);
+                           conversion, true);
         }
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         if (slot.depth) Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -612,9 +651,11 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     }
     const bool ran = slot.residualOnly ? appliedResidual : g_nr.successfulDispatches > before;
     Late::reset = !ran;
-    Late::Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden." :
-        ran ? (slot.residualOnly ? "Applying the pre-SR changes to the finished picture." :
-        "Applying NR to the finished picture.") : "Preparing NR for the finished picture.");
+    Late::Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden."
+              : ran ? (slot.residualOnly  ? "Applying the pre-SR changes to the finished picture."
+                       : gameFrameHandoff ? "Applying NR before Streamline interpolation."
+                                          : "Applying NR to the finished picture.")
+                    : "Preparing NR for the finished picture.");
     if (ran && (++Late::successes == 1 || Late::successes % 300 == 0))
         LOG_INFO("DLSS-NR finished picture: {} frames, {}x{}, FG {}", Late::successes,
                  desc.Width, desc.Height, State::Instance().currentFG &&
@@ -631,6 +672,102 @@ DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FOR
         swapchain->GetPrivateData(Late::colorSpaceKey, &colorSpaceSize, &colorSpace);
 
     return colorSpace;
+}
+
+// Ordinary picture lookup, shared by the unregistered-chain path and Streamline's FG-off
+// pass-through. Swapchain calls precede g_nrMutex: the runtime can hold its presentation lock
+// while submitting commands that take the NR lock, so querying it under that lock can deadlock.
+static void ApplyFinishedSwapchain(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, bool passThrough,
+                                  uint64_t snapshot = UINT64_MAX)
+{
+    if (State::Instance().isShuttingDown)
+        return;
+    const auto& cfg = *Config::Instance();
+    Late::ComPtr<IDXGISwapChain3> sc;
+    Late::ComPtr<ID3D12Resource> color;
+    D3D12_RESOURCE_DESC desc {};
+    auto space = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    if (cfg.DlssNrFinishedPicture.value_or_default() && cfg.DlssNrEnabled.value_or_default())
+    {
+        if (!swapchain || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+            return;
+        if (!passThrough && StreamlinePicture::Owns(swapchain))
+            return; // registered app-facing Present owns this chain; exclude all lower/generated presents
+        if (StreamlinePicture::NativeFgRunning())
+        {
+            FinishedPictureUnavailable("Paused: native frame generation has no application-picture handoff.");
+            return;
+        }
+        if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&sc))) ||
+            FAILED(SdrToHdr::GameBuffer(sc.Get(), sc->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&color))))
+            return;
+        desc = color->GetDesc();
+        space = NativeInputColourSpace(swapchain, desc.Format);
+    }
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    ApplyFinishedColor(color.Get(), queue, space, passThrough, desc, snapshot);
+}
+
+void FinishedPictureUnavailable(const char* message)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    Late::Cancel();
+    Late::Say(message);
+}
+
+uint64_t BeginStreamlinePicture()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    // Only captures already submitted at this boundary belong to the presented picture.
+    // A worker may have armed the next frame before Present; leave it for the next boundary.
+    uint64_t snapshot = 0;
+    for (const auto& slot : Late::slots)
+        if (slot.pending && slot.submitted && !slot.expired)
+            snapshot = std::max(snapshot, slot.serial);
+    return snapshot;
+}
+
+void EndStreamlinePicture(uint64_t snapshot, const char* unavailable)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    // Newer worker recordings/submissions are for a later app picture. Only expire the
+    // interval selected at Begin, even if another capture arrived while DXGI was queried.
+    for (auto& slot : Late::slots)
+        if (slot.serial <= snapshot)
+        {
+            slot.expired = true;
+            if (slot.submitted) slot.pending = false;
+        }
+    Late::reset |= Late::successes == Late::lastApplicationSuccesses;
+    Late::lastApplicationSuccesses = Late::successes;
+    if (unavailable)
+    {
+        Late::reset = true;
+        Late::Say(unavailable);
+    }
+}
+
+void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
+{
+    ApplyFinishedSwapchain(swapchain, queue, false);
+}
+
+void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue,
+                              uint64_t snapshot)
+{
+    if (State::Instance().isShuttingDown || !swapchain || !picture || !queue)
+        return;
+    const auto desc = picture->GetDesc();
+    const auto space = NativeInputColourSpace(swapchain, desc.Format);
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    ApplyFinishedColor(picture, queue, space, true, desc, snapshot);
+}
+
+void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, uint64_t snapshot)
+{
+    // Only the real app-facing Present calls this with FG off. Keep registration intact so
+    // asynchronous/generated presents remain excluded when FG restarts.
+    ApplyFinishedSwapchain(swapchain, queue, true, snapshot);
 }
 
 // The body of ApplyNativeInput and ApplyVirtualUpscalerInput. `fromVirtualUpscaler` skips the Finished Picture setting,
@@ -655,9 +792,9 @@ static bool ApplyFinishedPictureInput(ID3D12CommandQueue* queue, ID3D12GraphicsC
     // Depth is optional: NR runs without it.
     if (!queue || !cmd || !color || !motion)
         return false;
-    if (Late::PausedForGameFrameGeneration())
+    if (StreamlinePicture::NativeFgRunning())
     {
-        Late::Say(Late::pausedForGameFg);
+        Late::Say("Paused: native frame generation requires an application-picture handoff.");
         return false;
     }
     Late::ComPtr<ID3D12Device> currentDevice;

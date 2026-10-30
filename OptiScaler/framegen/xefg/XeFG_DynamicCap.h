@@ -54,6 +54,14 @@ class XeFG_DynamicCap
         if (s.targetFps <= 0.0 || s.frameMs <= 0.0 || s.frameMs > 250.0)
             return count;
 
+        // An isolated hitch is no load change either: a third in a row is
+        if (_frameMs > 0.0 && s.frameMs > _frameMs * kHitchFactor && _hitchRun < kMaxHitchRun)
+        {
+            ++_hitchRun;
+            return count;
+        }
+        _hitchRun = 0;
+
         const double work = std::max(s.frameMs - std::max(s.sleepMs, 0.0), 0.5);
         _sleepShare += kAlpha * ((s.sleepMs > 0.1 ? 1.0 : 0.0) - _sleepShare);
         _sleepSeen = _sleepShare > 0.5;
@@ -95,7 +103,7 @@ class XeFG_DynamicCap
             if (_checkCount >= kCheckMinFrames && sinceChange >= kCheckMinMs &&
                 1000.0 * _checkShownSum / _checkSumMs < s.targetFps * 0.93 && count < maxCount)
             {
-                _backoffMs = std::min(_backoffMs * 2.0, kMaxBackoffMs);
+                _backoffMs = std::min(_backoffMs * 2.0, kMaxDownBackoffMs);
                 _downBlockedUntilMs = s.nowMs + _backoffMs;
                 _failedReachable = _downReachable;
                 return Change(count + 1, s.nowMs, Reason::Undo, reachable);
@@ -109,7 +117,7 @@ class XeFG_DynamicCap
             if (_checkCount > 0 && 1000.0 * _checkShownSum / _checkSumMs < s.targetFps * 0.97 &&
                 count < maxCount)
             {
-                _backoffMs = std::min(_backoffMs * 2.0, kMaxBackoffMs);
+                _backoffMs = std::min(_backoffMs * 2.0, kMaxDownBackoffMs);
                 _downBlockedUntilMs = s.nowMs + _backoffMs;
                 _failedReachable = _downReachable;
                 return Change(count + 1, s.nowMs, Reason::Undo, reachable);
@@ -163,20 +171,24 @@ class XeFG_DynamicCap
         }
 
         // Down without evidence: held at the target with no limiter sleep to measure (V-Sync or an outside cap), try
-        // one step less now and then. Above the target, or with a measured sleep, the frame time is the evidence.
-        if (!_sleepSeen && presented >= s.targetFps * 0.97 && presented <= s.targetFps * 1.03)
+        // one step less now and then. Above the target the frame time is the evidence. With a measured sleep this
+        // tries too, after at least kSleepProbeMs: the wait that holds the rate may be one the sleep doesn't include.
+        if (presented >= s.targetFps * 0.97 && presented <= s.targetFps * 1.03)
         {
-            if (_cappedSinceMs < 0.0)
+            if (_cappedSinceMs < 0.0 || s.nowMs - _cappedLastMs > kGraceMs)
                 _cappedSinceMs = s.nowMs;
 
-            if (s.nowMs - _cappedSinceMs >= _backoffMs)
+            _cappedLastMs = s.nowMs;
+            const double wait = _sleepSeen ? std::max(_backoffMs, kSleepProbeMs) : _backoffMs;
+
+            if (s.nowMs - _cappedSinceMs >= std::min(wait, kHoldDownMs) && sinceChange >= wait)
             {
                 _checkUntilMs = s.nowMs + kCheckMs;
                 _downReachable = reachable;
                 return Change(count - 1, s.nowMs, Reason::Probe, reachable);
             }
         }
-        else
+        else if (_cappedSinceMs >= 0.0 && s.nowMs - _cappedLastMs > kGraceMs)
         {
             _cappedSinceMs = -1.0;
         }
@@ -205,7 +217,14 @@ class XeFG_DynamicCap
     static constexpr double kCheckMinMs = 400.0;
     static constexpr double kCheckMs = 1500.0;
     static constexpr double kMinBackoffMs = 5000.0;
-    static constexpr double kMaxBackoffMs = 60000.0;
+    // A step down that did not hold is tried again later and later, up to this: where a limiter holds the presented
+    // rate the game never looks lighter than when the step failed, only the clock asks again, and every try is a
+    // visible dip. One step more costs a little GPU time at the same rate.
+    static constexpr double kMaxDownBackoffMs = 600000.0;
+    static constexpr double kSleepProbeMs = 15000.0; // a try against a measured sleep's evidence
+    static constexpr double kGraceMs = 300.0;        // a dip this short doesn't end the hold at the target
+    static constexpr double kHitchFactor = 2.5;      // a frame this much longer than the average is a hitch
+    static constexpr int kMaxHitchRun = 2;           // more in a row are a load change
 
     int Change(int count, double nowMs, Reason reason, double reachable)
     {
@@ -235,6 +254,8 @@ class XeFG_DynamicCap
     double _lowSinceMs = -1.0;
     double _highSinceMs = -1.0;
     double _cappedSinceMs = -1.0;
+    double _cappedLastMs = -1.0;
+    int _hitchRun = 0;
     double _checkUntilMs = 0.0;
     int _checkFrames = 0; // frames since a step down
     int _checkCount = 0;  // of them averaged

@@ -62,10 +62,12 @@ D3D12_TEXTURE_COPY_LOCATION location(ID3D12Resource* resource)
 }
 
 void run(ID3D12Device* device, unsigned int allocationW, unsigned int allocationH,
-         unsigned int activeW, unsigned int activeH, bool uav, bool writeBack)
+         unsigned int activeW, unsigned int activeH, bool uav, bool writeBack, unsigned int baseX = 0, unsigned int baseY = 0)
 {
     const auto desc = texture(allocationW, allocationH, uav);
-    const auto active = DlssNr::PreSrColorExtent(desc, activeW, activeH);
+    const auto active = DlssNr::PreSrColorExtent(desc, activeW, activeH, baseX, baseY);
+    const auto inside = [&](unsigned int x, unsigned int y)
+    { return x >= baseX && x < baseX + activeW && y >= baseY && y < baseY + activeH; };
     expect(active.has_value(), "valid active extent rejected");
     auto game = create(device, desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
     auto compact = create(device, texture(activeW, activeH, true), D3D12_HEAP_TYPE_DEFAULT,
@@ -85,8 +87,7 @@ void run(ID3D12Device* device, unsigned int allocationW, unsigned int allocation
         {
             auto* row = (uint32_t*) (memory + y * footprint.Footprint.RowPitch);
             for (unsigned int x = 0; x < allocationW; ++x)
-                row[x] = resource == edited.Get() ? edit :
-                    (x < activeW && y < activeH ? y * allocationW + x : padding);
+                row[x] = resource == edited.Get() ? edit : (inside(x, y) ? y * allocationW + x : padding);
         }
         resource->Unmap(0, nullptr);
     }
@@ -107,7 +108,7 @@ void run(ID3D12Device* device, unsigned int allocationW, unsigned int allocation
     barrier(commands.Get(), game.Get(), D3D12_RESOURCE_STATE_COPY_DEST, arrival);
     barrier(commands.Get(), game.Get(), arrival, D3D12_RESOURCE_STATE_COPY_SOURCE);
     barrier(commands.Get(), compact.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-    DlssNr::CopyActiveColor(commands.Get(), compact.Get(), game.Get(), *active);
+    DlssNr::CopyActiveColorIn(commands.Get(), compact.Get(), game.Get(), *active);
     barrier(commands.Get(), game.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, arrival);
     barrier(commands.Get(), compact.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
     src = location(compact.Get()); dst = location(croppedReadback.Get());
@@ -126,7 +127,7 @@ void run(ID3D12Device* device, unsigned int allocationW, unsigned int allocation
     {
         barrier(commands.Get(), compact.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         barrier(commands.Get(), game.Get(), arrival, D3D12_RESOURCE_STATE_COPY_DEST);
-        DlssNr::CopyActiveColor(commands.Get(), game.Get(), compact.Get(), *active);
+        DlssNr::CopyActiveColorOut(commands.Get(), game.Get(), compact.Get(), *active);
         barrier(commands.Get(), game.Get(), D3D12_RESOURCE_STATE_COPY_DEST, arrival);
         barrier(commands.Get(), compact.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
@@ -152,17 +153,21 @@ void run(ID3D12Device* device, unsigned int allocationW, unsigned int allocation
             const auto* row = (const uint32_t*) (memory + y * footprint.Footprint.RowPitch);
             for (unsigned int x = 0; x < allocationW; ++x)
             {
-                const bool inside = x < activeW && y < activeH;
-                if (resource == croppedReadback.Get() && !inside) continue;
-                const uint32_t expected = !inside ? padding :
-                    (resource == finalReadback.Get() && writeBack ? edit : y * allocationW + x);
+                if (resource == croppedReadback.Get())
+                {
+                    // The compact copy holds the rectangle at its origin.
+                    if (x >= activeW || y >= activeH) continue;
+                    expect(row[x] == (y + baseY) * allocationW + (x + baseX), "the staged rectangle is not the active one");
+                    continue;
+                }
+                const uint32_t expected = !inside(x, y) ? padding : (writeBack ? edit : y * allocationW + x);
                 expect(row[x] == expected, "active pixels or allocation padding changed incorrectly");
             }
         }
         D3D12_RANGE noWrite { 0, 0 }; resource->Unmap(0, &noWrite);
     }
-    std::printf("PASS: %ux%u in %ux%u, UAV=%d, copy-back=%d\n",
-                activeW, activeH, allocationW, allocationH, uav, writeBack);
+    std::printf("PASS: %ux%u at %u,%u in %ux%u, UAV=%d, copy-back=%d\n",
+                activeW, activeH, baseX, baseY, allocationW, allocationH, uav, writeBack);
 }
 
 int main() try
@@ -173,7 +178,10 @@ int main() try
     expect(PreSrColorExtent(desc, 2558, 1439)->height == 1439, "odd extent rejected");
     expect(!PreSrColorExtent(desc, 0, 1439) && !PreSrColorExtent(desc, 2558, 0), "partial size accepted");
     expect(!PreSrColorExtent(desc, 2561, 1440) && !PreSrColorExtent(desc, 2560, 1441), "out-of-bounds size accepted");
-    expect(!PreSrColorExtent(desc, 2558, 1439, 1, 0) && !PreSrColorExtent(desc, 0, 0, 0, 1), "offset accepted");
+    expect(PreSrColorExtent(desc, 2558, 1439, 2, 1)->x == 2, "an offset rectangle inside the allocation rejected");
+    expect(!PreSrColorExtent(desc, 2558, 1439, 3, 0) && !PreSrColorExtent(desc, 0, 0, 0, 1),
+           "an offset past the edge or without a size accepted");
+    expect(!PreSrColorExtent(desc, 2558, 1439, 0xFFFFFFF0u, 0), "a base that wraps round accepted");
     desc.SampleDesc.Count = 4; expect(!PreSrColorExtent(desc, 2558, 1439), "MSAA accepted");
     desc.SampleDesc.Count = 1; desc.DepthOrArraySize = 2;
     expect(!PreSrColorExtent(desc, 2558, 1439), "array accepted");
@@ -188,6 +196,10 @@ int main() try
     run(device.Get(), 3840, 2160, 2227, 1253, false, true);
     run(device.Get(), 1920, 1080, 1920, 1080, false, true);
     run(device.Get(), 2560, 1440, 2558, 1439, false, false);
+    // A triple-screen layout: three views side by side in one texture (DlssNr_Views.h); the middle and the right one.
+    run(device.Get(), 5120, 960, 1707, 960, false, true, 1706, 0);
+    run(device.Get(), 5120, 960, 1707, 960, true, true, 3413, 0);
+    run(device.Get(), 5120, 960, 1707, 960, false, false, 1706, 0);
     ComPtr<ID3D12InfoQueue> messages;
     if (debugLayer && SUCCEEDED(device.As(&messages)))
     {

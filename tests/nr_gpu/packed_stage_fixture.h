@@ -92,6 +92,7 @@ struct PackedStages
             const float gain = Ss::ResolutionScale(3840, 2160, layout.modelW, layout.modelH);
             h.MvScaleX = Ss::EffectiveBand(.950f, gain, 1, 1);
             h.MvScaleY = Ss::EffectiveBand(.861f, gain, 1, 1);
+            Ss::SetGuidedRange(h, scale / 100.f);
             s->resolveCb = cb(h);
         }
         before.proxy = texture(before.w, before.h);

@@ -166,8 +166,8 @@ void RenderLoaders(Config* config, const std::vector<Plugins::Entry>& entries)
 
     const Switch switches[] = {
         { Plugins::kLoaderSpecialK, &config->LoadSpecialK,
-          "Loads SpecialK64.dll from the game folder. Not loaded while the OptiFG, DLSSG via Streamline or FSR-FG "
-          "inputs are on.\nSave Settings and restart to apply. ini: [Plugins] LoadSpecialK" },
+          "Loads SpecialK64.dll from the game folder. Not loaded while a frame generation input other than DLSSG via "
+          "Nvngx is selected.\nSave Settings and restart to apply. ini: [Plugins] LoadSpecialK" },
         { Plugins::kLoaderReShade, &config->LoadReShade,
           "Loads ReShade next to OptiScaler.\nSave Settings and restart to apply. ini: [Plugins] LoadReShade" },
         { Plugins::kLoaderAmdxc64, &config->LoadCustomAmdxc64OnRdna2,

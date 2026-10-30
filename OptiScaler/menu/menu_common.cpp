@@ -12,6 +12,9 @@
 #include <dlssnr/DlssNr.h>
 #include <native/VirtualUpscalerDriver.h>
 #include <native/NativeLowLatency.h>
+#include <native/NativeDriverDx11.h>
+#include <native/NativeDriverDx12.h>
+#include <native/NativeDriverVk.h>
 #include <native/VkPresentBridge.h>
 #include <output/SdrToHdr_Create.h>
 
@@ -1571,8 +1574,6 @@ void MenuCommon::FGOutputPresent() { fgOutputPresentRate.Present(Util::Milliseco
 
 void MenuCommon::FGOutputPresents(bool presents) { fgOutputPresentRate.SetEnabled(presents); }
 
-static double FGOutputFrameTime(double now) { return fgOutputPresentRate.FrameTime(now); }
-
 struct MenuCommon::RenderMenuContext
 {
     State& state;
@@ -1644,7 +1645,7 @@ void MenuCommon::UpdateRenderTiming(RenderMenuContext& ctx)
         frameRate = 1000.0 / frameTime;
     }
 
-    ctx.fgOutputFrameTimeMs = FGOutputFrameTime(now);
+    ctx.fgOutputFrameTimeMs = fgOutputPresentRate.FrameTime(now);
     if (ctx.fgOutputFrameTimeMs > 0.0)
     {
         frameTime = ctx.fgOutputFrameTimeMs;
@@ -1884,6 +1885,8 @@ void MenuCommon::BeginMenuFrameIfNeeded(RenderMenuContext& ctx)
 
     if ((!config->DisableSplash.value_or_default() && now > splashStart && now < splashLimit) ||
         config->ShowFps.value_or_default() || _isVisible || ImGui::notifications.size() > 0 || scanIndicator ||
+        NativeMotionDx12::ExpandedPreviewVisible() || NativeMotionDx11::ExpandedPreviewVisible() ||
+        NativeMotionVk::ExpandedPreviewVisible() ||
         (config->DlssNrCompare.value_or_default() != 0 && config->DlssNrCompareTags.value_or_default()))
     {
         if (!_isUWP)
@@ -2005,6 +2008,7 @@ void MenuCommon::RenderNotifications(RenderMenuContext& ctx)
     // No fallback font, SetWindowFontScale needs to be called after Begin()
 
     DlssNr::UpdateF5LowHint(config);
+    DlssNr::UpdateMultiViewHint(config);
 
     ImGui::RenderNotifications(ImGuiToastPos::TopCenter, notificationScale, tonemapRequired);
 
@@ -2059,7 +2063,10 @@ void MenuCommon::UpdateFrameTimeAverages(RenderMenuContext& ctx)
 
         float lastFT = static_cast<float>(state.frameTimes.empty() ? 0.0f : state.frameTimes.back());
         float lastUT = static_cast<float>(state.upscaleTimes.empty() ? 0.0f : state.upscaleTimes.back());
-        gFrameTimes.Push(lastFT);
+
+        if (!fgOutputPresentRate.TakeIntervals([](double ms) { gFrameTimes.Push(static_cast<float>(ms)); }))
+            gFrameTimes.Push(lastFT);
+
         gUpscalerTimes.Push(lastUT);
 
         averageFrameTime = gFrameTimes.Average();
@@ -9161,6 +9168,14 @@ bool MenuCommon::RenderMenu()
 
     // 4) Draw the full settings menu last so popups and child windows keep their existing behavior.
     RenderMainMenuWindow(ctx);
+
+    // The Optical F5Low debug view's enlarged or full screen picture, over the game whether the menu shows or not.
+    if (ctx.newFrame)
+    {
+        NativeMotionDx12::DrawExpandedPreview();
+        NativeMotionDx11::DrawExpandedPreview();
+        NativeMotionVk::DrawExpandedPreview();
+    }
 
     if (ctx.newFrame)
         ImGui::EndFrame();

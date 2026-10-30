@@ -29,6 +29,7 @@
 #include "DlssNr_Dx12.h"
 #include "DlssNr_SurfaceFormats.h"
 #include "DlssNr_ActiveColor.h"
+#include "DlssNr_Views.h"
 #include "DlssNr_Guides.h"
 #include "DlssNr_SeamClock.h"
 #include "DlssNr_GameScale.h"
@@ -46,6 +47,7 @@
 #include "DlssNr_ExposureFoundBlend.h"
 #include "DlssNr_ExposureMeter.h"
 #include "DlssNr_FinishedReady.h"
+#include <dlssnr/DlssNr_StreamlinePicture.h>
 #include <dlssnr/DlssNr_GameDefaults.h>
 
 #include <Config.h>
@@ -65,11 +67,24 @@
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
 #include "precompile/dlssnr_finished_color_Shader.h"
+#include "precompile/dlssnr_finished_pq_direct_Shader.h"
+#include "DlssNr_FinishedCopy.h"
+#include "DlssNr_FinishedRaster.h"
 #include "precompile/dlssnr_detail_stats_Shader.h"
 #include "precompile/dlssnr_detail_reuse_Shader.h"
 #include "precompile/dlssnr_edit_cache_Shader.h"
 #include "precompile/dlssnr_spatial_Shader.h"
 #include "precompile/dlssnr_spatial_guides_Shader.h"
+#include "superior/precompile/host_surface_guides_Shader.h"
+#include "superior/precompile/host_uniform_surface_guides_Shader.h"
+#include "superior/precompile/host_joint_guides_Shader.h"
+#include "superior/precompile/host_joint_minified_guides_Shader.h"
+#include "superior/precompile/host_uniform_joint_guides_Shader.h"
+#include "superior/precompile/host_uniform_joint_minified_guides_Shader.h"
+#include "superior/precompile/host_joint_guides_quantized_Shader.h"
+#include "superior/precompile/host_joint_minified_guides_quantized_Shader.h"
+#include "superior/precompile/host_uniform_joint_guides_quantized_Shader.h"
+#include "superior/precompile/host_uniform_joint_minified_guides_quantized_Shader.h"
 #include "precompile/dlssnr_exposure_adapt_Shader.h"
 #include "precompile/dlssnr_lut_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
@@ -1827,6 +1842,23 @@ void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESO
     cmdList->ResourceBarrier(1, &b);
 }
 
+float SuperiorDepthPrecision(DXGI_FORMAT f)
+{
+    switch (f)
+    {
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_D16_UNORM:
+    case DXGI_FORMAT_R16_UNORM:
+        return 2.f / 65535.f;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+        return 2.f / 16777215.f;
+    default:
+        return 0.f;
+    }
+}
+
 // A typeless resource cannot be viewed, and NGX builds its own views with nothing to tell it which
 // format to use. Depth is very often declared typeless, so the typed member of the same family is
 // substituted; CopyResource accepts that as a destination for the typeless original.
@@ -2128,10 +2160,365 @@ void ReportSkipOnce(const char* reason)
         LOG_INFO("DLSS-NR did not run: {}", reason);
 }
 
+namespace Views = DlssNr::Views;
+
+// A game that draws several views into one colour allocation (a triple-screen rig) calls the upscaler once per view,
+// each with its own active rectangle, and often once more for the combined picture. This module has one model feature
+// and one history: those calls rebuild it against each other (it never gets to evaluate), a view off the origin cannot
+// be staged, and the fallback after SR runs the model over the whole output. So NR stands down while it happens, unless
+// the user ticked views (DlssNrMultiViewScreens), and then it runs on those, each with a model of its own (the view
+// slots below). See DlssNr_Views.h.
+Views::Detector g_views;
+
+// While several views are drawn and more than one is ticked: what keeps one picture's state across frames and is not
+// kept per view (Superior Scaling, Reuse detail, the edit cache) stands aside, and the frame's measurements (exposure,
+// scene cut, the scan, frame statistics) are taken on the first view NR runs on in the frame only.
+bool g_multiRun = false;
+bool g_viewSecondary = false;
+unsigned long long g_sceneCuts = 0; // cuts the first view found; each other view resets once per cut
+unsigned long long g_viewSceneCuts[Views::kSlots] = {}; // ... and remembers the last one it took
+
+// The first view is the leftmost ticked view that is still being drawn, picked by slot, not by the present count: AC
+// EVO records its views on a render thread while presents go on elsewhere, so a present can fall between two views of
+// one frame, and "the first view of this present" was then the middle screen, measured against the left one.
+unsigned long long g_viewRuns = 0;
+unsigned long long g_viewLastRun[Views::kSlots] = {};
+
+bool IsSecondaryView(int slot, uint32_t mask)
+{
+    g_viewLastRun[slot] = ++g_viewRuns;
+    for (unsigned int s = 0; s < Views::kSlots; ++s)
+        if (Views::Runs(mask, s) && g_viewLastRun[s] != 0 && g_viewRuns - g_viewLastRun[s] <= 2 * Views::kSlots)
+            return (int) s != slot;
+    return false;
+}
+
+// What the game's parameter block says about this evaluate, handed to the detector. Called once per NR seam, so twice per
+// game evaluate; the detector counts a view once.
+Views::Detector::Result JudgeViews(const Config& cfg, NVSDK_NGX_Parameter* params, unsigned long long epoch)
+{
+    ID3D12Resource* color = GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color");
+    if (color == nullptr)
+        return {};
+
+    const D3D12_RESOURCE_DESC desc = color->GetDesc();
+    unsigned int width = 0, height = 0, baseX = 0, baseY = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &width);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &baseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &baseY);
+
+    // No rectangle given: the whole allocation, as PreSrColorExtent reads it.
+    if (width == 0 && height == 0)
+    {
+        width = (unsigned int) desc.Width;
+        height = desc.Height;
+    }
+
+    const Views::Seen seen { (unsigned int) desc.Width, desc.Height, (int) desc.Format, { baseX, baseY, width, height } };
+    const uint32_t mask = cfg.DlssNrMultiViewScreens.value_or_default();
+    const auto result = g_views.Note(epoch, seen, mask);
+
+    static unsigned int loggedViews = 0;
+    static unsigned long long skipped = 0;
+
+    if (result.latchedNow)
+    {
+        LOG_WARN("DLSS-NR: the game draws several views into one {}x{} Color allocation (a multi-monitor layout); {}",
+                 seen.allocW, seen.allocH,
+                 mask == 0 ? "NR stands down until views are ticked (Neural Rendering > Input > Several views)"
+                           : "NR works on the ticked views, each with its own model");
+    }
+
+    if (result.addedCandidate && loggedViews < 40)
+    {
+        ++loggedViews;
+        unsigned int outW = 0, outH = 0, depthX = 0, depthY = 0, motionX = 0, motionY = 0;
+        unsigned int outBaseX = 0, outBaseY = 0, transBaseX = 0, transBaseY = 0;
+        if (ID3D12Resource* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output"))
+        {
+            const auto outDesc = output->GetDesc();
+            outW = (unsigned int) outDesc.Width;
+            outH = outDesc.Height;
+        }
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &depthX);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &depthY);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &motionX);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &motionY);
+        // Where the game wants this view's result in the shared output. Nothing else in this module reads it on D3D12.
+        params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, &outBaseX);
+        params->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, &outBaseY);
+        params->Get("DLSS.Input.Translucency.Subrect.Base.X", &transBaseX);
+        params->Get("DLSS.Input.Translucency.Subrect.Base.Y", &transBaseY);
+        LOG_INFO(
+            "DLSS-NR view: Color allocation {}x{}, active {}x{} at {},{}; Output allocation {}x{}, output base {},{}; "
+            "depth base {},{} motion base {},{} translucency base {},{}; view {} seen in epoch {}, slot {}",
+            seen.allocW, seen.allocH, width, height, baseX, baseY, outW, outH, outBaseX, outBaseY, depthX, depthY,
+            motionX, motionY, transBaseX, transBaseY, result.viewInEpoch, epoch, result.slot);
+    }
+
+    if (result.unlatchedNow)
+    {
+        skipped = 0;
+        LOG_INFO("DLSS-NR: one view per frame again{}; NR runs as usual",
+                 result.quickRelease ? " (only the whole picture is drawn, e.g. an outside camera)" : "");
+    }
+
+    if (result.verdict != Views::Verdict::Run && (++skipped == 1 || skipped % 3600 == 0))
+        LOG_INFO("DLSS-NR: {} evaluates skipped so far for the other views of a multi-view frame", skipped);
+
+    return result;
+}
+
 #include "DlssNr_DetailReuse.inl"
 #include "DlssNr_EditCache.inl"
 #include "DlssNr_SceneCut.inl"
 #include "DlssNr_Spatial.inl"
+
+// One model, one history and one set of surfaces per view NR works on while several views are drawn (DlssNr_Views.h):
+// the views have different sizes and cameras, so one set rebuilt for each would never get to evaluate. The pass works
+// on g_nr and EdgeCompression as always; before a view's turn its own part is swapped in. g_nr holds the loaded view's
+// part, its slot holds a default-constructed one, so swapping back puts each where it belongs. Slot -1 is the single
+// view's own part (every game that draws one view never leaves it).
+struct ViewState
+{
+    NrState nr; // only the members SwapView names are used
+    DlssNr::Spatial::Tracker tracker;
+    ID3D12Resource* color = nullptr;
+    ID3D12Resource* depth = nullptr;
+    ID3D12Resource* motion = nullptr;
+    ID3D12Resource* proxy = nullptr;
+    ID3D12Resource* answer = nullptr;
+    ID3D12Resource* proxyNative = nullptr;
+    ID3D12Resource* answerNative = nullptr;
+    OS_Dx12* proxyDown = nullptr;
+    Scaler proxyDownScaler = Scaler::Count;
+    unsigned int madeFor[8] = {};
+    bool madeSuper = false, madeUnpack = true;
+};
+
+ViewState g_mainView;
+ViewState g_viewSlots[Views::kSlots];
+int g_loadedSlot = -1;
+
+void SwapView(ViewState& v)
+{
+    using std::swap;
+    NrState& a = g_nr;
+    NrState& b = v.nr;
+#define NR_VIEW_SWAP(member) swap(a.member, b.member)
+    NR_VIEW_SWAP(superiorMainOnlyGains);
+    NR_VIEW_SWAP(feature);
+    NR_VIEW_SWAP(featurePendingSubmission);
+    NR_VIEW_SWAP(featureCreateEpoch);
+    NR_VIEW_SWAP(passFeature);
+    NR_VIEW_SWAP(passNeedsReset);
+    NR_VIEW_SWAP(passCreateFailed);
+    NR_VIEW_SWAP(passPendingSubmission);
+    NR_VIEW_SWAP(passCreateEpoch);
+    NR_VIEW_SWAP(colorCopy);
+    NR_VIEW_SWAP(output);
+    NR_VIEW_SWAP(passScratch);
+    NR_VIEW_SWAP(passScratchFailed);
+    NR_VIEW_SWAP(passClampScratch);
+    NR_VIEW_SWAP(passClampScratch2);
+    NR_VIEW_SWAP(passClampScratchFailed);
+    NR_VIEW_SWAP(passClampScratch2Failed);
+    NR_VIEW_SWAP(hdrCopy);
+    NR_VIEW_SWAP(activeColor);
+    NR_VIEW_SWAP(lutScratch);
+    NR_VIEW_SWAP(lutScratchFailed);
+    NR_VIEW_SWAP(colorSmall);
+    NR_VIEW_SWAP(superUp);
+    NR_VIEW_SWAP(outputNative);
+    NR_VIEW_SWAP(superDown);
+    NR_VIEW_SWAP(sgsr1UpAnswer);
+    NR_VIEW_SWAP(nrScaler);
+    NR_VIEW_SWAP(styled);
+    NR_VIEW_SWAP(styledState);
+    NR_VIEW_SWAP(styledB);
+    NR_VIEW_SWAP(styledBState);
+    NR_VIEW_SWAP(heldColor);
+    NR_VIEW_SWAP(heldActive);
+    NR_VIEW_SWAP(heldWidth);
+    NR_VIEW_SWAP(heldHeight);
+    NR_VIEW_SWAP(heldFormat);
+    NR_VIEW_SWAP(heldWhitePoint);
+    NR_VIEW_SWAP(workWidth);
+    NR_VIEW_SWAP(workHeight);
+    NR_VIEW_SWAP(appliedWorkScale);
+    NR_VIEW_SWAP(depthClone);
+    NR_VIEW_SWAP(motionClone);
+    NR_VIEW_SWAP(depthConstant);
+    NR_VIEW_SWAP(width);
+    NR_VIEW_SWAP(height);
+    NR_VIEW_SWAP(beforeUpscale);
+    NR_VIEW_SWAP(rayReconstruction);
+    NR_VIEW_SWAP(reset);
+    NR_VIEW_SWAP(guideWidth);
+    NR_VIEW_SWAP(guideHeight);
+    NR_VIEW_SWAP(guideDepthInverted);
+    NR_VIEW_SWAP(guideMvScaleX);
+    NR_VIEW_SWAP(guideMvScaleY);
+    NR_VIEW_SWAP(builtPreset);
+    NR_VIEW_SWAP(builtIntensity);
+    NR_VIEW_SWAP(builtPassTuning);
+    NR_VIEW_SWAP(builtStyle);
+    NR_VIEW_SWAP(builtLocalStructure);
+    NR_VIEW_SWAP(builtLocalTone);
+    NR_VIEW_SWAP(builtSkinStructure);
+    NR_VIEW_SWAP(builtAutoMask);
+    NR_VIEW_SWAP(settledAt);
+    NR_VIEW_SWAP(lastGameFormat);
+#undef NR_VIEW_SWAP
+
+    namespace ec = EdgeCompression;
+    swap(ec::tracker, v.tracker);
+    swap(ec::color, v.color);
+    swap(ec::depth, v.depth);
+    swap(ec::motion, v.motion);
+    swap(ec::proxy, v.proxy);
+    swap(ec::answer, v.answer);
+    swap(ec::proxyNative, v.proxyNative);
+    swap(ec::answerNative, v.answerNative);
+    swap(ec::proxyDown, v.proxyDown);
+    swap(ec::proxyDownScaler, v.proxyDownScaler);
+    swap(ec::madeFor, v.madeFor);
+    swap(ec::madeSuper, v.madeSuper);
+    swap(ec::madeUnpack, v.madeUnpack);
+}
+
+ViewState& SlotState(int slot) { return slot < 0 ? g_mainView : g_viewSlots[slot]; }
+
+// When each view last ran (index slot + 1). A view's model is kept while the game switches layouts (AC EVO: the cockpit
+// camera draws one view per screen, the outside cameras one wide view) and released after kKeepIdle without a run.
+constexpr auto kKeepIdle = std::chrono::minutes(2);
+std::chrono::steady_clock::time_point g_viewLastUsed[Views::kSlots + 1] {};
+
+void UseViewSlot(int slot)
+{
+    if (slot >= (int) Views::kSlots)
+        return;
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto lastRun = g_viewLastUsed[slot + 1];
+    g_viewLastUsed[slot + 1] = now;
+
+    if (slot == g_loadedSlot)
+        return;
+
+    SwapView(SlotState(g_loadedSlot));
+    SwapView(SlotState(slot));
+    g_loadedSlot = slot;
+
+    // A kept model coming back after a layout switch: its history is of another moment.
+    if (now - lastRun > std::chrono::milliseconds(500))
+        g_nr.reset = true;
+}
+
+// Parks the loaded view's features and surfaces (released 32 frames later, as every other) and puts its part of the
+// state back to how a fresh view starts.
+void ParkLoadedView()
+{
+    ParkNrFeature(g_nr.feature);
+
+    for (unsigned int i = 1; i < DlssNr::MaxPassCount; ++i)
+        ParkNrFeature(g_nr.passFeature[i]);
+
+    for (ID3D12Resource** r :
+         { &g_nr.output, &g_nr.passScratch, &g_nr.passClampScratch, &g_nr.passClampScratch2, &g_nr.colorCopy,
+           &g_nr.hdrCopy, &g_nr.colorSmall, &g_nr.outputNative, &g_nr.activeColor, &g_nr.lutScratch, &g_nr.styled,
+           &g_nr.styledB, &g_nr.heldColor, &g_nr.depthClone, &g_nr.motionClone, &g_nr.depthConstant })
+        ParkNrResource(*r);
+
+    // The scalers are deleted on the spot wherever this module drops them (a filter change); the same here.
+    delete g_nr.superUp;
+    g_nr.superUp = nullptr;
+    delete g_nr.superDown;
+    g_nr.superDown = nullptr;
+    delete g_nr.sgsr1UpAnswer;
+    g_nr.sgsr1UpAnswer = nullptr;
+
+    EdgeCompression::Release();
+    EdgeCompression::ReleaseDown();
+
+    ViewState fresh;
+    SwapView(fresh);
+}
+
+// Parks a slot that is not the loaded one.
+void ParkSlot(int slot)
+{
+    if (slot == g_loadedSlot)
+    {
+        ParkLoadedView();
+        return;
+    }
+
+    ViewState loaded;
+    SwapView(loaded);          // g_nr: a fresh part; loaded: the loaded view's
+    SwapView(SlotState(slot)); // g_nr: the slot's part; the slot: a fresh one
+    ParkLoadedView();          // g_nr: a fresh part again
+    SwapView(loaded);          // g_nr: the loaded view's part back
+}
+
+bool SlotHolds(int slot)
+{
+    if (slot == g_loadedSlot)
+        return g_nr.feature != nullptr || g_nr.output != nullptr || EdgeCompression::color != nullptr;
+    const ViewState& v = SlotState(slot);
+    return v.nr.feature != nullptr || v.nr.output != nullptr || v.color != nullptr;
+}
+
+// Several views found. The single view's model is kept: the game may switch back (an outside camera).
+void EnterMultiView(bool recalled)
+{
+    LOG_INFO("DLSS-NR: one model per ticked view {}", recalled ? "again (the layout seen before)" : "from now on");
+}
+
+// The layout went away: back to the single view's part. The views' models are kept for a switch back; at shutdown
+// (release) every one goes.
+void LeaveMultiView(bool release)
+{
+    UseViewSlot(-1);
+
+    unsigned int parked = 0;
+    for (int slot = 0; release && slot < (int) Views::kSlots; ++slot)
+    {
+        parked += SlotHolds(slot) ? 1 : 0;
+        ParkSlot(slot);
+    }
+
+    g_multiRun = false;
+    g_viewSecondary = false;
+
+    if (parked != 0)
+        LOG_INFO("DLSS-NR: {} view models released", parked);
+}
+
+// Models of views that have not run for kKeepIdle (a layout the game no longer draws, an unticked view). Checked once a
+// second; the loaded view is never idle.
+void ParkIdleViews()
+{
+    static std::chrono::steady_clock::time_point checked {};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - checked < std::chrono::seconds(1))
+        return;
+    checked = now;
+
+    unsigned int parked = 0;
+    for (int slot = -1; slot < (int) Views::kSlots; ++slot)
+    {
+        if (slot == g_loadedSlot || !SlotHolds(slot) || now - g_viewLastUsed[slot + 1] < kKeepIdle)
+            continue;
+        ParkSlot(slot);
+        ++parked;
+    }
+
+    if (parked != 0)
+        LOG_INFO("DLSS-NR: {} view model(s) not used for {} minutes released", parked,
+                 std::chrono::duration_cast<std::chrono::minutes>(kKeepIdle).count());
+}
 
 } // namespace
 
@@ -2263,6 +2650,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 }
 
 #include "superior/Shader.inl"
+#include "superior/PrivateGuides.inl"
 
 DlssNr_Dx12::~DlssNr_Dx12()
 {
@@ -2287,6 +2675,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
             pipeline->Release();
     if (_finishedColorPipelineState)
         _finishedColorPipelineState->Release();
+    if (_finishedPqDirectPipelineState)
+        _finishedPqDirectPipelineState->Release();
     if (_detailStatsPipelineState)
         _detailStatsPipelineState->Release();
     if (_exposureAdaptPipelineState)
@@ -2299,6 +2689,16 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _spatialPipelineState->Release();
     if (_spatialGuidesPipelineState)
         _spatialGuidesPipelineState->Release();
+    if (_privateGuidesHeap)
+        _privateGuidesHeap->Release();
+    for (auto* pipeline : _privateGuidesPipeline)
+        if (pipeline)
+            pipeline->Release();
+    if (_privateGuidesRoot)
+        _privateGuidesRoot->Release();
+    for (auto* pipeline : _superiorSpatialGuides)
+        if (pipeline)
+            pipeline->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -2819,14 +3219,65 @@ bool DlssNr_Dx12::SpatialReady()
 }
 
 bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Spatial::Constants& InConstants,
-                                  ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2,
-                                  ID3D12Resource* Out0, ID3D12Resource* Out1)
+                                  ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2, ID3D12Resource* Out0,
+                                  ID3D12Resource* Out1, uint32_t motionMethod)
 {
-    if (!SpatialReady() || InCmdList == nullptr || _device == nullptr || Out0 == nullptr || InConstants.width == 0 ||
-        InConstants.height == 0)
+    const bool uniform = InConstants.mode == 104u;
+    if ((!uniform && !SpatialReady()) || !_init || InCmdList == nullptr || _device == nullptr || Out0 == nullptr ||
+        InConstants.width == 0 || InConstants.height == 0)
         return false;
 
-    const bool guides = InConstants.mode == 101;
+    const bool guides = InConstants.mode == 101 || uniform;
+    auto constants = InConstants;
+    constants.unused = g_nr.guideDepthInverted ? 1.f : 0.f;
+    if (guides && motionMethod == 2u && In1 && !constants.warp.reserved)
+        DlssNr::Spatial::SetDepthPrecision(constants, SuperiorDepthPrecision(In1->GetDesc().Format));
+    const bool joint = guides && motionMethod == 2u && constants.padding[0] > .5f;
+    const auto minified =
+        joint ? DlssNr::Spatial::PrepareJointMinification(constants) : DlssNr::Spatial::MinifiedMotionDispatch {};
+    ID3D12PipelineState* correction = nullptr;
+    auto* pipeline = guides ? _spatialGuidesPipelineState : _spatialPipelineState;
+    if (guides && motionMethod != 0u)
+    {
+        const unsigned primary =
+            joint ? (uniform ? 4u : 2u) + (constants.warp.reserved ? 4u : 0u) : (uniform ? 1u : 0u);
+        for (unsigned pass = 0; pass < (minified.pixels ? 2u : 1u); ++pass)
+        {
+            const unsigned index = pass ? primary + 1u : primary;
+            if (!_superiorSpatialGuidesAttempted[index])
+            {
+                _superiorSpatialGuidesAttempted[index] = true;
+                const void* blobs[] { host_surface_guides_cso,
+                                      host_uniform_surface_guides_cso,
+                                      host_joint_guides_cso,
+                                      host_joint_minified_guides_cso,
+                                      host_uniform_joint_guides_cso,
+                                      host_uniform_joint_minified_guides_cso,
+                                      host_joint_guides_quantized_cso,
+                                      host_joint_minified_guides_quantized_cso,
+                                      host_uniform_joint_guides_quantized_cso,
+                                      host_uniform_joint_minified_guides_quantized_cso };
+                const size_t sizes[] { sizeof(host_surface_guides_cso),
+                                       sizeof(host_uniform_surface_guides_cso),
+                                       sizeof(host_joint_guides_cso),
+                                       sizeof(host_joint_minified_guides_cso),
+                                       sizeof(host_uniform_joint_guides_cso),
+                                       sizeof(host_uniform_joint_minified_guides_cso),
+                                       sizeof(host_joint_guides_quantized_cso),
+                                       sizeof(host_joint_minified_guides_quantized_cso),
+                                       sizeof(host_uniform_joint_guides_quantized_cso),
+                                       sizeof(host_uniform_joint_minified_guides_quantized_cso) };
+                CreateComputePipeline(_device, &_superiorSpatialGuides[index], blobs[index], sizes[index], nullptr);
+            }
+            if (!_superiorSpatialGuides[index])
+                return false;
+            if (pass)
+                correction = _superiorSpatialGuides[index];
+        }
+        pipeline = _superiorSpatialGuides[primary];
+    }
+    if (!pipeline)
+        return false;
     ID3D12Resource* const first = In0 != nullptr ? In0 : In1;
 
     if (first == nullptr)
@@ -2855,7 +3306,7 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const Dl
     for (uint32_t i = 0; i < kUavCount; ++i)
         CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
 
-    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
         return false;
@@ -2864,12 +3315,74 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const Dl
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
     InCmdList->SetComputeRootSignature(_rootSignature);
-    InCmdList->SetPipelineState(guides ? _spatialGuidesPipelineState : _spatialPipelineState);
+    InCmdList->SetPipelineState(pipeline);
     InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
     InCmdList->Dispatch((InConstants.width + _numThreadsX - 1) / _numThreadsX,
                         (InConstants.height + _numThreadsY - 1) / _numThreadsY, 1);
+    if (correction)
+    {
+        D3D12_RESOURCE_BARRIER barrier {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = joint ? nullptr : Out1 != nullptr ? Out1 : Out0;
+        InCmdList->ResourceBarrier(1, &barrier);
+        InCmdList->SetPipelineState(correction);
+        InCmdList->Dispatch(minified.groupsX, minified.groupsY, 1);
+    }
 
     return true;
+}
+
+bool DlssNr_Dx12::RecordFinishedPqRaster(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linear,
+                                         ID3D12Resource* picture, D3D12_RESOURCE_STATES pictureState)
+{
+    if (!_init || !_device || !cmd || !linear || !picture)
+        return false;
+    if (!_finishedPqRaster)
+    {
+        if (!DlssNr::CanRasterFinishedPq(cmd->GetType(), linear->GetDesc(), picture->GetDesc()))
+            return false;
+        _finishedPqRaster = std::make_unique<DlssNr::FinishedPqRaster>(DLSSNR_NUM_OF_HEAPS);
+    }
+    const auto slot = _heapIndex;
+    auto& heap = _frameHeaps[slot];
+    if (!_finishedPqRaster->Record(_device, cmd, linear, picture, pictureState, heap.GetHeapCSU(), heap.GetSrvCPU(0),
+                                   heap.GetTableGPUStart(), slot))
+        return false;
+    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+    return true;
+}
+
+bool DlssNr_Dx12::FinishedPqDirectReady(DXGI_FORMAT format)
+{
+    if (!_init || !_device)
+        return false;
+    const unsigned formatIndex = format == DXGI_FORMAT_R10G10B10A2_UNORM    ? 0u
+                                 : format == DXGI_FORMAT_R8G8B8A8_UNORM     ? 1u
+                                 : format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 2u
+                                                                            : 3u;
+    if (formatIndex == _finishedPqDirectSupport.size())
+        return false;
+    // Immutable per device/format, including views that alternate formats every frame.
+    auto& state = _finishedPqDirectSupport[formatIndex];
+    if (state == 0)
+    {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support { format };
+        const bool supported =
+            SUCCEEDED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
+            (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 &&
+            (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0 &&
+            (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
+        state = supported ? 2 : 1;
+    }
+    if (state != 2)
+        return false;
+    if (!_finishedPqDirectPipelineState && !_finishedPqDirectPipelineFailed)
+    {
+        CreateComputePipeline(_device, &_finishedPqDirectPipelineState, dlssnr_finished_pq_direct_cso,
+                              sizeof(dlssnr_finished_pq_direct_cso), nullptr);
+        _finishedPqDirectPipelineFailed = !_finishedPqDirectPipelineState;
+    }
+    return _finishedPqDirectPipelineState != nullptr;
 }
 
 bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList,
@@ -2877,10 +3390,19 @@ bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList,
                                        ID3D12Resource* InModel, ID3D12Resource* InOriginal,
                                        ID3D12Resource* InMotion, ID3D12Resource* OutTarget)
 {
-    if (!_finishedColorPipelineState && _init)
+    if (!_init || !InCmdList || !_device || !InSource || !OutTarget)
+        return false;
+    const bool directPq = InConstants.Mode == 6;
+    if (directPq)
+    {
+        const auto desc = OutTarget->GetDesc();
+        if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0 || !FinishedPqDirectReady(desc.Format))
+            return false;
+    }
+    else if (!_finishedColorPipelineState)
         CreateComputePipeline(_device, &_finishedColorPipelineState, dlssnr_finished_color_cso,
                               sizeof(dlssnr_finished_color_cso), nullptr);
-    auto* pipeline = _finishedColorPipelineState;
+    auto* pipeline = directPq ? _finishedPqDirectPipelineState : _finishedColorPipelineState;
     if (!_init || pipeline == nullptr || InCmdList == nullptr || _device == nullptr ||
         InSource == nullptr || OutTarget == nullptr)
         return false;
@@ -2936,6 +3458,20 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
+
+    // Parked features and scratch textures are released 32 frames after they were parked. This used to tick only where an
+    // evaluate completed, after the return for a feature just created and the one for a feature still waiting for its first
+    // submission: a game that makes the model build again on every call (views of different sizes alternating) never reached
+    // it, and each build's resources piled up. One tick per submission epoch, before any return.
+    {
+        static unsigned long long lastRetiredEpoch = ~0ull;
+        if (frame.SubmissionEpoch != lastRetiredEpoch)
+        {
+            lastRetiredEpoch = frame.SubmissionEpoch;
+            TickNrRetired();
+        }
+    }
+
     // Superior Scaling (superior/Pipeline.inl) runs only while selected and not given up on this session; otherwise the
     // ordinary path runs, with Matched residual in its place. Selecting it again retries.
     const bool superiorSelected = DlssNr::SuperiorScaling::Enabled(cfg);
@@ -2945,7 +3481,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         superiorState.wasSelected = superiorSelected;
         superiorState.unavailable.clear();
     }
-    const bool superior = superiorSelected && superiorState.unavailable.empty();
+    const bool superior = superiorSelected && superiorState.unavailable.empty() && !g_multiRun;
     if (superiorState.wasActive != superior)
     {
         superiorState.wasActive = superior;
@@ -3023,9 +3559,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         lastGameFormat = desc.Format;
     }
-    const auto active = frame.BeforeUpscale
-        ? DlssNr::PreSrColorExtent(desc, frame.RenderSubrectWidth, frame.RenderSubrectHeight)
-        : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { (unsigned int) desc.Width, desc.Height } };
+    const auto active =
+        frame.BeforeUpscale
+            ? DlssNr::PreSrColorExtent(desc, frame.RenderSubrectWidth, frame.RenderSubrectHeight,
+                                       frame.ColorSubrectBaseX, frame.ColorSubrectBaseY)
+            : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { (unsigned int) desc.Width, desc.Height } };
     if (!active)
     {
         ReportSkipOnce("the pre-SR active colour size is invalid");
@@ -3034,7 +3572,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     const auto width = active->width;
     const auto height = active->height;
-    const bool cropColor = frame.BeforeUpscale && (width != desc.Width || height != desc.Height);
+    const bool cropColor =
+        frame.BeforeUpscale && (width != desc.Width || height != desc.Height || active->x != 0 || active->y != 0);
     const bool targetSupportsUav =
         cropColor || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
 
@@ -3081,9 +3620,20 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_INFO("DLSS-NR: the game asked for a history reset ({} so far)", resets);
     }
 
-    // A scene cut the game did not flag, found a few evaluates ago (DlssNr_SceneCut.inl; SceneCut=2 only).
-    if (SceneCut::BeginFrame(cfg, frame.Reset))
+    // A scene cut the game did not flag, found a few evaluates ago (DlssNr_SceneCut.inl; SceneCut=2 only). With several
+    // views the first view of the frame looks, and a cut it finds resets the others too.
+    if (g_viewSecondary)
+    {
+        if (g_viewSceneCuts[g_loadedSlot] != g_sceneCuts)
+            g_nr.reset = true;
+    }
+    else if (SceneCut::BeginFrame(cfg, frame.Reset))
+    {
         g_nr.reset = true;
+        ++g_sceneCuts;
+    }
+    if (g_loadedSlot >= 0)
+        g_viewSceneCuts[g_loadedSlot] = g_sceneCuts;
 
     // Logged whenever it changes, not once per session.
     //
@@ -3106,7 +3656,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DXGI_FORMAT motionFormat;
     };
 
-    static GuideReport loggedGuides {};
+    // One per view: two views of different sizes would otherwise log every evaluate.
+    static GuideReport loggedPerView[Views::kSlots + 1] {};
+    GuideReport& loggedGuides = loggedPerView[g_loadedSlot + 1];
 
     const GuideReport guidesNow { true,
                                   g_nr.guideDepthInverted,
@@ -3204,10 +3756,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Compress screen edges (DlssNr_Spatial.inl): whether the model works on a packed picture this frame, and at what
     // size. Everything about the model below (its features, its surfaces, the guides it is handed) follows the packed
     // size; the encode, the resolve and the frame stay at the ordinary ones.
-    const uint64_t spatialSignature = EdgeCompression::SignatureOf(
+    uint64_t spatialSignature = EdgeCompression::SignatureOf(
         colourFormat, depth != nullptr ? guideDesc.Format : DXGI_FORMAT_UNKNOWN,
         depth != nullptr ? (unsigned int) guideDesc.Width : 0u, depth != nullptr ? guideDesc.Height : 0u,
         motionDesc.Format, (unsigned int) motionDesc.Width, motionDesc.Height);
+
+    // Superior supplies the current guide subrect/units on every evaluate. A
+    // changing source allocation or render subrect does not change NR's colour history grid.
+    if (superior)
+        spatialSignature = DlssNr::Spatial::SuperiorSignature(
+            colourFormat, depth ? guideDesc.Format : DXGI_FORMAT_UNKNOWN, motionDesc.Format);
 
     bool spatialReset = false;
     bool spatial =
@@ -3222,8 +3780,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                EdgeCompression::Layout().modelW, EdgeCompression::Layout().modelH);
     // Exposure calibration alone still needs the original unpacked proxy. Normal Superior rendering bypasses it.
     const bool spatialNeedsUnpack = !superiorPacked || CalibrationWanted() || CalibrationActive();
+    const DlssNr::GuideExtent renderGuideSize { frame.RenderSubrectWidth, frame.RenderSubrectHeight };
+    const bool renderGuides = DlssNr::Spatial::UseRenderGuides(superior && workScale == 1.f, true, spatial, width,
+                                                               height, workWidth, workHeight, renderGuideSize);
+    const auto spatialGuideLayout = renderGuides
+                                        ? DlssNr::Spatial::RenderGuideLayout(EdgeCompression::Layout(), renderGuideSize)
+                                        : EdgeCompression::Layout();
     if (spatial && (!SpatialReady() ||
-                    !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f, spatialNeedsUnpack)))
+                    !EdgeCompression::Prepare(device, EdgeCompression::Layout(), workScale > 1.0f, spatialNeedsUnpack,
+                                              { spatialGuideLayout.modelW, spatialGuideLayout.modelH }, renderGuides)))
     {
         EdgeCompression::TurnOff(DlssNr::Spatial::Status::TurnedOffResources);
         g_nr.reset = true;
@@ -3699,7 +4264,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // and from the next one the ordinary path runs with Matched residual.
         if (SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height,
                                superiorPacked ? modelWidth : workWidth, superiorPacked ? modelHeight : workHeight,
-                               frame, temporal, depth && guides.depth.valid(),
+                               workScale, frame, temporal, depth && guides.depth.valid(),
                                superiorPacked ? &EdgeCompression::Layout() : nullptr) != SuperiorRun::Began::Run)
         {
             device->Release();
@@ -3759,7 +4324,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // of the game's exposure rather than a number worth asking anyone to guess: measured means of 0.065,
     // 1.8 and 185 have all been seen in this one game.
     ++g_frames;
-    TickNrRetired();
     CheckCaptureTrigger();
 
     if (g_captureWriteAtFrame != 0 && g_frames >= g_captureWriteAtFrame)
@@ -3817,7 +4381,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         TransitionTarget(D3D12_RESOURCE_STATE_COPY_SOURCE);
         Barrier(cmdList, g_nr.activeColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_COPY_DEST);
-        DlssNr::CopyActiveColor(cmdList, g_nr.activeColor, gameColor, *active);
+        DlssNr::CopyActiveColorIn(cmdList, g_nr.activeColor, gameColor, *active);
         TransitionTarget(outputArrival);
         Barrier(cmdList, g_nr.activeColor, D3D12_RESOURCE_STATE_COPY_DEST,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3833,7 +4397,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             {
                 TransitionTarget(D3D12_RESOURCE_STATE_COPY_SOURCE);
                 Barrier(cmdList, gameColor, outputArrival, D3D12_RESOURCE_STATE_COPY_DEST);
-                DlssNr::CopyActiveColor(cmdList, gameColor, target, *active);
+                DlssNr::CopyActiveColorOut(cmdList, gameColor, target, *active);
                 Barrier(cmdList, gameColor, D3D12_RESOURCE_STATE_COPY_DEST, outputArrival);
             }
             TransitionTarget(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -3881,7 +4445,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const bool wantExposure = exposureSettingOn && frame.ExposureTexture != nullptr;
 
-    if (g_nr.meter != nullptr && wantExposure)
+    if (g_nr.meter != nullptr && wantExposure && !g_viewSecondary)
     {
         DlssNrConstants meterParams {};
         meterParams.Mode = DlssNrMode_Meter;
@@ -3913,8 +4477,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     bool usingAutoExposure = false;
 
     // Nor on display light with a pinned white point (forced PQ: its reference white, see ApplyColourEncoding).
-    if (whitePointSource == 3 && !frame.FinishedPicture && isHdrBuffer && frame.WhitePointOverride <= 0.0f &&
-        g_nr.meter != nullptr && g_nr.autoExposure != nullptr)
+    const bool automaticApplies =
+        whitePointSource == 3 && !frame.FinishedPicture && isHdrBuffer && frame.WhitePointOverride <= 0.0f;
+
+    // A later view of a multi-monitor frame reads the exposure the first one measured this frame (the texture holds
+    // it).
+    if (automaticApplies && g_viewSecondary && g_nr.autoExposure != nullptr && g_nr.autoExposureReadable)
+        usingAutoExposure = true;
+    else if (automaticApplies && g_nr.meter != nullptr && g_nr.autoExposure != nullptr)
     {
         DlssNrConstants meterParams {};
         meterParams.Mode = DlssNrMode_Meter;
@@ -4238,8 +4808,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // and after the blocks above have finished with the meter, so it can overwrite anything in it: the
     // next frame's own dispatch writes it all again. The grid is copied out before the courier touches
     // tile 0. Read eight frames later, below, once the white point in force is known.
-    if (cfg.DlssNrFrameStats.value_or_default() && g_nr.meter != nullptr && g_nr.diagGridReadback != nullptr &&
-        g_nr.diagExposureReadback != nullptr && g_nr.diagQueuedAt == 0 && (g_frames % 120) == 0)
+    if (cfg.DlssNrFrameStats.value_or_default() && !g_viewSecondary && g_nr.meter != nullptr &&
+        g_nr.diagGridReadback != nullptr && g_nr.diagExposureReadback != nullptr && g_nr.diagQueuedAt == 0 &&
+        (g_frames % 120) == 0)
     {
         const D3D12_RESOURCE_STATES priorTargetState = targetState;
         const D3D12_RESOURCE_DESC gameDesc = gameColor->GetDesc();
@@ -4388,8 +4959,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Is this frame a cut from the last one (DlssNr_SceneCut.inl)? Judged on the frame the encode just wrote, which is
     // display-referred whatever the game's encoding. With SceneCut=2, Reuse detail reads the answer as its distrust.
     ID3D12Resource* const sceneCutDistrust =
-        SceneCut::Run(cmdList, device, cfg, frame, g_nr.colorCopy,
-                      TranslateTypelessFormats(g_nr.colorCopy->GetDesc().Format));
+        g_viewSecondary ? nullptr
+                        : SceneCut::Run(cmdList, device, cfg, frame, g_nr.colorCopy,
+                                        TranslateTypelessFormats(g_nr.colorCopy->GetDesc().Format));
     // Measure the buffer's scale from the copy the encode just kept -- untouched, so there is no path
     // (Calibration pass removed: it produced only a menu suggestion nothing consumed, at the cost
     // of a 4096-thread dispatch, a readback and an nth_element every frame.)
@@ -4401,7 +4973,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Frame statistics diagnostic: on the frame it queued a sample, meter the proxy the encode just wrote (an
     // sRGB-encoded picture, so the tile means are of encoded luma) and queue that readback too. What the model
     // is really shown, measured rather than computed from the white point.
-    if (g_nr.diagQueuedAt == g_frames && g_nr.diagProxyReadback != nullptr && g_nr.meter != nullptr)
+    if (g_nr.diagQueuedAt == g_frames && !g_viewSecondary && g_nr.diagProxyReadback != nullptr && g_nr.meter != nullptr)
     {
         DlssNrConstants proxyParams {};
         proxyParams.Mode = DlssNrMode_Meter;
@@ -4499,7 +5071,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Read the exposure scan's candidates on the pass's own command list, once a frame, with what is known about the
     // frame's brightness for its recording: Automatic's raw reading (Automatic only) and the game's exposure (read on
-    // Game exposure, paired on Automatic while scanning).
+    // Game exposure, paired on Automatic while scanning). The first view of a multi-monitor frame only.
+    if (!g_viewSecondary)
     {
         DlssNr::ExposureScan::FrameExposure scanFrame;
         scanFrame.handed = (ID3D12Resource*) frame.ExposureTexture;
@@ -4557,7 +5130,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 ? DlssNr::GuideExtent { frame.RenderSubrectWidth, frame.RenderSubrectHeight }
                 : DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
         auto guideConstants = DlssNr::Spatial::MakeEnlargementGuideConstants(
-            superior, spatialLayout, guides, motionReference, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
+            superior, spatialGuideLayout, guides, motionReference, g_nr.guideMvScaleX, g_nr.guideMvScaleY);
+        guideConstants.padding[0] = guides.depth.valid() ? 1.f : 0.f;
 
         if (!guides.depth.valid())
         {
@@ -4568,9 +5142,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const bool packedColor =
             DispatchSpatial(cmdList, MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f), g_nr.colorCopy, nullptr,
                             nullptr, EdgeCompression::color);
-        const bool packedGuides = packedColor && DispatchSpatial(cmdList, guideConstants, g_nr.colorCopy, depthIn,
-                                                                 motionIn, EdgeCompression::depth,
-                                                                 EdgeCompression::motion);
+        const bool packedGuides =
+            packedColor && DispatchSpatial(cmdList, guideConstants, g_nr.colorCopy, depthIn, motionIn,
+                                           EdgeCompression::depth, EdgeCompression::motion, superior ? 2u : 0u);
 
         if (!packedGuides)
         {
@@ -4909,10 +5483,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // What the model is handed as its guides: the game's, at the game's sizes and scale; or packed, where all three are
     // the packed picture's own (motion in packed pixels, so a scale of 1).
-    unsigned int evalGuideW = spatial ? modelWidth : guideWidth;
-    unsigned int evalGuideH = spatial ? modelHeight : guideHeight;
-    unsigned int evalMotionW = spatial ? modelWidth : motionWidth;
-    unsigned int evalMotionH = spatial ? modelHeight : motionHeight;
+    unsigned int evalGuideW = spatial ? spatialGuideLayout.modelW : guideWidth;
+    unsigned int evalGuideH = spatial ? spatialGuideLayout.modelH : guideHeight;
+    unsigned int evalMotionW = spatial ? spatialGuideLayout.modelW : motionWidth;
+    unsigned int evalMotionH = spatial ? spatialGuideLayout.modelH : motionHeight;
     unsigned int evalDepthX = spatial ? 0u : depthBaseX;
     unsigned int evalDepthY = spatial ? 0u : depthBaseY;
     float evalMvScaleX = spatial ? 1.0f : g_nr.guideMvScaleX * mvToWorkX;
@@ -4959,7 +5533,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // and measures Reuse bottleneck as it runs.
     // A capture shows the model on every frame: before/after are a control, and an edit cache dump measures carrying
     // the model's real answers
-    reuseFrame.blocked = calibrationPinned || g_nr.heldActive || g_capture.isActive();
+    reuseFrame.blocked = calibrationPinned || g_nr.heldActive || g_capture.isActive() || g_multiRun;
     reuseFrame.frameNumber = frame.SubmissionEpoch != 0 ? frame.SubmissionEpoch : g_frames;
     {
         // The motion size is left out on purpose: saved vectors are uv displacements, so a render-size change does not
@@ -5002,7 +5576,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ci.workAbove100 = workScale > 1.0f;
         ci.edgeCompression = spatial;
         ci.convertedEncoding = frame.InputEncoding != 0;
-        ci.blocked = calibrationPinned || g_nr.heldActive || g_capture.isActive() || CalibrationActive();
+        ci.blocked = calibrationPinned || g_nr.heldActive || g_capture.isActive() || CalibrationActive() || g_multiRun;
         // The skin mask preview is painted by the resolve: carried, it would be taken for the model's edit
         ci.debugOrCompare = cfg.DlssNrDebugView.value_or_default() != 0 || cfg.DlssNrCompare.value_or_default() != 0 ||
                             cfg.DlssNrShowSkinMask.value_or_default();
@@ -5039,7 +5613,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     unsigned int evalMotionBaseY = cachePlan.runs ? cachePlan.motionBaseY : reusePlan.motionBaseY;
 
     bool superiorMatched = false;
-    if (superiorGeneration && superiorGeneration->temporal && !superiorPacked && !cached)
+    if (superiorGeneration && !superiorPacked && !cached &&
+        (superiorGeneration->temporal || workWidth != width || workHeight != height))
     {
         auto matchedRegions = guides;
         matchedRegions.motion.x = evalMotionBaseX;
@@ -5650,18 +6225,22 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             auto& g = *superiorGeneration;
             auto* shapingProxy = g.packed ? modelInput : g.temporal ? ordinaryProxy : resolveProxy;
-            auto* residual = g.temporal ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy,
-                                                                 g.packed ? finalAnswer : ordinaryAnswer, motionIn,
-                                                                 guides, frame, superiorReset, g_nr.heldActive,
-                                                                 g.packed ? EdgeCompression::depth : nullptr,
-                                                                 g.packed ? EdgeCompression::motion : nullptr)
-                                        : resolveAnswer;
+            auto* residual =
+                g.temporal
+                    ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, g.packed ? finalAnswer : ordinaryAnswer,
+                                             motionIn, guides, frame, superiorReset, g_nr.heldActive,
+                                             g.packed ? EdgeCompression::depth : nullptr,
+                                             g.packed ? EdgeCompression::motion : nullptr,
+                                             { spatialGuideLayout.modelW, spatialGuideLayout.modelH },
+                                             SuperiorDepthPrecision(guideDesc.Format))
+                    : resolveAnswer;
             const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
                                                                    superiorGainScales, g_nr.superiorMainOnlyGains);
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
                             ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, g.temporal)
                             : nullptr;
             DlssNr::Superior::Fields::SetBandGains(resolveParams, gains.high, gains.low);
+            DlssNr::SuperiorScaling::SetGuidedRange(resolveParams, workScale);
             // A raw NR answer when temporal stabilization is inactive, else the decoded signed DLSS residual.
             DlssNr::Superior::Fields::SetResolveFlags(resolveParams, low != nullptr, !g.temporal);
             auto* pso = SuperiorResolvePipeline(resolveParams, !g.temporal, g.packed, g.warpCache.Get() != nullptr);
@@ -5974,6 +6553,61 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         lastPrecision = precision;
     }
     DlssNrNative::SetPrecision(precision);
+
+    // Several views in one allocation: only the ticked ones go on, each with its own model (the view slots). Before
+    // every placement and mode below, since all of them keep one model feature and one history.
+    bool viewNeedsBeforeSr = false;
+    bool viewLatched = false;
+    bool onePicture = false; // all screens as one picture: once per frame, after SR, on the whole shared output
+    unsigned long long viewEpoch = 0;
+    if (cfg.DlssNrEnabled.value_or_default() && cmdList != nullptr && params != nullptr && !rayReconstruction)
+    {
+        viewEpoch = timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount;
+        const auto view = JudgeViews(cfg, params, viewEpoch);
+
+        if (view.unlatchedNow)
+            LeaveMultiView(false);
+        if (view.latchedNow)
+            EnterMultiView(view.recalled);
+        ParkIdleViews();
+
+        const uint32_t mask = cfg.DlssNrMultiViewScreens.value_or_default();
+        onePicture = view.slot >= 0 && Views::OnePicture(mask);
+
+        // After SR the views are side by side in the shared output; once the frame's last view is upscaled it holds
+        // the whole picture. Every other seam of the frame stands aside.
+        if (onePicture && (beforeUpscale || view.slot != g_views.FeedSlot()))
+        {
+            DeferredSr::Cancel();
+            Late::Cancel();
+            return;
+        }
+
+        if (!onePicture && view.verdict != Views::Verdict::Run)
+        {
+            DeferredSr::Cancel();
+            Late::Cancel();
+            return;
+        }
+
+        // The finished-picture and deferred modes keep one picture of their own and stage from the origin.
+        const bool ownPictureModes =
+            cfg.DlssNrFinishedPicture.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default();
+        if (view.slot >= 0 && ownPictureModes)
+        {
+            ReportSkipOnce("several views are drawn: Finished picture and Deferred DLSS work on one picture only");
+            DeferredSr::Cancel();
+            Late::Cancel();
+            return;
+        }
+
+        // One picture keeps its model in the whole picture's slot: the same size whichever view comes last.
+        UseViewSlot(onePicture ? (int) Views::kWholeBit : view.slot);
+        viewNeedsBeforeSr = !onePicture && view.needsBeforeSr;
+        viewLatched = !onePicture && view.slot >= 0;
+        g_multiRun = viewLatched && Views::CountRuns(mask) >= 2;
+    }
+
     const unsigned finishedMode = !cfg.DlssNrFinishedPicture.value_or_default() ? 0u :
         (cfg.DlssNrRunBeforeSr.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default()) ? 2u : 1u;
     static unsigned lastFinishedMode = 0;
@@ -5994,12 +6628,18 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         if (!cfg.DlssNrEnabled.value_or_default())
         { DeferredSr::Cancel(); Late::Cancel(); return; }
         if (timingQueue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
-        { DeferredSr::Cancel(); Late::Cancel(); Late::Say("This option needs a native DirectX 12 game."); return; }
-        // Before the pre-SR model and private DLSS run, so nothing is computed that cannot be composed.
-        if (Late::PausedForGameFrameGeneration())
         {
-            DeferredSr::Cancel(); Late::Cancel(); Late::Say(Late::pausedForGameFg);
-            if (finishedMode == 2) DeferredSr::Say("paused: the game's own frame generation is on");
+            DeferredSr::Cancel();
+            Late::Cancel();
+            Late::Say("This option needs a native DirectX 12 game.");
+            return;
+        }
+        // Refuse before capture, pre-SR NR and private DLSS, not only when Present discards output.
+        if (StreamlinePicture::PauseEvaluation())
+        {
+            DeferredSr::Cancel();
+            Late::Cancel();
+            Late::Say("Paused: native frame generation has no application-picture handoff.");
             return;
         }
         if (finishedMode == 2)
@@ -6123,11 +6763,10 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
                 if (!warnedSubrect)
                 {
                     warnedSubrect = true;
-                    LOG_WARN("DLSS-NR before SR requires a valid origin-zero active rectangle inside a "
+                    LOG_WARN("DLSS-NR before SR requires a valid active rectangle inside a "
                              "single-sample 2D Color texture; got allocation {}x{}, active {}x{} at {},{}. "
                              "Falling back after SR.",
-                             allocationWidth, allocationHeight, renderWidth, renderHeight, colorBaseX,
-                             colorBaseY);
+                             allocationWidth, allocationHeight, renderWidth, renderHeight, colorBaseX, colorBaseY);
                 }
             }
         }
@@ -6138,14 +6777,25 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // edit from noise it is trained to remove unless the edit is motion-consistent across frames
     // the way real scene detail is. Running NR after RR sidesteps that entirely: RR active forces
     // post-SR placement unconditionally, regardless of the RunBeforeSR setting.
-    const bool configuredBefore = beforeSrSet && preSrCompatible && !rayReconstruction;
+    const bool configuredBefore = beforeSrSet && preSrCompatible && !rayReconstruction && !onePicture;
 
     // Where NR would run without a Tune, for the run's wait (CalibrationSituation): kept from before the Tune moved it.
     if (!tuneAfterSr)
         g_nr.beforeSrPlacement = configuredBefore;
 
+    // One screen of a shared output cannot be processed after SR: the output is every screen, and the model would run on all
+    // of it. It needs the pre-SR placement (a Color rectangle at the origin) or it does not run.
+    if (viewNeedsBeforeSr && !configuredBefore)
+    {
+        ReportSkipOnce("the picked screen needs Run before SR (Neural Rendering > Options); after SR the model would run on every screen");
+        return;
+    }
+
     if (configuredBefore != beforeUpscale)
         return;
+
+    // The first view takes the frame's measurements; the others read them.
+    g_viewSecondary = viewLatched && IsSecondaryView(g_loadedSlot, cfg.DlssNrMultiViewScreens.value_or_default());
 
     // Which of the game's APIs this evaluate arrived through.
     //
@@ -6238,6 +6888,34 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &frame.DepthSubrectBaseY);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &frame.MotionSubrectBaseX);
     params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &frame.MotionSubrectBaseY);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &frame.ColorSubrectBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &frame.ColorSubrectBaseY);
+
+    // All screens as one picture: this evaluate is the frame's last view, but the picture is every view. The whole
+    // output allocation (each view wrote its rectangle of it) and the whole depth and motion allocations, which hold
+    // every view side by side at the same scale.
+    if (onePicture)
+    {
+        if (output != nullptr)
+        {
+            frame.OutputWidth = (unsigned int) output->GetDesc().Width;
+            frame.OutputHeight = output->GetDesc().Height;
+        }
+        const D3D12_RESOURCE_DESC guideDesc = (depth != nullptr ? depth : motion)->GetDesc();
+        frame.RenderSubrectWidth = (unsigned int) guideDesc.Width;
+        frame.RenderSubrectHeight = guideDesc.Height;
+        frame.DepthSubrectBaseX = frame.DepthSubrectBaseY = 0;
+        frame.MotionSubrectBaseX = frame.MotionSubrectBaseY = 0;
+        frame.ColorSubrectBaseX = frame.ColorSubrectBaseY = 0;
+
+        static bool said = false;
+        if (!said)
+        {
+            said = true;
+            LOG_INFO("DLSS-NR: all screens as one picture: once per frame after SR on the {}x{} output, guides {}x{}",
+                     frame.OutputWidth, frame.OutputHeight, frame.RenderSubrectWidth, frame.RenderSubrectHeight);
+        }
+    }
 
     params->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, &frame.FrameTimeMs);
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
@@ -6579,6 +7257,8 @@ SceneCutInfo SceneCutStatus() { return SceneCut::Status(); }
 
 int CurrentModelResolutionPercent() { return (int) lroundf(g_nr.appliedWorkScale * 100.0f); }
 
+Views::Snapshot MultiViewStatus() { return g_views.Status(); }
+
 Spatial::Published EdgeCompressionStatus()
 {
     std::lock_guard<std::mutex> lock(EdgeCompression::publishedLock);
@@ -6617,6 +7297,9 @@ bool CaptureInProgress() { return g_capture.isActive(); }
 void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    // Every view's model into the retired list, which is emptied below
+    LeaveMultiView(true);
+    g_views.Reset();
     DeferredSr::Shutdown();
     if (SuperiorRun::g_used)
         SuperiorRun::Shutdown();

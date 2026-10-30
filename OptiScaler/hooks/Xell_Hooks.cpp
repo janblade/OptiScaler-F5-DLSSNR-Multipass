@@ -5,6 +5,7 @@
 #include <proxies/XeLL_Proxy.h>
 #include <low_latency/input/input_common.h>
 #include <misc/FrameLimit.h>
+#include <native/NativeLowLatency.h>
 
 #define HOOK(name)                                                                                                     \
     if (o_##name)                                                                                                      \
@@ -82,10 +83,16 @@ bool XellHooks::update()
 
     gamesContextCanLimitFps = true;
 
+    // The game's XeLL counts shown frames when Intel's XeFG reports its generated frames to it; an XeFG library that
+    // does not (xefg_cuda) leaves it counting the game's own, so the cap goes in per rendered frame (XL23)
+    float fpsLimit = FrameLimit::CapFps();
+    if (!native::lowlatency::XellCountsShown())
+        fpsLimit = native::lowlatency::CapPerRenderedFrame(fpsLimit, native::lowlatency::XefgShownPerRendered());
+
     static float lastFpslimit = 0.0f;
-    if (lastFpslimit == FrameLimit::CapFps())
+    if (lastFpslimit == fpsLimit)
         return false;
-    lastFpslimit = FrameLimit::CapFps();
+    lastFpslimit = fpsLimit;
     if (lastFpslimit <= 0.0f)
         currentParams.minimumIntervalUs = 0u;
     else

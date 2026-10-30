@@ -9,8 +9,10 @@
 #include "proxies/FfxApi_Proxy.h"
 
 #include "FG/FfxApi_Dx12_FG.h"
+#include "hooks/FG_Hooks.h"
 
 #include "ffx_upscale.h"
+#include "ffx_framegeneration.h"
 #include "dx12/ffx_api_dx12.h"
 
 #include <magic_enum.hpp>
@@ -22,6 +24,8 @@ static ID3D12Device* _d3d12Device = nullptr;
 static bool _nvnxgInited = false;
 static float qualityRatios[] = { 1.0f, 1.5f, 1.7f, 2.0f, 3.0f };
 static size_t _contextCounter = 0x00001ee7;
+// The game's own FSR FG contexts while another FG input feeds OptiScaler (FGHooks::NoteGameFsrFg)
+static std::unordered_set<ffxContext> _gameFgContexts;
 
 static float halton(int32_t index, int32_t base)
 {
@@ -216,6 +220,13 @@ ffxReturnCode_t ffxCreateContext_Dx12(ffxContext* context, ffxCreateContextDescH
     const bool unaffectedOutput = state.activeFgOutput == FGOutput::NoFG || state.activeFgInput == FGInput::NvngxFG;
     const bool shouldCaptureGamesSwapchain = Config::Instance()->FGAlwaysCaptureFSRFGSwapchain.value_or_default() &&
                                              !unaffectedOutput && swapchainCreationType;
+
+    // The game's own FFX FG while another FG input feeds OptiScaler: from here on its FSR FG turning on is seen.
+    // Before the create, which makes the swapchain through the FG library (FG_Hooks RefuseUnderGameFsrFg)
+    const bool gameFg = isFgType && state.activeFgInput != FGInput::FSRFG;
+    if (gameFg)
+        FGHooks::NoteGameFsrFgSeen();
+
     if (isFgType && (state.activeFgInput == FGInput::FSRFG || shouldCaptureGamesSwapchain))
     {
         auto result = ffxCreateContext_Dx12FG(context, desc, memCb);
@@ -254,6 +265,10 @@ ffxReturnCode_t ffxCreateContext_Dx12(ffxContext* context, ffxCreateContextDescH
 
         LOG_DEBUG("D3D12_CreateContext result: {:X} ({}), context: {:X}", (UINT) ffxApiResult,
                   FfxApiProxy::ReturnCodeToString(ffxApiResult), (size_t) *context);
+
+        if (gameFg && desc->type == FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION &&
+            ffxApiResult == FFX_API_RETURN_OK)
+            _gameFgContexts.insert(*context);
 
         if (!upscaleContext)
             return ffxApiResult;
@@ -306,6 +321,10 @@ ffxReturnCode_t ffxDestroyContext_Dx12(ffxContext* context, const ffxAllocationC
         return FFX_API_RETURN_OK;
 
     LOG_DEBUG("context: {:X}", (size_t) *context);
+
+    // The game ends its FSR FG with its context, often without configuring it off first
+    if (_gameFgContexts.erase(*context) > 0)
+        FGHooks::NoteGameFsrFg(false);
 
     if (*context == (void*) scContext || *context == (void*) fgContext)
     {
@@ -368,9 +387,12 @@ ffxReturnCode_t ffxConfigure_Dx12(ffxContext* context, ffxConfigureDescHeader* d
     if (type == FFXStructType::SwapchainDX12 || type == FFXStructType::FG)
     {
         ffxReturnCode_t result = PASSTHRU_RETURN_CODE;
+        auto& state = State::Instance();
 
-        if (State::Instance().activeFgInput == FGInput::FSRFG)
+        if (state.activeFgInput == FGInput::FSRFG)
             result = ffxConfigure_Dx12FG(context, desc);
+        else if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION)
+            FGHooks::NoteGameFsrFg(((ffxConfigureDescFrameGeneration*) desc)->frameGenerationEnabled);
 
         if (result == PASSTHRU_RETURN_CODE)
             return FfxApiProxy::D3D12_Configure(context, desc);

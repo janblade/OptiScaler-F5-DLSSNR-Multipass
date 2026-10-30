@@ -29,7 +29,7 @@
 #define VER_MAJOR_VERSION 0
 #define VER_MINOR_VERSION 7
 #define VER_HOTFIX_VERSION 7
-#define VER_BUILD_NUMBER 0
+#define VER_BUILD_NUMBER 1
 
 // This fork's own release train (git tags "vX.Y.Z-slug" on
 // janblade/OptiScaler-F5-DLSSNR-Multipass, e.g. v0.1.6-dlssnr-enlarge-filter-simplify) --
@@ -39,12 +39,12 @@
 // compares this against the fork repo's GitHub releases, not VER_MAJOR/MINOR/HOTFIX_VERSION.
 #define NR_RELEASE_MAJOR_VERSION 0
 #define NR_RELEASE_MINOR_VERSION 1
-#define NR_RELEASE_HOTFIX_VERSION 34
+#define NR_RELEASE_HOTFIX_VERSION 35
 #define NR_RELEASE_VERSION_STR                                                                                        \
     STRINGIZE(NR_RELEASE_MAJOR_VERSION) "." STRINGIZE(NR_RELEASE_MINOR_VERSION) "." STRINGIZE(NR_RELEASE_HOTFIX_VERSION)
 
 // #define VER_DEV_RELEASE
-// #define VER_PRE_RELEASE
+#define VER_PRE_RELEASE 1
 
 // OPTI_VERSION stays tied to VER_MAJOR/MINOR/HOTFIX_VERSION (the frozen upstream-sync marker,
 // see the comment above NR_RELEASE_* above) since it is what the XeSS/FSR/FfxApi wrapper paths

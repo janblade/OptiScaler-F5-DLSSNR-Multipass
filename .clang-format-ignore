@@ -1,0 +1,6 @@
+# Files clang-format (and the CI formatting check) skips: third-party code and generated shader blobs.
+OptiScaler/include/**
+OptiScaler/framegen/mfgunlock/hde/**
+OptiScaler/shaders/**/precompile/*
+external/**
+OptiScaler/native/F5LowShaderBytecode.h

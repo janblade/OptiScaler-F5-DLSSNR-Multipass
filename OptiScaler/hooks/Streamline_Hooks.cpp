@@ -6,6 +6,7 @@
 #include <Util.h>
 #include <intrin.h>
 #include <Config.h>
+#include <dlssnr/DlssNr_StreamlinePicture.h>
 
 #include <nvapi/fakenvapi.h>
 #include <misc/IdentifyGpu.h>
@@ -572,6 +573,16 @@ sl::Result StreamlineHooks::hkslGetFeatureFunction(sl::Feature feature, const ch
     }
 
     return o_slGetFeatureFunction(feature, functionName, function);
+}
+
+// With the DLSSG input slInit leaves DLSS-G out of featuresToLoad, so a game that loads DLSS-G at device setup
+// (Doom: The Dark Ages) would get eErrorFeatureFailedToLoad and grey out its frame generation option
+sl::Result StreamlineHooks::hkslSetFeatureLoaded(sl::Feature feature, bool loaded)
+{
+    if (feature == sl::kFeatureDLSS_G)
+        return sl::Result::eOk;
+
+    return o_slSetFeatureLoaded(feature, loaded);
 }
 
 sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
@@ -1644,6 +1655,15 @@ void* StreamlineHooks::hkdlss_slGetPluginFunction(const char* functionName)
     return LoadOriginal(o_dlss_slGetPluginFunction)(functionName);
 }
 
+// Keep the guarded Finished Picture lookup and original-export fallback identical for both runtimes.
+static void* FinishedPicturePluginFunction(const char* name, DlssNr::StreamlinePicture::GetFunction original,
+                                           bool local)
+{
+    if (auto* wrapped = DlssNr::StreamlinePicture::Wrap(name, original, local))
+        return wrapped;
+    return original ? original(name) : nullptr;
+}
+
 void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
 {
     // LOG_DEBUG("{}", functionName);
@@ -1703,7 +1723,7 @@ void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
     if (!o_slDLSSGGetState)
         o_slDLSSGGetState = (decltype(&slDLSSGGetState)) LoadOriginal(o_dlssg_slGetPluginFunction)("slDLSSGGetState");
 
-    return LoadOriginal(o_dlssg_slGetPluginFunction)(functionName);
+    return FinishedPicturePluginFunction(functionName, LoadOriginal(o_dlssg_slGetPluginFunction), false);
 }
 
 void* StreamlineHooks::hklocal_dlssg_slGetPluginFunction(const char* functionName)
@@ -1716,7 +1736,7 @@ void* StreamlineHooks::hklocal_dlssg_slGetPluginFunction(const char* functionNam
         return &hklocal_dlssg_slOnPluginLoad;
     }
 
-    return LoadOriginal(o_local_dlssg_slGetPluginFunction)(functionName);
+    return FinishedPicturePluginFunction(functionName, LoadOriginal(o_local_dlssg_slGetPluginFunction), true);
 }
 
 bool StreamlineHooks::hkreflex_slSetConstants_sl1(const void* data, uint32_t frameIndex, uint32_t id)
@@ -2166,6 +2186,8 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 KernelBaseProxy::GetProcAddress_()(slInterposer, "slGetFeatureVersion"));
             o_slGetFeatureFunction = reinterpret_cast<decltype(&slGetFeatureFunction)>(
                 KernelBaseProxy::GetProcAddress_()(slInterposer, "slGetFeatureFunction"));
+            o_slSetFeatureLoaded = reinterpret_cast<decltype(&slSetFeatureLoaded)>(
+                KernelBaseProxy::GetProcAddress_()(slInterposer, "slSetFeatureLoaded"));
 
             if (o_slInit != nullptr)
             {
@@ -2208,6 +2230,9 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 
                     if (o_slGetFeatureFunction != nullptr)
                         DetourAttach(&(PVOID&) o_slGetFeatureFunction, hkslGetFeatureFunction);
+
+                    if (o_slSetFeatureLoaded != nullptr)
+                        DetourAttach(&(PVOID&) o_slSetFeatureLoaded, hkslSetFeatureLoaded);
                 }
 
                 // if (o_slAllocateResources != nullptr)
@@ -2236,6 +2261,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                     o_slGetFeatureRequirements = nullptr;
                     o_slGetFeatureVersion = nullptr;
                     o_slGetFeatureFunction = nullptr;
+                    o_slSetFeatureLoaded = nullptr;
                 }
             }
         }

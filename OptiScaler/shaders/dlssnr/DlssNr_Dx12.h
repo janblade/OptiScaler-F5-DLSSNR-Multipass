@@ -52,6 +52,11 @@
 // 30-pass frames.
 #define DLSSNR_SUPERIOR_NUM_OF_HEAPS 416
 
+namespace DlssNr
+{
+class FinishedPqRaster;
+}
+
 // Goes through the same constant-buffer ring as DlssNrConstants.
 static_assert(sizeof(DlssNrDetailReuseConstants) == sizeof(DlssNrConstants));
 static_assert(sizeof(DlssNrEditCacheConstants) == sizeof(DlssNrConstants));
@@ -108,6 +113,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // dlssnr.hlsl blob is never regenerated (a current dxc produces materially different DXIL
     // from the committed one). Null on backends/builds where the finished-colour shader is absent.
     ID3D12PipelineState* _finishedColorPipelineState = nullptr;
+    ID3D12PipelineState* _finishedPqDirectPipelineState = nullptr;
+    std::array<uint8_t, 3> _finishedPqDirectSupport {}; // unchecked / unsupported / supported, per PQ format
+    bool _finishedPqDirectPipelineFailed = false;
+    std::unique_ptr<DlssNr::FinishedPqRaster> _finishedPqRaster;
 
     // "Tune for this scene"'s stats pass (dlssnr_detail_stats.hlsl), built on first use the same way. Only
     // dispatched while a calibration runs.
@@ -129,6 +138,14 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // pipelines of one shader, built on first use the same way. Not retried once they failed to build.
     ID3D12PipelineState* _spatialPipelineState = nullptr;
     ID3D12PipelineState* _spatialGuidesPipelineState = nullptr;
+    ID3D12PipelineState* _superiorSpatialGuides[10] = {};
+    bool _superiorSpatialGuidesAttempted[10] = {};
+    ID3D12RootSignature* _privateGuidesRoot = nullptr;
+    ID3D12PipelineState* _privateGuidesPipeline[2] = {};
+    bool _privateGuidesPipelineAttempted[2] = {};
+    ID3D12DescriptorHeap* _privateGuidesHeap = nullptr;
+    bool _privateGuidesAttempted = false;
+    bool PrivateGuidesReady(bool quantized);
     bool _spatialPipelineFailed = false;
 
     // The LUT pass (dlssnr_lut.hlsl, LUT-apply epic Story 2: dlssnr-lut-apply).
@@ -207,6 +224,13 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                               ID3D12Resource* motion, ID3D12Resource* previous, ID3D12Resource* low,
                               ID3D12Resource* target, ID3D12Resource* keep, uint32_t* immutableSlot = nullptr);
 
+    // Check/create the optional direct PQ encoder before recording transitions. False keeps
+    // the old encode/copy path without adding barriers on unsupported devices or failed PSOs.
+    bool FinishedPqDirectReady(DXGI_FORMAT format);
+    // Changes graphics state: only Finished Picture's own DIRECT list may use it.
+    bool RecordFinishedPqRaster(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linear, ID3D12Resource* picture,
+                                D3D12_RESOURCE_STATES pictureState);
+
     // One compute pass of Finished Picture's shader (dlssnr_finished_color.hlsl). Same descriptor
     // table shape as DispatchPass; binds _finishedColorPipelineState instead of _pipelineState.
     // t4/u1 are bound with a stand-in for parity. Returns false (no-op) if that PSO is absent.
@@ -259,7 +283,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     bool SpatialReady();
     bool DispatchSpatial(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Spatial::Constants& InConstants,
                          ID3D12Resource* In0, ID3D12Resource* In1, ID3D12Resource* In2, ID3D12Resource* Out0,
-                         ID3D12Resource* Out1 = nullptr);
+                         ID3D12Resource* Out1 = nullptr, uint32_t motionMethod = 0u);
+    bool DispatchSuperiorPrivateGuides(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
+                                       ID3D12Resource* proxy, ID3D12Resource* answer, ID3D12Resource* depth,
+                                       ID3D12Resource* motion, ID3D12Resource* outDepth, ID3D12Resource* outMotion,
+                                       ID3D12Resource* outCarrier);
 
     // The LUT pass (dlssnr_lut.hlsl, DlssNr_Lut.h, LUT-apply epic Story 2:
     // dlssnr-lut-apply). Grades InSource (Width x Height, already in the colour

@@ -11,6 +11,8 @@
 #include <low_latency/input/input_common.h>
 #include <misc/FrameLimit.h>
 #include <framegen/mfgunlock/MfgUnlock.h>
+#include <imgui/ImGuiNotify.hpp>
+#include <framegen/GameFsrFgRule.h>
 
 #include <magic_enum.hpp>
 
@@ -21,6 +23,30 @@ struct XellFrameIdAndSource
 };
 
 static XellFrameIdAndSource XellFrameId();
+
+// 1: the game's window is in front, 0: minimised or another process has the focus, -1: not known right now
+static int GameWindowFocus(HWND window)
+{
+    // Unknown window: nothing to tell, keep deciding
+    if (window == nullptr || !IsWindow(window))
+        return 1;
+
+    if (IsIconic(GetAncestor(window, GA_ROOT)))
+        return 0;
+
+    const auto foreground = GetForegroundWindow();
+
+    if (foreground == nullptr)
+        return -1;
+
+    if (GetAncestor(foreground, GA_ROOT) == GetAncestor(window, GA_ROOT))
+        return 1;
+
+    // Any window of the game's process counts, a game can present to one window while another has the focus
+    DWORD pid = 0;
+    GetWindowThreadProcessId(foreground, &pid);
+    return pid == GetCurrentProcessId() ? 1 : 0;
+}
 
 #include <DirectXMath.h>
 
@@ -663,6 +689,23 @@ void XeFG_Dx12::Activate()
 {
     LOG_DEBUG("");
 
+    // Our swapchain sits under the game's FSR FG one (FG_Hooks RefuseUnderGameFsrFg): both generating crashes
+    if (GameFsrFg::StandsAside(State::Instance().xefgUnderGameFsrFg, State::Instance().gameFsrFgOn))
+    {
+        static bool shown = false;
+
+        if (!shown)
+        {
+            shown = true;
+            LOG_WARN("The game's FSR Frame Generation is on: XeFG stands aside until it is off");
+            ImGui::InsertNotification({ ImGuiToastType::Warning, 15000,
+                                        "The game's FSR Frame Generation is on: XeFG can't run under it.\n"
+                                        "Turn the game's FSR frame generation off, or set FG Input to FSR-FG." });
+        }
+
+        return;
+    }
+
     auto currentFeature = State::Instance().currentFeature;
     bool nativeAA = false;
     if (State::Instance().activeFgInput == FGInput::Upscaler && currentFeature != nullptr)
@@ -1111,6 +1154,31 @@ int XeFG_Dx12::DynamicCount(int maxCount)
     const int kept = _framesToInterpolate >= 1 ? std::min(_framesToInterpolate, maxCount) : maxCount;
     const int current = _generationOff ? 0 : kept;
 
+    // In the background the game is throttled: the count is kept, and it starts over once the game is back in front
+    const int focus =
+        GameWindowFocus(_hwnd != nullptr ? _hwnd : State::Instance().currentSwapchainDesc.OutputWindow);
+
+    if (focus == 0 || (focus < 0 && _dynamicUnfocused))
+    {
+        if (!_dynamicUnfocused)
+            LOG_INFO("Dynamic MFG: the game's window lost focus, keeping {}X", current + 1);
+
+        _dynamicUnfocused = true;
+        _dynamicDrain = true; // the waits piled up in the background are no evidence
+        return current >= 1 ? current : kept;
+    }
+
+    if (_dynamicUnfocused)
+    {
+        LOG_INFO("Dynamic MFG: the game's window is back in front, starting over at {}X", current + 1);
+        _dynamicUnfocused = false;
+        _dynamicCount.Reset();
+        _dynamicCap.Reset();
+        _dynamicCapActive = false;
+        _shownPerFrame.Rebase();
+        _shownCount = -1;
+    }
+
     // Shown per real frame, measured (the count asked for is not always what XeFG shows): started over at a new count
     if (current != _shownCount)
     {
@@ -1222,6 +1290,7 @@ void XeFG_Dx12::StopDynamic()
     _dynamicCount.Reset();
     _dynamicCap.Reset();
     _dynamicCapActive = false;
+    _dynamicUnfocused = false;
     _shownPerFrame.Rebase();
     _shownCount = -1;
     State::Instance().xefgDynamicCapFps = 0.0f;

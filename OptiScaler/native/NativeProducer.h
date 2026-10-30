@@ -9,6 +9,7 @@
 // upscaler backend through native::VirtualUpscalerDriver, in the game; a stand-in in tests/nr_native_producer_gpu.cpp), so
 // this class and everything it uses build and run without either.
 
+#include "DepthAlign_Dx12.h"
 #include "FrameContract.h"
 
 #include "../motion/OpticalFlow_Dx12.h"
@@ -76,6 +77,10 @@ class NativeProducer
         bool apply = false;           // run the consumer (needs flow; depth is optional); off: flow and trust mask only
         bool flowPreview = false;     // also draw the flow picture for the menu
         float previewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
+        int previewView = 0;           // which debug view (native/FlowDebugViews.h)
+        // The depth alignment (DepthAlign_Dx12.h): XY scale, XY offset in the picture's pixels. Anything but the
+        // identity changes the depth the flow, the trust mask and the consumer get; a change resets the histories.
+        float depthTransform[4] = { 1.0f, 1.0f, 0.0f, 0.0f };
     };
 
     struct Result
@@ -86,6 +91,7 @@ class NativeProducer
         bool sceneCut = false;   // the mask saw a hard cut: the histories were reset
         float distrustedShare = 0.0f;
         bool nativeRan = false;  // the consumer ran on the picture
+        bool previewDrawn = false;       // the debug view was drawn this frame (Options::flowPreview)
         const char* stoppedAt = nullptr; // when nothing was submitted: the step that gave up (for the log)
         long stoppedHr = 0;              // and the HRESULT it got, when it had one
         long deviceRemoved = 0;          // the device's removed reason at that moment (0: not removed)
@@ -105,7 +111,7 @@ class NativeProducer
 
     // One frame. `queue` is a direct queue of Device(); the work goes onto it after waiting for input.ready, and output.done is
     // the point it finishes at. The picture is processed in place.
-    Result Run(ID3D12CommandQueue* queue, const FrameInput& input, const Options& options, const ApplyFn& apply,
+    Result Run(ID3D12CommandQueue* queue, const FrameInput& sourceInput, const Options& options, const ApplyFn& apply,
                FrameOutput& output);
 
     // Forget the previous frames (the game calls an upscaler, a resolution change, a scene cut).
@@ -118,8 +124,11 @@ class NativeProducer
 
   private:
     static constexpr uint32_t kRing = 3;
+    static_assert(DepthAlignDx12::kSlots >= kRing, "a depth alignment descriptor pair per ring slot");
 
-    void WaitFor(UINT64 value);
+    // Waits (at most a second) until the GPU has passed `value`. False when it has not: timed out, or the device is
+    // gone (a removed device's fence reads UINT64_MAX, which is not the work finishing).
+    bool WaitFor(UINT64 value);
 
     std::unique_ptr<OpticalFlowDx12> _flow;
     std::unique_ptr<TrustMaskDx12> _trust;
@@ -140,6 +149,8 @@ class NativeProducer
     uint32_t _width = 0;
     uint32_t _height = 0;
     bool _previewReady = false;
+    DepthAlignDx12 _depthAlign;
+    float _depthTransform[4] = { 1.0f, 1.0f, 0.0f, 0.0f }; // the alignment in effect
     std::string _error;
 };
 

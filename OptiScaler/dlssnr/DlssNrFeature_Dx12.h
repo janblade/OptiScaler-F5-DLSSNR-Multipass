@@ -1,12 +1,14 @@
 #pragma once
 
 #include <d3d12.h>
+#include <cstdint>
 #include <dxgi1_4.h>
 #include <string>
 #include <vector>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
+#include <shaders/dlssnr/DlssNr_Views.h>
 #include <nvsdk_ngx.h>
 #include <menu/MenuPages.h>
 #include <menu/HeaderBanner.h>
@@ -85,6 +87,10 @@ void RenderVulkanRoute(::Config* config);
 // toast per session points to the Optical F5Low page. [Menu] F5LowHint=false silences it.
 void UpdateF5LowHint(::Config* config);
 
+// Once per frame: one toast per session when the game draws several views into one picture (a multi-monitor layout) and NR
+// stood down for it, pointing to where the view is picked (Neural Rendering > Input).
+void UpdateMultiViewHint(::Config* config);
+
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
 
@@ -93,6 +99,15 @@ bool WaitForFinishedPicture();
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd);
 void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
+// Freeze submitted capture eligibility before querying the app buffer; expire only that interval.
+uint64_t BeginStreamlinePicture();
+void EndStreamlinePicture(uint64_t snapshot, const char* unavailable = nullptr);
+void FinishedPictureUnavailable(const char* message);
+// Streamline app-facing buffer, still PRESENT, on its original render queue before interpolation.
+void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue,
+                              uint64_t snapshot);
+// A registered runtime stopped exposing app buffers with FG off. Compose once before pass-through Present.
+void ApplyToStreamlinePassthrough(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue, uint64_t snapshot);
 
 // The native input producer's entry: runs DLSS-NR on the picture `color` (a back buffer in the PRESENT state, or any resource) with a depth and a motion
 // texture of the picture's size made from the depth finder and the optical flow (both NON_PIXEL_SHADER_RESOURCE, motion in
@@ -275,6 +290,10 @@ int CurrentModelResolutionPercent();
 // size the model works on and the one it would have without it, and the boxes to draw on screen (fractions of the
 // frame). Status::Off until a frame has run since the setting changed. The menu owns every word for it.
 Spatial::Published EdgeCompressionStatus();
+
+// Whether the game draws several views into one colour allocation (a multi-monitor layout), the views found, and the one
+// NR works on (shaders/dlssnr/DlssNr_Views.h). Direct3D 12 only.
+Views::Snapshot MultiViewStatus();
 
 // The size NR hands the model, in pixels, or 0x0 before the first frame. The network pools that 2x2 before
 // its body runs, so the body sees half of it (rounded up); the menu and log show both so tuning is not

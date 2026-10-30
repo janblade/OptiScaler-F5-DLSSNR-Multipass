@@ -41,6 +41,7 @@ inline constexpr std::string_view kKeptKeys[] = {
     "ReducedUpscaleMethod",
     "Transfer",
     "SuperiorScalingPreset",
+    "SuperiorScalingDisableIsHDR",
     "ScalingDownscaler",
     // reuse
     "VitEvery",
@@ -133,6 +134,12 @@ inline constexpr std::string_view kKeptKeys[] = {
     "NativeDepthResolveInList",
     "NativeDxvkVulkan",
     "NativeDepthWarmupFrames",
+    "NativeDepthWidth",
+    "NativeDepthHeight",
+    "NativeDepthScaleX",
+    "NativeDepthScaleY",
+    "NativeDepthOffsetX",
+    "NativeDepthOffsetY",
     "NativeMotionProfile",
     "NativeMotionProfileCustom",
     "NativeMotion",
@@ -160,6 +167,8 @@ inline constexpr std::string_view kLeftOutKeys[] = {
     "Enabled",
     "ToggleKey",
     "DisplayPaperWhiteNits",
+    // the rig's, not the look: which view of a multi-monitor layout NR works on
+    "MultiViewScreens",
     // old keys kept for older builds: NativeLowLatency is [Framerate] LowLatencyInput's, InputStyle and
     // InputStyleStrength are written from the input style card (whose keys are kept), WhitePointFromExposure became
     // WhitePointSource
@@ -178,6 +187,9 @@ inline constexpr std::string_view kLeftOutKeys[] = {
     "ShowSkinMask",
     "NativeDepthOverlay",
     "NativeDebugView",
+    "NativeDepthLinearize",
+    "NativeDepthMultiplier",
+    "NativeDepthFarPlane",
     "DetailReuseDebug",
     "EditCacheDebug",
     "ProbeD3D11",

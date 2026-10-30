@@ -514,6 +514,18 @@ int main()
         in.xellHoldsCap = true;
         c = CapForGame(in);
         CHECK(c.outputHoldsCap && c.fps == 75.0f);
+
+        // Intel's library tells XeLL about its frames: the shown cap, generating or not (3x: still 75)
+        in.xefgShownPerRendered = 3;
+        CHECK(CapForGame(in).fps == 75.0f);
+
+        // ... a library that does not tell XeLL about its frames (xefg_cuda, XL23): per rendered frame (3x: 25)
+        in.xellCountsShown = false;
+        in.xefgShownPerRendered = 3;
+        CHECK(CapForGame(in).fps == 25.0f);
+        in.xefgShownPerRendered = 1;
+        CHECK(CapForGame(in).fps == 75.0f);
+        in.xellCountsShown = true;
         in.xellHoldsCap = false;
         CHECK(!CapForGame(in).outputHoldsCap);
 

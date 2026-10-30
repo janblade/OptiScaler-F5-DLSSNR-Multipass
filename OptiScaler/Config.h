@@ -277,6 +277,11 @@ class Config
     // Generate NR before SR, upscale its signed contribution with a private DLSS feature,
     // and apply it after the game's upscaler. Takes precedence over RunBeforeSR; opt-in.
     CustomOptional<bool> DlssNrDeferredDlss { false };
+    // A game that draws several views into one colour allocation (a triple-screen rig) calls the upscaler once per
+    // view. The views NR works on, each with its own model: bit i = screen i + 1 from the left, bit 8 = the whole
+    // picture (shaders/dlssnr/DlssNr_Views.h). 0: NR stands down while that happens (default). Not part of an NR
+    // profile: it describes the rig.
+    CustomOptional<uint32_t> DlssNrMultiViewScreens { 0 };
     CustomOptional<bool> DlssNrResidualFg { false }; // forced off: not read from the ini, not in the menu
     CustomOptional<uint32_t> DlssNrPrecision { 0 }; // 0 NVIDIA FP8 (default), 4 Experimental NVFP4 hybrid
     CustomOptional<uint32_t> DlssNrVitEvery { 2 };  // NVIDIA model: compute the ViT bottleneck every N-th frame (1 = always; 2 = every other frame, default), reuse it in between
@@ -436,7 +441,10 @@ class Config
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual. Only has an effect when Model resolution is under 100%.
     CustomOptional<uint32_t> DlssNrTransfer { 1 }; // 11: Superior Scaling
-    CustomOptional<uint32_t> DlssNrSuperiorScalingPreset { 1 }; // private SR A=1 / K=11
+    // Private SR preference: CNN=1 (automatic A/E), Transformer=11 (K).
+    CustomOptional<uint32_t> DlssNrSuperiorScalingPreset { 1 };
+    // Test only the private residual DLSS creation flag; AutoExposure stays enabled.
+    CustomOptional<bool> DlssNrSuperiorScalingDisableIsHDR { false };
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the
     // game already tone mapped there is nothing to measure and this has no effect.
@@ -696,10 +704,24 @@ class Config
     CustomOptional<uint32_t> DlssNrNativeDepthWarmupFrames { 300 };
     CustomOptional<bool> DlssNrNativeDepthOverlay { false };
     // NativeDebugView: show the pictures of the depth finder and the motion estimate on the menu's Optical F5Low page
-    // (the depth preview, the motion and trust pictures, the trust view chooser; D3D12 only), set by "Show the motion
-    // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
-    // overlay's copy is not made (read at the start for that).
+    // (the depth preview and the trust pictures on D3D12; the debug views, native/FlowDebugViews.h, on D3D12, D3D11 and
+    // Vulkan), set by "Show the motion and trust pictures" there. The controls (flow tuning, the depth overlay switch)
+    // show either way. Off, the depth overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
+    // NativeDepthWidth/Height: the depth finder takes only a buffer of this size (0 = either size; both 0 = its own
+    // shape test), for a game whose scene depth it does not find. NativeDepthScaleX/Y, NativeDepthOffsetX/Y: the depth
+    // alignment (native/DepthAlign_Dx12.h), for a depth buffer that does not line up with the picture; it changes the
+    // depth the motion estimate, the trust mask and the consumer get (1/1/0/0 = none, no pass). NativeDepthLinearize,
+    // NativeDepthMultiplier, NativeDepthFarPlane: how the Normals / depth debug view shows the depth (that view only).
+    CustomOptional<uint32_t> DlssNrNativeDepthWidth { 0 };
+    CustomOptional<uint32_t> DlssNrNativeDepthHeight { 0 };
+    CustomOptional<float> DlssNrNativeDepthScaleX { 1.0f };
+    CustomOptional<float> DlssNrNativeDepthScaleY { 1.0f };
+    CustomOptional<float> DlssNrNativeDepthOffsetX { 0.0f };
+    CustomOptional<float> DlssNrNativeDepthOffsetY { 0.0f };
+    CustomOptional<bool> DlssNrNativeDepthLinearize { true };
+    CustomOptional<float> DlssNrNativeDepthMultiplier { 1.0f };
+    CustomOptional<float> DlssNrNativeDepthFarPlane { 1000.0f };
     // NativeMotionProfile: the Optical F5Low page's "Motion profile", a named set of the motion estimate's knobs for a
     // kind of game (motion/MotionProfiles.h): default, anime, realistic, sportswide, sportspan or custom. Custom is
     // NativeMotionProfileCustom, the Flow tuning menu's values as a key=value list (written when a Flow tuning control

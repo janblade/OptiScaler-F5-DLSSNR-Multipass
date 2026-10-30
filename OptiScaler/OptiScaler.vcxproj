@@ -312,6 +312,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="dlssnr\DlssNr_StreamlinePicture.h" />
     <ClInclude Include="dlssnr\DlssNr_GpuLifetime.h" />
     <ClInclude Include="dlssnr\DlssNr_GuidedShaping.h" />
     <ClInclude Include="dlssnr\DlssNr_InterPassPolicy.h" />
@@ -1144,6 +1145,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_ExposureCalibrate.cpp" />
     <ClInclude Include="shaders\dlssnr\DlssNr_ActiveColor.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNr_Views.h" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_LutVk.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNrDetailReuse_Vk.cpp" />
@@ -1156,6 +1158,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_LutStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_StreamlinePicture.cpp" />
     <ClCompile Include="dlssnr\DlssNr_GpuLifetime.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Menu.cpp" />
     <ClCompile Include="dlssnr\DlssNrNative.cpp">

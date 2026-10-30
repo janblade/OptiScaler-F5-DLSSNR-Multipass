@@ -1006,6 +1006,7 @@ void Config::ReadDlssNr()
     DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
     DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
     DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
+    DlssNrMultiViewScreens.set_from_config(readUInt("DlssNr", "MultiViewScreens"));
     // ResidualFG and ResidualFGApproxCamera are no longer read: NR every second frame through NVIDIA Frame
     // Generation is off for good, whatever an old ini says.
     DlssNrPrecision.set_from_config(readUInt("DlssNr", "Precision"));
@@ -1108,6 +1109,7 @@ void Config::ReadDlssNr()
     DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
     DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
     DlssNrSuperiorScalingPreset.set_from_config(readUInt("DlssNr", "SuperiorScalingPreset"));
+    DlssNrSuperiorScalingDisableIsHDR.set_from_config(readBool("DlssNr", "SuperiorScalingDisableIsHDR"));
 
     DlssNrWhitePointFromExposure.set_from_config(readBool("DlssNr", "WhitePointFromExposure"));
     DlssNrProbeD3D11.set_from_config(readBool("DlssNr", "ProbeD3D11"));
@@ -1194,6 +1196,15 @@ void Config::ReadDlssNr()
     DlssNrNativeDepthWarmupFrames.set_from_config(readUInt("DlssNr", "NativeDepthWarmupFrames"));
     DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
     DlssNrNativeDebugView.set_from_config(readBool("DlssNr", "NativeDebugView"));
+    DlssNrNativeDepthWidth.set_from_config(readUInt("DlssNr", "NativeDepthWidth"));
+    DlssNrNativeDepthHeight.set_from_config(readUInt("DlssNr", "NativeDepthHeight"));
+    DlssNrNativeDepthScaleX.set_from_config(readFloat("DlssNr", "NativeDepthScaleX"));
+    DlssNrNativeDepthScaleY.set_from_config(readFloat("DlssNr", "NativeDepthScaleY"));
+    DlssNrNativeDepthOffsetX.set_from_config(readFloat("DlssNr", "NativeDepthOffsetX"));
+    DlssNrNativeDepthOffsetY.set_from_config(readFloat("DlssNr", "NativeDepthOffsetY"));
+    DlssNrNativeDepthLinearize.set_from_config(readBool("DlssNr", "NativeDepthLinearize"));
+    DlssNrNativeDepthMultiplier.set_from_config(readFloat("DlssNr", "NativeDepthMultiplier"));
+    DlssNrNativeDepthFarPlane.set_from_config(readFloat("DlssNr", "NativeDepthFarPlane"));
     DlssNrNativeMotionProfile.set_from_config(
         readString("DlssNr", "NativeMotionProfile", true).transform(native::motion::ProfileFromIniText));
     DlssNrNativeMotionProfileCustom.set_from_config(readString("DlssNr", "NativeMotionProfileCustom"));
@@ -1302,6 +1313,7 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
                  GetBoolValue(c.DlssNrRunBeforeSr.value_for_config()).c_str());
     out.SetValue("DlssNr", "DeferredDLSS",
                  GetBoolValue(c.DlssNrDeferredDlss.value_for_config()).c_str());
+    out.SetValue("DlssNr", "MultiViewScreens", GetIntValue(c.DlssNrMultiViewScreens.value_for_config()).c_str());
     out.SetValue("DlssNr", "Precision", GetIntValue(c.DlssNrPrecision.value_for_config()).c_str());
     out.SetValue("DlssNr", "VitEvery", GetIntValue(c.DlssNrVitEvery.value_for_config()).c_str());
     out.SetValue("DlssNr", "VitEveryPlain", GetIntValue(c.DlssNrVitEveryPlain.value_for_config()).c_str());
@@ -1337,6 +1349,8 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "Transfer", GetIntValue(c.DlssNrTransfer.value_for_config()).c_str());
     out.SetValue("DlssNr", "SuperiorScalingPreset",
                  GetIntValue(c.DlssNrSuperiorScalingPreset.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorScalingDisableIsHDR",
+                 GetBoolValue(c.DlssNrSuperiorScalingDisableIsHDR.value_for_config()).c_str());
 
     out.SetValue("DlssNr", "ProbeD3D11",
                  GetBoolValue(c.DlssNrProbeD3D11.value_for_config()).c_str());
@@ -1424,6 +1438,18 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
                  GetBoolValue(c.DlssNrNativeDepthOverlay.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeDebugView",
                  GetBoolValue(c.DlssNrNativeDebugView.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthWidth", GetIntValue(c.DlssNrNativeDepthWidth.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthHeight", GetIntValue(c.DlssNrNativeDepthHeight.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthScaleX", GetFloatValue(c.DlssNrNativeDepthScaleX.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthScaleY", GetFloatValue(c.DlssNrNativeDepthScaleY.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthOffsetX", GetFloatValue(c.DlssNrNativeDepthOffsetX.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthOffsetY", GetFloatValue(c.DlssNrNativeDepthOffsetY.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthLinearize",
+                 GetBoolValue(c.DlssNrNativeDepthLinearize.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthMultiplier",
+                 GetFloatValue(c.DlssNrNativeDepthMultiplier.value_for_config()).c_str());
+    out.SetValue("DlssNr", "NativeDepthFarPlane",
+                 GetFloatValue(c.DlssNrNativeDepthFarPlane.value_for_config()).c_str());
     out.SetValue("DlssNr", "NativeMotionProfile",
                  native::motion::ProfileIniText(c.DlssNrNativeMotionProfile.value_or_default()));
     out.SetValue("DlssNr", "NativeMotionProfileCustom",
@@ -1697,6 +1723,7 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("ReducedUpscaleMethod", DlssNrReducedUpscaleMethod),
         NR_PROFILE_FIELD("Transfer", DlssNrTransfer),
         NR_PROFILE_FIELD("SuperiorScalingPreset", DlssNrSuperiorScalingPreset),
+        NR_PROFILE_FIELD("SuperiorScalingDisableIsHDR", DlssNrSuperiorScalingDisableIsHDR),
         NR_PROFILE_FIELD("ScalingDownscaler", DlssNrScalingDownscaler),
         NR_PROFILE_FIELD("VitEvery", DlssNrVitEvery),
         NR_PROFILE_FIELD("VitEveryPlain", DlssNrVitEveryPlain),
@@ -1783,6 +1810,12 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("NativeDepthResolveInList", DlssNrNativeDepthResolveInList),
         NR_PROFILE_FIELD("NativeDxvkVulkan", DlssNrNativeDxvkVulkan),
         NR_PROFILE_FIELD("NativeDepthWarmupFrames", DlssNrNativeDepthWarmupFrames),
+        NR_PROFILE_FIELD("NativeDepthWidth", DlssNrNativeDepthWidth),
+        NR_PROFILE_FIELD("NativeDepthHeight", DlssNrNativeDepthHeight),
+        NR_PROFILE_FIELD("NativeDepthScaleX", DlssNrNativeDepthScaleX),
+        NR_PROFILE_FIELD("NativeDepthScaleY", DlssNrNativeDepthScaleY),
+        NR_PROFILE_FIELD("NativeDepthOffsetX", DlssNrNativeDepthOffsetX),
+        NR_PROFILE_FIELD("NativeDepthOffsetY", DlssNrNativeDepthOffsetY),
         NR_PROFILE_FIELD("NativeMotionProfile", DlssNrNativeMotionProfile),
         NR_PROFILE_FIELD("NativeMotionProfileCustom", DlssNrNativeMotionProfileCustom),
         NR_PROFILE_FIELD("NativeMotion", DlssNrNativeMotion),

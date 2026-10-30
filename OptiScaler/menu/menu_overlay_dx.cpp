@@ -270,6 +270,9 @@ static void CleanupRenderTargetDx11(bool shutDown)
 
     SAFE_RELEASE(g_pd3dRenderTarget);
 
+    // The Optical F5Low debug view's shared copies belong to this device.
+    NativeMotionDx11::ReleaseDebugViews();
+
     if (g_pd3dDevice != nullptr)
         g_pd3dDevice = nullptr;
 
@@ -336,6 +339,10 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
 
+            // The Optical F5Low debug view's copy for this menu frame is made while the menu is drawn, and its read
+            // is fenced after the draw.
+            NativeMotionDx11::BeginDebugFrame(g_pd3dDevice);
+
             if (MenuOverlayBase::RenderMenu())
             {
                 ImGui::Render();
@@ -343,6 +350,8 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
                 g_pd3dDeviceContext->OMSetRenderTargets(1, &g_pd3dRenderTarget, NULL);
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             }
+
+            NativeMotionDx11::EndDebugFrame();
         }
     }
 }

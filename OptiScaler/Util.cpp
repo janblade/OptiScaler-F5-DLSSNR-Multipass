@@ -627,6 +627,28 @@ std::optional<std::filesystem::path> Util::FindFilePath(const std::filesystem::p
         cnt++;
     }
 
+    // 4) Unreal Engine game whose exe is not under Binaries\Win64 (Phantom Blade Zero: platform\steam): the engine's
+    // plugins sit in Engine\Plugins at the game root, a few folders above the exe
+    auto engineRoot = startDir;
+    for (uint32_t level = 0; level < 4 && engineRoot.has_parent_path() && engineRoot != engineRoot.parent_path();
+         level++)
+    {
+        engineRoot = engineRoot.parent_path();
+
+        std::error_code ec;
+        auto plugins = engineRoot / L"Engine" / L"Plugins";
+        if (!std::filesystem::is_directory(plugins, ec))
+            continue;
+
+        if (auto foundPath = SearchDirectoryBFS(plugins))
+        {
+            LOG_INFO(L"{} found at {}", fileName.wstring(), foundPath.value().wstring());
+            return foundPath;
+        }
+
+        break;
+    }
+
     // Not found anywhere
     return std::nullopt;
 }

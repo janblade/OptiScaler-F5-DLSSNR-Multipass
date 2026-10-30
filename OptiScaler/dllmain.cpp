@@ -2136,11 +2136,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         if (Config::Instance()->NVNGX_DLSS_Library.has_value())
         {
             std::filesystem::path dlssPath(Config::Instance()->NVNGX_DLSS_Library.value());
+            std::error_code ec;
 
-            if (std::filesystem::is_directory(dlssPath) && std::filesystem::exists(dlssPath))
+            // The ini names the file; a folder is taken to mean the nvngx_dlss.dll inside it
+            if (std::filesystem::is_directory(dlssPath, ec))
+                dlssPath /= L"nvngx_dlss.dll";
+
+            if (std::filesystem::is_regular_file(dlssPath, ec))
             {
                 State::Instance().NVNGX_DLSS_Path = dlssPath;
-                LOG_DEBUG("nvngx_dlss.dll found at {}", dlssPath.string());
+                // The library loads and the NGX search paths read the config value as the file
+                Config::Instance()->NVNGX_DLSS_Library.set_volatile_value(dlssPath.wstring());
+                LOG_INFO("nvngx_dlss.dll from NvngxDlssPath: {}", dlssPath.string());
+            }
+            else
+            {
+                LOG_WARN("NvngxDlssPath is not nvngx_dlss.dll or a folder holding it: {}", dlssPath.string());
             }
         }
 

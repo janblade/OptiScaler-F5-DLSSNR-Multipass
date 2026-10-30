@@ -6,6 +6,7 @@
 #include <Util.h>
 #include <intrin.h>
 #include <Config.h>
+#include <dlssnr/DlssNr_StreamlinePicture.h>
 
 #include <nvapi/fakenvapi.h>
 #include <misc/IdentifyGpu.h>
@@ -1654,6 +1655,15 @@ void* StreamlineHooks::hkdlss_slGetPluginFunction(const char* functionName)
     return LoadOriginal(o_dlss_slGetPluginFunction)(functionName);
 }
 
+// Keep the guarded Finished Picture lookup and original-export fallback identical for both runtimes.
+static void* FinishedPicturePluginFunction(const char* name, DlssNr::StreamlinePicture::GetFunction original,
+                                           bool local)
+{
+    if (auto* wrapped = DlssNr::StreamlinePicture::Wrap(name, original, local))
+        return wrapped;
+    return original ? original(name) : nullptr;
+}
+
 void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
 {
     // LOG_DEBUG("{}", functionName);
@@ -1713,7 +1723,7 @@ void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
     if (!o_slDLSSGGetState)
         o_slDLSSGGetState = (decltype(&slDLSSGGetState)) LoadOriginal(o_dlssg_slGetPluginFunction)("slDLSSGGetState");
 
-    return LoadOriginal(o_dlssg_slGetPluginFunction)(functionName);
+    return FinishedPicturePluginFunction(functionName, LoadOriginal(o_dlssg_slGetPluginFunction), false);
 }
 
 void* StreamlineHooks::hklocal_dlssg_slGetPluginFunction(const char* functionName)
@@ -1726,7 +1736,7 @@ void* StreamlineHooks::hklocal_dlssg_slGetPluginFunction(const char* functionNam
         return &hklocal_dlssg_slOnPluginLoad;
     }
 
-    return LoadOriginal(o_local_dlssg_slGetPluginFunction)(functionName);
+    return FinishedPicturePluginFunction(functionName, LoadOriginal(o_local_dlssg_slGetPluginFunction), true);
 }
 
 bool StreamlineHooks::hkreflex_slSetConstants_sl1(const void* data, uint32_t frameIndex, uint32_t id)

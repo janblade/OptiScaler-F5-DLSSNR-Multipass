@@ -52,6 +52,11 @@
 // 30-pass frames.
 #define DLSSNR_SUPERIOR_NUM_OF_HEAPS 416
 
+namespace DlssNr
+{
+class FinishedPqRaster;
+}
+
 // Goes through the same constant-buffer ring as DlssNrConstants.
 static_assert(sizeof(DlssNrDetailReuseConstants) == sizeof(DlssNrConstants));
 static_assert(sizeof(DlssNrEditCacheConstants) == sizeof(DlssNrConstants));
@@ -108,6 +113,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // dlssnr.hlsl blob is never regenerated (a current dxc produces materially different DXIL
     // from the committed one). Null on backends/builds where the finished-colour shader is absent.
     ID3D12PipelineState* _finishedColorPipelineState = nullptr;
+    ID3D12PipelineState* _finishedPqDirectPipelineState = nullptr;
+    std::array<uint8_t, 3> _finishedPqDirectSupport {}; // unchecked / unsupported / supported, per PQ format
+    bool _finishedPqDirectPipelineFailed = false;
+    std::unique_ptr<DlssNr::FinishedPqRaster> _finishedPqRaster;
 
     // "Tune for this scene"'s stats pass (dlssnr_detail_stats.hlsl), built on first use the same way. Only
     // dispatched while a calibration runs.
@@ -214,6 +223,13 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                               ID3D12Resource* source, ID3D12Resource* model, ID3D12Resource* original,
                               ID3D12Resource* motion, ID3D12Resource* previous, ID3D12Resource* low,
                               ID3D12Resource* target, ID3D12Resource* keep, uint32_t* immutableSlot = nullptr);
+
+    // Check/create the optional direct PQ encoder before recording transitions. False keeps
+    // the old encode/copy path without adding barriers on unsupported devices or failed PSOs.
+    bool FinishedPqDirectReady(DXGI_FORMAT format);
+    // Changes graphics state: only Finished Picture's own DIRECT list may use it.
+    bool RecordFinishedPqRaster(ID3D12GraphicsCommandList* cmd, ID3D12Resource* linear, ID3D12Resource* picture,
+                                D3D12_RESOURCE_STATES pictureState);
 
     // One compute pass of Finished Picture's shader (dlssnr_finished_color.hlsl). Same descriptor
     // table shape as DispatchPass; binds _finishedColorPipelineState instead of _pipelineState.

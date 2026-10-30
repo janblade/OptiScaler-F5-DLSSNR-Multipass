@@ -15,7 +15,8 @@ inline bool FinishedInputReady(bool sameQueue, uint64_t completed, uint64_t requ
 
 struct FinishedInput
 {
-    bool eligible = false; // submitted, pending, inside the epoch window, matching size and mode
+    bool eligible = false; // submitted + pending, not expired, matching size/mode;
+                           // ordinary: inside epoch window; handoff: serial <= app snapshot
     uint64_t serial = 0;
     bool sameQueue = false;
     uint64_t completed = 0, required = 0;

@@ -1,0 +1,105 @@
+name: Finished Picture native FG checks
+
+on:
+  push:
+    paths:
+      - 'OptiScaler/dlssnr/DlssNr_StreamlinePicture.*'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Late.inl'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.h'
+      - 'OptiScaler/dlssnr/DlssNrFeature_Dx12.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedReady.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedCopy.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedRaster.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Common.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Guides.h'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_pq.hlsli'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_color*'
+      - 'OptiScaler/shaders/shader_tools/**'
+      - 'OptiScaler/shaders/Shader_Dx12*'
+      - 'OptiScaler/include/d3dx/**'
+      - 'OptiScaler/shaders/dlssnr/superior/Constants.h'
+      - 'OptiScaler/shaders/dlssnr/superior/Fields.h'
+      - 'OptiScaler/State.h'
+      - 'OptiScaler/Config.*'
+      - 'OptiScaler/dlssnr/DlssNr_Profiles.h'
+      - 'OptiScaler/framegen/dlssg/DlssgTelemetry.h'
+      - 'OptiScaler/native/NativeDriver.cpp'
+      - 'OptiScaler/native/NativeDriver.h'
+      - 'OptiScaler/native/NativeDriverDx12.cpp'
+      - 'tools/prepare_finished_tests.py'
+      - 'tests/nr_gpu/nr_finished_production.cpp'
+      - 'tests/nr_gpu/nr_finished_native.cpp'
+      - 'tests/nr_gpu/nr_finished_evaluate.cpp'
+      - 'tests/nr_gpu/interpass_fixture.h'
+      - 'tests/nr_gpu/pch.h'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_raster.hlsl'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_[pv]s_Shader.*'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_direct*'
+      - 'tools/compile_nr_finished_pq.ps1'
+      - 'OptiScaler/hooks/Streamline_Hooks.cpp'
+      - 'tests/nr_gpu/nr_streamline_*.cpp'
+      - 'tests/nr_gpu/nr_finished_routing.cpp'
+      - 'tests/nr_gpu/nr_finished_performance.cpp'
+      - 'tests/nr_finished_*_smoke.cpp'
+      - 'tests/run_nr_finished_fg_tests.ps1'
+      - '.github/workflows/finished_picture_checks.yml'
+  pull_request:
+    paths:
+      - 'OptiScaler/dlssnr/DlssNr_StreamlinePicture.*'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Late.inl'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.h'
+      - 'OptiScaler/dlssnr/DlssNrFeature_Dx12.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedReady.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedCopy.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_FinishedRaster.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Common.h'
+      - 'OptiScaler/shaders/dlssnr/DlssNr_Guides.h'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_pq.hlsli'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_color*'
+      - 'OptiScaler/shaders/shader_tools/**'
+      - 'OptiScaler/shaders/Shader_Dx12*'
+      - 'OptiScaler/include/d3dx/**'
+      - 'OptiScaler/shaders/dlssnr/superior/Constants.h'
+      - 'OptiScaler/shaders/dlssnr/superior/Fields.h'
+      - 'OptiScaler/State.h'
+      - 'OptiScaler/Config.*'
+      - 'OptiScaler/dlssnr/DlssNr_Profiles.h'
+      - 'OptiScaler/framegen/dlssg/DlssgTelemetry.h'
+      - 'OptiScaler/native/NativeDriver.cpp'
+      - 'OptiScaler/native/NativeDriver.h'
+      - 'OptiScaler/native/NativeDriverDx12.cpp'
+      - 'tools/prepare_finished_tests.py'
+      - 'tests/nr_gpu/nr_finished_production.cpp'
+      - 'tests/nr_gpu/nr_finished_native.cpp'
+      - 'tests/nr_gpu/nr_finished_evaluate.cpp'
+      - 'tests/nr_gpu/interpass_fixture.h'
+      - 'tests/nr_gpu/pch.h'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_raster.hlsl'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_[pv]s_Shader.*'
+      - 'OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_direct*'
+      - 'tools/compile_nr_finished_pq.ps1'
+      - 'OptiScaler/hooks/Streamline_Hooks.cpp'
+      - 'tests/nr_gpu/nr_streamline_*.cpp'
+      - 'tests/nr_gpu/nr_finished_routing.cpp'
+      - 'tests/nr_gpu/nr_finished_performance.cpp'
+      - 'tests/nr_finished_*_smoke.cpp'
+      - 'tests/run_nr_finished_fg_tests.ps1'
+      - '.github/workflows/finished_picture_checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  finished-picture:
+    name: Finished Picture routing, queues and colour (WARP)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Build and run production wrapper and regression tests
+        shell: pwsh
+        run: ./tests/run_nr_finished_fg_tests.ps1

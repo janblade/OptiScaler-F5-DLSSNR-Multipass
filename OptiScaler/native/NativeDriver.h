@@ -29,7 +29,8 @@ class NativeDriver
     enum class Status
     {
         Off,
-        Waiting, // the game calls an upscaler
+        Waiting,           // the game calls an upscaler
+        PausedForNativeFg, // lower display buffers may contain generated frames
         Failed,
         Running
     };
@@ -51,6 +52,9 @@ class NativeDriver
     // The first thing a present does: false while [DlssNr] NativeMotion is off (the virtual upscaler is released and
     // the status goes back to Off).
     bool Enabled();
+
+    // Break native flow/NR history before standing aside for the game's native DLSS-G.
+    void PauseForNativeFg();
 
     // Once the producer could not start nothing more is tried (the status line says why).
     bool Failed() const { return _status == Status::Failed; }

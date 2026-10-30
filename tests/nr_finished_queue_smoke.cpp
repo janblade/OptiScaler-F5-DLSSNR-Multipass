@@ -1,5 +1,5 @@
 // Headless D3D12/WARP regression: no present may wait for render work gated by that same present.
-// Ported from wilsjo2 dd2b7906 (tests/nr_finished_queue_smoke.cpp). No game or NVIDIA runtime is loaded.
+// No game or NVIDIA runtime is loaded.
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -72,7 +72,7 @@ int main() try
     FinishedInput removed[1] { { true, 6, true, UINT64_MAX, 6 } };
     Expect(DlssNr::PickFinishedInput(removed, 1, index) == FinishedPick::NotReady, "Composed after device removal");
 
-    // Finished picture pauses only for the game's own DLSS-G, and only while it is running.
+    // The existing native FG detector remains available for conservative fallback decisions.
     const uint64_t never = UINT64_MAX;
     Expect(DlssNr::GameFrameGenerationOn(false, false, false, true, never), "Missed the game's DLSS-G mode");
     Expect(DlssNr::GameFrameGenerationOn(false, false, false, false, 3), "Missed recent DLSS-G evaluates without a mode call");
@@ -94,7 +94,7 @@ int main() try
     Expect(DlssNr::TouchedBackBuffer(5, 6), "Skipped a composed slot");
     Expect(!DlssNr::TouchedBackBuffer(5, 4), "Waited for a discarded recording");
     puts("PASS finished-picture queue readiness: presentation dependency, same-queue order, completed input, device "
-         "removal, newest-slot pick, game DLSS-G pause, resize wait");
+         "removal, newest-slot pick, game DLSS-G detection, resize wait");
     return 0;
 }
 catch (const std::exception& e) { puts(e.what()); return 1; }

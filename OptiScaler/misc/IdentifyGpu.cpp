@@ -224,13 +224,17 @@ void IdentifyGpu::queryNvapi(GpuInformation& gpuInfo)
 
     // No nvapi, should not be nvidia, possibly external spoofing
     if (!nvapiModule)
+    {
+        LOG_WARN("NvAPI query for {}: nvapi64.dll could not be loaded", gpuInfo.name);
         return;
+    }
 
     auto o_NvAPI_QueryInterface =
         (PFN_NvApi_QueryInterface) KernelBaseProxy::GetProcAddress_()(nvapiModule, "nvapi_QueryInterface");
 
     if (!o_NvAPI_QueryInterface)
     {
+        LOG_WARN("NvAPI query for {}: nvapi_QueryInterface not found", gpuInfo.name);
         NtdllProxy::FreeLibrary_Ldr(nvapiModule);
         return;
     }
@@ -238,6 +242,7 @@ void IdentifyGpu::queryNvapi(GpuInformation& gpuInfo)
     // Check for fakenvapi in system32, assume it's not nvidia if found
     if (o_NvAPI_QueryInterface(0x21382138))
     {
+        LOG_WARN("NvAPI query for {}: fakenvapi answered, treated as not NVIDIA", gpuInfo.name);
         NtdllProxy::FreeLibrary_Ldr(nvapiModule);
         return;
     }
@@ -248,13 +253,14 @@ void IdentifyGpu::queryNvapi(GpuInformation& gpuInfo)
     auto* init = GET_INTERFACE(NvAPI_Initialize, o_NvAPI_QueryInterface);
     if (!init)
     {
+        LOG_WARN("NvAPI query for {}: NvAPI_Initialize not found", gpuInfo.name);
         NtdllProxy::FreeLibrary_Ldr(nvapiModule);
         return;
     }
 
-    if (init() != NVAPI_OK)
+    if (auto initResult = init(); initResult != NVAPI_OK)
     {
-        LOG_ERROR("Failed to init NvApi");
+        LOG_ERROR("Failed to init NvApi: {}", magic_enum::enum_name(initResult));
         return;
     }
 
@@ -297,10 +303,17 @@ void IdentifyGpu::queryNvapi(GpuInformation& gpuInfo)
         }
     }
 
+    LOG_INFO("NvAPI query for {}: logical GPUs {}, physical handle {}, LUID {:X}:{:X}", gpuInfo.name,
+             logicalGpus.gpuHandleCount, hPhysicalGpu != nullptr, (uint32_t) gpuInfo.luid.HighPart,
+             (uint32_t) gpuInfo.luid.LowPart);
+
     auto* getArchInfo = GET_INTERFACE(NvAPI_GPU_GetArchInfo, o_NvAPI_QueryInterface);
     gpuInfo.nvidiaArchInfo.version = NV_GPU_ARCH_INFO_VER;
     if (getArchInfo && hPhysicalGpu && getArchInfo(hPhysicalGpu, &gpuInfo.nvidiaArchInfo) != NVAPI_OK)
         LOG_ERROR("Couldn't get GPU Architecture");
+
+    LOG_INFO("NvAPI query for {}: architecture id {:X}, DLSS enabled in config {}", gpuInfo.name,
+             (uint32_t) gpuInfo.nvidiaArchInfo.architecture_id, Config::Instance()->DLSSEnabled.value_or_default());
 
     auto* getConnectedDisplayIds = GET_INTERFACE(NvAPI_GPU_GetConnectedDisplayIds, o_NvAPI_QueryInterface);
     NvU32 displayCount = 0;

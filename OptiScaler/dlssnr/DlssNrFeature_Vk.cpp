@@ -794,8 +794,7 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     }
 
     bool graded = false;
-    const bool sceneLinear = cfg.DlssNrPostLutSceneLinear.value_or_default();
-    const bool usable = DlssNr_LutChainEnsure(&g_vk.postLut, entries, sceneLinear);
+    const bool usable = DlssNr_LutChainEnsure(&g_vk.postLut, entries);
 
     // The game's image after SR can be any format, so the pass writes it through a storage image declared without one,
     // which the device must allow (the resolve that just wrote it needs the same). Our own pre-SR image is RGBA16F.
@@ -832,8 +831,6 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
             CopyLiveWhitePoint(constants, encode);
             if (liveExposureView == VK_NULL_HANDLE)
                 constants.UseGameExposure = constants.UseExposureWhitePoint = 0u;
-            constants.SceneLinear = sceneLinear ? 1u : 0u;
-            constants.SceneExposure = std::exp2(cfg.DlssNrPostLutSceneExposure.value_or_default());
 
             // The resolve's writes must be visible to this pass's reads.
             VkMemoryBarrier barrier {};
@@ -851,8 +848,6 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     const DlssNr_LutChainState& chain = g_vk.postLut;
     status.loaded = graded && chain.Loaded();
     status.chain = chain.description;
-    if (status.loaded && sceneLinear && shaderConversion != 4u && !linearHdr)
-        status.note = "Scene-linear input on an SDR picture: its light is estimated (an approximation).";
     if (!chain.error.empty())
     {
         status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();

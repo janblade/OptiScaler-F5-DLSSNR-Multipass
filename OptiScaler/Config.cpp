@@ -1308,12 +1308,6 @@ void Config::ReadDlssNr()
                                            ? std::clamp(DlssNrPostLutStrength[i].value(), 0.0f, 1.0f)
                                            : 1.0f;
     }
-    DlssNrPostLutSceneLinear.set_from_config(readBool("DlssNr", "PostLutSceneLinear"));
-    DlssNrPostLutSceneExposure.set_from_config(readFloat("DlssNr", "PostLutSceneExposure"));
-    if (DlssNrPostLutSceneExposure.has_value())
-        DlssNrPostLutSceneExposure = std::isfinite(DlssNrPostLutSceneExposure.value())
-                                         ? std::clamp(DlssNrPostLutSceneExposure.value(), -6.0f, 6.0f)
-                                         : 0.0f;
     DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
     DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
 }
@@ -1569,9 +1563,6 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "PostLutStrength3", GetFloatValue(c.DlssNrPostLutStrength[2].value_for_config()).c_str());
     out.SetValue("DlssNr", "PostLutFile4", c.DlssNrPostLutFile[3].value_for_config_or("").c_str());
     out.SetValue("DlssNr", "PostLutStrength4", GetFloatValue(c.DlssNrPostLutStrength[3].value_for_config()).c_str());
-    out.SetValue("DlssNr", "PostLutSceneLinear", GetBoolValue(c.DlssNrPostLutSceneLinear.value_for_config()).c_str());
-    out.SetValue("DlssNr", "PostLutSceneExposure",
-                 GetFloatValue(c.DlssNrPostLutSceneExposure.value_for_config()).c_str());
     out.SetValue("DlssNr", "ApplyModel", GetBoolValue(c.DlssNrApplyModel.value_for_config()).c_str());
     out.SetValue("DlssNr", "HoldFrame", GetBoolValue(c.DlssNrHoldFrame.value_for_config()).c_str());
 }
@@ -1832,8 +1823,6 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("PostLutStrength3", DlssNrPostLutStrength[2]),
         NR_PROFILE_FIELD("PostLutFile4", DlssNrPostLutFile[3]),
         NR_PROFILE_FIELD("PostLutStrength4", DlssNrPostLutStrength[3]),
-        NR_PROFILE_FIELD("PostLutSceneLinear", DlssNrPostLutSceneLinear),
-        NR_PROFILE_FIELD("PostLutSceneExposure", DlssNrPostLutSceneExposure),
         NR_PROFILE_FIELD("WhitePointSource", DlssNrWhitePointSource),
         NR_PROFILE_FIELD("GameExposureScale", DlssNrGameExposureScale),
         NR_PROFILE_FIELD("WhitePointTrim", DlssNrWhitePointTrim),

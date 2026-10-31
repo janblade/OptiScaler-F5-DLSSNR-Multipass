@@ -275,18 +275,6 @@ int main(int argc, char** argv)
         CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.5f } }));
         CHECK(st.baked.rgb == two);
 
-        // Scene-linear input: the first layer (the view transform) is baked at full strength and its strength goes to the
-        // pass; a later layer's is baked. Same layers off the mode: baked as usual, pass at 1.
-        {
-            CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.5f } }));
-            const std::vector<float> full = st.baked.rgb;
-            CHECK(DlssNr_LutChainEnsure(&st, { { pa, 0.6f }, { pb, 0.5f } }, true));
-            CHECK(st.strength == 0.6f && st.baked.rgb == full);
-            CHECK(DlssNr_LutChainEnsure(&st, { { pa, 0.6f }, { pb, 0.5f } }));
-            CHECK(st.strength == 1.0f && st.baked.rgb != full);
-            CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.5f } }));
-        }
-
         // A layer at 0 is not in the bake, nor in the description.
         CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.0f } }));
         CHECK(st.description.find("_b.cube") == std::string::npos && st.strength == 1.0f);

@@ -42,17 +42,11 @@ struct alignas(256) DlssNrLutConstants
     uint32_t ExposureTrimPreview;
     uint32_t ExposureTrimAnchorCount;
     float ExposureTrimAnchors[16]; // key, trim pairs, as DlssNrConstants' ExposureTrimAnchorExposure0..Trim7
-    // Post-NR stack only (memory/plans/2026-10-31-nr-lut-chain.md Story 5): the lattice reads ARRI LogC4 (AWG4) of the
-    // frame's scene-linear light times SceneExposure, and writes sRGB display 0..1 (a view transform's output), put
-    // back at the game's paper white. 0 for the Input LUT.
-    uint32_t SceneLinear;
-    float SceneExposure; // linear multiplier (2^EV)
 };
 static_assert(sizeof(DlssNrLutConstants) == 256);
 // The HLSL Params cbuffer reads these by position; the live white point block must sit where dlssnr_lut.hlsl puts it.
 static_assert(offsetof(DlssNrLutConstants, Trim) == 48);
 static_assert(offsetof(DlssNrLutConstants, ExposureTrimAnchors) == 80);
-static_assert(offsetof(DlssNrLutConstants, SceneLinear) == 144);
 
 // The encode's white point fields into the LUT pass's constants. Templated on the encode's constants type
 // (DlssNrConstants) so this header stays free of it; its anchor table is eight key/trim float pairs in order.

@@ -164,12 +164,7 @@ inline std::string DlssNr_DescribeChain(const DlssNr_LutChainState& state,
 // Parses the entries (a path already tried is not read again unless its file was written since) and re-bakes only when
 // the ordered paths, their files or the strengths changed. Returns whether a chain is usable. No entries clears
 // everything.
-//
-// `sceneLinear`: the stack reads LogC4 (Story 5), so its first active layer is the view transform and its output, not
-// its input, is display 0..1. That layer is baked at full strength and its strength goes to the pass, which blends in
-// the frame's own light; a later layer's strength is baked as usual.
-inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector<DlssNr::ChainEntry>& entries,
-                                  bool sceneLinear = false)
+inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector<DlssNr::ChainEntry>& entries)
 {
     using namespace DlssNr;
     // About once a second at 60 fps: a .cube re-exported in place is picked up without a file query every frame.
@@ -239,7 +234,7 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
     const size_t effective =
         (size_t) std::count_if(present.begin(), present.end(), [](const ChainEntry& e) { return e.strength > 0.0f; });
 
-    std::string key = sceneLinear && effective > 1 ? "scene\n" : "";
+    std::string key;
     for (size_t i = 0; i < present.size(); ++i)
     {
         key += present[i].path + "|" + std::to_string(state->writeTimes[i].time_since_epoch().count()) +
@@ -255,22 +250,10 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
         for (size_t i = 0; i < present.size(); ++i)
             layers.push_back({ &state->layers[i].lut, present[i].strength });
 
-        float sceneStrength = 1.0f;
-        if (sceneLinear && effective > 1)
-            for (ChainLayer& layer : layers)
-                if (layer.strength > 0.0f)
-                {
-                    sceneStrength = std::clamp(layer.strength, 0.0f, 1.0f);
-                    layer.strength = 1.0f;
-                    break;
-                }
-
         std::string err;
         Lut3D baked;
         float strength = 1.0f;
         const bool ok = BakeChain(layers, &baked, &err, &strength);
-        if (sceneLinear && effective > 1)
-            strength = sceneStrength;
         state->key = key;
         state->baked = ok ? std::move(baked) : Lut3D();
         state->strength = strength;

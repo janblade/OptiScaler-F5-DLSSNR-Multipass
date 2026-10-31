@@ -75,8 +75,6 @@ cbuffer Params : register(b0)
     float gExposureTrimAnchorTrim6;
     float gExposureTrimAnchorExposure7;
     float gExposureTrimAnchorTrim7;
-    uint  sceneLinear;   // post-NR stack: the lattice reads LogC4 of scene-linear light (see SceneLinearGrade)
-    float sceneExposure; // linear multiplier on that light (2^EV)
 };
 
 #ifdef VK_MODE
@@ -149,68 +147,6 @@ float3 EncodeFromDisplay01(float3 c, float white)
     return c;
 }
 
-// The lattice at `v`, clamped to its domain, with the half-texel inset that puts its corners on the edge texels.
-float3 SampleCube(float3 v)
-{
-    const float3 domainMin = float3(domainMinR, domainMinG, domainMinB);
-    const float3 domainMax = float3(domainMaxR, domainMaxG, domainMaxB);
-    const float3 uvw = (clamp(v, domainMin, domainMax) - domainMin) / max(domainMax - domainMin, 1e-6);
-    const float lutSpan = max((float) lutSize, 2.0) - 1.0;
-    const float3 texCoord = (uvw * lutSpan + 0.5) / (float) lutSize;
-    return gLut.SampleLevel(gLutSampler, texCoord, 0).rgb;
-}
-
-// Scene-linear input (post-NR stack, Story 5): for view-transform LUTs, which read ARRI LogC4 in ARRI Wide Gamut 4 and
-// write sRGB display 0..1. The frame's light is put on the game's paper white (1.0 = white, the same divisor the other
-// branches use), times the user's exposure, turned from BT.709 into AWG4 and encoded with the published LogC4 curve.
-// Checked against the LinRec709-to-ArriLogC4AWG4 LUT such packs ship (within 0.003 from mid grey up).
-static const float3x3 kBt709ToAwg4 = {
-    0.56583654, 0.34033100, 0.09383246,
-    0.08862564, 0.80934684, 0.10202752,
-    0.01775004, 0.10944762, 0.87280234,
-};
-
-float LogC4(float e)
-{
-    const float a = 2231.826309;
-    const float b = 0.9071358749;
-    const float c = 0.09286412512;
-    const float s = 0.1135972086;
-    const float t = -0.01805699612;
-    return e >= t ? (log2(a * e + 64.0) - 6.0) / 14.0 * b + c : (e - t) / s;
-}
-
-// The frame's light on paper white. A tone-mapped SDR frame has none to give: its sRGB is decoded and a Reinhard-shaped
-// tone curve undone (white lands at 63x paper white), an approximation of the light the game started from.
-float3 SceneLight(float3 c, float white)
-{
-    if (inputEncoding == kInputPq)
-        return mul(kBt2020To709, DecodePQ(c)) / kScrgbPerReferenceWhite / white;
-    if (colourIsLinearHdr != 0)
-        return max(c, 0.0) / white;
-    const float3 y = SrgbToLinear(saturate(c));
-    return y / max(1.0 - y, 1.0 / 64.0);
-}
-
-// The graded picture back in the frame's encoding, blended with the frame by `strength` in that encoding's light: the
-// look's sRGB white lands on the game's paper white (an sRGB view transform makes an SDR picture), its highlights stop
-// there.
-float3 SceneLinearGrade(float3 c, float white)
-{
-    const float3 awg = mul(kBt709ToAwg4, SceneLight(c, white) * sceneExposure);
-    const float3 graded = saturate(SampleCube(float3(LogC4(awg.r), LogC4(awg.g), LogC4(awg.b))));
-    const float s = saturate(strength);
-
-    if (inputEncoding == kInputPq)
-    {
-        const float3 frame = mul(kBt2020To709, DecodePQ(c));
-        return EncodePQ(mul(kBt709To2020, lerp(frame, SrgbToLinear(graded) * white * kScrgbPerReferenceWhite, s)));
-    }
-    if (colourIsLinearHdr != 0)
-        return lerp(max(c, 0.0), SrgbToLinear(graded) * white, s);
-    return lerp(saturate(c), graded, s);
-}
-
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
@@ -222,12 +158,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     const float white = WhitePoint();
 
     const float4 raw = gSource.Load(int3(id.xy, 0));
-    if (sceneLinear != 0u)
-    {
-        gTarget[id.xy] = float4(SceneLinearGrade(raw.rgb, white), raw.a);
-        return;
-    }
-
     const float3 display = DecodeToDisplay01(raw.rgb, white);
 
     const float3 domainMin = float3(domainMinR, domainMinG, domainMinB);

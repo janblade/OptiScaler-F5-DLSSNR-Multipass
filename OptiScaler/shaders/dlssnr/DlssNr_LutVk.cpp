@@ -3,13 +3,14 @@
 #include "DlssNr_LutVk.h"
 
 #include "precompile/dlssnr_lut_Shader_Vk.h"
+#include "precompile/dlssnr_lut_anyformat_Shader_Vk.h"
 #include <dlssnr/DlssNr_LutPack.h>
 
 #include <algorithm>
 #include <cstring>
 
-DlssNr_LutVk::DlssNr_LutVk(VkDevice device, VkPhysicalDevice physicalDevice)
-    : _device(device), _physicalDevice(physicalDevice)
+DlssNr_LutVk::DlssNr_LutVk(VkDevice device, VkPhysicalDevice physicalDevice, bool anyFormatTarget)
+    : _device(device), _physicalDevice(physicalDevice), _anyFormatTarget(anyFormatTarget)
 {
 }
 
@@ -172,8 +173,8 @@ bool DlssNr_LutVk::Build()
 
     VkShaderModuleCreateInfo moduleInfo {};
     moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    moduleInfo.codeSize = sizeof(dlssnr_lut_spv);
-    moduleInfo.pCode = reinterpret_cast<const uint32_t*>(dlssnr_lut_spv);
+    moduleInfo.codeSize = _anyFormatTarget ? sizeof(dlssnr_lut_anyformat_spv) : sizeof(dlssnr_lut_spv);
+    moduleInfo.pCode = reinterpret_cast<const uint32_t*>(_anyFormatTarget ? dlssnr_lut_anyformat_spv : dlssnr_lut_spv);
 
     VkShaderModule module = VK_NULL_HANDLE;
     if (vkCreateShaderModule(_device, &moduleInfo, nullptr, &module) != VK_SUCCESS)

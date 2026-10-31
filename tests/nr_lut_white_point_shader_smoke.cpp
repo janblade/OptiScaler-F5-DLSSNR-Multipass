@@ -2,7 +2,11 @@
 // white point it grades for: the encode's own, recomputed this frame from the live exposure texture.
 //
 //   1. With no live exposure the pass is bit-identical to the shader before the white point became shared
-//      (dlssnr_lut.hlsl at 7364a7f8): linear HDR, PQ, tone-mapped sRGB and gamma 2.2 frames, at several white points.
+//      (dlssnr_lut.hlsl at 7364a7f8) for PQ, tone-mapped sRGB and gamma 2.2 frames. Linear HDR grades in the sRGB
+//      display domain a .cube is made for (sRGB of Neutwo of light / white; fixed 2026-10-31, the reference graded
+//      the Neutwo values as they were), checked against a CPU model of that grade at several white points, and
+//      linear mid grey 0.18 lands on display 0.46.
+//      With LatticeCoord 1 the lattice is looked up at the CPU's LatticeFromDisplay (DlssNr_LutFile.h) of that value.
 //   2. With a live exposure texture (UseGameExposure, or UseExposureWhitePoint for Automatic's) the pass grades for
 //      PreExposure / exposure x the Trim -- the encode's own rule (dlssnr_whitepoint.hlsli) -- and follows the texel
 //      when it changes between dispatches, instead of the host value it was handed.
@@ -28,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "../OptiScaler/dlssnr/DlssNr_LutFile.h"
 #include "../OptiScaler/shaders/dlssnr/DlssNr_LutConstants.h"
 using Microsoft::WRL::ComPtr;
 
@@ -159,6 +164,23 @@ static float Worst(const std::array<Pixel, N>& a, const std::array<Pixel, N>& b)
     return worst;
 }
 
+// The shader's Linear HDR decode on the CPU: sRGB of Neutwo (peak channel, hue kept) of light / white.
+static float Neutwo(float x) { return x / std::sqrt(x * x + 1.0f); }
+static float SrgbOf(float v)
+{
+    v = std::clamp(v, 0.0f, 1.0f);
+    return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+}
+static void ToDisplay(const float in[3], float white, float out[3])
+{
+    float v[3], m = 0.0f;
+    for (int c = 0; c < 3; ++c)
+        m = std::max(m, v[c] = std::max(in[c], 0.0f) / white);
+    const float scale = m <= 1e-6f ? 1.0f : Neutwo(m) / m;
+    for (int c = 0; c < 3; ++c)
+        out[c] = SrgbOf(v[c] * scale);
+}
+
 static DlssNrLutConstants Base(uint32_t encoding, bool linearHdr, float white)
 {
     DlssNrLutConstants c {};
@@ -191,12 +213,60 @@ try
                                      {0.65f, 0.5f, 0.4f, 1}, {0.75f, 0.75f, 0.75f, 1}, {0.4f, 0.55f, 0.7f, 1},
                                      {0.5f, 0.62f, 0.3f, 1}, {0.2f, 0.25f, 0.45f, 1} }};
 
-    // 1. Bit-identical to the reference with no live exposure.
+    // 1. Linear HDR grades in the sRGB display domain: compared where the LUT works (display 0-1), as the GPU's
+    // trilinear weights are 8-bit; the rest is bit-identical to the reference with no live exposure.
     for (float white : { 0.01f, 1.0f, 2.5375f, 1700.0f })
     {
-        const auto c = Base(0, true, white);
-        expect(SameBits(gpu.Run(shader.Get(), linear, c, 0.0f), gpu.Run(reference.Get(), linear, c, 0.0f)),
-               "linear HDR differs from the reference at white " + std::to_string(white));
+        const auto got = gpu.Run(shader.Get(), linear, Base(0, true, white), 0.0f);
+        float off = 0.0f;
+        for (int i = 0; i < N; ++i)
+        {
+            const float in[3] = { linear[i].r, linear[i].g, linear[i].b };
+            const float out[3] = { got[i].r, got[i].g, got[i].b };
+            float d[3], back[3];
+            ToDisplay(in, white, d);
+            ToDisplay(out, white, back);
+            const float want[3] = { 0.9f * d[1] + 0.05f, 0.9f * d[2] + 0.05f, 0.9f * d[0] + 0.05f };
+            for (int c = 0; c < 3; ++c)
+                off = std::max(off, std::abs(back[c] - want[c]));
+            expect(got[i].a == linear[i].a, "linear HDR alpha changed");
+        }
+        std::printf("linear HDR at white %g: worst display error %.2e\n", white, off);
+        expect(off < 5e-3f, "linear HDR does not grade in the sRGB display domain at white " + std::to_string(white));
+    }
+    {
+        // mid grey: the cube's red is 0.9 x the display green + 0.05, so display = (red - 0.05) / 0.9
+        const auto got = gpu.Run(shader.Get(), linear, Base(0, true, 1.0f), 0.0f);
+        const float out[3] = { got[2].r, got[2].g, got[2].b };
+        float back[3];
+        ToDisplay(out, 1.0f, back);
+        const float grey = (back[0] - 0.05f) / 0.9f;
+        std::printf("linear mid grey 0.18 graded at display %.3f\n", grey);
+        expect(std::abs(grey - 0.46f) < 0.01f, "linear mid grey does not reach the LUT as display 0.46");
+    }
+    {
+        // LatticeCoord 1 (a post-NR stack converting Linear HDR for a log look): the lattice is looked up at
+        // DlssNr_LutFile.h's LatticeFromDisplay of the display value, the same function the bake lays it out by.
+        auto c = Base(0, true, 2.0f);
+        c.LatticeCoord = 1u;
+        const auto got = gpu.Run(shader.Get(), linear, c, 0.0f);
+        float off = 0.0f;
+        for (int i = 0; i < N; ++i)
+        {
+            const float in[3] = { linear[i].r, linear[i].g, linear[i].b };
+            const float out[3] = { got[i].r, got[i].g, got[i].b };
+            float d[3], back[3];
+            ToDisplay(in, 2.0f, d);
+            ToDisplay(out, 2.0f, back);
+            float u[3];
+            for (int ch = 0; ch < 3; ++ch)
+                u[ch] = DlssNr::LatticeFromDisplay(d[ch]);
+            const float want[3] = { 0.9f * u[1] + 0.05f, 0.9f * u[2] + 0.05f, 0.9f * u[0] + 0.05f };
+            for (int ch = 0; ch < 3; ++ch)
+                off = std::max(off, std::abs(back[ch] - want[ch]));
+        }
+        std::printf("log-spaced lattice (LatticeCoord 1): worst display error %.2e\n", off);
+        expect(off < 5e-3f, "the shader's LatticeFromDisplay does not match the CPU's");
     }
     expect(SameBits(gpu.Run(shader.Get(), display, Base(0, false, 1.0f), 0.0f),
                     gpu.Run(reference.Get(), display, Base(0, false, 1.0f), 0.0f)),

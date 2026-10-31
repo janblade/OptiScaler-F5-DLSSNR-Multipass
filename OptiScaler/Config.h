@@ -422,6 +422,17 @@ class Config
     // How much of the LUT's grade reaches the image, 0..1. Default is fully graded once a LutFile is set.
     CustomOptional<float> DlssNrLutStrength { 1.0f };
 
+    // Post-NR LUT stack (memory/plans/2026-10-31-nr-lut-chain.md): up to four .cube files graded onto the picture NR
+    // returns, applied in order 1..4 with their own strength each. Unlike LutFile above the model never sees this
+    // grade. Dense: an empty slot is an absent layer, and an all-empty stack is the feature not existing.
+    static constexpr int kPostLutLayers = 4;
+    CustomOptional<std::string> DlssNrPostLutFile[kPostLutLayers] { std::string(), std::string(), std::string(),
+                                                                    std::string() };
+    CustomOptional<float> DlssNrPostLutStrength[kPostLutLayers] { 1.0f, 1.0f, 1.0f, 1.0f };
+    // Each layer's look input (Story 6): -1 = Auto (DlssNr::kLookInputAuto), else a DlssNr::LutSpace value, 0 = None.
+    // The ini holds words (DlssNr::LookInputKey).
+    CustomOptional<int> DlssNrPostLutInput[kPostLutLayers] { -1, -1, -1, -1 };
+
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
     // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.
     CustomOptional<bool> DlssNrApplyModel { true };

@@ -7,6 +7,7 @@
 #include "nvapi/fakenvapi.h"
 #include <hooks/Streamline_Hooks.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_LutSpaces.h>
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 
 #include <SimpleIni.h>
@@ -1298,6 +1299,18 @@ void Config::ReadDlssNr()
                                           DlssNrLutStrength.value() < 0.0f || DlssNrLutStrength.value() > 1.0f))
         DlssNrLutStrength =
             std::isfinite(DlssNrLutStrength.value()) ? std::clamp(DlssNrLutStrength.value(), 0.0f, 1.0f) : 1.0f;
+    for (int i = 0; i < kPostLutLayers; ++i)
+    {
+        const std::string n = std::to_string(i + 1);
+        DlssNrPostLutFile[i].set_from_config(readString("DlssNr", ("PostLutFile" + n).c_str()));
+        DlssNrPostLutStrength[i].set_from_config(readFloat("DlssNr", ("PostLutStrength" + n).c_str()));
+        DlssNrPostLutInput[i].set_from_config(
+            readString("DlssNr", ("PostLutInput" + n).c_str()).transform(DlssNr::LookInputFromKey));
+        if (DlssNrPostLutStrength[i].has_value())
+            DlssNrPostLutStrength[i] = std::isfinite(DlssNrPostLutStrength[i].value())
+                                           ? std::clamp(DlssNrPostLutStrength[i].value(), 0.0f, 1.0f)
+                                           : 1.0f;
+    }
     DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
     DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
 }
@@ -1544,6 +1557,23 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
                  GetFloatValue(c.DlssNrDisplayPaperWhiteNits.value_for_config()).c_str());
     out.SetValue("DlssNr", "LutFile", c.DlssNrLutFile.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "LutStrength", GetFloatValue(c.DlssNrLutStrength.value_for_config()).c_str());
+    // One literal line per key (not a loop): tests/nr_profiles_smoke.cpp finds the keys SaveIni writes by these names.
+    out.SetValue("DlssNr", "PostLutFile1", c.DlssNrPostLutFile[0].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength1", GetFloatValue(c.DlssNrPostLutStrength[0].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutFile2", c.DlssNrPostLutFile[1].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength2", GetFloatValue(c.DlssNrPostLutStrength[1].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutFile3", c.DlssNrPostLutFile[2].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength3", GetFloatValue(c.DlssNrPostLutStrength[2].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutFile4", c.DlssNrPostLutFile[3].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength4", GetFloatValue(c.DlssNrPostLutStrength[3].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutInput1",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[0].value_for_config().value_or(DlssNr::kLookInputAuto)));
+    out.SetValue("DlssNr", "PostLutInput2",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[1].value_for_config().value_or(DlssNr::kLookInputAuto)));
+    out.SetValue("DlssNr", "PostLutInput3",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[2].value_for_config().value_or(DlssNr::kLookInputAuto)));
+    out.SetValue("DlssNr", "PostLutInput4",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[3].value_for_config().value_or(DlssNr::kLookInputAuto)));
     out.SetValue("DlssNr", "ApplyModel", GetBoolValue(c.DlssNrApplyModel.value_for_config()).c_str());
     out.SetValue("DlssNr", "HoldFrame", GetBoolValue(c.DlssNrHoldFrame.value_for_config()).c_str());
 }
@@ -1615,7 +1645,7 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
     for (const auto& [key, value] : KeptSection(all))
     {
         // The LUT by file name only: a shared profile must not carry this PC's folders (see ProfileLut)
-        const bool lut = DlssNrProfiles::EqualNoCase(key, "LutFile") && !value.empty();
+        const bool lut = DlssNrProfiles::IsLutFileKey(key) && !value.empty();
         out.SetValue("DlssNr", key.c_str(),
                      lut ? std::filesystem::path(value).filename().string().c_str() : value.c_str());
     }
@@ -1648,7 +1678,7 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
 // A profile's LUT is looked for by its file name in this game's OptiScaler\LUTs only, never at a folder the file names:
 // a shared profile could otherwise point the game at someone else's folders or a network path. Not there: LUT off.
 // The name is read wide: path::string() throws on a name the code page cannot hold.
-static std::string ProfileLut(Config& c, std::string& lut)
+static std::string ProfileLut(Config& c, const std::string& key, std::string& lut)
 {
     if (lut.empty() || DlssNrProfiles::EqualNoCase(lut, "auto"))
         return {};
@@ -1678,8 +1708,13 @@ static std::string ProfileLut(Config& c, std::string& lut)
         // the LUTs folder's own path cannot be held as text here: LUT off, as for a missing file
     }
 
+    // Which LUT it was: the Input LUT, or one layer of the post-NR stack (the other layers still apply).
+    std::string which = "Input LUT";
+    if (!DlssNrProfiles::EqualNoCase(key, "LutFile") && !key.empty())
+        which = "Post-NR LUT " + key.substr(key.size() - 1);
+
     lut.clear();
-    return "LUT " + shown + " is not in OptiScaler\\LUTs: LUT off.";
+    return which + " " + shown + " is not in OptiScaler\\LUTs: that LUT is off.";
 }
 
 bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& error, std::string& note)
@@ -1691,8 +1726,15 @@ bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& e
         return false;
     }
 
-    if (const auto lut = profile->settings.find("LutFile"); lut != profile->settings.end())
-        note = ProfileLut(*this, lut->second);
+    for (auto& [key, value] : profile->settings)
+    {
+        if (!DlssNrProfiles::IsLutFileKey(key))
+            continue;
+
+        const std::string problem = ProfileLut(*this, key, value);
+        if (!problem.empty())
+            note += (note.empty() ? "" : " ") + problem;
+    }
 
     const size_t defaulted = ApplyDlssNrSection(profile->settings);
     LOG_INFO("NR profile loaded: {} (saved in {}; {} settings, {} at their default)", wstring_to_string(path.wstring()),
@@ -1784,6 +1826,18 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("InputStyleFacesOnly", DlssNrInputStyleFacesOnly),
         NR_PROFILE_FIELD("LutFile", DlssNrLutFile),
         NR_PROFILE_FIELD("LutStrength", DlssNrLutStrength),
+        NR_PROFILE_FIELD("PostLutFile1", DlssNrPostLutFile[0]),
+        NR_PROFILE_FIELD("PostLutStrength1", DlssNrPostLutStrength[0]),
+        NR_PROFILE_FIELD("PostLutFile2", DlssNrPostLutFile[1]),
+        NR_PROFILE_FIELD("PostLutStrength2", DlssNrPostLutStrength[1]),
+        NR_PROFILE_FIELD("PostLutFile3", DlssNrPostLutFile[2]),
+        NR_PROFILE_FIELD("PostLutStrength3", DlssNrPostLutStrength[2]),
+        NR_PROFILE_FIELD("PostLutFile4", DlssNrPostLutFile[3]),
+        NR_PROFILE_FIELD("PostLutStrength4", DlssNrPostLutStrength[3]),
+        NR_PROFILE_FIELD("PostLutInput1", DlssNrPostLutInput[0]),
+        NR_PROFILE_FIELD("PostLutInput2", DlssNrPostLutInput[1]),
+        NR_PROFILE_FIELD("PostLutInput3", DlssNrPostLutInput[2]),
+        NR_PROFILE_FIELD("PostLutInput4", DlssNrPostLutInput[3]),
         NR_PROFILE_FIELD("WhitePointSource", DlssNrWhitePointSource),
         NR_PROFILE_FIELD("GameExposureScale", DlssNrGameExposureScale),
         NR_PROFILE_FIELD("WhitePointTrim", DlssNrWhitePointTrim),

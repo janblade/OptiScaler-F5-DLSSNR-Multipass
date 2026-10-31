@@ -105,6 +105,14 @@ inline constexpr std::string_view kKeptKeys[] = {
     "InputStyleFacesOnly",
     "LutFile",
     "LutStrength",
+    "PostLutFile1",
+    "PostLutStrength1",
+    "PostLutFile2",
+    "PostLutStrength2",
+    "PostLutFile3",
+    "PostLutStrength3",
+    "PostLutFile4",
+    "PostLutStrength4",
     // the game's: exposure and colour encoding
     "WhitePointSource",
     "GameExposureScale",
@@ -378,6 +386,16 @@ inline Section Filter(const Section& section)
     return kept;
 }
 
+// The keys that name a LUT file (the Input LUT and the post-NR stack's layers): a profile keeps only the file name.
+inline bool IsLutFileKey(const std::string& key)
+{
+    if (EqualNoCase(key, "LutFile"))
+        return true;
+
+    static const char* post[] = { "PostLutFile1", "PostLutFile2", "PostLutFile3", "PostLutFile4" };
+    return std::any_of(std::begin(post), std::end(post), [&](const char* name) { return EqualNoCase(key, name); });
+}
+
 // Whether two sections hold the same kept settings. A missing key reads as "auto", as the ini reader has it. The LUT
 // counts by file name: a profile keeps only the name, the config the path it was found at.
 inline bool Same(const Section& a, const Section& b)
@@ -387,7 +405,7 @@ inline bool Same(const Section& a, const Section& b)
         const auto it = s.find(key);
         if (it == s.end())
             return "auto";
-        return EqualNoCase(key, "LutFile") ? std::filesystem::path(it->second).filename().string() : it->second;
+        return IsLutFileKey(key) ? std::filesystem::path(it->second).filename().string() : it->second;
     };
 
     for (const Section* s : { &a, &b })

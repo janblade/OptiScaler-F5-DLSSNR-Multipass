@@ -1554,13 +1554,14 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
                  GetFloatValue(c.DlssNrDisplayPaperWhiteNits.value_for_config()).c_str());
     out.SetValue("DlssNr", "LutFile", c.DlssNrLutFile.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "LutStrength", GetFloatValue(c.DlssNrLutStrength.value_for_config()).c_str());
-    for (int i = 0; i < Config::kPostLutLayers; ++i)
-    {
-        const std::string n = std::to_string(i + 1);
-        out.SetValue("DlssNr", ("PostLutFile" + n).c_str(), c.DlssNrPostLutFile[i].value_for_config_or("").c_str());
-        out.SetValue("DlssNr", ("PostLutStrength" + n).c_str(),
-                     GetFloatValue(c.DlssNrPostLutStrength[i].value_for_config()).c_str());
-    }
+    out.SetValue("DlssNr", "PostLutFile1", c.DlssNrPostLutFile[0].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength1", GetFloatValue(c.DlssNrPostLutStrength[0].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutFile2", c.DlssNrPostLutFile[1].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength2", GetFloatValue(c.DlssNrPostLutStrength[1].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutFile3", c.DlssNrPostLutFile[2].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength3", GetFloatValue(c.DlssNrPostLutStrength[2].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutFile4", c.DlssNrPostLutFile[3].value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "PostLutStrength4", GetFloatValue(c.DlssNrPostLutStrength[3].value_for_config()).c_str());
     out.SetValue("DlssNr", "ApplyModel", GetBoolValue(c.DlssNrApplyModel.value_for_config()).c_str());
     out.SetValue("DlssNr", "HoldFrame", GetBoolValue(c.DlssNrHoldFrame.value_for_config()).c_str());
 }
@@ -1632,7 +1633,7 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
     for (const auto& [key, value] : KeptSection(all))
     {
         // The LUT by file name only: a shared profile must not carry this PC's folders (see ProfileLut)
-        const bool lut = DlssNrProfiles::EqualNoCase(key, "LutFile") && !value.empty();
+        const bool lut = DlssNrProfiles::IsLutFileKey(key) && !value.empty();
         out.SetValue("DlssNr", key.c_str(),
                      lut ? std::filesystem::path(value).filename().string().c_str() : value.c_str());
     }
@@ -1708,8 +1709,15 @@ bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& e
         return false;
     }
 
-    if (const auto lut = profile->settings.find("LutFile"); lut != profile->settings.end())
-        note = ProfileLut(*this, lut->second);
+    for (auto& [key, value] : profile->settings)
+    {
+        if (!DlssNrProfiles::IsLutFileKey(key))
+            continue;
+
+        const std::string problem = ProfileLut(*this, value);
+        if (!problem.empty())
+            note += (note.empty() ? "" : " ") + problem;
+    }
 
     const size_t defaulted = ApplyDlssNrSection(profile->settings);
     LOG_INFO("NR profile loaded: {} (saved in {}; {} settings, {} at their default)", wstring_to_string(path.wstring()),
@@ -1801,6 +1809,14 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("InputStyleFacesOnly", DlssNrInputStyleFacesOnly),
         NR_PROFILE_FIELD("LutFile", DlssNrLutFile),
         NR_PROFILE_FIELD("LutStrength", DlssNrLutStrength),
+        NR_PROFILE_FIELD("PostLutFile1", DlssNrPostLutFile[0]),
+        NR_PROFILE_FIELD("PostLutStrength1", DlssNrPostLutStrength[0]),
+        NR_PROFILE_FIELD("PostLutFile2", DlssNrPostLutFile[1]),
+        NR_PROFILE_FIELD("PostLutStrength2", DlssNrPostLutStrength[1]),
+        NR_PROFILE_FIELD("PostLutFile3", DlssNrPostLutFile[2]),
+        NR_PROFILE_FIELD("PostLutStrength3", DlssNrPostLutStrength[2]),
+        NR_PROFILE_FIELD("PostLutFile4", DlssNrPostLutFile[3]),
+        NR_PROFILE_FIELD("PostLutStrength4", DlssNrPostLutStrength[3]),
         NR_PROFILE_FIELD("WhitePointSource", DlssNrWhitePointSource),
         NR_PROFILE_FIELD("GameExposureScale", DlssNrGameExposureScale),
         NR_PROFILE_FIELD("WhitePointTrim", DlssNrWhitePointTrim),

@@ -44,6 +44,7 @@
 #include "DlssNr_NativeMode.h"
 #include "DlssNr_TierPlacement.h"
 #include "DlssNr_LutStatus.h"
+#include "DlssNr_LutChain.h"
 #include "DlssNrDetailReuseHost.h"
 
 #include <string>
@@ -3355,7 +3356,7 @@ static void RenderLutSection(Config* config)
     const std::string current = config->DlssNrLutFile.value_or_default();
     const std::string preview = current.empty() ? "(none)" : std::filesystem::path(current).filename().string();
 
-    if (ImGui::BeginCombo("LUT", preview.c_str()))
+    if (ImGui::BeginCombo("Input LUT", preview.c_str()))
     {
         const bool noneSelected = current.empty();
         if (ImGui::Selectable("(none)", noneSelected))
@@ -3380,7 +3381,8 @@ static void RenderLutSection(Config* config)
         lutFiles = ScanLutFolder();
 
     HelpMarker("Applies a colour grade (.cube LUT) to the picture NR works from. Put files in OptiScaler\\LUTs and "
-               "press Rescan. Strong grades also affect exposure, skin detection and reuse.");
+               "press Rescan. Strong grades also affect exposure, skin detection and reuse. To grade NR's result "
+               "instead, use Post-NR LUT on the Output page.");
 
     if (!current.empty())
     {
@@ -3423,6 +3425,189 @@ static void RenderLutSection(Config* config)
             ImGui::PopStyleColor();
         }
         StatusSlotEnd(lutSlot, 5);
+        ImGui::TreePop();
+    }
+}
+
+// A stack of up to four .cube LUTs graded onto the picture NR returns (memory/plans/2026-10-31-nr-lut-chain.md). Unlike
+// the Input LUT the model never sees this grade. The settings are dense (an empty slot is an absent layer), so every
+// edit rewrites the list from its non-empty layers and the rows are always the layers in order plus, at most, one empty
+// row waiting for a file.
+static void RenderPostLutSection(Config* config)
+{
+    static std::vector<std::filesystem::path> lutFiles = ScanLutFolder();
+    static bool addRow = false; // an empty row after the last layer, shown until it gets a file or is removed
+
+    constexpr int kMax = Config::kPostLutLayers;
+    struct Layer
+    {
+        std::string file;
+        float strength;
+    };
+    std::vector<Layer> layers;
+    for (int i = 0; i < kMax; ++i)
+        if (!config->DlssNrPostLutFile[i].value_or_default().empty())
+            layers.push_back({ config->DlssNrPostLutFile[i].value_or_default(),
+                               config->DlssNrPostLutStrength[i].value_or_default() });
+
+    const auto store = [&]()
+    {
+        for (int i = 0; i < kMax; ++i)
+        {
+            config->DlssNrPostLutFile[i] = i < (int) layers.size() ? layers[i].file : std::string();
+            config->DlssNrPostLutStrength[i] = i < (int) layers.size() ? layers[i].strength : 1.0f;
+        }
+    };
+
+    if (addRow && (int) layers.size() >= kMax)
+        addRow = false;
+
+    const int rows = std::max(1, (int) layers.size() + (addRow ? 1 : 0));
+    int removeRow = -1;
+    int moveRow = -1;
+    int moveBy = 0;
+
+    for (int row = 0; row < rows; ++row)
+    {
+        const bool filled = row < (int) layers.size();
+        const std::string id = std::to_string(row + 1);
+        const std::string current = filled ? layers[row].file : std::string();
+        const std::string preview = current.empty() ? "(none)" : std::filesystem::path(current).filename().string();
+        const std::string label = (rows > 1 ? "Post LUT " + id : std::string("Post LUT")) + "##postlut" + id;
+
+        if (ImGui::BeginCombo(label.c_str(), preview.c_str()))
+        {
+            if (ImGui::Selectable("(none)", current.empty()) && filled)
+                removeRow = row;
+
+            for (const auto& path : lutFiles)
+            {
+                const std::string pathStr = path.string();
+                if (ImGui::Selectable(path.filename().string().c_str(), pathStr == current))
+                {
+                    if (filled)
+                        layers[row].file = pathStr;
+                    else
+                        layers.push_back({ pathStr, 1.0f });
+                    addRow = false;
+                    store();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        if (row == 0)
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Rescan##postlut"))
+                lutFiles = ScanLutFolder();
+        }
+
+        if (filled && layers.size() > 1)
+        {
+            ImGui::SameLine();
+            if (row > 0 && ImGui::SmallButton(("^##postlutup" + id).c_str()))
+            {
+                moveRow = row;
+                moveBy = -1;
+            }
+            if (row > 0)
+                ImGui::SameLine();
+            if (row + 1 < (int) layers.size() && ImGui::SmallButton(("v##postlutdown" + id).c_str()))
+            {
+                moveRow = row;
+                moveBy = 1;
+            }
+            if (row + 1 < (int) layers.size())
+                ImGui::SameLine();
+            if (ImGui::SmallButton(("x##postlutremove" + id).c_str()))
+                removeRow = row;
+        }
+        else if (!filled && addRow)
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton(("x##postlutremove" + id).c_str()))
+                addRow = false;
+        }
+
+        if (filled)
+        {
+            float strength = layers[row].strength;
+            const std::string sliderLabel =
+                (rows > 1 ? "LUT strength " + id : std::string("LUT strength")) + "##postlutstrength" + id;
+            if (ImGui::SliderFloat(sliderLabel.c_str(), &strength, 0.0f, 1.0f, "%.2f"))
+            {
+                layers[row].strength = strength;
+                store();
+            }
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton(("Reset##postlutstrengthreset" + id).c_str()))
+            {
+                layers[row].strength = 1.0f;
+                store();
+            }
+        }
+
+        if (row == 0)
+            HelpMarker("Applies a colour grade (.cube LUT) to the picture NR returns, so the model never sees it and "
+                       "exposure, skin detection and reuse are not affected. Put files in OptiScaler\\LUTs and press "
+                       "Rescan. With NR before Super Resolution the grade is applied before the upscaler. Not applied "
+                       "in Finished Picture mode.\n"
+                       "Several LUTs are applied top to bottom (^ v move a layer, x removes it); each strength blends "
+                       "that layer only. Strong grades stack up.");
+    }
+
+    if (removeRow >= 0 && removeRow < (int) layers.size())
+    {
+        layers.erase(layers.begin() + removeRow);
+        store();
+    }
+    else if (moveRow >= 0 && moveRow + moveBy >= 0 && moveRow + moveBy < (int) layers.size())
+    {
+        std::swap(layers[moveRow], layers[moveRow + moveBy]);
+        store();
+    }
+
+    if (layers.size() > 1)
+        ImGui::TextDisabled("Applied top to bottom, after NR.");
+
+    if (!layers.empty() && (int) layers.size() < kMax && !addRow)
+    {
+        if (ImGui::SmallButton("Add LUT##postlut"))
+            addRow = true;
+        ImGui::SameLine();
+        HelpMarker("Adds another LUT after the last one. Up to four.");
+    }
+
+    const auto status = DlssNr::ReadPostLutStatus();
+    if (ImGui::TreeNode("Status##postlut"))
+    {
+        const float slot = StatusSlotBegin();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        if (layers.empty())
+            ImGui::TextWrapped("No LUT loaded.");
+        else if (config->DlssNrFinishedPicture.value_or_default())
+            ImGui::TextWrapped("Not applied: Finished Picture mode does not run it.");
+        else if (!status.seen || !status.wanted)
+            ImGui::TextWrapped("Waiting for a frame.");
+        else if (status.loaded)
+            ImGui::TextWrapped("Loaded: %s", status.chain.c_str());
+        else
+            ImGui::TextWrapped("Not applied.");
+        ImGui::PopStyleColor();
+
+        if (!status.failedPath.empty() || !status.error.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+            if (!status.failedPath.empty())
+                ImGui::TextWrapped("%s: %s", std::filesystem::path(status.failedPath).filename().string().c_str(),
+                                   status.error.c_str());
+            else
+                ImGui::TextWrapped("%s", status.error.c_str());
+            ImGui::PopStyleColor();
+        }
+        StatusSlotEnd(slot, 5);
         ImGui::TreePop();
     }
 }
@@ -3914,7 +4099,7 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     if (NrCard card("Compress screen edges (experimental)##card", menuResScale, spatialOn); card.IsOpen())
         RenderEdgeCompression(config, menuResScale, nr);
 
-    if (NrCard card("LUT##card", menuResScale, lutOn); card.IsOpen())
+    if (NrCard card("Input LUT##card", menuResScale, lutOn); card.IsOpen())
         RenderLutSection(config);
 
     ImGui::PopItemWidth();
@@ -4156,6 +4341,10 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
 
         HelpMarker("Higher: stronger NR colour (above 1 more saturated). 0: keeps the game's colours. Default: 1.");
     }
+
+    const bool postLutOn = !config->DlssNrPostLutFile[0].value_or_default().empty();
+    if (NrCard card("Post-NR LUT##card", menuResScale, postLutOn); card.IsOpen())
+        RenderPostLutSection(config);
 
     ImGui::PopItemWidth();
 }

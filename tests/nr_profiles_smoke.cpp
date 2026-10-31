@@ -102,6 +102,22 @@ static void Keys()
     Check(Same({ { "LutFile", "warm.cube" } }, { { "LutFile", "C:\\Games\\X\\OptiScaler\\LUTs\\warm.cube" } }) &&
               !Same({ { "LutFile", "warm.cube" } }, { { "LutFile", "C:\\LUTs\\cold.cube" } }),
           "the LUT counts by file name");
+
+    // The post-NR LUT stack (memory/plans/2026-10-31-nr-lut-chain.md): its files and strengths are kept, by file name.
+    for (int i = 1; i <= 4; ++i)
+    {
+        const std::string file = "PostLutFile" + std::to_string(i);
+        const std::string strength = "PostLutStrength" + std::to_string(i);
+        Check(IsLutFileKey(file) && IsLutFileKey("postlutfile" + std::to_string(i)), "post LUT file key: " + file);
+        Check(!IsLeftOut(file) && !IsLeftOut(strength), "post LUT keys are not left out: " + file);
+        const Section kept = Filter({ { file, "a.cube" }, { strength, "0.5" }, { "Bogus", "1" } });
+        Check(kept.size() == 2 && kept.count(file) && kept.count(strength), "filter keeps " + file + " and its strength");
+    }
+    Check(!IsLutFileKey("PostLutStrength1") && !IsLutFileKey("LutStrength") && !IsLutFileKey("PostLutFile5"),
+          "only file keys are LUT file keys");
+    Check(Same({ { "PostLutFile2", "warm.cube" } }, { { "PostLutFile2", "C:\\Games\\X\\OptiScaler\\LUTs\\warm.cube" } }) &&
+              !Same({ { "PostLutFile2", "warm.cube" } }, { { "PostLutFile2", "cold.cube" } }),
+          "a post LUT layer counts by file name");
 }
 
 // Every key SaveIni writes into [DlssNr] is kept or left out. The Pass{}... keys written in a loop are covered by the

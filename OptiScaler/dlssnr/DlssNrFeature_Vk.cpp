@@ -13,6 +13,7 @@
 #include <shaders/dlssnr/DlssNr_Vk.h>
 #include <shaders/dlssnr/DlssNr_LutVk.h>
 #include <dlssnr/DlssNr_Lut.h>
+#include <dlssnr/DlssNr_LutChain.h>
 #include <dlssnr/DlssNr_LutStatus.h>
 #include <shaders/dlssnr/DlssNr_Guides.h>
 #include <shaders/dlssnr/DlssNr_GameScale.h>
@@ -164,6 +165,12 @@ struct VkState
     std::unique_ptr<DlssNr_LutVk> lutPass;
     OwnedImage lutScratch;
     bool lutScratchFailed = false;
+
+    // The post-NR LUT stack (memory/plans/2026-10-31-nr-lut-chain.md): its layers baked into one lattice, and a pass of
+    // its own (its own 3D image) so the Inputs LUT's and this one's lattices never replace each other. Graded in place
+    // on the picture NR just wrote. Nothing exists until the stack holds a file.
+    DlssNr_LutChainState postLut;
+    std::unique_ptr<DlssNr_LutVk> postLutPass;
 
     // Experimental input styles (DlssNr_InputStyles.h): the model's picture restyled, standing in for the model input and
     // the resolve's proxy; styledB is the second image they alternate with when more than one is on. Made on first use at
@@ -755,6 +762,92 @@ unsigned long long VkFrameClock()
 {
     const unsigned long long presents = State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
     return presents != 0 ? presents : g_vk.frames;
+}
+
+// The post-NR LUT stack on `view`, the picture NR just wrote (the game's image after SR, our own pre-SR image before
+// it). In place: the pass reads and writes one pixel per thread and nothing around it, and the image is already in
+// GENERAL for the resolve that wrote it. Only called after a resolve that ran, so a failed evaluation leaves the game's
+// image alone.
+static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysicalDevice physicalDevice,
+                           const Config& cfg, VkImageView view, uint32_t width, uint32_t height,
+                           uint32_t shaderConversion, bool linearHdr, const DlssNrConstants& encode,
+                           VkImageView liveExposureView)
+{
+    const auto entries = DlssNr::PostLutEntries(cfg);
+    const bool wanted =
+        std::any_of(entries.begin(), entries.end(), [](const DlssNr::ChainEntry& e) { return !e.path.empty(); });
+    DlssNr::PostLutStatus status;
+    status.wanted = wanted;
+
+    if (!wanted)
+    {
+        if (g_vk.postLutPass && g_vk.postLutPass->HoldsImage())
+        {
+            // Earlier frames may still read the image; one drain, then every frame without a stack costs nothing.
+            vkDeviceWaitIdle(device);
+            g_vk.postLutPass->ReleaseLutImage();
+        }
+
+        DlssNr_LutChainEnsure(&g_vk.postLut, {});
+        DlssNr::ReportPostLutStatus(status);
+        return;
+    }
+
+    bool graded = false;
+    const bool usable = DlssNr_LutChainEnsure(&g_vk.postLut, entries);
+
+    if (usable)
+    {
+        if (!g_vk.postLutPass)
+            g_vk.postLutPass = std::make_unique<DlssNr_LutVk>(device, physicalDevice);
+
+        const DlssNr::Lut3D& lut = g_vk.postLut.baked;
+
+        if (g_vk.postLutPass->Ready() && g_vk.postLutPass->NeedsDrainFor(lut.size, g_vk.postLut.key))
+            vkDeviceWaitIdle(device);
+
+        if (g_vk.postLutPass->Ready() &&
+            g_vk.postLutPass->EnsureLutImage(cmdBuffer, lut.rgb.data(), lut.size, g_vk.postLut.key))
+        {
+            DlssNrLutConstants constants {};
+            constants.Width = width;
+            constants.Height = height;
+            constants.Strength = 1.0f; // each layer's strength is in the bake
+            constants.DomainMinR = lut.domainMin[0];
+            constants.DomainMinG = lut.domainMin[1];
+            constants.DomainMinB = lut.domainMin[2];
+            constants.DomainMaxR = lut.domainMax[0];
+            constants.DomainMaxG = lut.domainMax[1];
+            constants.DomainMaxB = lut.domainMax[2];
+            constants.LutSize = (uint32_t) lut.size;
+            constants.InputEncoding = shaderConversion;
+            constants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
+            CopyLiveWhitePoint(constants, encode);
+            if (liveExposureView == VK_NULL_HANDLE)
+                constants.UseGameExposure = constants.UseExposureWhitePoint = 0u;
+
+            // The resolve's writes must be visible to this pass's reads.
+            VkMemoryBarrier barrier {};
+            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+            graded = g_vk.postLutPass->Dispatch(cmdBuffer, view, VK_IMAGE_LAYOUT_GENERAL, view, constants,
+                                                liveExposureView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+
+    const DlssNr_LutChainState& chain = g_vk.postLut;
+    status.loaded = graded && chain.Loaded();
+    status.chain = DlssNr_DescribeChain(chain);
+    if (chain.failedLayer >= 0)
+    {
+        status.failedPath = chain.failedPath;
+        status.error = chain.error;
+    }
+    DlssNr::ReportPostLutStatus(status);
 }
 
 static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
@@ -2718,6 +2811,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         return;
     }
 
+    ApplyPostLutVk(cmdBuffer, device, physicalDevice, cfg,
+                   beforeSr ? g_vk.preColor.view : colour->Resource.ImageViewInfo.ImageView, width, height,
+                   shaderConversion, linearHdr, encode, liveExposureView);
+
     if (beforeSr)
         Transition(cmdBuffer, g_vk.preColor, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -2839,6 +2936,7 @@ void ReleaseNrObjects()
 
     g_vk.pass.reset();
     g_vk.lutPass.reset(); // frees the 3D image, its staging buffer and the pass's own rings
+    g_vk.postLutPass.reset();
     g_vk.superUp.reset();
     g_vk.superDown.reset();
     g_vk.sgsr1UpAnswer.reset();
@@ -2864,6 +2962,7 @@ void ShutdownVk(bool deviceAlive)
         // handle from the dead device would be reused on the NEW device and crash.
         g_vk.pass.release();
         g_vk.lutPass.release(); // same reason: its destructor would vkDestroy on the dead device
+        g_vk.postLutPass.release();
         g_vk.superUp.release();
         g_vk.superDown.release();
         g_vk.sgsr1UpAnswer.release();

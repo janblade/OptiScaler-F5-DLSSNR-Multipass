@@ -3468,6 +3468,12 @@ static void RenderPostLutSection(Config* config)
     int moveRow = -1;
     int moveBy = 0;
 
+    // Every row's buttons start in one column, past the widest label any row can have, and a button that does not apply
+    // to a row (^ on the first, v on the last) is shown disabled rather than left out, so nothing shifts between rows.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float buttonsX = ImGui::GetCursorPosX() + ImGui::CalcItemWidth() + style.ItemInnerSpacing.x +
+                           ImGui::CalcTextSize("LUT strength 4").x + style.ItemSpacing.x;
+
     for (int row = 0; row < rows; ++row)
     {
         const bool filled = row < (int) layers.size();
@@ -3498,36 +3504,33 @@ static void RenderPostLutSection(Config* config)
             ImGui::EndCombo();
         }
 
-        if (row == 0)
-        {
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Rescan##postlut"))
-                lutFiles = ScanLutFolder();
-        }
-
         if (filled)
         {
-            ImGui::SameLine();
-            if (row > 0 && ImGui::SmallButton(("^##postlutup" + id).c_str()))
+            ImGui::SameLine(buttonsX);
+            ImGui::BeginDisabled(row == 0);
+            if (ImGui::SmallButton(("^##postlutup" + id).c_str()))
             {
                 moveRow = row;
                 moveBy = -1;
             }
-            if (row > 0)
-                ImGui::SameLine();
-            if (row + 1 < (int) layers.size() && ImGui::SmallButton(("v##postlutdown" + id).c_str()))
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(row + 1 >= (int) layers.size());
+            if (ImGui::SmallButton(("v##postlutdown" + id).c_str()))
             {
                 moveRow = row;
                 moveBy = 1;
             }
-            if (row + 1 < (int) layers.size())
-                ImGui::SameLine();
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
             if (ImGui::SmallButton(("x##postlutremove" + id).c_str()))
                 removeRow = row;
         }
-        else if (!filled && addRow)
+        else if (addRow)
         {
-            ImGui::SameLine();
+            ImGui::SameLine(buttonsX);
             if (ImGui::SmallButton(("x##postlutremove" + id).c_str()))
                 addRow = false;
         }
@@ -3543,7 +3546,7 @@ static void RenderPostLutSection(Config* config)
                 store();
             }
 
-            ImGui::SameLine();
+            ImGui::SameLine(buttonsX);
             if (ImGui::SmallButton(("Reset##postlutstrengthreset" + id).c_str()))
             {
                 layers[row].strength = 1.0f;
@@ -3551,14 +3554,9 @@ static void RenderPostLutSection(Config* config)
             }
         }
 
-        if (row == 0)
-            HelpMarker("Applies a colour grade (.cube LUT) to the picture NR returns, so the model never sees it and "
-                       "exposure, skin detection and reuse are not affected. Put files in OptiScaler\\LUTs and press "
-                       "Rescan. With NR before Super Resolution the grade is applied before the upscaler. In "
-                       "Finished Picture mode it grades the finished picture, UI included (D3D12; Vulkan does not run "
-                       "that mode).\n"
-                       "Several LUTs are applied top to bottom (^ v move a layer, x removes it); each strength blends "
-                       "that layer only. Strong grades stack up.");
+        // A little air between layers, so each combo + slider pair reads as one.
+        if (row + 1 < rows)
+            ImGui::Spacing();
     }
 
     if (removeRow >= 0 && removeRow < (int) layers.size())
@@ -3575,13 +3573,22 @@ static void RenderPostLutSection(Config* config)
     if (layers.size() > 1)
         ImGui::TextDisabled("Applied top to bottom, after NR.");
 
+    // One toolbar under the list: Add LUT (when there is a layer and room for another), Rescan, and the help.
     if (!layers.empty() && (int) layers.size() < kMax && !addRow)
     {
         if (ImGui::SmallButton("Add LUT##postlut"))
             addRow = true;
         ImGui::SameLine();
-        HelpMarker("Adds another LUT after the last one. Up to four.");
     }
+    if (ImGui::SmallButton("Rescan##postlut"))
+        lutFiles = ScanLutFolder();
+    ImGui::SameLine();
+    HelpMarker("Applies a colour grade (.cube LUT) to the picture NR returns, so the model never sees it and "
+               "exposure, skin detection and reuse are not affected. Put files in OptiScaler\\LUTs and press Rescan. "
+               "With NR before Super Resolution the grade is applied before the upscaler. In Finished Picture mode it "
+               "grades the finished picture, UI included (D3D12; Vulkan does not run that mode).\n"
+               "Add LUT adds another after the last one, up to four. They are applied top to bottom (^ v move a "
+               "layer, x removes it); each strength blends that layer only. Strong grades stack up.");
 
     const auto status = DlssNr::ReadPostLutStatus();
     if (ImGui::TreeNode("Status##postlut"))

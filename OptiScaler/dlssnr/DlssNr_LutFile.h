@@ -15,6 +15,7 @@
 #include <charconv>
 #include <cmath>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -32,6 +33,8 @@ constexpr int kMaxShaperSize = 65536;
 // are given anywhere (DlssNr_LutChain.h kChainMaxSize).
 constexpr int kShaperBakeSize = 65;
 
+struct Shaper1D;
+
 struct Lut3D
 {
     int size = 0; // the grid is size x size x size
@@ -47,6 +50,15 @@ struct Lut3D
     // line. `rgb` is then the bake (kShaperBakeSize, domain 0..1), not the file's table.
     int shaperSize = 0;
     int fileSize = 0;
+
+    // The file's shaper and its own 3D table (null without a shaper), kept so a layer handed a converted signal (scene
+    // light above 1, DlssNr_LutSpaces.h) reads the file itself instead of the 0..1 bake.
+    std::shared_ptr<const Shaper1D> shaper;
+    std::shared_ptr<const Lut3D> fileTable;
+
+    // The header's "# Input Gamma:", "# Input Color Space:" and Output lines (as view-transform packs write them), for
+    // the look input's Auto. Empty when absent.
+    std::string inGamma, inGamut, outGamma, outGamut;
 };
 
 // Trilinear sample of `lut` at the display value `in`, with the shader's domain clamp (dlssnr_lut.hlsl). Lattice point
@@ -102,6 +114,25 @@ struct Shaper1D
     }
 };
 
+// The file itself at `in`: through its shaper and own table when it has one (any input, not only 0..1), else the
+// lattice. What a layer with a converted input reads (DlssNr_LutChain.h).
+inline void SampleLutFile(const Lut3D& lut, const float in[3], float out[3])
+{
+    if (lut.shaper == nullptr)
+    {
+        SampleLut(lut, in, out);
+        return;
+    }
+
+    float shaped[3];
+    for (int c = 0; c < 3; ++c)
+        shaped[c] = lut.shaper->Apply(in[c], c);
+    if (lut.fileTable != nullptr && lut.fileTable->size >= 2)
+        SampleLut(*lut.fileTable, shaped, out);
+    else
+        std::copy(shaped, shaped + 3, out);
+}
+
 // Bakes shaper -> table into a plain lattice over display 0..1 (the LUT passes' input domain).
 inline Lut3D BakeShaper(const Shaper1D& shaper, const Lut3D& table)
 {
@@ -147,6 +178,41 @@ inline bool TryParseFloat(const std::string& token, float* out)
     const auto result = std::from_chars(token.data(), token.data() + token.size(), *out);
     return result.ec == std::errc {} && result.ptr == token.data() + token.size();
 }
+
+inline std::string Trimmed(const std::string& s)
+{
+    const size_t a = s.find_first_not_of(" \t\r");
+    const size_t z = s.find_last_not_of(" \t\r");
+    return a == std::string::npos ? std::string() : s.substr(a, z - a + 1);
+}
+
+// "#  Input Gamma: Arri LogC4" -> hints->inGamma = "Arri LogC4"; the colour/color spelling and case do not matter.
+inline void ReadHeaderHint(const std::string& line, Lut3D* hints)
+{
+    const size_t hash = line.find('#');
+    const size_t colon = line.find(':', hash);
+    if (hash == std::string::npos || colon == std::string::npos)
+        return;
+
+    const std::string key = UpperCopy(Trimmed(line.substr(hash + 1, colon - hash - 1)));
+    const std::string value = Trimmed(line.substr(colon + 1));
+    if (key == "INPUT GAMMA")
+        hints->inGamma = value;
+    else if (key == "INPUT COLOR SPACE" || key == "INPUT COLOUR SPACE")
+        hints->inGamut = value;
+    else if (key == "OUTPUT GAMMA")
+        hints->outGamma = value;
+    else if (key == "OUTPUT COLOR SPACE" || key == "OUTPUT COLOUR SPACE")
+        hints->outGamut = value;
+}
+
+inline void CopyHeaderHints(const Lut3D& from, Lut3D* to)
+{
+    to->inGamma = from.inGamma;
+    to->inGamut = from.inGamut;
+    to->outGamma = from.outGamma;
+    to->outGamut = from.outGamut;
+}
 } // namespace
 
 // "33^3", or for a file with a shaper "1D 4096 + 33^3" (what the file holds, not the bake).
@@ -175,6 +241,7 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
     float domainMin[3] = { 0.0f, 0.0f, 0.0f };
     float domainMax[3] = { 1.0f, 1.0f, 1.0f };
     std::vector<float> rgb;
+    Lut3D hints; // only its header strings
 
     std::string line;
     unsigned int lineNumber = 0;
@@ -189,7 +256,10 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
             continue; // blank line
 
         if (first[0] == '#')
+        {
+            ReadHeaderHint(line, &hints);
             continue;
+        }
 
         const std::string keyword = UpperCopy(first);
 
@@ -354,6 +424,10 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
             table.rgb = std::move(rgb);
         }
         *out = BakeShaper(shaper, table);
+        if (sawSize)
+            out->fileTable = std::make_shared<const Lut3D>(std::move(table));
+        out->shaper = std::make_shared<const Shaper1D>(std::move(shaper));
+        CopyHeaderHints(hints, out);
         return true;
     }
 
@@ -365,6 +439,7 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
     out->domainMax[1] = domainMax[1];
     out->domainMax[2] = domainMax[2];
     out->rgb = std::move(rgb);
+    CopyHeaderHints(hints, out);
     return true;
 }
 } // namespace DlssNr

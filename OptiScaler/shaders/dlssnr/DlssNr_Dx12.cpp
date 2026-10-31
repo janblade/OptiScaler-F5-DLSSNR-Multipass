@@ -3006,7 +3006,7 @@ bool DlssNr_Dx12::DispatchPostLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Re
                                   uint32_t InputEncoding, bool ColourIsLinearHdr, const DlssNrConstants& White,
                                   ID3D12Resource* ExposureTex, const std::vector<DlssNr::ChainEntry>& Entries)
 {
-    if (!DlssNr_LutChainEnsure(&_postLut, Entries))
+    if (!DlssNr_LutChainEnsure(&_postLut, Entries, DlssNr::FrameDecodeFor(InputEncoding, ColourIsLinearHdr)))
         return false;
 
     if (InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr || Width == 0 ||

@@ -794,7 +794,8 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     }
 
     bool graded = false;
-    const bool usable = DlssNr_LutChainEnsure(&g_vk.postLut, entries);
+    const bool usable =
+        DlssNr_LutChainEnsure(&g_vk.postLut, entries, DlssNr::FrameDecodeFor(shaderConversion, linearHdr));
 
     // The game's image after SR can be any format, so the pass writes it through a storage image declared without one,
     // which the device must allow (the resolve that just wrote it needs the same). Our own pre-SR image is RGBA16F.

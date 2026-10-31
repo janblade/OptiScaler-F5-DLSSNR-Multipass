@@ -17,11 +17,11 @@ inline constexpr size_t kMaxEntries = 200;
 
 struct Entry
 {
-    uint64_t id = 0;       // grows with every new entry, so the page can tell what it has seen
-    uint8_t type = 0;      // ImGuiToastType, kept as a number
+    uint64_t id = 0;  // grows with every new entry, so the page can tell what it has seen
+    uint8_t type = 0; // ImGuiToastType, kept as a number
     std::string title;
     std::string content;
-    uint32_t count = 1;    // a toast repeated back to back is one entry shown "x N"
+    uint32_t count = 1;                          // a toast repeated back to back is one entry shown "x N"
     std::chrono::system_clock::time_point first; // when it first appeared
     std::chrono::system_clock::time_point last;  // when it last appeared
 };

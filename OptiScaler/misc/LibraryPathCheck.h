@@ -56,7 +56,8 @@ inline Verdict Check(const std::string& what, const std::wstring& fileName, cons
 
     const std::string shown = Utf8(configured);
     const std::string loaded = loadedPath.empty() ? std::string() : Utf8(loadedPath);
-    const std::string instead = loaded.empty() ? what + " could not be loaded at all." : "Using " + loaded + " instead.";
+    const std::string instead =
+        loaded.empty() ? what + " could not be loaded at all." : "Using " + loaded + " instead.";
 
     if (!std::filesystem::exists(wanted, error))
     {

@@ -178,6 +178,24 @@ int main(int argc, char** argv)
         CHECK(worstDom < 0.02f);
         CHECK(BakeChain({ { &dom, 0.6f }, { &tiny, 1.0f } }, &out, &err, &ps));
         CHECK(SequentialError({ { &dom, 0.6f }, { &tiny, 1.0f } }, out, &mean) < 0.02f);
+
+        // A non-linear layer over -0.25..1.25 in a stack: the domain map is what makes this close (sampling it as if
+        // its domain were 0..1 puts every point a quarter of the way off).
+        const Lut3D domCurve = Make(
+            33, [](const float* i, float* o) { for (int c = 0; c < 3; ++c) o[c] = std::pow(std::clamp(i[c], 0.0f, 1.25f) / 1.25f, 2.0f); },
+            -0.25f, 1.25f);
+        const Lut3D gamma = Curvy(33, 0.8f, 0.2f);
+        CHECK(BakeChain({ { &domCurve, 1.0f }, { &gamma, 1.0f } }, &out, &err, &ps));
+        const float worstCurve = SequentialError({ { &domCurve, 1.0f }, { &gamma, 1.0f } }, out, &mean);
+        printf("non-linear domain layer + gamma @33: worst %.5f mean %.6f\n", worstCurve, mean);
+        CHECK(worstCurve < 0.02f && worstCurve > 0.0f);
+        Lut3D asIf01 = domCurve;
+        for (int c = 0; c < 3; ++c)
+        {
+            asIf01.domainMin[c] = 0.0f;
+            asIf01.domainMax[c] = 1.0f;
+        }
+        CHECK(SequentialError({ { &asIf01, 1.0f }, { &gamma, 1.0f } }, out, &mean) > 0.05f);
         const Lut3D big = Identity(128);
         CHECK(BakeChain({ { &big, 1.0f }, { &tiny, 1.0f } }, &out, &err, &ps));
         CHECK(out.size == kChainMaxSize);
@@ -214,6 +232,12 @@ int main(int argc, char** argv)
         CHECK(DlssNr_LutChainEnsure(&st, { { pa, 0.4f } }));
         CHECK(st.key == key1 && st.strength == 0.4f);
         CHECK(st.description.find("baked") == std::string::npos && st.description.find("_a.cube (17^3)") != std::string::npos);
+
+        // The one active layer moving to another entry is another LUT: baked again.
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 0.5f }, { pb, 0.0f } }));
+        const std::vector<float> onlyA = st.baked.rgb;
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 0.0f }, { pb, 0.5f } }));
+        CHECK(st.baked.rgb != onlyA && st.strength == 0.5f && st.description.find("_b.cube") != std::string::npos);
 
         // Every layer at 0: nothing applied, and said why.
         CHECK(!DlssNr_LutChainEnsure(&st, { { pa, 0.0f } }));

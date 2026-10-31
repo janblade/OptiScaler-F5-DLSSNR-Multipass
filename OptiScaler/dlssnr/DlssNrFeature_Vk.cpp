@@ -875,6 +875,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         return;
     }
 
+    if (!cfg.DlssNrEnabled.value_or_default())
+        return;
+
     if (cfg.DlssNrFinishedPicture.value_or_default())
     {
         // Finished-picture composition requires a native D3D12 swapchain; say so where the post-NR stack is shown.
@@ -886,9 +889,6 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         DlssNr::ReportPostLutStatus(status);
         return;
     }
-
-    if (!cfg.DlssNrEnabled.value_or_default())
-        return;
 
     if (cmdBuffer == VK_NULL_HANDLE || params == nullptr || device == VK_NULL_HANDLE ||
         physicalDevice == VK_NULL_HANDLE)

@@ -3555,7 +3555,8 @@ static void RenderPostLutSection(Config* config)
             HelpMarker("Applies a colour grade (.cube LUT) to the picture NR returns, so the model never sees it and "
                        "exposure, skin detection and reuse are not affected. Put files in OptiScaler\\LUTs and press "
                        "Rescan. With NR before Super Resolution the grade is applied before the upscaler. In "
-                       "Finished Picture mode it grades the finished picture (D3D12; Vulkan does not run that mode).\n"
+                       "Finished Picture mode it grades the finished picture, UI included (D3D12; Vulkan does not run "
+                       "that mode).\n"
                        "Several LUTs are applied top to bottom (^ v move a layer, x removes it); each strength blends "
                        "that layer only. Strong grades stack up.");
     }

@@ -178,8 +178,9 @@ struct DlssNr_LutChainState
     std::filesystem::file_time_type writeTimes[DlssNr::kMaxLutChainLayers] {}; // of each layer's file when last looked
     int ensuresUntilTimeCheck = 0; // the files' write times are looked at once every kTimeCheckEvery Ensure calls
 
-    // What `baked` was made from: ordered "path|write time|strength", the strength left out for a single layer, whose
-    // strength the pass applies (so moving its slider re-uploads nothing).
+    // What `baked` was made from: ordered "path|write time|on|strength", the strength left out for a single layer,
+    // whose strength the pass applies (so moving its slider re-uploads nothing). "on" (strength above 0) stays in, so
+    // the one active layer moving to another entry is a new bake.
     std::string key;
     DlssNr::Lut3D baked;
     float strength = 1.0f;   // the strength the pass applies `baked` with
@@ -271,7 +272,8 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
     std::string key;
     for (size_t i = 0; i < present.size(); ++i)
     {
-        key += present[i].path + "|" + std::to_string(state->writeTimes[i].time_since_epoch().count());
+        key += present[i].path + "|" + std::to_string(state->writeTimes[i].time_since_epoch().count()) +
+               (present[i].strength > 0.0f ? "|on" : "|off");
         if (effective != 1)
             key += "|" + std::to_string(std::clamp(present[i].strength, 0.0f, 1.0f));
         key += "\n";

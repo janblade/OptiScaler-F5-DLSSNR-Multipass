@@ -1298,6 +1298,16 @@ void Config::ReadDlssNr()
                                           DlssNrLutStrength.value() < 0.0f || DlssNrLutStrength.value() > 1.0f))
         DlssNrLutStrength =
             std::isfinite(DlssNrLutStrength.value()) ? std::clamp(DlssNrLutStrength.value(), 0.0f, 1.0f) : 1.0f;
+    for (int i = 0; i < kPostLutLayers; ++i)
+    {
+        const std::string n = std::to_string(i + 1);
+        DlssNrPostLutFile[i].set_from_config(readString("DlssNr", ("PostLutFile" + n).c_str()));
+        DlssNrPostLutStrength[i].set_from_config(readFloat("DlssNr", ("PostLutStrength" + n).c_str()));
+        if (DlssNrPostLutStrength[i].has_value())
+            DlssNrPostLutStrength[i] = std::isfinite(DlssNrPostLutStrength[i].value())
+                                           ? std::clamp(DlssNrPostLutStrength[i].value(), 0.0f, 1.0f)
+                                           : 1.0f;
+    }
     DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
     DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
 }
@@ -1544,6 +1554,13 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
                  GetFloatValue(c.DlssNrDisplayPaperWhiteNits.value_for_config()).c_str());
     out.SetValue("DlssNr", "LutFile", c.DlssNrLutFile.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "LutStrength", GetFloatValue(c.DlssNrLutStrength.value_for_config()).c_str());
+    for (int i = 0; i < Config::kPostLutLayers; ++i)
+    {
+        const std::string n = std::to_string(i + 1);
+        out.SetValue("DlssNr", ("PostLutFile" + n).c_str(), c.DlssNrPostLutFile[i].value_for_config_or("").c_str());
+        out.SetValue("DlssNr", ("PostLutStrength" + n).c_str(),
+                     GetFloatValue(c.DlssNrPostLutStrength[i].value_for_config()).c_str());
+    }
     out.SetValue("DlssNr", "ApplyModel", GetBoolValue(c.DlssNrApplyModel.value_for_config()).c_str());
     out.SetValue("DlssNr", "HoldFrame", GetBoolValue(c.DlssNrHoldFrame.value_for_config()).c_str());
 }

@@ -4,11 +4,15 @@
 #include <Config.h>
 #include <Util.h>
 
+#include "LibraryPathCheck.h"
+#include <imgui/ImGuiNotify.hpp>
+
 #include <proxies/KernelBase_Proxy.h>
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/XeLL_Proxy.h>
 
+#include <atomic>
 #include <fstream>
 
 #include <bcrypt.h>
@@ -289,6 +293,27 @@ std::string XeModuleInfo::XeFGLine()
 
     std::scoped_lock lock(lineMutex);
     return xefgLine;
+}
+
+void XeModuleInfo::CheckXeFGPath()
+{
+    static std::atomic<bool> checked = false;
+
+    if (checked.exchange(true))
+        return;
+
+    const auto verdict = LibraryPathCheck::Check(
+        "XeFG", L"libxess_fg.dll", Config::Instance()->XeFGLibrary.value_or(L""), XeFGProxy::Module_Path());
+
+    if (verdict.result != LibraryPathCheck::Result::NotFound && verdict.result != LibraryPathCheck::Result::NotUsed)
+        return;
+
+    LOG_WARN("{}", verdict.message);
+
+    ImGuiToast toast { ImGuiToastType::Warning, 30000 };
+    toast.setTitle("XeFGPath is not used");
+    toast.setContent("%s", verdict.message.c_str());
+    ImGui::InsertNotification(toast);
 }
 
 std::string XeModuleInfo::XeLLLine()

@@ -2,6 +2,7 @@
 #include "menu_common.h"
 #include "PresentRateMeter.h"
 #include "MenuPages.h"
+#include "NotificationsPage.h"
 #include "PluginsPage.h"
 #include <framegen/dlssg/DlssgTelemetry.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
@@ -8313,6 +8314,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
         navItem(Page::Input);
         navItem(Page::Misc);
         navItem(Page::Plugins);
+        navItem(Page::Notifications);
 
         if (modern)
             ImGui::PopStyleColor(3);
@@ -8374,6 +8376,9 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             break;
         case Page::Plugins:
             PluginsPage::Render(ctx.config);
+            break;
+        case Page::Notifications:
+            NotificationsPage::Render();
             break;
         case Page::NrF5Low:
         case Page::NrStatus:

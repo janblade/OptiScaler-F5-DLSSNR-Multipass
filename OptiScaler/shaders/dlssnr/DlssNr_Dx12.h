@@ -324,7 +324,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                          bool ColourIsLinearHdr, const DlssNrConstants& White, ID3D12Resource* ExposureTex,
                          const DlssNr::Lut3D& Lut, ID3D12Resource* Texture);
     // The post-NR stack on NR's returned picture: parses and bakes `Entries` (re-baking only on a change), uploads the
-    // baked lattice and dispatches it. Strength is already in the bake. False when no chain is usable (see PostLut()).
+    // baked lattice and dispatches it with the chain's strength (a single layer's own; a stack's strengths are in the
+    // bake). False when no chain is usable (see PostLut()).
     bool DispatchPostLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
                          unsigned int Width, unsigned int Height, uint32_t InputEncoding, bool ColourIsLinearHdr,
                          const DlssNrConstants& White, ID3D12Resource* ExposureTex,

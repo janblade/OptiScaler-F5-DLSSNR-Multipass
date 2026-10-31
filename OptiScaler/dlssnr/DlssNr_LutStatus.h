@@ -38,8 +38,9 @@ struct PostLutStatus
     std::string chain;   // DlssNr_DescribeChain
     std::string failedPath;
     std::string error;
-    std::string note;        // why it is not applied when it is wanted (a mode that does not run it)
-    LayerInput inputs[4] {}; // each layer's look input at the last bake (DlssNr_LutChain.h kMaxLutChainLayers)
+    std::string note;                    // why it is not applied when it is wanted (a mode that does not run it)
+    LayerInput inputs[4] {};             // each layer's look input (DlssNr_LutChain.h kMaxLutChainLayers)
+    LutSpace endsIn = LutSpace::Display; // the stack's output: not the picture = it ends in a log signal
 };
 
 // Render thread. A frame where the stack is empty reports that too, so the card never shows a stale chain.

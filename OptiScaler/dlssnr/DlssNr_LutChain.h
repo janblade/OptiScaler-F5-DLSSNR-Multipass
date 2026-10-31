@@ -41,13 +41,14 @@ inline void ApplyLayer(const Lut3D& lut, float strength, const float in[3], floa
         out[c] = in[c] + (graded[c] - in[c]) * s;
 }
 
-// One layer with its input converted from the picture into `space` first: the file is read through its own shaper and
-// table (SampleLutFile, any input), and its strength fades from the picture to the graded result.
-inline void ApplyConvertedLayer(const Lut3D& lut, float strength, FrameDecode decode, LutSpace space, const float in[3],
-                                float out[3])
+// One layer with its input converted from the picture into `space` (in `gamut`'s primaries) first: the file is read
+// through its own shaper and table (SampleLutFile, any input), and its strength fades from the picture to the graded
+// result.
+inline void ApplyConvertedLayer(const Lut3D& lut, float strength, FrameDecode decode, LutSpace space, LutSpace gamut,
+                                const float in[3], float out[3])
 {
     float converted[3], graded[3];
-    ConvertDisplayToSpace(decode, space, in, converted);
+    ConvertDisplayToSpace(decode, space, gamut, in, converted);
     SampleLutFile(lut, converted, graded);
     const float s = std::clamp(strength, 0.0f, 1.0f);
 
@@ -60,10 +61,12 @@ struct ChainLayer
     const Lut3D* lut = nullptr; // null or empty: skipped
     float strength = 1.0f;      // 0 is skipped too (it leaves the picture untouched)
 
-    // Look input: when set, the layer reads the picture converted into `space` (decoded per `decode`).
+    // Look input: when set, the layer reads the picture converted into `space` in `gamut`'s primaries (decoded per
+    // `decode`).
     bool convert = false;
     LutSpace space = LutSpace::Display;
     FrameDecode decode = FrameDecode::Srgb;
+    LutSpace gamut = LutSpace::Display;
 };
 
 // Composes `layers`, first to last, into *out, and gives in *passStrength the strength the GPU pass applies it with.
@@ -128,17 +131,30 @@ inline bool BakeChain(const std::vector<ChainLayer>& layers, Lut3D* out, std::st
     out->size = n;
     out->rgb.resize((size_t) n * n * n * 3);
 
+    // A Linear HDR frame converted for a log look spans ~20 stops of light, most of them squeezed into the top of
+    // display 0..1: the lattice is laid out over log light there (kLatticeLinearHdr), so highlights keep their
+    // roll-off.
+    const auto convertsLinearHdr = [](const ChainLayer& l) { return l.convert && l.decode == FrameDecode::LinearHdr; };
+    out->latticeCoord = std::any_of(active.begin(), active.end(), convertsLinearHdr) ? kLatticeLinearHdr : kLatticeEven;
+    std::vector<float> axis((size_t) n);
+    for (int i = 0; i < n; ++i)
+    {
+        const float u = (float) i / (float) (n - 1);
+        axis[(size_t) i] = out->latticeCoord == kLatticeLinearHdr ? DisplayFromLattice(u) : u;
+    }
+
     for (int b = 0; b < n; ++b)
         for (int g = 0; g < n; ++g)
             for (int r = 0; r < n; ++r)
             {
-                float v[3] = { (float) r / (float) (n - 1), (float) g / (float) (n - 1), (float) b / (float) (n - 1) };
+                float v[3] = { axis[(size_t) r], axis[(size_t) g], axis[(size_t) b] };
 
                 for (const ChainLayer& layer : active)
                 {
                     float next[3];
                     if (layer.convert)
-                        ApplyConvertedLayer(*layer.lut, layer.strength, layer.decode, layer.space, v, next);
+                        ApplyConvertedLayer(*layer.lut, layer.strength, layer.decode, layer.space, layer.gamut, v,
+                                            next);
                     else
                         ApplyLayer(*layer.lut, layer.strength, v, next);
                     v[0] = next[0];
@@ -165,8 +181,9 @@ struct ChainEntry
 
 // Look input for each entry in order (one per entry, absent or at strength 0 included, those left as Display): the
 // stack starts as the picture; a layer reading a log space gets the conversion while the signal is still the picture,
-// and its output (header or name, else the picture) is what the next layer is handed.
-inline void ResolveLookInputs(const std::vector<ChainEntry>& entries, const Lut3D* const* luts, LayerInput* out)
+// and its output (header or name, else the picture) is what the next layer is handed. Returns what the last layer
+// hands on: not the picture means the stack ends in a log signal (no view transform after a conversion LUT).
+inline LutSpace ResolveLookInputs(const std::vector<ChainEntry>& entries, const Lut3D* const* luts, LayerInput* out)
 {
     LutSpace current = LutSpace::Display;
     for (size_t i = 0; i < entries.size(); ++i)
@@ -175,19 +192,18 @@ inline void ResolveLookInputs(const std::vector<ChainEntry>& entries, const Lut3
         if (luts[i] == nullptr || luts[i]->size < 2 || !(entries[i].strength > 0.0f))
             continue;
 
-        const Lut3D& lut = *luts[i];
-        const LookSpaces found = DetectLookSpaces(std::filesystem::path(entries[i].path).stem().string(), lut.inGamma,
-                                                  lut.inGamut, lut.outGamma, lut.outGamut);
+        const LookSpaces& found = luts[i]->look;
         const int input = entries[i].input;
         LayerInput& r = out[i];
         if (input >= 0 && input < (int) LutSpace::Count)
         {
-            r.space = (LutSpace) input;
+            r.space = r.gamut = (LutSpace) input;
             r.from = "set";
         }
         else
         {
             r.space = found.in;
+            r.gamut = found.inGamut;
             r.from = found.inFrom;
         }
 
@@ -195,6 +211,7 @@ inline void ResolveLookInputs(const std::vector<ChainEntry>& entries, const Lut3
         r.given = r.converted ? r.space : current;
         current = found.out;
     }
+    return current;
 }
 
 // The post-NR stack as Config holds it (templated so this header stays free of Config.h).
@@ -224,7 +241,8 @@ struct DlssNr_LutChainState
     std::string key;
     DlssNr::Lut3D baked;
     float strength = 1.0f;                                    // the strength the pass applies `baked` with
-    DlssNr::LayerInput inputs[DlssNr::kMaxLutChainLayers] {}; // each kept entry's look input at the last bake
+    DlssNr::LayerInput inputs[DlssNr::kMaxLutChainLayers] {}; // each kept entry's look input at the last Ensure
+    DlssNr::LutSpace endsIn = DlssNr::LutSpace::Display;      // what the stack hands on: not the picture = a log signal
     DlssNr::FrameDecode decode = DlssNr::FrameDecode::Srgb;   // the frame the last bake converted for
     std::string description;                                  // DlssNr_DescribeChain's text, made when `baked` is
     bool wanted = false;
@@ -272,6 +290,7 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
         state->ensuresUntilTimeCheck = 0;
         for (LayerInput& in : state->inputs)
             in = LayerInput();
+        state->endsIn = LutSpace::Display;
         return false;
     }
 
@@ -309,7 +328,13 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
     }
 
     if (state->failedLayer >= 0)
+    {
+        // The last good chain stays, but which layer read what no longer matches the entries the menu shows.
+        for (LayerInput& in : state->inputs)
+            in = LayerInput();
+        state->endsIn = LutSpace::Display;
         return state->Loaded(); // keep the last good chain
+    }
 
     const size_t effective =
         (size_t) std::count_if(present.begin(), present.end(), [](const ChainEntry& e) { return e.strength > 0.0f; });
@@ -318,7 +343,10 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
     for (size_t i = 0; i < present.size(); ++i)
         luts[i] = state->layers[i].Loaded() ? &state->layers[i].lut : nullptr;
     LayerInput inputs[kMaxLutChainLayers] {};
-    ResolveLookInputs(present, luts, inputs);
+    // Every call, not only on a bake: a setting that changes no conversion (Auto -> the same space by hand) bakes
+    // nothing but still changes what the menu says.
+    state->endsIn = ResolveLookInputs(present, luts, inputs);
+    std::copy(inputs, inputs + kMaxLutChainLayers, state->inputs);
     const bool converts =
         std::any_of(inputs, inputs + present.size(), [](const LayerInput& in) { return in.converted; });
 
@@ -332,7 +360,7 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
         if (strengthBaked)
             key += "|" + std::to_string(std::clamp(present[i].strength, 0.0f, 1.0f));
         if (inputs[i].converted)
-            key += "|as " + std::to_string((int) inputs[i].space);
+            key += "|as " + std::to_string((int) inputs[i].space) + "/" + std::to_string((int) inputs[i].gamut);
         key += "\n";
     }
 
@@ -340,8 +368,8 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
     {
         std::vector<ChainLayer> layers;
         for (size_t i = 0; i < present.size(); ++i)
-            layers.push_back(
-                { &state->layers[i].lut, present[i].strength, inputs[i].converted, inputs[i].space, decode });
+            layers.push_back({ &state->layers[i].lut, present[i].strength, inputs[i].converted, inputs[i].space, decode,
+                               inputs[i].gamut });
 
         std::string err;
         Lut3D baked;
@@ -350,7 +378,6 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
         state->key = key;
         state->baked = ok ? std::move(baked) : Lut3D();
         state->strength = strength;
-        std::copy(inputs, inputs + kMaxLutChainLayers, state->inputs);
         state->decode = decode;
         state->description = DlssNr_DescribeChain(*state, present);
     }
@@ -391,7 +418,11 @@ inline std::string DlssNr_DescribeChain(const DlssNr_LutChainState& state,
         const DlssNr::LayerInput& in = state.inputs[i];
         text += std::filesystem::path(layer.loadedPath).filename().string() + " (" +
                 DlssNr::DescribeLutSize(layer.lut) +
-                (in.converted ? std::string(", as ") + DlssNr::LutSpaceName(in.space) : std::string()) + ")";
+                (in.converted
+                     ? std::string(", as ") + DlssNr::LutSpaceName(in.space) +
+                           (in.gamut != in.space ? std::string(" in ") + DlssNr::LutGamutName(in.gamut) : std::string())
+                     : std::string()) +
+                ")";
         ++shown;
         converted = converted || in.converted;
     }

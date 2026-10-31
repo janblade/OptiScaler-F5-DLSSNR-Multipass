@@ -10,10 +10,13 @@
 // display 0..1 domain the LUT passes feed it, so every consumer (the Input LUT, the post-NR stack, the GPU passes)
 // keeps handling one shape of data.
 
+#include "DlssNr_LutSpaces.h"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -46,6 +49,10 @@ struct Lut3D
     // b = i / (size * size)). Trilinear sampling of this is a GPU-side concern (Story 2/3), not here.
     std::vector<float> rgb;
 
+    // How the lattice is laid out over the display value: kLatticeEven (a file, and most bakes), or kLatticeLinearHdr
+    // (a post-NR stack converting a Linear HDR frame for a log look: LatticeFromDisplay). The GPU passes read it too.
+    int latticeCoord = 0;
+
     // When the file had a 1D shaper: its length and the file's own 3D size (0 for a 1D-only file), for the status
     // line. `rgb` is then the bake (kShaperBakeSize, domain 0..1), not the file's table.
     int shaperSize = 0;
@@ -56,13 +63,46 @@ struct Lut3D
     std::shared_ptr<const Shaper1D> shaper;
     std::shared_ptr<const Lut3D> fileTable;
 
-    // The header's "# Input Gamma:", "# Input Color Space:" and Output lines (as view-transform packs write them), for
-    // the look input's Auto. Empty when absent.
-    std::string inGamma, inGamut, outGamma, outGamut;
+    // What the look reads and writes as Auto sees it (DlssNr_LutSpaces.h DetectLookSpaces), from the header's
+    // "# Input Gamma:" / "# Input Color Space:" / Output lines and the file name, worked out once when it is parsed.
+    LookSpaces look;
 };
 
+constexpr int kLatticeEven = 0;
+constexpr int kLatticeLinearHdr = 1;
+
+// kLatticeLinearHdr's coordinate, the shader's LatticeFromDisplay: per channel the Linear HDR light a display value
+// stands for (sRGB decode, then the Neutwo inverse clamped as NeutwoDecode), log2-spaced from kLatticeFloor to that
+// clamp's light. Even display steps put everything from ~4x white up into the top lattice cell; this gives a 65 lattice
+// about 0.3 stop per step from deep shadow to the brightest highlight.
+constexpr float kLatticeFloor = 1.0f / 1024.0f;
+constexpr float kLatticeMaxLight = 707.10614f; // 0.999999 / sqrt(1 - 0.999999^2)
+
+inline float LatticeFromDisplay(float d)
+{
+    d = std::clamp(d, 0.0f, 1.0f);
+    const float lin = d <= 0.04045f ? d / 12.92f : std::pow((d + 0.055f) / 1.055f, 2.4f);
+    const float m = std::min(lin, 0.999999f);
+    const float light = m / std::sqrt(std::max(1.0f - m * m, 1e-8f));
+    const float lo = std::log2(kLatticeFloor);
+    return std::clamp((std::log2(light + kLatticeFloor) - lo) / (std::log2(kLatticeMaxLight + kLatticeFloor) - lo),
+                      0.0f, 1.0f);
+}
+
+// The inverse: the display value lattice coordinate `u` stands for (what a bake evaluates the stack at).
+inline float DisplayFromLattice(float u)
+{
+    const float lo = std::log2(kLatticeFloor);
+    const float light = std::max(
+        std::exp2(std::clamp(u, 0.0f, 1.0f) * (std::log2(kLatticeMaxLight + kLatticeFloor) - lo) + lo) - kLatticeFloor,
+        0.0f);
+    const float m = std::min(light / std::sqrt(1.0f + light * light), 1.0f);
+    return m <= 0.0031308f ? m * 12.92f : 1.055f * std::pow(m, 1.0f / 2.4f) - 0.055f;
+}
+
 // Trilinear sample of `lut` at the display value `in`, with the shader's domain clamp (dlssnr_lut.hlsl). Lattice point
-// i sits at uvw = i / (size - 1); red is the fastest axis (see Lut3D::rgb).
+// i sits at uvw = i / (size - 1) (through LatticeFromDisplay for kLatticeLinearHdr); red is the fastest axis (see
+// Lut3D::rgb).
 inline void SampleLut(const Lut3D& lut, const float in[3], float out[3])
 {
     const int n = lut.size;
@@ -76,7 +116,8 @@ inline void SampleLut(const Lut3D& lut, const float in[3], float out[3])
         const float lo = lut.domainMin[c];
         const float width = std::max(lut.domainMax[c] - lo, 1e-6f);
         const float clamped = std::clamp(in[c], lut.domainMin[c], lut.domainMax[c]);
-        const float p = std::clamp((clamped - lo) / width, 0.0f, 1.0f) * span;
+        const float even = std::clamp((clamped - lo) / width, 0.0f, 1.0f);
+        const float p = (lut.latticeCoord == kLatticeLinearHdr ? LatticeFromDisplay(even) : even) * span;
         i0[c] = std::min((int) std::floor(p), n - 1);
         i1[c] = std::min(i0[c] + 1, n - 1);
         f[c] = p - (float) i0[c];
@@ -186,8 +227,14 @@ inline std::string Trimmed(const std::string& s)
     return a == std::string::npos ? std::string() : s.substr(a, z - a + 1);
 }
 
+// The header lines view-transform packs write about their input and output.
+struct HeaderHints
+{
+    std::string inGamma, inGamut, outGamma, outGamut;
+};
+
 // "#  Input Gamma: Arri LogC4" -> hints->inGamma = "Arri LogC4"; the colour/color spelling and case do not matter.
-inline void ReadHeaderHint(const std::string& line, Lut3D* hints)
+inline void ReadHeaderHint(const std::string& line, HeaderHints* hints)
 {
     const size_t hash = line.find('#');
     const size_t colon = line.find(':', hash);
@@ -204,14 +251,6 @@ inline void ReadHeaderHint(const std::string& line, Lut3D* hints)
         hints->outGamma = value;
     else if (key == "OUTPUT COLOR SPACE" || key == "OUTPUT COLOUR SPACE")
         hints->outGamut = value;
-}
-
-inline void CopyHeaderHints(const Lut3D& from, Lut3D* to)
-{
-    to->inGamma = from.inGamma;
-    to->inGamut = from.inGamut;
-    to->outGamma = from.outGamma;
-    to->outGamut = from.outGamut;
 }
 } // namespace
 
@@ -241,7 +280,7 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
     float domainMin[3] = { 0.0f, 0.0f, 0.0f };
     float domainMax[3] = { 1.0f, 1.0f, 1.0f };
     std::vector<float> rgb;
-    Lut3D hints; // only its header strings
+    HeaderHints hints;
 
     std::string line;
     unsigned int lineNumber = 0;
@@ -283,7 +322,7 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
         if (keyword == "LUT_1D_INPUT_RANGE" || keyword == "LUT_3D_INPUT_RANGE")
         {
             float lo = 0.0f, hi = 0.0f;
-            if (!(iss >> lo >> hi) || !(hi > lo))
+            if (!(iss >> lo >> hi) || !std::isfinite(lo) || !std::isfinite(hi) || !(hi > lo))
             {
                 *error = keyword + " needs two increasing numbers (line " + std::to_string(lineNumber) + ")";
                 return false;
@@ -334,7 +373,7 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
         if (keyword == "DOMAIN_MIN" || keyword == "DOMAIN_MAX")
         {
             float v[3];
-            if (!(iss >> v[0] >> v[1] >> v[2]))
+            if (!(iss >> v[0] >> v[1] >> v[2]) || !std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]))
             {
                 *error = keyword + " needs three numbers (line " + std::to_string(lineNumber) + ")";
                 return false;
@@ -359,6 +398,13 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
         if (!(iss >> g >> b))
         {
             *error = "data row on line " + std::to_string(lineNumber) + " needs three numbers";
+            return false;
+        }
+
+        // "nan" / "inf" parse as numbers, but a lattice holding one turns into an out-of-range index when sampled.
+        if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b))
+        {
+            *error = "data row on line " + std::to_string(lineNumber) + " is not a finite number";
             return false;
         }
 
@@ -427,7 +473,8 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
         if (sawSize)
             out->fileTable = std::make_shared<const Lut3D>(std::move(table));
         out->shaper = std::make_shared<const Shaper1D>(std::move(shaper));
-        CopyHeaderHints(hints, out);
+        out->look = DetectLookSpaces(std::filesystem::path(path).stem().string(), hints.inGamma, hints.inGamut,
+                                     hints.outGamma, hints.outGamut);
         return true;
     }
 
@@ -439,7 +486,8 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
     out->domainMax[1] = domainMax[1];
     out->domainMax[2] = domainMax[2];
     out->rgb = std::move(rgb);
-    CopyHeaderHints(hints, out);
+    out->look = DetectLookSpaces(std::filesystem::path(path).stem().string(), hints.inGamma, hints.inGamut,
+                                 hints.outGamma, hints.outGamut);
     return true;
 }
 } // namespace DlssNr

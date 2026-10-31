@@ -22,6 +22,7 @@
 #include <cmath>
 #include <iterator>
 #include <string>
+#include <vector>
 
 namespace DlssNr
 {
@@ -83,6 +84,29 @@ inline const char* LutSpaceName(LutSpace s)
         return "DaVinci Intermediate DWG";
     default:
         return "sRGB picture";
+    }
+}
+
+// A LutSpace standing for its own primaries, by name ("AWG4", "BT.709"), for a header that pairs a curve with another
+// gamut.
+inline const char* LutGamutName(LutSpace s)
+{
+    switch (s)
+    {
+    case LutSpace::ArriLogC3:
+        return "AWG3";
+    case LutSpace::ArriLogC4:
+        return "AWG4";
+    case LutSpace::AcesCct:
+        return "AP1";
+    case LutSpace::SLog3:
+        return "S-Gamut3.Cine";
+    case LutSpace::VLog:
+        return "V-Gamut";
+    case LutSpace::DaVinciIntermediate:
+        return "DaVinci Wide Gamut";
+    default:
+        return "BT.709";
     }
 }
 
@@ -301,6 +325,14 @@ inline float EncodeCurve(LutSpace s, float x)
 } // namespace LutSpaces
 
 // The display value the LUT pass hands the stack -> Rec.709 light relative to the encode's white (mid grey 0.18).
+//
+// What "exact" means here, and what is assumed:
+//  - Linear HDR undoes the pass's sRGB(Neutwo(light / white)) to float precision.
+//  - PQ: the pass hands sRGB of BT.709 light clamped to 0..1 (DecodeToDisplay01: BT.2020 -> BT.709, then LinearToSrgb's
+//    saturate), so light above paper white and colours outside BT.709 are already clipped when they arrive here.
+//  - Mid grey: a log look expects scene mid grey at 0.18. The game's light is taken as it comes, relative to the
+//    encode's white; ITU-R BT.2408 puts HDR reference grey lower (about 0.13 of reference white), so on HDR games the
+//    look can sit up to half a stop darker than a camera exposed for 18% grey.
 inline void DecodeFrameToLight(FrameDecode d, const float in[3], float out[3])
 {
     using namespace LutSpaces;
@@ -336,17 +368,18 @@ inline void DecodeFrameToLight(FrameDecode d, const float in[3], float out[3])
         out[c] = lin[c] * scale;
 }
 
-// Rec.709 light -> `space`'s signal.
-inline void EncodeLightToSpace(LutSpace space, const float light[3], float out[3])
+// Rec.709 light -> `space`'s curve in `gamut`'s primaries (a LutSpace standing for its own primaries: LinearRec709 =
+// BT.709, ArriLogC4 = AWG4, ...). A look's header can name a gamut other than its curve's own (LogC4 in Rec.709).
+inline void EncodeLightToSpace(LutSpace space, LutSpace gamut, const float light[3], float out[3])
 {
     using namespace LutSpaces;
-    if (space == LutSpace::Display || space == LutSpace::LinearRec709)
+    if (space == LutSpace::Display)
     {
         std::copy(light, light + 3, out);
         return;
     }
 
-    // Built once per space; the bake calls this per lattice point.
+    // Built once per gamut; the bake calls this per lattice point.
     struct Cache
     {
         Mat3 m[(int) LutSpace::Count];
@@ -359,97 +392,180 @@ inline void EncodeLightToSpace(LutSpace space, const float light[3], float out[3
     static const Cache cache;
 
     float g[3];
-    Mul(cache.m[(int) space], light, g);
+    Mul(cache.m[std::clamp((int) gamut, 0, (int) LutSpace::Count - 1)], light, g);
     for (int c = 0; c < 3; ++c)
         out[c] = EncodeCurve(space, g[c]);
 }
 
-// The conversion a layer gets: the stack's display value -> `space`.
-inline void ConvertDisplayToSpace(FrameDecode d, LutSpace space, const float in[3], float out[3])
+// In the space's own primaries.
+inline void EncodeLightToSpace(LutSpace space, const float light[3], float out[3])
+{
+    EncodeLightToSpace(space, space, light, out);
+}
+
+// The conversion a layer gets: the stack's display value -> `space` (in `gamut`'s primaries).
+inline void ConvertDisplayToSpace(FrameDecode d, LutSpace space, LutSpace gamut, const float in[3], float out[3])
 {
     float light[3];
     DecodeFrameToLight(d, in, light);
-    EncodeLightToSpace(space, light, out);
+    EncodeLightToSpace(space, gamut, light, out);
 }
 
 // ---- Auto detection ----
 
 namespace LutSpaces
 {
-// lower case, letters and digits only: "Arri LogC4" -> "arrilogc4", "S-Log3" -> "slog3"
-inline std::string Squash(const std::string& s)
+// The words of a name or header value, lower case: split at anything not a letter or digit, between letters and digits,
+// at a lower -> upper change, and before the last capital of a capital run that goes on in lower case. "ARRILogC4AWG4"
+// -> arri log c 4 awg 4, "S-Log3" -> s log 3, "ACEScct" -> ace scct, "Analog Cinema" -> analog cinema.
+inline std::vector<std::string> Words(const std::string& s)
 {
-    std::string out;
-    for (unsigned char ch : s)
-        if (std::isalnum(ch))
-            out += (char) std::tolower(ch);
-    return out;
+    std::vector<std::string> words;
+    std::string cur;
+    const auto flush = [&]()
+    {
+        if (!cur.empty())
+            words.push_back(cur);
+        cur.clear();
+    };
+
+    for (size_t i = 0; i < s.size(); ++i)
+    {
+        const unsigned char ch = (unsigned char) s[i];
+        if (!std::isalnum(ch))
+        {
+            flush();
+            continue;
+        }
+
+        if (!cur.empty())
+        {
+            const unsigned char prev = (unsigned char) s[i - 1];
+            const bool next = i + 1 < s.size() && std::islower((unsigned char) s[i + 1]);
+            if ((std::isdigit(ch) != 0) != (std::isdigit(prev) != 0) || (std::islower(prev) && std::isupper(ch)) ||
+                (std::isupper(prev) && std::isupper(ch) && next))
+                flush();
+        }
+        cur += (char) std::tolower(ch);
+    }
+    flush();
+    return words;
 }
 
-inline bool Has(const std::string& s, const char* token) { return s.find(token) != std::string::npos; }
-
-// A log curve named in squashed text, or Count when none.
-inline LutSpace LogCurveIn(const std::string& t)
+// True when consecutive words, at least `minWords` of them, join to exactly `token`: "logc" is found in "Log-C" and
+// "ARRILogC4" but not inside "Analog Cinema"; "vlog" with minWords 2 is "V-Log" / "VLog", never a "Vlog" (video blog).
+inline bool HasWords(const std::vector<std::string>& w, const char* token, size_t minWords = 1)
 {
-    if (Has(t, "logc4"))
+    const std::string t = token;
+    for (size_t first = 0; first < w.size(); ++first)
+    {
+        std::string joined;
+        for (size_t last = first; last < w.size() && joined.size() < t.size(); ++last)
+        {
+            joined += w[last];
+            if (joined == t && last - first + 1 >= minWords)
+                return true;
+        }
+    }
+    return false;
+}
+
+// A log curve named in the words, or Count when none.
+inline LutSpace LogCurveIn(const std::vector<std::string>& w)
+{
+    if (HasWords(w, "logc4"))
         return LutSpace::ArriLogC4;
-    if (Has(t, "logc3") || Has(t, "logc"))
+    if (HasWords(w, "logc3") || HasWords(w, "logc"))
         return LutSpace::ArriLogC3;
-    if (Has(t, "acescct"))
+    if (HasWords(w, "acescct"))
         return LutSpace::AcesCct;
-    if (Has(t, "slog3"))
+    if (HasWords(w, "slog3"))
         return LutSpace::SLog3;
-    if (Has(t, "vlog"))
+    if (HasWords(w, "vlog", 2))
         return LutSpace::VLog;
-    if (Has(t, "davinciintermediate") || Has(t, "davinciwidegamut") || Has(t, "dwg"))
+    if (HasWords(w, "davinciintermediate") || HasWords(w, "davinciwidegamut") || HasWords(w, "dwg"))
         return LutSpace::DaVinciIntermediate;
     return LutSpace::Count;
 }
 
-inline bool IsLinear709Name(const std::string& t)
+inline bool IsLinear709(const std::vector<std::string>& w)
 {
-    return Has(t, "linrec709") || Has(t, "linearrec709") || Has(t, "linear709") || Has(t, "lin709") ||
-           Has(t, "linbt709") || Has(t, "linearbt709");
+    for (const char* t : { "linrec709", "linearrec709", "linear709", "lin709", "linbt709", "linearbt709" })
+        if (HasWords(w, t))
+            return true;
+    return false;
+}
+
+inline bool IsDisplay(const std::vector<std::string>& w)
+{
+    for (const char* t :
+         { "srgb", "rec709", "bt709", "709", "display", "gamma", "rec1886", "bt1886", "1886", "22", "24" })
+        if (HasWords(w, t))
+            return true;
+    return false;
+}
+
+// A gamut named in the words (as the LutSpace whose primaries it is), or Count when none.
+inline LutSpace GamutIn(const std::vector<std::string>& w)
+{
+    if (HasWords(w, "awg4") || HasWords(w, "arriwidegamut4") || HasWords(w, "widegamut4"))
+        return LutSpace::ArriLogC4;
+    if (HasWords(w, "awg3") || HasWords(w, "arriwidegamut3") || HasWords(w, "widegamut3") || HasWords(w, "awg") ||
+        HasWords(w, "arriwidegamut"))
+        return LutSpace::ArriLogC3;
+    if (HasWords(w, "ap1") || HasWords(w, "acescg") || HasWords(w, "acescct"))
+        return LutSpace::AcesCct;
+    if (HasWords(w, "sgamut3cine"))
+        return LutSpace::SLog3;
+    if (HasWords(w, "vgamut"))
+        return LutSpace::VLog;
+    if (HasWords(w, "davinciwidegamut") || HasWords(w, "dwg"))
+        return LutSpace::DaVinciIntermediate;
+    if (HasWords(w, "rec709") || HasWords(w, "bt709") || HasWords(w, "709") || HasWords(w, "srgb"))
+        return LutSpace::LinearRec709;
+    return LutSpace::Count;
 }
 } // namespace LutSpaces
 
-// What the header's "Gamma" and "Color Space" lines say, or false when they name nothing this knows.
-inline bool SpaceFromHeader(const std::string& gamma, const std::string& gamut, LutSpace* out)
+// What the header's "Gamma" and "Color Space" lines say, or false when they name nothing this knows. `*gamut` is the
+// gamut the Color Space line names (as the LutSpace whose primaries it is), else the curve's own.
+inline bool SpaceFromHeader(const std::string& gamma, const std::string& gamut, LutSpace* out, LutSpace* outGamut)
 {
     using namespace LutSpaces;
-    const std::string g = Squash(gamma);
-    const std::string s = Squash(gamut);
+    const std::vector<std::string> g = Words(gamma);
+    const std::vector<std::string> s = Words(gamut);
     if (g.empty())
         return false;
 
+    const LutSpace namedGamut = GamutIn(s);
     const LutSpace log = LogCurveIn(g);
     if (log != LutSpace::Count)
     {
         *out = log;
+        *outGamut = namedGamut != LutSpace::Count ? namedGamut : log;
         return true;
     }
 
-    if (Has(g, "linear"))
+    if (HasWords(g, "linear"))
     {
-        if (s.empty() || Has(s, "709") || Has(s, "srgb"))
+        if (s.empty() || namedGamut == LutSpace::LinearRec709)
         {
-            *out = LutSpace::LinearRec709;
+            *out = *outGamut = LutSpace::LinearRec709;
             return true;
         }
         return false; // linear light in another gamut (ACES AP0, ...): not one of ours
     }
 
-    if (Has(g, "srgb") || Has(g, "gamma") || Has(g, "display") || Has(g, "709") || Has(g, "1886") || Has(g, "22") ||
-        Has(g, "24"))
+    if (IsDisplay(g))
     {
-        *out = LutSpace::Display;
+        *out = *outGamut = LutSpace::Display;
         return true;
     }
     return false;
 }
 
-// What a file name says: "<input>-to-<output>" (the common pack naming), or a log curve anywhere in a name without
-// "-to-" as its input. False for a side the name says nothing about.
+// What a file name says: "<input>-to-<output>" (the common pack naming), or a log curve named in a name without "-to-"
+// as its input. Whole words only (LutSpaces::HasWords). False for a side the name says nothing about.
 inline void SpacesFromName(const std::string& stem, bool* inFound, LutSpace* in, bool* outFound, LutSpace* out)
 {
     using namespace LutSpaces;
@@ -461,7 +577,7 @@ inline void SpacesFromName(const std::string& stem, bool* inFound, LutSpace* in,
         if ((to = lower.find(sep)) != std::string::npos)
             break;
 
-    const std::string left = Squash(to == std::string::npos ? stem : stem.substr(0, to));
+    const std::vector<std::string> left = Words(to == std::string::npos ? stem : stem.substr(0, to));
     *inFound = *outFound = false;
 
     const LutSpace leftLog = LogCurveIn(left);
@@ -470,7 +586,7 @@ inline void SpacesFromName(const std::string& stem, bool* inFound, LutSpace* in,
         *inFound = true;
         *in = leftLog;
     }
-    else if (IsLinear709Name(left))
+    else if (IsLinear709(left))
     {
         *inFound = true;
         *in = LutSpace::LinearRec709;
@@ -479,26 +595,26 @@ inline void SpacesFromName(const std::string& stem, bool* inFound, LutSpace* in,
     if (to == std::string::npos)
         return;
 
-    const std::string right = Squash(stem.substr(to + 4));
-    if (Has(right, "srgb") || Has(right, "rec709") || Has(right, "bt709") || Has(right, "display") ||
-        Has(right, "gamma"))
-    {
-        *outFound = true;
-        *out = LutSpace::Display;
-        return;
-    }
+    const std::vector<std::string> right = Words(stem.substr(to + 4));
     const LutSpace rightLog = LogCurveIn(right);
     if (rightLog != LutSpace::Count)
     {
         *outFound = true;
         *out = rightLog;
     }
+    else if (IsDisplay(right))
+    {
+        *outFound = true;
+        *out = LutSpace::Display;
+    }
 }
 
-// What a layer's look input resolved to at the last bake, for the menu.
+// What a layer's look input resolved to at the last Ensure, for the menu.
 struct LayerInput
 {
     LutSpace space = LutSpace::Display; // what the layer reads
+    LutSpace gamut = LutSpace::Display; // in which primaries (a LutSpace standing for its own), `space` unless the
+                                        // header names another
     const char* from = "";              // Auto's source: "header", "name", "" (nothing found); "set" when chosen
     bool converted = false;             // the picture is converted into `space` for it
     LutSpace given = LutSpace::Display; // the signal the layer is actually handed (differs from `space`: a mismatch)
@@ -509,6 +625,7 @@ struct LayerInput
 struct LookSpaces
 {
     LutSpace in = LutSpace::Display;
+    LutSpace inGamut = LutSpace::Display;
     LutSpace out = LutSpace::Display;
     const char* inFrom = "";
 };
@@ -521,19 +638,20 @@ inline LookSpaces DetectLookSpaces(const std::string& stem, const std::string& i
     LutSpace fromNameIn = LutSpace::Display, fromNameOut = LutSpace::Display;
     SpacesFromName(stem, &nameIn, &fromNameIn, &nameOut, &fromNameOut);
 
-    LutSpace h;
-    if (SpaceFromHeader(inGamma, inGamut, &h))
+    LutSpace h, hGamut;
+    if (SpaceFromHeader(inGamma, inGamut, &h, &hGamut))
     {
         r.in = h;
+        r.inGamut = hGamut;
         r.inFrom = "header";
     }
     else if (nameIn)
     {
-        r.in = fromNameIn;
+        r.in = r.inGamut = fromNameIn;
         r.inFrom = "name";
     }
 
-    if (SpaceFromHeader(outGamma, outGamut, &h))
+    if (SpaceFromHeader(outGamma, outGamut, &h, &hGamut))
         r.out = h;
     else if (nameOut)
         r.out = fromNameOut;

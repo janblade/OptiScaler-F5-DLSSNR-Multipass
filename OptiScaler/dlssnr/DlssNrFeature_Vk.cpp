@@ -827,6 +827,7 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
             constants.DomainMaxG = lut.domainMax[1];
             constants.DomainMaxB = lut.domainMax[2];
             constants.LutSize = (uint32_t) lut.size;
+            constants.LatticeCoord = (uint32_t) lut.latticeCoord;
             constants.InputEncoding = shaderConversion;
             constants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
             CopyLiveWhitePoint(constants, encode);
@@ -851,6 +852,7 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     status.chain = chain.description;
     static_assert(std::size(decltype(status.inputs) {}) == DlssNr::kMaxLutChainLayers);
     std::copy(std::begin(chain.inputs), std::end(chain.inputs), status.inputs);
+    status.endsIn = chain.endsIn;
     if (!chain.error.empty())
     {
         status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();
@@ -2083,6 +2085,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                         lutConstants.DomainMaxG = g_vk.lut.lut.domainMax[1];
                         lutConstants.DomainMaxB = g_vk.lut.lut.domainMax[2];
                         lutConstants.LutSize = (uint32_t) g_vk.lut.lut.size;
+                        lutConstants.LatticeCoord = (uint32_t) g_vk.lut.lut.latticeCoord;
                         lutConstants.InputEncoding = shaderConversion;
                         lutConstants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
                         // The white point the encode below uses (Tune's pinned value included), so linear HDR lands

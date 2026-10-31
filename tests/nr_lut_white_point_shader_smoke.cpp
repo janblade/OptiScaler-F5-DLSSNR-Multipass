@@ -6,6 +6,7 @@
 //      display domain a .cube is made for (sRGB of Neutwo of light / white; fixed 2026-10-31, the reference graded
 //      the Neutwo values as they were), checked against a CPU model of that grade at several white points, and
 //      linear mid grey 0.18 lands on display 0.46.
+//      With LatticeCoord 1 the lattice is looked up at the CPU's LatticeFromDisplay (DlssNr_LutFile.h) of that value.
 //   2. With a live exposure texture (UseGameExposure, or UseExposureWhitePoint for Automatic's) the pass grades for
 //      PreExposure / exposure x the Trim -- the encode's own rule (dlssnr_whitepoint.hlsli) -- and follows the texel
 //      when it changes between dispatches, instead of the host value it was handed.
@@ -31,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "../OptiScaler/dlssnr/DlssNr_LutFile.h"
 #include "../OptiScaler/shaders/dlssnr/DlssNr_LutConstants.h"
 using Microsoft::WRL::ComPtr;
 
@@ -241,6 +243,30 @@ try
         const float grey = (back[0] - 0.05f) / 0.9f;
         std::printf("linear mid grey 0.18 graded at display %.3f\n", grey);
         expect(std::abs(grey - 0.46f) < 0.01f, "linear mid grey does not reach the LUT as display 0.46");
+    }
+    {
+        // LatticeCoord 1 (a post-NR stack converting Linear HDR for a log look): the lattice is looked up at
+        // DlssNr_LutFile.h's LatticeFromDisplay of the display value, the same function the bake lays it out by.
+        auto c = Base(0, true, 2.0f);
+        c.LatticeCoord = 1u;
+        const auto got = gpu.Run(shader.Get(), linear, c, 0.0f);
+        float off = 0.0f;
+        for (int i = 0; i < N; ++i)
+        {
+            const float in[3] = { linear[i].r, linear[i].g, linear[i].b };
+            const float out[3] = { got[i].r, got[i].g, got[i].b };
+            float d[3], back[3];
+            ToDisplay(in, 2.0f, d);
+            ToDisplay(out, 2.0f, back);
+            float u[3];
+            for (int ch = 0; ch < 3; ++ch)
+                u[ch] = DlssNr::LatticeFromDisplay(d[ch]);
+            const float want[3] = { 0.9f * u[1] + 0.05f, 0.9f * u[2] + 0.05f, 0.9f * u[0] + 0.05f };
+            for (int ch = 0; ch < 3; ++ch)
+                off = std::max(off, std::abs(back[ch] - want[ch]));
+        }
+        std::printf("log-spaced lattice (LatticeCoord 1): worst display error %.2e\n", off);
+        expect(off < 5e-3f, "the shader's LatticeFromDisplay does not match the CPU's");
     }
     expect(SameBits(gpu.Run(shader.Get(), display, Base(0, false, 1.0f), 0.0f),
                     gpu.Run(reference.Get(), display, Base(0, false, 1.0f), 0.0f)),

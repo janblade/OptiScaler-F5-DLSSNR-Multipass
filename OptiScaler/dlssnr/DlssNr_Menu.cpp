@@ -3442,9 +3442,12 @@ static std::string LookInputPreview(int setting, const DlssNr::LayerInput* found
         return text;
 
     if (automatic)
-        text += found->space == LutSpace::Display ? std::string(": the picture")
-                                                  : std::string(": ") + DlssNr::LutSpaceName(found->space) +
-                                                        (*found->from ? std::string(" (") + found->from + ")" : "");
+        text += found->space == LutSpace::Display
+                    ? std::string(": the picture")
+                    : std::string(": ") + DlssNr::LutSpaceName(found->space) +
+                          (found->gamut != found->space ? std::string(" in ") + DlssNr::LutGamutName(found->gamut)
+                                                        : std::string()) +
+                          (*found->from ? std::string(" (") + found->from + ")" : "");
     if (found->space != LutSpace::Display && !found->converted)
         text += found->given == found->space ? ", from the LUT above"
                                              : std::string(", but gets ") + DlssNr::LutSpaceName(found->given);
@@ -3521,8 +3524,12 @@ static void RenderPostLutSection(Config* config)
                 const std::string pathStr = path.string();
                 if (ImGui::Selectable(path.filename().string().c_str(), pathStr == current))
                 {
-                    if (filled)
+                    if (filled && layers[row].file != pathStr)
+                    {
+                        // a hand-picked input belonged to the old file
                         layers[row].file = pathStr;
+                        layers[row].input = DlssNr::kLookInputAuto;
+                    }
                     else
                         layers.push_back({ pathStr, 1.0f, DlssNr::kLookInputAuto });
                     addRow = false;
@@ -3674,6 +3681,14 @@ static void RenderPostLutSection(Config* config)
                                    status.error.c_str());
             else
                 ImGui::TextWrapped("%s", status.error.c_str());
+            ImGui::PopStyleColor();
+        }
+        else if (status.loaded && status.endsIn != DlssNr::LutSpace::Display)
+        {
+            // A conversion LUT with no look after it: the screen shows the flat log signal.
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+            ImGui::TextWrapped("The stack ends in %s, not a picture: add a look made for it after the last LUT.",
+                               DlssNr::LutSpaceName(status.endsIn));
             ImGui::PopStyleColor();
         }
         StatusSlotEnd(slot, 5);

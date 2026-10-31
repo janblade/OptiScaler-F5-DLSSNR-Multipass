@@ -75,6 +75,10 @@ cbuffer Params : register(b0)
     float gExposureTrimAnchorTrim6;
     float gExposureTrimAnchorExposure7;
     float gExposureTrimAnchorTrim7;
+    // How the lattice is laid out over the display value (DlssNr_LutFile.h LatticeCoord): 0 evenly, 1 log-spaced Linear
+    // HDR light, for a post-NR stack baked with a look-input conversion (highlights up to the Neutwo clamp get lattice
+    // points of their own instead of sharing the top one).
+    uint latticeCoord;
 };
 
 #ifdef VK_MODE
@@ -150,6 +154,19 @@ float3 EncodeFromDisplay01(float3 c, float white)
     return c;
 }
 
+// LatticeCoord 1, exactly as DlssNr_LutFile.h's LatticeFromDisplay: per channel, the Linear HDR light this display value
+// stands for (sRGB decode, Neutwo inverse, clamped as NeutwoDecode), log2-spaced from kLatticeFloor to the clamp.
+static const float kLatticeFloor = 1.0 / 1024.0;
+static const float kLatticeMaxLight = 707.10614; // 0.999999 / sqrt(1 - 0.999999^2)
+
+float3 LatticeFromDisplay(float3 d)
+{
+    const float3 m = min(SrgbToLinear(d), 0.999999);
+    const float3 light = m * rsqrt(max(1.0 - m * m, 1e-8));
+    const float lo = log2(kLatticeFloor);
+    return saturate((log2(light + kLatticeFloor) - lo) / (log2(kLatticeMaxLight + kLatticeFloor) - lo));
+}
+
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
@@ -167,7 +184,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     const float3 domainMax = float3(domainMaxR, domainMaxG, domainMaxB);
     const float3 clamped = clamp(display, domainMin, domainMax);
     const float3 span = max(domainMax - domainMin, 1e-6);
-    const float3 uvw = (clamped - domainMin) / span;
+    const float3 even = (clamped - domainMin) / span;
+    const float3 uvw = latticeCoord == 1u ? LatticeFromDisplay(even) : even;
 
     // Half-texel inset: texel i's centre sits at (i + 0.5) / lutSize, so the lattice's own corners land
     // exactly on the texture's edge texels instead of bleeding into the clamp border.

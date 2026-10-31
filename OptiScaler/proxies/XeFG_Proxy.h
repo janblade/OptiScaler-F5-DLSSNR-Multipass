@@ -7,6 +7,7 @@
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
+#include <misc/XeModuleInfo.h>
 
 #include <xefg_swapchain.h>
 #include <xefg_swapchain_d3d12.h>
@@ -160,9 +161,11 @@ class XeFGProxy
 
             LOG_INFO("Loaded from {}", wstring_to_string(_dllPath));
 
+            XeModuleInfo::CheckXeFGPath();
             return HookXeFG(mainModule);
         }
 
+        XeModuleInfo::CheckXeFGPath();
         return false;
     }
 

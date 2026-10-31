@@ -1079,6 +1079,15 @@
     <ClInclude Include="menu\PluginsPage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="menu\NotificationsPage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="misc\NotificationHistory.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="misc\LibraryPathCheck.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="framegen\mfgunlock\hde\hde64.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1467,6 +1476,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="menu\PluginsPage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="menu\NotificationsPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="menu\menu_dx_base.cpp">

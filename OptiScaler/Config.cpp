@@ -1554,6 +1554,7 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
                  GetFloatValue(c.DlssNrDisplayPaperWhiteNits.value_for_config()).c_str());
     out.SetValue("DlssNr", "LutFile", c.DlssNrLutFile.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "LutStrength", GetFloatValue(c.DlssNrLutStrength.value_for_config()).c_str());
+    // One literal line per key (not a loop): tests/nr_profiles_smoke.cpp finds the keys SaveIni writes by these names.
     out.SetValue("DlssNr", "PostLutFile1", c.DlssNrPostLutFile[0].value_for_config_or("").c_str());
     out.SetValue("DlssNr", "PostLutStrength1", GetFloatValue(c.DlssNrPostLutStrength[0].value_for_config()).c_str());
     out.SetValue("DlssNr", "PostLutFile2", c.DlssNrPostLutFile[1].value_for_config_or("").c_str());
@@ -1666,7 +1667,7 @@ bool Config::SaveDlssNrProfile(const std::filesystem::path& path, std::string& e
 // A profile's LUT is looked for by its file name in this game's OptiScaler\LUTs only, never at a folder the file names:
 // a shared profile could otherwise point the game at someone else's folders or a network path. Not there: LUT off.
 // The name is read wide: path::string() throws on a name the code page cannot hold.
-static std::string ProfileLut(Config& c, std::string& lut)
+static std::string ProfileLut(Config& c, const std::string& key, std::string& lut)
 {
     if (lut.empty() || DlssNrProfiles::EqualNoCase(lut, "auto"))
         return {};
@@ -1696,8 +1697,13 @@ static std::string ProfileLut(Config& c, std::string& lut)
         // the LUTs folder's own path cannot be held as text here: LUT off, as for a missing file
     }
 
+    // Which LUT it was: the Input LUT, or one layer of the post-NR stack (the other layers still apply).
+    std::string which = "Input LUT";
+    if (!DlssNrProfiles::EqualNoCase(key, "LutFile") && !key.empty())
+        which = "Post-NR LUT " + key.substr(key.size() - 1);
+
     lut.clear();
-    return "LUT " + shown + " is not in OptiScaler\\LUTs: LUT off.";
+    return which + " " + shown + " is not in OptiScaler\\LUTs: that LUT is off.";
 }
 
 bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& error, std::string& note)
@@ -1714,7 +1720,7 @@ bool Config::LoadDlssNrProfile(const std::filesystem::path& path, std::string& e
         if (!DlssNrProfiles::IsLutFileKey(key))
             continue;
 
-        const std::string problem = ProfileLut(*this, value);
+        const std::string problem = ProfileLut(*this, key, value);
         if (!problem.empty())
             note += (note.empty() ? "" : " ") + problem;
     }

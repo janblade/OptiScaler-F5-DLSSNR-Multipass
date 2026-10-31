@@ -769,7 +769,7 @@ unsigned long long VkFrameClock()
 // GENERAL for the resolve that wrote it. Only called after a resolve that ran, so a failed evaluation leaves the game's
 // image alone.
 static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysicalDevice physicalDevice,
-                           const Config& cfg, VkImageView view, uint32_t width, uint32_t height,
+                           const Config& cfg, VkImageView view, bool ownTarget, uint32_t width, uint32_t height,
                            uint32_t shaderConversion, bool linearHdr, const DlssNrConstants& encode,
                            VkImageView liveExposureView)
 {
@@ -796,10 +796,16 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     bool graded = false;
     const bool usable = DlssNr_LutChainEnsure(&g_vk.postLut, entries);
 
-    if (usable)
+    // The game's image after SR can be any format, so the pass writes it through a storage image declared without one,
+    // which the device must allow (the resolve that just wrote it needs the same). Our own pre-SR image is RGBA16F.
+    const bool anyFormat = VkExt::WritesWithoutFormat(device);
+    if (usable && !ownTarget && !anyFormat)
+        status.note = "Not applied after Super Resolution: the game's Vulkan device was created without a feature it "
+                      "needs (restart the game with NR on).";
+    else if (usable)
     {
         if (!g_vk.postLutPass)
-            g_vk.postLutPass = std::make_unique<DlssNr_LutVk>(device, physicalDevice);
+            g_vk.postLutPass = std::make_unique<DlssNr_LutVk>(device, physicalDevice, anyFormat);
 
         const DlssNr::Lut3D& lut = g_vk.postLut.baked;
 
@@ -812,7 +818,7 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
             DlssNrLutConstants constants {};
             constants.Width = width;
             constants.Height = height;
-            constants.Strength = 1.0f; // each layer's strength is in the bake
+            constants.Strength = g_vk.postLut.strength; // a single layer's own; a baked stack holds its strengths
             constants.DomainMinR = lut.domainMin[0];
             constants.DomainMinG = lut.domainMin[1];
             constants.DomainMinB = lut.domainMin[2];
@@ -841,10 +847,10 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
 
     const DlssNr_LutChainState& chain = g_vk.postLut;
     status.loaded = graded && chain.Loaded();
-    status.chain = DlssNr_DescribeChain(chain);
-    if (chain.failedLayer >= 0)
+    status.chain = chain.description;
+    if (!chain.error.empty())
     {
-        status.failedPath = chain.failedPath;
+        status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();
         status.error = chain.error;
     }
     DlssNr::ReportPostLutStatus(status);
@@ -870,7 +876,16 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     }
 
     if (cfg.DlssNrFinishedPicture.value_or_default())
-        return; // finished-picture composition requires a native D3D12 swapchain
+    {
+        // Finished-picture composition requires a native D3D12 swapchain; say so where the post-NR stack is shown.
+        DlssNr::PostLutStatus status;
+        status.wanted = std::any_of(cfg.DlssNrPostLutFile, cfg.DlssNrPostLutFile + Config::kPostLutLayers,
+                                    [](const auto& file) { return !file.value_or_default().empty(); });
+        if (status.wanted)
+            status.note = "Not applied: Finished Picture mode does not run NR on Vulkan.";
+        DlssNr::ReportPostLutStatus(status);
+        return;
+    }
 
     if (!cfg.DlssNrEnabled.value_or_default())
         return;
@@ -2812,7 +2827,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     }
 
     ApplyPostLutVk(cmdBuffer, device, physicalDevice, cfg,
-                   beforeSr ? g_vk.preColor.view : colour->Resource.ImageViewInfo.ImageView, width, height,
+                   beforeSr ? g_vk.preColor.view : colour->Resource.ImageViewInfo.ImageView, beforeSr, width, height,
                    shaderConversion, linearHdr, encode, liveExposureView);
 
     if (beforeSr)

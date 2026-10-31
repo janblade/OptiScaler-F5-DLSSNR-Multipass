@@ -3459,7 +3459,8 @@ static void RenderPostLutSection(Config* config)
         }
     };
 
-    if (addRow && (int) layers.size() >= kMax)
+    // The empty row follows a layer, so it goes with the last one (and at the cap there is no room for it).
+    if (addRow && (layers.empty() || (int) layers.size() >= kMax))
         addRow = false;
 
     const int rows = std::max(1, (int) layers.size() + (addRow ? 1 : 0));
@@ -3473,7 +3474,8 @@ static void RenderPostLutSection(Config* config)
         const std::string id = std::to_string(row + 1);
         const std::string current = filled ? layers[row].file : std::string();
         const std::string preview = current.empty() ? "(none)" : std::filesystem::path(current).filename().string();
-        const std::string label = (rows > 1 ? "Post LUT " + id : std::string("Post LUT")) + "##postlut" + id;
+        // "###": the ID stays the row's when its label gains a number.
+        const std::string label = (rows > 1 ? "Post LUT " + id : std::string("Post LUT")) + "###postlut" + id;
 
         if (ImGui::BeginCombo(label.c_str(), preview.c_str()))
         {
@@ -3503,7 +3505,7 @@ static void RenderPostLutSection(Config* config)
                 lutFiles = ScanLutFolder();
         }
 
-        if (filled && layers.size() > 1)
+        if (filled)
         {
             ImGui::SameLine();
             if (row > 0 && ImGui::SmallButton(("^##postlutup" + id).c_str()))
@@ -3534,8 +3536,8 @@ static void RenderPostLutSection(Config* config)
         {
             float strength = layers[row].strength;
             const std::string sliderLabel =
-                (rows > 1 ? "LUT strength " + id : std::string("LUT strength")) + "##postlutstrength" + id;
-            if (ImGui::SliderFloat(sliderLabel.c_str(), &strength, 0.0f, 1.0f, "%.2f"))
+                (rows > 1 ? "LUT strength " + id : std::string("LUT strength")) + "###postlutstrength" + id;
+            if (ImGui::SliderFloat(sliderLabel.c_str(), &strength, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
             {
                 layers[row].strength = strength;
                 store();
@@ -3552,8 +3554,8 @@ static void RenderPostLutSection(Config* config)
         if (row == 0)
             HelpMarker("Applies a colour grade (.cube LUT) to the picture NR returns, so the model never sees it and "
                        "exposure, skin detection and reuse are not affected. Put files in OptiScaler\\LUTs and press "
-                       "Rescan. With NR before Super Resolution the grade is applied before the upscaler. Not applied "
-                       "in Finished Picture mode.\n"
+                       "Rescan. With NR before Super Resolution the grade is applied before the upscaler. In "
+                       "Finished Picture mode it grades the finished picture (D3D12; Vulkan does not run that mode).\n"
                        "Several LUTs are applied top to bottom (^ v move a layer, x removes it); each strength blends "
                        "that layer only. Strong grades stack up.");
     }
@@ -3587,14 +3589,18 @@ static void RenderPostLutSection(Config* config)
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         if (layers.empty())
             ImGui::TextWrapped("No LUT loaded.");
-        else if (config->DlssNrFinishedPicture.value_or_default())
-            ImGui::TextWrapped("Not applied: Finished Picture mode does not run it.");
+        else if (!config->DlssNrEnabled.value_or_default())
+            ImGui::TextWrapped("Not applied: NR is off.");
         else if (!status.seen || !status.wanted)
             ImGui::TextWrapped("Waiting for a frame.");
         else if (status.loaded)
             ImGui::TextWrapped("Loaded: %s", status.chain.c_str());
-        else
+        else if (status.note.empty())
             ImGui::TextWrapped("Not applied.");
+
+        // The backend's reason (a mode or device that does not run it), or how it runs in this mode.
+        if (!layers.empty() && status.wanted && !status.note.empty())
+            ImGui::TextWrapped("%s", status.note.c_str());
         ImGui::PopStyleColor();
 
         if (!status.failedPath.empty() || !status.error.empty())
@@ -4342,7 +4348,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         HelpMarker("Higher: stronger NR colour (above 1 more saturated). 0: keeps the game's colours. Default: 1.");
     }
 
-    const bool postLutOn = !config->DlssNrPostLutFile[0].value_or_default().empty();
+    const bool postLutOn = std::any_of(config->DlssNrPostLutFile, config->DlssNrPostLutFile + Config::kPostLutLayers,
+                                       [](const auto& file) { return !file.value_or_default().empty(); });
     if (NrCard card("Post-NR LUT##card", menuResScale, postLutOn); card.IsOpen())
         RenderPostLutSection(config);
 

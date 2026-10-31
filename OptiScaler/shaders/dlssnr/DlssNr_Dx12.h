@@ -153,9 +153,9 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // Its own root signature, PSO and small descriptor-heap ring -- not the shared table above -- because it
     // is the first pass here to sample a 3D texture, and keeping it separate means DispatchPass/
     // DispatchDetailReuse/DispatchExposureAdapt/DispatchResidualPass and their compiled bytecode need no
-    // changes at all. Eight heap/constant-buffer slots: this dispatches at most once a frame, unlike the 64
-    // the shared ring budgets for several passes deep in flight.
-    static constexpr uint32_t kLutHeapCount = 8;
+    // changes at all. 32 heap/constant-buffer slots: the Input LUT and the post-NR stack each dispatch once per view
+    // per frame (two a frame, six on three screens), and a slot must outlive the frames in flight that read it.
+    static constexpr uint32_t kLutHeapCount = 32;
     ID3D12RootSignature* _lutRootSignature = nullptr;
     ID3D12PipelineState* _lutPipelineState = nullptr;
     bool _lutPipelineFailed = false;

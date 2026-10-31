@@ -90,7 +90,13 @@ Texture3D<float4> gLut : register(t1);
 #endif
 SamplerState gLutSampler : register(s0);
 #ifdef VK_MODE
+// LUT_ANY_FORMAT_TARGET: the post-NR stack grades the game's own image in place, whatever its format, so that
+// variant declares no format (the device must allow storage writes without one, as the resolve already needs).
+#ifdef LUT_ANY_FORMAT_TARGET
+[[vk::binding(4, 0)]]
+#else
 [[vk::binding(4, 0)]] [[vk::image_format("rgba16f")]]
+#endif
 #endif
 RWTexture2D<float4> gTarget : register(u0);
 #ifdef VK_MODE

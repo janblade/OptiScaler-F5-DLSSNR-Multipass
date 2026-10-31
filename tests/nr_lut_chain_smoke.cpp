@@ -4,6 +4,7 @@
 // cl /std:c++20 /EHsc /W4 tests/nr_lut_chain_smoke.cpp
 #include "../OptiScaler/dlssnr/DlssNr_LutChain.h"
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -95,45 +96,48 @@ int main(int argc, char** argv)
 {
     std::string err;
     Lut3D out;
+    float ps = 0.0f; // the strength the pass applies the bake with
 
     // Nothing to do: empty, null, zero strength.
-    CHECK(!BakeChain({}, &out, &err));
+    CHECK(!BakeChain({}, &out, &err, &ps));
     const Lut3D id17 = Identity(17);
-    CHECK(!BakeChain({ { nullptr, 1.0f } }, &out, &err));
-    CHECK(!BakeChain({ { &id17, 0.0f } }, &out, &err));
+    CHECK(!BakeChain({ { nullptr, 1.0f } }, &out, &err, &ps));
+    CHECK(!BakeChain({ { &id17, 0.0f } }, &out, &err, &ps));
     CHECK(out.size == 0);
 
     // One layer at full strength is the file itself, bit for bit, whatever its size and domain.
     const Lut3D curvy33 = Curvy(33, 2.2f, 0.3f);
-    CHECK(BakeChain({ { &curvy33, 1.0f } }, &out, &err));
-    CHECK(out.size == 33 && out.rgb == curvy33.rgb);
+    CHECK(BakeChain({ { &curvy33, 1.0f } }, &out, &err, &ps));
+    CHECK(out.size == 33 && out.rgb == curvy33.rgb && ps == 1.0f);
     const Lut3D dom = Make(9, [](const float* i, float* o) { for (int c = 0; c < 3; ++c) o[c] = i[c] * 0.5f; }, -0.25f, 1.25f);
-    CHECK(BakeChain({ { &dom, 1.0f } }, &out, &err));
+    CHECK(BakeChain({ { &dom, 1.0f } }, &out, &err, &ps));
     CHECK(out.size == 9 && out.domainMin[0] == -0.25f && out.domainMax[2] == 1.25f && out.rgb == dom.rgb);
 
-    // One layer at half strength equals the shader's lerp(display, graded, s), anywhere inside the domain.
+    // One layer at half strength is still the file itself, with the strength left to the pass: the single-LUT pass
+    // exactly, also for display values outside the domain (HDR highlights above 1), which a blended lattice would clip.
     for (const Lut3D* lut : { &curvy33, &dom })
     {
-        CHECK(BakeChain({ { lut, 0.5f } }, &out, &err));
+        CHECK(BakeChain({ { lut, 0.5f } }, &out, &err, &ps));
+        CHECK(out.rgb == lut->rgb && ps == 0.5f);
         std::mt19937 rng(3);
-        std::uniform_real_distribution<float> u(lut->domainMin[0], lut->domainMax[0]);
+        std::uniform_real_distribution<float> u(lut->domainMin[0] - 0.5f, lut->domainMax[0] + 0.5f);
         float worst = 0.0f;
         for (int s = 0; s < 5000; ++s)
         {
             const float in[3] = { u(rng), u(rng), u(rng) };
             float want[3], got[3];
             ApplyLayer(*lut, 0.5f, in, want);
-            SampleLut(out, in, got);
+            ApplyLayer(out, ps, in, got);
             for (int c = 0; c < 3; ++c)
                 worst = std::max(worst, std::fabs(got[c] - want[c]));
         }
-        CHECK(worst < 1e-5f);
+        CHECK(worst == 0.0f);
     }
 
     // An identity layer anywhere in a stack changes nothing: the result is the other layer.
     {
         const Lut3D a = Curvy(33, 1.8f, 0.0f);
-        CHECK(BakeChain({ { &id17, 1.0f }, { &a, 1.0f }, { &id17, 1.0f } }, &out, &err));
+        CHECK(BakeChain({ { &id17, 1.0f }, { &a, 1.0f }, { &id17, 1.0f } }, &out, &err, &ps));
         CHECK(out.size == 33);
         double mean = 0.0;
         const float worst = SequentialError({ { &a, 1.0f } }, out, &mean);
@@ -146,7 +150,7 @@ int main(int argc, char** argv)
     {
         const Lut3D a = Curvy(33, 2.2f, 0.3f);
         const Lut3D b = Curvy(33, 0.6f, 0.0f);
-        CHECK(BakeChain({ { &a, 1.0f }, { &b, 0.7f } }, &out, &err));
+        CHECK(BakeChain({ { &a, 1.0f }, { &b, 0.7f } }, &out, &err, &ps));
         CHECK(out.size == 33);
         double mean = 0.0;
         const float worst = SequentialError({ { &a, 1.0f }, { &b, 0.7f } }, out, &mean);
@@ -155,7 +159,7 @@ int main(int argc, char** argv)
         CHECK(mean < 0.002);
 
         const Lut3D a65 = Curvy(65, 2.2f, 0.3f);
-        CHECK(BakeChain({ { &a65, 1.0f }, { &b, 0.7f } }, &out, &err));
+        CHECK(BakeChain({ { &a65, 1.0f }, { &b, 0.7f } }, &out, &err, &ps));
         CHECK(out.size == 65);
         const float worst65 = SequentialError({ { &a65, 1.0f }, { &b, 0.7f } }, out, &mean);
         printf("2 layers @65: worst %.5f mean %.6f\n", worst65, mean);
@@ -165,13 +169,20 @@ int main(int argc, char** argv)
     // Mixed sizes and a domain: result is clamped into 17..65, 4 layers allowed, a fifth is not.
     {
         const Lut3D tiny = Curvy(5, 1.4f, 0.1f);
-        CHECK(BakeChain({ { &tiny, 1.0f }, { &dom, 1.0f } }, &out, &err));
-        CHECK(out.size == kChainMinSize);
+        CHECK(BakeChain({ { &tiny, 1.0f }, { &dom, 1.0f } }, &out, &err, &ps));
+        CHECK(out.size == kChainMinSize && ps == 1.0f);
+        // The values too: the -0.25..1.25 domain layer is mapped right inside the stack.
+        double mean = 0.0;
+        const float worstDom = SequentialError({ { &tiny, 1.0f }, { &dom, 1.0f } }, out, &mean);
+        printf("tiny + domain layer @17: worst %.5f mean %.6f\n", worstDom, mean);
+        CHECK(worstDom < 0.02f);
+        CHECK(BakeChain({ { &dom, 0.6f }, { &tiny, 1.0f } }, &out, &err, &ps));
+        CHECK(SequentialError({ { &dom, 0.6f }, { &tiny, 1.0f } }, out, &mean) < 0.02f);
         const Lut3D big = Identity(128);
-        CHECK(BakeChain({ { &big, 1.0f }, { &tiny, 1.0f } }, &out, &err));
+        CHECK(BakeChain({ { &big, 1.0f }, { &tiny, 1.0f } }, &out, &err, &ps));
         CHECK(out.size == kChainMaxSize);
-        CHECK(BakeChain({ { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f } }, &out, &err));
-        CHECK(!BakeChain({ { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f } }, &out, &err));
+        CHECK(BakeChain({ { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f } }, &out, &err, &ps));
+        CHECK(!BakeChain({ { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f }, { &tiny, 1.0f } }, &out, &err, &ps));
         CHECK(out.size == 0 && !err.empty());
     }
 
@@ -179,7 +190,8 @@ int main(int argc, char** argv)
     {
         const auto write = [](const char* name, const Lut3D& l)
         {
-            const std::string path = std::string("nr_lut_chain_smoke_") + name + ".cube";
+            const std::string path =
+                (std::filesystem::temp_directory_path() / (std::string("nr_lut_chain_smoke_") + name + ".cube")).string();
             std::ofstream f(path);
             f << "LUT_3D_SIZE " << l.size << "\n";
             for (size_t i = 0; i < l.rgb.size(); i += 3)
@@ -188,20 +200,61 @@ int main(int argc, char** argv)
         };
         const std::string pa = write("a", Curvy(17, 2.0f, 0.2f));
         const std::string pb = write("b", Curvy(17, 0.7f, 0.0f));
-        const std::string bad = "nr_lut_chain_smoke_missing.cube";
+        const std::string bad = (std::filesystem::temp_directory_path() / "nr_lut_chain_smoke_missing.cube").string();
 
         DlssNr_LutChainState st;
         CHECK(!DlssNr_LutChainEnsure(&st, {}));
         CHECK(!st.wanted && !st.Loaded());
 
         CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f } }));
-        CHECK(st.wanted && st.baked.size == 17 && st.failedLayer < 0);
+        CHECK(st.wanted && st.baked.size == 17 && st.failedLayer < 0 && st.strength == 1.0f);
+
+        // A single layer's strength goes to the pass: no re-bake, so no re-upload.
+        const std::string key1 = st.key;
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 0.4f } }));
+        CHECK(st.key == key1 && st.strength == 0.4f);
+        CHECK(st.description.find("baked") == std::string::npos && st.description.find("_a.cube (17^3)") != std::string::npos);
+
+        // Every layer at 0: nothing applied, and said why.
+        CHECK(!DlssNr_LutChainEnsure(&st, { { pa, 0.0f } }));
+        CHECK(!st.error.empty());
+
+        // The file re-exported in place is read again within a time-check period, and only then.
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f } }));
+        const std::vector<float> before = st.baked.rgb;
+        const auto written = std::filesystem::last_write_time(pa);
+        write("a", Curvy(17, 1.3f, 0.0f));
+        std::filesystem::last_write_time(pa, written + std::chrono::seconds(5));
+        int calls = 0;
+        while (st.baked.rgb == before && calls < 200)
+        {
+            DlssNr_LutChainEnsure(&st, { { pa, 1.0f } });
+            ++calls;
+        }
+        printf("re-exported file picked up after %d calls\n", calls);
+        CHECK(st.baked.rgb != before && calls <= 61);
+        write("a", Curvy(17, 2.0f, 0.2f));
+        std::filesystem::last_write_time(pa, written + std::chrono::seconds(10));
+        CHECK(DlssNr_LutChainEnsure(&st, {}) == false); // forget it, so the stack below starts from the file as written
 
         CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.5f } }));
         const std::vector<float> two = st.baked.rgb;
         const std::string key2 = st.key;
         CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.5f } })); // unchanged: not baked again
         CHECK(st.key == key2 && st.baked.rgb == two);
+        CHECK(st.strength == 1.0f && st.description.find(" -> ") != std::string::npos &&
+              st.description.find("baked at 17^3") != std::string::npos);
+
+        // A strength change in a stack is in the bake: baked again.
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.6f } }));
+        CHECK(st.key != key2 && st.baked.rgb != two);
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.5f } }));
+        CHECK(st.baked.rgb == two);
+
+        // A layer at 0 is not in the bake, nor in the description.
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.0f } }));
+        CHECK(st.description.find("_b.cube") == std::string::npos && st.strength == 1.0f);
+        CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { pb, 0.5f } }));
 
         // A layer that cannot be read: the chain that worked stays, the failure is named.
         CHECK(DlssNr_LutChainEnsure(&st, { { pa, 1.0f }, { bad, 0.5f } }));
@@ -248,7 +301,7 @@ int main(int argc, char** argv)
             {
                 std::vector<ChainLayer> layers = { { &luts[i], 1.0f }, { &luts[j], 0.8f } };
                 Lut3D baked;
-                if (!BakeChain(layers, &baked, &err))
+                if (!BakeChain(layers, &baked, &err, &ps))
                     continue;
                 double mean = 0.0;
                 const float worst = SequentialError(layers, baked, &mean);

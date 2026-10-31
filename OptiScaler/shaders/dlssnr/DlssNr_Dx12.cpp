@@ -3020,8 +3020,8 @@ bool DlssNr_Dx12::DispatchPostLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Re
                               _postLutTextureKey))
         return false;
 
-    return DispatchLutWith(InCmdList, InSource, OutTarget, Width, Height, 1.0f, InputEncoding, ColourIsLinearHdr, White,
-                           ExposureTex, _postLut.baked, _postLutTexture);
+    return DispatchLutWith(InCmdList, InSource, OutTarget, Width, Height, _postLut.strength, InputEncoding,
+                           ColourIsLinearHdr, White, ExposureTex, _postLut.baked, _postLutTexture);
 }
 
 void DlssNr_Dx12::ReleasePostLut()
@@ -6471,10 +6471,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // The post-NR LUT stack (memory/plans/2026-10-31-nr-lut-chain.md): grades NR's returned picture, which the model
     // never sees, so it cannot move the exposure meter, skin detection or reuse. Same scratch / dispatch / copy-back as
     // the Inputs LUT above, with the same white point so a linear HDR frame lands in the LUT's 0-1 domain the same way.
-    // Only on a frame NR composed: a failed evaluation leaves the game's own image untouched.
+    // Only on a frame NR composed: a failed evaluation leaves the game's own image untouched. In Finished Picture mode
+    // this is the picture at the present seam, so the grade lands on it as it is shown.
     {
         DlssNr::PostLutStatus status;
         status.wanted = postLutWanted;
+        bool graded = false;
 
         if (!postLutWanted)
         {
@@ -6506,9 +6508,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
                 DlssNrConstants lutWhite {};
                 fillLiveWhitePoint(lutWhite);
-                const bool graded =
-                    DispatchPostLut(cmdList, target, g_nr.lutScratch, width, height, frame.InputEncoding, isHdrBuffer,
-                                    lutWhite, exposureTex, postLutEntries);
+                graded = DispatchPostLut(cmdList, target, g_nr.lutScratch, width, height, frame.InputEncoding,
+                                         isHdrBuffer, lutWhite, exposureTex, postLutEntries);
 
                 if (graded)
                 {
@@ -6526,15 +6527,21 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 status.error = "could not allocate the scratch target";
         }
 
-        const DlssNr_LutChainState& chain = PostLut();
-        status.loaded = postLutWanted && chain.Loaded();
-        status.chain = DlssNr_DescribeChain(chain);
-        if (postLutWanted && chain.failedLayer >= 0)
+        // A frame NR did not compose says nothing new: the last report stands.
+        if (!postLutWanted || composed)
         {
-            status.failedPath = chain.failedPath;
-            status.error = chain.error;
+            const DlssNr_LutChainState& chain = PostLut();
+            status.loaded = graded && chain.Loaded();
+            status.chain = chain.description;
+            if (postLutWanted && !chain.error.empty())
+            {
+                status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();
+                status.error = chain.error;
+            }
+            if (status.loaded && frame.FinishedPicture)
+                status.note = "Graded on the finished picture (Finished Picture mode).";
+            DlssNr::ReportPostLutStatus(status);
         }
-        DlssNr::ReportPostLutStatus(status);
     }
 
     // Failed evaluations leave the game's original image intact. A successful copy-back writes

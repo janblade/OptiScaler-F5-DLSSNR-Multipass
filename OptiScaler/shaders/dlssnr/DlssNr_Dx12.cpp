@@ -2955,7 +2955,8 @@ bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resour
 bool DlssNr_Dx12::DispatchLutWith(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource,
                                   ID3D12Resource* OutTarget, unsigned int Width, unsigned int Height, float Strength,
                                   uint32_t InputEncoding, bool ColourIsLinearHdr, const DlssNrConstants& White,
-                                  ID3D12Resource* ExposureTex, const DlssNr::Lut3D& Lut, ID3D12Resource* Texture)
+                                  ID3D12Resource* ExposureTex, const DlssNr::Lut3D& Lut, ID3D12Resource* Texture,
+                                  bool SceneLinear, float SceneExposure)
 {
     const uint32_t slot = _lutHeapIndex;
     _lutHeapIndex = (_lutHeapIndex + 1) % kLutHeapCount;
@@ -2984,6 +2985,8 @@ bool DlssNr_Dx12::DispatchLutWith(ID3D12GraphicsCommandList* InCmdList, ID3D12Re
     CopyLiveWhitePoint(constants, White);
     if (ExposureTex == nullptr)
         constants.UseGameExposure = constants.UseExposureWhitePoint = 0u;
+    constants.SceneLinear = SceneLinear ? 1u : 0u;
+    constants.SceneExposure = SceneExposure;
 
     if (!CreateConstantsBuffer(_device, _lutConstantBuffers[slot], constants, heap.GetCbvCPU(0)))
     {
@@ -3004,9 +3007,10 @@ bool DlssNr_Dx12::DispatchLutWith(ID3D12GraphicsCommandList* InCmdList, ID3D12Re
 bool DlssNr_Dx12::DispatchPostLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource,
                                   ID3D12Resource* OutTarget, unsigned int Width, unsigned int Height,
                                   uint32_t InputEncoding, bool ColourIsLinearHdr, const DlssNrConstants& White,
-                                  ID3D12Resource* ExposureTex, const std::vector<DlssNr::ChainEntry>& Entries)
+                                  ID3D12Resource* ExposureTex, const std::vector<DlssNr::ChainEntry>& Entries,
+                                  bool SceneLinear, float SceneExposure)
 {
-    if (!DlssNr_LutChainEnsure(&_postLut, Entries))
+    if (!DlssNr_LutChainEnsure(&_postLut, Entries, SceneLinear))
         return false;
 
     if (InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr || Width == 0 ||
@@ -3021,7 +3025,8 @@ bool DlssNr_Dx12::DispatchPostLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Re
         return false;
 
     return DispatchLutWith(InCmdList, InSource, OutTarget, Width, Height, _postLut.strength, InputEncoding,
-                           ColourIsLinearHdr, White, ExposureTex, _postLut.baked, _postLutTexture);
+                           ColourIsLinearHdr, White, ExposureTex, _postLut.baked, _postLutTexture, SceneLinear,
+                           SceneExposure);
 }
 
 void DlssNr_Dx12::ReleasePostLut()
@@ -6477,6 +6482,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DlssNr::PostLutStatus status;
         status.wanted = postLutWanted;
         bool graded = false;
+        const bool postSceneLinear = cfg.DlssNrPostLutSceneLinear.value_or_default();
+        const float postSceneExposure = std::exp2(cfg.DlssNrPostLutSceneExposure.value_or_default());
 
         if (!postLutWanted)
         {
@@ -6508,8 +6515,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
                 DlssNrConstants lutWhite {};
                 fillLiveWhitePoint(lutWhite);
-                graded = DispatchPostLut(cmdList, target, g_nr.lutScratch, width, height, frame.InputEncoding,
-                                         isHdrBuffer, lutWhite, exposureTex, postLutEntries);
+                graded =
+                    DispatchPostLut(cmdList, target, g_nr.lutScratch, width, height, frame.InputEncoding, isHdrBuffer,
+                                    lutWhite, exposureTex, postLutEntries, postSceneLinear, postSceneExposure);
 
                 if (graded)
                 {
@@ -6540,6 +6548,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
             if (status.loaded && frame.FinishedPicture)
                 status.note = "Graded on the finished picture (Finished Picture mode).";
+            if (status.loaded && postSceneLinear && frame.InputEncoding != 4u && !isHdrBuffer)
+                status.note += std::string(status.note.empty() ? "" : " ") +
+                               "Scene-linear input on an SDR picture: its light is estimated (an approximation).";
             DlssNr::ReportPostLutStatus(status);
         }
     }

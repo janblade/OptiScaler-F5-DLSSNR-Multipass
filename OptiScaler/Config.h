@@ -429,6 +429,10 @@ class Config
     CustomOptional<std::string> DlssNrPostLutFile[kPostLutLayers] { std::string(), std::string(), std::string(),
                                                                     std::string() };
     CustomOptional<float> DlssNrPostLutStrength[kPostLutLayers] { 1.0f, 1.0f, 1.0f, 1.0f };
+    // The post-NR stack fed scene-linear light encoded to ARRI LogC4 / AWG4 instead of the display picture, for
+    // view-transform LUTs (LogC4 in, sRGB out). An SDR picture gets an inverse tone curve first (an approximation).
+    CustomOptional<bool> DlssNrPostLutSceneLinear { false };
+    CustomOptional<float> DlssNrPostLutSceneExposure { 0.0f }; // EV on that light before LogC4, -6..6
 
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
     // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.

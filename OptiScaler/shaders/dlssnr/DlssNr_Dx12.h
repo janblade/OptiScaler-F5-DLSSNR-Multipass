@@ -322,13 +322,14 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     bool DispatchLutWith(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
                          unsigned int Width, unsigned int Height, float Strength, uint32_t InputEncoding,
                          bool ColourIsLinearHdr, const DlssNrConstants& White, ID3D12Resource* ExposureTex,
-                         const DlssNr::Lut3D& Lut, ID3D12Resource* Texture);
+                         const DlssNr::Lut3D& Lut, ID3D12Resource* Texture, bool SceneLinear = false,
+                         float SceneExposure = 1.0f);
     // The post-NR stack on NR's returned picture: parses and bakes `Entries` (re-baking only on a change), uploads the
     // baked lattice and dispatches it. Strength is already in the bake. False when no chain is usable (see PostLut()).
     bool DispatchPostLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource, ID3D12Resource* OutTarget,
                          unsigned int Width, unsigned int Height, uint32_t InputEncoding, bool ColourIsLinearHdr,
                          const DlssNrConstants& White, ID3D12Resource* ExposureTex,
-                         const std::vector<DlssNr::ChainEntry>& Entries);
+                         const std::vector<DlssNr::ChainEntry>& Entries, bool SceneLinear, float SceneExposure);
     // Frees the stack's parsed layers and texture (an emptied stack holds nothing).
     void ReleasePostLut();
     const DlssNr_LutChainState& PostLut() const { return _postLut; }

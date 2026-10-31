@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -90,7 +91,8 @@ inline bool BakeChain(const std::vector<ChainLayer>& layers, Lut3D* out, std::st
 
     for (const ChainLayer& layer : layers)
     {
-        if (layer.lut == nullptr || layer.lut->size < 2 || layer.lut->rgb.size() < (size_t) layer.lut->size * layer.lut->size * layer.lut->size * 3)
+        if (layer.lut == nullptr || layer.lut->size < 2 ||
+            layer.lut->rgb.size() < (size_t) layer.lut->size * layer.lut->size * layer.lut->size * 3)
             continue;
         if (!(layer.strength > 0.0f))
             continue;
@@ -130,7 +132,8 @@ inline bool BakeChain(const std::vector<ChainLayer>& layers, Lut3D* out, std::st
                         const int idx[3] = { r, g, b };
                         for (int c = 0; c < 3; ++c)
                         {
-                            const float id = src.domainMin[c] + (src.domainMax[c] - src.domainMin[c]) * ((float) idx[c] / (float) (m - 1));
+                            const float id = src.domainMin[c] +
+                                             (src.domainMax[c] - src.domainMin[c]) * ((float) idx[c] / (float) (m - 1));
                             float& v = out->rgb[(((size_t) b * m + g) * m + r) * 3 + c];
                             v = id + (v - id) * s;
                         }
@@ -172,6 +175,16 @@ struct ChainEntry
     std::string path;
     float strength = 1.0f;
 };
+
+// The post-NR stack as Config holds it (templated so this header stays free of Config.h).
+template <typename ConfigT> inline std::vector<ChainEntry> PostLutEntries(const ConfigT& cfg)
+{
+    std::vector<ChainEntry> entries;
+    for (int i = 0; i < ConfigT::kPostLutLayers; ++i)
+        entries.push_back(
+            { cfg.DlssNrPostLutFile[i].value_or_default(), cfg.DlssNrPostLutStrength[i].value_or_default() });
+    return entries;
+}
 
 } // namespace DlssNr
 
@@ -255,4 +268,23 @@ inline bool DlssNr_LutChainEnsure(DlssNr_LutChainState* state, const std::vector
     }
 
     return state->Loaded();
+}
+
+// "A (33^3) -> B (65^3), baked at 33^3" for the menu's status line; empty when nothing is loaded.
+inline std::string DlssNr_DescribeChain(const DlssNr_LutChainState& state)
+{
+    if (!state.Loaded())
+        return std::string();
+
+    std::string text;
+    for (const DlssNr_LutState& layer : state.layers)
+    {
+        if (!layer.Loaded())
+            continue;
+        if (!text.empty())
+            text += " -> ";
+        text +=
+            std::filesystem::path(layer.loadedPath).filename().string() + " (" + std::to_string(layer.lut.size) + "^3)";
+    }
+    return text + ", baked at " + std::to_string(state.baked.size) + "^3";
 }

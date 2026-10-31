@@ -9,6 +9,7 @@ namespace
 {
 std::mutex g_mutex;
 LutStatus g_status;
+PostLutStatus g_postStatus;
 } // namespace
 
 void ReportLutStatus(bool wanted, const std::string& loadedPath, int size, bool failed, const std::string& error,
@@ -30,5 +31,18 @@ LutStatus ReadLutStatus()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_status;
+}
+
+void ReportPostLutStatus(const PostLutStatus& status)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_postStatus = status;
+    g_postStatus.seen = true;
+}
+
+PostLutStatus ReadPostLutStatus()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_postStatus;
 }
 } // namespace DlssNr

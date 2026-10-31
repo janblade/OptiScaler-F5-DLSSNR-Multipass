@@ -27,6 +27,22 @@ struct LutStatus
     float strength = 1.0f;
 };
 
+// The post-NR LUT stack's last frame, for its own card. Same split as above.
+struct PostLutStatus
+{
+    bool seen = false;   // at least one frame has reported
+    bool wanted = false; // the stack held at least one file
+    bool loaded = false; // a chain is active
+    std::string chain;   // DlssNr_DescribeChain
+    std::string failedPath;
+    std::string error;
+    std::string note; // why it is not applied when it is wanted (a mode that does not run it)
+};
+
+// Render thread. A frame where the stack is empty reports that too, so the card never shows a stale chain.
+void ReportPostLutStatus(const PostLutStatus& status);
+
 // Menu thread.
 LutStatus ReadLutStatus();
+PostLutStatus ReadPostLutStatus();
 } // namespace DlssNr

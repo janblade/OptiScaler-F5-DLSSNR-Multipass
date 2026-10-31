@@ -2714,6 +2714,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _lutRootSignature->Release();
     if (_lutTexture)
         _lutTexture->Release();
+    if (_postLutTexture)
+        _postLutTexture->Release();
     for (auto& buffer : _lutConstantBuffers)
     {
         if (buffer != nullptr)
@@ -2817,22 +2819,33 @@ void DlssNr_Dx12::ReleaseLutTexture()
 
 bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
 {
-    if (!_lutState.Loaded() || InCmdList == nullptr || _device == nullptr)
+    if (!_lutState.Loaded())
         return false;
 
-    const int size = _lutState.lut.size;
+    return EnsureLutTextureFrom(InCmdList, _lutState.lut, _lutState.loadedPath, _lutTexture, _lutTextureSize,
+                                _lutTextureSourcePath);
+}
+
+bool DlssNr_Dx12::EnsureLutTextureFrom(ID3D12GraphicsCommandList* InCmdList, const DlssNr::Lut3D& Lut,
+                                       const std::string& Key, ID3D12Resource*& Texture, int& TextureSize,
+                                       std::string& TextureKey)
+{
+    if (Lut.size < 2 || InCmdList == nullptr || _device == nullptr)
+        return false;
+
+    const int size = Lut.size;
 
     // Keyed on the loaded path, not the lattice size: two different .cube files sharing a size (17/33/65
     // are near-universal) must not read as "nothing changed" just because neither resized the texture --
     // that was the bug (Review Pass, 2026-10-04): switching between two same-size LUTs silently kept
     // sampling whichever uploaded first.
-    if (_lutTexture != nullptr && _lutTextureSize == size && _lutTextureSourcePath == _lutState.loadedPath)
+    if (Texture != nullptr && TextureSize == size && TextureKey == Key)
         return true; // already uploaded, and it is still this exact file
 
-    if (_lutTexture != nullptr)
-        ParkNrResource(_lutTexture);
-    _lutTextureSize = 0;
-    _lutTextureSourcePath.clear();
+    if (Texture != nullptr)
+        ParkNrResource(Texture);
+    TextureSize = 0;
+    TextureKey.clear();
 
     D3D12_HEAP_PROPERTIES heapProps {};
     heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2848,8 +2861,8 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
     HRESULT hr = _device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
-                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&_lutTexture));
-    if (FAILED(hr) || _lutTexture == nullptr)
+                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&Texture));
+    if (FAILED(hr) || Texture == nullptr)
     {
         LOG_ERROR("DLSS-NR: the LUT texture could not be allocated ({0}x{0}x{0})", size);
         return false;
@@ -2873,7 +2886,7 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     if (FAILED(hr) || uploadBuffer == nullptr)
     {
         LOG_ERROR("DLSS-NR: the LUT texture's upload buffer could not be allocated");
-        ParkNrResource(_lutTexture);
+        ParkNrResource(Texture);
         return false;
     }
 
@@ -2883,17 +2896,17 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     {
         LOG_ERROR("DLSS-NR: the LUT texture's upload buffer could not be mapped");
         uploadBuffer->Release();
-        ParkNrResource(_lutTexture);
+        ParkNrResource(Texture);
         return false;
     }
 
-    DlssNrLutPack::PackHalf4(_lutState.lut.rgb.data(), size, mapped, (size_t) footprint.Footprint.RowPitch,
+    DlssNrLutPack::PackHalf4(Lut.rgb.data(), size, mapped, (size_t) footprint.Footprint.RowPitch,
                              (size_t) footprint.Footprint.RowPitch * (size_t) size);
 
     uploadBuffer->Unmap(0, nullptr);
 
     D3D12_TEXTURE_COPY_LOCATION dst {};
-    dst.pResource = _lutTexture;
+    dst.pResource = Texture;
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     dst.SubresourceIndex = 0;
 
@@ -2903,15 +2916,15 @@ bool DlssNr_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
     src.PlacedFootprint = footprint;
 
     InCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    Barrier(InCmdList, _lutTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Barrier(InCmdList, Texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // The copy above is only recorded, not yet executed -- the upload buffer must outlive it, which
     // ParkNrResource's deferred release (rather than an immediate one here) already guarantees for every
     // other scratch resource in this file.
     ParkNrResource(uploadBuffer);
 
-    _lutTextureSize = size;
-    _lutTextureSourcePath = _lutState.loadedPath;
+    TextureSize = size;
+    TextureKey = Key;
     return true;
 }
 
@@ -2935,13 +2948,22 @@ bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resour
     if (!EnsureLutTexture(InCmdList))
         return false;
 
+    return DispatchLutWith(InCmdList, InSource, OutTarget, Width, Height, Strength, InputEncoding, ColourIsLinearHdr,
+                           White, ExposureTex, _lutState.lut, _lutTexture);
+}
+
+bool DlssNr_Dx12::DispatchLutWith(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource,
+                                  ID3D12Resource* OutTarget, unsigned int Width, unsigned int Height, float Strength,
+                                  uint32_t InputEncoding, bool ColourIsLinearHdr, const DlssNrConstants& White,
+                                  ID3D12Resource* ExposureTex, const DlssNr::Lut3D& Lut, ID3D12Resource* Texture)
+{
     const uint32_t slot = _lutHeapIndex;
     _lutHeapIndex = (_lutHeapIndex + 1) % kLutHeapCount;
 
     FrameDescriptorHeap& heap = _lutHeaps[slot];
 
     CreateShaderResourceView(_device, InSource, heap.GetSrvCPU(0));
-    CreateShaderResourceView(_device, _lutTexture, heap.GetSrvCPU(1));
+    CreateShaderResourceView(_device, Texture, heap.GetSrvCPU(1));
     // The source stands in when there is no live exposure; the constants then say not to read it.
     CreateShaderResourceView(_device, ExposureTex != nullptr ? ExposureTex : InSource, heap.GetSrvCPU(2));
     CreateUnorderedAccessView(_device, OutTarget, heap.GetUavCPU(0), 0);
@@ -2950,13 +2972,13 @@ bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resour
     constants.Width = Width;
     constants.Height = Height;
     constants.Strength = Strength;
-    constants.DomainMinR = _lutState.lut.domainMin[0];
-    constants.DomainMinG = _lutState.lut.domainMin[1];
-    constants.DomainMinB = _lutState.lut.domainMin[2];
-    constants.DomainMaxR = _lutState.lut.domainMax[0];
-    constants.DomainMaxG = _lutState.lut.domainMax[1];
-    constants.DomainMaxB = _lutState.lut.domainMax[2];
-    constants.LutSize = (uint32_t) _lutState.lut.size;
+    constants.DomainMinR = Lut.domainMin[0];
+    constants.DomainMinG = Lut.domainMin[1];
+    constants.DomainMinB = Lut.domainMin[2];
+    constants.DomainMaxR = Lut.domainMax[0];
+    constants.DomainMaxG = Lut.domainMax[1];
+    constants.DomainMaxB = Lut.domainMax[2];
+    constants.LutSize = (uint32_t) Lut.size;
     constants.InputEncoding = InputEncoding;
     constants.ColourIsLinearHdr = ColourIsLinearHdr ? 1u : 0u;
     CopyLiveWhitePoint(constants, White);
@@ -2977,6 +2999,38 @@ bool DlssNr_Dx12::DispatchLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resour
     InCmdList->Dispatch((Width + 7) / 8, (Height + 7) / 8, 1);
 
     return true;
+}
+
+bool DlssNr_Dx12::DispatchPostLut(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InSource,
+                                  ID3D12Resource* OutTarget, unsigned int Width, unsigned int Height,
+                                  uint32_t InputEncoding, bool ColourIsLinearHdr, const DlssNrConstants& White,
+                                  ID3D12Resource* ExposureTex, const std::vector<DlssNr::ChainEntry>& Entries)
+{
+    if (!DlssNr_LutChainEnsure(&_postLut, Entries))
+        return false;
+
+    if (InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr || Width == 0 ||
+        Height == 0)
+        return false;
+
+    if (!LutPipelineReady())
+        return false;
+
+    if (!EnsureLutTextureFrom(InCmdList, _postLut.baked, _postLut.key, _postLutTexture, _postLutTextureSize,
+                              _postLutTextureKey))
+        return false;
+
+    return DispatchLutWith(InCmdList, InSource, OutTarget, Width, Height, 1.0f, InputEncoding, ColourIsLinearHdr, White,
+                           ExposureTex, _postLut.baked, _postLutTexture);
+}
+
+void DlssNr_Dx12::ReleasePostLut()
+{
+    if (_postLutTexture != nullptr)
+        ParkNrResource(_postLutTexture);
+    _postLutTextureSize = 0;
+    _postLutTextureKey.clear();
+    DlssNr_LutChainEnsure(&_postLut, {});
 }
 
 bool DlssNr_Dx12::DispatchDetailStats(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
@@ -4723,6 +4777,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // this epic existed; only the model and everything after it see the grade. Writes back onto
     // `target` itself (via lutScratch and a GPU copy) rather than reassigning the pointer, so codec,
     // model and resolve all still run exactly as they did before the epic existed, LUT loaded or not.
+    const auto postLutEntries = DlssNr::PostLutEntries(cfg);
+    const bool postLutWanted = std::any_of(postLutEntries.begin(), postLutEntries.end(),
+                                           [](const DlssNr::ChainEntry& e) { return !e.path.empty(); });
+
     {
         const std::string lutPath = cfg.DlssNrLutFile.value_or_default();
 
@@ -4796,7 +4854,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // Fixed (Review Pass, 2026-10-04): this used to park only the scratch target, so _lutTexture
             // stayed resident for the rest of the session once any LUT had ever loaded. A no-op once
             // already released/parked.
-            ParkNrResource(g_nr.lutScratch);
+            // The post-NR stack shares the scratch, so it stays while that stack wants it.
+            if (!postLutWanted)
+                ParkNrResource(g_nr.lutScratch);
             ReleaseLutTexture();
             DlssNr::ReportLutStatus(false, "", 0, false, "", "", cfg.DlssNrLutStrength.value_or_default());
         }
@@ -6406,6 +6466,75 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             for (ID3D12Resource* unpacked : { EdgeCompression::proxy, EdgeCompression::answer })
                 Barrier(cmdList, unpacked, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    // The post-NR LUT stack (memory/plans/2026-10-31-nr-lut-chain.md): grades NR's returned picture, which the model
+    // never sees, so it cannot move the exposure meter, skin detection or reuse. Same scratch / dispatch / copy-back as
+    // the Inputs LUT above, with the same white point so a linear HDR frame lands in the LUT's 0-1 domain the same way.
+    // Only on a frame NR composed: a failed evaluation leaves the game's own image untouched.
+    {
+        DlssNr::PostLutStatus status;
+        status.wanted = postLutWanted;
+
+        if (!postLutWanted)
+        {
+            ReleasePostLut();
+            if (g_nr.lutScratch != nullptr && cfg.DlssNrLutFile.value_or_default().empty())
+                ParkNrResource(g_nr.lutScratch);
+        }
+        else if (composed)
+        {
+            if (g_nr.lutScratch != nullptr && g_nr.lutScratch->GetDesc().Format != desc.Format)
+            {
+                ParkNrResource(g_nr.lutScratch);
+                g_nr.lutScratchFailed = false;
+            }
+
+            if (g_nr.lutScratch == nullptr && !g_nr.lutScratchFailed)
+            {
+                g_nr.lutScratch = CreateScratch(device, desc.Format, width, height);
+                g_nr.lutScratchFailed = g_nr.lutScratch == nullptr;
+
+                if (g_nr.lutScratchFailed)
+                    LOG_ERROR("DLSS-NR: could not allocate the LUT pass's scratch target; the post-NR LUT is ignored");
+            }
+
+            if (g_nr.lutScratch != nullptr)
+            {
+                const D3D12_RESOURCE_STATES priorTargetState = targetState;
+                TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                DlssNrConstants lutWhite {};
+                fillLiveWhitePoint(lutWhite);
+                const bool graded =
+                    DispatchPostLut(cmdList, target, g_nr.lutScratch, width, height, frame.InputEncoding, isHdrBuffer,
+                                    lutWhite, exposureTex, postLutEntries);
+
+                if (graded)
+                {
+                    TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
+                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    DlssNr::CopyActiveColor(cmdList, target, g_nr.lutScratch, DlssNr::ColorExtent { width, height });
+                    Barrier(cmdList, g_nr.lutScratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+
+                TransitionTarget(priorTargetState);
+            }
+            else
+                status.error = "could not allocate the scratch target";
+        }
+
+        const DlssNr_LutChainState& chain = PostLut();
+        status.loaded = postLutWanted && chain.Loaded();
+        status.chain = DlssNr_DescribeChain(chain);
+        if (postLutWanted && chain.failedLayer >= 0)
+        {
+            status.failedPath = chain.failedPath;
+            status.error = chain.error;
+        }
+        DlssNr::ReportPostLutStatus(status);
     }
 
     // Failed evaluations leave the game's original image intact. A successful copy-back writes

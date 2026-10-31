@@ -26,41 +26,6 @@ constexpr int kMaxLutChainLayers = 4;
 constexpr int kChainMinSize = 17;
 constexpr int kChainMaxSize = 65;
 
-// Trilinear sample of `lut` at the display value `in`, with the shader's domain clamp. Lattice point i sits at
-// uvw = i / (size - 1); red is the fastest axis (see Lut3D::rgb).
-inline void SampleLut(const Lut3D& lut, const float in[3], float out[3])
-{
-    const int n = lut.size;
-    const float span = (float) (n - 1);
-    float f[3];
-    int i0[3];
-    int i1[3];
-
-    for (int c = 0; c < 3; ++c)
-    {
-        const float lo = lut.domainMin[c];
-        const float width = std::max(lut.domainMax[c] - lo, 1e-6f);
-        const float clamped = std::clamp(in[c], lut.domainMin[c], lut.domainMax[c]);
-        const float p = std::clamp((clamped - lo) / width, 0.0f, 1.0f) * span;
-        i0[c] = std::min((int) std::floor(p), n - 1);
-        i1[c] = std::min(i0[c] + 1, n - 1);
-        f[c] = p - (float) i0[c];
-    }
-
-    const auto at = [&](int r, int g, int b, int c) { return lut.rgb[(((size_t) b * n + g) * n + r) * 3 + c]; };
-
-    for (int c = 0; c < 3; ++c)
-    {
-        const float c00 = at(i0[0], i0[1], i0[2], c) * (1 - f[0]) + at(i1[0], i0[1], i0[2], c) * f[0];
-        const float c10 = at(i0[0], i1[1], i0[2], c) * (1 - f[0]) + at(i1[0], i1[1], i0[2], c) * f[0];
-        const float c01 = at(i0[0], i0[1], i1[2], c) * (1 - f[0]) + at(i1[0], i0[1], i1[2], c) * f[0];
-        const float c11 = at(i0[0], i1[1], i1[2], c) * (1 - f[0]) + at(i1[0], i1[1], i1[2], c) * f[0];
-        const float c0 = c00 * (1 - f[1]) + c10 * f[1];
-        const float c1 = c01 * (1 - f[1]) + c11 * f[1];
-        out[c] = c0 * (1 - f[2]) + c1 * f[2];
-    }
-}
-
 // One layer on a display value, as the shader does it.
 inline void ApplyLayer(const Lut3D& lut, float strength, const float in[3], float out[3])
 {
@@ -326,8 +291,8 @@ inline std::string DlssNr_DescribeChain(const DlssNr_LutChainState& state,
             continue;
         if (!text.empty())
             text += " -> ";
-        text +=
-            std::filesystem::path(layer.loadedPath).filename().string() + " (" + std::to_string(layer.lut.size) + "^3)";
+        text += std::filesystem::path(layer.loadedPath).filename().string() + " (" +
+                DlssNr::DescribeLutSize(layer.lut) + ")";
         ++shown;
     }
     return shown > 1 ? text + ", baked at " + std::to_string(state.baked.size) + "^3" : text;

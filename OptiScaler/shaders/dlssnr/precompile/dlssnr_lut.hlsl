@@ -127,8 +127,11 @@ float3 DecodeToDisplay01(float3 c, float white)
         // Open-ended scene-linear light: divide by the encode's white point to land near 1.0, then Neutwo
         // compresses [0, inf) into [0, 1) with no hard clip -- the same reversible proxy curve
         // dlssnr_replace_curve.hlsli's own Encode pass uses, so a bright highlight fades toward white instead of
-        // being clipped flat there.
-        return NeutwoEncode(max(c, 0.0) / white);
+        // being clipped flat there -- and LinearToSrgb puts it in the gamma-encoded display 0-1 a .cube is made for.
+        // Fixed (2026-10-31): the sRGB encode was missing, so a .cube read linear light as display values (mid grey
+        // 0.18 instead of 0.46): creative LUTs graded a far too dark picture and their sRGB result was read back as
+        // linear light.
+        return LinearToSrgb(NeutwoEncode(max(c, 0.0) / white));
     }
 
     // Gamma 2.2, passthrough and tone-mapped-sRGB frames are already display-referred: a .cube LUT is
@@ -142,7 +145,7 @@ float3 EncodeFromDisplay01(float3 c, float white)
         return EncodePQ(mul(kBt709To2020, SrgbToLinear(c) * white * kScrgbPerReferenceWhite));
 
     if (colourIsLinearHdr != 0)
-        return NeutwoDecode(saturate(c)) * white;
+        return NeutwoDecode(SrgbToLinear(c)) * white;
 
     return c;
 }

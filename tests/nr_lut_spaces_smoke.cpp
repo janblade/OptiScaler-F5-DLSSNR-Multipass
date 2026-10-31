@@ -174,6 +174,12 @@ int main(int argc, char** argv)
             expect(got.in == c.in && got.out == c.out && std::string(got.inFrom) == c.from,
                    std::string("name ") + c.stem + ": in " + Name(got.in) + " (" + got.inFrom + "), out " + Name(got.out));
         }
+        // The ini words (PostLutInput1-4) round-trip; anything unknown is Auto.
+        for (int i = kLookInputAuto; i < (int) LutSpace::Count; ++i)
+            expect(LookInputFromKey(LookInputKey(i)) == i, std::string("ini word ") + LookInputKey(i) + " does not round-trip");
+        expect(LookInputFromKey("LogC4") == (int) LutSpace::ArriLogC4 && LookInputFromKey("logc5") == kLookInputAuto &&
+                   LookInputFromKey("") == kLookInputAuto,
+               "ini words are not read case-blind with Auto for anything else");
         std::puts("4. names resolve");
     }
 

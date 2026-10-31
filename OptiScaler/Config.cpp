@@ -7,6 +7,7 @@
 #include "nvapi/fakenvapi.h"
 #include <hooks/Streamline_Hooks.h>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_LutSpaces.h>
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 
 #include <SimpleIni.h>
@@ -1303,6 +1304,8 @@ void Config::ReadDlssNr()
         const std::string n = std::to_string(i + 1);
         DlssNrPostLutFile[i].set_from_config(readString("DlssNr", ("PostLutFile" + n).c_str()));
         DlssNrPostLutStrength[i].set_from_config(readFloat("DlssNr", ("PostLutStrength" + n).c_str()));
+        DlssNrPostLutInput[i].set_from_config(
+            readString("DlssNr", ("PostLutInput" + n).c_str()).transform(DlssNr::LookInputFromKey));
         if (DlssNrPostLutStrength[i].has_value())
             DlssNrPostLutStrength[i] = std::isfinite(DlssNrPostLutStrength[i].value())
                                            ? std::clamp(DlssNrPostLutStrength[i].value(), 0.0f, 1.0f)
@@ -1563,6 +1566,14 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "PostLutStrength3", GetFloatValue(c.DlssNrPostLutStrength[2].value_for_config()).c_str());
     out.SetValue("DlssNr", "PostLutFile4", c.DlssNrPostLutFile[3].value_for_config_or("").c_str());
     out.SetValue("DlssNr", "PostLutStrength4", GetFloatValue(c.DlssNrPostLutStrength[3].value_for_config()).c_str());
+    out.SetValue("DlssNr", "PostLutInput1",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[0].value_for_config().value_or(DlssNr::kLookInputAuto)));
+    out.SetValue("DlssNr", "PostLutInput2",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[1].value_for_config().value_or(DlssNr::kLookInputAuto)));
+    out.SetValue("DlssNr", "PostLutInput3",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[2].value_for_config().value_or(DlssNr::kLookInputAuto)));
+    out.SetValue("DlssNr", "PostLutInput4",
+                 DlssNr::LookInputKey(c.DlssNrPostLutInput[3].value_for_config().value_or(DlssNr::kLookInputAuto)));
     out.SetValue("DlssNr", "ApplyModel", GetBoolValue(c.DlssNrApplyModel.value_for_config()).c_str());
     out.SetValue("DlssNr", "HoldFrame", GetBoolValue(c.DlssNrHoldFrame.value_for_config()).c_str());
 }
@@ -1823,6 +1834,10 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("PostLutStrength3", DlssNrPostLutStrength[2]),
         NR_PROFILE_FIELD("PostLutFile4", DlssNrPostLutFile[3]),
         NR_PROFILE_FIELD("PostLutStrength4", DlssNrPostLutStrength[3]),
+        NR_PROFILE_FIELD("PostLutInput1", DlssNrPostLutInput[0]),
+        NR_PROFILE_FIELD("PostLutInput2", DlssNrPostLutInput[1]),
+        NR_PROFILE_FIELD("PostLutInput3", DlssNrPostLutInput[2]),
+        NR_PROFILE_FIELD("PostLutInput4", DlssNrPostLutInput[3]),
         NR_PROFILE_FIELD("WhitePointSource", DlssNrWhitePointSource),
         NR_PROFILE_FIELD("GameExposureScale", DlssNrGameExposureScale),
         NR_PROFILE_FIELD("WhitePointTrim", DlssNrWhitePointTrim),

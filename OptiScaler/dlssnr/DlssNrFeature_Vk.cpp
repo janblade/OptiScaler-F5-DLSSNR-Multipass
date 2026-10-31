@@ -849,6 +849,8 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     const DlssNr_LutChainState& chain = g_vk.postLut;
     status.loaded = graded && chain.Loaded();
     status.chain = chain.description;
+    static_assert(std::size(decltype(status.inputs) {}) == DlssNr::kMaxLutChainLayers);
+    std::copy(std::begin(chain.inputs), std::end(chain.inputs), status.inputs);
     if (!chain.error.empty())
     {
         status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();

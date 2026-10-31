@@ -6533,6 +6533,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             const DlssNr_LutChainState& chain = PostLut();
             status.loaded = graded && chain.Loaded();
             status.chain = chain.description;
+            static_assert(std::size(decltype(status.inputs) {}) == DlssNr::kMaxLutChainLayers);
+            std::copy(std::begin(chain.inputs), std::end(chain.inputs), status.inputs);
             if (postLutWanted && !chain.error.empty())
             {
                 status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();

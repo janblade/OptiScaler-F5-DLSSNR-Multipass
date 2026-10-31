@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iterator>
 #include <string>
 
 namespace DlssNr
@@ -41,6 +42,26 @@ enum class LutSpace : int
 
 // A layer's "Look input" setting: Auto, or a LutSpace value (Display = None, use the picture as it is).
 constexpr int kLookInputAuto = -1;
+
+// The ini's words for the setting (PostLutInput1-4): auto, none, linear709, logc3, logc4, acescct, slog3, vlog,
+// davinci.
+inline const char* LookInputKey(int input)
+{
+    static const char* const kKeys[] = { "none", "linear709", "logc3", "logc4", "acescct", "slog3", "vlog", "davinci" };
+    static_assert(std::size(kKeys) == (size_t) LutSpace::Count);
+    return input >= 0 && input < (int) LutSpace::Count ? kKeys[input] : "auto";
+}
+
+// Anything it does not know (a typo, "auto") is Auto.
+inline int LookInputFromKey(const std::string& key)
+{
+    std::string k = key;
+    std::transform(k.begin(), k.end(), k.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    for (int i = 0; i < (int) LutSpace::Count; ++i)
+        if (k == LookInputKey(i))
+            return i;
+    return kLookInputAuto;
+}
 
 inline const char* LutSpaceName(LutSpace s)
 {
@@ -473,6 +494,15 @@ inline void SpacesFromName(const std::string& stem, bool* inFound, LutSpace* in,
         *out = rightLog;
     }
 }
+
+// What a layer's look input resolved to at the last bake, for the menu.
+struct LayerInput
+{
+    LutSpace space = LutSpace::Display; // what the layer reads
+    const char* from = "";              // Auto's source: "header", "name", "" (nothing found); "set" when chosen
+    bool converted = false;             // the picture is converted into `space` for it
+    LutSpace given = LutSpace::Display; // the signal the layer is actually handed (differs from `space`: a mismatch)
+};
 
 // A look's input and output as Auto sees them: the header first, then the name; nothing found = the picture
 // (an ordinary creative LUT). `inFrom` is "header", "name" or "" (nothing found).

@@ -3429,6 +3429,30 @@ static void RenderLutSection(Config* config)
     }
 }
 
+// The Look input combo's text: the setting, and for Auto what it found ("Auto: ARRI LogC4 AWG4 (header)"); a layer that
+// is handed its space by the LUT above, or a space it cannot be handed, says so. `found` is null before a bake reports.
+static std::string LookInputPreview(int setting, const DlssNr::LayerInput* found)
+{
+    using DlssNr::LutSpace;
+    const bool automatic = setting == DlssNr::kLookInputAuto;
+    std::string text = automatic                            ? "Auto"
+                       : setting == (int) LutSpace::Display ? "None (the picture)"
+                                                            : DlssNr::LutSpaceName((LutSpace) setting);
+    if (found == nullptr)
+        return text;
+
+    if (automatic)
+        text += found->space == LutSpace::Display ? std::string(": the picture")
+                                                  : std::string(": ") + DlssNr::LutSpaceName(found->space) +
+                                                        (*found->from ? std::string(" (") + found->from + ")" : "");
+    if (found->space != LutSpace::Display && !found->converted)
+        text += found->given == found->space ? ", from the LUT above"
+                                             : std::string(", but gets ") + DlssNr::LutSpaceName(found->given);
+    else if (found->space == LutSpace::Display && found->given != LutSpace::Display)
+        text += std::string(", but gets ") + DlssNr::LutSpaceName(found->given);
+    return text;
+}
+
 // A stack of up to four .cube LUTs graded onto the picture NR returns (memory/plans/2026-10-31-nr-lut-chain.md). Unlike
 // the Input LUT the model never sees this grade. The settings are dense (an empty slot is an absent layer), so every
 // edit rewrites the list from its non-empty layers and the rows are always the layers in order plus, at most, one empty
@@ -3443,12 +3467,14 @@ static void RenderPostLutSection(Config* config)
     {
         std::string file;
         float strength;
+        int input; // look input, DlssNr::kLookInputAuto or a DlssNr::LutSpace
     };
     std::vector<Layer> layers;
     for (int i = 0; i < kMax; ++i)
         if (!config->DlssNrPostLutFile[i].value_or_default().empty())
             layers.push_back({ config->DlssNrPostLutFile[i].value_or_default(),
-                               config->DlssNrPostLutStrength[i].value_or_default() });
+                               config->DlssNrPostLutStrength[i].value_or_default(),
+                               config->DlssNrPostLutInput[i].value_or_default() });
 
     const auto store = [&]()
     {
@@ -3456,8 +3482,10 @@ static void RenderPostLutSection(Config* config)
         {
             config->DlssNrPostLutFile[i] = i < (int) layers.size() ? layers[i].file : std::string();
             config->DlssNrPostLutStrength[i] = i < (int) layers.size() ? layers[i].strength : 1.0f;
+            config->DlssNrPostLutInput[i] = i < (int) layers.size() ? layers[i].input : DlssNr::kLookInputAuto;
         }
     };
+    const auto status = DlssNr::ReadPostLutStatus();
 
     // The empty row follows a layer, so it goes with the last one (and at the cap there is no room for it).
     if (addRow && (layers.empty() || (int) layers.size() >= kMax))
@@ -3496,7 +3524,7 @@ static void RenderPostLutSection(Config* config)
                     if (filled)
                         layers[row].file = pathStr;
                     else
-                        layers.push_back({ pathStr, 1.0f });
+                        layers.push_back({ pathStr, 1.0f, DlssNr::kLookInputAuto });
                     addRow = false;
                     store();
                 }
@@ -3537,6 +3565,29 @@ static void RenderPostLutSection(Config* config)
 
         if (filled)
         {
+            // What the layer reads: Auto shows what it found, from the last bake.
+            const bool reported = status.seen && status.loaded && layers[row].strength > 0.0f;
+            const std::string inputPreview =
+                LookInputPreview(layers[row].input, reported ? &status.inputs[row] : nullptr);
+            const std::string inputLabel =
+                (rows > 1 ? "Look input " + id : std::string("Look input")) + "###postlutinput" + id;
+            if (ImGui::BeginCombo(inputLabel.c_str(), inputPreview.c_str()))
+            {
+                for (int choice = DlssNr::kLookInputAuto; choice < (int) DlssNr::LutSpace::Count; ++choice)
+                {
+                    const char* name = choice == DlssNr::kLookInputAuto ? "Auto"
+                                       : choice == (int) DlssNr::LutSpace::Display
+                                           ? "None (the picture)"
+                                           : DlssNr::LutSpaceName((DlssNr::LutSpace) choice);
+                    if (ImGui::Selectable(name, layers[row].input == choice))
+                    {
+                        layers[row].input = choice;
+                        store();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
             float strength = layers[row].strength;
             const std::string sliderLabel =
                 (rows > 1 ? "LUT strength " + id : std::string("LUT strength")) + "###postlutstrength" + id;
@@ -3588,9 +3639,13 @@ static void RenderPostLutSection(Config* config)
                "With NR before Super Resolution the grade is applied before the upscaler. In Finished Picture mode it "
                "grades the finished picture, UI included (D3D12; Vulkan does not run that mode).\n"
                "Add LUT adds another after the last one, up to four. They are applied top to bottom (^ v move a "
-               "layer, x removes it); each strength blends that layer only. Strong grades stack up.");
+               "layer, x removes it); each strength blends that layer only. Strong grades stack up.\n"
+               "Look input: a LUT made for a camera log space (ARRILogC4AWG4-to-..., S-Log3, ...) needs the picture in "
+               "that space. Auto reads it from the file's header or name and converts the game's picture for it, so no "
+               "conversion LUT is needed in front; an ordinary LUT gets the picture as it is. Exact on Linear HDR "
+               "games, up to paper white on PQ, highlights estimated on SDR. Pick one by hand if Auto guesses wrong; "
+               "None always uses the picture.");
 
-    const auto status = DlssNr::ReadPostLutStatus();
     if (ImGui::TreeNode("Status##postlut"))
     {
         const float slot = StatusSlotBegin();

@@ -5,6 +5,8 @@
 // frame, whether a LUT was wanted, loaded, or failed; the menu reads it back. Mirrors
 // DlssNr_ColourEncodingStatus.h's split (report from the render thread, read from the menu).
 
+#include "DlssNr_LutSpaces.h"
+
 #include <string>
 
 namespace DlssNr
@@ -36,7 +38,8 @@ struct PostLutStatus
     std::string chain;   // DlssNr_DescribeChain
     std::string failedPath;
     std::string error;
-    std::string note; // why it is not applied when it is wanted (a mode that does not run it)
+    std::string note;        // why it is not applied when it is wanted (a mode that does not run it)
+    LayerInput inputs[4] {}; // each layer's look input at the last bake (DlssNr_LutChain.h kMaxLutChainLayers)
 };
 
 // Render thread. A frame where the stack is empty reports that too, so the card never shows a stale chain.

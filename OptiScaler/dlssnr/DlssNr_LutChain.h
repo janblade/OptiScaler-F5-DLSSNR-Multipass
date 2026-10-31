@@ -163,15 +163,6 @@ struct ChainEntry
     int input = kLookInputAuto; // Look input: kLookInputAuto or a LutSpace value (Display = None)
 };
 
-// What a layer's look input resolved to at the last bake, for the menu.
-struct LayerInput
-{
-    LutSpace space = LutSpace::Display; // what the layer reads
-    const char* from = "";              // Auto's source: "header", "name", "" (nothing found); "set" when chosen
-    bool converted = false;             // the picture is converted into `space` for it
-    LutSpace given = LutSpace::Display; // the signal the layer is actually handed (differs from `space`: a mismatch)
-};
-
 // Look input for each entry in order (one per entry, absent or at strength 0 included, those left as Display): the
 // stack starts as the picture; a layer reading a log space gets the conversion while the signal is still the picture,
 // and its output (header or name, else the picture) is what the next layer is handed.
@@ -211,8 +202,9 @@ template <typename ConfigT> inline std::vector<ChainEntry> PostLutEntries(const 
 {
     std::vector<ChainEntry> entries;
     for (int i = 0; i < ConfigT::kPostLutLayers; ++i)
-        entries.push_back(
-            { cfg.DlssNrPostLutFile[i].value_or_default(), cfg.DlssNrPostLutStrength[i].value_or_default() });
+        entries.push_back({ cfg.DlssNrPostLutFile[i].value_or_default(),
+                            cfg.DlssNrPostLutStrength[i].value_or_default(),
+                            cfg.DlssNrPostLutInput[i].value_or_default() });
     return entries;
 }
 

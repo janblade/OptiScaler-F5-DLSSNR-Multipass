@@ -3474,6 +3474,37 @@ static void RenderPostLutSection(Config* config)
     const float buttonsX = ImGui::GetCursorPosX() + ImGui::CalcItemWidth() + style.ItemInnerSpacing.x +
                            ImGui::CalcTextSize("LUT strength 4").x + style.ItemSpacing.x;
 
+    // View-transform LUTs (Story 5): the stack reads LogC4 of the picture's light instead of the picture. It is the
+    // step that runs first (what a LinRec709-to-ArriLogC4 LUT does in a grading app), so it sits above the LUTs, and
+    // shows with an empty stack so it can be ticked before a view transform is picked.
+    {
+        bool sceneLinear = config->DlssNrPostLutSceneLinear.value_or_default();
+        if (ImGui::Checkbox("Scene-linear input##postlut", &sceneLinear))
+            config->DlssNrPostLutSceneLinear = sceneLinear;
+        ImGui::SameLine();
+        HelpMarker(
+            "For view-transform LUTs made for ARRI LogC4 / Wide Gamut 4 in and sRGB out (AgX, Filmic, JP2499DRT, "
+            "OpenDRT and the like): the stack is fed the picture's light encoded to LogC4 instead of the "
+            "picture: this is the LinRec709-to-ArriLogC4 step, so leave that LUT out. The first LUT is the view "
+            "transform and its "
+            "strength fades the whole stack; LUTs after it grade its sRGB result as usual. The look's white "
+            "lands on the game's paper white.\n"
+            "HDR games hand over their real light. On an SDR game it is estimated by undoing a typical tone "
+            "curve, so the look is an approximation of what the LUT's author made.");
+
+        if (sceneLinear)
+        {
+            float ev = config->DlssNrPostLutSceneExposure.value_or_default();
+            if (ImGui::SliderFloat("Exposure (EV)##postlutscene", &ev, -6.0f, 6.0f, "%+.1f EV",
+                                   ImGuiSliderFlags_AlwaysClamp))
+                config->DlssNrPostLutSceneExposure = ev;
+            ImGui::SameLine(buttonsX);
+            if (ImGui::SmallButton("Reset##postlutsceneev"))
+                config->DlssNrPostLutSceneExposure = 0.0f;
+        }
+        ImGui::Spacing();
+    }
+
     for (int row = 0; row < rows; ++row)
     {
         const bool filled = row < (int) layers.size();
@@ -3571,35 +3602,9 @@ static void RenderPostLutSection(Config* config)
     }
 
     if (layers.size() > 1)
-        ImGui::TextDisabled("Applied top to bottom, after NR.");
-
-    // View-transform LUTs (Story 5): the stack reads LogC4 of the picture's light instead of the picture.
-    if (!layers.empty())
-    {
-        bool sceneLinear = config->DlssNrPostLutSceneLinear.value_or_default();
-        if (ImGui::Checkbox("Scene-linear input##postlut", &sceneLinear))
-            config->DlssNrPostLutSceneLinear = sceneLinear;
-        ImGui::SameLine();
-        HelpMarker(
-            "For view-transform LUTs made for ARRI LogC4 / Wide Gamut 4 in and sRGB out (AgX, Filmic, JP2499DRT, "
-            "OpenDRT and the like): the stack is fed the picture's light encoded to LogC4 instead of the "
-            "picture, so leave out a LinRec709-to-ArriLogC4 LUT. The first LUT is the view transform and its "
-            "strength fades the whole stack; LUTs after it grade its sRGB result as usual. The look's white "
-            "lands on the game's paper white.\n"
-            "HDR games hand over their real light. On an SDR game it is estimated by undoing a typical tone "
-            "curve, so the look is an approximation of what the LUT's author made.");
-
-        if (sceneLinear)
-        {
-            float ev = config->DlssNrPostLutSceneExposure.value_or_default();
-            if (ImGui::SliderFloat("Exposure (EV)##postlutscene", &ev, -6.0f, 6.0f, "%+.1f EV",
-                                   ImGuiSliderFlags_AlwaysClamp))
-                config->DlssNrPostLutSceneExposure = ev;
-            ImGui::SameLine(buttonsX);
-            if (ImGui::SmallButton("Reset##postlutsceneev"))
-                config->DlssNrPostLutSceneExposure = 0.0f;
-        }
-    }
+        ImGui::TextDisabled(config->DlssNrPostLutSceneLinear.value_or_default()
+                                ? "After NR: the light to LogC4, then the LUTs top to bottom."
+                                : "Applied top to bottom, after NR.");
 
     // One toolbar under the list: Add LUT (when there is a layer and room for another), Rescan, and the help.
     if (!layers.empty() && (int) layers.size() < kMax && !addRow)

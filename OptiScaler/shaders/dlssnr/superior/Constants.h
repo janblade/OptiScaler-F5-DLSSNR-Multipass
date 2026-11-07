@@ -9,20 +9,31 @@ namespace DlssNr::Superior
 // not listed here.
 enum DlssNrMode : uint32_t
 {
-    DlssNrMode_Encode = 0,              // the frame -> a tone-mapped proxy, plus an untouched copy
-    DlssNrMode_Resolve = 1,             // proxy + the model's answer + the untouched copy -> the edited frame
-    DlssNrMode_Downsample = 2,          // Area downsample of the proxy to the working raster
-    DlssNrMode_Meter = 3,               // automatic exposure, 64x64 meter
-    DlssNrMode_UnitExposure = 7,        // constant exposure for the private DLSS feature (reads no SRV)
-    DlssNrMode_ClampProxy = 8,          // restore the encoded RGB range between model passes
-    DlssNrMode_ResizePrivateGuides = 10, // match depth/motion to the working raster for the private DLSS
-    DlssNrMode_AutoExposure = 11,       // automatic exposure, 1x1 white reduction
-    DlssNrMode_GuidedResidualLow = 18,  // 1/8-size low-frequency field of the residual (final shaping)
-    DlssNrMode_InterPassLow36 = 34,     // between passes: 1/8-size low field
-    DlssNrMode_InterPassFastCross5 = 36, // between passes: guided working-raster reconstruction
+    DlssNrMode_Encode = 0,                 // the frame -> a tone-mapped proxy, plus an untouched copy
+    DlssNrMode_Resolve = 1,                // proxy + the model's answer + the untouched copy -> the edited frame
+    DlssNrMode_Downsample = 2,             // Area downsample of the proxy to the working raster
+    DlssNrMode_Meter = 3,                  // automatic exposure, 64x64 meter
+    DlssNrMode_UnitExposure = 7,           // constant exposure for the private DLSS feature (reads no SRV)
+    DlssNrMode_ClampProxy = 8,             // restore the encoded RGB range between model passes
+    DlssNrMode_ResizePrivateGuides = 10,   // match depth/motion to the working raster for the private DLSS
+    DlssNrMode_AutoExposure = 11,          // automatic exposure, 1x1 white reduction
+    DlssNrMode_GuidedResidualLow = 18,     // 1/8-size low-frequency field of the residual (final shaping)
+    DlssNrMode_InterPassLow36 = 34,        // between passes: 1/8-size low field
+    DlssNrMode_InterPassFastCross5 = 36,   // between passes: guided working-raster reconstruction
     DlssNrMode_SuperiorCarrierEncode = 37, // fixed clamp(0.5 + N-P, -1, 2), no gain analysis
     DlssNrMode_SuperiorCarrierDecode = 38, // fixed DLAA(carrier)-0.5, no gain texture
-    DlssNrMode_SuperiorCarrierMotion = 39  // fixed carrier plus exact private motion resize
+    DlssNrMode_SuperiorCarrierMotion = 39, // fixed carrier plus exact private motion resize
+    DlssNrMode_PrivateFade = 40,
+    DlssNrMode_PrivateMotion = 41,
+    DlssNrMode_PrivateGhostClear = 42,
+    DlssNrMode_PrivateGhostScatter = 43,
+    DlssNrMode_PrivateGhostAge = 44,
+    DlssNrMode_PrivateGhostReference = 45,
+    DlssNrMode_PrivateGhostDilate = 46,
+    DlssNrMode_PrivateGhostDecode = 47,
+    DlssNrMode_PrivateGhostRings = 48,
+    DlssNrMode_PrivateGhostFeather = 49,
+    DlssNrMode_PrivateGhostFeatherInPlace = 50
 };
 
 struct alignas(256) DlssNrConstants

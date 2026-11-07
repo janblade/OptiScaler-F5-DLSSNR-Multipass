@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include "Constants.h"
 #include "../DlssNr_Common.h"
 
@@ -47,6 +48,53 @@ inline void SetMotionRegion(DlssNrConstants& c, uint32_t x, uint32_t y, uint32_t
     c.ColourStrength = float(h);
     c.CompareSwap = x;
     c.Transfer = y;
+}
+
+// Private motion uses the active source MV rectangle, in 1080p-height pixel units.
+inline void SetPrivateMotion(DlssNrConstants& c, unsigned x, unsigned y, unsigned w, unsigned h, float scaleX,
+                             float scaleY)
+{
+    c.Mode = DlssNrMode_PrivateMotion;
+    c.Width = c.Height = 1;
+    SetDepthRegion(c, x, y, w, h);
+    c.MvScaleX = scaleX;
+    c.MvScaleY = scaleY;
+}
+inline void SetPrivateFade(DlssNrConstants& c, float rawWeight)
+{
+    c.Mode = DlssNrMode_PrivateFade;
+    std::memcpy(&c.ExposurePadding, &rawWeight, sizeof(rawWeight));
+}
+static_assert(offsetof(DlssNrConstants, ExposurePadding) == 172);
+
+// Compact visibility and reference history share the first 52 bytes.
+inline void SetPrivateGhost(DlssNrConstants& c, unsigned w, unsigned h, bool inverted, bool previous,
+                            float depthPrecision)
+{
+    c.Width = (w + 3) / 4;
+    c.Height = (h + 3) / 4;
+    c.GuideWidth = w;
+    c.GuideHeight = h;
+    c.WhitePoint = 18;
+    c.TransferStrength = 6;
+    c.ColourStrength = .05f;
+    c.MaxRatio = 2.5f;
+    c.Passthrough = inverted;
+    c.DebugView = previous;
+    c.MvScaleX = depthPrecision;
+}
+inline void SetPrivateRings(DlssNrConstants& c, unsigned w, unsigned h, bool inverted, float depthPrecision, bool apply)
+{
+    c = {};
+    c.Mode = apply ? DlssNrMode_PrivateGhostFeather : DlssNrMode_PrivateGhostRings;
+    c.Width = apply ? w : (w + 3) / 4;
+    c.Height = apply ? h : (h + 3) / 4;
+    c.GuideWidth = 4;
+    c.GuideHeight = h;
+    c.Passthrough = 3;
+    c.ColourStrength = .05f;
+    c.DebugView = inverted;
+    c.MaxRatio = depthPrecision;
 }
 
 // The fields above, at the offsets both cbuffers (superior/precompile/dlssnr.hlsl and precompile/dlssnr.hlsl,

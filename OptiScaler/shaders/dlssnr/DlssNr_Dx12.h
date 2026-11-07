@@ -85,19 +85,19 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     bool _superiorRingReady = false;
     bool EnsureSuperiorRing();
 
-    ID3D12PipelineState* _superiorResolve[6] {};
-    bool _superiorResolveAttempted[6] {};
+    ID3D12PipelineState* _superiorResolve[9] {};
+    bool _superiorResolveAttempted[9] {};
     ID3D12PipelineState* _superiorNormalResolve[15] {};
     bool _superiorNormalResolveAttempted[15] {};
     ID3D12PipelineState* _superiorWarpCache = nullptr;
     bool _superiorWarpCacheAttempted = false;
-    ID3D12PipelineState* SuperiorResolvePipeline(const DlssNrConstants& params, bool rawAnswer, bool packed,
-                                                 bool cachedWarp);
+    ID3D12PipelineState* SuperiorResolvePipeline(const DlssNrConstants& params, bool rawAnswer, bool guidedRaw,
+                                                 bool packed, bool cachedWarp);
     ID3D12PipelineState* _superiorRawLow = nullptr;
     bool _superiorRawLowAttempted = false;
     ID3D12PipelineState* SuperiorRawLowPipeline();
-    ID3D12PipelineState* _superiorPipeline[16] {};
-    bool _superiorAttempted[16] {};
+    ID3D12PipelineState* _superiorPipeline[28] {};
+    bool _superiorAttempted[28] {};
     ID3D12PipelineState* SuperiorPipeline(const DlssNr::Superior::DlssNrConstants&, ID3D12Resource*);
 
     // The shader reads five inputs and writes two, and not every mode uses all of them. Unused slots

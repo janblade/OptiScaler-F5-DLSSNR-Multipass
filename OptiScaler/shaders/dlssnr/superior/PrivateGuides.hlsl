@@ -45,5 +45,5 @@ float3 PrivateFinite(float3 value, float3 fallback)
     const float3 model = PrivateFinite(gPrivateAnswer.Load(int3(id.xy, 0)).rgb, proxy);
     precise float3 residual = model - proxy;
     precise float3 encoded = 0.5 + residual;
-    gPrivateCarrier[id.xy] = float4(clamp(encoded, -1.0, 2.0), 1.0);
+    gPrivateCarrier[id.xy] = float4(clamp(encoded, 0.0, 65504.0), 1.0);
 }

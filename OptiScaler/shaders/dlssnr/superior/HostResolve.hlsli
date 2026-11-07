@@ -29,16 +29,22 @@ float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
     // Packed temporal reconstruction instead uses the direct warped query below.
     // Non-finite NR or proxy values (an Inf from a pass) must not reach the frame. SanitizeFinite3 returns finite
     // values unchanged, so finite results are bit-identical.
+#if !defined(DLSSNR_SUPERIOR_GUIDED_RAW)
     if (gGuideHeight != 0u)
         return SuperiorShapeEdit(SanitizeFinite3(gModel.SampleLevel(gLinear, uvq, 0).rgb -
                                                  gSource.SampleLevel(gLinear, uvq, 0).rgb, 0.0), uvq);
+#endif
     uint srcW, srcH;
     gSource.GetDimensions(srcW, srcH);
 #if defined(DLSSNR_SUPERIOR_HOST_PACKED)
     // Map the native query directly to the packed lattice; no bilinear intermediate images.
     uvq = SuperiorPackedUv(uvq);
 #endif
-    const float3 fallback = SanitizeFinite3(gModel.SampleLevel(gLinear, saturate(uvq), 0).rgb, 0.0);
+    float3 fallbackAnswer = gModel.SampleLevel(gLinear, saturate(uvq), 0).rgb;
+#if defined(DLSSNR_SUPERIOR_GUIDED_RAW)
+    fallbackAnswer -= gSource.SampleLevel(gLinear, saturate(uvq), 0).rgb;
+#endif
+    const float3 fallback = SanitizeFinite3(fallbackAnswer, 0.0);
     const float spatialSigma = max(abs(3.0), 1e-4);
     // CPU computes the cubic Model-resolution policy once per frame. Exposure
     // meter dimensions are unused by this final Superior composition stage.
@@ -67,8 +73,13 @@ float3 SuperiorGuidedEdit(float2 uvq, float3 nativeGuide)
         {
             const int2 p = clamp(base + int2(ox, oy), int2(0, 0), int2((int)srcW - 1, (int)srcH - 1));
             // A non-finite proxy tap gets ~zero range weight, a non-finite residual tap contributes nothing.
-            const float3 proxy = SanitizeFinite3(gSource.Load(int3(p, 0)).rgb, 1e4);
-            const float3 residual = SanitizeFinite3(gModel.Load(int3(p, 0)).rgb, 0.0);
+            const float3 rawProxy = gSource.Load(int3(p, 0)).rgb;
+            const float3 proxy = SanitizeFinite3(rawProxy, 1e4);
+            float3 answer = gModel.Load(int3(p, 0)).rgb;
+#if defined(DLSSNR_SUPERIOR_GUIDED_RAW)
+            answer -= rawProxy;
+#endif
+            const float3 residual = SanitizeFinite3(answer, 0.0);
             const float3 colourDelta = proxy - nativeGuide;
             const float rangeDistance2 = dot(colourDelta, colourDelta) * (1.0 / 3.0);
             const float2 spatialDelta = float2(p) - sourcePos;

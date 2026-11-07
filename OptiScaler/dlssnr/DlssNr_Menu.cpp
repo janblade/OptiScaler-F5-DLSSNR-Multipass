@@ -4513,41 +4513,39 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             ImGui::EndCombo();
         }
 
-        HelpMarker("Below 100% Model resolution, how NR's result is enlarged.\n"
-                   "Classic: the whole output.\n"
-                   "Matched residual: only NR's changes; less blur and colour shift.\n"
-                   "NVIDIA residual: only the changes, NVIDIA's way; with Upscale Method Bilinear, also kept on "
-                   "their side of edges.\n"
-                   "Superior Scaling: its own Area downsample, frequency shaping and a private DLSS that steadies NR "
-                   "over time, including at 100% with Compress screen edges. Needs DirectX 12 and NVIDIA DLSS; "
-                   "where it cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
-                   "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
+        HelpMarker(
+            "Below 100% Model resolution, how NR's result is enlarged.\n"
+            "Classic: the whole output.\n"
+            "Matched residual: only NR's changes; less blur and colour shift.\n"
+            "NVIDIA residual: only the changes, NVIDIA's way; with Upscale Method Bilinear, also kept on "
+            "their side of edges.\n"
+            "Superior Scaling: its own Area downsample, frequency shaping and optional private DLSS to steady NR "
+            "over time, including at 100% with Compress screen edges. Needs DirectX 12 or a DirectX 12 bridge; "
+            "where it cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
+            "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
 
         if (superior)
         {
-            static const char* presets[] = { "CNN - higher performance",
-                                             "Transformer - slower, more stable NR in motion" };
-            int preset =
-                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) == 11 ? 1 : 0;
-
+            static const char* presets[] = { "No DLSS", "CNN (recommended)", "Transformer" };
+            static constexpr unsigned choices[] = { DlssNr::SuperiorScaling::NoPrivateDlss,
+                                                    DlssNr::SuperiorScaling::CnnPreference,
+                                                    DlssNr::SuperiorScaling::TransformerK };
+            const auto selected =
+                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default());
+            int preset = selected == choices[0] ? 0 : selected == choices[2] ? 2 : 1;
+            ImGui::BeginDisabled(nr.vulkan);
             if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
-                config->DlssNrSuperiorScalingPreset = preset == 1 ? 11u : 1u;
-
-            HelpMarker("Superior Scaling: a private DLSS in DLAA mode, applied to NR's change at its working "
-                       "resolution. Independent of the NR model preset and the game's own DLSS preset. "
-                       "CNN automatically chooses its model from guided range sigma. Transformer keeps the same model. "
-                       "Preset availability depends on the installed DLSS runtime.");
+                config->DlssNrSuperiorScalingPreset = choices[preset];
+            ImGui::EndDisabled();
+            HelpMarker("No DLSS - Best performance, lowest NR stability. Use when the current game and OptiScaler "
+                       "settings give a stable enough image that the cost of DLSS seems unwarranted, or when the other "
+                       "DLSS options produce visible artifacts.\n\n"
+                       "CNN - A good balance between performance and NR stability. Recommended in most cases.\n\n"
+                       "Transformer - Should provide greater stability than CNN at a performance cost. Use it when CNN "
+                       "is not stable enough or shows artifacts that Transformer avoids. Transformer can introduce "
+                       "different artifacts of its own.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
-            ImGui::BeginDisabled(nr.vulkan || !unavailable.empty());
-            bool disableIsHDR = config->DlssNrSuperiorScalingDisableIsHDR.value_or_default();
-            if (ImGui::Checkbox("Disable DLSS IsHDR flag", &disableIsHDR))
-                config->DlssNrSuperiorScalingDisableIsHDR = disableIsHDR;
-            ImGui::EndDisabled();
-
-            HelpMarker("Experimental: try only if experiencing severe ghosting. Disabling IsHDR may help, but "
-                       "could reduce NR stability.");
-
             if (nr.vulkan)
                 ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "
                                    "used here.");

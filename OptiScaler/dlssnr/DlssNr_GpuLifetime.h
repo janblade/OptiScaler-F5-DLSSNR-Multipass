@@ -42,6 +42,8 @@ class GpuLifetime
     // The same, for a callback that only reports to `owner`: once `owner` has expired, Collect() drops it without
     // running it, so a recording that never completes does not keep it (and the recordings it waits on) for good.
     void Retire(std::function<void()> destroy, std::weak_ptr<const void> owner);
+    // Completion of this specific recording, including its final replay. False means it was discarded.
+    bool AfterRecording(ID3D12GraphicsCommandList* commands, std::function<void(bool)> completed);
     // Runs the destruction callbacks whose GPU work has completed. A removed device counts as completed.
     void Collect();
 };

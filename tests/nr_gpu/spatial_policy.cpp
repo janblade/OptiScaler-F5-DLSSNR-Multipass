@@ -83,9 +83,9 @@ int main()
             for (unsigned frame = 0; frame < 1000; ++frame)
                 require(choice.Select(1, true, 1.f, frame % 2 ? .5f : 1.f) == selected);
             require(choice.Select(11, true, 1.f, start) == 11);
-            require(choice.Select(1, false, .65f, .65f) == 1);
+            require(choice.Select(1, false, .65f, .65f) == Ss::CnnD);
             require(choice.Select(1, false, 1.f, 1.f) == 5);
-            require(Ss::PrivatePresetChanged(1, 5) && !Ss::PrivatePresetChanged(5, 5));
+            require(Ss::PrivatePresetChanged(Ss::CnnD, Ss::CnnE) && !Ss::PrivatePresetChanged(5, 5));
         }
         unsigned renderChecks = 0;
         for (auto render : { DlssNr::GuideExtent { 1920, 1080 }, { 1280, 720 }, { 1919, 1079 }, { 3840, 2160 } })

@@ -485,10 +485,9 @@ class Config
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual. Only has an effect when Model resolution is under 100%.
     CustomOptional<uint32_t> DlssNrTransfer { 1 }; // 11: Superior Scaling
-    // Private SR preference: CNN=1 (automatic A/E), Transformer=11 (K).
+    // Private SR preference: No DLSS=0, CNN=1 (D/E), Transformer=11 (K).
     CustomOptional<uint32_t> DlssNrSuperiorScalingPreset { 1 };
     // Test only the private residual DLSS creation flag; AutoExposure stays enabled.
-    CustomOptional<bool> DlssNrSuperiorScalingDisableIsHDR { false };
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the
     // game already tone mapped there is nothing to measure and this has no effect.

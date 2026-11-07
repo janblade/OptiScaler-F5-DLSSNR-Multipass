@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "../../OptiScaler/dlssnr/DlssNr_SuperiorPrivatePolicy.h"
 #include "../../OptiScaler/dlssnr/DlssNr_SuperiorScaling.h"
 #include "../../OptiScaler/dlssnr/DlssNr_InterPassSchedule.h"
 #include "../../OptiScaler/shaders/dlssnr/superior/Constants.h"
@@ -165,7 +166,8 @@ int main() {
                 1274.f / 1440.f); // missing declared reference uses valid source, not allocation/depth
         require(MotionScale(1920, 2496, 0, 1920) == 2496);
         require(MotionScale(1,1274,0)==1); // unspecified game reference
-        for(unsigned i=0;i<30;++i)require(Preset(i)==(i==11u?11u:1u));
+        for (unsigned i = 0; i < 30; ++i)
+            require(Preset(i) == (i == 0 || i == 11 ? i : 1u));
         require(Preset(UINT32_MAX)==1u);
         require(std::abs(GuidedRange(.25f) - .015f) < 1e-9f);
         require(std::abs(GuidedRange(.5f) - .015f) < 1e-9f);
@@ -179,7 +181,7 @@ int main() {
             const float sigma = GuidedRange(percent / 100.f);
             require(sigma <= previousSigma && sigma > 0.f);
             previousSigma = sigma;
-            require(PrivatePreset(1, sigma) == (sigma < .01f ? 5u : 1u));
+            require(PrivatePreset(1, sigma) == (sigma < .01f ? 5u : 4u));
             require(PrivatePreset(11, sigma) == 11u);
             for (unsigned mode : { 0u, 1u, 2u, 11u })
                 for (bool vulkan : { false, true })
@@ -191,7 +193,34 @@ int main() {
             std::memcpy(&inverse, &resolve.ExposureSourceWidth, 4);
             require(inverse == 1.f / (sigma * sigma));
         }
-        require(PrivatePreset(1, .01f) == 1 && PrivatePreset(1, std::nextafter(.01f, 0.f)) == 5);
+        require(PrivatePreset(1, .01f) == CnnD && PrivatePreset(1, std::nextafter(.01f, 0.f)) == CnnE);
+        require(PrivatePreset(0, .003f) == NoPrivateDlss);
+        PrivatePresetChoice latch;
+        require(latch.Select(CnnPreference, true, .65f, .65f) == CnnD);
+        require(latch.Select(CnnPreference, true, .65f, .98f) == CnnD);
+        require(latch.Select(TransformerK, true, .65f, .98f) == TransformerK);
+        require(latch.Select(CnnPreference, true, .65f, .98f) == CnnE);
+        require(latch.Select(NoPrivateDlss, true, .65f, .98f) == NoPrivateDlss);
+        latch = {};
+        require(latch.Select(CnnPreference, true, .65f, .65f) == CnnD);
+
+        // 431 / 576 is quiet, 432 / 576 is camera motion. Only a switch resets the next instance.
+        DlssNr::SuperiorPrivate::CnnMotion motion;
+        motion.Observe(431, 1.0);
+        require(!motion.Advance(1.0));
+        motion.Observe(431, 1.04);
+        require(!motion.Advance(1.04) && motion.fade.weight == 1.f);
+        motion.Observe(431, 1.06);
+        require(!motion.Advance(1.06) && motion.fade.weight == 1.f);
+        require(!motion.Advance(1.2) && !motion.idle && motion.fade.weight < 1.f);
+        require(!motion.Advance(1.35) && !motion.idle);
+        require(motion.Advance(1.36) && motion.idle && motion.fade.weight == 1.f);
+        require(!motion.Advance(1.37));
+        motion.Observe(432, 1.39);
+        require(!motion.Advance(1.39));
+        require(motion.Advance(1.69) && !motion.idle);
+        motion.Invalidate();
+        require(!motion.Advance(2.0) && motion.fade.weight == 1.f);
 
         // Native-scale fallback is tested by the host integration contract.
         DlssNrConstants input{};input.Mode=0;input.Width=1920;input.Height=1080;input.DirectResolveFlags=ShaderFlag;
@@ -296,6 +325,6 @@ int main() {
             require(!Enabled(cfg));
         }
         std::cout << "Superior policy PASS: Main/Small/Default/legacy presets on 310.8 and 310.9, mixed gain blocks "
-                     "and schedules, fixed settings, A/K, guides and PSO guards\n";
+                     "and schedules, No DLSS / CNN D-E / Transformer K, guides and PSO guards\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

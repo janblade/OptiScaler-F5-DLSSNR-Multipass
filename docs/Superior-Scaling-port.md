@@ -51,20 +51,20 @@ No K/headroom analysis is introduced. Native Vulkan is outside the original v59 
 
 ### When Superior cannot run
 
-Superior never leaves NR off. Native Vulkan with Superior selected runs Matched residual. On D3D12, if the temporal
-path cannot run -- no depth/motion guides, NVIDIA DLSS SR through NGX unavailable (non-NVIDIA GPU, the vendor-neutral
-NR port, missing nvngx_dlss), its surfaces cannot be created, or the private DLSS creation is never submitted within
-240 frames -- Superior gives up for the session with one warning in the log, skips that one frame, and the ordinary path
-runs with **Matched residual** from the next frame. The menu says why; selecting Superior again retries. When NGX itself
-was unavailable (or on Vulkan) the Superior entry is greyed out. If the requested private DLSS preset (A or K) cannot be
-created by the installed runtime, it is created once more with the runtime's default preset (logged once).
+Superior runs on DirectX 12 and compatible bridges. Native Vulkan falls back to Matched residual.
+With **No DLSS**, the current NR answer supplies the guided reconstruction directly, including when it is packed.
+CNN uses D or E under the existing guided range rule. When D is selected and E is resident, the camera motion probe
+checks 576 vectors using a threshold of 0.1 pixel in 1080p-height units. At least 432 samples must exceed the threshold
+to classify a frame as moving. After 0.05 s of observed quiet, the active preset fades toward the current edit over 0.3 s.
+The incoming preset resets its own DLSS history on its first evaluation. Only the active preset evaluates.
+Changing the selection preserves the NR history when its geometry is compatible.
 
-Every non-Superior resolve while Superior is selected (100% without compression, supersampling, or after giving up)
-explicitly runs Matched residual. The private DLSS's first evaluate waits for a later submission epoch, exactly like the
-NR feature. Its NGX handles are dropped (never released or evaluated) when the game shuts NGX down, and rebuilt under
-the next runtime. With Auto model resolution the exact raster only moves when the ordinary 16-pixel cell moves, so
-dynamic resolution does not rebuild NR and the private DLSS every frame. Superior's own dispatches use a separate
-descriptor ring, created the first time Superior runs; users who never select it allocate nothing extra.
+Transformer uses K with a quarter-grid disocclusion mask at strength 1, an 18-frame window and a 6-frame return.
+The relative motion gate is 2.5 pixels in 1080p-height units. One coarse texel of expansion is followed by output
+evidence filtering at 0.18 and three coarse boundary rings. K does not sample motion for CNN switching.
+The private features always request IsHDR, AutoExposure and MVLowRes with applicable reversed-depth flags.
+If the runtime rejects the requested model, the existing runtime-default retry applies. While a private feature is
+pending or unavailable, Superior reconstructs the current edit. This also applies when depth is missing.
 
 ### Frozen v59 shader baseline
 
@@ -81,17 +81,9 @@ is the live shader compiled with `superior/HostResolve.hlsli` (`host_resolve_*`,
 
 ### Carrier encoding limits
 
-The private DLSS stabilises the signed residual E = NR - proxy, carried as `clamp(0.5 + E, -1, 2)` in an RGBA16F
-texture (modes 37/39) and decoded as `DLSS(carrier) - 0.5` (mode 38). This is unchanged from v59; the limits, not
-measured in game:
-
-- Range: |E| above 1.5 is clipped by the encode. Around the 0.5 bias FP16 has a step of 2^-11 (about 4.9e-4) for
-  carrier values in [0.5, 1) and 2^-10 above 1, so residuals are quantised to about 2.4e-4 (4.9e-4 above E = 0.5)
-  before DLSS sees them; smaller detail survives only through DLSS's own accumulation.
-- Negative carrier: E below -0.5 gives a carrier below zero. The private feature is created with IsHDR; if the DLSS
-  runtime clamps negative input colour, those residuals come back as -0.5 at most (darkening limited to 0.5 in the
-  encoded domain). Whether a given runtime clamps is not verified.
-- The decode sanitises non-finite DLSS output to the bias (no change).
+The private carrier stores `clamp(0.5 + NR - proxy, 0, 65504)` in RGBA16F with the subtraction performed
+before the offset. It decodes as `DLSS(carrier) - 0.5`. The range is shared by the matched and packed guide
+paths. The carrier uses the edit at its original magnitude. Nonfinite DLSS output decodes to zero edit.
 
 ### Calibrating new models and styles
 
@@ -200,7 +192,7 @@ visual parity. Raw samples are summarised in [validation/README.md](validation/R
 ### Superior isolation, residual flags and lossless host optimization
 
 The model-resolution tooltip now explains that a few percentage points higher or lower can give a better match to native NR.
-The residual DLSS feature explicitly requests **IsHDR + AutoExposure + MVLowRes** with unit exposure and A/K DLAA; these
+The residual DLSS feature explicitly requests **IsHDR + AutoExposure + MVLowRes** with unit exposure and D/E/K DLAA; these
 flags are independent of the game's exposure settings and are passed to the private parameter object through the direct
 NGX proxy entry point. No game/NR exposure flags or options are changed.
 

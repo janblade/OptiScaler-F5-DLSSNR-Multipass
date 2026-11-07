@@ -275,6 +275,16 @@ void GpuLifetime::Retire(std::function<void()> destroy, std::weak_ptr<const void
     std::lock_guard lock(impl->mutex);
     impl->retired.push_back({ impl->currentGeneration, std::move(destroy), std::move(owner), true });
 }
+bool GpuLifetime::AfterRecording(ID3D12GraphicsCommandList* commands, std::function<void(bool)> completed)
+{
+    std::lock_guard lock(impl->mutex);
+    auto use = impl->OpenRecording(Identity(commands));
+    if (!use)
+        return false;
+    impl->retired.push_back(
+        { { use }, [use, completed = std::move(completed)] { completed(!use->completions.empty()); } });
+    return true;
+}
 void GpuLifetime::BeginGeneration()
 {
     std::lock_guard lock(impl->mutex);

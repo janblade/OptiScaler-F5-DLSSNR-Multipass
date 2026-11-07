@@ -2684,6 +2684,7 @@ void ParkIdleViews()
 // of OptiScaler sees.
 // ---------------------------------------------------------------------------------------------
 
+#include <dlssnr/DlssNr_SuperiorPrivatePolicy.h>
 #include "superior/Pipeline.inl"
 
 DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice)
@@ -4524,9 +4525,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ResTrack_Dx12::HookLateNrQueue(device);
         const bool temporal = DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, spatial,
                                                                      modelWidth, modelHeight);
-        // Wait: the private DLSS was just created, its first evaluate waits for a later submission (one frame, like
-        // the NR feature's own creation). Unavailable: given up for this session (logged once); this frame is skipped
-        // and from the next one the ordinary path runs with Matched residual.
         if (SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height,
                                superiorPacked ? modelWidth : workWidth, superiorPacked ? modelHeight : workHeight,
                                workScale, frame, temporal, depth && guides.depth.valid(),
@@ -6511,35 +6509,40 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // the output takes a UAV, so resolveTarget is the output there)
         if (cached)
             EditCache::ApplyCached(cacheFrame, resolveTarget);
-        else if (superiorGeneration && (superiorGeneration->temporal || (spatial && superiorGainScales.low < 1.0f)))
+        else if (superiorGeneration && (superiorGeneration->shaping || (spatial && superiorGainScales.low < 1.0f)))
         {
             auto& g = *superiorGeneration;
-            auto* shapingProxy = g.packed ? modelInput : g.temporal ? ordinaryProxy : resolveProxy;
-            auto* residual =
-                g.temporal
-                    ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, g.packed ? finalAnswer : ordinaryAnswer,
-                                             motionIn, guides, frame, superiorReset, g_nr.heldActive,
-                                             g.packed ? EdgeCompression::depth : nullptr,
-                                             g.packed ? EdgeCompression::motion : nullptr,
-                                             { spatialGuideLayout.modelW, spatialGuideLayout.modelH },
-                                             SuperiorDepthPrecision(guideDesc.Format))
-                    : resolveAnswer;
+            auto* shapingProxy = g.packed ? modelInput : g.shaping ? ordinaryProxy : resolveProxy;
+            auto* answer = g.packed ? finalAnswer : g.shaping ? ordinaryAnswer : resolveAnswer;
+            auto* residual = g.PrivateReady() && depth && guides.depth.valid()
+                                 ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, answer, motionIn, guides,
+                                                          frame, superiorReset, g_nr.heldActive,
+                                                          g.packed ? EdgeCompression::depth : nullptr,
+                                                          g.packed ? EdgeCompression::motion : nullptr,
+                                                          { spatialGuideLayout.modelW, spatialGuideLayout.modelH },
+                                                          SuperiorDepthPrecision(guideDesc.Format))
+                                 : nullptr;
+            const bool signedResidual = residual != nullptr;
+            if (!residual)
+                residual = answer;
             const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
                                                                    superiorGainScales, g_nr.superiorMainOnlyGains);
             auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
-                            ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, g.temporal)
+                            ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, signedResidual)
                             : nullptr;
             DlssNr::Superior::Fields::SetBandGains(resolveParams, gains.high, gains.low);
             DlssNr::SuperiorScaling::SetGuidedRange(resolveParams, workScale);
             // A raw NR answer when temporal stabilization is inactive, else the decoded signed DLSS residual.
-            DlssNr::Superior::Fields::SetResolveFlags(resolveParams, low != nullptr, !g.temporal);
-            auto* pso = SuperiorResolvePipeline(resolveParams, !g.temporal, g.packed, g.warpCache.Get() != nullptr);
+            DlssNr::Superior::Fields::SetResolveFlags(resolveParams, low != nullptr, !signedResidual);
+            auto* pso = SuperiorResolvePipeline(resolveParams, !signedResidual, !signedResidual && g.shaping, g.packed,
+                                                g.warpCache.Get() != nullptr);
             const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
             composed = residual && lowReady && pso &&
                        DispatchPass(cmdList, resolveParams, shapingProxy, residual, resolveOriginal,
                                     g.packed ? (g.warpCache.Get() ? g.warpCache.Get() : g.warp.Get()) : motionIn,
                                     exposureTex, resolveTarget, nullptr, low, pso);
-            SuperiorRun::Say(composed ? "" : "Superior reconstruction failed; keeping the game frame.");
+            if (!composed)
+                SuperiorRun::Say("Superior reconstruction failed; keeping the game frame.");
         }
         else
         {

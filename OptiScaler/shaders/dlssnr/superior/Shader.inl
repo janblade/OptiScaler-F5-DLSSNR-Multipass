@@ -19,6 +19,18 @@ namespace DlssNr::Superior::Bytecode
 #include "precompile/dlssnr_superior_normal_Shader.h"
 #include "precompile/dlssnr_superior_resolve_Shader.h"
 #include "precompile/dlssnr_superior_sdr_Shader.h"
+#include "precompile/private_encode_Shader.h"
+#include "precompile/private_fade_Shader.h"
+#include "precompile/private_cnn_motion_Shader.h"
+#include "precompile/private_ghost_clear_Shader.h"
+#include "precompile/private_ghost_coarse_1_Shader.h"
+#include "precompile/private_ghost_coarse_2_Shader.h"
+#include "precompile/private_ghost_reference_Shader.h"
+#include "precompile/private_ghost_dilate_Shader.h"
+#include "precompile/private_ghost_decode_Shader.h"
+#include "precompile/private_ghost_rings_Shader.h"
+#include "precompile/private_ghost_rings_apply_Shader.h"
+#include "precompile/private_ghost_rings_inplace_Shader.h"
 } // namespace DlssNr::Superior::Bytecode
 
 bool DlssNr_Dx12::EnsureSuperiorRing()
@@ -121,7 +133,10 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
                                        ID3D12Resource* OutKeep, uint32_t* immutableSlot)
 {
     using namespace DlssNr::Superior::Bytecode;
-    ID3D12PipelineState* pipeline = SuperiorPipeline(InConstants, InSource);
+    using namespace DlssNr::Superior;
+    const bool privatePass = InConstants.Mode >= DlssNrMode_SuperiorCarrierMotion &&
+                             InConstants.Mode <= DlssNrMode_PrivateGhostFeatherInPlace;
+    ID3D12PipelineState* pipeline = privatePass ? nullptr : SuperiorPipeline(InConstants, InSource);
     const auto get = [&](unsigned index, const void* blob, size_t size)
     {
         if (!_superiorAttempted[index])
@@ -131,6 +146,33 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
         }
         return _superiorPipeline[index];
     };
+    if (privatePass)
+    {
+        const struct
+        {
+            const void* data;
+            size_t bytes;
+        } privateBlobs[] {
+            { private_encode_cso, sizeof(private_encode_cso) },
+            { private_fade_cso, sizeof(private_fade_cso) },
+            { private_cnn_motion_cso, sizeof(private_cnn_motion_cso) },
+            { private_ghost_clear_cso, sizeof(private_ghost_clear_cso) },
+            { private_ghost_coarse_1_cso, sizeof(private_ghost_coarse_1_cso) },
+            { private_ghost_coarse_2_cso, sizeof(private_ghost_coarse_2_cso) },
+            { private_ghost_reference_cso, sizeof(private_ghost_reference_cso) },
+            { private_ghost_dilate_cso, sizeof(private_ghost_dilate_cso) },
+            { private_ghost_decode_cso, sizeof(private_ghost_decode_cso) },
+            { private_ghost_rings_cso, sizeof(private_ghost_rings_cso) },
+            { private_ghost_rings_apply_cso, sizeof(private_ghost_rings_apply_cso) },
+            { private_ghost_rings_inplace_cso, sizeof(private_ghost_rings_inplace_cso) },
+        };
+        static_assert(std::size(privateBlobs) ==
+                      DlssNrMode_PrivateGhostFeatherInPlace - DlssNrMode_SuperiorCarrierMotion + 1);
+        const unsigned index = InConstants.Mode - DlssNrMode_SuperiorCarrierMotion;
+        pipeline = get(16u + index, privateBlobs[index].data, privateBlobs[index].bytes);
+        if (!pipeline)
+            return false;
+    }
     if (!pipeline && (InConstants.Mode == 37u || InConstants.Mode == 38u || InConstants.Mode == 39u))
         return false;
     if (!pipeline && InConstants.Mode == 34u)
@@ -219,6 +261,9 @@ namespace DlssNr::Superior::HostBytecode
 #include "precompile/host_resolve_hdr_Shader.h"
 #include "precompile/host_resolve_sdr_Shader.h"
 #include "precompile/host_resolve_raw_Shader.h"
+#include "precompile/host_resolve_guided_raw_Shader.h"
+#include "precompile/host_resolve_packed_guided_raw_Shader.h"
+#include "precompile/host_resolve_cached_packed_guided_raw_Shader.h"
 #include "precompile/host_low_raw_Shader.h"
 #include "precompile/host_resolve_packed_hdr_Shader.h"
 #include "precompile/host_resolve_packed_sdr_Shader.h"
@@ -240,19 +285,10 @@ namespace DlssNr::Superior::HostBytecode
 #include "precompile/host_warp_cache_Shader.h"
 } // namespace DlssNr::Superior::HostBytecode
 
-ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(const DlssNrConstants& params, bool rawAnswer, bool packed,
-                                                          bool cachedWarp)
+ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(const DlssNrConstants& params, bool rawAnswer, bool guidedRaw,
+                                                          bool packed, bool cachedWarp)
 {
     using namespace DlssNr::Superior::HostBytecode;
-    // Every packed PSO fixes gGuideHeight to 0 (precompile/dlssnr.hlsl, DLSSNR_SUPERIOR_HOST_RESOLVE): it adds the
-    // decoded signed DLSS residual to the proxy. A raw NR answer there would be added as if it were a residual. A
-    // packed generation is always temporal (NeedsTemporal), so this only guards that invariant: no PSO, game frame kept.
-    if (packed && rawAnswer)
-    {
-        static std::once_flag once;
-        std::call_once(once, [] { LOG_ERROR("Superior Scaling: packed resolve asked for a raw NR answer; skipped"); });
-        return nullptr;
-    }
     int normal =
         DlssNr::SuperiorScaling::NormalResolveVariant(rawAnswer, packed, params.Passthrough, params.ReversibleMode,
                                                       params.DebugView, params.CompareMode, params.ApplyModel);
@@ -286,16 +322,32 @@ ID3D12PipelineState* DlssNr_Dx12::SuperiorResolvePipeline(const DlssNrConstants&
     }
     const bool sdr = params.Passthrough != 0;
     // The raw (non-temporal) resolve compiles to the same bytecode for SDR and HDR: one blob, one PSO (slot 2).
-    const auto index = packed ? 4u + (sdr ? 1u : 0u) : rawAnswer ? 2u : (sdr ? 1u : 0u);
+    const auto index = guidedRaw   ? (packed ? (cachedWarp ? 8u : 7u) : 6u)
+                       : packed    ? 4u + (sdr ? 1u : 0u)
+                       : rawAnswer ? 2u
+                                   : (sdr ? 1u : 0u);
     auto*& pso = _superiorResolve[index];
     if (!_superiorResolveAttempted[index])
     {
         _superiorResolveAttempted[index] = true;
-        const void* blobs[] { host_resolve_hdr_cso, host_resolve_sdr_cso,        host_resolve_raw_cso,
-                              host_resolve_raw_cso, host_resolve_packed_hdr_cso, host_resolve_packed_sdr_cso };
-        const size_t sizes[] { sizeof(host_resolve_hdr_cso),        sizeof(host_resolve_sdr_cso),
-                               sizeof(host_resolve_raw_cso),        sizeof(host_resolve_raw_cso),
-                               sizeof(host_resolve_packed_hdr_cso), sizeof(host_resolve_packed_sdr_cso) };
+        const void* blobs[] { host_resolve_hdr_cso,
+                              host_resolve_sdr_cso,
+                              host_resolve_raw_cso,
+                              host_resolve_raw_cso,
+                              host_resolve_packed_hdr_cso,
+                              host_resolve_packed_sdr_cso,
+                              host_resolve_guided_raw_cso,
+                              host_resolve_packed_guided_raw_cso,
+                              host_resolve_cached_packed_guided_raw_cso };
+        const size_t sizes[] { sizeof(host_resolve_hdr_cso),
+                               sizeof(host_resolve_sdr_cso),
+                               sizeof(host_resolve_raw_cso),
+                               sizeof(host_resolve_raw_cso),
+                               sizeof(host_resolve_packed_hdr_cso),
+                               sizeof(host_resolve_packed_sdr_cso),
+                               sizeof(host_resolve_guided_raw_cso),
+                               sizeof(host_resolve_packed_guided_raw_cso),
+                               sizeof(host_resolve_cached_packed_guided_raw_cso) };
         CreateComputePipeline(_device, &pso, blobs[index], sizes[index], nullptr);
     }
     return pso;

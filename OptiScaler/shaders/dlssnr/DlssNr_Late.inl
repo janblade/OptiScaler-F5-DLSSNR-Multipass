@@ -708,6 +708,9 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
         slot.submitted = false;
         return;
     }
+    // Each finished-picture slot resets its list before recording again. It may remain in the pool unused
+    // after a mode change, so Superior can retire this recording after the GPU fence without waiting for that reset.
+    SuperiorRun::MarkSingleSubmit(cmd);
     ID3D12CommandList* lists[] = { cmd };
     queue->ExecuteCommandLists(1, lists);
     slot.done = slot.ready + 1;

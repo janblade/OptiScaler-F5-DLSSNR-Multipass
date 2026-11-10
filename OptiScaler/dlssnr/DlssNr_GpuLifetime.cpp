@@ -38,7 +38,7 @@ struct GpuLifetime::Impl
     struct Recording
     {
         std::atomic_bool open { true };
-        bool signalFailed = false;
+        bool signalFailed = false, singleSubmit = false;
         // Only the latest value on each queue is needed, including when the list is replayed.
         std::map<std::shared_ptr<Timeline>, UINT64> completions;
         bool Complete() const { return !open && Finished(); }
@@ -217,6 +217,12 @@ void GpuLifetime::Record(ID3D12GraphicsCommandList* commands)
     impl->currentGeneration.push_back(use);
     impl->recordings.emplace_back(commands, std::move(use));
 }
+void GpuLifetime::MarkSingleSubmit(ID3D12GraphicsCommandList* commands)
+{
+    std::lock_guard lock(impl->mutex);
+    if (auto use = impl->OpenRecording(Identity(commands)))
+        use->singleSubmit = true;
+}
 bool GpuLifetime::Open(ID3D12CommandList* commands)
 {
     if (!commands)
@@ -253,6 +259,8 @@ void GpuLifetime::Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12Command
             use->completions[timeline] = 0; // nothing will execute on a removed device
         else
             use->signalFailed = true; // unresolved: retained rather than released under the GPU
+        if (use->singleSubmit)
+            use->open = false;
     }
 }
 void GpuLifetime::ResetRecording(ID3D12CommandList* commands)

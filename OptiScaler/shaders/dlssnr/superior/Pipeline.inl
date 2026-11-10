@@ -235,6 +235,12 @@ void Record(ID3D12GraphicsCommandList* cmd)
     Watch(Util::RealObjectIdentity(cmd));
 }
 
+void MarkSingleSubmit(ID3D12GraphicsCommandList* cmd)
+{
+    if (g_used)
+        GetState().lifetime.MarkSingleSubmit(cmd);
+}
+
 void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
     auto& s = GetState();
@@ -762,6 +768,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         if (ngxGone || geometryChanged || selectionChanged)
         {
             Drop();
+            Say("");
             if (geometryChanged)
                 g_nr.reset = true;
         }
@@ -809,7 +816,10 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
     if (!g.feature)
     {
         if (!state.retiringPrivate.expired())
+        {
+            Say("Waiting for the previous private DLSS to retire. Using the current NR edit.");
             return Began::Run;
+        }
         if (CreateTemporal(g, shader, cmd) != Created::Ok)
         {
             g.privateFailed = true;
@@ -833,6 +843,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
             return Began::Run;
         }
         g.waitedFrames = UINT_MAX;
+        LOG_INFO("Superior Scaling: private DLSS preset {} ready after submission", g.actualPreset);
         Say("");
     }
     UpdateResidentCnn(g, cmd, frame);

@@ -121,6 +121,28 @@ int main()
         CHECK(ran);
     }
 
+    // A finished-picture list can stay in its pool indefinitely after changing modes.
+    // It is safe to retire after its sole submission finishes, even while the list object remains alive.
+    {
+        DlssNr::GpuLifetime tracker;
+        auto list = gpu.NewList();
+        tracker.Record(list.Get());
+        tracker.MarkSingleSubmit(list.Get());
+
+        bool ran = false;
+        tracker.Retire([&] { ran = true; });
+        tracker.Collect();
+        CHECK(tracker.Open(list.Get()) && !ran);
+
+        gpu.Submit(tracker, list.Get());
+        tracker.Collect();
+        CHECK(!tracker.Open(list.Get()) && !ran);
+
+        gpu.Release();
+        tracker.Collect();
+        CHECK(ran && list.Get());
+    }
+
     // Retired in the middle of the recording (before the list is closed or submitted): the list it was parked on counts.
     {
         DlssNr::GpuLifetime tracker;

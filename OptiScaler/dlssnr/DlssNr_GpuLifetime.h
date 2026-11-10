@@ -27,6 +27,8 @@ class GpuLifetime
     GpuLifetime(const GpuLifetime&) = delete;
     GpuLifetime& operator=(const GpuLifetime&) = delete;
     void Record(ID3D12GraphicsCommandList* commands);
+    // Only for a caller-owned list that will be reset before any reuse. A submitted recording still waits on its fence.
+    void MarkSingleSubmit(ID3D12GraphicsCommandList* commands);
     // One reusable monotonic fence per queue, kept only while a recording still waits on it; aliases are normalized
     // at every notification. Only call after the real ExecuteCommandLists or a successful command-list Reset.
     void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);

@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <dlssnr/DlssNr_GpuLifetime.h>
 #include <dlssnr/DlssNr.h>
 
 #include "ResTrack_dx12.h"
@@ -121,6 +122,16 @@ typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandLists)(ID3D12CommandQueue* Thi
 using PFN_LateReset = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*,
                                                   ID3D12PipelineState*);
 static PFN_LateReset o_LateReset = nullptr;
+using PFN_AllocatorReset = HRESULT(STDMETHODCALLTYPE*)(ID3D12CommandAllocator*);
+static PFN_AllocatorReset o_LateAllocatorReset = nullptr;
+
+static HRESULT STDMETHODCALLTYPE hkLateAllocatorReset(ID3D12CommandAllocator* allocator)
+{
+    const auto result = o_LateAllocatorReset(allocator);
+    if (SUCCEEDED(result))
+        DlssNr::GpuLifetime::NoteAllocatorReset(allocator);
+    return result;
+}
 // True when hkLateReset went on after the tracker's hkReset (the usual order: the tracker hooks at device creation,
 // NR later). See DetachLateReset.
 static bool lateResetOnTop = false;
@@ -129,7 +140,11 @@ static HRESULT STDMETHODCALLTYPE hkLateReset(ID3D12GraphicsCommandList* cmd, ID3
 {
     const auto result = o_LateReset(cmd, allocator, pipeline);
     if (SUCCEEDED(result))
+    {
         DlssNr::FinishedPictureResetCommandList(cmd);
+        if (o_LateAllocatorReset)
+            DlssNr::GpuLifetime::NoteCommandListAllocator(cmd, allocator);
+    }
     return result;
 }
 
@@ -144,9 +159,14 @@ static void DetachLateReset()
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourDetach(&(PVOID&) o_LateReset, hkLateReset);
+    if (o_LateAllocatorReset)
+        DetourDetach(&(PVOID&) o_LateAllocatorReset, hkLateAllocatorReset);
 
     if (DetourTransactionCommit() == NO_ERROR)
+    {
         o_LateReset = nullptr;
+        o_LateAllocatorReset = nullptr;
+    }
     else
         LOG_ERROR("Failed to unhook the DLSS-NR command list Reset");
 }
@@ -2620,14 +2640,30 @@ bool ResTrack_Dx12::HookLateNrQueue(ID3D12Device* device)
                 real = cmd;
 
             o_LateReset = (PFN_LateReset) (*(void***) real)[10];
+            auto* realAllocator = static_cast<ID3D12CommandAllocator*>(Util::RealObjectIdentity(allocator));
+            o_LateAllocatorReset = (PFN_AllocatorReset) (*(void***) realAllocator)[8];
             DetourTransactionBegin();
             DetourUpdateThread(GetCurrentThread());
             DetourAttach(&(PVOID&) o_LateReset, hkLateReset);
 
             if (DetourTransactionCommit() != NO_ERROR)
+            {
                 o_LateReset = nullptr;
+                o_LateAllocatorReset = nullptr;
+            }
             else
+            {
                 lateResetOnTop = true;
+                DetourTransactionBegin();
+                DetourUpdateThread(GetCurrentThread());
+                if (DetourAttach(&(PVOID&) o_LateAllocatorReset, hkLateAllocatorReset) != NO_ERROR)
+                {
+                    DetourTransactionAbort();
+                    o_LateAllocatorReset = nullptr;
+                }
+                else if (DetourTransactionCommit() != NO_ERROR)
+                    o_LateAllocatorReset = nullptr;
+            }
             cmd->Close();
             cmd->Release();
         }

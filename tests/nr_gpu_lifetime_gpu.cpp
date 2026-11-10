@@ -143,6 +143,47 @@ int main()
         CHECK(ran && list.Get());
     }
 
+    // A game can reset its allocator but leave the closed list in a pool for much longer.
+    {
+        DlssNr::GpuLifetime tracker;
+        auto list = gpu.NewList();
+        tracker.Record(list.Get(), true); // turn on allocator tracking
+        CHECK(SUCCEEDED(list->Close()));
+        CHECK(SUCCEEDED(list->Reset(gpu.allocator.Get(), nullptr)));
+        tracker.ResetRecording(list.Get());
+        DlssNr::GpuLifetime::NoteCommandListAllocator(list.Get(), gpu.allocator.Get());
+        tracker.Record(list.Get(), true);
+        gpu.Submit(tracker, list.Get());
+
+        bool ran = false;
+        tracker.Retire([&] { ran = true; });
+        tracker.Collect();
+        CHECK(!ran);
+        gpu.Release();
+        tracker.Collect();
+        CHECK(tracker.Open(list.Get()) && !ran);
+
+        CHECK(SUCCEEDED(gpu.allocator->Reset()));
+        DlssNr::GpuLifetime::NoteAllocatorReset(gpu.allocator.Get());
+        tracker.Collect();
+        CHECK(!tracker.Open(list.Get()) && ran);
+
+        // Re-recording on another allocator detaches the earlier association.
+        ComPtr<ID3D12CommandAllocator> another;
+        CHECK(SUCCEEDED(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&another))));
+        CHECK(SUCCEEDED(list->Reset(another.Get(), nullptr)));
+        tracker.ResetRecording(list.Get());
+        DlssNr::GpuLifetime::NoteCommandListAllocator(list.Get(), another.Get());
+        tracker.Record(list.Get(), true);
+        CHECK(SUCCEEDED(list->Close()));
+        CHECK(SUCCEEDED(gpu.allocator->Reset()));
+        DlssNr::GpuLifetime::NoteAllocatorReset(gpu.allocator.Get());
+        CHECK(tracker.Open(list.Get()));
+        CHECK(SUCCEEDED(another->Reset()));
+        DlssNr::GpuLifetime::NoteAllocatorReset(another.Get());
+        CHECK(!tracker.Open(list.Get()));
+    }
+
     // Retired in the middle of the recording (before the list is closed or submitted): the list it was parked on counts.
     {
         DlssNr::GpuLifetime tracker;

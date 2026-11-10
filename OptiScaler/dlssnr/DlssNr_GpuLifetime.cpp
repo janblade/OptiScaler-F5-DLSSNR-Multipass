@@ -2,6 +2,7 @@
 #include "DlssNr_GpuLifetime.h"
 #include <Util.h>
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 #include <map>
 #include <wrl/client.h>
@@ -15,6 +16,63 @@ namespace
 {
 // Identity only (never dereferenced later); no log line, this runs for every notification.
 template <typename T> T* Identity(T* object) { return static_cast<T*>(Util::RealObjectIdentity(object)); }
+
+using Microsoft::WRL::ComPtr;
+constexpr GUID kAllocatorEpoch { 0x20d52417, 0x7447, 0x4ef4, { 0xad, 0x1c, 0x86, 0xe6, 0x1a, 0x0d, 0xa3, 0x68 } };
+constexpr GUID kListAllocator { 0xf250b496, 0x3aaf, 0x417d, { 0x81, 0xe6, 0xf1, 0x1d, 0xf2, 0x23, 0x97, 0x12 } };
+std::atomic_bool trackingAllocators = false;
+
+// The allocator and each bound list own a reference to this token, not to one another.
+template <class T> struct PrivateToken final : IUnknown
+{
+    std::atomic<ULONG> references { 1 };
+    T value {};
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override
+    {
+        if (!out)
+            return E_POINTER;
+        *out = nullptr;
+        if (iid != __uuidof(IUnknown))
+            return E_NOINTERFACE;
+        *out = static_cast<IUnknown*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const auto remaining = --references;
+        if (remaining == 0)
+            delete this;
+        return remaining;
+    }
+};
+
+using AllocatorEpoch = PrivateToken<std::atomic<uint64_t>>;
+using ListAllocator = PrivateToken<ComPtr<AllocatorEpoch>>;
+
+template <class Token> ComPtr<Token> GetToken(ID3D12Object* object, REFGUID key)
+{
+    IUnknown* token = nullptr;
+    UINT size = sizeof(token);
+    ComPtr<Token> result;
+    if (SUCCEEDED(object->GetPrivateData(key, &size, &token)))
+        result.Attach(static_cast<Token*>(token));
+    return result;
+}
+
+template <class Token> ComPtr<Token> EnsureToken(ID3D12Object* object, REFGUID key)
+{
+    auto token = GetToken<Token>(object, key);
+    if (!token)
+    {
+        token.Attach(new Token);
+        if (FAILED(object->SetPrivateDataInterface(key, token.Get())))
+            token.Reset();
+    }
+    return token;
+}
 } // namespace
 
 struct GpuLifetime::Impl
@@ -41,7 +99,13 @@ struct GpuLifetime::Impl
         bool signalFailed = false, singleSubmit = false;
         // Only the latest value on each queue is needed, including when the list is replayed.
         std::map<std::shared_ptr<Timeline>, UINT64> completions;
-        bool Complete() const { return !open && Finished(); }
+        ComPtr<AllocatorEpoch> allocator;
+        uint64_t allocatorEpoch = 0;
+        bool Open() const
+        {
+            return open && (!allocator || allocator->value.load(std::memory_order_relaxed) == allocatorEpoch);
+        }
+        bool Complete() const { return !Open() && Finished(); }
         bool Finished() const
         {
             return !signalFailed && std::all_of(completions.begin(), completions.end(),
@@ -145,11 +209,11 @@ struct GpuLifetime::Impl
     {
         const auto entry = lists->byIdentity.find(commands);
         if (entry != lists->byIdentity.end())
-            if (auto use = entry->second.recording.lock(); use && use->open)
+            if (auto use = entry->second.recording.lock(); use && use->Open())
                 return use;
         // A list whose destruction cannot be watched is still tracked by its recordings vector entry.
         for (const auto& [identity, use] : recordings)
-            if (identity == commands && use->open)
+            if (identity == commands && use->Open())
                 return use;
         return {};
     }
@@ -187,7 +251,24 @@ GpuLifetime::~GpuLifetime()
     if (!impl->recordings.empty() || !impl->retired.empty())
         (void) impl.release();
 }
-void GpuLifetime::Record(ID3D12GraphicsCommandList* commands)
+void GpuLifetime::NoteCommandListAllocator(ID3D12GraphicsCommandList* commands, ID3D12CommandAllocator* allocator)
+{
+    if (!trackingAllocators.load(std::memory_order_relaxed))
+        return;
+    // This runs on the native list before Reset returns. Update the existing binding even if getting the new
+    // allocator token fails, so an unrelated allocator can never invalidate a later recording on this list.
+    if (auto list = EnsureToken<ListAllocator>(commands, kListAllocator))
+        list->value = EnsureToken<AllocatorEpoch>(Identity(allocator), kAllocatorEpoch);
+}
+
+void GpuLifetime::NoteAllocatorReset(ID3D12CommandAllocator* allocator)
+{
+    if (trackingAllocators.load(std::memory_order_relaxed))
+        if (auto token = GetToken<AllocatorEpoch>(allocator, kAllocatorEpoch))
+            token->value.fetch_add(1, std::memory_order_relaxed);
+}
+
+void GpuLifetime::Record(ID3D12GraphicsCommandList* commands, bool trackAllocator)
 {
     if (!commands)
         return;
@@ -201,6 +282,14 @@ void GpuLifetime::Record(ID3D12GraphicsCommandList* commands)
         return;
     }
     auto use = std::make_shared<Impl::Recording>();
+    if (trackAllocator)
+    {
+        trackingAllocators.store(true, std::memory_order_relaxed);
+        if (auto list = GetToken<ListAllocator>(commands, kListAllocator))
+            use->allocator = list->value;
+        if (use->allocator)
+            use->allocatorEpoch = use->allocator->value.load(std::memory_order_relaxed);
+    }
     auto entry = impl->lists->byIdentity.find(commands);
     if (entry == impl->lists->byIdentity.end() && impl->watchKeyValid)
     {

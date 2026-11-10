@@ -231,7 +231,7 @@ void GiveUp(const std::string& reason, bool srUnavailable)
 void Record(ID3D12GraphicsCommandList* cmd)
 {
     auto& s = GetState();
-    s.lifetime.Record(cmd);
+    s.lifetime.Record(cmd, true);
     Watch(Util::RealObjectIdentity(cmd));
 }
 
@@ -768,6 +768,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         if (ngxGone || geometryChanged || selectionChanged)
         {
             Drop();
+            state.lifetime.Collect(); // if the old recording is already retired, switch in this frame
             Say("");
             if (geometryChanged)
                 g_nr.reset = true;

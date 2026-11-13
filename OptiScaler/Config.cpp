@@ -1007,6 +1007,8 @@ bool Config::LoadFromPath(const wchar_t* InPath)
     std::filesystem::path iniPath(InPath);
     auto newPath = iniPath / fileName;
 
+    std::lock_guard<std::recursive_mutex> lock(iniMutex);
+
     if (Reload(newPath))
     {
         absoluteFileName = newPath;

@@ -19,8 +19,9 @@ class NtdllProxy
 
     typedef NTSTATUS(NTAPI* PFN_RtlGetVersion)(PRTL_OSVERSIONINFOW lpVersionInformation);
 
-    // It's a partial implementation
-    static HMODULE LoadLibraryExW_Ldr(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
+    // It's a partial implementation. searchPath (LdrLoadDll's DllPath, ';' separated) is where the dll and the dlls it
+    // imports are looked for first, null is the default search order
+    static HMODULE LoadLibraryExW_Ldr(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags, LPCWSTR searchPath = nullptr)
     {
         // LdrLoadDll wants a ULONG*, remove unsupported flags
         ULONG ldrFlags = dwFlags & ~(LOAD_WITH_ALTERED_SEARCH_PATH | LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
@@ -56,7 +57,7 @@ class NtdllProxy
             UNICODE_STRING uName;
             o_RtlInitUnicodeString(&uName, lpLibFileName);
 
-            status = o_LdrLoadDll(nullptr,                        // null is default search order
+            status = o_LdrLoadDll(const_cast<PWSTR>(searchPath),  // null is default search order
                                   ldrFlags ? &ldrFlags : nullptr, // optional flags
                                   &uName,                         // the name of the DLL
                                   &hModule                        // out: module handle

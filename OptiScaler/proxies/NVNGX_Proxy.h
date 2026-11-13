@@ -9,6 +9,7 @@
 #include <proxies/KernelBase_Proxy.h>
 
 #include "nvapi/NvApiHooks.h"
+#include <misc/CustomProviders.h>
 
 #include "detours/detours.h"
 
@@ -437,6 +438,10 @@ struct NvngxModule
     PFN_CUDA_EvaluateFeature CUDA_EvaluateFeature = nullptr;
     PFN_CUDA_ReleaseFeature CUDA_ReleaseFeature = nullptr;
 
+    // A plugin's resolver for a custom runtime registered through the plugin API (upstream 74ae2c65), else the dll
+    CustomProviders::GetProcFn getProc = nullptr;
+    void* getProcUserData = nullptr;
+
     PFN_D3D11_Init D3D11_Init = nullptr;
     PFN_D3D11_Init_ProjectID D3D11_Init_ProjectID = nullptr;
     PFN_D3D11_Init_Ext D3D11_Init_Ext = nullptr;
@@ -491,10 +496,145 @@ struct NvngxModule
     PFN_UpdateFeature UpdateFeature = nullptr;
 };
 
+// NGX runtime from custom/<name>/dlss or a plugin, only used by Opti's DLSS upscaler and never hooked
+struct CustomNgxModule
+{
+    NvngxModule module;
+    bool dx12Inited = false;
+    bool vulkanInited = false;
+};
+
 class NVNGXProxy
 {
   private:
     inline static NvngxModule _module;
+
+    // std::map so the pointers handed out stay valid
+    inline static std::map<std::string, CustomNgxModule> _customModules;
+    inline static std::mutex _customMutex;
+
+    // The custom module's export: from a plugin's resolver when it has one, else KernelBase's GetProcAddress
+    static FARPROC Proc(const NvngxModule& module, const char* name)
+    {
+        if (module.getProc != nullptr)
+            return (FARPROC) module.getProc(module.getProcUserData, name);
+
+        return KernelBaseProxy::GetProcAddress_()(module.dll, name);
+    }
+
+    static void GetDx12Functions(NvngxModule& module)
+    {
+        module.D3D12_Init = (PFN_D3D12_Init) Proc(module, "NVSDK_NGX_D3D12_Init");
+        module.D3D12_Init_ProjectID = (PFN_D3D12_Init_ProjectID) Proc(module, "NVSDK_NGX_D3D12_Init_ProjectID");
+        module.D3D12_Init_Ext = (PFN_D3D12_Init_Ext) Proc(module, "NVSDK_NGX_D3D12_Init_Ext");
+        module.D3D12_Shutdown = (PFN_D3D12_Shutdown) Proc(module, "NVSDK_NGX_D3D12_Shutdown");
+        module.D3D12_Shutdown1 = (PFN_D3D12_Shutdown1) Proc(module, "NVSDK_NGX_D3D12_Shutdown1");
+        module.D3D12_GetParameters = (PFN_D3D12_GetParameters) Proc(module, "NVSDK_NGX_D3D12_GetParameters");
+        module.D3D12_AllocateParameters =
+            (PFN_D3D12_AllocateParameters) Proc(module, "NVSDK_NGX_D3D12_AllocateParameters");
+        module.D3D12_GetCapabilityParameters =
+            (PFN_D3D12_GetCapabilityParameters) Proc(module, "NVSDK_NGX_D3D12_GetCapabilityParameters");
+        module.D3D12_DestroyParameters =
+            (PFN_D3D12_DestroyParameters) Proc(module, "NVSDK_NGX_D3D12_DestroyParameters");
+        module.D3D12_GetScratchBufferSize =
+            (PFN_D3D12_GetScratchBufferSize) Proc(module, "NVSDK_NGX_D3D12_GetScratchBufferSize");
+        module.D3D12_CreateFeature = (PFN_D3D12_CreateFeature) Proc(module, "NVSDK_NGX_D3D12_CreateFeature");
+        module.D3D12_ReleaseFeature = (PFN_D3D12_ReleaseFeature) Proc(module, "NVSDK_NGX_D3D12_ReleaseFeature");
+        module.D3D12_GetFeatureRequirements =
+            (PFN_D3D12_GetFeatureRequirements) Proc(module, "NVSDK_NGX_D3D12_GetFeatureRequirements");
+        module.D3D12_EvaluateFeature = (PFN_D3D12_EvaluateFeature) Proc(module, "NVSDK_NGX_D3D12_EvaluateFeature");
+    }
+
+    static void GetVulkanFunctions(NvngxModule& module)
+    {
+        module.VULKAN_RequiredExtensions =
+            (PFN_VULKAN_RequiredExtensions) Proc(module, "NVSDK_NGX_VULKAN_RequiredExtensions");
+        module.VULKAN_Init = (PFN_VULKAN_Init) Proc(module, "NVSDK_NGX_VULKAN_Init");
+        module.VULKAN_Init_Ext = (PFN_VULKAN_Init_Ext) Proc(module, "NVSDK_NGX_VULKAN_Init_Ext");
+        module.VULKAN_Init_Ext2 = (PFN_VULKAN_Init_Ext2) Proc(module, "NVSDK_NGX_VULKAN_Init_Ext2");
+        module.VULKAN_Init_ProjectID_Ext =
+            (PFN_VULKAN_Init_ProjectID_Ext) Proc(module, "NVSDK_NGX_VULKAN_Init_ProjectID_Ext");
+        module.VULKAN_Init_ProjectID = (PFN_VULKAN_Init_ProjectID) Proc(module, "NVSDK_NGX_VULKAN_Init_ProjectID");
+        module.VULKAN_Shutdown = (PFN_VULKAN_Shutdown) Proc(module, "NVSDK_NGX_VULKAN_Shutdown");
+        module.VULKAN_Shutdown1 = (PFN_VULKAN_Shutdown1) Proc(module, "NVSDK_NGX_VULKAN_Shutdown1");
+        module.VULKAN_GetParameters = (PFN_VULKAN_GetParameters) Proc(module, "NVSDK_NGX_VULKAN_GetParameters");
+        module.VULKAN_AllocateParameters =
+            (PFN_VULKAN_AllocateParameters) Proc(module, "NVSDK_NGX_VULKAN_AllocateParameters");
+        module.VULKAN_GetCapabilityParameters =
+            (PFN_VULKAN_GetCapabilityParameters) Proc(module, "NVSDK_NGX_VULKAN_GetCapabilityParameters");
+        module.VULKAN_DestroyParameters =
+            (PFN_VULKAN_DestroyParameters) Proc(module, "NVSDK_NGX_VULKAN_DestroyParameters");
+        module.VULKAN_GetScratchBufferSize =
+            (PFN_VULKAN_GetScratchBufferSize) Proc(module, "NVSDK_NGX_VULKAN_GetScratchBufferSize");
+        module.VULKAN_CreateFeature = (PFN_VULKAN_CreateFeature) Proc(module, "NVSDK_NGX_VULKAN_CreateFeature");
+        module.VULKAN_CreateFeature1 = (PFN_VULKAN_CreateFeature1) Proc(module, "NVSDK_NGX_VULKAN_CreateFeature1");
+        module.VULKAN_ReleaseFeature = (PFN_VULKAN_ReleaseFeature) Proc(module, "NVSDK_NGX_VULKAN_ReleaseFeature");
+        module.VULKAN_GetFeatureRequirements =
+            (PFN_VULKAN_GetFeatureRequirements) Proc(module, "NVSDK_NGX_VULKAN_GetFeatureRequirements");
+        module.VULKAN_GetFeatureInstanceExtensionRequirements =
+            (PFN_VULKAN_GetFeatureInstanceExtensionRequirements) Proc(
+                module, "NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements");
+        module.VULKAN_GetFeatureDeviceExtensionRequirements = (PFN_VULKAN_GetFeatureDeviceExtensionRequirements) Proc(
+            module, "NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements");
+        module.VULKAN_EvaluateFeature = (PFN_VULKAN_EvaluateFeature) Proc(module, "NVSDK_NGX_VULKAN_EvaluateFeature");
+    }
+
+    static NVSDK_NGX_Result InitDx12Module(const NvngxModule& module, ID3D12Device* InDevice)
+    {
+        NVSDK_NGX_FeatureCommonInfo fcInfo {};
+        GetFeatureCommonInfo(&fcInfo);
+        NVSDK_NGX_Result nvResult = NVSDK_NGX_Result_Fail;
+
+        if (State::Instance().NVNGX_ProjectId != "" && module.D3D12_Init_ProjectID != nullptr)
+        {
+            LOG_INFO("module.D3D12_Init_ProjectID!");
+
+            nvResult = module.D3D12_Init_ProjectID(
+                State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
+                State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                InDevice, State::Instance().NVNGX_Version, &fcInfo);
+        }
+        else if (module.D3D12_Init_Ext != nullptr)
+        {
+            LOG_INFO("module.D3D12_Init_Ext!");
+            nvResult = module.D3D12_Init_Ext(State::Instance().NVNGX_ApplicationId,
+                                             State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
+                                             State::Instance().NVNGX_Version, &fcInfo);
+        }
+
+        LOG_INFO("result: {0:X}", (UINT) nvResult);
+
+        return nvResult;
+    }
+
+    static NVSDK_NGX_Result InitVulkanModule(const NvngxModule& module, VkInstance InInstance, VkPhysicalDevice InPD,
+                                             VkDevice InDevice, PFN_vkGetInstanceProcAddr InGIPA,
+                                             PFN_vkGetDeviceProcAddr InGDPA)
+    {
+        NVSDK_NGX_FeatureCommonInfo fcInfo {};
+        GetFeatureCommonInfo(&fcInfo);
+        NVSDK_NGX_Result nvResult = NVSDK_NGX_Result_Fail;
+
+        if (State::Instance().NVNGX_ProjectId != "" && module.VULKAN_Init_ProjectID != nullptr)
+        {
+            LOG_DEBUG("module.VULKAN_Init_ProjectID!");
+            nvResult = module.VULKAN_Init_ProjectID(
+                State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
+                State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                InInstance, InPD, InDevice, InGIPA, InGDPA, State::Instance().NVNGX_Version, &fcInfo);
+        }
+        else if (module.VULKAN_Init_Ext != nullptr)
+        {
+            LOG_DEBUG("module.VULKAN_Init_Ext!");
+            nvResult = module.VULKAN_Init_Ext(State::Instance().NVNGX_ApplicationId,
+                                              State::Instance().NVNGX_ApplicationDataPath.c_str(), InInstance, InPD,
+                                              InDevice, State::Instance().NVNGX_Version, &fcInfo);
+        }
+
+        LOG_DEBUG("result: {0:X}", (UINT) nvResult);
+
+        return nvResult;
+    }
 
     inline static bool _cudaInited = false;
     inline static bool _dx11Inited = false;
@@ -616,36 +756,7 @@ class NVNGXProxy
             _module.D3D11_EvaluateFeature = (PFN_D3D11_EvaluateFeature) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "NVSDK_NGX_D3D11_EvaluateFeature");
 
-            _module.D3D12_Init =
-                (PFN_D3D12_Init) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Init");
-            _module.D3D12_Init_ProjectID = (PFN_D3D12_Init_ProjectID) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_Init_ProjectID");
-            _module.D3D12_Init_Ext =
-                (PFN_D3D12_Init_Ext) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Init_Ext");
-            _module.D3D12_Shutdown =
-                (PFN_D3D12_Shutdown) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Shutdown");
-            _module.D3D12_Shutdown1 =
-                (PFN_D3D12_Shutdown1) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Shutdown1");
-            _module.D3D12_GetParameters = (PFN_D3D12_GetParameters) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_GetParameters");
-            _module.D3D12_AllocateParameters = (PFN_D3D12_AllocateParameters) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_AllocateParameters");
-            _module.D3D12_GetCapabilityParameters =
-                (PFN_D3D12_GetCapabilityParameters) KernelBaseProxy::GetProcAddress_()(
-                    _module.dll, "NVSDK_NGX_D3D12_GetCapabilityParameters");
-            _module.D3D12_DestroyParameters = (PFN_D3D12_DestroyParameters) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_DestroyParameters");
-            _module.D3D12_GetScratchBufferSize = (PFN_D3D12_GetScratchBufferSize) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_GetScratchBufferSize");
-            _module.D3D12_CreateFeature = (PFN_D3D12_CreateFeature) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_CreateFeature");
-            _module.D3D12_ReleaseFeature = (PFN_D3D12_ReleaseFeature) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_ReleaseFeature");
-            _module.D3D12_GetFeatureRequirements =
-                (PFN_D3D12_GetFeatureRequirements) KernelBaseProxy::GetProcAddress_()(
-                    _module.dll, "NVSDK_NGX_D3D12_GetFeatureRequirements");
-            _module.D3D12_EvaluateFeature = (PFN_D3D12_EvaluateFeature) KernelBaseProxy::GetProcAddress_()(
-                _module.dll, "NVSDK_NGX_D3D12_EvaluateFeature");
+            GetDx12Functions(_module);
 
             _module.VULKAN_RequiredExtensions = (PFN_VULKAN_RequiredExtensions) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "NVSDK_NGX_VULKAN_RequiredExtensions");
@@ -855,35 +966,79 @@ class NVNGXProxy
         if (_module.dll == nullptr)
             return false;
 
-        NVSDK_NGX_FeatureCommonInfo fcInfo {};
-        GetFeatureCommonInfo(&fcInfo);
-        NVSDK_NGX_Result nvResult = NVSDK_NGX_Result_Fail;
-
-        if (State::Instance().NVNGX_ProjectId != "" && _module.D3D12_Init_ProjectID != nullptr)
-        {
-            LOG_INFO("_module.D3D12_Init_ProjectID!");
-
-            nvResult = _module.D3D12_Init_ProjectID(
-                State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
-                State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InDevice, State::Instance().NVNGX_Version, &fcInfo);
-        }
-        else if (_module.D3D12_Init_Ext != nullptr)
-        {
-            LOG_INFO("_module.D3D12_Init_Ext!");
-            nvResult = _module.D3D12_Init_Ext(State::Instance().NVNGX_ApplicationId,
-                                              State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
-                                              State::Instance().NVNGX_Version, &fcInfo);
-        }
-
-        LOG_INFO("result: {0:X}", (UINT) nvResult);
-
-        _dx12Inited = (nvResult == NVSDK_NGX_Result_Success);
+        _dx12Inited = InitDx12Module(_module, InDevice) == NVSDK_NGX_Result_Success;
 
         if (_dx12Inited)
             ++_dx12Epoch;
 
         return _dx12Inited;
+    }
+
+    // Loading is only tried once per name, nullptr if it failed or it can't run DLSS on the API
+    static CustomNgxModule* LoadCustom(const std::string& name, API api)
+    {
+        std::scoped_lock lock(_customMutex);
+
+        auto [it, inserted] = _customModules.try_emplace(name);
+        auto& custom = it->second;
+        auto& module = custom.module;
+
+        if (inserted)
+        {
+            auto exports = CustomProviders::Load(name, CustomProviders::Kind::Dlss);
+
+            if (!exports)
+                return nullptr;
+
+            module.dll = exports.dll;
+            module.filePath = exports.path.wstring();
+            module.getProc = exports.getProc;
+            module.getProcUserData = exports.userData;
+            GetDx12Functions(module);
+            GetVulkanFunctions(module);
+        }
+
+        bool usable = false;
+
+        if (api == API::Vulkan)
+            usable = (module.VULKAN_Init_ProjectID != nullptr || module.VULKAN_Init_Ext != nullptr) &&
+                     module.VULKAN_CreateFeature != nullptr && module.VULKAN_EvaluateFeature != nullptr &&
+                     module.VULKAN_ReleaseFeature != nullptr;
+        else
+            usable = (module.D3D12_Init_ProjectID != nullptr || module.D3D12_Init_Ext != nullptr) &&
+                     module.D3D12_CreateFeature != nullptr && module.D3D12_EvaluateFeature != nullptr &&
+                     module.D3D12_ReleaseFeature != nullptr;
+
+        return usable ? &custom : nullptr;
+    }
+
+    // Inited once until ShutdownCustomDx12
+    static bool InitCustomDx12(CustomNgxModule& custom, ID3D12Device* InDevice)
+    {
+        if (!custom.dx12Inited)
+            custom.dx12Inited = InitDx12Module(custom.module, InDevice) == NVSDK_NGX_Result_Success;
+
+        return custom.dx12Inited;
+    }
+
+    static void ShutdownAllCustomDx12(ID3D12Device* InDevice)
+    {
+        std::scoped_lock lock(_customMutex);
+        for (auto& [name, custom] : _customModules)
+            ShutdownCustomDx12(custom, InDevice);
+    }
+
+    static void ShutdownCustomDx12(CustomNgxModule& custom, ID3D12Device* InDevice)
+    {
+        if (!custom.dx12Inited)
+            return;
+
+        if (custom.module.D3D12_Shutdown != nullptr)
+            custom.module.D3D12_Shutdown();
+        else if (custom.module.D3D12_Shutdown1 != nullptr)
+            custom.module.D3D12_Shutdown1(InDevice);
+
+        custom.dx12Inited = false;
     }
 
     static void SetDx12Inited(bool value)
@@ -898,6 +1053,17 @@ class NVNGXProxy
     static void BumpDx12Epoch() { ++_dx12Epoch; }
 
     static uint64_t Dx12Epoch() { return _dx12Epoch.load(); }
+
+    // Inited once, like NVIDIA's runtime on Vulkan (upstream 74ae2c65)
+    static bool InitCustomVulkan(CustomNgxModule& custom, VkInstance InInstance, VkPhysicalDevice InPD,
+                                 VkDevice InDevice, PFN_vkGetInstanceProcAddr InGIPA, PFN_vkGetDeviceProcAddr InGDPA)
+    {
+        if (!custom.vulkanInited)
+            custom.vulkanInited =
+                InitVulkanModule(custom.module, InInstance, InPD, InDevice, InGIPA, InGDPA) == NVSDK_NGX_Result_Success;
+
+        return custom.vulkanInited;
+    }
 
     static bool IsDx12Inited() { return _dx12Inited; }
 
@@ -981,29 +1147,8 @@ class NVNGXProxy
         if (_module.dll == nullptr)
             return false;
 
-        NVSDK_NGX_FeatureCommonInfo fcInfo {};
-        GetFeatureCommonInfo(&fcInfo);
-        NVSDK_NGX_Result nvResult = NVSDK_NGX_Result_Fail;
-
-        if (State::Instance().NVNGX_ProjectId != "" && _module.VULKAN_Init_ProjectID != nullptr)
-        {
-            LOG_DEBUG("_module.VULKAN_Init_ProjectID!");
-            nvResult = _module.VULKAN_Init_ProjectID(
-                State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
-                State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InInstance, InPD, InDevice, InGIPA, InGDPA, State::Instance().NVNGX_Version, &fcInfo);
-        }
-        else if (_module.VULKAN_Init_Ext != nullptr)
-        {
-            LOG_DEBUG("_module.VULKAN_Init_Ext!");
-            nvResult = _module.VULKAN_Init_Ext(State::Instance().NVNGX_ApplicationId,
-                                               State::Instance().NVNGX_ApplicationDataPath.c_str(), InInstance, InPD,
-                                               InDevice, State::Instance().NVNGX_Version, &fcInfo);
-        }
-
-        LOG_DEBUG("result: {0:X}", (UINT) nvResult);
-
-        _vulkanInited = (nvResult == NVSDK_NGX_Result_Success);
+        _vulkanInited =
+            InitVulkanModule(_module, InInstance, InPD, InDevice, InGIPA, InGDPA) == NVSDK_NGX_Result_Success;
 
         return true;
     }

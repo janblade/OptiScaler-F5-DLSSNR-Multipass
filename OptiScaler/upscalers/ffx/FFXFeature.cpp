@@ -18,8 +18,12 @@ double FFXFeature::GetDeltaTime()
     return deltaTime;
 }
 
-void FFXFeature::QueryVersionsDx12(ID3D12Device* device)
+// The custom upscaler's own list when given (custom\<name>\ffx), else the regular one in State
+bool FFXFeature::QueryVersionsDx12(ID3D12Device* device, CustomFfxModule* custom)
 {
+    auto& ids = custom != nullptr ? custom->versions.ids : State::Instance().ffxUpscalerVersionIds;
+    auto& names = custom != nullptr ? custom->versions.names : State::Instance().ffxUpscalerVersionNames;
+
     // Get number of versions for allocation
     ffxQueryDescGetVersions versionQuery {};
     versionQuery.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
@@ -31,52 +35,61 @@ void FFXFeature::QueryVersionsDx12(ID3D12Device* device)
     // The driver upscaler is always offered in the menu, even when the FFX SDK has a newer one
     constexpr auto driverListing = FSR4DriverProviderDx12::Listing::Always;
 
-    FfxApiProxy::D3D12_QueryUpscalerVersions(&versionQuery, driverListing);
+    auto query = [&]
+    {
+        return custom != nullptr ? custom->module.Query(nullptr, &versionQuery.header)
+                                 : FfxApiProxy::D3D12_QueryUpscalerVersions(&versionQuery, driverListing);
+    };
+
+    if (query() != FFX_API_RETURN_OK)
+        return false;
 
     // Fill version ids and names arrays
-    State::Instance().ffxUpscalerVersionIds.resize(versionCount);
-    State::Instance().ffxUpscalerVersionNames.resize(versionCount);
-    versionQuery.versionIds = State::Instance().ffxUpscalerVersionIds.data();
-    versionQuery.versionNames = State::Instance().ffxUpscalerVersionNames.data();
-    FfxApiProxy::D3D12_QueryUpscalerVersions(&versionQuery, driverListing);
+    ids.resize(versionCount);
+    names.resize(versionCount);
+    versionQuery.versionIds = ids.data();
+    versionQuery.versionNames = names.data();
+
+    return query() == FFX_API_RETURN_OK;
 }
 
-void FFXFeature::QueryVersionsVulkan()
+bool FFXFeature::QueryVersionsVulkan(void* deviceContext, CustomFfxModule* custom)
 {
+    // A custom upscaler (custom\<name>fx_vk) has its own version list
+    auto& ids = custom != nullptr ? custom->versions.ids : State::Instance().ffxUpscalerVersionIds;
+    auto& names = custom != nullptr ? custom->versions.names : State::Instance().ffxUpscalerVersionNames;
+
     // Get number of versions for allocation
     ffxQueryDescGetVersions versionQuery {};
     versionQuery.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
     versionQuery.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    // versionQuery.device = Device; // only for DirectX 12 applications
+    versionQuery.device = deviceContext;
     uint64_t versionCount = 0;
     versionQuery.outputCount = &versionCount;
 
-    auto& state = State::Instance();
+    // The driver upscaler is always offered in the menu, even when the FFX SDK has a newer one
+    constexpr auto driverListing = DriverListing::Always;
 
-    // The driver provided FSR 4 works without amd_fidelityfx_vk.dll
-    if (FfxApiProxy::VULKAN_Query() != nullptr)
+    auto query = [&]
     {
-        FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
+        return custom != nullptr ? custom->module.Query(nullptr, &versionQuery.header)
+                                 : FfxApiProxy::VULKAN_QueryUpscalerVersions(&versionQuery, driverListing);
+    };
 
-        // Fill version ids and names arrays
-        state.ffxUpscalerVersionIds.resize(versionCount);
-        state.ffxUpscalerVersionNames.resize(versionCount);
-        versionQuery.versionIds = state.ffxUpscalerVersionIds.data();
-        versionQuery.versionNames = state.ffxUpscalerVersionNames.data();
-        FfxApiProxy::VULKAN_Query()(nullptr, &versionQuery.header);
-    }
-    else
+    if (query() != FFX_API_RETURN_OK)
     {
-        state.ffxUpscalerVersionIds.clear();
-        state.ffxUpscalerVersionNames.clear();
+        ids.clear();
+        names.clear();
+        return false;
     }
 
-    // FSR 4 provided by the Vulkan driver
-    if (FSR4DriverProviderVk::Init())
-    {
-        state.ffxUpscalerVersionIds.push_back(FSR4DriverProviderVk::VersionId());
-        state.ffxUpscalerVersionNames.push_back(FSR4DriverProviderVk::VersionName());
-    }
+    // Fill version ids and names arrays
+    ids.resize(versionCount);
+    names.resize(versionCount);
+    versionQuery.versionIds = ids.data();
+    versionQuery.versionNames = names.data();
+
+    return query() == FFX_API_RETURN_OK;
 }
 
 void FFXFeature::InitFlags()

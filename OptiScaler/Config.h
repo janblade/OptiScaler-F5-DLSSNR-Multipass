@@ -976,6 +976,8 @@ class Config
     CustomOptional<std::wstring, NoDefault> FfxDx12RRPath;
     CustomOptional<std::wstring, NoDefault> FfxDx12RCPath;
     CustomOptional<std::wstring, NoDefault> FfxVkPath;
+    CustomOptional<std::wstring, NoDefault> FfxVkSRPath;
+    CustomOptional<std::wstring, NoDefault> FfxVkFGPath;
     CustomOptional<std::wstring, NoDefault> XeSSLibrary;
     CustomOptional<std::wstring, NoDefault> XeFGLibrary;
     CustomOptional<std::wstring, NoDefault> XeLLLibrary;
@@ -1144,6 +1146,29 @@ class Config
     // FSR
     CustomOptional<bool> FsrDebugView { false };
     CustomOptional<int> FfxUpscalerIndex { 0 };
+    // Custom upscaler name (misc/CustomProviders.h) of each API, stored in the API's upscaler setting in place of
+    // the upscaler it runs as, empty for the regular upscalers
+    CustomOptional<std::string, NoDefault> CustomUpscalerDx11;
+    CustomOptional<std::string, NoDefault> CustomUpscaler;
+    CustomOptional<std::string, NoDefault> CustomUpscalerVk;
+    // Folder in custom with a dlssd for the game's ray reconstruction, RRUpscaler in the ini, empty for auto
+    CustomOptional<std::string, NoDefault> CustomRRUpscaler;
+    // Regular upscaler running the game's ray reconstruction without denoising, RRUpscaler in the ini, empty for DLSSD
+    CustomOptional<Upscaler, NoDefault> RRRegularUpscaler;
+    // Regular upscalers can be picked for ray reconstruction, which is then offered to the game without a DLSSD
+    CustomOptional<bool> RRAllowRegularUpscalers { false };
+
+    // UpscalerIndex of [FSR] for the regular FFX upscaler, of [<name>] for a custom one
+    CustomOptional<int>& FfxUpscalerIndexFor(const std::string& custom)
+    {
+        // A custom folder named FSR shares [FSR] UpscalerIndex, the ini section it is saved in
+        if (custom.empty() || _stricmp(custom.c_str(), "FSR") == 0)
+            return FfxUpscalerIndex;
+
+        // Entries never move, the reference stays valid outside the lock
+        std::scoped_lock lock(_customIndexMutex);
+        return _ffxCustomUpscalerIndex.try_emplace(custom, 0).first->second;
+    }
     CustomOptional<int> FfxFGIndex { 0 };
     CustomOptional<bool> FsrUseMaskForTransparency { true };
     CustomOptional<bool> FsrNonLinearColorSpace { false };
@@ -1234,6 +1259,8 @@ class Config
     // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll
     CustomOptional<bool> FGStreamlineIgnoreOTA { false };
     CustomOptional<FGNvngxReplacement> FGNvngxReplacement { FGNvngxReplacement::None };
+    // With FGNvngxReplacement Custom: the folder name under OptiScaler's custom folder (any other value of the key)
+    std::string FGNvngxCustomName;
     CustomOptional<bool> FGDrawUIOverFG { false };
     CustomOptional<bool> FGUIPremultipliedAlpha { true };
     CustomOptional<bool> FGDisableHudless { false };
@@ -1314,6 +1341,8 @@ class Config
     CustomOptional<bool> FSRFGSkipConfigForHudless { false };
     CustomOptional<bool> FSRFGSkipDispatchForHudless { false };
     CustomOptional<bool> FSRFGEnableWatermark { false };
+    // Custom FFX FG name (misc/CustomProviders.h) used by FSR FG, empty for the regular one
+    CustomOptional<std::string, NoDefault> FSRFGProvider;
 
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
@@ -1417,6 +1446,12 @@ class Config
     static std::optional<DlssNrProfiles::File> ReadDlssNrProfile(const std::filesystem::path& path);
     bool SaveXeFG();
 
+    // Keys that aren't OptiScaler options (plugin settings), kept in the ini as they are
+    std::optional<std::string> GetRawValue(const char* section, const char* key);
+    void SetRawValue(const char* section, const char* key, const char* value);
+    void DeleteRawValue(const char* section, const char* key);
+    bool SaveRawValues();
+
     void CheckUpscalerFiles();
 
     // FG on/off and frame count. With FG Input DLSSG (Streamline 2+) and Enabled unset they follow the game's DLSS
@@ -1436,6 +1471,15 @@ class Config
 
     std::filesystem::path absoluteFileName;
     std::wstring fileName = L"OptiScaler.ini";
+
+    // Ini sections aren't case sensitive, the folder names neither
+    struct NoCaseLess
+    {
+        bool operator()(const std::string& a, const std::string& b) const { return _stricmp(a.c_str(), b.c_str()) < 0; }
+    };
+
+    std::map<std::string, CustomOptional<int>, NoCaseLess> _ffxCustomUpscalerIndex;
+    std::mutex _customIndexMutex;
 
     bool Reload(std::filesystem::path iniPath);
     void ReadDlssNr();

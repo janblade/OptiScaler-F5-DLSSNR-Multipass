@@ -4,6 +4,8 @@
 
 #include <upscalers/IFeature.h>
 
+struct CustomFfxModule;
+
 class FFXFeature : public virtual IFeature
 {
   private:
@@ -22,8 +24,10 @@ class FFXFeature : public virtual IFeature
 
     double GetDeltaTime();
 
-    void QueryVersionsDx12(ID3D12Device* device);
-    void QueryVersionsVulkan();
+    // Fills the custom upscaler's list when given, the regular one otherwise
+    bool QueryVersionsDx12(ID3D12Device* device, CustomFfxModule* custom = nullptr);
+    // deviceContext is VkDeviceContext of FFX SDK 2.x, used for filtering out unsupported upscalers (FSR4)
+    bool QueryVersionsVulkan(void* deviceContext = nullptr, CustomFfxModule* custom = nullptr);
 
     void InitFlags();
 

@@ -10,9 +10,10 @@
 // GetDynamicOutputResolution sees it, returns immediately without resolving the output size, and
 // leaves DLSS to be driven at the wrong resolution. No DLSS feature sets it anywhere else in the
 // tree, and this one must not either.
-DLSSFeatureDx11on12::DLSSFeatureDx11on12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters)
+DLSSFeatureDx11on12::DLSSFeatureDx11on12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters,
+                                         const std::string& customUpscaler)
     : IFeature_Dx11wDx12(InHandleId, InParameters), IFeature_Dx11(InHandleId, InParameters),
       IFeature(InHandleId, InParameters)
 {
-    dx12Feature = std::make_unique<DLSSFeatureDx12>(InHandleId, InParameters);
+    dx12Feature = std::make_unique<DLSSFeatureDx12>(InHandleId, InParameters, customUpscaler);
 }

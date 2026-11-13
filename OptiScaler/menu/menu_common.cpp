@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "menu_common.h"
 #include "PresentRateMeter.h"
 #include "MenuPages.h"
@@ -28,6 +28,7 @@
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/FfxApi_Proxy.h>
 #include <upscalers/ffx/FFXFeature.h>
+#include <upscalers/dlssd/DLSSDFeature.h>
 #include <fsr4/FSR4Models.h>
 #include <fsr4/FSR4Presets.h>
 #include <fsr4/FSR4DriverProviderVk.h>
@@ -35,6 +36,9 @@
 
 #include <framegen/mfgunlock/Status.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <misc/CustomProviders.h>
+#include <plugins/PluginApi.h>
+#include <upscalers/nvngx/Nvngx_RR.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -446,10 +450,10 @@ inline void MenuCommon::ReInitUpscaler()
     if (!State::Instance().currentFeature)
         return;
 
-    if (State::Instance().currentFeature->GetUpscalerType() == Upscaler::DLSSD)
-        State::Instance().newBackend = Upscaler::DLSSD;
-    else
-        State::Instance().newBackend = currentBackend;
+    // currentBackend is only updated while the menu is drawn, ray reconstruction keeps its DLSSD
+    auto feature = State::Instance().currentFeature;
+    State::Instance().newBackend =
+        State::Instance().rrHandles.contains(feature->Handle()->Id) ? Upscaler::Reset : feature->GetUpscalerType();
 
     MARK_ALL_BACKENDS_CHANGED();
 }
@@ -590,10 +594,33 @@ void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, co
     if (targetBackend == Upscaler::Reset)
         targetBackend = currentUpscaler;
 
-    std::string selectedName = UpscalerDisplayName(targetBackend, api);
+    // A custom upscaler (custom\<name>\ffx, ffx_vk or dlss; upstream OptiScaler 74ae2c65) runs as FFX or DLSS: the
+    // name decides which entry is the current one
+    auto& customSetting = CustomProviders::NameSetting(api);
+    const auto currentCustom = CustomProviders::Selected(api, currentUpscaler);
+    const auto targetCustom = CustomProviders::Selected(api, targetBackend);
+
+    std::string selectedName = targetCustom.empty() ? UpscalerDisplayName(targetBackend, api) : targetCustom;
 
     if (ImGui::BeginCombo("##UpscalerCombo", selectedName.c_str()))
     {
+        // Picking a regular entry where a custom one ran (or the other way) keeps the upscaler type, so the change
+        // is marked here
+        auto pick = [&](Upscaler upscaler, const std::string& custom)
+        {
+            State::Instance().newBackend = upscaler;
+
+            if (_stricmp(customSetting.value_or("").c_str(), custom.c_str()) != 0)
+            {
+                if (custom.empty())
+                    customSetting.reset();
+                else
+                    customSetting = custom;
+
+                MARK_ALL_BACKENDS_CHANGED();
+            }
+        };
+
         for (auto opt : options)
         {
             // Check if GPU is capable of a given backend
@@ -609,12 +636,46 @@ void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, co
             if (opt == Upscaler::XeSS && api == API::DX11 && primaryGpu.vendorId != VendorId::Intel)
                 continue;
 
-            bool isSelected = (currentUpscaler == opt);
+            bool isSelected = (currentUpscaler == opt) && currentCustom.empty();
             if (ImGui::Selectable(UpscalerDisplayName(opt, api).c_str(), isSelected))
+                pick(opt, "");
+        }
+
+        // Custom upscalers after the regular ones, one entry per upscaler type a name runs as on this API
+        std::vector<std::string> names;
+        for (auto kind : { CustomProviders::Kind::Ffx, CustomProviders::Kind::FfxVk, CustomProviders::Kind::Dlss })
+        {
+            for (auto& name : CustomProviders::List(kind))
             {
-                State::Instance().newBackend = opt;
+                if (!CustomProviders::Contains(names, name))
+                    names.push_back(name);
             }
         }
+
+        bool separated = false;
+        for (auto& name : names)
+        {
+            for (auto upscaler : CustomProviders::Upscalers(name, api))
+            {
+                if (!separated)
+                {
+                    ImGui::Separator();
+                    separated = true;
+                }
+
+                const char* tag = upscaler == Upscaler::FFX         ? "FFX"
+                                  : upscaler == Upscaler::FFX_on12  ? "FFX w/Dx12"
+                                  : upscaler == Upscaler::DLSS_on12 ? "DLSS w/Dx12"
+                                                                    : "DLSS";
+                auto label = StrFmt("%s (%s)##custom%d", name.c_str(), tag, (int) upscaler);
+                const bool isSelected =
+                    currentUpscaler == upscaler && _stricmp(currentCustom.c_str(), name.c_str()) == 0;
+
+                if (ImGui::Selectable(label.c_str(), isSelected))
+                    pick(upscaler, name);
+            }
+        }
+
         ImGui::EndCombo();
     }
 }
@@ -648,6 +709,163 @@ void MenuCommon::AddVulkanBackends(Upscaler upscaler)
     RenderUpscalerCombo(API::Vulkan, upscaler,
                         { Upscaler::XeSS, Upscaler::FSR21, Upscaler::FSR22, Upscaler::FFX, Upscaler::FSR21_on12,
                           Upscaler::FFX_on12, Upscaler::DLSS });
+}
+
+static std::string NameWithVersion(IFeature* feature)
+{
+    const auto version = feature->Version();
+    return StrFmt("%s %u.%u.%u", feature->ShortName().c_str(), version.major, version.minor, version.patch);
+}
+
+// Upscaler for the game's ray reconstruction: DLSSDs first, NVIDIA's then custom ones, regular upscalers after.
+// Feature is the running one, nullptr before the game starts ray reconstruction
+static void RenderRRUpscalerCombo(API api, IFeature* feature, const char* label = "##RRUpscalerCombo")
+{
+    auto& state = State::Instance();
+    auto config = Config::Instance();
+
+    // Empty for NVIDIA's, custom ones until they turn out not to run on the api
+    std::vector<std::string> entries;
+
+    if (Nvngx_RR::NativeAvailable())
+        entries.push_back({});
+
+    for (auto& name : CustomProviders::List(CustomProviders::Kind::Dlssd))
+    {
+        if (Nvngx_RR::Listable(name, api))
+            entries.push_back(name);
+    }
+
+    auto entryName = [](const std::string& entry) { return entry.empty() ? std::string("DLSSD") : entry; };
+
+    // Regular upscalers take ray reconstruction without denoising it, when allowed
+    const bool allowRegulars = config->RRAllowRegularUpscalers.value_or_default();
+    std::vector<Upscaler> regulars;
+
+    if (allowRegulars)
+    {
+        regulars = { Upscaler::XeSS, Upscaler::FSR21, Upscaler::FSR22, Upscaler::FFX };
+
+        if (IdentifyGpu::getPrimaryGpu().dlssCapable)
+            regulars.push_back(Upscaler::DLSS);
+    }
+
+    const auto picked = Nvngx_RR::Regular();
+
+    // Running: the FSR fallback isn't one of them. Not running yet: the configured one, a DLSSD unless a regular
+    // upscaler is picked, Off when no DLSSD can run
+    auto* dlssd = dynamic_cast<DLSSDFeature*>(feature);
+    const bool runsDlssd = feature != nullptr ? dlssd != nullptr : !picked.has_value() && !entries.empty();
+    const auto current = dlssd != nullptr ? dlssd->CustomName() : config->CustomRRUpscaler.value_or("");
+
+    std::string preview;
+
+    if (runsDlssd)
+        preview = entryName(current);
+    else if (feature != nullptr)
+        preview = NameWithVersion(feature);
+    else if (picked.has_value())
+        preview = UpscalerDisplayName(picked.value(), api);
+    else
+        preview = "Off";
+
+    if (!ImGui::BeginCombo(label, preview.c_str(), ImGuiComboFlags_HeightLargest))
+        return;
+
+    auto changeAll = [&state]()
+    {
+        Nvngx_RR::ResetFailures();
+
+        for (auto handle : state.rrHandles)
+            state.changeBackend[handle] = true;
+    };
+
+    for (const auto& entry : entries)
+    {
+        // Folder names in RRUpscaler aren't case sensitive
+        const bool selected = runsDlssd && _stricmp(current.c_str(), entry.c_str()) == 0;
+        auto label = StrFmt("%s##rr%s", entryName(entry).c_str(), entry.c_str());
+
+        if (ImGui::Selectable(label.c_str(), selected) && !selected)
+        {
+            // NVIDIA's is auto, it's picked when the gpu can run it
+            if (entry.empty())
+                config->CustomRRUpscaler.reset();
+            else
+                config->CustomRRUpscaler = entry;
+
+            config->RRRegularUpscaler.reset();
+            changeAll();
+        }
+    }
+
+    // Without a DLSSD ray reconstruction is only offered to the game for a regular upscaler
+    if (allowRegulars && entries.empty())
+    {
+        if (ImGui::Selectable("Off##rrOff", !picked.has_value()))
+            config->RRRegularUpscaler.reset();
+    }
+
+    if (allowRegulars)
+        ImGui::Separator();
+
+    for (auto upscaler : regulars)
+    {
+        const bool selected = !runsDlssd && picked == upscaler;
+        auto label = StrFmt("%s##rrRegular%d", UpscalerDisplayName(upscaler, api).c_str(), (int) upscaler);
+
+        if (ImGui::Selectable(label.c_str(), selected) && !selected)
+        {
+            config->RRRegularUpscaler = upscaler;
+            changeAll();
+        }
+
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() -
+                                                                  ImGui::GetStyle().WindowPadding.x -
+                                                                  ImGui::CalcTextSize("No denoise").x));
+        ImGui::TextDisabled("No denoise");
+    }
+
+    ImGui::EndCombo();
+}
+
+// Warning text colour (upstream's StatusWarn), toned for the HDR menu like the rest of ours
+static ImVec4 toneMapColor(const ImVec4& color);
+static ImVec4 StatusWarn() { return toneMapColor(ImVec4(0.95f, 0.70f, 0.20f, 1.0f)); }
+
+// Ray reconstruction's upscaler before the game starts it. Without a DLSSD the game checks at start whether it's
+// offered, so changing that needs a restart
+static void RenderRROfferCombo(API api)
+{
+    const auto picked = Nvngx_RR::Regular();
+    static const bool pickedAtStart = picked.has_value();
+    const bool dlssdAvailable = Nvngx_RR::DlssdAvailable();
+
+    RenderRRUpscalerCombo(api, nullptr, "Ray Reconstruction##RROfferCombo");
+
+    if (ImGui::IsItemHovered())
+    {
+        if (dlssdAvailable)
+            ImGui::SetTooltip("Upscaler used when Ray Reconstruction is turned on in the game.");
+        else
+            ImGui::SetTooltip("No DLSSD can run on this GPU, so the game doesn't offer Ray Reconstruction.\n"
+                              "Picking an upscaler here lets you turn it on in the game.");
+    }
+
+    if (picked.has_value())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, StatusWarn());
+        ImGui::TextWrapped("This upscaler can't denoise.\nWith DLSSD on in the game, image may look grainy or noisy.");
+        ImGui::PopStyleColor();
+    }
+
+    if (!dlssdAvailable && picked.has_value() != pickedAtStart)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, StatusWarn());
+        ImGui::TextWrapped("Save Settings and restart the game to apply");
+        ImGui::PopStyleColor();
+    }
 }
 
 template <HasDefaultValue B> void MenuCommon::AddResourceBarrier(std::string name, CustomOptional<int32_t, B>* value)
@@ -2319,6 +2537,10 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             {
                 fgText = formatFg("Combo", Nvngx_FG::getMaxFakeFramesCount());
             }
+            else if (activeNvngxFg == FGNvngxReplacement::Custom)
+            {
+                fgText = formatFg(state.activeFgNvngxCustom.c_str(), Nvngx_FG::getMaxFakeFramesCount());
+            }
             else if (state.activeFgOutput == FGOutput::DLSSG && fg)
             {
                 fgText = formatFg("DLSSG", fg->GetMaxInterpolationCount());
@@ -2886,6 +3108,11 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         const bool usesDlssd = currentFeature->GetUpscalerType() == Upscaler::DLSSD;
         const bool usesDx12CompatLayer = currentFeature->IsWithDx12();
 
+        // Ray reconstruction's handle (DX12/Vulkan) changes through the ray reconstruction combo whatever runs it now:
+        // DLSSD, a regular upscaler (RRAllowRegularUpscalers) or the FSR fallback after a DLSSD failure
+        const bool rayReconstruction = state.rrHandles.contains(currentFeature->Handle()->Id);
+        const bool rrPicker = rayReconstruction && (state.api == DX12 || state.api == Vulkan);
+
         switch (state.api)
         {
         case DX11:
@@ -2920,7 +3147,10 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             spoofingText = config->DxgiSpoofing.value_or_default() ? "On" : "Off";
             ImGui::Text("| Spoof: %s", spoofingText.c_str());
 
-            if (!usesDlssd)
+            // Ray reconstruction picks its DLSSD: NVIDIA's or a custom one (custom\<name>\dlssd)
+            if (rrPicker)
+                RenderRRUpscalerCombo(API::DX12, currentFeature);
+            else
                 AddDx12Backends(currentBackend);
 
             break;
@@ -2950,13 +3180,35 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ImGui::SameLine(0.0f, 6.0f);
             ImGui::Text("| Spoof: %s", spoofingText.c_str());
 
-            if (!usesDlssd)
+            if (rrPicker)
+                RenderRRUpscalerCombo(API::Vulkan, currentFeature);
+            else
                 AddVulkanBackends(currentBackend);
         }
 
         ImGui::PopItemWidth();
 
-        if (!usesDlssd)
+        // Ray reconstruction on a regular upscaler ([Upscalers] RRAllowRegularUpscalers, upstream 9e9a7190): the game
+        // leaves ray traced effects noisy for ray reconstruction to clean up
+        if (rayReconstruction && !usesDlssd && config->RRAllowRegularUpscalers.value_or_default())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, toneMapColor(ImVec4(0.95f, 0.70f, 0.20f, 1.0f)));
+            ImGui::TextWrapped(
+                "DLSSD is on in the game, but this upscaler can't denoise.\nImage may look grainy or noisy.");
+            ImGui::PopStyleColor();
+        }
+
+        // Ray reconstruction's upscaler can be picked before the game starts it, shown for games that look for it
+        if (!rayReconstruction && state.rrRequested && config->RRAllowRegularUpscalers.value_or_default() &&
+            (state.api == DX12 || state.api == Vulkan))
+        {
+            ImGui::PushItemWidth(150.0f * menuResScale);
+            RenderRROfferCombo(state.api);
+            ImGui::PopItemWidth();
+        }
+
+        // A ray reconstruction handle is recreated through its own combo (FeatureProvider takes Nvngx_RR::Backend())
+        if (!usesDlssd && !rrPicker)
         {
             ImGui::SameLine(0.0f, 6.0f);
 
@@ -3711,11 +3963,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // The native Vulkan FG output reads the upscaler's inputs; FSR FG's Vulkan dll is loaded with the device
     if (state.swapchainApi != API::Vulkan && !inputOptions[optiFgIndex].disabled &&
-        state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady() && !ffxInitTried)
+        state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFsrFgReady() && !ffxInitTried)
     {
         ffxInitTried = true;
         FfxApiProxy::InitFfxDx12();
-        inputOptions[optiFgIndex].set_disabled(!FfxApiProxy::IsFGReady(), "amd_fidelityfx_dx12.dll is missing");
+        inputOptions[optiFgIndex].set_disabled(!FfxApiProxy::IsFsrFgReady(), "amd_fidelityfx_dx12.dll is missing");
     }
     else if (!inputOptions[optiFgIndex].disabled && UsesXeFGApi(state.activeFgOutput) && !xefgInitTried &&
              XeFGProxy::Module() == nullptr)
@@ -3845,6 +4097,56 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // clang-format on
 
+    // Custom DLSS-G providers (custom\<name>\dlssg, or registered by a plugin) go after the rest, each one a value from
+    // FGNvngxReplacement::Custom on (adapted from upstream OptiScaler 941ce6a1). A name the ini gives that is not found
+    // is listed too, greyed out, so the setting stays visible.
+    auto customFgs = CustomProviders::List(CustomProviders::Kind::Dlssg);
+    if (CustomProviders::IsValidName(config->FGNvngxCustomName) &&
+        !CustomProviders::Contains(customFgs, config->FGNvngxCustomName))
+        customFgs.push_back(config->FGNvngxCustomName);
+
+    auto constexpr fgNvngxCustomIndex = (uint32_t) FGNvngxReplacement::Custom;
+    for (uint32_t i = 0; i < customFgs.size(); i++)
+    {
+        MenuOption<FGNvngxReplacement> option { (FGNvngxReplacement) (fgNvngxCustomIndex + i),
+                                                "Custom: " + customFgs[i],
+                                                "From OptiScaler's custom\\" + customFgs[i] + "\\dlssg folder" };
+        option.set_disabled(!CustomProviders::Has(customFgs[i], CustomProviders::Kind::Dlssg),
+                            "No DLSS-G dll in custom\\" + customFgs[i] + "\\dlssg");
+        nvngxOptions.push_back(option);
+    }
+
+    // The combo works on a value with one entry per custom name; the config keeps Custom plus the name
+    auto isActiveCustomFg = [&config](const std::string& name)
+    {
+        return config->FGNvngxReplacement.value_or_default() == FGNvngxReplacement::Custom &&
+               _stricmp(config->FGNvngxCustomName.c_str(), name.c_str()) == 0;
+    };
+
+    auto nvngxCombo = [&](const char* label)
+    {
+        auto current = config->FGNvngxReplacement.value_or_default();
+        if (current == FGNvngxReplacement::Custom)
+            current = (FGNvngxReplacement) (fgNvngxCustomIndex +
+                                            (std::ranges::find_if(customFgs, isActiveCustomFg) - customFgs.begin()));
+
+        auto selected = current;
+        PopulateCombo(label, selected, nvngxOptions);
+
+        if (selected == current)
+            return;
+
+        if ((uint32_t) selected >= fgNvngxCustomIndex)
+        {
+            config->FGNvngxCustomName = customFgs[(uint32_t) selected - fgNvngxCustomIndex];
+            config->FGNvngxReplacement = FGNvngxReplacement::Custom;
+        }
+        else
+        {
+            config->FGNvngxReplacement = selected;
+        }
+    };
+
     bool replaceFgOutputWithNvngx = false;
     bool showNvngxFgDowndown = false;
 
@@ -3908,7 +4210,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             if (replaceFgOutputWithNvngx)
             {
                 // Disable None?
-                PopulateCombo("FG Nvngx", config->FGNvngxReplacement, nvngxOptions);
+                nvngxCombo("FG Nvngx");
                 ShowTooltip("What backend to use instead of the real DLSSG");
             }
             else
@@ -3923,7 +4225,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         // Should be on a new line
         if (setupCard.IsOpen() && showNvngxFgDowndown)
         {
-            PopulateCombo("FG Nvngx Replacement", config->FGNvngxReplacement, nvngxOptions);
+            nvngxCombo("FG Nvngx Replacement");
             ShowTooltip("What backend to use instead of the real DLSSG");
         }
 
@@ -3941,8 +4243,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 config->FGNvngxReplacement.set_volatile_value(FGNvngxReplacement::FFX);
         }
 
-        const bool nvngxFgChanged = (replaceFgOutputWithNvngx || showNvngxFgDowndown) &&
-                                    state.activeFgNvngx != config->FGNvngxReplacement.value_or_default();
+        const bool nvngxFgChanged =
+            (replaceFgOutputWithNvngx || showNvngxFgDowndown) &&
+            (state.activeFgNvngx != config->FGNvngxReplacement.value_or_default() ||
+             (state.activeFgNvngx == FGNvngxReplacement::Custom &&
+              _stricmp(state.activeFgNvngxCustom.c_str(), config->FGNvngxCustomName.c_str()) != 0));
         state.fgSettingsChanged = state.activeFgOutput != config->FGOutput.value_or_default() ||
                                   state.activeFgInput != config->FGInput.value_or_default() || nvngxFgChanged;
 
@@ -4608,8 +4913,9 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
     if (state.activeFgOutput == FGOutput::FSRFG && state.activeFgInput != FGInput::NoFG &&
         state.FGSwapchainExists())
     {
-        if (state.activeFgInput != FGInput::Upscaler || (currentFeature != nullptr && !currentFeature->IsFrozen()) &&
-                                                            (state.currentVkFG != nullptr || FfxApiProxy::IsFGReady()))
+        if (state.activeFgInput != FGInput::Upscaler ||
+            (currentFeature != nullptr && !currentFeature->IsFrozen()) &&
+                (state.currentVkFG != nullptr || FfxApiProxy::IsFsrFgReady()))
         {
             ImGui::SeparatorText("Frame Generation (FSR FG)");
 
@@ -5654,7 +5960,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         {
             ImGui::Text("Upscaler is not active"); // Probably never will be visible
         }
-        else if (state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady())
+        else if (state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFsrFgReady())
         {
             ImGui::TextColored(toneMapColor({ 1.0f, 0.0f, 0.0f, 1.0f }),
                                "amd_fidelityfx_dx12.dll is missing!"); // Probably never will be visible
@@ -8693,8 +8999,26 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             section(RenderApiAndTextureSettings, true);
             break;
         case Page::Plugins:
+        {
             PluginsPage::Render(ctx.config);
+
+            // Tabs registered through the plugin API (plugin_sdk/optiscaler_plugin.h) by ASI plugins and custom
+            // provider dlls, one card each (upstream OptiScaler shows them as sidebar tabs)
+            const auto pluginTabs = PluginApi::GetTabs();
+            for (size_t i = 0; i < pluginTabs.size(); i++)
+            {
+                ImGui::PushID((int) i);
+                if (MenuCard card(pluginTabs[i].name.c_str(), ctx.menuResScale); card.IsOpen())
+                {
+                    if (!pluginTabs[i].description.empty())
+                        ImGui::TextDisabled("%s", pluginTabs[i].description.c_str());
+
+                    PluginApi::DrawTab(i, ctx.menuResScale, toneMapColor);
+                }
+                ImGui::PopID();
+            }
             break;
+        }
         case Page::Notifications:
             NotificationsPage::Render();
             break;
@@ -9470,6 +9794,10 @@ bool MenuCommon::RenderMenu()
     RenderMenuContext ctx { State::Instance(), Config::Instance(), ImGui::GetIO() };
     ctx.now = Util::MillisecondsNow();
     ctx.currentFeature = ctx.state.currentFeature;
+
+    // Applied here, the feature isn't safe to read from the plugin's thread, kept until there is one
+    if (ctx.currentFeature != nullptr && PluginApi::TakeReInitRequest())
+        ReInitUpscaler();
 
     // 1) Collect timing and input state before any ImGui drawing.
     UpdateRenderTiming(ctx);

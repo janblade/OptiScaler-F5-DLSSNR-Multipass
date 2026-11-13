@@ -291,6 +291,20 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
         return dlssModule;
     }
 
+    // sl.dlss_d.dll
+    if (shouldHookSl && (CheckDllNameW(&libName, &slDlssdNamesW) ||
+                         (normalizedPath.contains(L"\\versions\\") && normalizedPath.contains(L"\\sl_dlss_d_"))))
+    {
+        auto dlssdModule = load(lpLibFullPath, NULL, 0);
+
+        if (dlssdModule != nullptr)
+            StreamlineHooks::hookDlssd(dlssdModule);
+        else
+            LOG_ERROR("Trying to load dll as sl.dlss_d: {}", libNameA);
+
+        return dlssdModule;
+    }
+
     // sl.dlss_g.dll
     if ((CheckDllNameW(&libName, &slDlssgNamesW) ||
          (normalizedPath.contains(L"\\versions\\") && normalizedPath.contains(L"\\sl_dlss_g_"))))
@@ -701,7 +715,11 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 
     if (CheckDllNameW(&libName, &ffxVkNamesW))
     {
-        if (FfxApiProxy::VkModule() != nullptr)
+        // FFX SDK 2.x and the legacy dll take different backend types, only the input hooks convert between them
+        const bool sameBackend = CheckDllNameW(&libName, &ffxVkLegacyNamesW) != FfxApiProxy::VkModule_BackendV2();
+
+        if (FfxApiProxy::VkModule() != nullptr &&
+            (sameBackend || Config::Instance()->EnableFfxInputs.value_or_default()))
         {
             auto module = load(FfxApiProxy::VkModule_Path().c_str(), NULL, NULL);
             return module;
@@ -711,6 +729,38 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 
         if (module != nullptr)
             FfxApiProxy::InitFfxVk(module);
+
+        return module;
+    }
+
+    if (CheckDllNameW(&libName, &ffxVkUpscalerNamesW))
+    {
+        if (FfxApiProxy::VkModule_SR() != nullptr)
+        {
+            auto module = load(FfxApiProxy::VkModule_SR_Path().c_str(), NULL, NULL);
+            return module;
+        }
+
+        auto module = load(libName.c_str(), NULL, NULL);
+
+        if (module != nullptr)
+            FfxApiProxy::InitFfxVk_SR(module);
+
+        return module;
+    }
+
+    if (CheckDllNameW(&libName, &ffxVkFGNamesW))
+    {
+        if (FfxApiProxy::VkModule_FG() != nullptr)
+        {
+            auto module = load(FfxApiProxy::VkModule_FG_Path().c_str(), NULL, NULL);
+            return module;
+        }
+
+        auto module = load(libName.c_str(), NULL, NULL);
+
+        if (module != nullptr)
+            FfxApiProxy::InitFfxVk_FG(module);
 
         return module;
     }
@@ -880,7 +930,8 @@ bool LibraryLoadHooks::IsKeptLoaded(PVOID library)
            // OptiScaler keeps function pointers into these too: freed by the game (or a plugin) they would point at
            // unloaded code. The game gets its reference back now as if freed; they go at OptiScaler's own unload.
            library == XeSSProxy::ModuleDx11() || library == XeFGProxy::Module() || library == XeLLProxy::Module() ||
-           library == FfxApiProxy::Dx12Module_SR() || library == FfxApiProxy::Dx12Module_FG();
+           library == FfxApiProxy::Dx12Module_SR() || library == FfxApiProxy::Dx12Module_FG() ||
+           library == FfxApiProxy::VkModule_SR() || library == FfxApiProxy::VkModule_FG();
 }
 
 std::optional<NTSTATUS> LibraryLoadHooks::FreeLibrary(PVOID lpLibrary)
@@ -1184,6 +1235,16 @@ void LibraryLoadHooks::CheckModulesInMemory()
             std::filesystem::path(Config::Instance()->MainDllPath.value()) / L"streamline";
         return Util::IsSubpath(path, localSlPath.lexically_normal());
     };
+    // sl.dlss_d, hooked only for its plugin load (a custom DLSSD needs the arch spoof and the json trimmed)
+    if (!StreamlineHooks::isDlssdHooked())
+    {
+        HMODULE slDlssd = GetDllNameWModule(&slDlssdNamesW);
+        if (slDlssd != nullptr)
+        {
+            LOG_DEBUG("sl.dlss_d.dll already in memory");
+            StreamlineHooks::hookDlssd(slDlssd);
+        }
+    }
 
     // DLSS-G
     if (!StreamlineHooks::isDlssgHooked() || !StreamlineHooks::isLocalDlssgHooked())

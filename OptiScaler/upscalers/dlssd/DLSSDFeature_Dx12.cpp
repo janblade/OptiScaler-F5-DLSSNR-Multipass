@@ -2,6 +2,32 @@
 #include "DLSSDFeature_Dx12.h"
 #include <dxgi1_4.h>
 #include <Config.h>
+#include <upscalers/nvngx/Nvngx_RR.h>
+#include <imgui/ImGuiNotify.hpp>
+
+PFN_D3D12_CreateFeature DLSSDFeatureDx12::CreateFeature() const
+{
+    if (_custom != nullptr)
+        return _custom->IsDx12Inited() ? _custom->D3D12_CreateFeature : nullptr;
+
+    return NVNGXProxy::D3D12_CreateFeature();
+}
+
+PFN_D3D12_EvaluateFeature DLSSDFeatureDx12::EvaluateFeature() const
+{
+    if (_custom != nullptr)
+        return _custom->IsDx12Inited() ? _custom->D3D12_EvaluateFeature : nullptr;
+
+    return NVNGXProxy::D3D12_EvaluateFeature();
+}
+
+PFN_D3D12_ReleaseFeature DLSSDFeatureDx12::ReleaseFeature() const
+{
+    if (_custom != nullptr)
+        return _custom->IsDx12Inited() ? _custom->D3D12_ReleaseFeature : nullptr;
+
+    return NVNGXProxy::D3D12_ReleaseFeature();
+}
 
 bool DLSSDFeatureDx12::InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
@@ -13,13 +39,19 @@ bool DLSSDFeatureDx12::InitInternal(ID3D12GraphicsCommandList* InCommandList, NV
 
 bool DLSSDFeatureDx12::InitDLSSD(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
-    if (NVNGXProxy::NVNGXModule() == nullptr)
+    if (_custom == nullptr && NVNGXProxy::NVNGXModule() == nullptr)
     {
         LOG_ERROR("nvngx.dll not loaded!");
         return false;
     }
 
-    if (!_dlssdInitedDx12)
+    // A custom DLSSD (custom\<name>\dlssd) inits its own runtime once (Nvngx_RR); NVIDIA's uses the shared flag
+    if (_custom != nullptr)
+    {
+        if (!_custom->InitDx12(Device))
+            return false;
+    }
+    else if (!_dlssdInitedDx12)
     {
         _dlssdInitedDx12 = NVNGXProxy::InitDx12(Device);
 
@@ -39,7 +71,7 @@ bool DLSSDFeatureDx12::InitDLSSD(ID3D12GraphicsCommandList* InCommandList, NVSDK
 
     LOG_INFO("Creating DLSSD feature");
 
-    if (NVNGXProxy::D3D12_CreateFeature() != nullptr)
+    if (CreateFeature() != nullptr)
     {
         ProcessInitParams(InParameters);
 
@@ -49,8 +81,8 @@ bool DLSSDFeatureDx12::InitDLSSD(ID3D12GraphicsCommandList* InCommandList, NVSDK
         {
             ScopedSkipHeapCapture skipHeapCapture {};
 
-            nvResult = NVNGXProxy::D3D12_CreateFeature()(InCommandList, NVSDK_NGX_Feature_RayReconstruction,
-                                                         InParameters, &_p_dlssdHandle);
+            nvResult =
+                CreateFeature()(InCommandList, NVSDK_NGX_Feature_RayReconstruction, InParameters, &_p_dlssdHandle);
         }
 
         if (nvResult != NVSDK_NGX_Result_Success)
@@ -85,11 +117,11 @@ bool DLSSDFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList
 
     NVSDK_NGX_Result nvResult;
 
-    if (NVNGXProxy::D3D12_EvaluateFeature() != nullptr)
+    if (EvaluateFeature() != nullptr)
     {
         ProcessEvaluateParams(InParameters);
 
-        nvResult = NVNGXProxy::D3D12_EvaluateFeature()(InCommandList, _p_dlssdHandle, InParameters, NULL);
+        nvResult = EvaluateFeature()(InCommandList, _p_dlssdHandle, InParameters, NULL);
 
         if (nvResult != NVSDK_NGX_Result_Success)
         {
@@ -108,10 +140,23 @@ bool DLSSDFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList
     return true;
 }
 
-DLSSDFeatureDx12::DLSSDFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters)
+DLSSDFeatureDx12::DLSSDFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters,
+                                   const std::string& customRR)
     : IFeature(InHandleId, InParameters), IFeature_Dx12(InHandleId, InParameters),
       DLSSDFeature(InHandleId, InParameters)
 {
+    if (!customRR.empty())
+    {
+        _customName = customRR;
+        _custom = Nvngx_RR::Find(customRR, API::DX12);
+        _moduleLoaded = _custom != nullptr;
+
+        if (!_moduleLoaded)
+            ImGui::InsertNotification({ ImGuiToastType::Error, 10000, "Can't load custom DLSSD %s", customRR.c_str() });
+
+        return;
+    }
+
     if (NVNGXProxy::NVNGXModule() == nullptr)
     {
         LOG_INFO("nvngx.dll not loaded, now loading");
@@ -126,6 +171,6 @@ DLSSDFeatureDx12::~DLSSDFeatureDx12()
     if (State::Instance().isShuttingDown)
         return;
 
-    if (NVNGXProxy::D3D12_ReleaseFeature() != nullptr && _p_dlssdHandle != nullptr)
-        NVNGXProxy::D3D12_ReleaseFeature()(_p_dlssdHandle);
+    if (ReleaseFeature() != nullptr && _p_dlssdHandle != nullptr)
+        ReleaseFeature()(_p_dlssdHandle);
 }

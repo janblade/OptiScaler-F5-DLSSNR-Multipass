@@ -12,6 +12,9 @@
     <Filter Include="IFeature">
       <UniqueIdentifier>{0d5515bc-9b5a-4d33-a918-989059c29e08}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Plugins">
+      <UniqueIdentifier>{a3805674-e01c-4786-856f-119e7c376d29}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Config">
       <UniqueIdentifier>{eb352600-7864-4906-a7f8-b065f137cc80}</UniqueIdentifier>
     </Filter>
@@ -125,6 +128,12 @@
     <ClInclude Include="upscalers\dlssd\DLSSDFeature_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="upscalers\nvngx\Nvngx_RR.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\nvngx\Nvngx_RRDllProxy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="upscalers\dlssd\DLSSDFeature_Vk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -144,6 +153,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="proxies\FfxApi_Proxy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="proxies\FfxModule.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hooks\Vulkan_Hooks.h">
@@ -307,6 +319,12 @@
     </ClInclude>
     <ClInclude Include="menu\menu_dx_base.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="plugins\PluginApi.h">
+      <Filter>Plugins</Filter>
+    </ClInclude>
+    <ClInclude Include="..\plugin_sdk\optiscaler_plugin.h">
+      <Filter>Plugins</Filter>
     </ClInclude>
     <ClInclude Include="menu\menu_common.h">
       <Filter>Header Files</Filter>
@@ -1395,6 +1413,12 @@
     <ClCompile Include="upscalers\dlssd\DLSSDFeature_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="upscalers\nvngx\Nvngx_RR.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\nvngx\Nvngx_RRDllProxy.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="upscalers\dlssd\DLSSDFeature_Vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1478,6 +1502,9 @@
     </ClCompile>
     <ClCompile Include="include\imgui\imgui_draw.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="plugins\PluginApi.cpp">
+      <Filter>Plugins</Filter>
     </ClCompile>
     <ClCompile Include="menu\menu_common.cpp">
       <Filter>Source Files</Filter>

@@ -3,10 +3,35 @@
 #include <Logger.h>
 
 #include "DLSSFeature_Vk.h"
+#include <imgui/ImGuiNotify.hpp>
+
+PFN_VULKAN_CreateFeature DLSSFeatureVk::CreateFeature() const
+{
+    if (_custom != nullptr)
+        return _custom->vulkanInited ? _custom->module.VULKAN_CreateFeature : nullptr;
+
+    return NVNGXProxy::VULKAN_CreateFeature();
+}
+
+PFN_VULKAN_EvaluateFeature DLSSFeatureVk::EvaluateFeature() const
+{
+    if (_custom != nullptr)
+        return _custom->vulkanInited ? _custom->module.VULKAN_EvaluateFeature : nullptr;
+
+    return NVNGXProxy::VULKAN_EvaluateFeature();
+}
+
+PFN_VULKAN_ReleaseFeature DLSSFeatureVk::ReleaseFeature() const
+{
+    if (_custom != nullptr)
+        return _custom->vulkanInited ? _custom->module.VULKAN_ReleaseFeature : nullptr;
+
+    return NVNGXProxy::VULKAN_ReleaseFeature();
+}
 
 bool DLSSFeatureVk::InitInternal(VkCommandBuffer InCmdList, NVSDK_NGX_Parameter* InParameters)
 {
-    if (NVNGXProxy::NVNGXModule() == nullptr)
+    if (_custom == nullptr && NVNGXProxy::NVNGXModule() == nullptr)
     {
         LOG_ERROR("nvngx.dll not loaded!");
 
@@ -19,9 +44,20 @@ bool DLSSFeatureVk::InitInternal(VkCommandBuffer InCmdList, NVSDK_NGX_Parameter*
 
     do
     {
-        if (!_dlssInitedVk)
+        // A custom NGX runtime (custom\<name>\dlss) keeps its own init state; NVIDIA's uses the shared flag
+        if (_custom != nullptr)
         {
+            if (!_custom->vulkanInited)
+            {
+                if (!NVNGXProxy::InitCustomVulkan(*_custom, Instance, PhysicalDevice, Device, GIPA, GDPA))
+                    return false;
 
+                // delay between init and create feature
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }
+        else if (!_dlssInitedVk)
+        {
             _dlssInitedVk = NVNGXProxy::InitVulkan(Instance, PhysicalDevice, Device, GIPA, GDPA);
 
             if (!_dlssInitedVk)
@@ -40,13 +76,12 @@ bool DLSSFeatureVk::InitInternal(VkCommandBuffer InCmdList, NVSDK_NGX_Parameter*
 
         LOG_INFO("Creating DLSS feature");
 
-        if (NVNGXProxy::VULKAN_CreateFeature() != nullptr)
+        if (CreateFeature() != nullptr)
         {
             ProcessInitParams(InParameters);
 
             _p_dlssHandle = &_dlssHandle;
-            nvResult = NVNGXProxy::VULKAN_CreateFeature()(InCmdList, NVSDK_NGX_Feature_SuperSampling, InParameters,
-                                                          &_p_dlssHandle);
+            nvResult = CreateFeature()(InCmdList, NVSDK_NGX_Feature_SuperSampling, InParameters, &_p_dlssHandle);
 
             if (nvResult != NVSDK_NGX_Result_Success)
             {
@@ -60,7 +95,7 @@ bool DLSSFeatureVk::InitInternal(VkCommandBuffer InCmdList, NVSDK_NGX_Parameter*
             break;
         }
 
-        ReadVersion();
+        ReadVersion(_custom != nullptr ? _custom->module.filePath : L"");
 
         initResult = true;
 
@@ -79,12 +114,11 @@ bool DLSSFeatureVk::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Para
         return false;
     }
 
-    if (NVNGXProxy::VULKAN_EvaluateFeature() != nullptr)
+    if (EvaluateFeature() != nullptr)
     {
         ProcessEvaluateParams(InParameters);
 
-        NVSDK_NGX_Result nvResult =
-            NVNGXProxy::VULKAN_EvaluateFeature()(InCmdBuffer, _p_dlssHandle, InParameters, NULL);
+        NVSDK_NGX_Result nvResult = EvaluateFeature()(InCmdBuffer, _p_dlssHandle, InParameters, NULL);
 
         if (nvResult != NVSDK_NGX_Result_Success)
         {
@@ -101,9 +135,22 @@ bool DLSSFeatureVk::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Para
     return true;
 }
 
-DLSSFeatureVk::DLSSFeatureVk(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters)
+DLSSFeatureVk::DLSSFeatureVk(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters,
+                             const std::string& customUpscaler)
     : IFeature(InHandleId, InParameters), IFeature_Vk(InHandleId, InParameters), DLSSFeature(InHandleId, InParameters)
 {
+    if (!customUpscaler.empty())
+    {
+        _custom = NVNGXProxy::LoadCustom(customUpscaler, API::Vulkan);
+        _moduleLoaded = _custom != nullptr;
+
+        if (!_moduleLoaded)
+            ImGui::InsertNotification(
+                { ImGuiToastType::Error, 10000, "Can't load custom upscaler %s", customUpscaler.c_str() });
+
+        return;
+    }
+
     if (NVNGXProxy::NVNGXModule() == nullptr)
     {
         LOG_INFO("nvngx.dll not loaded, now loading");
@@ -118,6 +165,6 @@ DLSSFeatureVk::~DLSSFeatureVk()
     if (State::Instance().isShuttingDown)
         return;
 
-    if (NVNGXProxy::VULKAN_ReleaseFeature() != nullptr && _p_dlssHandle != nullptr)
-        NVNGXProxy::VULKAN_ReleaseFeature()(_p_dlssHandle);
+    if (ReleaseFeature() != nullptr && _p_dlssHandle != nullptr)
+        ReleaseFeature()(_p_dlssHandle);
 }

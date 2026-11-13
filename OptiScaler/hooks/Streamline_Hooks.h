@@ -158,6 +158,8 @@ class StreamlineHooks
 
     static void hookCommon(HMODULE slCommon);
 
+    static void hookDlssd(HMODULE slDlssd);
+
     static bool isInterposerHooked();
     static bool isDlssHooked();
     static bool isDlssgHooked();
@@ -165,6 +167,7 @@ class StreamlineHooks
     static bool isCommonHooked();
     static bool isPclHooked();
     static bool isReflexHooked();
+    static bool isDlssdHooked();
 
   private:
     inline static sl::RenderAPI renderApi = sl::RenderAPI::eCount;
@@ -242,6 +245,13 @@ class StreamlineHooks
     static bool hkdlss_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON, const char** pluginJSON);
     static sl::Result hkslDLSSGetOptimalSettings(const sl::DLSSOptions& options, sl::DLSSOptimalSettings& settings);
     static void* hkdlss_slGetPluginFunction(const char* functionName);
+
+    // DLSSD
+    inline static PFN_slOnPluginLoad o_dlssd_slOnPluginLoad = nullptr;
+
+    static bool hkdlssd_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON, const char** pluginJSON);
+    inline static PFN_slGetPluginFunction o_dlssd_slGetPluginFunction = nullptr;
+    static void* hkdlssd_slGetPluginFunction(const char* functionName);
 
     // DLSSG
     inline static PFN_slGetPluginFunction o_dlssg_slGetPluginFunction = nullptr;
@@ -324,6 +334,8 @@ class StreamlineHooks
     VALIDATE_MEMBER_HOOK(hkslGetNativeInterface, decltype(&slGetNativeInterface))
     VALIDATE_MEMBER_HOOK(hkslSetD3DDevice, decltype(&slSetD3DDevice))
     VALIDATE_MEMBER_HOOK(hkdlss_slOnPluginLoad, PFN_slOnPluginLoad)
+    VALIDATE_MEMBER_HOOK(hkdlssd_slOnPluginLoad, PFN_slOnPluginLoad)
+    VALIDATE_MEMBER_HOOK(hkdlssd_slGetPluginFunction, PFN_slGetPluginFunction)
     VALIDATE_MEMBER_HOOK(hkslDLSSGetOptimalSettings, decltype(&slDLSSGetOptimalSettings))
     VALIDATE_MEMBER_HOOK(hkdlss_slGetPluginFunction, PFN_slGetPluginFunction)
     VALIDATE_MEMBER_HOOK(hkdlssg_slOnPluginLoad, PFN_slOnPluginLoad)

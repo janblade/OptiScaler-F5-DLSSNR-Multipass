@@ -16,6 +16,7 @@
 #include "upscalers/dlss/DLSSFeature_Dx12.h"
 
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <upscalers/nvngx/Nvngx_RR.h>
 #include "FG/FSR3_Dx12_FG.h"
 #include "FG/Upscaler_Inputs_Dx12.h"
 
@@ -214,6 +215,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
         Nvngx_FG::D3D12_Init_Ext(InApplicationId, InApplicationDataPath, InDevice, InSDKVersion, &localFeatureInfo);
     }
 
+    // Before the parameter maps, they report what the custom DLSSD gives
+    if (auto customRR = Nvngx_RR::Selected(API::DX12); customRR != nullptr)
+        customRR->InitDx12(InDevice);
+
     LOG_INFO("AppId: {0}", InApplicationId);
     LOG_INFO("SDK: {0:x}", (unsigned int) InSDKVersion);
     LOG_INFO(L"InApplicationDataPath {0}", std::wstring(InApplicationDataPath));
@@ -406,10 +411,14 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
         Nvngx_FG::D3D12_Shutdown1(requestedDevice);
     }
 
+    // Custom DLSSD runtime (custom\<name>\dlssd)
+    Nvngx_RR::ShutdownDx12(requestedDevice);
+
     // Unhooking and cleaning stuff causing issues during shutdown.
     // Disabled for now to check if it cause any issues
     // UnhookAll();
-    DLSSFeatureDx12::Shutdown(D3D12Device);
+    // The device asked for (null: all), D3D12Device is already cleared here
+    DLSSFeatureDx12::Shutdown(requestedDevice);
 
     // Added `&& !State::Instance().isShuttingDown` hack for crash on exit
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx12Inited())
@@ -461,6 +470,8 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
     {
         Nvngx_FG::D3D12_Shutdown();
     }
+
+    Nvngx_RR::ShutdownDx12(nullptr);
 
     State::Instance().nvngxDx12Inited = false;
 
@@ -677,16 +688,18 @@ static NVSDK_NGX_Result TryCreateOptiFeature(ID3D12GraphicsCommandList* InCmdLis
     LOG_INFO("Creating OptiScaler feature, HandleId: {}", handleId);
 
     // Determine backend name
+    const bool rayReconstruction = InFeatureID == NVSDK_NGX_Feature_RayReconstruction;
     Upscaler upscalerBackend;
-    if (InFeatureID == NVSDK_NGX_Feature_SuperSampling)
+    if (!rayReconstruction)
     {
         upscalerBackend = GetUpscalerBackend();
         LOG_INFO("Creating {} upscaler feature", UpscalerDisplayName(upscalerBackend));
     }
     else
     {
-        upscalerBackend = Upscaler::DLSSD;
-        LOG_INFO("Creating DLSSD (Ray Reconstruction) feature");
+        upscalerBackend = Nvngx_RR::Backend(API::DX12);
+        LOG_INFO("Creating {} feature for Ray Reconstruction", UpscalerDisplayName(upscalerBackend));
+        state.rrHandles.insert(handleId);
     }
 
     // Root signature restoration setup
@@ -704,13 +717,15 @@ static NVSDK_NGX_Result TryCreateOptiFeature(ID3D12GraphicsCommandList* InCmdLis
     Dx12Contexts[handleId] = {};
 
     // Retrieve feature implementation
-    if (!FeatureProvider_Dx12::GetFeature(upscalerBackend, handleId, InParameters, &Dx12Contexts[handleId].feature))
+    if (!FeatureProvider_Dx12::GetFeature(upscalerBackend, handleId, InParameters, &Dx12Contexts[handleId].feature,
+                                          rayReconstruction))
     {
         LOG_ERROR("Failed to retrieve feature implementation for '{}'", UpscalerDisplayName(upscalerBackend));
 
         D3D12Hooks::SetRootSignatureTracking(true);
 
         Dx12Contexts.erase(handleId);
+        state.rrHandles.erase(handleId);
         return NVSDK_NGX_Result_Fail;
     }
 
@@ -723,6 +738,7 @@ static NVSDK_NGX_Result TryCreateOptiFeature(ID3D12GraphicsCommandList* InCmdLis
 
         // Partial cleanup � handle is allocated but context is incomplete
         Dx12Contexts.erase(handleId);
+        state.rrHandles.erase(handleId);
         return NVSDK_NGX_Result_Fail;
     }
 
@@ -745,9 +761,13 @@ static NVSDK_NGX_Result TryCreateOptiFeature(ID3D12GraphicsCommandList* InCmdLis
     }
     else
     {
-        LOG_ERROR("Feature '{}' initialization failed falling back to FSR 2.1.2", UpscalerDisplayName(upscalerBackend));
-        state.newBackend = Upscaler::FSR21;
-        state.changeBackend[handleId] = true;
+        LOG_ERROR("Feature '{}' initialization failed", UpscalerDisplayName(upscalerBackend));
+
+        if (!rayReconstruction)
+            state.newBackend = Upscaler::FSR21;
+
+        // The FSR fallback isn't retried
+        state.changeBackend[handleId] = !rayReconstruction || Nvngx_RR::InitFailed(feature);
     }
 
     // Restore root signatures
@@ -926,6 +946,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* 
             // Erase from map (smart pointer reset is implicit on erase)
             Dx12Contexts.erase(it);
         }
+
+        State::Instance().rrHandles.erase(handleId);
     }
     else
     {
@@ -949,6 +971,24 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_GetFeatureRequirements(
     NVSDK_NGX_FeatureRequirement* OutSupported)
 {
     LOG_DEBUG("for ({0})", (int) FeatureDiscoveryInfo->FeatureID);
+
+    if (FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_RayReconstruction)
+        State::Instance().rrRequested = true;
+
+    if (auto customRR = FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_RayReconstruction
+                            ? Nvngx_RR::Selected(API::DX12)
+                            : nullptr;
+        customRR != nullptr)
+    {
+        if (customRR->D3D12_GetFeatureRequirements != nullptr)
+            return customRR->D3D12_GetFeatureRequirements(Adapter, FeatureDiscoveryInfo, OutSupported);
+
+        return Nvngx_RR::ReportSupported(OutSupported);
+    }
+
+    // A regular upscaler picked for ray reconstruction
+    if (FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_RayReconstruction && Nvngx_RR::Offered(API::DX12))
+        return Nvngx_RR::ReportSupported(OutSupported);
 
     const bool isUpscaling = FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_SuperSampling;
     const bool isFG = FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_FrameGeneration;
@@ -1084,12 +1124,24 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
     }
 
     // Fallback to FSR 2.1.2 if feature failed to initialize and user didn't explicitly request it
-    if (!feature->IsInited() && cfg.Dx12Upscaler.value_or_default() != Upscaler::FSR21)
-    {
-        LOG_WARN("Feature '{}' failed to initialize. Falling back to FSR 2.1.2", feature->Name());
-        ImGui::InsertNotification({ ImGuiToastType::Warning, 10000, "Falling back to FSR 2.1.2" });
+    const bool rayReconstruction = state.rrHandles.contains(handleId);
+    const auto configuredBackend =
+        rayReconstruction ? Nvngx_RR::Backend(API::DX12) : cfg.Dx12Upscaler.value_or_default();
 
-        state.newBackend = Upscaler::FSR21;
+    if (!feature->IsInited() && configuredBackend != Upscaler::FSR21)
+    {
+        LOG_WARN("Feature '{}' failed to initialize", feature->Name());
+
+        if (rayReconstruction)
+        {
+            Nvngx_RR::InitFailed(feature);
+        }
+        else
+        {
+            ImGui::InsertNotification({ ImGuiToastType::Warning, 10000, "Falling back to FSR 2.1.2" });
+            state.newBackend = Upscaler::FSR21;
+        }
+
         state.changeBackend[handleId] = true;
 
         D3D12Hooks::SetRootSignatureTracking(true);

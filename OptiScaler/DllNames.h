@@ -129,6 +129,7 @@ DEFINE_NAME_VECTORS(nvapi, "nvapi64");
 DEFINE_NAME_VECTORS(slInterposer, "sl.interposer");
 DEFINE_NAME_VECTORS(slDlss, "sl.dlss");
 DEFINE_NAME_VECTORS(slDlssg, "sl.dlss_g");
+DEFINE_NAME_VECTORS(slDlssd, "sl.dlss_d");
 DEFINE_NAME_VECTORS(slReflex, "sl.reflex");
 DEFINE_NAME_VECTORS(slPcl, "sl.pcl");
 DEFINE_NAME_VECTORS(slCommon, "sl.common");
@@ -150,7 +151,10 @@ DEFINE_NAME_VECTORS(ffxDx12Upscaler, "amd_fidelityfx_upscaler_dx12");
 DEFINE_NAME_VECTORS(ffxDx12FG, "amd_fidelityfx_framegeneration_dx12");
 DEFINE_NAME_VECTORS(ffxDx12Denoiser, "amd_fidelityfx_denoiser_dx12");
 DEFINE_NAME_VECTORS(ffxDx12Radiance, "amd_fidelityfx_radiancecache_dx12");
-DEFINE_NAME_VECTORS(ffxVk, "amd_fidelityfx_vk");
+DEFINE_NAME_VECTORS(ffxVk, "amd_fidelityfx_vk", "amd_fidelityfx_loader_vk");
+DEFINE_NAME_VECTORS(ffxVkLegacy, "amd_fidelityfx_vk");
+DEFINE_NAME_VECTORS(ffxVkUpscaler, "amd_fidelityfx_upscaler_vk");
+DEFINE_NAME_VECTORS(ffxVkFG, "amd_fidelityfx_framegeneration_vk");
 DEFINE_NAME_VECTORS(uell, "main");
 
 inline static bool CompareFileName(std::string* first, std::string* second)

@@ -17,6 +17,7 @@
 #include "upscalers/xess/XeSSFeature_Dx11.h"
 #include "upscalers/xess/XeSSFeature_Dx11on12.h"
 #include <misc/IdentifyGpu.h>
+#include <misc/CustomProviders.h>
 #include <imgui/ImGuiNotify.hpp>
 
 bool FeatureProvider_Dx11::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NGX_Parameter* parameters,
@@ -25,6 +26,10 @@ bool FeatureProvider_Dx11::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NG
     State& state = State::Instance();
     Config& cfg = *Config::Instance();
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+
+    // DLSSD is only the game's ray reconstruction, it isn't one of the upscalers
+    const bool rayReconstruction = upscaler == Upscaler::DLSSD;
+    const auto custom = CustomProviders::Selected(API::DX11, upscaler);
 
     switch (upscaler)
     {
@@ -53,15 +58,16 @@ bool FeatureProvider_Dx11::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NG
         break;
 
     case Upscaler::FFX_on12:
-        *feature = std::make_unique<FFXFeatureDx11on12>(handleId, parameters);
+        *feature = std::make_unique<FFXFeatureDx11on12>(handleId, parameters, custom);
         break;
 
     case Upscaler::DLSS_on12:
         // DLSS across the bridge. The only way a D3D11 game can have both DLSS and Neural
         // Rendering, because the model will not initialise on a D3D11 device.
-        if (primaryGpu.dlssCapable && state.NVNGX_DLSS_Path.has_value())
+        // A custom DLSS (custom\<name>\dlss) doesn't need a DLSS capable GPU
+        if (!custom.empty() || (primaryGpu.dlssCapable && state.NVNGX_DLSS_Path.has_value()))
         {
-            *feature = std::make_unique<DLSSFeatureDx11on12>(handleId, parameters);
+            *feature = std::make_unique<DLSSFeatureDx11on12>(handleId, parameters, custom);
             break;
         }
 
@@ -110,11 +116,8 @@ bool FeatureProvider_Dx11::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NG
         loaded = true; // Assuming the fallback always loads successfully
     }
 
-    // DLSSD is stored in the config as DLSS
-    if (upscaler == Upscaler::DLSSD)
-        upscaler = Upscaler::DLSS;
-
-    cfg.Dx11Upscaler = upscaler;
+    if (!rayReconstruction)
+        cfg.Dx11Upscaler = upscaler;
 
     return loaded;
 }
@@ -126,7 +129,9 @@ bool FeatureProvider_Dx11::ChangeFeature(Upscaler upscaler, ID3D11Device* device
     State& state = State::Instance();
     Config& cfg = *Config::Instance();
 
-    const bool dlssOnNonCapable = !IdentifyGpu::getPrimaryGpu().dlssCapable && state.newBackend == Upscaler::DLSS;
+    const bool dlssOnNonCapable = !IdentifyGpu::getPrimaryGpu().dlssCapable &&
+                                  (state.newBackend == Upscaler::DLSS || state.newBackend == Upscaler::DLSS_on12) &&
+                                  CustomProviders::Selected(API::DX11, state.newBackend).empty();
     if (state.newBackend == Upscaler::Reset || dlssOnNonCapable)
         state.newBackend = cfg.Dx11Upscaler.value_or_default();
 

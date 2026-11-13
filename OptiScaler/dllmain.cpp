@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "dllmain.h"
+#include "plugins/PluginApi.h"
+#include "misc/CustomProviders.h"
 
 #include "Util.h"
 #include "Config.h"
@@ -226,7 +228,7 @@ static std::wstring PluginVersionNumber(const std::filesystem::path& plugin)
 
 // Runs a freshly loaded plugin's entry points; OptiPatcher-style plugins report that they patched the game, and then
 // the spoofing that would have hidden the GPU is turned off.
-static void InitializeAsiModule(HMODULE hMod)
+static void InitializeAsiModule(HMODULE hMod, const std::filesystem::path& path)
 {
     {
         std::lock_guard lock(_asiHandlesMutex);
@@ -238,6 +240,10 @@ static void InitializeAsiModule(HMODULE hMod)
 
     if (init != nullptr)
         init();
+
+    // Plugin API (plugin_sdk/optiscaler_plugin.h): menu tabs, settings, providers; upstream OptiScaler e6a4c3e8
+    PluginApi::InitPlugin(hMod, (PFN_OptiPluginInit) KernelBaseProxy::GetProcAddress_()(hMod, OPTI_PLUGIN_INIT_NAME),
+                          path);
 
     if (patchResult != nullptr)
     {
@@ -345,7 +351,7 @@ void LoadAsiPlugins(bool load)
                 LOG_INFO(L"Loaded: {}{}", entry.path().wstring(),
                          row.version.empty() ? std::wstring() : std::format(L" (v{})", row.version));
                 registry.Upsert(std::move(row));
-                InitializeAsiModule(hMod);
+                InitializeAsiModule(hMod, entry.path());
             }
             else
             {
@@ -392,7 +398,7 @@ void LoadAsiPlugins(bool load)
                             LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(),
                                      version.empty() ? std::wstring() : std::format(L" (v{})", version));
                             registry.SetState(Plugins::Kind::Asi, name, Plugins::State::LoadedLate, 0, version);
-                            InitializeAsiModule(hMod);
+                            InitializeAsiModule(hMod, entry.path());
                         }
                         else
                         {
@@ -1064,6 +1070,14 @@ static void CheckWorkingMode()
         StreamlineHooks::hookDlss(slDlss);
     }
 
+    HMODULE slDlssd = GetDllNameWModule(&slDlssdNamesW);
+    if (slDlssd != nullptr)
+    {
+        State::Instance().postCodes |= PostCode::SlPluginsAlreadyInMemory;
+        LOG_WARN("sl.dlss_d.dll already in memory");
+        StreamlineHooks::hookDlssd(slDlssd);
+    }
+
     HMODULE slDlssg = nullptr;
     slDlssg = GetDllNameWModule(&slDlssgNamesW);
     if (slDlssg != nullptr)
@@ -1174,6 +1188,22 @@ static void CheckWorkingMode()
     {
         LOG_DEBUG("amd_fidelityfx_vk.dll already in memory");
         FfxApiProxy::InitFfxVk(ffxVkModule);
+    }
+
+    HMODULE ffxVkSRModule = nullptr;
+    ffxVkSRModule = GetDllNameWModule(&ffxVkUpscalerNamesW);
+    if (ffxVkSRModule != nullptr)
+    {
+        LOG_DEBUG("amd_fidelityfx_upscaler_vk.dll already in memory");
+        FfxApiProxy::InitFfxVk_SR(ffxVkSRModule);
+    }
+
+    HMODULE ffxVkFGModule = nullptr;
+    ffxVkFGModule = GetDllNameWModule(&ffxVkFGNamesW);
+    if (ffxVkFGModule != nullptr)
+    {
+        LOG_DEBUG("amd_fidelityfx_framegeneration_vk.dll already in memory");
+        FfxApiProxy::InitFfxVk_FG(ffxVkFGModule);
     }
 
     // Hook kernel32 methods
@@ -1968,6 +1998,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("");
         spdlog::info("LogLevel: {}", Config::Instance()->LogLevel.value_or_default());
 
+        // Custom provider dlls (custom\<name>\<kind>) that export OptiPluginInit get the plugin API, as [Plugin.<name>]
+        CustomProviders::onDllLoaded = [](HMODULE dll, const std::string& name)
+        {
+            PluginApi::InitPlugin(
+                dll, (PFN_OptiPluginInit) KernelBaseProxy::GetProcAddress_()(dll, OPTI_PLUGIN_INIT_NAME), name);
+        };
+
+        CustomProviders::ResolveAll();
+
         spdlog::info("");
         if (Util::GetRealWindowsVersion(winVer))
             spdlog::info("Windows version: {} ({}.{}.{})", Util::GetWindowsName(winVer), winVer.dwMajorVersion,
@@ -2041,6 +2080,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
         F5Low::LatchSettings();
         State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();
+        State::Instance().activeFgNvngxCustom = Config::Instance()->FGNvngxCustomName;
+        State::Instance().activeFsrFgProvider = Config::Instance()->FSRFGProvider.value_or("");
 
         // Ensure valid FG configuration
         if (State::Instance().activeFgOutput == FGOutput::NoFG && State::Instance().activeFgInput != FGInput::NoFG &&

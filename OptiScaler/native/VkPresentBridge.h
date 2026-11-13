@@ -69,7 +69,8 @@ bool Owns(VkSwapchainKHR swapchain);
 // The swapchain is the game's, bridged: its presents go to the D3D12 swapchain.
 bool Active(VkSwapchainKHR swapchain);
 
-// Any bridge is up (the menu, the frame limiter and the Vulkan menu overlay ask).
+// Any bridge is up, or is being let go of (the menu, the frame limiter and the Vulkan menu overlay ask). Lock-free: the
+// menu is drawn on frame generation's present thread, which a resize waits for with the bridge's mutex held.
 bool IsUp();
 
 // A bridged D3D12 output is up, or is being let go of (until frame generation's swapchain is released and the state no

@@ -804,11 +804,9 @@ bool Active(VkSwapchainKHR swapchain)
     return g_bridge != nullptr && g_bridge->outputUp && g_bridge->swapchains.contains(swapchain);
 }
 
-bool IsUp()
-{
-    std::lock_guard lock(g_mutex);
-    return g_bridge != nullptr && g_bridge->outputUp;
-}
+// Without the mutex: the menu asks while it is drawn on frame generation's present thread, and a resize holds the mutex
+// while F5Low's ResizeBuffers waits for that very thread (the picture froze on a window resize with the menu open).
+bool IsUp() { return g_outputsActive.load(std::memory_order_acquire) > 0; }
 
 bool OutputActive()
 {

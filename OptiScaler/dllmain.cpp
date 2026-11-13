@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "dllmain.h"
+#include "plugins/PluginApi.h"
 
 #include "Util.h"
 #include "Config.h"
@@ -226,7 +227,7 @@ static std::wstring PluginVersionNumber(const std::filesystem::path& plugin)
 
 // Runs a freshly loaded plugin's entry points; OptiPatcher-style plugins report that they patched the game, and then
 // the spoofing that would have hidden the GPU is turned off.
-static void InitializeAsiModule(HMODULE hMod)
+static void InitializeAsiModule(HMODULE hMod, const std::filesystem::path& path)
 {
     {
         std::lock_guard lock(_asiHandlesMutex);
@@ -238,6 +239,10 @@ static void InitializeAsiModule(HMODULE hMod)
 
     if (init != nullptr)
         init();
+
+    // Plugin API (plugin_sdk/optiscaler_plugin.h): menu tabs, settings, providers; upstream OptiScaler e6a4c3e8
+    PluginApi::InitPlugin(hMod, (PFN_OptiPluginInit) KernelBaseProxy::GetProcAddress_()(hMod, OPTI_PLUGIN_INIT_NAME),
+                          path);
 
     if (patchResult != nullptr)
     {
@@ -345,7 +350,7 @@ void LoadAsiPlugins(bool load)
                 LOG_INFO(L"Loaded: {}{}", entry.path().wstring(),
                          row.version.empty() ? std::wstring() : std::format(L" (v{})", row.version));
                 registry.Upsert(std::move(row));
-                InitializeAsiModule(hMod);
+                InitializeAsiModule(hMod, entry.path());
             }
             else
             {
@@ -392,7 +397,7 @@ void LoadAsiPlugins(bool load)
                             LOG_INFO(L"Loaded late: {}{}", entry.path().wstring(),
                                      version.empty() ? std::wstring() : std::format(L" (v{})", version));
                             registry.SetState(Plugins::Kind::Asi, name, Plugins::State::LoadedLate, 0, version);
-                            InitializeAsiModule(hMod);
+                            InitializeAsiModule(hMod, entry.path());
                         }
                         else
                         {

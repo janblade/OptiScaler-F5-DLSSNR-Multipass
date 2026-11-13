@@ -36,6 +36,7 @@
 #include <framegen/mfgunlock/Status.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <misc/CustomProviders.h>
+#include <plugins/PluginApi.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -8751,8 +8752,26 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             section(RenderApiAndTextureSettings, true);
             break;
         case Page::Plugins:
+        {
             PluginsPage::Render(ctx.config);
+
+            // Tabs registered through the plugin API (plugin_sdk/optiscaler_plugin.h) by ASI plugins and custom
+            // provider dlls, one card each (upstream OptiScaler shows them as sidebar tabs)
+            const auto pluginTabs = PluginApi::GetTabs();
+            for (size_t i = 0; i < pluginTabs.size(); i++)
+            {
+                ImGui::PushID((int) i);
+                if (MenuCard card(pluginTabs[i].name.c_str(), ctx.menuResScale); card.IsOpen())
+                {
+                    if (!pluginTabs[i].description.empty())
+                        ImGui::TextDisabled("%s", pluginTabs[i].description.c_str());
+
+                    PluginApi::DrawTab(i, ctx.menuResScale, toneMapColor);
+                }
+                ImGui::PopID();
+            }
             break;
+        }
         case Page::Notifications:
             NotificationsPage::Render();
             break;

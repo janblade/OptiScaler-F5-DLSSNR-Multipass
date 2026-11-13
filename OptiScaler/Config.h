@@ -1436,6 +1436,12 @@ class Config
     static std::optional<DlssNrProfiles::File> ReadDlssNrProfile(const std::filesystem::path& path);
     bool SaveXeFG();
 
+    // Keys that aren't OptiScaler options (plugin settings), kept in the ini as they are
+    std::optional<std::string> GetRawValue(const char* section, const char* key);
+    void SetRawValue(const char* section, const char* key, const char* value);
+    void DeleteRawValue(const char* section, const char* key);
+    bool SaveRawValues();
+
     void CheckUpscalerFiles();
 
     // FG on/off and frame count. With FG Input DLSSG (Streamline 2+) and Enabled unset they follow the game's DLSS

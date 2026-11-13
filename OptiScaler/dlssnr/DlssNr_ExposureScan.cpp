@@ -1061,6 +1061,9 @@ bool Tick(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, const FrameE
     {
         std::lock_guard<std::mutex> lock(g_scanMutex);
 
+        // Auto starts over when it is wanted again, also when nothing was held (a Baked or a give-up would stick)
+        AutoScan::DroppedAllLocked();
+
         if (g_scan.retiring.empty() && g_scan.waiting.empty() && !Core::AnyAliveLocked(Api::D3D12))
             return false;
 
@@ -1691,9 +1694,19 @@ void ReleaseTrackedResources()
     {
         const Tracked& t = g_scan.tracked[i];
 
+        // Nor Auto's found match: the game recreating its upscaler feature (a resolution or frame generation change)
+        // does not remake its exposure, and with the other candidates let go when it was found, dropping it left Auto
+        // nothing to search for the session (2026-11-10). Tick lets go of it once the game releases it.
         if (t.alive && t.api == Api::D3D12 &&
             std::chrono::duration<float>(now - t.adoptedAt).count() >= kFreshSeconds)
-            Core::DropLocked(i);
+        {
+            if (!AutoScan::KeepsLocked(i))
+                Core::DropLocked(i);
+            else
+                LOG_INFO("DLSS-NR exposure scan (Auto): feature released; keeping candidate {} ({}), the game's "
+                         "exposure",
+                         i + 1, t.shape);
+        }
     }
 
     ReleaseRetiredLocked(true);

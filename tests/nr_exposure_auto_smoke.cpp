@@ -196,6 +196,139 @@ int main()
         CHECK(l.Now() == Phase::Found && !l.Closed());
     }
 
+    // Our meter not running (Cyberpunk 2077 with Finished Picture on, 2026-11-06): no search against nothing -- wait,
+    // holding, copying nothing; search once it runs again
+    {
+        Lifecycle l;
+        Frame off = At(0.0f);
+        off.metering = false;
+        l.OnFrame(off);
+        CHECK(l.Now() == Phase::NoMeter && l.SearchNumber() == 0);
+        CHECK(!l.CopiesAll() && !l.CopiesMatchOnly() && !l.LetsGo() && !l.Closed());
+        off.seconds = 900.0f;
+        l.OnFrame(off);
+        CHECK(l.Now() == Phase::NoMeter); // never gives up while waiting
+        l.OnFrame(At(901.0f));
+        CHECK(l.Now() == Phase::Searching && l.SearchNumber() == 1);
+
+        // the meter stops mid-search: wait, then carry on with the same search (its history kept), the wait not
+        // counted toward giving up
+        off.seconds = 950.0f;
+        l.OnFrame(off);
+        CHECK(l.Now() == Phase::NoMeter);
+        l.OnFrame(At(960.0f));
+        CHECK(l.Now() == Phase::Searching && l.SearchNumber() == 1);
+
+        // a found exposure does not need the meter
+        Frame found = At(970.0f);
+        found.verdict = Verdict::Found;
+        l.OnFrame(found);
+        off.seconds = 980.0f;
+        l.OnFrame(off);
+        CHECK(l.Now() == Phase::Found);
+    }
+
+    // A pause menu (no meter) every minute: the search neither restarts nor runs forever -- it gives up after
+    // searchSeconds of metered time
+    {
+        Lifecycle l(Settings { 300.0f });
+        l.OnFrame(At(0.0f));
+        float t = 0.0f;
+        for (int i = 0; i < 20 && l.Now() != Phase::GaveUp; ++i)
+        {
+            t += 50.0f; // 50 s metered
+            l.OnFrame(At(t));
+            Frame pause = At(t + 1.0f);
+            pause.metering = false;
+            l.OnFrame(pause);
+            t += 30.0f; // 30 s in a menu
+            l.OnFrame(At(t));
+        }
+        CHECK(l.Now() == Phase::GaveUp && l.SearchNumber() == 1);
+        CHECK(t > 300.0f && t < 520.0f); // ~300 s metered plus the pauses
+    }
+
+    // Started over in the same session (Auto off and on): the earlier find still counts
+    {
+        Lifecycle l;
+        l.NoteFoundBefore();
+        CHECK(l.FoundBefore());
+        l.OnFrame(At(0.0f));
+        Frame baked = At(10.0f);
+        baked.verdict = Verdict::Baked;
+        l.OnFrame(baked);
+        CHECK(l.Now() == Phase::GaveUp);
+    }
+
+    // Held candidates alone retry for the first kHeldRetries give-ups only; then new ones are needed
+    {
+        Lifecycle l(Settings { 300.0f, 60.0f, 1800.0f });
+        float t = 0.0f;
+        l.OnFrame(At(t));
+        unsigned int searches = 1;
+        for (unsigned int g = 1; g <= Lifecycle::kHeldRetries + 1; ++g)
+        {
+            t += 300.0f;
+            Frame held = At(t);
+            held.holding = true;
+            l.OnFrame(held);
+            CHECK(l.Now() == Phase::GaveUp);
+            held.seconds = t += 2000.0f; // past any retry time
+            l.OnFrame(held);
+            if (g <= Lifecycle::kHeldRetries)
+                CHECK(l.Now() == Phase::Searching && l.SearchNumber() == ++searches);
+            else
+                CHECK(l.Now() == Phase::GaveUp);
+        }
+        Frame fresh = At(t + 1.0f);
+        fresh.newCandidates = true;
+        l.OnFrame(fresh);
+        CHECK(l.Now() == Phase::Searching); // a new creation still does
+    }
+
+    // Lost after a find: a later Baked is a give-up (retried), not the end of the session
+    {
+        Lifecycle l;
+        l.OnFrame(At(0.0f));
+        Frame found = At(10.0f);
+        found.verdict = Verdict::Found;
+        l.OnFrame(found);
+        CHECK(l.FoundBefore());
+        Frame gone = At(20.0f);
+        gone.matchAlive = false;
+        l.OnFrame(gone);
+        CHECK(l.Now() == Phase::Searching);
+        Frame baked = At(40.0f);
+        baked.verdict = Verdict::Baked;
+        l.OnFrame(baked);
+        CHECK(l.Now() == Phase::GaveUp && l.KeepsLikely() && !l.Closed());
+    }
+
+    // Given up while holding likely candidates: they are searched again after the retry time, with no new creation
+    // (before: a give-up was for the session unless the game made new buffers). Not while the meter is off
+    {
+        Lifecycle l(Settings { 300.0f, 60.0f, 1800.0f });
+        l.OnFrame(At(10.0f));
+        Frame held = At(310.0f);
+        held.holding = true;
+        l.OnFrame(held);
+        CHECK(l.Now() == Phase::GaveUp && l.KeepsLikely() && l.LetsGo());
+        held.seconds = 369.0f;
+        l.OnFrame(held);
+        CHECK(l.Now() == Phase::GaveUp);
+        held.seconds = 370.0f;
+        held.metering = false;
+        l.OnFrame(held);
+        CHECK(l.Now() == Phase::GaveUp);
+        held.metering = true;
+        held.seconds = 371.0f;
+        l.OnFrame(held);
+        CHECK(l.Now() == Phase::Searching && l.SearchNumber() == 2);
+        held.seconds = 671.0f;
+        l.OnFrame(held);
+        CHECK(l.Now() == Phase::GaveUp && l.RetrySeconds() == 120.0f);
+    }
+
     // The pre-exposure rung: Dawnwalker's moves with the light; a constant one, a single change (a setting) or a few
     // values switched between (gameplay and cutscenes) do not
     {

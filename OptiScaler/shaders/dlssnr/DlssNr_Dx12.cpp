@@ -430,6 +430,9 @@ struct NrState
     // and everything downstream reads that. autoExposureRawValue is the reading's readback, for the log.
     ID3D12Resource* autoExposureRaw = nullptr;
     float autoExposureRawValue = 0.0f;
+    // NR frames in a row the meter ran (for the exposure scan): its readback is a few frames behind, so the first ones
+    // after it starts again still read what it measured before it stopped
+    unsigned int meterRunFrames = 0;
     bool autoExposureAdapting = false;
     bool autoExposureRawFailed = false;
     DlssNrExposureAdapt::Adapter autoExposureAdapter;
@@ -5367,7 +5370,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         DlssNr::ExposureScan::FrameExposure scanFrame;
         scanFrame.handed = (ID3D12Resource*) frame.ExposureTexture;
-        scanFrame.meter = whitePointSource == 3 ? g_nr.autoExposureRawValue : 0.0f;
+        // Only while the meter runs this frame: its last reading stays behind once it stops (finished picture switched
+        // on, a frame that is not linear HDR, its resources not made), and the scan would record a frozen meter beside
+        // moving candidates
+        const bool meterRuns = automaticApplies && g_nr.meter != nullptr && g_nr.autoExposure != nullptr;
+        g_nr.meterRunFrames = meterRuns ? std::min(g_nr.meterRunFrames + 1, 1000u) : 0u;
+        scanFrame.meter = g_nr.meterRunFrames > 6 ? g_nr.autoExposureRawValue : 0.0f;
         scanFrame.game = whitePointSource == 1   ? g_nr.gameExposure
                          : whitePointSource == 3 ? g_nr.autoPairGameExposure
                                                  : 0.0f;

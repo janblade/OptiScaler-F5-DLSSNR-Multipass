@@ -581,6 +581,60 @@ inline Verdict MatchEach(const std::vector<float>& meter, const std::vector<std:
     return out;
 }
 
+// After the game's exposure was found once this session: the evidence a search after a loss asks of candidates shaped
+// as the find was. A first search must tell units from nothing; this one only confirms that a buffer like the one
+// already found still behaves the same way (the game remade it on a quality change, or it came back after a give-up).
+// A still or evenly lit stretch rarely gives 2 EV of meter travel within a search, and the scan could not find again
+// what it had found (2026-11-10).
+inline Settings RefindSettings()
+{
+    Settings s;
+    s.minRows = 50; // ~5 s at the recording's ~10 rows a second
+    s.minTravelEv = 1.0f;
+    s.minLevels = 3;
+    // The halves are not asked to agree: a short history often holds one light change, and the half that only rises
+    // reads as a timer. Being the same kind of value as the earlier find, in a buffer of its shape, is the
+    // confirmation.
+    s.halfTravelEv = 1e9f;
+    return s;
+}
+
+// MatchEach on lighter evidence (RefindSettings) over candidates shaped as the earlier find, accepted only as the same
+// value behaving the same way: the same kind, at the earlier find's lag (within kRefindLagRows) and slope (within
+// kRefindSlope of it). Found, or NotSure; never Baked or None: those need a first search's evidence.
+//
+// The lag and slope matter: on 50-100 rows a decoy fits at an edge lag on a few overlapping rows. Replayed on the
+// recordings (Review Pass 2026-11-10), kind alone let Cyberpunk's c11 in at lag 27-29 (slope 0.39) and c9 at slope
+// 0.63, and Doom's scene luminance in as a divisor at lag -2/-3; the exposure itself came back at lag 0 (once -2) every
+// time.
+inline constexpr int kRefindLagRows = 3;
+inline constexpr float kRefindSlope = 0.3f;
+
+inline Verdict Refind(const std::vector<float>& meter, const std::vector<std::vector<float>>& candidates,
+                      const std::vector<size_t>& first, const Fit& found)
+{
+    // Each candidate judged and gated on its own, then the tightest of those that pass: gated after MatchEach's pick, a
+    // decoy fitting tighter at the wrong lag hid the exposure beside it
+    Verdict best;
+
+    for (size_t c = 0; c < candidates.size(); ++c)
+    {
+        Verdict v = MatchEach(meter, { candidates[c] }, { c < first.size() ? first[c] : (size_t) 0 }, RefindSettings());
+
+        const bool sameWay = v.what == What::Found && v.fit.kind == found.kind &&
+                             std::abs(v.fit.lag - found.lag) <= kRefindLagRows && found.slope != 0.0f &&
+                             std::fabs(v.fit.slope / found.slope - 1.0f) <= kRefindSlope;
+
+        if (sameWay && (best.what != What::Found || std::fabs(v.fit.corr) > std::fabs(best.fit.corr)))
+        {
+            best = v;
+            best.index = (int) c;
+        }
+    }
+
+    return best;
+}
+
 // A candidate's value as an exposure multiplier in our meter's sense, up to a constant factor; 0 when it has none.
 inline float AsExposure(const Fit& f, float value)
 {

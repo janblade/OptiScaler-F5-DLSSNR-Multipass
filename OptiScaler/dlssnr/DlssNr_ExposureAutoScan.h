@@ -39,6 +39,13 @@ bool CopiesLocked(size_t slot);
 // Whether every candidate is copied (watching or searching, or Auto not on): candidates waiting for a slot are only
 // rotated in then (Core::AdoptLocked)
 bool SearchingLocked();
+
+// The scan let go of everything for not being wanted (Auto switched off): when Auto is on again it starts over
+void DroppedAllLocked();
+
+// A feature release keeps this slot: Auto's found match (the per-frame check in Tick still lets go of it once the game
+// releases it)
+bool KeepsLocked(size_t slot);
 } // namespace AutoScan
 } // namespace ExposureScan
 } // namespace DlssNr

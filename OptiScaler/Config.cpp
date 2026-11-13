@@ -67,13 +67,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             auto dx12Upscaler = readString("Upscalers", "Dx12Upscaler", true).transform(CodeToUpscalerFfx);
 
             // Any other value is the folder name of a custom upscaler, its kind is set by
-            // CustomUpscalers::ResolveDx12Upscaler once the Opti folder is known
+            // CustomProviders::ResolveDx12Upscaler once the Opti folder is known
             if (dx12Upscaler == Upscaler::Reset)
                 CustomUpscaler.set_from_config(std::string(ini.GetValue("Upscalers", "Dx12Upscaler")));
             else
                 Dx12Upscaler.set_from_config(dx12Upscaler);
 
-            // Same for Vulkan, checked by CustomUpscalers::ResolveVulkanUpscaler
+            // Same for Vulkan, checked by CustomProviders::ResolveVulkanUpscaler
             auto vulkanUpscaler = readString("Upscalers", "VulkanUpscaler", true).transform(CodeToUpscalerFfx);
 
             if (vulkanUpscaler == Upscaler::Reset)

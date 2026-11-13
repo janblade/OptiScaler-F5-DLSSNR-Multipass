@@ -15,7 +15,7 @@
 #include "upscalers/xess/XeSSFeature_Dx12.h"
 #include "FeatureProvider_Dx11.h"
 #include <misc/IdentifyGpu.h>
-#include "CustomUpscalers.h"
+#include <misc/CustomProviders.h>
 
 bool FeatureProvider_Dx12::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NGX_Parameter* parameters,
                                       std::unique_ptr<IFeature_Dx12>* feature)
@@ -45,11 +45,11 @@ bool FeatureProvider_Dx12::GetFeature(Upscaler upscaler, UINT handleId, NVSDK_NG
         break;
 
     case Upscaler::FFX:
-        *feature = std::make_unique<FFXFeatureDx12>(handleId, parameters, CustomUpscalers::IsFfx(custom) ? custom : "");
+        *feature = std::make_unique<FFXFeatureDx12>(handleId, parameters, CustomProviders::Has(custom, CustomProviders::Kind::Ffx) ? custom : "");
         break;
 
     case Upscaler::DLSS:
-        if (CustomUpscalers::IsDlss(custom))
+        if (CustomProviders::Has(custom, CustomProviders::Kind::Dlss))
         {
             *feature = std::make_unique<DLSSFeatureDx12>(handleId, parameters, custom);
             break;
@@ -116,7 +116,7 @@ bool FeatureProvider_Dx12::ChangeFeature(Upscaler upscaler, ID3D12Device* device
         return false;
 
     const bool dlssOnNonCapable = !IdentifyGpu::getPrimaryGpu().dlssCapable && state.newBackend == Upscaler::DLSS &&
-                                  !CustomUpscalers::IsDlss(cfg.CustomUpscaler.value_or(""));
+                                  !CustomProviders::Has(cfg.CustomUpscaler.value_or(""), CustomProviders::Kind::Dlss);
     if (state.newBackend == Upscaler::Reset || dlssOnNonCapable)
         state.newBackend = cfg.Dx12Upscaler.value_or_default();
 

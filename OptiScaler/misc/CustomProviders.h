@@ -198,6 +198,42 @@ inline bool Has(const std::string& name, Kind kind) { return IsValidName(name) &
 using DllLoadedFn = void (*)(HMODULE dll, const std::string& name);
 inline DllLoadedFn onDllLoaded = nullptr;
 
+// Loads the dll found for a kind (DllPath); logs the path and the error when it fails
+inline HMODULE LoadDll(const std::string& name, Kind kind, const std::filesystem::path& path)
+{
+    if (path.empty())
+    {
+        LOG_ERROR("Custom {} {}: no dll in {}", Info(kind).label, name,
+                  wstring_to_string((Folder(name) / Info(kind).folder).wstring()));
+        return nullptr;
+    }
+
+    auto dll = NtdllProxy::LoadLibraryExW_Ldr(path.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (dll == nullptr)
+    {
+        // ERROR_DLL_INIT_FAILED: the dll refused to load, e.g. it needs a module this process does not have
+        const DWORD error = GetLastError();
+        LOG_ERROR("Custom {} {}: {} did not load, error {}{}", Info(kind).label, name,
+                  wstring_to_string(path.wstring()), error,
+                  error == ERROR_DLL_INIT_FAILED ? " (the dll refused to load; it needs something this process lacks)"
+                                                 : "");
+        return nullptr;
+    }
+
+    LOG_INFO("Custom {} {}: loaded {}", Info(kind).label, name, wstring_to_string(path.wstring()));
+
+    if (onDllLoaded != nullptr)
+        onDllLoaded(dll, name);
+
+    return dll;
+}
+
+// The FFX SDK 1.x Vulkan dll takes the old Vulkan backend description, the newer ones the V2 type
+inline bool IsLegacyFfxVkDll(const std::filesystem::path& path)
+{
+    return _wcsicmp(path.filename().c_str(), L"amd_fidelityfx_vk.dll") == 0;
+}
+
 // The exports of name's kind: a plugin's first, then the folder's dll. Empty when there are none.
 inline Exports Load(const std::string& name, Kind kind)
 {
@@ -214,29 +250,9 @@ inline Exports Load(const std::string& name, Kind kind)
     }
 
     const auto path = DllPath(name, kind);
-    if (path.empty())
-    {
-        LOG_ERROR("Custom {} {}: no dll in {}", Info(kind).label, name,
-                  wstring_to_string((Folder(name) / Info(kind).folder).wstring()));
-        return {};
-    }
-
-    auto dll = NtdllProxy::LoadLibraryExW_Ldr(path.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    auto dll = LoadDll(name, kind, path);
     if (dll == nullptr)
-    {
-        // ERROR_DLL_INIT_FAILED: the dll refused to load, e.g. it needs a module this process does not have
-        const DWORD error = GetLastError();
-        LOG_ERROR("Custom {} {}: {} did not load, error {}{}", Info(kind).label, name,
-                  wstring_to_string(path.wstring()), error,
-                  error == ERROR_DLL_INIT_FAILED ? " (the dll refused to load; it needs something this process lacks)"
-                                                 : "");
         return {};
-    }
-
-    LOG_INFO("Custom {} {}: loaded {}", Info(kind).label, name, wstring_to_string(path.wstring()));
-
-    if (onDllLoaded != nullptr)
-        onDllLoaded(dll, name);
 
     return { .dll = dll, .path = path };
 }
@@ -258,5 +274,44 @@ inline bool Register(const std::string& name, Kind kind, GetProcFn getProc, void
     pluginProviders.push_back({ name, kind, getProc, userData });
     LOG_INFO("Custom {} {} registered by a plugin", Info(kind).label, name);
     return true;
+}
+// [Upscalers] Dx12Upscaler=<name> from the ini as the custom folder's kind: FFX when it has ffx, else DLSS when it
+// has dlss (upstream CustomUpscalers::ResolveDx12Upscaler). Kept while a plugin may still register it.
+inline void ResolveDx12Upscaler()
+{
+    auto cfg = Config::Instance();
+    auto name = cfg->CustomUpscaler.value_or("");
+
+    if (name.empty())
+        return;
+
+    if (Has(name, Kind::Ffx))
+        cfg->Dx12Upscaler.set_from_config(Upscaler::FFX);
+    else if (Has(name, Kind::Dlss))
+        cfg->Dx12Upscaler.set_from_config(Upscaler::DLSS);
+    else if (!cfg->LoadAsiPlugins.value_or_default())
+    {
+        LOG_WARN("Dx12Upscaler={} is not an upscaler or a folder in {}", name, wstring_to_string(Root().wstring()));
+        cfg->CustomUpscaler.reset();
+    }
+}
+
+// [Upscalers] VulkanUpscaler=<name>: only FFX (ffx_vk) runs on Vulkan
+inline void ResolveVulkanUpscaler()
+{
+    auto cfg = Config::Instance();
+    auto name = cfg->CustomUpscalerVk.value_or("");
+
+    if (name.empty())
+        return;
+
+    if (Has(name, Kind::FfxVk))
+        cfg->VulkanUpscaler.set_from_config(Upscaler::FFX);
+    else if (!cfg->LoadAsiPlugins.value_or_default())
+    {
+        LOG_WARN("VulkanUpscaler={} is not an upscaler or a folder with ffx_vk in {}", name,
+                 wstring_to_string(Root().wstring()));
+        cfg->CustomUpscalerVk.reset();
+    }
 }
 } // namespace CustomProviders

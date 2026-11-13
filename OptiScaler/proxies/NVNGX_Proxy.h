@@ -9,7 +9,7 @@
 #include <proxies/KernelBase_Proxy.h>
 
 #include "nvapi/NvApiHooks.h"
-#include <upscalers/CustomUpscalers.h>
+#include <misc/CustomProviders.h>
 
 #include "detours/detours.h"
 
@@ -916,8 +916,8 @@ class NVNGXProxy
 
         if (inserted)
         {
-            auto path = CustomUpscalers::NgxDllPath(name);
-            module.dll = CustomUpscalers::LoadDll(name, path);
+            auto path = CustomProviders::DllPath(name, CustomProviders::Kind::Dlss);
+            module.dll = CustomProviders::LoadDll(name, CustomProviders::Kind::Dlss, path);
 
             if (module.dll == nullptr)
                 return nullptr;

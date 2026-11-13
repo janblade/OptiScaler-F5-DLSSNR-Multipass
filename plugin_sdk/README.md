@@ -18,7 +18,7 @@ Both use the API the same way. Below, "plugin" means either kind.
    ```cpp
    extern "C" __declspec(dllexport) bool OptiPluginInit(const OptiPluginApi* api, OptiPlugin* plugin)
    {
-       api->RegisterTab(plugin, "My Plugin", "Tooltip in the sidebar", DrawTab, nullptr);
+       api->RegisterTab(plugin, "My Plugin", "Shown under the tab title", DrawTab, nullptr);
        return true;
    }
    ```
@@ -31,7 +31,7 @@ Both use the API the same way. Below, "plugin" means either kind.
 2. Install the dll:
    - ASI plugin: put the `.asi` file in the `plugins` folder and set `LoadAsiPlugins=true` in `OptiScaler.ini`.
    - Custom upscaler, FG or ray reconstruction: put the dll in `custom/<name>/<kind>` and select `<name>` as the upscaler, FG or ray reconstruction upscaler in the menu.
-3. Your tabs appear under **PLUGINS** in the menu sidebar.
+3. Your tabs appear on the **Plugins** page of the menu, one card per tab.
 
 Custom upscaler and FG dlls in `custom/<name>/<kind>` can export `OptiPluginInit` too. It's called when OptiScaler loads the dll, which happens when the upscaler or FG is first used, so their tabs can show up after the game started.
 

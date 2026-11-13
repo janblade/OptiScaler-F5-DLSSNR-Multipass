@@ -1161,7 +1161,8 @@ class Config
     // UpscalerIndex of [FSR] for the regular FFX upscaler, of [<name>] for a custom one
     CustomOptional<int>& FfxUpscalerIndexFor(const std::string& custom)
     {
-        if (custom.empty())
+        // A custom folder named FSR shares [FSR] UpscalerIndex, the ini section it is saved in
+        if (custom.empty() || _stricmp(custom.c_str(), "FSR") == 0)
             return FfxUpscalerIndex;
 
         // Entries never move, the reference stays valid outside the lock

@@ -417,7 +417,8 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
     // Unhooking and cleaning stuff causing issues during shutdown.
     // Disabled for now to check if it cause any issues
     // UnhookAll();
-    DLSSFeatureDx12::Shutdown(D3D12Device);
+    // The device asked for (null: all), D3D12Device is already cleared here
+    DLSSFeatureDx12::Shutdown(requestedDevice);
 
     // Added `&& !State::Instance().isShuttingDown` hack for crash on exit
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx12Inited())

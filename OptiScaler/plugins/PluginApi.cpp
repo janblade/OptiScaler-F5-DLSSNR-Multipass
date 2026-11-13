@@ -19,9 +19,20 @@ struct OptiPlugin
         Declined,
     };
 
+    struct Provider
+    {
+        std::string name;
+        OptiProviderKind kind;
+        OptiGetProcFn getProc;
+        void* userData;
+    };
+
     std::string name;
     std::string section; // Plugin.<name> in OptiScaler.ini
     InitState initState = InitState::Running;
+
+    // Registered during OptiPluginInit, kept only when it accepts the API (like its tabs)
+    std::vector<Provider> pendingProviders;
 };
 
 namespace
@@ -195,7 +206,7 @@ bool Api_RegisterTab(OptiPlugin* plugin, const char* name, const char* descripti
 
 void Api_Section(const char* title)
 {
-    if (_draw == nullptr)
+    if (_draw == nullptr || title == nullptr)
         return;
 
     // This fork's menu has collapsible cards (MenuCard) whose open state the widgets would have to check; a plugin
@@ -470,6 +481,22 @@ bool Api_RegisterProvider(OptiPlugin* plugin, const char* name, OptiProviderKind
     if (plugin == nullptr || name == nullptr)
         return false;
 
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+
+        switch (plugin->initState)
+        {
+        case OptiPlugin::InitState::Running:
+            LOG_INFO("[{}] Registering provider {} once OptiPluginInit accepts", plugin->name, name);
+            plugin->pendingProviders.push_back({ name, kind, getProc, userData });
+            return true;
+        case OptiPlugin::InitState::Accepted:
+            break;
+        default:
+            return false;
+        }
+    }
+
     LOG_INFO("[{}] Registering provider {}", plugin->name, name);
     return CustomProviders::Register(name, (CustomProviders::Kind) kind, getProc, userData);
 }
@@ -567,11 +594,11 @@ void PluginApi::InitPlugin(HMODULE module, PFN_OptiPluginInit init, const std::s
     const bool finished = CallInit(init, &_api, plugin, &accepted);
 
     if (!finished)
-        LOG_ERROR("[{}] Crashed in OptiPluginInit, its tabs are removed", plugin->name);
+        LOG_ERROR("[{}] Crashed in OptiPluginInit, its tabs and providers are removed", plugin->name);
     else if (!accepted)
         LOG_INFO("[{}] Declined the plugin API", plugin->name);
 
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::unique_lock<std::mutex> lock(_mutex);
 
     // Declined plugins can't register tabs later either
     plugin->initState = finished && accepted ? OptiPlugin::InitState::Accepted : OptiPlugin::InitState::Declined;
@@ -586,6 +613,21 @@ void PluginApi::InitPlugin(HMODULE module, PFN_OptiPluginInit init, const std::s
     }
 
     std::erase_if(_pendingTabs, [plugin](const auto& tab) { return tab->plugin == plugin; });
+
+    auto providers = std::move(plugin->pendingProviders);
+    plugin->pendingProviders.clear();
+    const bool keep = plugin->initState == OptiPlugin::InitState::Accepted;
+    lock.unlock();
+
+    // Outside the lock: registering resolves the ini settings that name it
+    for (const auto& provider : providers)
+    {
+        if (keep)
+            CustomProviders::Register(provider.name, (CustomProviders::Kind) provider.kind, provider.getProc,
+                                      provider.userData);
+        else
+            LOG_INFO("[{}] Provider {} not kept, the plugin didn't accept the API", plugin->name, provider.name);
+    }
 }
 
 bool PluginApi::TakeReInitRequest() { return _reInitRequested.exchange(false); }

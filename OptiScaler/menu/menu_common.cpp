@@ -3108,6 +3108,11 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         const bool usesDlssd = currentFeature->GetUpscalerType() == Upscaler::DLSSD;
         const bool usesDx12CompatLayer = currentFeature->IsWithDx12();
 
+        // Ray reconstruction's handle (DX12/Vulkan) changes through the ray reconstruction combo whatever runs it now:
+        // DLSSD, a regular upscaler (RRAllowRegularUpscalers) or the FSR fallback after a DLSSD failure
+        const bool rayReconstruction = state.rrHandles.contains(currentFeature->Handle()->Id);
+        const bool rrPicker = rayReconstruction && (state.api == DX12 || state.api == Vulkan);
+
         switch (state.api)
         {
         case DX11:
@@ -3143,7 +3148,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ImGui::Text("| Spoof: %s", spoofingText.c_str());
 
             // Ray reconstruction picks its DLSSD: NVIDIA's or a custom one (custom\<name>\dlssd)
-            if (usesDlssd)
+            if (rrPicker)
                 RenderRRUpscalerCombo(API::DX12, currentFeature);
             else
                 AddDx12Backends(currentBackend);
@@ -3175,7 +3180,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ImGui::SameLine(0.0f, 6.0f);
             ImGui::Text("| Spoof: %s", spoofingText.c_str());
 
-            if (usesDlssd)
+            if (rrPicker)
                 RenderRRUpscalerCombo(API::Vulkan, currentFeature);
             else
                 AddVulkanBackends(currentBackend);
@@ -3185,8 +3190,6 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
         // Ray reconstruction on a regular upscaler ([Upscalers] RRAllowRegularUpscalers, upstream 9e9a7190): the game
         // leaves ray traced effects noisy for ray reconstruction to clean up
-        const bool rayReconstruction = state.rrHandles.contains(currentFeature->Handle()->Id);
-
         if (rayReconstruction && !usesDlssd && config->RRAllowRegularUpscalers.value_or_default())
         {
             ImGui::PushStyleColor(ImGuiCol_Text, toneMapColor(ImVec4(0.95f, 0.70f, 0.20f, 1.0f)));
@@ -3204,7 +3207,8 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ImGui::PopItemWidth();
         }
 
-        if (!usesDlssd)
+        // A ray reconstruction handle is recreated through its own combo (FeatureProvider takes Nvngx_RR::Backend())
+        if (!usesDlssd && !rrPicker)
         {
             ImGui::SameLine(0.0f, 6.0f);
 

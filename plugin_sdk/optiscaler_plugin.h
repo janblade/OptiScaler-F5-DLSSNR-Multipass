@@ -88,14 +88,14 @@ extern "C"
 
         // Registration -------------------------------------------------------------------------------------
 
-        // Adds a tab under the PLUGINS group of the menu sidebar. A plugin can register several tabs.
-        // description is shown as the sidebar tooltip and can be NULL.
+        // Adds a tab to the menu's plugin tabs (in this fork: a card per tab on the Plugins page). A plugin can register several tabs.
+        // description is shown with the tab (in this fork: a grey line under the card title) and can be NULL.
         bool (*RegisterTab)(OptiPlugin* plugin, const char* name, const char* description, OptiDrawTabFn draw,
                             void* userData);
 
         // Layout, only inside a draw callback ---------------------------------------------------------------
 
-        // Starts a new card with a title, the previous one is closed. Cards are closed after the callback.
+        // Starts a new section with a title (in this fork: a separator title inside the tab's card).
         void (*Section)(const char* title);
         void (*Separator)(void);
         // Places the next widget on the same line as the previous one

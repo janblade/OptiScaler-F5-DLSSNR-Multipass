@@ -2458,7 +2458,19 @@ class FfxApiProxy
             GetMethods(module, exports);
         }
 
-        return module.CreateContext != nullptr && module.Query != nullptr ? &it->second : nullptr;
+        if (inserted && !HasAllMethods(module))
+            LOG_ERROR("Custom FFX {} lacks one of ffxCreateContext, ffxDestroyContext, ffxConfigure, ffxQuery, "
+                      "ffxDispatch, not used",
+                      name);
+
+        return HasAllMethods(module) ? &it->second : nullptr;
+    }
+
+    // Features call all five without checks
+    static bool HasAllMethods(const FfxModule& module)
+    {
+        return module.CreateContext != nullptr && module.DestroyContext != nullptr && module.Configure != nullptr &&
+               module.Query != nullptr && module.Dispatch != nullptr;
     }
 
     static CustomFfxModule* FindCustom(std::map<std::string, CustomFfxModule>& customs, const std::string& name)
@@ -2466,7 +2478,7 @@ class FfxApiProxy
         std::scoped_lock lock(customMutex);
 
         auto it = customs.find(name);
-        return it != customs.end() && it->second.module.CreateContext != nullptr ? &it->second : nullptr;
+        return it != customs.end() && HasAllMethods(it->second.module) ? &it->second : nullptr;
     }
 
     static void GetMethods(FfxModule& module) { GetMethods(module, { .dll = module.dll }); }

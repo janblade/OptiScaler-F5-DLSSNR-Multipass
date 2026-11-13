@@ -12,7 +12,7 @@
 //   custom\<name>\dlssd      nvngx_dlssd.dll replacement (ray reconstruction)
 // The dll may have any name; when the folder has several, the kind's standard name wins, else the first dll. For the
 // DLSS-G kind a dll directly in custom\<name> is also taken (the first layout this fork shipped).
-// Dlls load by full path with LOAD_WITH_ALTERED_SEARCH_PATH, so files a provider loads itself are found next to it.
+// Dlls load by full path with their folder searched first, so dlls a provider imports are found next to it.
 
 #include "Config.h"
 #include "State.h"
@@ -208,7 +208,32 @@ inline HMODULE LoadDll(const std::string& name, Kind kind, const std::filesystem
         return nullptr;
     }
 
-    auto dll = NtdllProxy::LoadLibraryExW_Ldr(path.c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    // The provider's folder first, so the dlls it imports are found next to it (LdrLoadDll drops the altered search
+    // path flag), then the standard order: exe folder, System32, Windows, current folder, PATH
+    auto searchPath = path.parent_path().wstring();
+    {
+        wchar_t buffer[MAX_PATH];
+
+        if (auto n = GetModuleFileNameW(nullptr, buffer, MAX_PATH); n > 0 && n < MAX_PATH)
+            searchPath += L";" + std::filesystem::path(buffer).parent_path().wstring();
+
+        if (auto n = GetSystemDirectoryW(buffer, MAX_PATH); n > 0 && n < MAX_PATH)
+            searchPath += L";" + std::wstring(buffer, n);
+
+        if (auto n = GetWindowsDirectoryW(buffer, MAX_PATH); n > 0 && n < MAX_PATH)
+            searchPath += L";" + std::wstring(buffer, n);
+
+        searchPath += L";.";
+
+        if (auto n = GetEnvironmentVariableW(L"PATH", nullptr, 0); n > 0)
+        {
+            std::wstring envPath(n, L'\0');
+            envPath.resize(GetEnvironmentVariableW(L"PATH", envPath.data(), n));
+            searchPath += L";" + envPath;
+        }
+    }
+
+    auto dll = NtdllProxy::LoadLibraryExW_Ldr(path.c_str(), NULL, 0, searchPath.c_str());
     if (dll == nullptr)
     {
         // ERROR_DLL_INIT_FAILED: the dll refused to load, e.g. it needs a module this process does not have

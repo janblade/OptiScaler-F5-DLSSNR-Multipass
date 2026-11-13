@@ -185,7 +185,7 @@ bool FeatureProvider_Dx12::ChangeFeature(Upscaler upscaler, ID3D12Device* device
             backend = Upscaler::Reset;
             state.changeBackend[handleId] = false;
 
-            if (contextData->createParams != nullptr)
+            if (contextData->createParams != nullptr && !contextData->createParamsFromGame)
             {
                 TryDestroyNGXParameters(contextData->createParams, NVNGXProxy::D3D12_DestroyParameters());
                 contextData->createParams = nullptr;

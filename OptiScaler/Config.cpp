@@ -2092,8 +2092,10 @@ bool Config::SaveIni()
             auto upscaler = upscalerSetting.value_for_config();
             auto custom = customSetting.value_or("");
 
-            if (!custom.empty() && (upscaler == Upscaler::FFX || upscaler == Upscaler::FFX_on12 ||
-                                    upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSS_on12))
+            // Unset: a name an ASI plugin hasn't registered yet (this session) is kept as it was read
+            if (!custom.empty() &&
+                (!upscaler.has_value() || upscaler == Upscaler::FFX || upscaler == Upscaler::FFX_on12 ||
+                 upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSS_on12))
             {
                 ini.SetValue("Upscalers", key, custom.c_str());
                 return;

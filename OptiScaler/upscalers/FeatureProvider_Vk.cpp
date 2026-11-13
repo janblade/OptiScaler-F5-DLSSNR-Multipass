@@ -196,6 +196,7 @@ bool FeatureProvider_Vk::ChangeFeature(Upscaler upscaler, VkInstance instance, V
                 TryDestroyNGXParameters(contextData->createParams, NVNGXProxy::VULKAN_DestroyParameters());
 
             contextData->createParams = isPassthrough ? parameters : GetNGXParameters(API::Vulkan, false);
+            contextData->createParamsFromGame = isPassthrough;
             contextData->createParams->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, dc->GetFeatureFlags());
             contextData->createParams->Set(NVSDK_NGX_Parameter_Width, dc->RenderWidth());
             contextData->createParams->Set(NVSDK_NGX_Parameter_Height, dc->RenderHeight());
@@ -224,7 +225,7 @@ bool FeatureProvider_Vk::ChangeFeature(Upscaler upscaler, VkInstance instance, V
             backend = Upscaler::Reset;
             state.changeBackend[handleId] = false;
 
-            if (contextData->createParams != nullptr)
+            if (contextData->createParams != nullptr && !contextData->createParamsFromGame)
             {
                 TryDestroyNGXParameters(contextData->createParams, NVNGXProxy::VULKAN_DestroyParameters());
                 contextData->createParams = nullptr;
@@ -314,9 +315,11 @@ bool FeatureProvider_Vk::ChangeFeature(Upscaler upscaler, VkInstance instance, V
         }
 
         // If this is an OptiScaler fake NVNGX param table, delete it
+        // Not the game's own one (DLSS passthrough), which is also Opti's without NVIDIA's NGX and still in use
         int optiParam = 0;
 
-        if (contextData->createParams->Get("OptiScaler", &optiParam) == NVSDK_NGX_Result_Success && optiParam == 1)
+        if (!contextData->createParamsFromGame &&
+            contextData->createParams->Get("OptiScaler", &optiParam) == NVSDK_NGX_Result_Success && optiParam == 1)
         {
             TryDestroyNGXParameters(contextData->createParams, NVNGXProxy::VULKAN_DestroyParameters());
             contextData->createParams = nullptr;

@@ -27,7 +27,7 @@ class FFXFeature : public virtual IFeature
     // Fills the custom upscaler's list when given, the regular one otherwise
     bool QueryVersionsDx12(ID3D12Device* device, CustomFfxModule* custom = nullptr);
     // deviceContext is VkDeviceContext of FFX SDK 2.x, used for filtering out unsupported upscalers (FSR4)
-    bool QueryVersionsVulkan(void* deviceContext = nullptr);
+    bool QueryVersionsVulkan(void* deviceContext = nullptr, CustomFfxModule* custom = nullptr);
 
     void InitFlags();
 

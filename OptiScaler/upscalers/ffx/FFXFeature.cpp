@@ -53,9 +53,11 @@ bool FFXFeature::QueryVersionsDx12(ID3D12Device* device, CustomFfxModule* custom
     return query() == FFX_API_RETURN_OK;
 }
 
-bool FFXFeature::QueryVersionsVulkan(void* deviceContext)
+bool FFXFeature::QueryVersionsVulkan(void* deviceContext, CustomFfxModule* custom)
 {
-    auto& state = State::Instance();
+    // A custom upscaler (custom\<name>fx_vk) has its own version list
+    auto& ids = custom != nullptr ? custom->versions.ids : State::Instance().ffxUpscalerVersionIds;
+    auto& names = custom != nullptr ? custom->versions.names : State::Instance().ffxUpscalerVersionNames;
 
     // Get number of versions for allocation
     ffxQueryDescGetVersions versionQuery {};
@@ -68,20 +70,26 @@ bool FFXFeature::QueryVersionsVulkan(void* deviceContext)
     // The driver upscaler is always offered in the menu, even when the FFX SDK has a newer one
     constexpr auto driverListing = DriverListing::Always;
 
-    if (FfxApiProxy::VULKAN_QueryUpscalerVersions(&versionQuery, driverListing) != FFX_API_RETURN_OK)
+    auto query = [&]
     {
-        state.ffxUpscalerVersionIds.clear();
-        state.ffxUpscalerVersionNames.clear();
+        return custom != nullptr ? custom->module.Query(nullptr, &versionQuery.header)
+                                 : FfxApiProxy::VULKAN_QueryUpscalerVersions(&versionQuery, driverListing);
+    };
+
+    if (query() != FFX_API_RETURN_OK)
+    {
+        ids.clear();
+        names.clear();
         return false;
     }
 
     // Fill version ids and names arrays
-    state.ffxUpscalerVersionIds.resize(versionCount);
-    state.ffxUpscalerVersionNames.resize(versionCount);
-    versionQuery.versionIds = state.ffxUpscalerVersionIds.data();
-    versionQuery.versionNames = state.ffxUpscalerVersionNames.data();
+    ids.resize(versionCount);
+    names.resize(versionCount);
+    versionQuery.versionIds = ids.data();
+    versionQuery.versionNames = names.data();
 
-    return FfxApiProxy::VULKAN_QueryUpscalerVersions(&versionQuery, driverListing) == FFX_API_RETURN_OK;
+    return query() == FFX_API_RETURN_OK;
 }
 
 void FFXFeature::InitFlags()

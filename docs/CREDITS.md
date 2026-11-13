@@ -55,6 +55,17 @@ generation on Vulkan only with real FP8 (FakeMichau, the Vulkan half of `65ee5d6
 swapchain on another window out of frame generation (cdozdil, release/0.9 `192a59bb` and `0fc1ef63`, the other-window
 part only). The rules behind them, the per-chain wrapper handling and the host tests are this fork's own.
 
+## Custom providers and the plugin API (November 2026)
+
+Custom upscaler, frame generation and ray reconstruction providers (`custom\<name>\<kind>` folders for ffx, ffx_vk,
+ffx_fg, ffx_fg_vk, dlss, dlssg and dlssd), the plugin API with `plugin_sdk` (MIT) and provider registration by ASI
+plugins, regular upscalers in place of DLSSD, and the FidelityFX SDK 2.4 per-feature DLLs with the fallback to the older
+DLL are ported from [upstream OptiScaler](https://github.com/optiscaler/OptiScaler) (GPL-3.0) and adapted to this fork:
+FakeMichau (`de2626f1`, `63463bde`, `760ae412`, `941ce6a1`, `e6a4c3e8`, `db646bcb`, `df8a8f13`, `9e9a7190`, `74ae2c65`,
+`a0161cd9`, `6febb35b`), cdozdil (`c2a40331`, `6ce1b1a4`) and Michael Robles (@dashdogy; `9302028e`, `91ab9fe3`,
+`5f69a25d`). The provider lookup, the menu pages and cards, and the hooks onto this fork's NGX, FFX and Streamline layers
+are this fork's own.
+
 ## Inter font
 
 The menu's Modern style uses [Inter](https://github.com/rsms/inter) by Rasmus Andersson and the Inter Project

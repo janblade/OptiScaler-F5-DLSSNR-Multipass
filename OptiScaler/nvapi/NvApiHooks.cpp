@@ -11,6 +11,7 @@
 
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
+#include <framegen/nvngx/DlssgPresetSupport.h>
 #include <low_latency/input/input_reflex.h>
 
 // #define LOG_ALL_DRS_GET_CALLS
@@ -100,7 +101,29 @@ NvAPI_Status __stdcall NvApiHooks::hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSe
         }
 
         const auto preset = Config::Instance()->FGDLSSGPreset.value_or_default();
-        if (preset >= 1 && preset <= 3)
+
+        // A custom DLSS-G replacement makes the frames: only a preset it can take is answered, else it keeps what the
+        // driver profile says (logged once)
+        auto& state = State::Instance();
+        const bool customMakesFrames =
+            state.activeFgNvngx == FGNvngxReplacement::Custom &&
+            (state.activeFgOutput == FGOutput::DLSSG || state.activeFgInput == FGInput::NvngxFG);
+        bool customTakes = true;
+
+        if (customMakesFrames && preset >= 1 && preset <= 3)
+        {
+            customTakes = DlssgPresetSupport::Takes(DlssgPresetSupport::ForCustom(state.activeFgNvngxCustom), preset);
+
+            static bool logged = false;
+            if (!customTakes && !logged)
+            {
+                logged = true;
+                LOG_WARN("DLSS-G preset: {} can't take preset {}, left to the driver profile",
+                         state.activeFgNvngxCustom, (char) ('A' + preset - 1));
+            }
+        }
+
+        if (preset >= 1 && preset <= 3 && customTakes)
         {
             pSetting->settingId = dlssgPresetId;
             pSetting->settingType = NVDRS_DWORD_TYPE;

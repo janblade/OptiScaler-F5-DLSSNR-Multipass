@@ -36,6 +36,7 @@
 
 #include <framegen/mfgunlock/Status.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/nvngx/DlssgPresetSupport.h>
 #include <misc/CustomProviders.h>
 #include <plugins/PluginApi.h>
 #include <upscalers/nvngx/Nvngx_RR.h>
@@ -4228,9 +4229,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             nvngxCombo("FG Nvngx Replacement");
             ShowTooltip("What backend to use instead of the real DLSSG");
 
-            // The preset only means something to NVIDIA's own DLSS-G
+            // The preset means something to NVIDIA's own DLSS-G and to a custom replacement that reads it
             if (config->FGNvngxReplacement.value_or_default() == FGNvngxReplacement::None)
                 RenderDlssgPresetCombo(ctx);
+            else if (config->FGNvngxReplacement.value_or_default() == FGNvngxReplacement::Custom)
+                RenderDlssgPresetCombo(ctx, config->FGNvngxCustomName);
         }
 
         // Try to avoid having None selected when the gpu doesn't support DLSSG + some fallbacks
@@ -4579,7 +4582,7 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
 // DLSS-G frame generation preset ([DLSSG] Preset). DLSS-G reads it from the driver profile once when it starts;
 // OptiScaler answers that read in this process (the driver profile is not changed), so a change applies at the next
 // game start. The line under the combo says what DLSS-G was answered with and which nvngx_dlssg asked.
-void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx)
+void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx, const std::string& custom)
 {
     auto& state = ctx.state;
     auto config = ctx.config;
@@ -4595,11 +4598,16 @@ void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx)
 
     int preset = std::clamp(config->FGDLSSGPreset.value_or_default(), 0, 3);
 
+    // A custom replacement takes only the presets its dll knows (DlssgPresetSupport); the rest are not answered
+    const auto customSupport = custom.empty() ? DlssgPresetSupport::Support {} : DlssgPresetSupport::ForCustom(custom);
+    auto customTakes = [&](int i) { return custom.empty() || DlssgPresetSupport::Takes(customSupport, i); };
+
     ImGui::PushItemWidth(170.0f * ctx.menuResScale);
     if (ImGui::BeginCombo("DLSS-G preset", names[preset]))
     {
         for (int i = 0; i <= 3; i++)
         {
+            ImGui::BeginDisabled(!customTakes(i));
             if (ImGui::Selectable(names[i], preset == i))
             {
                 if (i == 0)
@@ -4607,8 +4615,12 @@ void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx)
                 else
                     config->FGDLSSGPreset = i;
             }
+            ImGui::EndDisabled();
 
-            if (i == 3 && !readerHasLite && ImGui::IsItemHovered())
+            if (!customTakes(i) && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s doesn't read the %s setting; it keeps its own model.", custom.c_str(),
+                                  i == 2 ? "UI recomposition" : "FG Lite");
+            else if (custom.empty() && i == 3 && !readerHasLite && ImGui::IsItemHovered())
                 ImGui::SetTooltip("The loaded nvngx_dlssg.dll is older than 310.9.16 and has no Preset C;\n"
                                   "it would keep its default model.");
         }
@@ -4643,7 +4655,14 @@ void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx)
             ImGui::TextDisabled("In use: %s", inUse.c_str());
     }
 
-    if (readerSeen && wanted != answered)
+    if (!custom.empty() && !customSupport.known)
+        ImGui::TextDisabled("%s: can't check which presets it takes (no dll file), passed on as picked",
+                            custom.c_str());
+    else if (!custom.empty() && !customTakes(wanted))
+        ImGui::TextColored(toneMapColor(ImVec4(0.95f, 0.70f, 0.20f, 1.0f)),
+                           "%s can't take this preset, it keeps the driver profile's", custom.c_str());
+
+    if (readerSeen && wanted != answered && customTakes(wanted))
         ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.35f, 0.25f, 1.f)), "Save Settings and restart the game to apply");
     else if (wanted == 3 && !readerHasLite)
         ImGui::TextColored(toneMapColor(ImVec4(0.95f, 0.70f, 0.20f, 1.0f)),
@@ -4778,10 +4797,15 @@ void MenuCommon::RenderFrameGenerationFooter(RenderMenuContext& ctx)
                 ImGui::EndDisabled();
             }
 
-            // The answer to DLSS-G's preset read covers the game's own DLSS-G too, unless an FG Nvngx replacement
-            // makes the frames in its place
-            if (!(state.activeFgInput == FGInput::NvngxFG && state.activeFgNvngx != FGNvngxReplacement::None))
+            // The answer to DLSS-G's preset read covers the game's own DLSS-G too; with an FG Nvngx replacement making
+            // the frames in its place only a custom one can take it
+            const bool replaced =
+                state.activeFgInput == FGInput::NvngxFG && state.activeFgNvngx != FGNvngxReplacement::None;
+
+            if (!replaced)
                 RenderDlssgPresetCombo(ctx);
+            else if (state.activeFgNvngx == FGNvngxReplacement::Custom)
+                RenderDlssgPresetCombo(ctx, state.activeFgNvngxCustom);
         }
     }
 

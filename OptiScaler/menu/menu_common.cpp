@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "menu_common.h"
 #include "PresentRateMeter.h"
 #include "MenuPages.h"
@@ -28,6 +28,7 @@
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/FfxApi_Proxy.h>
 #include <upscalers/ffx/FFXFeature.h>
+#include <upscalers/dlssd/DLSSDFeature.h>
 #include <fsr4/FSR4Models.h>
 #include <fsr4/FSR4Presets.h>
 #include <fsr4/FSR4DriverProviderVk.h>
@@ -37,6 +38,7 @@
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <misc/CustomProviders.h>
 #include <plugins/PluginApi.h>
+#include <upscalers/nvngx/Nvngx_RR.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -448,8 +450,10 @@ inline void MenuCommon::ReInitUpscaler()
     if (!State::Instance().currentFeature)
         return;
 
-    // currentBackend is only updated while the menu is drawn
-    State::Instance().newBackend = State::Instance().currentFeature->GetUpscalerType();
+    // currentBackend is only updated while the menu is drawn, ray reconstruction keeps its DLSSD
+    auto feature = State::Instance().currentFeature;
+    State::Instance().newBackend =
+        State::Instance().rrHandles.contains(feature->Handle()->Id) ? Upscaler::Reset : feature->GetUpscalerType();
 
     MARK_ALL_BACKENDS_CHANGED();
 }
@@ -648,6 +652,65 @@ void MenuCommon::AddVulkanBackends(Upscaler upscaler)
     RenderUpscalerCombo(API::Vulkan, upscaler,
                         { Upscaler::XeSS, Upscaler::FSR21, Upscaler::FSR22, Upscaler::FFX, Upscaler::FSR21_on12,
                           Upscaler::FFX_on12, Upscaler::DLSS });
+}
+
+static std::string NameWithVersion(IFeature* feature)
+{
+    const auto version = feature->Version();
+    return StrFmt("%s %u.%u.%u", feature->ShortName().c_str(), version.major, version.minor, version.patch);
+}
+
+// DLSSD running the game's ray reconstruction, NVIDIA's or a custom one
+static void RenderRRUpscalerCombo(API api, IFeature* feature)
+{
+    auto& state = State::Instance();
+    auto config = Config::Instance();
+
+    // Empty for NVIDIA's, custom ones until they turn out not to run on the api
+    std::vector<std::string> entries;
+
+    if (Nvngx_RR::NativeAvailable())
+        entries.push_back({});
+
+    for (auto& name : CustomProviders::List(CustomProviders::Kind::Dlssd))
+    {
+        if (Nvngx_RR::Listable(name, api))
+            entries.push_back(name);
+    }
+
+    auto entryName = [](const std::string& entry) { return entry.empty() ? std::string("DLSSD") : entry; };
+
+    // The FSR fallback isn't one of them
+    auto* dlssd = dynamic_cast<DLSSDFeature*>(feature);
+    const bool runsDlssd = dlssd != nullptr;
+    const auto current = runsDlssd ? dlssd->CustomName() : std::string();
+    const auto preview = runsDlssd ? entryName(current) : NameWithVersion(feature);
+
+    if (!ImGui::BeginCombo("##RRUpscalerCombo", preview.c_str(), ImGuiComboFlags_HeightLargest))
+        return;
+
+    for (const auto& entry : entries)
+    {
+        // Folder names in RRUpscaler aren't case sensitive
+        const bool selected = runsDlssd && _stricmp(current.c_str(), entry.c_str()) == 0;
+        auto label = StrFmt("%s##rr%s", entryName(entry).c_str(), entry.c_str());
+
+        if (ImGui::Selectable(label.c_str(), selected) && !selected)
+        {
+            // NVIDIA's is auto, it's picked when the gpu can run it
+            if (entry.empty())
+                config->CustomRRUpscaler.reset();
+            else
+                config->CustomRRUpscaler = entry;
+
+            Nvngx_RR::ResetFailures();
+
+            for (auto handle : state.rrHandles)
+                state.changeBackend[handle] = true;
+        }
+    }
+
+    ImGui::EndCombo();
 }
 
 template <HasDefaultValue B> void MenuCommon::AddResourceBarrier(std::string name, CustomOptional<int32_t, B>* value)
@@ -2924,7 +2987,10 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             spoofingText = config->DxgiSpoofing.value_or_default() ? "On" : "Off";
             ImGui::Text("| Spoof: %s", spoofingText.c_str());
 
-            if (!usesDlssd)
+            // Ray reconstruction picks its DLSSD: NVIDIA's or a custom one (custom\<name>\dlssd)
+            if (usesDlssd)
+                RenderRRUpscalerCombo(API::DX12, currentFeature);
+            else
                 AddDx12Backends(currentBackend);
 
             break;
@@ -2954,7 +3020,9 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ImGui::SameLine(0.0f, 6.0f);
             ImGui::Text("| Spoof: %s", spoofingText.c_str());
 
-            if (!usesDlssd)
+            if (usesDlssd)
+                RenderRRUpscalerCombo(API::Vulkan, currentFeature);
+            else
                 AddVulkanBackends(currentBackend);
         }
 

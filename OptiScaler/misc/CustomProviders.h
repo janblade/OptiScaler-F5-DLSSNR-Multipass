@@ -314,4 +314,16 @@ inline void ResolveVulkanUpscaler()
         cfg->CustomUpscalerVk.reset();
     }
 }
+// [Upscalers] RRUpscaler=<name>: a custom DLSSD (custom\<name>\dlssd) runs ray reconstruction (upstream c2a40331)
+inline void ResolveRRUpscaler()
+{
+    auto cfg = Config::Instance();
+    auto name = cfg->CustomRRUpscaler.value_or("");
+
+    if (!name.empty() && !Has(name, Kind::Dlssd) && !cfg->LoadAsiPlugins.value_or_default())
+    {
+        LOG_WARN("RRUpscaler={} is not a folder with dlssd in {}", name, wstring_to_string(Root().wstring()));
+        cfg->CustomRRUpscaler.reset();
+    }
+}
 } // namespace CustomProviders

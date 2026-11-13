@@ -15,6 +15,7 @@
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/dlssg/DlssgTelemetry.h>
 #include <framegen/f5low/F5Low.h>
+#include <upscalers/nvngx/Nvngx_RR.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <proxies/Streamline_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -1025,10 +1026,14 @@ void StreamlineHooks::spoofArch(uint32_t currentArch, sl::Feature feature, Syste
             return setArch(maxArch, altSystemCaps);
     }
 
-    // Don't spoof DLSSD at all
+    // Only spoof DLSSD for a custom one, NVIDIA's needs turing and above
     else if (feature == sl::kFeatureDLSS_RR)
     {
-        return;
+        if (Nvngx_RR::Selected(API::DX12) == nullptr && Nvngx_RR::Selected(API::Vulkan) == nullptr)
+            return;
+
+        if (currentArch < NV_GPU_ARCHITECTURE_TU100)
+            return setArch(maxArch, altSystemCaps);
     }
 
     // Don't change arch for DLSSG with ada and above
@@ -1091,6 +1096,67 @@ bool StreamlineHooks::hkdlss_slOnPluginLoad(sl::param::IParameters* params, cons
     }
 
     PatchSL1PluginJson(configJson);
+
+    config = configJson.dump();
+
+    *pluginJSON = config.c_str();
+
+    return result;
+}
+
+// A plugin load that succeeded and handed back a non-empty plugin json
+static bool HasPluginJson(bool result, const char** pluginJSON)
+{
+    return result && pluginJSON != nullptr && *pluginJSON != nullptr && **pluginJSON != 0;
+}
+
+// Only hooked when ray reconstruction runs on a custom DLSSD
+bool StreamlineHooks::hkdlssd_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON,
+                                             const char** pluginJSON)
+{
+    LOG_FUNC();
+
+    // TODO: do it better than "static" and hoping for the best
+    static std::string config;
+
+    uint32_t currentArch = 0;
+    if (Config::Instance()->StreamlineSpoofing.value_or_default())
+    {
+        hookSystemCaps(params);
+        currentArch = getSystemCapsArch();
+        spoofArch(currentArch, sl::kFeatureDLSS_RR);
+    }
+
+    auto result = o_dlssd_slOnPluginLoad != nullptr && o_dlssd_slOnPluginLoad(params, loaderJSON, pluginJSON);
+
+    if (Config::Instance()->StreamlineSpoofing.value_or_default())
+        setArch(currentArch);
+
+    if (!HasPluginJson(result, pluginJSON))
+        return result;
+
+    nlohmann::json configJson = nlohmann::json::parse(*pluginJSON, nullptr, false);
+    if (configJson.is_discarded())
+    {
+        LOG_ERROR("Failed to parse plugin JSON");
+        return result;
+    }
+
+    auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+    if (primaryGpu.vendorId != VendorId::Nvidia || !primaryGpu.dlssCapable)
+    {
+        if (configJson.contains("/external/vk/instance/extensions"_json_pointer))
+            configJson["external"]["vk"]["instance"]["extensions"].clear();
+
+        if (configJson.contains("/external/vk/device/extensions"_json_pointer))
+            configJson["external"]["vk"]["device"]["extensions"].clear();
+
+        if (configJson.contains("/external/vk/device/1.2_features"_json_pointer))
+            configJson["external"]["vk"]["device"]["1.2_features"].clear();
+
+        if (configJson.contains("/external/vk/device/1.3_features"_json_pointer))
+            configJson["external"]["vk"]["device"]["1.3_features"].clear();
+    }
 
     config = configJson.dump();
 
@@ -2382,6 +2448,7 @@ static PluginHook g_localDlssgPlugin { "local sl.dlssg", "local DLSSG" };
 static PluginHook g_reflexPlugin { "sl.reflex", "Reflex" };
 static PluginHook g_pclPlugin { "sl.pcl", "PCL" };
 static PluginHook g_commonPlugin { "sl.common", "Common" };
+static PluginHook g_dlssdPlugin { "sl.dlss_d", "DLSSD" };
 
 // Held around each plugin's record and its Detours transaction (taken before g_detoursTransactionMutex, never after).
 // Nothing under it loads a library, waits for the loader or frees a module: a module pinned for a check (PluginPin) is
@@ -2621,6 +2688,36 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
     HookPlugin(g_dlssPlugin, slDlss, o_dlss_slGetPluginFunction, reinterpret_cast<void*>(hkdlss_slGetPluginFunction));
 }
 
+// SL DLSSD (upstream OptiScaler c2a40331, on our PluginHook records)
+
+void* StreamlineHooks::hkdlssd_slGetPluginFunction(const char* functionName)
+{
+    if (strcmp(functionName, "slOnPluginLoad") == 0 &&
+        (Nvngx_RR::Selected(API::DX12) != nullptr || Nvngx_RR::Selected(API::Vulkan) != nullptr))
+    {
+        o_dlssd_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_dlssd_slGetPluginFunction)(functionName);
+        return &hkdlssd_slOnPluginLoad;
+    }
+
+    return LoadOriginal(o_dlssd_slGetPluginFunction)(functionName);
+}
+
+void StreamlineHooks::hookDlssd(HMODULE slDlssd)
+{
+    if (State::Instance().externalFrameGeneration)
+        return;
+    LOG_FUNC();
+
+    if (!slDlssd)
+    {
+        LOG_WARN("Dlssd module in NULL");
+        return;
+    }
+
+    HookPlugin(g_dlssdPlugin, slDlssd, o_dlssd_slGetPluginFunction,
+               reinterpret_cast<void*>(hkdlssd_slGetPluginFunction));
+}
+
 // SL DLSSG
 
 void StreamlineHooks::hookDlssg(HMODULE slDlssg)
@@ -2730,3 +2827,5 @@ bool StreamlineHooks::isCommonHooked() { return PluginHooked(g_commonPlugin); }
 bool StreamlineHooks::isPclHooked() { return PluginHooked(g_pclPlugin); }
 
 bool StreamlineHooks::isReflexHooked() { return PluginHooked(g_reflexPlugin); }
+
+bool StreamlineHooks::isDlssdHooked() { return PluginHooked(g_dlssdPlugin); }

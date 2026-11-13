@@ -160,6 +160,7 @@ std::string UpscalerToCode(Upscaler upscaler)
 }
 
 // Converts string codes into enum for config
+// dlssd is DLSS, ray reconstruction is picked by RRUpscaler
 Upscaler CodeToUpscaler(const std::string& code)
 {
     static const std::unordered_map<std::string, Upscaler> mapping = {

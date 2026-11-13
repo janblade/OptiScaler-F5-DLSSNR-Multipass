@@ -1,6 +1,11 @@
 # OptiScaler plugin SDK
 
-ASI plugins loaded by OptiScaler can add their own tabs to the OptiScaler menu and keep their settings in `OptiScaler.ini`.
+Dlls loaded by OptiScaler can add their own tabs to the OptiScaler menu and keep their settings in `OptiScaler.ini`. Two kinds of dlls get the API:
+
+- **ASI plugins** in the `plugins` folder, loaded when `LoadAsiPlugins=true`.
+- **Custom upscaler and FG dlls** in `custom/<name>/<kind>` (`ffx`, `ffx_vk`, `dlss`, `dlssg` or `dlssd`).
+
+Both use the API the same way. Below, "plugin" means either kind.
 
 - The API is a plain C function table defined in [`optiscaler_plugin.h`](optiscaler_plugin.h). This header is all you need: you don't link against OptiScaler or ImGui.
 - Plugins don't have to be rebuilt for newer OptiScaler versions. Fields are only ever appended to `OptiPluginApi`, so before you use a field added after version 1, check it with `OPTI_API_HAS(api, Field)`.
@@ -17,8 +22,14 @@ ASI plugins loaded by OptiScaler can add their own tabs to the OptiScaler menu a
    }
    ```
 
-   OptiScaler calls it once, right after `InitializeASI`. Tabs registered here show up once it returns `true`. Return `false` to opt out; the tabs you registered are then dropped and `RegisterTab` fails from then on.
-2. Put the `.asi` file in the `plugins` folder and set `LoadAsiPlugins=true` in `OptiScaler.ini`.
+   OptiScaler calls it once per dll:
+   - ASI plugins: right after `InitializeASI`, when the game starts (or after `LateAsiPluginsDelay` for `-loadlate` plugins).
+   - Custom upscaler and FG dlls: when OptiScaler loads the dll, the first time that upscaler or FG is used. This can be well after the game started.
+
+   Tabs registered here show up once it returns `true`. Return `false` to opt out; the tabs you registered are then dropped and `RegisterTab` fails from then on.
+2. Install the dll:
+   - ASI plugin: put the `.asi` file in the `plugins` folder and set `LoadAsiPlugins=true` in `OptiScaler.ini`.
+   - Custom upscaler, FG or ray reconstruction: put the dll in `custom/<name>/<kind>` and select `<name>` as the upscaler, FG or ray reconstruction upscaler in the menu.
 3. Your tabs appear under **PLUGINS** in the menu sidebar.
 
 Custom upscaler and FG dlls in `custom/<name>/<kind>` can export `OptiPluginInit` too. It's called when OptiScaler loads the dll, which happens when the upscaler or FG is first used, so their tabs can show up after the game started.

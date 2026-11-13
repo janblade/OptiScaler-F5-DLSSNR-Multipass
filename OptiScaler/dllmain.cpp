@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "dllmain.h"
 #include "plugins/PluginApi.h"
+#include "misc/CustomProviders.h"
 
 #include "Util.h"
 #include "Config.h"
@@ -1988,6 +1989,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::warn("DO NOT USE IN MULTIPLAYER GAMES");
         spdlog::info("");
         spdlog::info("LogLevel: {}", Config::Instance()->LogLevel.value_or_default());
+
+        // Custom provider dlls (custom\<name>\<kind>) that export OptiPluginInit get the plugin API, as [Plugin.<name>]
+        CustomProviders::onDllLoaded = [](HMODULE dll, const std::string& name)
+        {
+            PluginApi::InitPlugin(
+                dll, (PFN_OptiPluginInit) KernelBaseProxy::GetProcAddress_()(dll, OPTI_PLUGIN_INIT_NAME), name);
+        };
 
         CustomProviders::ResolveDx12Upscaler();
         CustomProviders::ResolveVulkanUpscaler();

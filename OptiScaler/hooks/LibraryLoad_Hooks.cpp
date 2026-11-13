@@ -701,7 +701,11 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 
     if (CheckDllNameW(&libName, &ffxVkNamesW))
     {
-        if (FfxApiProxy::VkModule() != nullptr)
+        // FFX SDK 2.x and the legacy dll take different backend types, only the input hooks convert between them
+        const bool sameBackend = CheckDllNameW(&libName, &ffxVkLegacyNamesW) != FfxApiProxy::VkModule_BackendV2();
+
+        if (FfxApiProxy::VkModule() != nullptr &&
+            (sameBackend || Config::Instance()->EnableFfxInputs.value_or_default()))
         {
             auto module = load(FfxApiProxy::VkModule_Path().c_str(), NULL, NULL);
             return module;
@@ -711,6 +715,38 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 
         if (module != nullptr)
             FfxApiProxy::InitFfxVk(module);
+
+        return module;
+    }
+
+    if (CheckDllNameW(&libName, &ffxVkUpscalerNamesW))
+    {
+        if (FfxApiProxy::VkModule_SR() != nullptr)
+        {
+            auto module = load(FfxApiProxy::VkModule_SR_Path().c_str(), NULL, NULL);
+            return module;
+        }
+
+        auto module = load(libName.c_str(), NULL, NULL);
+
+        if (module != nullptr)
+            FfxApiProxy::InitFfxVk_SR(module);
+
+        return module;
+    }
+
+    if (CheckDllNameW(&libName, &ffxVkFGNamesW))
+    {
+        if (FfxApiProxy::VkModule_FG() != nullptr)
+        {
+            auto module = load(FfxApiProxy::VkModule_FG_Path().c_str(), NULL, NULL);
+            return module;
+        }
+
+        auto module = load(libName.c_str(), NULL, NULL);
+
+        if (module != nullptr)
+            FfxApiProxy::InitFfxVk_FG(module);
 
         return module;
     }
@@ -880,7 +916,8 @@ bool LibraryLoadHooks::IsKeptLoaded(PVOID library)
            // OptiScaler keeps function pointers into these too: freed by the game (or a plugin) they would point at
            // unloaded code. The game gets its reference back now as if freed; they go at OptiScaler's own unload.
            library == XeSSProxy::ModuleDx11() || library == XeFGProxy::Module() || library == XeLLProxy::Module() ||
-           library == FfxApiProxy::Dx12Module_SR() || library == FfxApiProxy::Dx12Module_FG();
+           library == FfxApiProxy::Dx12Module_SR() || library == FfxApiProxy::Dx12Module_FG() ||
+           library == FfxApiProxy::VkModule_SR() || library == FfxApiProxy::VkModule_FG();
 }
 
 std::optional<NTSTATUS> LibraryLoadHooks::FreeLibrary(PVOID lpLibrary)

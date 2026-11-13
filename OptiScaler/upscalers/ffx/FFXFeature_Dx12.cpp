@@ -13,13 +13,27 @@ NVSDK_NGX_Parameter* FFXFeatureDx12::SetParameters(NVSDK_NGX_Parameter* InParame
     return InParameters;
 }
 
-FFXFeatureDx12::FFXFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters)
+FFXFeatureDx12::FFXFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters,
+                               const std::string& customUpscaler)
     : FFXFeature(InHandleId, InParameters), IFeature_Dx12(InHandleId, InParameters),
       IFeature(InHandleId, SetParameters(InParameters))
 {
+    // Regular dlls go first, so their name lookups don't find the custom dll
     FfxApiProxy::InitFfxDx12();
 
-    _moduleLoaded = FfxApiProxy::IsSRReady();
+    if (customUpscaler.empty())
+    {
+        _moduleLoaded = FfxApiProxy::IsSRReady();
+    }
+    else
+    {
+        _customUpscaler = FfxApiProxy::LoadCustomUpscalerDx12(customUpscaler);
+        _moduleLoaded = _customUpscaler != nullptr;
+
+        if (!_moduleLoaded)
+            ImGui::InsertNotification(
+                { ImGuiToastType::Error, 10000, "Can't load custom upscaler %s", customUpscaler.c_str() });
+    }
 
     if (_moduleLoaded)
         LOG_INFO("amd_fidelityfx_dx12.dll methods loaded!");
@@ -541,9 +555,13 @@ bool FFXFeatureDx12::InitFFX(const NVSDK_NGX_Parameter* InParameters)
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
-        QueryVersionsDx12(Device);
+        // A custom upscaler (custom\<name>\ffx) has its own version list
+        auto& versionIds =
+            _customUpscaler != nullptr ? _customUpscaler->versions.ids : State::Instance().ffxUpscalerVersionIds;
+        auto& versionNames =
+            _customUpscaler != nullptr ? _customUpscaler->versions.names : State::Instance().ffxUpscalerVersionNames;
 
-        if (State::Instance().ffxUpscalerVersionIds.empty() || State::Instance().ffxUpscalerVersionNames.empty())
+        if (!QueryVersionsDx12(Device, _customUpscaler) || versionIds.empty() || versionNames.empty())
         {
             LOG_ERROR("No FFX upscalers reported!");
             return false;
@@ -557,17 +575,18 @@ bool FFXFeatureDx12::InitFFX(const NVSDK_NGX_Parameter* InParameters)
 
         _contextDesc.header.pNext = &backendDesc.header;
 
-        if (Config::Instance()->FfxUpscalerIndex.value_or_default() < 0 ||
-            Config::Instance()->FfxUpscalerIndex.value_or_default() >= State::Instance().ffxUpscalerVersionIds.size())
-            Config::Instance()->FfxUpscalerIndex.set_volatile_value(0);
+        // [FSR] UpscalerIndex for the regular FFX upscaler, [<name>] UpscalerIndex for a custom one
+        auto& upscalerIndex =
+            Config::Instance()->FfxUpscalerIndexFor(_customUpscaler != nullptr ? _customUpscaler->name : "");
 
-        parse_version(
-            State::Instance().ffxUpscalerVersionNames[Config::Instance()->FfxUpscalerIndex.value_or_default()]);
+        if (upscalerIndex.value_or_default() < 0 || upscalerIndex.value_or_default() >= versionIds.size())
+            upscalerIndex.set_volatile_value(0);
+
+        parse_version(versionNames[upscalerIndex.value_or_default()]);
 
         ffxOverrideVersion override = { 0 };
         override.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
-        override.versionId =
-            State::Instance().ffxUpscalerVersionIds[Config::Instance()->FfxUpscalerIndex.value_or_default()];
+        override.versionId = versionIds[upscalerIndex.value_or_default()];
         backendDesc.header.pNext = &override.header;
 
         // FSR4's own auto exposure reads the whole color texture instead of just renderSize. On UE the padding
@@ -596,7 +615,10 @@ bool FFXFeatureDx12::InitFFX(const NVSDK_NGX_Parameter* InParameters)
         {
             ScopedSkipHeapCapture skipHeapCapture {};
 
-            auto ret = FfxApiProxy::D3D12_CreateContext(&_context, &_contextDesc.header, NULL);
+            auto ret =
+                _customUpscaler != nullptr
+                    ? FfxApiProxy::D3D12_CreateContext(&_customUpscaler->module, &_context, &_contextDesc.header, NULL)
+                    : FfxApiProxy::D3D12_CreateContext(&_context, &_contextDesc.header, NULL);
 
             if (ret != FFX_API_RETURN_OK)
             {

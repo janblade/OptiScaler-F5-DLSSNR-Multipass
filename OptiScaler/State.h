@@ -346,6 +346,13 @@ class State
     std::vector<std::string> detectedQuirks {};
 
     // FFX
+    // A version list of its own, for a custom FFX upscaler (custom\<name>\ffx, CustomFfxModule)
+    struct FfxVersionList
+    {
+        std::vector<uint64_t> ids;
+        std::vector<const char*> names;
+    };
+
     std::vector<const char*> ffxUpscalerVersionNames {};
     std::vector<uint64_t> ffxUpscalerVersionIds {};
     std::vector<const char*> ffxFGVersionNames {};

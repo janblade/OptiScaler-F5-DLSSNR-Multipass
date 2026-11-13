@@ -4,6 +4,8 @@
 
 #include <upscalers/IFeature.h>
 
+struct CustomFfxModule;
+
 class FFXFeature : public virtual IFeature
 {
   private:
@@ -22,7 +24,8 @@ class FFXFeature : public virtual IFeature
 
     double GetDeltaTime();
 
-    void QueryVersionsDx12(ID3D12Device* device);
+    // Fills the custom upscaler's list when given, the regular one otherwise
+    bool QueryVersionsDx12(ID3D12Device* device, CustomFfxModule* custom = nullptr);
     void QueryVersionsVulkan();
 
     void InitFlags();

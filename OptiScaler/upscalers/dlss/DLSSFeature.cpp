@@ -263,9 +263,18 @@ void DLSSFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)
     LOG_FUNC_RESULT(0);
 }
 
-void DLSSFeature::ReadVersion()
+void DLSSFeature::ReadVersion(const std::wstring& customDll)
 {
     LOG_FUNC();
+
+    if (!customDll.empty())
+    {
+        if (version_t version {}; Util::GetFileVersion(customDll, &version))
+            _version = feature_version { (uint32_t) version.major, (uint32_t) version.minor, (uint32_t) version.patch };
+
+        LOG_INFO("Custom DLSS v{0}.{1}.{2} loaded.", _version.major, _version.minor, _version.patch);
+        return;
+    }
 
     std::vector<std::string> possibleDlls;
 

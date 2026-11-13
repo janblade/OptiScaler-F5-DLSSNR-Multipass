@@ -166,7 +166,7 @@ DLSSFeatureDx12::DLSSFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* I
 {
     if (!customUpscaler.empty())
     {
-        _custom = NVNGXProxy::LoadCustomDx12(customUpscaler);
+        _custom = NVNGXProxy::LoadCustom(customUpscaler, API::DX12);
         _moduleLoaded = _custom != nullptr;
 
         if (!_moduleLoaded)

@@ -2005,9 +2005,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 dll, (PFN_OptiPluginInit) KernelBaseProxy::GetProcAddress_()(dll, OPTI_PLUGIN_INIT_NAME), name);
         };
 
-        CustomProviders::ResolveDx12Upscaler();
-        CustomProviders::ResolveVulkanUpscaler();
-        CustomProviders::ResolveRRUpscaler();
+        CustomProviders::ResolveAll();
 
         spdlog::info("");
         if (Util::GetRealWindowsVersion(winVer))
@@ -2083,6 +2081,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         F5Low::LatchSettings();
         State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();
         State::Instance().activeFgNvngxCustom = Config::Instance()->FGNvngxCustomName;
+        State::Instance().activeFsrFgProvider = Config::Instance()->FSRFGProvider.value_or("");
 
         // Ensure valid FG configuration
         if (State::Instance().activeFgOutput == FGOutput::NoFG && State::Instance().activeFgInput != FGInput::NoFG &&

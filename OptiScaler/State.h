@@ -186,6 +186,8 @@ class State
     FGNvngxReplacement activeFgNvngx = FGNvngxReplacement::None;
     // The custom provider name in use when activeFgNvngx is Custom (Config::FGNvngxCustomName at startup)
     std::string activeFgNvngxCustom;
+    // Config::FSRFGProvider FSR FG was started with, applied after a restart
+    std::string activeFsrFgProvider;
 
     // Streamline FG inputs
     Sl_Inputs slFGInputs = {};

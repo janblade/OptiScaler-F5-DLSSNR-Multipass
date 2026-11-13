@@ -243,9 +243,9 @@ bool FSRFG_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     _swapchainOutdated = false;
 
     // ML FG only works with the swapchain of the same module, the version can't be switched without recreating it
-    _ffxSwapchain = FfxApiProxy::VkFfxModule_FG();
+    _ffxSwapchain = _custom != nullptr ? &_custom->module : FfxApiProxy::VkFfxModule_FG();
 
-    if (IsDriverVersionSelected())
+    if (_custom == nullptr && IsDriverVersionSelected())
     {
         if (FSR4DriverProviderVk::IsFgSupported(device, _physicalDevice, &VulkanHooks::GetDeviceProcAddr))
             _ffxSwapchain = FSR4DriverProviderVk::FgSwapchainModule();
@@ -284,7 +284,9 @@ bool FSRFG_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
 
     if (!UsesDriver())
     {
-        BypassOverlayHooks(_ffxSwapchain->dll);
+        // A plugin's FG has no dll of its own to patch
+        if (_ffxSwapchain->dll != nullptr)
+            BypassOverlayHooks(_ffxSwapchain->dll);
 
         // Logs why the swapchain can't be created, SDK 2.x takes it without a context
         if (_ffxSwapchain->vkBackendV2)
@@ -449,7 +451,9 @@ void FSRFG_Vk::CreateContext()
         _swapchainOutdated = true;
     }
 
-    _ffx = driver ? FSR4DriverProviderVk::FgModule() : FfxApiProxy::VkFfxModule_FG();
+    _ffx = driver               ? FSR4DriverProviderVk::FgModule()
+           : _custom != nullptr ? &_custom->module
+                                : FfxApiProxy::VkFfxModule_FG();
 
     ffxCreateBackendVKDesc backendDesc {};
     backendDesc.header.type = FfxApiProxy::VkBackendType(_ffx);
@@ -585,7 +589,8 @@ void FSRFG_Vk::ConfigureFramePaceTuning()
 void FSRFG_Vk::QueryVersions()
 {
     auto& state = State::Instance();
-    FfxApiProxy::VULKAN_QueryFgVersions(state.ffxFGVersionIds, state.ffxFGVersionNames);
+    FfxApiProxy::VULKAN_QueryFgVersions(nullptr, state.ffxFGVersionIds, state.ffxFGVersionNames,
+                                        _custom != nullptr ? &_custom->module : nullptr);
 
     auto config = Config::Instance();
 

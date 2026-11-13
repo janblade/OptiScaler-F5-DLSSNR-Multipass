@@ -257,73 +257,153 @@ inline Exports Load(const std::string& name, Kind kind)
     return { .dll = dll, .path = path };
 }
 
+inline void ResolveRegistered(const std::string& name);
+
 // From the plugin API: a plugin's name takes the place of a folder with the same name
 inline bool Register(const std::string& name, Kind kind, GetProcFn getProc, void* userData)
 {
     if (!IsValidName(name) || kind >= Kind::Count || getProc == nullptr)
         return false;
 
-    std::scoped_lock lock(pluginMutex);
-    if (std::ranges::any_of(pluginProviders, [&](const PluginProvider& p)
-                            { return p.kind == kind && _stricmp(p.name.c_str(), name.c_str()) == 0; }))
     {
-        LOG_WARN("Custom {} {} is already registered", Info(kind).label, name);
-        return false;
+        std::scoped_lock lock(pluginMutex);
+        if (std::ranges::any_of(pluginProviders, [&](const PluginProvider& p)
+                                { return p.kind == kind && _stricmp(p.name.c_str(), name.c_str()) == 0; }))
+        {
+            LOG_WARN("Custom {} {} is already registered", Info(kind).label, name);
+            return false;
+        }
+
+        pluginProviders.push_back({ name, kind, getProc, userData });
     }
 
-    pluginProviders.push_back({ name, kind, getProc, userData });
     LOG_INFO("Custom {} {} registered by a plugin", Info(kind).label, name);
+
+    // The ini can name it before it is registered
+    ResolveRegistered(name);
     return true;
 }
-// [Upscalers] Dx12Upscaler=<name> from the ini as the custom folder's kind: FFX when it has ffx, else DLSS when it
-// has dlss (upstream CustomUpscalers::ResolveDx12Upscaler). Kept while a plugin may still register it.
-inline void ResolveDx12Upscaler()
+// The upscaler type through Config: Hudfix_Dx12.h's unscoped CaptureInfo::Upscaler hides ::Upscaler in files that
+// include it first
+using Upscaler = decltype(Config::Dx12Upscaler)::value_type;
+
+// Per-API upscaler settings: [Upscalers] Dx11Upscaler / Dx12Upscaler / VulkanUpscaler may name a custom provider
+// (upstream OptiScaler 74ae2c65)
+inline CustomOptional<std::string, NoDefault>& NameSetting(API api)
 {
     auto cfg = Config::Instance();
-    auto name = cfg->CustomUpscaler.value_or("");
-
-    if (name.empty())
-        return;
-
-    if (Has(name, Kind::Ffx))
-        cfg->Dx12Upscaler.set_from_config(Upscaler::FFX);
-    else if (Has(name, Kind::Dlss))
-        cfg->Dx12Upscaler.set_from_config(Upscaler::DLSS);
-    else if (!cfg->LoadAsiPlugins.value_or_default())
-    {
-        LOG_WARN("Dx12Upscaler={} is not an upscaler or a folder in {}", name, wstring_to_string(Root().wstring()));
-        cfg->CustomUpscaler.reset();
-    }
+    return api == API::DX11     ? cfg->CustomUpscalerDx11
+           : api == API::Vulkan ? cfg->CustomUpscalerVk
+                                : cfg->CustomUpscaler;
 }
 
-// [Upscalers] VulkanUpscaler=<name>: only FFX (ffx_vk) runs on Vulkan
-inline void ResolveVulkanUpscaler()
+inline CustomOptional<Upscaler, SoftDefault>& UpscalerSetting(API api)
 {
     auto cfg = Config::Instance();
-    auto name = cfg->CustomUpscalerVk.value_or("");
+    return api == API::DX11 ? cfg->Dx11Upscaler : api == API::Vulkan ? cfg->VulkanUpscaler : cfg->Dx12Upscaler;
+}
+
+// Upscalers a custom name runs as on the API, the native one first (DX11 only through DX12, Vulkan also through it)
+inline std::vector<Upscaler> Upscalers(const std::string& name, API api)
+{
+    std::vector<Upscaler> upscalers;
+
+    auto add = [&](Upscaler upscaler, Kind kind)
+    {
+        if (Has(name, kind))
+            upscalers.push_back(upscaler);
+    };
+
+    if (api == API::DX11)
+    {
+        add(Upscaler::FFX_on12, Kind::Ffx);
+        add(Upscaler::DLSS_on12, Kind::Dlss);
+    }
+    else if (api == API::Vulkan)
+    {
+        add(Upscaler::FFX, Kind::FfxVk);
+        add(Upscaler::FFX_on12, Kind::Ffx);
+        add(Upscaler::DLSS, Kind::Dlss);
+    }
+    else
+    {
+        add(Upscaler::FFX, Kind::Ffx);
+        add(Upscaler::DLSS, Kind::Dlss);
+    }
+
+    return upscalers;
+}
+
+inline bool Runs(const std::string& name, API api, Upscaler upscaler)
+{
+    return std::ranges::contains(Upscalers(name, api), upscaler);
+}
+
+// Custom name picked for the API when it runs as that upscaler, empty for the regular ones
+inline std::string Selected(API api, Upscaler upscaler)
+{
+    auto name = NameSetting(api).value_or("");
+    return Runs(name, api, upscaler) ? name : "";
+}
+
+// The API's upscaler setting from the ini as the upscaler a custom name runs as. Kept while an ASI plugin may still
+// register it.
+inline void ResolveUpscaler(API api)
+{
+    auto& setting = NameSetting(api);
+    auto name = setting.value_or("");
 
     if (name.empty())
         return;
 
-    if (Has(name, Kind::FfxVk))
-        cfg->VulkanUpscaler.set_from_config(Upscaler::FFX);
-    else if (!cfg->LoadAsiPlugins.value_or_default())
+    if (auto upscalers = Upscalers(name, api); !upscalers.empty())
     {
-        LOG_WARN("VulkanUpscaler={} is not an upscaler or a folder with ffx_vk in {}", name,
+        UpscalerSetting(api).set_from_config(upscalers[0]);
+    }
+    else if (!Config::Instance()->LoadAsiPlugins.value_or_default())
+    {
+        LOG_WARN("{} is not an upscaler or a custom upscaler for API {} in {}", name, (int) api,
                  wstring_to_string(Root().wstring()));
-        cfg->CustomUpscalerVk.reset();
+        setting.reset();
     }
 }
-// [Upscalers] RRUpscaler=<name>: a custom DLSSD (custom\<name>\dlssd) runs ray reconstruction (upstream c2a40331)
-inline void ResolveRRUpscaler()
-{
-    auto cfg = Config::Instance();
-    auto name = cfg->CustomRRUpscaler.value_or("");
 
-    if (!name.empty() && !Has(name, Kind::Dlssd) && !cfg->LoadAsiPlugins.value_or_default())
+// A custom name of FGNvngxReplacement, FSRFGProvider or RRUpscaler from the ini; kept while a plugin may register it
+inline bool ResolveName(const std::string& name, std::initializer_list<Kind> kinds, const char* key)
+{
+    if (name.empty() || std::ranges::any_of(kinds, [&name](Kind kind) { return Has(name, kind); }) ||
+        Config::Instance()->LoadAsiPlugins.value_or_default())
     {
-        LOG_WARN("RRUpscaler={} is not a folder with dlssd in {}", name, wstring_to_string(Root().wstring()));
-        cfg->CustomRRUpscaler.reset();
+        return true;
+    }
+
+    LOG_WARN("{}={} is not a replacement or a custom provider in {}", key, name, wstring_to_string(Root().wstring()));
+    return false;
+}
+
+// Once OptiScaler's folder is known (dllmain)
+inline void ResolveAll()
+{
+    for (auto api : { API::DX11, API::DX12, API::Vulkan })
+        ResolveUpscaler(api);
+
+    // FGNvngxReplacement=<name>: Nvngx_FG falls back by itself when the provider is missing, only warn here
+    ResolveName(Config::Instance()->FGNvngxCustomName, { Kind::Dlssg }, "FGNvngxReplacement");
+
+    if (!ResolveName(Config::Instance()->FSRFGProvider.value_or(""), { Kind::FfxFg, Kind::FfxFgVk }, "FSRFGProvider"))
+        Config::Instance()->FSRFGProvider.reset();
+
+    if (!ResolveName(Config::Instance()->CustomRRUpscaler.value_or(""), { Kind::Dlssd }, "RRUpscaler"))
+        Config::Instance()->CustomRRUpscaler.reset();
+}
+
+// After a plugin registered a provider: the ini may name it already
+inline void ResolveRegistered(const std::string& name)
+{
+    for (auto api : { API::DX11, API::DX12, API::Vulkan })
+    {
+        if (_stricmp(NameSetting(api).value_or("").c_str(), name.c_str()) == 0)
+            ResolveUpscaler(api);
     }
 }
 } // namespace CustomProviders

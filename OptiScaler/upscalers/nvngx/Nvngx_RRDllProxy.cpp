@@ -5,39 +5,39 @@
 
 Nvngx_RRDllProxy::Nvngx_RRDllProxy(const std::string& name)
 {
-    auto path = CustomProviders::DllPath(name, CustomProviders::Kind::Dlssd);
-    _dll = CustomProviders::LoadDll(name, CustomProviders::Kind::Dlssd, path);
+    // From custom\<name>\dlssd or a plugin that registered it (upstream 74ae2c65)
+    auto exports = CustomProviders::Load(name, CustomProviders::Kind::Dlssd);
 
-    if (_dll == nullptr)
+    if (!exports)
         return;
 
-    filePath = path.wstring();
+    _dll = exports.dll;
+    filePath = exports.path.wstring();
 
-    D3D12_Init = (PFN_D3D12_Init) GetProcAddress(_dll, "NVSDK_NGX_D3D12_Init");
-    D3D12_Init_Ext = (PFN_D3D12_Init_Ext) GetProcAddress(_dll, "NVSDK_NGX_D3D12_Init_Ext");
-    D3D12_Shutdown = (PFN_D3D12_Shutdown) GetProcAddress(_dll, "NVSDK_NGX_D3D12_Shutdown");
-    D3D12_Shutdown1 = (PFN_D3D12_Shutdown1) GetProcAddress(_dll, "NVSDK_NGX_D3D12_Shutdown1");
-    D3D12_CreateFeature = (PFN_D3D12_CreateFeature) GetProcAddress(_dll, "NVSDK_NGX_D3D12_CreateFeature");
-    D3D12_ReleaseFeature = (PFN_D3D12_ReleaseFeature) GetProcAddress(_dll, "NVSDK_NGX_D3D12_ReleaseFeature");
-    D3D12_GetFeatureRequirements =
-        (PFN_D3D12_GetFeatureRequirements) GetProcAddress(_dll, "NVSDK_NGX_D3D12_GetFeatureRequirements");
-    D3D12_EvaluateFeature = (PFN_D3D12_EvaluateFeature) GetProcAddress(_dll, "NVSDK_NGX_D3D12_EvaluateFeature");
+    D3D12_Init = (PFN_D3D12_Init) exports("NVSDK_NGX_D3D12_Init");
+    D3D12_Init_Ext = (PFN_D3D12_Init_Ext) exports("NVSDK_NGX_D3D12_Init_Ext");
+    D3D12_Shutdown = (PFN_D3D12_Shutdown) exports("NVSDK_NGX_D3D12_Shutdown");
+    D3D12_Shutdown1 = (PFN_D3D12_Shutdown1) exports("NVSDK_NGX_D3D12_Shutdown1");
+    D3D12_CreateFeature = (PFN_D3D12_CreateFeature) exports("NVSDK_NGX_D3D12_CreateFeature");
+    D3D12_ReleaseFeature = (PFN_D3D12_ReleaseFeature) exports("NVSDK_NGX_D3D12_ReleaseFeature");
+    D3D12_GetFeatureRequirements = (PFN_D3D12_GetFeatureRequirements) exports("NVSDK_NGX_D3D12_GetFeatureRequirements");
+    D3D12_EvaluateFeature = (PFN_D3D12_EvaluateFeature) exports("NVSDK_NGX_D3D12_EvaluateFeature");
     D3D12_PopulateParameters_Impl =
-        (PFN_D3D12_PopulateParameters_Impl) GetProcAddress(_dll, "NVSDK_NGX_D3D12_PopulateParameters_Impl");
+        (PFN_D3D12_PopulateParameters_Impl) exports("NVSDK_NGX_D3D12_PopulateParameters_Impl");
 
-    VULKAN_Init = (PFN_VULKAN_Init) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_Init");
-    VULKAN_Init_Ext = (PFN_VULKAN_Init_Ext) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_Init_Ext");
-    VULKAN_Init_Ext2 = (PFN_VULKAN_Init_Ext2) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_Init_Ext2");
-    VULKAN_Shutdown = (PFN_VULKAN_Shutdown) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_Shutdown");
-    VULKAN_Shutdown1 = (PFN_VULKAN_Shutdown1) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_Shutdown1");
-    VULKAN_CreateFeature = (PFN_VULKAN_CreateFeature) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_CreateFeature");
-    VULKAN_CreateFeature1 = (PFN_VULKAN_CreateFeature1) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_CreateFeature1");
-    VULKAN_ReleaseFeature = (PFN_VULKAN_ReleaseFeature) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_ReleaseFeature");
+    VULKAN_Init = (PFN_VULKAN_Init) exports("NVSDK_NGX_VULKAN_Init");
+    VULKAN_Init_Ext = (PFN_VULKAN_Init_Ext) exports("NVSDK_NGX_VULKAN_Init_Ext");
+    VULKAN_Init_Ext2 = (PFN_VULKAN_Init_Ext2) exports("NVSDK_NGX_VULKAN_Init_Ext2");
+    VULKAN_Shutdown = (PFN_VULKAN_Shutdown) exports("NVSDK_NGX_VULKAN_Shutdown");
+    VULKAN_Shutdown1 = (PFN_VULKAN_Shutdown1) exports("NVSDK_NGX_VULKAN_Shutdown1");
+    VULKAN_CreateFeature = (PFN_VULKAN_CreateFeature) exports("NVSDK_NGX_VULKAN_CreateFeature");
+    VULKAN_CreateFeature1 = (PFN_VULKAN_CreateFeature1) exports("NVSDK_NGX_VULKAN_CreateFeature1");
+    VULKAN_ReleaseFeature = (PFN_VULKAN_ReleaseFeature) exports("NVSDK_NGX_VULKAN_ReleaseFeature");
     VULKAN_GetFeatureRequirements =
-        (PFN_VULKAN_GetFeatureRequirements) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_GetFeatureRequirements");
-    VULKAN_EvaluateFeature = (PFN_VULKAN_EvaluateFeature) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_EvaluateFeature");
+        (PFN_VULKAN_GetFeatureRequirements) exports("NVSDK_NGX_VULKAN_GetFeatureRequirements");
+    VULKAN_EvaluateFeature = (PFN_VULKAN_EvaluateFeature) exports("NVSDK_NGX_VULKAN_EvaluateFeature");
     VULKAN_PopulateParameters_Impl =
-        (PFN_VULKAN_PopulateParameters_Impl) GetProcAddress(_dll, "NVSDK_NGX_VULKAN_PopulateParameters_Impl");
+        (PFN_VULKAN_PopulateParameters_Impl) exports("NVSDK_NGX_VULKAN_PopulateParameters_Impl");
 
     LOG_INFO("Custom DLSSD {} DX12: {}, Vulkan: {}", name, IsDx12Available(), IsVulkanAvailable());
 }

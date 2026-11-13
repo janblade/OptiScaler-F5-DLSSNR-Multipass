@@ -172,8 +172,7 @@ void Nvngx_RR::PopulateParameters(NVSDK_NGX_Parameter* InParameters, API api)
     {
         if (api == API::DX12 && custom->IsDx12Inited() && custom->D3D12_PopulateParameters_Impl != nullptr)
             custom->D3D12_PopulateParameters_Impl(InParameters);
-        else if (api == API::Vulkan && custom->IsVulkanInited() &&
-                 custom->VULKAN_PopulateParameters_Impl != nullptr)
+        else if (api == API::Vulkan && custom->IsVulkanInited() && custom->VULKAN_PopulateParameters_Impl != nullptr)
             custom->VULKAN_PopulateParameters_Impl(InParameters);
     }
 

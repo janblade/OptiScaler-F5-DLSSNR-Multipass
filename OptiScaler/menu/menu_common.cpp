@@ -594,10 +594,33 @@ void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, co
     if (targetBackend == Upscaler::Reset)
         targetBackend = currentUpscaler;
 
-    std::string selectedName = UpscalerDisplayName(targetBackend, api);
+    // A custom upscaler (custom\<name>\ffx, ffx_vk or dlss; upstream OptiScaler 74ae2c65) runs as FFX or DLSS: the
+    // name decides which entry is the current one
+    auto& customSetting = CustomProviders::NameSetting(api);
+    const auto currentCustom = CustomProviders::Selected(api, currentUpscaler);
+    const auto targetCustom = CustomProviders::Selected(api, targetBackend);
+
+    std::string selectedName = targetCustom.empty() ? UpscalerDisplayName(targetBackend, api) : targetCustom;
 
     if (ImGui::BeginCombo("##UpscalerCombo", selectedName.c_str()))
     {
+        // Picking a regular entry where a custom one ran (or the other way) keeps the upscaler type, so the change
+        // is marked here
+        auto pick = [&](Upscaler upscaler, const std::string& custom)
+        {
+            State::Instance().newBackend = upscaler;
+
+            if (_stricmp(customSetting.value_or("").c_str(), custom.c_str()) != 0)
+            {
+                if (custom.empty())
+                    customSetting.reset();
+                else
+                    customSetting = custom;
+
+                MARK_ALL_BACKENDS_CHANGED();
+            }
+        };
+
         for (auto opt : options)
         {
             // Check if GPU is capable of a given backend
@@ -613,12 +636,46 @@ void MenuCommon::RenderUpscalerCombo(const API api, Upscaler currentUpscaler, co
             if (opt == Upscaler::XeSS && api == API::DX11 && primaryGpu.vendorId != VendorId::Intel)
                 continue;
 
-            bool isSelected = (currentUpscaler == opt);
+            bool isSelected = (currentUpscaler == opt) && currentCustom.empty();
             if (ImGui::Selectable(UpscalerDisplayName(opt, api).c_str(), isSelected))
+                pick(opt, "");
+        }
+
+        // Custom upscalers after the regular ones, one entry per upscaler type a name runs as on this API
+        std::vector<std::string> names;
+        for (auto kind : { CustomProviders::Kind::Ffx, CustomProviders::Kind::FfxVk, CustomProviders::Kind::Dlss })
+        {
+            for (auto& name : CustomProviders::List(kind))
             {
-                State::Instance().newBackend = opt;
+                if (!CustomProviders::Contains(names, name))
+                    names.push_back(name);
             }
         }
+
+        bool separated = false;
+        for (auto& name : names)
+        {
+            for (auto upscaler : CustomProviders::Upscalers(name, api))
+            {
+                if (!separated)
+                {
+                    ImGui::Separator();
+                    separated = true;
+                }
+
+                const char* tag = upscaler == Upscaler::FFX         ? "FFX"
+                                  : upscaler == Upscaler::FFX_on12  ? "FFX w/Dx12"
+                                  : upscaler == Upscaler::DLSS_on12 ? "DLSS w/Dx12"
+                                                                    : "DLSS";
+                auto label = StrFmt("%s (%s)##custom%d", name.c_str(), tag, (int) upscaler);
+                const bool isSelected =
+                    currentUpscaler == upscaler && _stricmp(currentCustom.c_str(), name.c_str()) == 0;
+
+                if (ImGui::Selectable(label.c_str(), isSelected))
+                    pick(upscaler, name);
+            }
+        }
+
         ImGui::EndCombo();
     }
 }
@@ -3902,11 +3959,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // The native Vulkan FG output reads the upscaler's inputs; FSR FG's Vulkan dll is loaded with the device
     if (state.swapchainApi != API::Vulkan && !inputOptions[optiFgIndex].disabled &&
-        state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady() && !ffxInitTried)
+        state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFsrFgReady() && !ffxInitTried)
     {
         ffxInitTried = true;
         FfxApiProxy::InitFfxDx12();
-        inputOptions[optiFgIndex].set_disabled(!FfxApiProxy::IsFGReady(), "amd_fidelityfx_dx12.dll is missing");
+        inputOptions[optiFgIndex].set_disabled(!FfxApiProxy::IsFsrFgReady(), "amd_fidelityfx_dx12.dll is missing");
     }
     else if (!inputOptions[optiFgIndex].disabled && UsesXeFGApi(state.activeFgOutput) && !xefgInitTried &&
              XeFGProxy::Module() == nullptr)
@@ -4852,8 +4909,9 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
     if (state.activeFgOutput == FGOutput::FSRFG && state.activeFgInput != FGInput::NoFG &&
         state.FGSwapchainExists())
     {
-        if (state.activeFgInput != FGInput::Upscaler || (currentFeature != nullptr && !currentFeature->IsFrozen()) &&
-                                                            (state.currentVkFG != nullptr || FfxApiProxy::IsFGReady()))
+        if (state.activeFgInput != FGInput::Upscaler ||
+            (currentFeature != nullptr && !currentFeature->IsFrozen()) &&
+                (state.currentVkFG != nullptr || FfxApiProxy::IsFsrFgReady()))
         {
             ImGui::SeparatorText("Frame Generation (FSR FG)");
 
@@ -5898,7 +5956,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         {
             ImGui::Text("Upscaler is not active"); // Probably never will be visible
         }
-        else if (state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady())
+        else if (state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFsrFgReady())
         {
             ImGui::TextColored(toneMapColor({ 1.0f, 0.0f, 0.0f, 1.0f }),
                                "amd_fidelityfx_dx12.dll is missing!"); // Probably never will be visible

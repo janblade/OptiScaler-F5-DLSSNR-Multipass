@@ -341,9 +341,12 @@ class State
     uint32_t dlssdRenderPresetExternal = 0;
     // DLSS-G frame generation preset (driver setting 0x10E41DF1): the driver profile's own value (0 = none/not read)
     // and the value DLSS-G was answered with in this process (0 = not answered by us)
-    uint32_t dlssgPresetExternal = 0;
-    uint32_t dlssgPresetAnswered = 0;
-    // Version of the nvngx_dlssg.dll that read the preset ({0,0,0,0} = no read seen); Preset C needs 310.9.16+
+    // Written on the game's thread at DLSS-G's read, shown by the menu
+    std::atomic<uint32_t> dlssgPresetExternal = 0;
+    std::atomic<uint32_t> dlssgPresetAnswered = 0;
+    std::atomic<bool> dlssgPresetRead = false; // any reader: nvngx_dlssg itself or Streamline's sl.common / sl.dlss_g
+    // Version of the nvngx_dlssg.dll that read the preset ({0,0,0,0} = not read by nvngx_dlssg itself); Preset C
+    // needs 310.9.16+
     uint16_t dlssgPresetReaderVersion[4] {};
     uint32_t dlssdRenderPresetDLAA = 0;
     uint32_t dlssdRenderPresetUltraQuality = 0;

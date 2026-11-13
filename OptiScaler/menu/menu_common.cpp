@@ -4588,11 +4588,10 @@ void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx)
     static constexpr const char* letters[] = { "default", "A", "B", "C" };
 
     const auto& v = state.dlssgPresetReaderVersion;
-    const bool readerSeen = v[0] != 0;
-    // Preset C (FG Lite) first appears in nvngx_dlssg 310.9.16
-    const bool readerHasLite =
-        !readerSeen || std::make_tuple(v[0], v[1], v[2], v[3]) >=
-                           std::make_tuple<uint16_t, uint16_t, uint16_t, uint16_t>(310, 9, 16, 0);
+    const bool readerSeen = state.dlssgPresetRead;
+    // Preset C (FG Lite) first appears in nvngx_dlssg 310.9.16; unknown when Streamline read it for nvngx_dlssg
+    const bool readerHasLite = v[0] == 0 || std::make_tuple(v[0], v[1], v[2], v[3]) >=
+                                                std::make_tuple<uint16_t, uint16_t, uint16_t, uint16_t>(310, 9, 16, 0);
 
     int preset = std::clamp(config->FGDLSSGPreset.value_or_default(), 0, 3);
 
@@ -4628,18 +4627,20 @@ void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx)
                    "DLSS-G reads it when it starts: Save Settings and restart the game to apply.");
 
     const int wanted = config->FGDLSSGPreset.value_or_default();
-    const int answered = (int) state.dlssgPresetAnswered;
+    const int answered = (int) state.dlssgPresetAnswered.load();
+    const uint32_t external = state.dlssgPresetExternal.load();
 
     if (readerSeen)
     {
-        if (answered >= 1 && answered <= 3)
-            ImGui::TextDisabled("In use: %s (nvngx_dlssg %u.%u.%u)", letters[answered], v[0], v[1], v[2]);
+        const auto inUse =
+            answered >= 1 && answered <= 3
+                ? std::string(letters[answered])
+                : StrFmt("driver profile (%s)", external >= 1 && external <= 3 ? letters[external] : "default");
+
+        if (v[0] != 0)
+            ImGui::TextDisabled("In use: %s (nvngx_dlssg %u.%u.%u)", inUse.c_str(), v[0], v[1], v[2]);
         else
-            ImGui::TextDisabled("In use: driver profile (%s) (nvngx_dlssg %u.%u.%u)",
-                                state.dlssgPresetExternal >= 1 && state.dlssgPresetExternal <= 3
-                                    ? letters[state.dlssgPresetExternal]
-                                    : "default",
-                                v[0], v[1], v[2]);
+            ImGui::TextDisabled("In use: %s", inUse.c_str());
     }
 
     if (readerSeen && wanted != answered)
@@ -4777,8 +4778,10 @@ void MenuCommon::RenderFrameGenerationFooter(RenderMenuContext& ctx)
                 ImGui::EndDisabled();
             }
 
-            // The answer to DLSS-G's preset read covers the game's own DLSS-G too
-            RenderDlssgPresetCombo(ctx);
+            // The answer to DLSS-G's preset read covers the game's own DLSS-G too, unless an FG Nvngx replacement
+            // makes the frames in its place
+            if (!(state.activeFgInput == FGInput::NvngxFG && state.activeFgNvngx != FGNvngxReplacement::None))
+                RenderDlssgPresetCombo(ctx);
         }
     }
 

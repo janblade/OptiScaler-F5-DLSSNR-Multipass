@@ -71,10 +71,14 @@ NvAPI_Status __stdcall NvApiHooks::hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSe
     // first; A/B/C select UI recomposition / FG Lite (candidate blending). Answered in this process only, also when
     // the profile has no value, so the driver profile itself is never written.
     constexpr NvU32 dlssgPresetId = 0x10E41DF1;
-    if (pSetting && settingId == dlssgPresetId && (result == NVAPI_OK || result == NVAPI_SETTING_NOT_FOUND))
+    // Only the struct layout this was written for; the caller's version is checked before anything is read or written
+    if (pSetting && settingId == dlssgPresetId && pSetting->version == NVDRS_SETTING_VER &&
+        (result == NVAPI_OK || result == NVAPI_SETTING_NOT_FOUND))
     {
         if (result == NVAPI_OK && pSetting->settingType == NVDRS_DWORD_TYPE)
             State::Instance().dlssgPresetExternal = pSetting->u32CurrentValue;
+
+        State::Instance().dlssgPresetRead = true;
 
         // Which DLSS-G asks (nvngx_dlssg reads it itself; Streamline's sl.dlss_g asks through sl.common)
         HMODULE caller = nullptr;
@@ -102,10 +106,12 @@ NvAPI_Status __stdcall NvApiHooks::hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSe
             pSetting->settingType = NVDRS_DWORD_TYPE;
             pSetting->settingLocation = NVDRS_CURRENT_PROFILE_LOCATION;
             pSetting->isCurrentPredefined = 0;
+            pSetting->isPredefinedValid = 0;
+            pSetting->u32PredefinedValue = (NvU32) preset;
             pSetting->u32CurrentValue = (NvU32) preset;
             State::Instance().dlssgPresetAnswered = (uint32_t) preset;
             LOG_INFO("DLSS-G preset: answered {} (driver profile {}: 0x{:X})", (char) ('A' + preset - 1),
-                     result == NVAPI_OK ? "value" : "none", State::Instance().dlssgPresetExternal);
+                     result == NVAPI_OK ? "value" : "none", State::Instance().dlssgPresetExternal.load());
             return NVAPI_OK;
         }
     }

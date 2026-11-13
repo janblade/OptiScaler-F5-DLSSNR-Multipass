@@ -4227,6 +4227,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         {
             nvngxCombo("FG Nvngx Replacement");
             ShowTooltip("What backend to use instead of the real DLSSG");
+
+            // The preset only means something to NVIDIA's own DLSS-G
+            if (config->FGNvngxReplacement.value_or_default() == FGNvngxReplacement::None)
+                RenderDlssgPresetCombo(ctx);
         }
 
         // Try to avoid having None selected when the gpu doesn't support DLSSG + some fallbacks
@@ -4572,6 +4576,79 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
     }
 }
 
+// DLSS-G frame generation preset ([DLSSG] Preset). DLSS-G reads it from the driver profile once when it starts;
+// OptiScaler answers that read in this process (the driver profile is not changed), so a change applies at the next
+// game start. The line under the combo says what DLSS-G was answered with and which nvngx_dlssg asked.
+void MenuCommon::RenderDlssgPresetCombo(RenderMenuContext& ctx)
+{
+    auto& state = ctx.state;
+    auto config = ctx.config;
+
+    static constexpr const char* names[] = { "Default", "A - default model", "B - UI focus", "C - FG Lite (faster)" };
+    static constexpr const char* letters[] = { "default", "A", "B", "C" };
+
+    const auto& v = state.dlssgPresetReaderVersion;
+    const bool readerSeen = v[0] != 0;
+    // Preset C (FG Lite) first appears in nvngx_dlssg 310.9.16
+    const bool readerHasLite =
+        !readerSeen || std::make_tuple(v[0], v[1], v[2], v[3]) >=
+                           std::make_tuple<uint16_t, uint16_t, uint16_t, uint16_t>(310, 9, 16, 0);
+
+    int preset = std::clamp(config->FGDLSSGPreset.value_or_default(), 0, 3);
+
+    ImGui::PushItemWidth(170.0f * ctx.menuResScale);
+    if (ImGui::BeginCombo("DLSS-G preset", names[preset]))
+    {
+        for (int i = 0; i <= 3; i++)
+        {
+            if (ImGui::Selectable(names[i], preset == i))
+            {
+                if (i == 0)
+                    config->FGDLSSGPreset.reset();
+                else
+                    config->FGDLSSGPreset = i;
+            }
+
+            if (i == 3 && !readerHasLite && ImGui::IsItemHovered())
+                ImGui::SetTooltip("The loaded nvngx_dlssg.dll is older than 310.9.16 and has no Preset C;\n"
+                                  "it would keep its default model.");
+        }
+
+        ImGui::EndCombo();
+    }
+    ImGui::PopItemWidth();
+
+    ShowHelpMarker("Which DLSS frame generation model DLSS-G uses.\n"
+                   "Default: what the NVIDIA driver profile says (usually A).\n"
+                   "A: the default model.\n"
+                   "B: UI focus (UI recomposition; needs the game's UI and HUD-less inputs).\n"
+                   "C: FG Lite, a lighter second stage: faster generation, slightly lower quality.\n"
+                   "   Needs nvngx_dlssg.dll 310.9.16 or newer.\n\n"
+                   "Answered to DLSS-G inside this game only; the driver profile is not changed.\n"
+                   "DLSS-G reads it when it starts: Save Settings and restart the game to apply.");
+
+    const int wanted = config->FGDLSSGPreset.value_or_default();
+    const int answered = (int) state.dlssgPresetAnswered;
+
+    if (readerSeen)
+    {
+        if (answered >= 1 && answered <= 3)
+            ImGui::TextDisabled("In use: %s (nvngx_dlssg %u.%u.%u)", letters[answered], v[0], v[1], v[2]);
+        else
+            ImGui::TextDisabled("In use: driver profile (%s) (nvngx_dlssg %u.%u.%u)",
+                                state.dlssgPresetExternal >= 1 && state.dlssgPresetExternal <= 3
+                                    ? letters[state.dlssgPresetExternal]
+                                    : "default",
+                                v[0], v[1], v[2]);
+    }
+
+    if (readerSeen && wanted != answered)
+        ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.35f, 0.25f, 1.f)), "Save Settings and restart the game to apply");
+    else if (wanted == 3 && !readerHasLite)
+        ImGui::TextColored(toneMapColor(ImVec4(0.95f, 0.70f, 0.20f, 1.0f)),
+                           "This nvngx_dlssg.dll has no Preset C (needs 310.9.16+)");
+}
+
 // The end of the Frame Generation page: the game's own DLSS-G and the unlock/external switches, both collapsed
 // (set once, rarely touched). The unlock card opens by itself while external frame generation is on, since that
 // is where it is switched off.
@@ -4699,6 +4776,9 @@ void MenuCommon::RenderFrameGenerationFooter(RenderMenuContext& ctx)
 
                 ImGui::EndDisabled();
             }
+
+            // The answer to DLSS-G's preset read covers the game's own DLSS-G too
+            RenderDlssgPresetCombo(ctx);
         }
     }
 
@@ -5330,6 +5410,9 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     {
                         if (const auto missing = F5Low::DlssgFilesMissing(); !missing.empty())
                             ImGui::TextColored(toneMapColor(ImVec4(1.0f, 0.2f, 0.2f, 1.0f)), "%s", missing.c_str());
+
+                        // F5Low's own DLSS-G asks the same driver-profile question in this process
+                        RenderDlssgPresetCombo(ctx);
 
                         if (config->FGInput.value_or_default() == FGInput::DLSSG)
                         {

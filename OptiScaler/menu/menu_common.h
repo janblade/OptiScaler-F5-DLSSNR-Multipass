@@ -262,6 +262,7 @@ class MenuCommon
     static void RenderFrameGenerationSelection(RenderMenuContext& ctx);
     static void RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx);
     static void RenderFrameGenerationFooter(RenderMenuContext& ctx);
+    static void RenderDlssgPresetCombo(RenderMenuContext& ctx);
     static void RenderFgStatusLine(RenderMenuContext& ctx);
     static void RenderXeFGDynamicMFG(RenderMenuContext& ctx, int maxInterpolationCount, bool followsGame);
     static void RenderFGFollowGame();

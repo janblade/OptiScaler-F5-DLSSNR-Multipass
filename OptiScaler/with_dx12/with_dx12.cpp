@@ -6,6 +6,7 @@
 #include <proxies/D3D12_Proxy.h>
 
 #include <Config.h>
+#include <native/GpuMarker.h>
 
 // D3D12 DRED (device-removed extended data): auto-breadcrumbs and page-fault tracking, read back by
 // Util::GetDeviceRemovedReason when a device is lost. Turned on before the bridge's D3D12 device is created; the
@@ -30,9 +31,23 @@ static void EnableDredOnce()
 
     settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
     settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+
+    // The names GpuMarkers::Mark leaves between the operations (native/GpuMarker.h): kept only with breadcrumb
+    // contexts, which are off unless a debugger or PIX is attached
+    ID3D12DeviceRemovedExtendedDataSettings1* settings1 = nullptr;
+    const bool contexts = SUCCEEDED(settings->QueryInterface(IID_PPV_ARGS(&settings1))) && settings1 != nullptr;
+
+    if (contexts)
+    {
+        settings1->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+        settings1->Release();
+        GpuMarkers::g_on = true;
+    }
+
     settings->Release();
 
-    LOG_INFO("D3D12 DRED on (breadcrumbs and page faults) for D3D12 devices created from now on");
+    LOG_INFO("D3D12 DRED on (breadcrumbs, page faults{}) for D3D12 devices created from now on",
+             contexts ? ", stage names" : "; no stage names on this system");
 }
 
 HRESULT CreateD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL featureLevel, ID3D12Device** device)

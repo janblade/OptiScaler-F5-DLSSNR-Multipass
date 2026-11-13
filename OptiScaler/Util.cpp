@@ -867,15 +867,6 @@ static const char* DredOpName(D3D12_AUTO_BREADCRUMB_OP op)
     }
 }
 
-void Util::GpuMarker(ID3D12GraphicsCommandList* list, const char* name)
-{
-    if (list == nullptr || name == nullptr || !Config::Instance()->D3D12Dred.value_or_default())
-        return;
-
-    // Metadata 1: an ANSI string (PIX's convention), which DRED keeps as the breadcrumb's context
-    list->SetMarker(1, name, (UINT) strlen(name) + 1);
-}
-
 static std::string DredName(const char* a, const wchar_t* w)
 {
     if (a != nullptr && a[0] != 0)
@@ -938,10 +929,15 @@ static void LogDredReport(ID3D12Device* device)
                       (size_t) node->pCommandQueue, DredName(node->pCommandQueueDebugNameA, node->pCommandQueueDebugNameW),
                       done, count);
 
-            // The whole list (it is one frame's work), with the names Util::GpuMarker left between the operations
-            const UINT last = std::min<UINT>(count, 600);
+            // The list around the operation the GPU stopped at, with the names GpuMarkers::Mark left between the
+            // operations (native/GpuMarker.h); a long list is shown from 300 before it to 300 after it
+            const UINT first = done > 300 ? done - 300 : 0;
+            const UINT last = std::min<UINT>(count, done + 300);
 
-            for (UINT i = 0; i < last && node->pCommandHistory != nullptr; ++i)
+            if (first > 0)
+                LOG_ERROR("DRED:      ({} earlier operations not shown)", first);
+
+            for (UINT i = first; i < last && node->pCommandHistory != nullptr; ++i)
             {
                 const char* name = DredOpName(node->pCommandHistory[i]);
                 std::string context;

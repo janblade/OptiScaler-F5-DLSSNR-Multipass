@@ -61,6 +61,7 @@
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
+#include <native/GpuMarker.h>
 #include "DlssNr_WatchedLists.h"
 #include "DlssNr_GpuTime.h"
 
@@ -2803,10 +2804,10 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
         parallelExposureMeter ? InConstants.Width : (InConstants.Width + _numThreadsX - 1) / _numThreadsX;
     const UINT dispatchHeight =
         parallelExposureMeter ? InConstants.Height : (InConstants.Height + _numThreadsY - 1) / _numThreadsY;
-    if (Config::Instance()->D3D12Dred.value_or_default())
-        Util::GpuMarker(InCmdList, std::format("NR pass mode {} {}x{}", (int) InConstants.Mode, dispatchWidth,
-                                               dispatchHeight)
-                                       .c_str());
+    if (GpuMarkers::On())
+        GpuMarkers::Mark(
+            InCmdList,
+            std::format(L"NR pass mode {} {}x{}", (int) InConstants.Mode, dispatchWidth, dispatchHeight).c_str());
     InCmdList->Dispatch(dispatchWidth, dispatchHeight, 1);
 
     return true;
@@ -3664,10 +3665,10 @@ bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList,
 
     const UINT dispatchWidth = (InConstants.Width + _numThreadsX - 1) / _numThreadsX;
     const UINT dispatchHeight = (InConstants.Height + _numThreadsY - 1) / _numThreadsY;
-    if (Config::Instance()->D3D12Dred.value_or_default())
-        Util::GpuMarker(InCmdList, std::format("NR pass mode {} {}x{}", (int) InConstants.Mode, dispatchWidth,
-                                               dispatchHeight)
-                                       .c_str());
+    if (GpuMarkers::On())
+        GpuMarkers::Mark(
+            InCmdList,
+            std::format(L"NR pass mode {} {}x{}", (int) InConstants.Mode, dispatchWidth, dispatchHeight).c_str());
     InCmdList->Dispatch(dispatchWidth, dispatchHeight, 1);
 
     return true;
@@ -4648,7 +4649,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_gpuTime != nullptr)
         g_gpuTime->Start(cmdList);
-    Util::GpuMarker(cmdList, "NR: dispatch begin");
+    GpuMarkers::Mark(cmdList, L"NR: dispatch begin");
 
     // Copy just the live image, not the stale right/bottom margins. Do this only after model
     // creation/pending-submission early returns, and inside the measured GPU interval. The compact
@@ -5378,9 +5379,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (timeScan)
             g_scanTime->Start(cmdList);
 
-        Util::GpuMarker(cmdList, "NR: exposure scan");
+        GpuMarkers::Mark(cmdList, L"NR: exposure scan");
         const bool copied = DlssNr::ExposureScan::Tick(device, cmdList, scanFrame);
-        Util::GpuMarker(cmdList, "NR: exposure scan end");
+        GpuMarkers::Mark(cmdList, L"NR: exposure scan end");
 
         if (timeScan && copied)
             g_scanTime->End(cmdList);
@@ -5944,7 +5945,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // The model's own time: the passes alone, so the detail reuse work above counts as surrounding work (and a reused
     // frame's model time is about zero).
-    Util::GpuMarker(cmdList, "NR: model passes begin");
+    GpuMarkers::Mark(cmdList, L"NR: model passes begin");
     if (g_ngxTime != nullptr)
         g_ngxTime->Start(cmdList);
 
@@ -6132,7 +6133,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
-    Util::GpuMarker(cmdList, "NR: model passes end");
+    GpuMarkers::Mark(cmdList, L"NR: model passes end");
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
 

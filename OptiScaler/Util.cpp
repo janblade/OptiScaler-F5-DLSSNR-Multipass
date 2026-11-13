@@ -929,14 +929,28 @@ static void LogDredReport(ID3D12Device* device)
                       (size_t) node->pCommandQueue, DredName(node->pCommandQueueDebugNameA, node->pCommandQueueDebugNameW),
                       done, count);
 
-            const UINT first = done > 6 ? done - 6 : 0;
-            const UINT last = std::min(count, done + 4);
+            // The list around the operation the GPU stopped at, with the names GpuMarkers::Mark left between the
+            // operations (native/GpuMarker.h); a long list is shown from 300 before it to 300 after it
+            const UINT first = done > 300 ? done - 300 : 0;
+            const UINT last = std::min<UINT>(count, done + 300);
+
+            if (first > 0)
+                LOG_ERROR("DRED:      ({} earlier operations not shown)", first);
 
             for (UINT i = first; i < last && node->pCommandHistory != nullptr; ++i)
             {
                 const char* name = DredOpName(node->pCommandHistory[i]);
-                LOG_ERROR("DRED:   {} {:3} {}", i == done ? "->" : "  ", i,
-                          name != nullptr ? name : std::to_string((int) node->pCommandHistory[i]));
+                std::string context;
+
+                for (UINT c = 0; c < node->BreadcrumbContextsCount && node->pBreadcrumbContexts != nullptr; ++c)
+                {
+                    if (node->pBreadcrumbContexts[c].BreadcrumbIndex == i &&
+                        node->pBreadcrumbContexts[c].pContextString != nullptr)
+                        context = " \"" + wstring_to_string(node->pBreadcrumbContexts[c].pContextString) + "\"";
+                }
+
+                LOG_ERROR("DRED:   {} {:3} {}{}", i == done ? "->" : "  ", i,
+                          name != nullptr ? name : std::to_string((int) node->pCommandHistory[i]), context);
             }
         }
 

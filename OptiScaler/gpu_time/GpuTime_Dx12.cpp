@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GpuTime_Dx12.h"
+#include <native/GpuMarker.h>
 
 #include <State.h>
 
@@ -66,6 +67,7 @@ void GpuTime_Dx12::End(ID3D12GraphicsCommandList* cmdList)
     {
         cmdList->EndQuery(_queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, _currentFrameIndex * 2 + 1);
 
+        GpuMarkers::Mark(cmdList, L"shader/upscaler timer end");
         cmdList->ResolveQueryData(_queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, _currentFrameIndex * 2, 2, _readbackBuffer,
                                   _currentFrameIndex * 2 * sizeof(UINT64));
 

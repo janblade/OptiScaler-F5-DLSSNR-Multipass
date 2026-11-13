@@ -1,4 +1,5 @@
 // Not built with the precompiled header: no game headers in here, so tests/nr_native_producer_gpu.cpp compiles it alone.
+#include "GpuMarker.h"
 #include "NativeProducer.h"
 
 #include <algorithm>
@@ -367,6 +368,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     const OpticalFlowDx12::Encoding encoding = input.colorSpace == ColorSpace::ScRgb ? OpticalFlowDx12::Encoding::ScRgb
                                                : input.colorSpace == ColorSpace::Pq  ? OpticalFlowDx12::Encoding::Pq
                                                                                      : OpticalFlowDx12::Encoding::Srgb;
+    GpuMarkers::Mark(list, L"F5Low: optical flow");
     const bool recorded =
         _flow->Dispatch(list, input.picture, input.pictureFormat, flowDepth ? input.depth[0] : nullptr,
                         flowDepth ? input.depthView : DXGI_FORMAT_UNKNOWN, input.depthReversed, encoding);
@@ -432,6 +434,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
             in.depthReversed = input.depthReversed;
         }
 
+        GpuMarkers::Mark(list, L"F5Low: trust mask");
         result.trustRan = _trust->Dispatch(list, in);
         nativeInputs = in;
         nativeReady = result.trustRan;
@@ -461,6 +464,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     // The consumer's guides; also for the debug views that show the guide motion (arrows, final flow), with the
     // consumer off too, so they show what it would get.
+    GpuMarkers::Mark(list, L"F5Low: guides");
     const bool guideView = options.flowPreview && (options.previewView == 0 || options.previewView == 2);
     const bool guidesBuilt = nativeReady && ((options.apply && apply) || guideView) &&
                              _trust->BuildGuides(list, nativeInputs, input.width, input.height);
@@ -515,7 +519,9 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
             frame.historyDistrust = _trust->Mask();
             frame.depthReversed = true; // the guide is reversed-Z whatever the game's depth is
             frame.reset = nativeReset || _consumerResetPending;
+            GpuMarkers::Mark(list, L"F5Low: consumer begin");
             result.nativeRan = apply(list, frame);
+            GpuMarkers::Mark(list, L"F5Low: consumer end");
 
             if (result.nativeRan)
                 _consumerResetPending = false;

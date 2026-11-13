@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "VirtualUpscalerDriver.h"
+#include "GpuMarker.h"
 
 #include "DepthFinderCore.h"
 #include "VirtualUpscalerMode.h"
@@ -500,6 +501,9 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
     bool nrRan = false;
 
     if (route == VuNrRoute::InPlace)
+        GpuMarkers::Mark(cmd, L"VU: NR in place");
+
+    if (route == VuNrRoute::InPlace)
         nrRan = DlssNr::ApplyVirtualUpscalerInput(queue, cmd, frame.color, frame.depth, frame.motion,
                                                   frame.historyDistrust, frame.depthReversed, frame.reset, colorSpace,
                                                   frame.pictureState, epoch);
@@ -561,6 +565,7 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         state.currentFG != nullptr && state.currentFGSwapchain != nullptr && UsesXeFGApi(state.activeFgOutput))
         nrInList.emplace();
 
+    GpuMarkers::Mark(cmd, L"VU: NR before upscale");
     if (route != VuNrRoute::InPlace)
         DlssNr::EvaluateBeforeUpscale(cmd, _params);
     _params->Set(NVSDK_NGX_Parameter_Depth, depth);
@@ -604,6 +609,7 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         Transition(cmd, color, D3D12_RESOURCE_STATE_COPY_SOURCE, colorNow);
     }
 
+    GpuMarkers::Mark(cmd, L"VU: frame generation inputs");
     UpscalerInputsDx12::UpscaleStart(cmd, _params, _feature.get());
     UpscalerInputsDx12::UpscaleEnd(cmd, _params, _feature.get());
 
@@ -623,6 +629,7 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
         ScopedSkipHeapCapture skip {};
         try
         {
+            GpuMarkers::Mark(cmd, L"VU: backend evaluate");
             evaluated = _feature->Evaluate(cmd, _params);
         }
         catch (...)
@@ -634,8 +641,10 @@ bool VirtualUpscalerDriver::Run(ID3D12GraphicsCommandList* cmd, const NativeFram
 
     _params->Set(NVSDK_NGX_Parameter_Depth, frame.depth);
 
+    GpuMarkers::Mark(cmd, L"VU: NR after upscale");
     if (evaluated)
         DlssNr::EvaluateAfterUpscale(cmd, _params);
+    GpuMarkers::Mark(cmd, L"VU: NR after upscale done");
 
     if ((int) route != _routeLogged || _evaluations == 0)
     {

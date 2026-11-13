@@ -13,6 +13,7 @@
 #include <Config.h>
 #include <State.h>
 #include <dlssnr/DlssNr_VkExtensions.h>
+#include <framegen/f5low/F5Low.h>
 #include <hooks/DxgiFactory_Hooks.h>
 #include <hooks/FG_Hooks.h>
 #include <hooks/Vulkan_Hooks.h>
@@ -175,6 +176,11 @@ bool g_newSwapchainAsked = false;
 // session, and the game is told its hidden swapchain is out of date a few times so it makes one on its own window.
 bool g_outputGivenUp = false;
 std::string g_giveUpReason; // for the menu, plain; the log has the code
+// The menu's copy of the two, without g_mutex: the menu is drawn on frame generation's present thread, which a resize
+// or a retire waits for with g_mutex held (FailureReason)
+std::atomic<bool> g_givenUpForMenu { false };
+std::mutex g_giveUpReasonMutex;
+std::string g_giveUpReasonForMenu;
 int g_giveUpAsks = 0;
 constexpr int kGiveUpAsksMax = 60;
 
@@ -333,10 +339,12 @@ void LetGoOfOutput(Bridge& bridge, ComPtr<IDXGISwapChain4>& reference)
 }
 
 // A resize of the D3D12 swapchain is the same hazard as the D3D11 bridge's (Dx11wDx12SC::ResizeBuffers): frame
-// generation is switched off, and XeFG's presents on its own thread are waited for, before ResizeBuffers releases the back
-// buffers they use. Held until the resize is done; when it is let go frame generation is told the swapchain changed. The
-// caller takes it BEFORE the bridge's own mutex: XeFG's thread holds the shared side while it draws the menu, which asks
-// IsUp().
+// generation is switched off, and XeFG's presents on its own thread are waited for, before ResizeBuffers releases the
+// back buffers they use. Held until the resize is done; when it is let go frame generation is told the swapchain
+// changed. The caller takes it BEFORE the bridge's own mutex: XeFG's thread holds the shared side while it draws the
+// menu. Not taken for F5Low's own generator, which waits for its presenter itself (F5LowDrainsOwnPresents): there the
+// hold only switches frame generation off. Anything the menu asks the bridge from that thread is lock-free (IsUp,
+// FailureReason), since a resize or a retire holds the bridge's mutex while it waits for that thread.
 struct ResizeHold
 {
     std::unique_lock<std::shared_mutex> lock { Dx11wDx12Sync::PresentResizeMutex(), std::defer_lock };
@@ -356,6 +364,17 @@ struct ResizeHold
     }
 };
 
+// F5Low's own generator (XeFG Tensor) waits for its presenter in ResizeBuffers and in its swapchain's release (f5low-fg
+// Resize/DrainPresenter), and that presenter's present is what waits for the shared side of the resize lock: holding
+// the exclusive side across the resize deadlocked it (the picture stopped after a window resize). Where f5low.dll
+// handed over to Intel's library, or runs another generator, Intel's present thread is not drained, so the hold is kept
+// as for XeFG.
+bool F5LowDrainsOwnPresents()
+{
+    return F5Low::LatchedGenerator() == F5Low::Generator::XefgTensor &&
+           F5Low::QueryStatus().state == F5Low::RunState::Own;
+}
+
 std::shared_ptr<ResizeHold> BeginResize()
 {
     auto& state = State::Instance();
@@ -369,8 +388,9 @@ std::shared_ptr<ResizeHold> BeginResize()
 
     auto hold = std::make_shared<ResizeHold>();
 
-    // The wrapped swapchain's present takes the shared side for XeFG only
-    if (UsesXeFGApi(state.activeFgOutput))
+    // The wrapped swapchain's present takes the shared side for the XeFG API outputs only (XeFG, F5Low)
+    if (state.activeFgOutput == FGOutput::XeFG ||
+        (state.activeFgOutput == FGOutput::F5Low && !F5LowDrainsOwnPresents()))
         hold->lock.lock();
 
     return hold;
@@ -801,11 +821,9 @@ bool Active(VkSwapchainKHR swapchain)
     return g_bridge != nullptr && g_bridge->outputUp && g_bridge->swapchains.contains(swapchain);
 }
 
-bool IsUp()
-{
-    std::lock_guard lock(g_mutex);
-    return g_bridge != nullptr && g_bridge->outputUp;
-}
+// Without the mutex: the menu asks while it is drawn on frame generation's present thread, and a resize holds the mutex
+// while F5Low's ResizeBuffers waits for that very thread (the picture froze on a window resize with the menu open).
+bool IsUp() { return g_outputsActive.load(std::memory_order_acquire) > 0; }
 
 bool OutputActive()
 {
@@ -871,16 +889,24 @@ void GiveUpOutput(const std::string& reason, const std::string& plain)
         g_outputGivenUp = true;
         g_giveUpReason = plain;
         g_giveUpAsks = 0;
+
+        {
+            std::lock_guard reasonLock(g_giveUpReasonMutex);
+            g_giveUpReasonForMenu = plain;
+        }
+
+        g_givenUpForMenu.store(true, std::memory_order_release);
     }
 
     LOG_ERROR("Vulkan bridge: {}. The D3D12 swapchain is given up; the game is told to make a new swapchain on its own "
               "window, and frame generation stays off until the game is restarted",
               reason);
 
-    // The resize hold only drains frame generation: it is switched off, its present in flight finishes, and its next one no
-    // longer takes the shared side of the resize lock (the interop is no longer this bridge's). The hold must be let go
-    // BEFORE the swapchain is retired: retiring destroys XeFG's swapchain, which waits for XeFG's present thread, and that
-    // thread would be waiting for the shared side of the very lock held here (the order OnCreateSwapchain keeps too).
+    // The resize hold only drains frame generation: it is switched off, its present in flight finishes, and its next
+    // one no longer takes the shared side of the resize lock (the interop is no longer this bridge's; F5Low's own
+    // generator drains itself and the hold only switches it off, see ResizeHold). The hold must be let go BEFORE the
+    // swapchain is retired: retiring destroys XeFG's swapchain, which waits for XeFG's present thread, and that thread
+    // would be waiting for the shared side of the very lock held here (the order OnCreateSwapchain keeps too).
     {
         const auto hold = BeginResize();
         State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
@@ -1047,8 +1073,12 @@ void FrameGenerationInputsQueued(ID3D12Fence* fence, uint64_t value)
 
 std::string FailureReason()
 {
-    std::lock_guard lock(g_mutex);
-    return g_outputGivenUp ? g_giveUpReason : std::string {};
+    // Not g_mutex: asked by the menu on frame generation's present thread (g_givenUpForMenu)
+    if (!g_givenUpForMenu.load(std::memory_order_acquire))
+        return {};
+
+    std::lock_guard lock(g_giveUpReasonMutex);
+    return g_giveUpReasonForMenu;
 }
 
 bool ModeWantsBridge()

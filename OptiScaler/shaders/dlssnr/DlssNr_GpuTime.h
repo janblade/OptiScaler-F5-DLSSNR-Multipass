@@ -1,6 +1,9 @@
 #pragma once
 
 #include "DlssNr_WatchedLists.h"
+#include "../../native/GpuMarker.h"
+
+#include <algorithm>
 
 // NR calls are serialized by g_nrMutex, including submission/reset notifications.
 // Associate every query pair with its actual submitting queue and GPU completion.
@@ -102,6 +105,7 @@ class DlssNrGpuTime
         if (recording < 0) return;
         const auto i = (unsigned) recording;
         cmd->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i * 2 + 1);
+        GpuMarkers::Mark(cmd, L"NR timer end");
         cmd->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i * 2, 2,
                              readback.Get(), i * 2 * sizeof(UINT64));
         samples[i].ended = true;

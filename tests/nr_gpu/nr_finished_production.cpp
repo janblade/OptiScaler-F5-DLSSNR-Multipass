@@ -25,6 +25,8 @@ struct Config
 };
 #include "../../OptiScaler/shaders/Shader_Dx12Utils.h"
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_FinishedRaster.h"
+#include "../../OptiScaler/native/GpuMarker.h" // DispatchResidualPass names its dispatch for DRED (off here)
+#include <format>
 #include "../../OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_color_Shader.h"
 #include "../../OptiScaler/shaders/dlssnr/precompile/dlssnr_finished_pq_direct_Shader.h"
 static void expect(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }

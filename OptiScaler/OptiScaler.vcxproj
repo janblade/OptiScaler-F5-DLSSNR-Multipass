@@ -432,6 +432,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="framegen\nvngx\Nvngx_Nukems.h" />
     <ClInclude Include="framegen\nvngx\Nvngx_DllProxy.h" />
     <ClInclude Include="framegen\nvngx\Nvngx_Arturs.h" />
+    <ClInclude Include="framegen\nvngx\Nvngx_Custom.h" />
     <ClInclude Include="shaders\hudless_compare_compute\HCC_Common.h" />
     <ClInclude Include="shaders\hudless_compare_compute\HCC_Dx12.h" />
     <ClInclude Include="hooks\Xell_Hooks.h" />
@@ -883,6 +884,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="framegen\nvngx\Nvngx_FFX.cpp" />
     <ClCompile Include="framegen\nvngx\Nvngx_Nukems.cpp" />
     <ClCompile Include="framegen\nvngx\Nvngx_Arturs.cpp" />
+    <ClCompile Include="framegen\nvngx\Nvngx_Custom.cpp" />
     <ClCompile Include="NVNGX_Parameter.cpp" />
     <ClCompile Include="framegen\nvngx\Nvngx_DllProxy.cpp" />
     <ClCompile Include="OptiTypes.cpp" />

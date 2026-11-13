@@ -53,6 +53,7 @@ enum class FGNvngxReplacement : uint32_t
     Arturs,
     FFX,
     Combo,
+    Custom, // [FrameGen] FGNvngxReplacement=<name>: OptiScaler's custom\<name> folder (Config::FGNvngxCustomName)
 };
 
 enum class WorkingMode : uint32_t

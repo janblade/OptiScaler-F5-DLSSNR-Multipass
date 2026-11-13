@@ -144,6 +144,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             const bool canUseNvngxReplacement =
                 FGInput.value_or_default() == FGInput::NvngxFG || FGOutput.value_or_default() == FGOutput::DLSSG;
 
+            FGNvngxCustomName.clear();
+
             if (auto FGNvngxReplacementString = readString("FrameGen", "FGNvngxReplacement");
                 canUseNvngxReplacement && FGNvngxReplacementString.has_value())
             {
@@ -157,6 +159,20 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGNvngxReplacement.set_from_config(FGNvngxReplacement::FFX);
                 else if (lstrcmpiA(FGNvngxReplacementString.value().c_str(), "combo") == 0)
                     FGNvngxReplacement.set_from_config(FGNvngxReplacement::Combo);
+                else if (const std::string& name = FGNvngxReplacementString.value();
+                         !name.empty() && lstrcmpiA(name.c_str(), "auto") != 0)
+                {
+                    // Any other value names a folder in OptiScaler's custom folder: one plain name, never a path
+                    if (name.find_first_of("\\/:*?\"<>|") == std::string::npos && name != "." && name != "..")
+                    {
+                        FGNvngxReplacement.set_from_config(FGNvngxReplacement::Custom);
+                        FGNvngxCustomName = name;
+                    }
+                    else
+                    {
+                        LOG_WARN("[FrameGen] FGNvngxReplacement={} is not a folder name, ignored", name);
+                    }
+                }
             }
 
             if (auto forceXell = readBool("fakenvapi", "ForceXeLL"); forceXell.has_value() && forceXell.value())
@@ -2106,6 +2122,8 @@ bool Config::SaveIni()
                 FGNvngxReplacementString = "FFX";
             else if (FGNvngxReplacementHeld.value() == FGNvngxReplacement::Combo)
                 FGNvngxReplacementString = "Combo";
+            else if (FGNvngxReplacementHeld.value() == FGNvngxReplacement::Custom && !Instance()->FGNvngxCustomName.empty())
+                FGNvngxReplacementString = Instance()->FGNvngxCustomName;
         }
         ini.SetValue("FrameGen", "FGNvngxReplacement", FGNvngxReplacementString.c_str());
 

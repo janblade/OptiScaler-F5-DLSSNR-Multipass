@@ -11,6 +11,7 @@
 #include "Nvngx_Arturs.h"
 #include "Nvngx_FFX.h"
 #include "Nvngx_Combo.h"
+#include "Nvngx_Custom.h"
 #include <imgui/ImGuiNotify.hpp>
 
 IFGNvngx* Nvngx_FG::getProvider()
@@ -36,6 +37,10 @@ IFGNvngx* Nvngx_FG::getProvider()
 
     case FGNvngxReplacement::Combo:
         _provider = std::make_unique<Nvngx_Combo>();
+        break;
+
+    case FGNvngxReplacement::Custom:
+        _provider = std::make_unique<Nvngx_Custom>();
         break;
 
     case FGNvngxReplacement::None:
@@ -65,6 +70,8 @@ IFGNvngx* Nvngx_FG::getProvider()
                 return "Nukems";
             case FGNvngxReplacement::Combo:
                 return "Combo";
+            case FGNvngxReplacement::Custom:
+                return "Custom";
             case FGNvngxReplacement::None:
             default:
                 return "???";

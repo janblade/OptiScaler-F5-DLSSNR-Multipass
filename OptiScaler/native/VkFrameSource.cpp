@@ -10,6 +10,7 @@
 #include <Config.h>
 #include <proxies/D3D12_Proxy.h>
 #include <proxies/DXGI_Proxy.h>
+#include <with_dx12/with_dx12.h>
 
 #include <format>
 #include <mutex>
@@ -262,9 +263,8 @@ bool VkFrameSource::EnsureD3D12(VkPhysicalDevice physical, std::string& why)
 
     if (SUCCEEDED(hr))
     {
-        hr = D3d12Proxy::Module() == nullptr
-                 ? D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device12))
-                 : D3d12Proxy::D3D12CreateDevice_()(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device12));
+        // (the Vulkan bridge's device too: [Log] D3D12Dred must be on before it is made to report a hang on it)
+        hr = CreateD3D12DeviceOnAdapter(adapter.Get(), D3D_FEATURE_LEVEL_11_0, &_device12);
     }
 
     if (FAILED(hr) || _device12 == nullptr)

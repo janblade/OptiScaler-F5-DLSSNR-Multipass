@@ -4,6 +4,9 @@
 #include <d3d11.h>
 #include <dxgi.h>
 
+// Through the D3D12 proxy when it is loaded; turns DRED on first when [Log] D3D12Dred asks for it.
+HRESULT CreateD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL featureLevel, ID3D12Device** device);
+
 class WithDx12
 {
   private:

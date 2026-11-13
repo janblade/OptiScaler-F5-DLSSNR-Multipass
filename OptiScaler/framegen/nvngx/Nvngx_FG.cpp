@@ -40,7 +40,7 @@ IFGNvngx* Nvngx_FG::getProvider()
         break;
 
     case FGNvngxReplacement::Custom:
-        _provider = std::make_unique<Nvngx_Custom>();
+        _provider = std::make_unique<Nvngx_Custom>(State::Instance().activeFgNvngxCustom);
         break;
 
     case FGNvngxReplacement::None:

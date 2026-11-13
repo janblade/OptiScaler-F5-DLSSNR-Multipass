@@ -468,6 +468,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="spoofing\User32_Spoofing.h" />
     <ClInclude Include="hooks\VulkanwDx12_Hooks.h" />
     <ClInclude Include="misc\IdentifyGpu.h" />
+    <ClInclude Include="misc\CustomProviders.h" />
     <ClInclude Include="misc\XeModuleInfo.h" />
     <ClInclude Include="misc\REFrameworkCompat.h" />
     <ClInclude Include="misc\REFrameworkCompatCore.h" />

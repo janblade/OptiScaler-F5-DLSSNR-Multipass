@@ -2041,6 +2041,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
         F5Low::LatchSettings();
         State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();
+        State::Instance().activeFgNvngxCustom = Config::Instance()->FGNvngxCustomName;
 
         // Ensure valid FG configuration
         if (State::Instance().activeFgOutput == FGOutput::NoFG && State::Instance().activeFgInput != FGInput::NoFG &&

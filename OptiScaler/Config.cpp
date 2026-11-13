@@ -2122,7 +2122,8 @@ bool Config::SaveIni()
                 FGNvngxReplacementString = "FFX";
             else if (FGNvngxReplacementHeld.value() == FGNvngxReplacement::Combo)
                 FGNvngxReplacementString = "Combo";
-            else if (FGNvngxReplacementHeld.value() == FGNvngxReplacement::Custom && !Instance()->FGNvngxCustomName.empty())
+            else if (FGNvngxReplacementHeld.value() == FGNvngxReplacement::Custom &&
+                     !Instance()->FGNvngxCustomName.empty())
                 FGNvngxReplacementString = Instance()->FGNvngxCustomName;
         }
         ini.SetValue("FrameGen", "FGNvngxReplacement", FGNvngxReplacementString.c_str());

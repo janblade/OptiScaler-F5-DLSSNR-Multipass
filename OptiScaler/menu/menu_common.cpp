@@ -35,6 +35,7 @@
 
 #include <framegen/mfgunlock/Status.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <misc/CustomProviders.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -2321,7 +2322,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             }
             else if (activeNvngxFg == FGNvngxReplacement::Custom)
             {
-                fgText = formatFg(config->FGNvngxCustomName.c_str(), Nvngx_FG::getMaxFakeFramesCount());
+                fgText = formatFg(state.activeFgNvngxCustom.c_str(), Nvngx_FG::getMaxFakeFramesCount());
             }
             else if (state.activeFgOutput == FGOutput::DLSSG && fg)
             {
@@ -3845,11 +3846,59 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         { FGNvngxReplacement::FFX, "FSR 3/4 FG", "FSR 3/4 FG using the FFX" },
         { FGNvngxReplacement::Combo, "FFX + Enabler", "FFX for the middle fake frame, Enabler for the rest\n\n"
                                                       "2x - FFX\n3x - Enabler\n4x - FFX + Enabler\n5x - Enabler\n6x - FFX + Enabler" },
-        { FGNvngxReplacement::Custom, "Custom: " + config->FGNvngxCustomName,
-          "nvngx_dlssg.dll from OptiScaler's custom\\" + config->FGNvngxCustomName + " folder\n(named by FGNvngxReplacement in the ini)" },
     };
 
     // clang-format on
+
+    // Custom DLSS-G providers (custom\<name>\dlssg, or registered by a plugin) go after the rest, each one a value from
+    // FGNvngxReplacement::Custom on (adapted from upstream OptiScaler 941ce6a1). A name the ini gives that is not found
+    // is listed too, greyed out, so the setting stays visible.
+    auto customFgs = CustomProviders::List(CustomProviders::Kind::Dlssg);
+    if (CustomProviders::IsValidName(config->FGNvngxCustomName) &&
+        !CustomProviders::Contains(customFgs, config->FGNvngxCustomName))
+        customFgs.push_back(config->FGNvngxCustomName);
+
+    auto constexpr fgNvngxCustomIndex = (uint32_t) FGNvngxReplacement::Custom;
+    for (uint32_t i = 0; i < customFgs.size(); i++)
+    {
+        MenuOption<FGNvngxReplacement> option { (FGNvngxReplacement) (fgNvngxCustomIndex + i),
+                                                "Custom: " + customFgs[i],
+                                                "From OptiScaler's custom\\" + customFgs[i] + "\\dlssg folder" };
+        option.set_disabled(!CustomProviders::Has(customFgs[i], CustomProviders::Kind::Dlssg),
+                            "No DLSS-G dll in custom\\" + customFgs[i] + "\\dlssg");
+        nvngxOptions.push_back(option);
+    }
+
+    // The combo works on a value with one entry per custom name; the config keeps Custom plus the name
+    auto isActiveCustomFg = [&config](const std::string& name)
+    {
+        return config->FGNvngxReplacement.value_or_default() == FGNvngxReplacement::Custom &&
+               _stricmp(config->FGNvngxCustomName.c_str(), name.c_str()) == 0;
+    };
+
+    auto nvngxCombo = [&](const char* label)
+    {
+        auto current = config->FGNvngxReplacement.value_or_default();
+        if (current == FGNvngxReplacement::Custom)
+            current = (FGNvngxReplacement) (fgNvngxCustomIndex +
+                                            (std::ranges::find_if(customFgs, isActiveCustomFg) - customFgs.begin()));
+
+        auto selected = current;
+        PopulateCombo(label, selected, nvngxOptions);
+
+        if (selected == current)
+            return;
+
+        if ((uint32_t) selected >= fgNvngxCustomIndex)
+        {
+            config->FGNvngxCustomName = customFgs[(uint32_t) selected - fgNvngxCustomIndex];
+            config->FGNvngxReplacement = FGNvngxReplacement::Custom;
+        }
+        else
+        {
+            config->FGNvngxReplacement = selected;
+        }
+    };
 
     bool replaceFgOutputWithNvngx = false;
     bool showNvngxFgDowndown = false;
@@ -3889,10 +3938,6 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         !FfxApiProxy::IsFGReady(false) || !state.artursFgFileAvailable,
         "Missing amd_fidelityfx_framegeneration_dx12.dll\nor missing dlss-enabler-headless.dll");
 
-    // Only offered when the ini names a custom folder
-    auto constexpr fgNvngxCustomIndex = (uint32_t) FGNvngxReplacement::Custom;
-    nvngxOptions[fgNvngxCustomIndex].set_hidden(config->FGNvngxCustomName.empty());
-
     // TODO: Automatically switch to any other option
 
     if (!config->FGNvngxReplacement.has_value())
@@ -3918,7 +3963,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             if (replaceFgOutputWithNvngx)
             {
                 // Disable None?
-                PopulateCombo("FG Nvngx", config->FGNvngxReplacement, nvngxOptions);
+                nvngxCombo("FG Nvngx");
                 ShowTooltip("What backend to use instead of the real DLSSG");
             }
             else
@@ -3933,7 +3978,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         // Should be on a new line
         if (setupCard.IsOpen() && showNvngxFgDowndown)
         {
-            PopulateCombo("FG Nvngx Replacement", config->FGNvngxReplacement, nvngxOptions);
+            nvngxCombo("FG Nvngx Replacement");
             ShowTooltip("What backend to use instead of the real DLSSG");
         }
 
@@ -3951,8 +3996,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 config->FGNvngxReplacement.set_volatile_value(FGNvngxReplacement::FFX);
         }
 
-        const bool nvngxFgChanged = (replaceFgOutputWithNvngx || showNvngxFgDowndown) &&
-                                    state.activeFgNvngx != config->FGNvngxReplacement.value_or_default();
+        const bool nvngxFgChanged =
+            (replaceFgOutputWithNvngx || showNvngxFgDowndown) &&
+            (state.activeFgNvngx != config->FGNvngxReplacement.value_or_default() ||
+             (state.activeFgNvngx == FGNvngxReplacement::Custom &&
+              _stricmp(state.activeFgNvngxCustom.c_str(), config->FGNvngxCustomName.c_str()) != 0));
         state.fgSettingsChanged = state.activeFgOutput != config->FGOutput.value_or_default() ||
                                   state.activeFgInput != config->FGInput.value_or_default() || nvngxFgChanged;
 

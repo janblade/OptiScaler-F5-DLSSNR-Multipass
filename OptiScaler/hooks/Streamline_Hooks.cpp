@@ -1026,10 +1026,10 @@ void StreamlineHooks::spoofArch(uint32_t currentArch, sl::Feature feature, Syste
             return setArch(maxArch, altSystemCaps);
     }
 
-    // Only spoof DLSSD for a custom one, NVIDIA's needs turing and above
+    // Only spoof DLSSD for a custom one or a regular upscaler, NVIDIA's needs turing and above
     else if (feature == sl::kFeatureDLSS_RR)
     {
-        if (Nvngx_RR::Selected(API::DX12) == nullptr && Nvngx_RR::Selected(API::Vulkan) == nullptr)
+        if (!Nvngx_RR::OfferedAny())
             return;
 
         if (currentArch < NV_GPU_ARCHITECTURE_TU100)
@@ -1110,7 +1110,7 @@ static bool HasPluginJson(bool result, const char** pluginJSON)
     return result && pluginJSON != nullptr && *pluginJSON != nullptr && **pluginJSON != 0;
 }
 
-// Only hooked when ray reconstruction runs on a custom DLSSD
+// Only hooked when Opti reports ray reconstruction, for a custom DLSSD or a regular upscaler
 bool StreamlineHooks::hkdlssd_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON,
                                              const char** pluginJSON)
 {
@@ -2692,8 +2692,10 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
 
 void* StreamlineHooks::hkdlssd_slGetPluginFunction(const char* functionName)
 {
-    if (strcmp(functionName, "slOnPluginLoad") == 0 &&
-        (Nvngx_RR::Selected(API::DX12) != nullptr || Nvngx_RR::Selected(API::Vulkan) != nullptr))
+    // The game looked for ray reconstruction (upstream 9e9a7190)
+    State::Instance().rrRequested = true;
+
+    if (strcmp(functionName, "slOnPluginLoad") == 0 && Nvngx_RR::OfferedAny())
     {
         o_dlssd_slOnPluginLoad = (PFN_slOnPluginLoad) LoadOriginal(o_dlssd_slGetPluginFunction)(functionName);
         return &hkdlssd_slOnPluginLoad;

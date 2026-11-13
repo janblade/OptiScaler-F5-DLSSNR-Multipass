@@ -102,6 +102,7 @@ class DlssNrGpuTime
         if (recording < 0) return;
         const auto i = (unsigned) recording;
         cmd->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i * 2 + 1);
+        Util::GpuMarker(cmd, "NR timer end");
         cmd->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i * 2, 2,
                              readback.Get(), i * 2 * sizeof(UINT64));
         samples[i].ended = true;

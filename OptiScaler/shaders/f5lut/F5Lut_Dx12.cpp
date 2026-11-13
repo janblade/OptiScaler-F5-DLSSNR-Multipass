@@ -49,6 +49,8 @@ void F5Lut_Dx12::ReleaseLutTexture()
     // Frames already recorded may still sample it.
     Util::DelayedRelease(_lutTexture);
     _lutTexture = nullptr;
+    Util::DelayedRelease(_lutUpload);
+    _lutUpload = nullptr;
     _lutKey.clear();
 }
 
@@ -125,8 +127,9 @@ bool F5Lut_Dx12::EnsureLutTexture(ID3D12GraphicsCommandList* InCmdList)
         _lutTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     InCmdList->ResourceBarrier(1, &barrier);
 
-    // The copy is only recorded: the upload buffer goes once the GPU is past it.
-    Util::DelayedRelease(upload);
+    // The copy is only recorded, and the list may be submitted much later: the upload buffer lives as long as the
+    // texture (F5Lut_Dx12.h).
+    _lutUpload = upload;
 
     _lutKey = _chain.key;
     _failedKey.clear();

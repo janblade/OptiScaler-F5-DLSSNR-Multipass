@@ -867,6 +867,15 @@ static const char* DredOpName(D3D12_AUTO_BREADCRUMB_OP op)
     }
 }
 
+void Util::GpuMarker(ID3D12GraphicsCommandList* list, const char* name)
+{
+    if (list == nullptr || name == nullptr || !Config::Instance()->D3D12Dred.value_or_default())
+        return;
+
+    // Metadata 1: an ANSI string (PIX's convention), which DRED keeps as the breadcrumb's context
+    list->SetMarker(1, name, (UINT) strlen(name) + 1);
+}
+
 static std::string DredName(const char* a, const wchar_t* w)
 {
     if (a != nullptr && a[0] != 0)
@@ -929,14 +938,23 @@ static void LogDredReport(ID3D12Device* device)
                       (size_t) node->pCommandQueue, DredName(node->pCommandQueueDebugNameA, node->pCommandQueueDebugNameW),
                       done, count);
 
-            const UINT first = done > 6 ? done - 6 : 0;
-            const UINT last = std::min(count, done + 4);
+            // The whole list (it is one frame's work), with the names Util::GpuMarker left between the operations
+            const UINT last = std::min<UINT>(count, 600);
 
-            for (UINT i = first; i < last && node->pCommandHistory != nullptr; ++i)
+            for (UINT i = 0; i < last && node->pCommandHistory != nullptr; ++i)
             {
                 const char* name = DredOpName(node->pCommandHistory[i]);
-                LOG_ERROR("DRED:   {} {:3} {}", i == done ? "->" : "  ", i,
-                          name != nullptr ? name : std::to_string((int) node->pCommandHistory[i]));
+                std::string context;
+
+                for (UINT c = 0; c < node->BreadcrumbContextsCount && node->pBreadcrumbContexts != nullptr; ++c)
+                {
+                    if (node->pBreadcrumbContexts[c].BreadcrumbIndex == i &&
+                        node->pBreadcrumbContexts[c].pContextString != nullptr)
+                        context = " \"" + wstring_to_string(node->pBreadcrumbContexts[c].pContextString) + "\"";
+                }
+
+                LOG_ERROR("DRED:   {} {:3} {}{}", i == done ? "->" : "  ", i,
+                          name != nullptr ? name : std::to_string((int) node->pCommandHistory[i]), context);
             }
         }
 

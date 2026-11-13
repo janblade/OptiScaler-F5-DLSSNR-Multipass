@@ -22,6 +22,10 @@ class F5Lut_Dx12 : public Shader_Dx12, public F5Lut_Common
 
     // The baked lattice as a 3D texture, and the chain key it was uploaded from.
     ID3D12Resource* _lutTexture = nullptr;
+    // The buffer the lattice was uploaded from, kept as long as the texture: the copy is only recorded, and the list
+    // may be submitted seconds later (Neural Rendering's model is made between the recording and the submit of its
+    // first frame). Released after a fixed delay, the copy read a freed buffer and the GPU hung.
+    ID3D12Resource* _lutUpload = nullptr;
     std::string _lutKey;
     std::string _failedKey; // the bake whose upload failed, not retried every frame
 

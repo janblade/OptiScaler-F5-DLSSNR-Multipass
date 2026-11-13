@@ -58,6 +58,9 @@ bool CheckForRealObject(std::string functionName, IUnknown* pObject, IUnknown** 
 IUnknown* RealObjectIdentity(IUnknown* pObject);
 void GetDeviceRemovedReason(ID3D11Device* pDevice);
 void GetDeviceRemovedReason(ID3D12Device* pDevice);
+// A named point on a D3D12 command list for the DRED report ([Log] D3D12Dred): after a GPU hang the report shows the
+// operations of the unfinished lists with these names between them. Nothing is recorded with the setting off.
+void GpuMarker(ID3D12GraphicsCommandList* list, const char* name);
 void LoadProxyLibrary(const std::wstring& name, const std::wstring& optiPath, const std::wstring& overridePath,
                       HMODULE* memoryModule, HMODULE* loadedModule);
 

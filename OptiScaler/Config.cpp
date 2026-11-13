@@ -352,6 +352,21 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDLSSGFramerateTargetDMFG.set_from_config(readFloat("DLSSG", "FramerateTargetDMFG"));
             FGDLSSGOverrideForceDMFG.set_from_config(readBool("DLSSG", "OverrideForceDMFG"));
             FGDLSSGForceDMFG.set_from_config(readBool("DLSSG", "ForceDMFG"));
+
+            // Preset=auto|A|B|C (also 0-3); anything else falls back to auto
+            FGDLSSGPreset.reset();
+            if (auto preset = readString("DLSSG", "Preset", true); preset.has_value())
+            {
+                const auto& p = preset.value();
+                if (p == "a" || p == "1")
+                    FGDLSSGPreset.set_from_config(1);
+                else if (p == "b" || p == "2")
+                    FGDLSSGPreset.set_from_config(2);
+                else if (p == "c" || p == "3")
+                    FGDLSSGPreset.set_from_config(3);
+                else if (p != "auto" && p != "0")
+                    LOG_WARN("[DLSSG] Preset={} is not auto, A, B or C; using auto", p);
+            }
         }
 
         // FSR FG Inputs
@@ -2301,6 +2316,11 @@ bool Config::SaveIni()
         ini.SetValue("DLSSG", "OverrideForceDMFG",
                      GetBoolValue(Instance()->FGDLSSGOverrideForceDMFG.value_for_config()).c_str());
         ini.SetValue("DLSSG", "ForceDMFG", GetBoolValue(Instance()->FGDLSSGForceDMFG.value_for_config()).c_str());
+        {
+            static constexpr const char* presetNames[] = { "auto", "A", "B", "C" };
+            const int preset = Instance()->FGDLSSGPreset.value_or_default();
+            ini.SetValue("DLSSG", "Preset", presetNames[(preset >= 0 && preset <= 3) ? preset : 0]);
+        }
     }
 
     // OptiFG

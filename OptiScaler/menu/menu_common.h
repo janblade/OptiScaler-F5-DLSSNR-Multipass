@@ -262,6 +262,8 @@ class MenuCommon
     static void RenderFrameGenerationSelection(RenderMenuContext& ctx);
     static void RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx);
     static void RenderFrameGenerationFooter(RenderMenuContext& ctx);
+    // custom: the custom DLSS-G replacement that would take the preset (empty: NVIDIA's DLSS-G)
+    static void RenderDlssgPresetCombo(RenderMenuContext& ctx, const std::string& custom = "");
     static void RenderFgStatusLine(RenderMenuContext& ctx);
     static void RenderXeFGDynamicMFG(RenderMenuContext& ctx, int maxInterpolationCount, bool followsGame);
     static void RenderFGFollowGame();

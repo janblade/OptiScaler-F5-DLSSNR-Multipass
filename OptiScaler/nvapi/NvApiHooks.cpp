@@ -5,11 +5,13 @@
 
 #include "State.h"
 #include <Config.h>
+#include <Util.h>
 
 #include <proxies/KernelBase_Proxy.h>
 
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
+#include <framegen/nvngx/DlssgPresetSupport.h>
 #include <low_latency/input/input_reflex.h>
 
 // #define LOG_ALL_DRS_GET_CALLS
@@ -65,6 +67,78 @@ NvAPI_Status __stdcall NvApiHooks::hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSe
         return NVAPI_ERROR;
 
     auto result = o_NvAPI_DRS_GetSetting(hSession, hProfile, settingId, pSetting);
+
+    // DLSS-G frame generation preset. nvngx_dlssg (310.9.16+) and sl.dlss_g read this once at start, app profile
+    // first; A/B/C select UI recomposition / FG Lite (candidate blending). Answered in this process only, also when
+    // the profile has no value, so the driver profile itself is never written.
+    constexpr NvU32 dlssgPresetId = 0x10E41DF1;
+    // Only the struct layout this was written for; the caller's version is checked before anything is read or written
+    if (pSetting && settingId == dlssgPresetId && pSetting->version == NVDRS_SETTING_VER &&
+        (result == NVAPI_OK || result == NVAPI_SETTING_NOT_FOUND))
+    {
+        if (result == NVAPI_OK && pSetting->settingType == NVDRS_DWORD_TYPE)
+            State::Instance().dlssgPresetExternal = pSetting->u32CurrentValue;
+
+        State::Instance().dlssgPresetRead = true;
+
+        // Which DLSS-G asks (nvngx_dlssg reads it itself; Streamline's sl.dlss_g asks through sl.common)
+        HMODULE caller = nullptr;
+        wchar_t callerPath[MAX_PATH] {};
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR) _ReturnAddress(), &caller) &&
+            GetModuleFileNameW(caller, callerPath, MAX_PATH) != 0 &&
+            _wcsnicmp(std::filesystem::path(callerPath).filename().c_str(), L"nvngx_dlssg", 11) == 0)
+        {
+            version_t version {};
+            if (Util::GetFileVersion(callerPath, &version))
+            {
+                auto& v = State::Instance().dlssgPresetReaderVersion;
+                v[0] = (uint16_t) version.major;
+                v[1] = (uint16_t) version.minor;
+                v[2] = (uint16_t) version.patch;
+                v[3] = (uint16_t) version.reserved;
+            }
+        }
+
+        const auto preset = Config::Instance()->FGDLSSGPreset.value_or_default();
+
+        // A custom DLSS-G replacement makes the frames: only a preset it can take is answered, else it keeps what the
+        // driver profile says (logged once)
+        auto& state = State::Instance();
+        const bool customMakesFrames =
+            state.activeFgNvngx == FGNvngxReplacement::Custom &&
+            (state.activeFgOutput == FGOutput::DLSSG || state.activeFgInput == FGInput::NvngxFG);
+        bool customTakes = true;
+
+        if (customMakesFrames && preset >= 1 && preset <= 3)
+        {
+            customTakes = DlssgPresetSupport::Takes(DlssgPresetSupport::ForCustom(state.activeFgNvngxCustom), preset);
+
+            static bool logged = false;
+            if (!customTakes && !logged)
+            {
+                logged = true;
+                LOG_WARN("DLSS-G preset: {} can't take preset {}, left to the driver profile",
+                         state.activeFgNvngxCustom, (char) ('A' + preset - 1));
+            }
+        }
+
+        if (preset >= 1 && preset <= 3 && customTakes)
+        {
+            pSetting->settingId = dlssgPresetId;
+            pSetting->settingType = NVDRS_DWORD_TYPE;
+            pSetting->settingLocation = NVDRS_CURRENT_PROFILE_LOCATION;
+            pSetting->isCurrentPredefined = 0;
+            pSetting->isPredefinedValid = 0;
+            pSetting->u32PredefinedValue = (NvU32) preset;
+            pSetting->u32CurrentValue = (NvU32) preset;
+            State::Instance().dlssgPresetAnswered = (uint32_t) preset;
+            LOG_INFO("DLSS-G preset: answered {} (driver profile {}: 0x{:X})", (char) ('A' + preset - 1),
+                     result == NVAPI_OK ? "value" : "none", State::Instance().dlssgPresetExternal.load());
+            return NVAPI_OK;
+        }
+    }
+
     if (pSetting && result == NVAPI_OK)
     {
         constexpr NvU32 streamlineOverrideId = 0x10E41E06;

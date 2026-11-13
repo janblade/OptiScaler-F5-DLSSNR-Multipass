@@ -1373,6 +1373,9 @@ class Config
     CustomOptional<bool> FGDLSSGOverrideForceDMFG { false };   // Overrides game's DLSSG mode to Dynamic
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
+    // DLSS-G frame generation preset, answered in this process to DLSS-G's driver-profile read (setting 0x10E41DF1):
+    // 0 = leave the driver/game choice, 1 = A (default model), 2 = B (UI focus), 3 = C (FG Lite, nvngx_dlssg 310.9.16+)
+    CustomOptional<int> FGDLSSGPreset { 0 };
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

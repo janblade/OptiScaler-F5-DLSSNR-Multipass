@@ -369,8 +369,11 @@ std::shared_ptr<ResizeHold> BeginResize()
 
     auto hold = std::make_shared<ResizeHold>();
 
-    // The wrapped swapchain's present takes the shared side for XeFG only
-    if (UsesXeFGApi(state.activeFgOutput))
+    // The wrapped swapchain's present takes the shared side for XeFG only. Not for F5Low: its ResizeBuffers (and its
+    // swapchain's release) first waits for its own presenter to finish, and that presenter's present is the one that waits
+    // for the shared side here, so holding the exclusive side would deadlock the resize (the picture stops after a window
+    // resize). F5Low's own wait already keeps its presents off the back buffers being replaced.
+    if (state.activeFgOutput == FGOutput::XeFG)
         hold->lock.lock();
 
     return hold;

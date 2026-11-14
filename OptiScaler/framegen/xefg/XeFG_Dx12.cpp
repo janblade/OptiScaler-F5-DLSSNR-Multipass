@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <algorithm>
 #include "XeFG_Dx12.h"
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
@@ -85,6 +86,9 @@ bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
             LOG_ERROR("XeFG proxy can't find libxess_fg.dll!");
         return false;
     }
+
+    // a context parked by an earlier swapchain teardown may be free to go now
+    RetryParkedContexts("new context");
 
     // F5Low runs our f5low.dll: the XeFG unlock patches Intel's library only
     const bool f5low = State::Instance().activeFgOutput == FGOutput::F5Low;
@@ -261,6 +265,52 @@ bool XeFG_Dx12::DestroySwapchainContext()
     }
 
     return true;
+}
+
+void XeFG_Dx12::ParkSwapchainContext(xefg_swapchain_handle_t context)
+{
+    std::lock_guard<std::mutex> lock(_parkedMutex);
+
+    if (std::find(_parkedContexts.begin(), _parkedContexts.end(), context) == _parkedContexts.end())
+        _parkedContexts.push_back(context);
+
+    LOG_WARN("Swapchain context {:X} could not be destroyed (still in use): kept to destroy later, {} waiting",
+             (size_t) context, _parkedContexts.size());
+}
+
+void XeFG_Dx12::RetryParkedContexts(const char* when)
+{
+    // (at process exit nothing is destroyed: DestroySwapchainContext skips it as well)
+    if (State::Instance().isShuttingDown)
+        return;
+
+    std::vector<xefg_swapchain_handle_t> parked;
+    {
+        std::lock_guard<std::mutex> lock(_parkedMutex);
+        parked.swap(_parkedContexts);
+    }
+
+    if (parked.empty())
+        return;
+
+    // Outside the lock: destroying a context releases its swapchain, which can come back into this class
+    std::vector<xefg_swapchain_handle_t> stillParked;
+    for (auto context : parked)
+    {
+        auto result = XeFGProxy::Destroy()(context);
+
+        if (result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
+            LOG_INFO("Parked swapchain context {:X} destroyed ({})", (size_t) context, when);
+        else
+            stillParked.push_back(context);
+    }
+
+    if (stillParked.empty())
+        return;
+
+    std::lock_guard<std::mutex> lock(_parkedMutex);
+    _parkedContexts.insert(_parkedContexts.end(), stillParked.begin(), stillParked.end());
+    LOG_DEBUG("{} parked swapchain context(s) still in use ({})", _parkedContexts.size(), when);
 }
 
 xefg_swapchain_d3d12_resource_data_t XeFG_Dx12::GetResourceData(FG_ResourceType type, int index)
@@ -825,6 +875,8 @@ bool XeFG_Dx12::Shutdown()
 
     if (_swapChainContext != nullptr)
         DestroySwapchainContext();
+
+    RetryParkedContexts("shutdown");
 
     return true;
 }
@@ -2082,7 +2134,14 @@ bool XeFG_Dx12::ReleaseSwapchain(HWND hwnd)
         if (_swapChainContext != nullptr)
             DestroySwapchainContext();
 
+        // DestroySwapchainContext puts the context back when XeFG refuses (the swapchain still in use): keep it to
+        // destroy later instead of losing it with everything it holds
+        if (_swapChainContext != nullptr)
+            ParkSwapchainContext(_swapChainContext);
+
         _swapChainContext = nullptr;
+
+        RetryParkedContexts("swapchain released");
     }
 
     ReleaseObjects();

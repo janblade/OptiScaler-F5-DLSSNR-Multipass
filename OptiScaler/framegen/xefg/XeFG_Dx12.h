@@ -18,11 +18,22 @@
 #include <xefg_swapchain_d3d12.h>
 #include <xefg_swapchain_debug.h>
 
+#include <mutex>
+#include <vector>
+
 class XeFG_Dx12 : public virtual IFGFeature_Dx12
 {
   private:
     xefg_swapchain_handle_t _swapChainContext = nullptr;
     xefg_swapchain_handle_t _fgContext = nullptr;
+
+    // Swapchain contexts whose Destroy failed (XeFG says the swapchain is still in use) when the swapchain was let go:
+    // destroyed later, at the next swapchain teardown or context creation and at shutdown. Dropping them instead
+    // left the context, its back buffers and its working set in VRAM for the rest of the process
+    std::vector<xefg_swapchain_handle_t> _parkedContexts;
+    std::mutex _parkedMutex;
+    void ParkSwapchainContext(xefg_swapchain_handle_t context);
+    void RetryParkedContexts(const char* when);
 
     uint32_t _width = 0;
     uint32_t _height = 0;

@@ -259,8 +259,17 @@ bool XeFG_Dx12::DestroySwapchainContext()
         {
             State::Instance().currentFGSwapchain = nullptr;
 
-            // Its XeLL context isn't read anymore
-            InputCommon::release_xefg_xell();
+            // Its XeLL context isn't read anymore, unless a parked context (refused before) still links it: then it
+            // goes once the last of those is destroyed (RetryParkedContexts)
+            bool parked = false;
+            {
+                std::lock_guard<std::mutex> lock(_parkedMutex);
+                parked = !_parkedContexts.empty();
+                _xellReleasePending = parked;
+            }
+
+            if (!parked)
+                InputCommon::release_xefg_xell();
         }
     }
 
@@ -274,8 +283,8 @@ void XeFG_Dx12::ParkSwapchainContext(xefg_swapchain_handle_t context)
     if (std::find(_parkedContexts.begin(), _parkedContexts.end(), context) == _parkedContexts.end())
         _parkedContexts.push_back(context);
 
-    LOG_WARN("Swapchain context {:X} could not be destroyed (still in use): kept to destroy later, {} waiting",
-             (size_t) context, _parkedContexts.size());
+    LOG_WARN("Swapchain context {:X}: Destroy refused, kept to destroy later, {} waiting", (size_t) context,
+             _parkedContexts.size());
 }
 
 void XeFG_Dx12::RetryParkedContexts(const char* when)
@@ -305,12 +314,29 @@ void XeFG_Dx12::RetryParkedContexts(const char* when)
             stillParked.push_back(context);
     }
 
-    if (stillParked.empty())
-        return;
+    bool releaseXell = false;
+    {
+        std::lock_guard<std::mutex> lock(_parkedMutex);
+        _parkedContexts.insert(_parkedContexts.end(), stillParked.begin(), stillParked.end());
 
-    std::lock_guard<std::mutex> lock(_parkedMutex);
-    _parkedContexts.insert(_parkedContexts.end(), stillParked.begin(), stillParked.end());
-    LOG_DEBUG("{} parked swapchain context(s) still in use ({})", _parkedContexts.size(), when);
+        if (!_parkedContexts.empty())
+        {
+            LOG_DEBUG("{} parked swapchain context(s) still refused ({})", _parkedContexts.size(), when);
+        }
+        else if (_xellReleasePending && _swapChainContext == nullptr)
+        {
+            // the last parked context held the XeLL context the current one left behind (none current: a new one
+            // takes its own)
+            _xellReleasePending = false;
+            releaseXell = true;
+        }
+    }
+
+    if (releaseXell)
+    {
+        LOG_INFO("The last parked swapchain context is gone: its XeLL context is let go of");
+        InputCommon::release_xefg_xell();
+    }
 }
 
 xefg_swapchain_d3d12_resource_data_t XeFG_Dx12::GetResourceData(FG_ResourceType type, int index)

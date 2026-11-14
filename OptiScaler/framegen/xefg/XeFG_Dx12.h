@@ -27,11 +27,14 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     xefg_swapchain_handle_t _swapChainContext = nullptr;
     xefg_swapchain_handle_t _fgContext = nullptr;
 
-    // Swapchain contexts whose Destroy failed (XeFG says the swapchain is still in use) when the swapchain was let go:
-    // destroyed later, at the next swapchain teardown or context creation and at shutdown. Dropping them instead
-    // left the context, its back buffers and its working set in VRAM for the rest of the process
+    // Swapchain contexts whose Destroy XeFG refused (the swapchain still in use) when the swapchain was let go:
+    // destroyed later, at the next swapchain teardown or context creation. Dropping them instead left the context,
+    // its back buffers and its working set in VRAM for the rest of the process
     std::vector<xefg_swapchain_handle_t> _parkedContexts;
     std::mutex _parkedMutex;
+    // A parked context still links the XeLL context it was made with: XeLL is let go of once the last of them is
+    // destroyed, not before (XeFG first, then XeLL, as Intel's sample does)
+    bool _xellReleasePending = false;
     void ParkSwapchainContext(xefg_swapchain_handle_t context);
     void RetryParkedContexts(const char* when);
 

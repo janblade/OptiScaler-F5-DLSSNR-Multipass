@@ -6127,9 +6127,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // reaching this through the D3D12 bridge (IFeature_VkwDx12) uses it for the fp8 set too: on the native Vulkan path
         // the kept result was overwritten between frames (dark scenes flashed), and the copy does not depend on it staying.
         const bool vitEveryFrame = reusePlan.active || cachePlan.runs;
-        const unsigned copySets =
-            DlssNrVitReuse::kCopyPlain | (State::Instance().api == Vulkan ? DlssNrVitReuse::kCopyFp8 : 0u);
-        DlssNrNative::BeginEvaluate(passFeature, passReset,
+        const unsigned copySets = DlssNrVitReuse::kCopyPlain | DlssNrVitReuse::kCopyFp8;
+        DlssNrNative::BeginEvaluate(passFeature, passReset || superiorReset,
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,

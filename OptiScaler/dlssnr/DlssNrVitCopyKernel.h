@@ -6,64 +6,65 @@
 // (CUDA 13 toolkit), then written out as bytes.
 namespace DlssNrVitCopyKernel
 {
-// Damped temporal linear prediction for plain FP16 ViT bottleneck reuse:
-//   pred = curr + clamp(0.42 * (curr - prev), -(0.35 * |curr| + 0.125), +(0.35 * |curr| + 0.125))
-// Eliminates 30 Hz stair-step flickering on moving lights/camera pans while staying bit-exact on static pixels.
-inline const char predictFp16Ptx[] = R"(
+// Adaptive convex temporal EMA for plain FP16 ViT bottleneck reuse (runs on computed frames):
+//   alpha = clamp(0.50 + 0.50 * |fresh - prev| / (max(|fresh|, |prev|) + 0.25), 0.50, 1.0)
+//   out   = prev + alpha * (fresh - prev)  (written to both dst and our saved buffer)
+// Strictly convex (never overshoots or leaves the ViT latent manifold, safe for both Small and Large models).
+inline const char emaFp16Ptx[] = R"(
 .version 7.0
 .target sm_75
 .address_size 64
 
-.visible .entry nr_vit_predict_fp16(
+.visible .entry nr_vit_ema_fp16(
     .param .u64 p_dst,
-    .param .u64 p_curr,
-    .param .u64 p_prev,
+    .param .u64 p_buf,
     .param .u64 p_n
 )
 {
     .reg .pred %p;
     .reg .b16 %h<4>;
     .reg .b32 %r<5>;
-    .reg .f32 %f<10>;
-    .reg .b64 %rd<12>;
+    .reg .f32 %f<9>;
+    .reg .b64 %rd<9>;
 
     ld.param.u64 %rd1, [p_dst];
-    ld.param.u64 %rd2, [p_curr];
-    ld.param.u64 %rd3, [p_prev];
-    ld.param.u64 %rd4, [p_n];
+    ld.param.u64 %rd2, [p_buf];
+    ld.param.u64 %rd3, [p_n];
     cvta.to.global.u64 %rd1, %rd1;
     cvta.to.global.u64 %rd2, %rd2;
-    cvta.to.global.u64 %rd3, %rd3;
     mov.u32 %r1, %ctaid.x;
     mov.u32 %r2, %ntid.x;
     mov.u32 %r3, %tid.x;
     mov.u32 %r4, %nctaid.x;
-    mul.wide.u32 %rd5, %r1, %r2;
-    cvt.u64.u32 %rd6, %r3;
-    add.u64 %rd5, %rd5, %rd6;
-    mul.wide.u32 %rd7, %r4, %r2;
+    mul.wide.u32 %rd4, %r1, %r2;
+    cvt.u64.u32 %rd5, %r3;
+    add.u64 %rd4, %rd4, %rd5;
+    mul.wide.u32 %rd8, %r4, %r2;
 LOOP:
-    setp.ge.u64 %p, %rd5, %rd4;
+    setp.ge.u64 %p, %rd4, %rd3;
     @%p bra DONE;
-    shl.b64 %rd8, %rd5, 1;
-    add.u64 %rd9, %rd2, %rd8;
-    add.u64 %rd10, %rd3, %rd8;
-    ld.global.b16 %h1, [%rd9];
-    ld.global.b16 %h2, [%rd10];
+    shl.b64 %rd5, %rd4, 1;
+    add.u64 %rd6, %rd1, %rd5;
+    add.u64 %rd7, %rd2, %rd5;
+    ld.global.b16 %h1, [%rd6];
+    ld.global.b16 %h2, [%rd7];
     cvt.f32.f16 %f1, %h1;
     cvt.f32.f16 %f2, %h2;
     sub.f32 %f3, %f1, %f2;
-    mul.f32 %f4, %f3, 0f3ED70A3D;
+    abs.f32 %f4, %f3;
     abs.f32 %f5, %f1;
-    fma.rn.f32 %f6, %f5, 0f3EB33333, 0f3E000000;
-    neg.f32 %f7, %f6;
-    min.f32 %f8, %f4, %f6;
-    max.f32 %f8, %f8, %f7;
-    add.f32 %f9, %f1, %f8;
-    cvt.rn.f16.f32 %h3, %f9;
-    add.u64 %rd11, %rd1, %rd8;
-    st.global.b16 [%rd11], %h3;
-    add.u64 %rd5, %rd5, %rd7;
+    abs.f32 %f6, %f2;
+    max.f32 %f5, %f5, %f6;
+    add.f32 %f5, %f5, 0f3E800000;
+    div.approx.f32 %f6, %f4, %f5;
+    fma.rn.f32 %f7, %f6, 0f3F000000, 0f3F000000;
+    min.f32 %f7, %f7, 0f3F800000;
+    max.f32 %f7, %f7, 0f3F000000;
+    fma.rn.f32 %f8, %f7, %f3, %f2;
+    cvt.rn.f16.f32 %h3, %f8;
+    st.global.b16 [%rd6], %h3;
+    st.global.b16 [%rd7], %h3;
+    add.u64 %rd4, %rd4, %rd8;
     bra LOOP;
 DONE:
     ret;

@@ -14,12 +14,15 @@ struct Axis {
     float bandCenter = 0, workCenter = 0, halfBand = 0, scale = 1;
     float halfSpan[2] = {}, periphery[2] = {}, allotted[2] = {};
     float center[2] = {}, work[2] = {}, compression[2] = {}, edgeSlope[2] = {};
+    uint32_t curveMode = 2u; // 2 = Classic C1 hyperbolic, 3 = Smooth C2 radical (fog-safe)
 };
 
 // Split the peripheral budget between the two sides, respecting the native side extent.
 inline Axis BuildAxis(uint32_t native, uint32_t rawWork, uint32_t model,
-                      float centerFraction, float offsetFraction, float shiftFraction) {
+                      float centerFraction, float offsetFraction, float shiftFraction,
+                      uint32_t curveMode = 2u) {
     Axis a{};
+    a.curveMode = curveMode == 3u ? 3u : 2u;
     a.nativeExtent = static_cast<float>(native);
     a.rawExtent = static_cast<float>(rawWork);
     a.workExtent = static_cast<float>(model);
@@ -59,25 +62,36 @@ inline Axis BuildAxis(uint32_t native, uint32_t rawWork, uint32_t model,
         a.center[i] = a.halfBand / a.halfSpan[i];
         a.work[i] = (a.halfBand + a.allotted[i]) / a.halfSpan[i];
         a.compression[i] = a.periphery[i] > 0 ? a.allotted[i] / a.periphery[i] : 1.0f;
-        a.edgeSlope[i] = a.compression[i] * a.compression[i];
+        a.edgeSlope[i] = a.curveMode == 3u
+            ? a.compression[i] * a.compression[i] * a.compression[i]
+            : a.compression[i] * a.compression[i];
     }
     a.workCenter = (a.halfBand + a.allotted[0]) * a.scale;
     return a;
 }
 
-inline float PackRadius(float r, float center, float work, float compression, float edgeSlope) {
+inline float PackRadius(float r, float center, float work, float compression, float edgeSlope, uint32_t curveMode = 2u) {
     r = std::abs(r);
     if (work >= 1 || center >= 1 || r <= center) return r;
     if (r > 1) return work + (r - 1) * edgeSlope;
     const float t = (r - center) / (1 - center);
+    if (curveMode == 3u) {
+        const float k2 = compression * compression;
+        return center + (work - center) * t / std::sqrt(k2 + (1.0f - k2) * t * t);
+    }
     return center + (work - center) * t / (compression + (1 - compression) * t);
 }
 
-inline float UnpackRadius(float r, float center, float work, float compression, float edgeSlope) {
+inline float UnpackRadius(float r, float center, float work, float compression, float edgeSlope, uint32_t curveMode = 2u) {
     r = std::abs(r);
     if (work >= 1 || center >= 1 || r <= center) return r;
     if (r > work) return 1 + (r - work) / edgeSlope;
     const float y = (r - center) / (work - center);
+    if (curveMode == 3u) {
+        const float k2 = compression * compression;
+        const float t = compression * y / std::sqrt(std::max(1.0f - (1.0f - k2) * y * y, 1e-12f));
+        return center + (1 - center) * t;
+    }
     const float t = compression * y / (1 - (1 - compression) * y);
     return center + (1 - center) * t;
 }
@@ -86,7 +100,7 @@ inline float Pack(float nativePixel, const Axis& a) {
     const float delta = nativePixel - a.bandCenter;
     const int side = delta < 0 ? 0 : 1;
     const float radius = std::abs(delta) / a.halfSpan[side];
-    const float packed = PackRadius(radius, a.center[side], a.work[side], a.compression[side], a.edgeSlope[side]);
+    const float packed = PackRadius(radius, a.center[side], a.work[side], a.compression[side], a.edgeSlope[side], a.curveMode);
     return a.workCenter + (delta < 0 ? -1.0f : 1.0f) * packed * a.halfSpan[side] * a.scale;
 }
 
@@ -94,7 +108,7 @@ inline float Unpack(float workPixel, const Axis& a) {
     const float delta = workPixel - a.workCenter;
     const int side = delta < 0 ? 0 : 1;
     const float packed = std::abs(delta) / (a.halfSpan[side] * a.scale);
-    const float radius = UnpackRadius(packed, a.center[side], a.work[side], a.compression[side], a.edgeSlope[side]);
+    const float radius = UnpackRadius(packed, a.center[side], a.work[side], a.compression[side], a.edgeSlope[side], a.curveMode);
     return a.bandCenter + (delta < 0 ? -1.0f : 1.0f) * radius * a.halfSpan[side];
 }
 
@@ -122,7 +136,7 @@ inline ShaderConstants MakeShaderConstants(const Layout& l) {
         x.rawExtent / x.nativeExtent, y.rawExtent / y.nativeExtent,
         std::min(x.compression[0], x.compression[1]), std::min(y.compression[0], y.compression[1]),
         std::min(x.edgeSlope[0], x.edgeSlope[1]), std::min(y.edgeSlope[0], y.edgeSlope[1]),
-        2u, 1u, 1u, 0u,
+        x.curveMode == 3u ? 3u : 2u, 1u, 1u, 0u,
         x.bandCenter, y.bandCenter, x.workCenter, y.workCenter,
         x.halfSpan[0], y.halfSpan[0], x.center[0], y.center[0],
         x.halfSpan[1], y.halfSpan[1], x.center[1], y.center[1],

@@ -4253,6 +4253,7 @@ static void RenderPostLutSection(Config* config)
 // history once); every edit goes through Spatial::Constrain, the same limits the runtime checks against.
 static void StoreSpatialSettings(Config* config, const DlssNr::Spatial::Settings& s)
 {
+    config->DlssNrSpatialSmoothCurve = s.smoothCurve;
     config->DlssNrSpatialCenterX = s.centerX;
     config->DlssNrSpatialCenterY = s.centerY;
     config->DlssNrSpatialWorkX = s.workX;
@@ -4298,28 +4299,66 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
         return;
 
     Sp::Settings settings = Sp::ReadSettings(*config);
+    const bool autoAdjust = config->DlssNrSpatialAutoAdjustCenter.value_or_default();
     const float scale = EdgeCompressionScale(config, nr);
-    const int matched = Sp::MatchedLayout(settings);
+    int matched = Sp::MatchedLayout(settings, autoAdjust);
 
-    char preview[48];
-    if (matched >= 0)
-        std::snprintf(preview, sizeof(preview), "%s (%.0f / %.0f)", Sp::kNamedLayouts[matched].name,
-                      Sp::kNamedLayouts[matched].center, Sp::kNamedLayouts[matched].work);
-    else
+    bool smoothCurve = settings.smoothCurve;
+    if (ImGui::Checkbox("Smooth curve (C2, fog-safe)##edgecompression", &smoothCurve))
+    {
+        settings.smoothCurve = smoothCurve;
+        // If on a named layout and auto-adjust is on, re-apply it so the center moves to the
+        // fog-safe value (smooth: wider transition) or back to the classic value.
+        if (matched >= 0 && autoAdjust)
+            Sp::ApplyNamedLayout(settings, matched, /*autoAdjustCenter=*/true);
+        Sp::Constrain(settings, scale);
+        StoreSpatialSettings(config, settings);
+        matched = Sp::MatchedLayout(settings, autoAdjust);
+    }
+    HelpMarker("Uses a C2-continuous warp with a gentler transition and lower edge squeeze (~2x instead of 4x at Balanced). "
+               "Prevents rectangular lighting boxes and brightness shifts in foggy games like Silent Hill 3. Zero extra Resolve cost. "
+               "When Auto-adjust center is on, switching this automatically widens or narrows the sharp middle to match.");
+
+    bool autoAdjustVal = autoAdjust;
+    if (ImGui::Checkbox("Auto-adjust center for smooth curve##edgecompression", &autoAdjustVal))
+    {
+        config->DlssNrSpatialAutoAdjustCenter = autoAdjustVal;
+        // If enabling auto-adjust while on a named layout, apply the fog-safe center immediately.
+        if (autoAdjustVal && settings.smoothCurve && matched >= 0)
+        {
+            Sp::ApplyNamedLayout(settings, matched, /*autoAdjustCenter=*/true);
+            Sp::Constrain(settings, scale);
+            StoreSpatialSettings(config, settings);
+        }
+        matched = Sp::MatchedLayout(settings, autoAdjustVal);
+    }
+    HelpMarker("When on: toggling Smooth curve automatically moves the sharp middle to the fog-safe width for the "
+               "current layout (wider = less edge squeeze, same NR pixel count). "
+               "Turn off to keep your center value unchanged when toggling the curve.");
+
+    // Build the preview label: show the active center value (smooth or classic) and the work %.
+    char preview[64];
+    if (matched >= 0) {
+        const Sp::NamedLayout& n = Sp::kNamedLayouts[matched];
+        const float activeCenter = (settings.smoothCurve && autoAdjust) ? n.smoothCenter : n.center;
+        std::snprintf(preview, sizeof(preview), "%s (%.0f / %.0f)", n.name, activeCenter, n.work);
+    } else {
         std::snprintf(preview, sizeof(preview), "Custom");
+    }
 
     if (ImGui::BeginCombo("Layout", preview))
     {
         for (int i = 0; i != 3; ++i)
         {
-            char item[48];
-            std::snprintf(item, sizeof(item), "%s (%.0f / %.0f)", Sp::kNamedLayouts[i].name, Sp::kNamedLayouts[i].center,
-                          Sp::kNamedLayouts[i].work);
+            const Sp::NamedLayout& n = Sp::kNamedLayouts[i];
+            const float activeCenter = (settings.smoothCurve && autoAdjust) ? n.smoothCenter : n.center;
+            char item[64];
+            std::snprintf(item, sizeof(item), "%s (%.0f / %.0f)", n.name, activeCenter, n.work);
 
             if (ImGui::Selectable(item, matched == i))
             {
-                // Picking a layout is also the reset: it puts every advanced value back to that layout's own.
-                Sp::ApplyNamedLayout(settings, i);
+                // Picking a layout resets every advanced value back to that layout's own.
+                Sp::ApplyNamedLayout(settings, i, autoAdjust);
                 Sp::Constrain(settings, scale);
                 StoreSpatialSettings(config, settings);
             }
@@ -4378,14 +4417,20 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
 
         {
             const auto r = range(1.0f, settings.workX - 0.5f);
-            changed |= DeferredSlider("Sharp middle width", &config->DlssNrSpatialCenterX, r.first, r.second, 80.0f,
-                                      "%.1f%%");
+            const float defCenter = (settings.smoothCurve && autoAdjust)
+                ? Sp::kNamedLayouts[Sp::kDefaultLayout].smoothCenter
+                : Sp::kNamedLayouts[Sp::kDefaultLayout].center;
+            changed |= DeferredSlider("Sharp middle width", &config->DlssNrSpatialCenterX, r.first, r.second,
+                                      defCenter, "%.1f%%");
             HelpMarker("Width of the full-sharpness middle. Higher: more stays sharp, saves less. Lower: saves more.");
         }
         {
             const auto r = range(1.0f, settings.workY - 0.5f);
-            changed |= DeferredSlider("Sharp middle height", &config->DlssNrSpatialCenterY, r.first, r.second, 80.0f,
-                                      "%.1f%%");
+            const float defCenter = (settings.smoothCurve && autoAdjust)
+                ? Sp::kNamedLayouts[Sp::kDefaultLayout].smoothCenter
+                : Sp::kNamedLayouts[Sp::kDefaultLayout].center;
+            changed |= DeferredSlider("Sharp middle height", &config->DlssNrSpatialCenterY, r.first, r.second,
+                                      defCenter, "%.1f%%");
             HelpMarker("Height of the full-sharpness middle. Higher: more stays sharp, saves less. Lower: saves "
                        "more.");
         }

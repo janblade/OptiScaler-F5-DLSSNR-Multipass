@@ -1,5 +1,6 @@
 // Immutable metadata in row zero; optional exact per-column/per-row FP32 UVs in rows one/two.
 #define gNativeWorkSize gMotion.Load(int3(0, 0, 0))
+#define gOptions asuint(gMotion.Load(int3(3, 0, 0)))
 #define gBandCenter gMotion.Load(int3(4, 0, 0))
 #define gSideNeg gMotion.Load(int3(5, 0, 0))
 #define gSidePos gMotion.Load(int3(6, 0, 0))

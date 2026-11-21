@@ -1305,6 +1305,8 @@ void Config::ReadDlssNr()
             DlssNrInputStructureStrength = std::clamp(DlssNrInputStructureStrength.value(), 0.0f, 3.0f);
     }
     DlssNrSpatialCompression.set_from_config(readBool("DlssNr", "SpatialCompression"));
+    DlssNrSpatialSmoothCurve.set_from_config(readBool("DlssNr", "SpatialSmoothCurve"));
+    DlssNrSpatialAutoAdjustCenter.set_from_config(readBool("DlssNr", "SpatialAutoAdjustCenter"));
     DlssNrSpatialCenterX.set_from_config(readFloat("DlssNr", "SpatialCenterX"));
     DlssNrSpatialCenterY.set_from_config(readFloat("DlssNr", "SpatialCenterY"));
     DlssNrSpatialWorkX.set_from_config(readFloat("DlssNr", "SpatialWorkX"));
@@ -1572,6 +1574,10 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     }
     out.SetValue("DlssNr", "SpatialCompression",
                  GetBoolValue(c.DlssNrSpatialCompression.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialSmoothCurve",
+                 GetBoolValue(c.DlssNrSpatialSmoothCurve.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialAutoAdjustCenter",
+                 GetBoolValue(c.DlssNrSpatialAutoAdjustCenter.value_for_config()).c_str());
     out.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(c.DlssNrSpatialCenterX.value_for_config()).c_str());
     out.SetValue("DlssNr", "SpatialCenterY", GetFloatValue(c.DlssNrSpatialCenterY.value_for_config()).c_str());
     out.SetValue("DlssNr", "SpatialWorkX", GetFloatValue(c.DlssNrSpatialWorkX.value_for_config()).c_str());
@@ -2087,6 +2093,8 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("NativeLowLatencyBoost", DlssNrNativeLowLatencyBoost),
         NR_PROFILE_FIELD("NativeLowLatencyDxvkGameThread", DlssNrNativeLowLatencyDxvkGameThread),
         NR_PROFILE_FIELD("SpatialCompression", DlssNrSpatialCompression),
+        NR_PROFILE_FIELD("SpatialSmoothCurve", DlssNrSpatialSmoothCurve),
+        NR_PROFILE_FIELD("SpatialAutoAdjustCenter", DlssNrSpatialAutoAdjustCenter),
         NR_PROFILE_FIELD("SpatialCenterX", DlssNrSpatialCenterX),
         NR_PROFILE_FIELD("SpatialCenterY", DlssNrSpatialCenterY),
         NR_PROFILE_FIELD("SpatialWorkX", DlssNrSpatialWorkX),

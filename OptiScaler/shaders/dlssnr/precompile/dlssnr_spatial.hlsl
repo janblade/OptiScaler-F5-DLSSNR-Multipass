@@ -74,16 +74,34 @@ RWTexture2D<float4> gTarget1 : register(u1); // RGBA16F unpacked model answer
 
 float4 SamplePackedColour(float2 nativePixel, float2 workPixel)
 {
-    float2 nativeUv = nativePixel / gNativeWorkSize.xy;
-    float2 footprint = PwFootprint(workPixel);
-    float spread = 0.375 * saturate((max(footprint.x, footprint.y) - 1.0) / 0.3);
-    if (spread <= 0.0) return gSource0.SampleLevel(gLinearClamp, nativeUv, 0);
-    float2 delta = spread * footprint / gNativeWorkSize.xy;
-    return 0.2 * (gSource0.SampleLevel(gLinearClamp, nativeUv, 0) +
-                  gSource0.SampleLevel(gLinearClamp, nativeUv + float2(-delta.x, -delta.y), 0) +
-                  gSource0.SampleLevel(gLinearClamp, nativeUv + float2( delta.x, -delta.y), 0) +
-                  gSource0.SampleLevel(gLinearClamp, nativeUv + float2(-delta.x,  delta.y), 0) +
-                  gSource0.SampleLevel(gLinearClamp, nativeUv + float2( delta.x,  delta.y), 0));
+    float2 p0 = PwUnpack(workPixel - 0.5);
+    float2 p1 = PwUnpack(workPixel + 0.5);
+    float2 span = max(abs(p1 - p0), 1.0.xx);
+    if (all(span <= 1.02))
+        return gSource0.SampleLevel(gLinearClamp, nativePixel / gNativeWorkSize.xy, 0);
+
+    // Axis-independent adaptive bilinear box/area integration:
+    // - 2x1 on 1D-compressed edges (zero cross-axis blur, fewer taps than 5-tap quincunx)
+    // - 2x2 in reduced-scale center (4 taps vs 5, exact area energy conservation)
+    // - up to 4x4 on heavily compressed reduced-scale edges/corners (eliminates aliasing & luminance patches)
+    int nx = clamp(int(ceil(span.x * 0.5)), 1, 4);
+    int ny = clamp(int(ceil(span.y * 0.5)), 1, 4);
+    float2 invNative = 1.0 / gNativeWorkSize.xy;
+    float2 lo = min(p0, p1);
+    float2 hi = max(p0, p1);
+    float invNx = 1.0 / float(nx);
+    float invNy = 1.0 / float(ny);
+    float4 sum = 0.0;
+    [loop] for (int y = 0; y < ny; ++y)
+    {
+        float vy = lerp(lo.y, hi.y, (float(y) + 0.5) * invNy) * invNative.y;
+        [loop] for (int x = 0; x < nx; ++x)
+        {
+            float vx = lerp(lo.x, hi.x, (float(x) + 0.5) * invNx) * invNative.x;
+            sum += gSource0.SampleLevel(gLinearClamp, float2(vx, vy), 0);
+        }
+    }
+    return sum * (invNx * invNy);
 }
 
 [numthreads(8, 8, 1)]

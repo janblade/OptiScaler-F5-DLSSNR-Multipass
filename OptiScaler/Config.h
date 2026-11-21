@@ -635,6 +635,8 @@ class Config
     // frame on each axis (centre < work <= 100); offset moves the centre band and shift moves pixels between the two
     // edges, both in percent of the frame. Out-of-range values leave compression off (the menu says why).
     CustomOptional<bool> DlssNrSpatialCompression { false };
+    CustomOptional<bool> DlssNrSpatialSmoothCurve { false };
+    CustomOptional<bool> DlssNrSpatialAutoAdjustCenter { true };
     CustomOptional<float> DlssNrSpatialCenterX { 80.0f };
     CustomOptional<float> DlssNrSpatialCenterY { 80.0f };
     CustomOptional<float> DlssNrSpatialWorkX { 90.0f };

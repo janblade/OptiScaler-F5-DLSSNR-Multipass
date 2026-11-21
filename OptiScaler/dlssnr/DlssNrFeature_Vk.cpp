@@ -46,6 +46,7 @@
 
 #include <dlssnr/DlssNr_RetryRequest.h>
 #include <dlssnr/DlssNr_Weights.h>
+#include "NrNvfp4.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1409,6 +1410,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     const unsigned int passes = std::clamp(cfg.DlssNrPasses.value_or_default(),
                                            1u, cfg.DlssNrUnlockPasses.value_or_default() ? DlssNr::MaxPassCount
                                                                                        : DlssNr::DefaultMaxPassCount);
+
+    // The 4-bit models exist on the D3D12 path only, and there is no fallback to the runtime's own model: a pass that
+    // asks for one here says so (Problem()) and NR is not applied.
+    if (Profiles::WantsNvfp4(cfg, passes))
+    {
+        Nvfp4::Refuse("the 4-bit models need the D3D12 processing path (this game runs NR on Vulkan)");
+        return;
+    }
 
     g_vk.instance = instance;
     g_vk.physicalDevice = physicalDevice;

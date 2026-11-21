@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Header Files">
@@ -2154,6 +2154,16 @@
     <ClCompile Include="dlssnr\DlssNr_StreamlinePicture.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="dlssnr\DlssNr_GpuLifetime.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="dlssnr\DlssNr_AllocatorEpochs.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="dlssnr\NrNvfp4.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="dlssnr\NrNvfp4.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="nvfp4\NrFfnV2.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="nvfp4\NrFfnV2.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="nvfp4\NrSwin4.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="nvfp4\NrSwin4.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="nvfp4\NrNet4.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="nvfp4\NrNet4.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="nvfp4\NrFp8.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="nvfp4\NrFp8.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="shaders\dlssnr\superior\HostResolve.hlsli"><Filter>Header Files</Filter></ClInclude>

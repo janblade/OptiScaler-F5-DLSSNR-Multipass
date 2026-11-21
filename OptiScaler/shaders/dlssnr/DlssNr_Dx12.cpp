@@ -15,6 +15,7 @@
 
 #include <dlssnr/DlssNr.h>
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/NrNvfp4.h>
 #include <dlssnr/DlssNrVitReuse.h>
 #include <dlssnr/ResidualFg.h>
 #include <dlssnr/DlssNrDetailReuse.h>
@@ -6109,6 +6110,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_ngxTime != nullptr)
         g_ngxTime->Start(cmdList);
 
+    // The 4-bit kernels and pass-in-one weight sets (model choices 4, 15..20): loaded when a pass first asks for them.
+    // No fallback: a pass that asked for one and was not run by our kernels is not shown (nvfp4Rejected).
+    bool nvfp4Rejected = false;
+    {
+        const bool nvfp4 = DlssNr::Profiles::WantsNvfp4(cfg, effectivePasses);
+        DlssNr::Nvfp4::Configure(nvfp4, Util::DllPath().parent_path() / L"OptiScaler" / L"nvfp4");
+        static unsigned int nvfp4Frames = 0;
+        if (nvfp4 && nvfp4Frames++ % 600 == 30)
+            LOG_INFO("DLSS-NR NVFP4 status: {}", DlssNr::Nvfp4::Status());
+    }
+
     for (unsigned int pass = 0; !reused && !cached && pass < effectivePasses && result == NVSDK_NGX_Result_Success;
          ++pass)
     {
@@ -6129,6 +6141,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const bool vitEveryFrame = reusePlan.active || cachePlan.runs;
         const unsigned copySets =
             DlssNrVitReuse::kCopyPlain | (State::Instance().api == Vulkan ? DlssNrVitReuse::kCopyFp8 : 0u);
+        // Which kernels and weights this pass runs; told where the evaluation ends whatever its outcome.
+        DlssNr::Nvfp4::BeginEvaluation(DlssNr::Profiles::RequestedPreset(cfg, pass));
         DlssNrNative::BeginEvaluate(passFeature, passReset,
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
@@ -6144,6 +6158,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             tuning.tone, tuning.skin,
             tuning.autoMask ? 1 : 0, evalMvScaleX,
             evalMvScaleY);
+        DlssNr::Nvfp4::EndEvaluation(cmdList);
         if (DlssNrNative::EndEvaluate(cmdList))
             LOG_WARN("DLSS-NR: Reuse bottleneck is {}", DlssNrNative::VitStatus());
 
@@ -6152,6 +6167,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (result != NVSDK_NGX_Result_Success)
             break;
+
+        // F5 has no pass borrowing, so the whole evaluation is ours to check.
+        if (!DlssNr::Nvfp4::OursRan(true))
+            nvfp4Rejected = true;
 
         if (pass > 0)
             g_nr.passNeedsReset[pass] = false;
@@ -6293,6 +6312,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    // The 4-bit feed-forward buffers of picture sizes no longer in use: this frame's command list and earlier ones may
+    // still refer to them, so they are freed only once the GPU has finished everything recorded so far.
+    if (const auto ticket = DlssNr::Nvfp4::RetireIdle(device, effectivePasses))
+        NrLifetime().Retire([device, ticket] { DlssNr::Nvfp4::FreeRetired(device, ticket); });
+
     GpuMarkers::Mark(cmdList, L"NR: model passes end");
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
@@ -6323,6 +6347,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
     g_nr.reset = superior && (superiorBoundaryFailed || result != NVSDK_NGX_Result_Success);
+
+    if (nvfp4Rejected)
+    {
+        // The answer is, at least in part, the runtime's own model's. It is not shown: the picture stays unprocessed
+        // and the histories start again, so the first frame our kernels do run starts clean.
+        ReportSkipOnce("a pass asked for a 4-bit model that did not run; there is no fallback to the original model");
+        result = NVSDK_NGX_Result_Fail;
+        finalAnswer = nullptr;
+        g_nr.reset = true;
+    }
 
     // Legacy Compress and exposure calibration unpack the pair to the ordinary grid. Superior temporal reconstruction
     // instead reads the packed pair directly and combines unwarping with its final guided resolve.

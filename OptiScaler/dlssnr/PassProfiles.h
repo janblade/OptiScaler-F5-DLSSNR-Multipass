@@ -1,5 +1,6 @@
 #pragma once
 #include <Config.h>
+#include "NrNvfp4.h"
 #include <algorithm>
 #include <cmath>
 
@@ -15,15 +16,40 @@ struct NrPassTuning
     bool operator==(const NrPassTuning&) const = default;
 };
 
-inline unsigned int PassPreset(const Config& cfg, unsigned int pass)
+// The model a pass asks for: the runtime's presets 0..3, or one of DlssNr::Nvfp4's (4, 15..20: Model A with the 4-bit
+// kernels, a pass-in-one model's weight set, an FP8 set). PassPreset gives the runtime preset 1 for those.
+inline unsigned int RequestedPreset(const Config& cfg, unsigned int pass)
 {
-    const unsigned int base = std::min(cfg.DlssNrPreset.value_or_default(), 3u);
+    if (pass == 0)
+        return cfg.DlssNrPreset.value_or_default();
 
     if (pass == 1 && cfg.DlssNrPass2Preset.has_value())
-        return std::min(cfg.DlssNrPass2Preset.value(), 3u);
+        return cfg.DlssNrPass2Preset.value();
 
     if (pass == 2 && cfg.DlssNrPass3Preset.has_value())
-        return std::min(cfg.DlssNrPass3Preset.value(), 3u);
+        return cfg.DlssNrPass3Preset.value();
+
+    return cfg.DlssNrPreset.value_or_default();
+}
+
+// Whether any of the passes asks for one of DlssNr::Nvfp4's models.
+inline bool WantsNvfp4(const Config& cfg, unsigned int passes)
+{
+    for (unsigned int pass = 0; pass < passes; ++pass)
+        if (Nvfp4::IsNvfp4(RequestedPreset(cfg, pass)))
+            return true;
+    return false;
+}
+
+inline unsigned int PassPreset(const Config& cfg, unsigned int pass)
+{
+    const unsigned int requested = RequestedPreset(cfg, pass);
+    // A 4-bit model is asked for by the preset number; the runtime itself gets Model A (preset 1), whose launches our
+    // kernels replace one by one.
+    if (Nvfp4::IsNvfp4(requested))
+        return 1u;
+
+    const unsigned int base = std::min(requested, 3u);
 
     return base;
 }

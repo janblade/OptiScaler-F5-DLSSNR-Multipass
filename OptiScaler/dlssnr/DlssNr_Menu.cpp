@@ -11,6 +11,7 @@
 #include "DlssNr_Weights.h"
 #include "PassProfiles.h"
 #include "DlssNrNative.h"
+#include "NrNvfp4.h"
 
 
 #include <Config.h>
@@ -629,6 +630,93 @@ static bool InheritedProfileCombo(const char* label, CustomOptional<uint32_t, No
         *opt = (uint32_t) (selected - 1);
 
     return true;
+}
+
+// The model a pass runs: the runtime's own presets (0..2), plus DlssNr::Nvfp4's 4-bit and FP8 models (4, 15..20) shown
+// as extra items. Values above 3 are this fork's own numbers; the runtime is given preset 1 for them, because our
+// kernels replace its launches one by one (see dlssnr/NrNvfp4.h). A pass that asks for one of these and cannot get it
+// is NOT applied -- there is no fallback; the reason shows in red under the combo. The option type covers both the
+// pass 1 key (always set) and the later-pass keys (absent = inherit pass 1); allowInherit says which card this is.
+template <typename PresetOption> static void NrModelCombo(const char* label, PresetOption* opt, bool allowInherit)
+{
+    static const char* names[] = { "Automatic",
+                                   "Preset A (main model)",
+                                   "Preset B (small model)",
+                                   "Original - NVFP4 (4-bit kernels)",
+                                   "NVFP4 2xPass-in-one",
+                                   "NVFP4 3xPass-in-one",
+                                   "FP8 2xPass-in-one",
+                                   "FP8 3xPass-in-one",
+                                   "FP8 2xPass-in-one v2",
+                                   "FP8 3xPass-in-one v2" };
+    static const uint32_t values[] = { 0, 1, 2, 4, 16, 15, 17, 18, 19, 20 };
+    const bool inherited = allowInherit && !opt->has_value();
+    const uint32_t preset = opt->has_value() ? opt->value() : 0u;
+    const char* preview = inherited ? "Inherit pass 1" : "Unavailable preset";
+    if (!inherited)
+        for (int index = 0; index < IM_ARRAYSIZE(names); ++index)
+            if (values[index] == preset)
+                preview = names[index];
+
+    int selected = -1;
+    if (inherited)
+        selected = 0;
+    else
+        for (int index = 0; index < IM_ARRAYSIZE(names); ++index)
+            if (values[index] == preset)
+                selected = allowInherit ? index + 1 : index;
+
+    if (ImGui::BeginCombo(label, preview))
+    {
+        int pick = selected;
+        if (allowInherit && ImGui::Selectable("Inherit pass 1", inherited))
+            pick = 0;
+        for (int index = 0; index < IM_ARRAYSIZE(names); ++index)
+        {
+            const bool itemSelected = !inherited && preset == values[index];
+            if (ImGui::Selectable(names[index], itemSelected))
+                pick = allowInherit ? index + 1 : index;
+            if (itemSelected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+
+        if (pick >= 0)
+            *opt = pick == 0 && allowInherit ? std::optional<uint32_t> {} : values[allowInherit ? pick - 1 : pick];
+    }
+
+    HelpMarker("Which model NR runs on this pass. Preset A: the main model (more detail). Preset B: the small model "
+               "(about half the cost, softer; only in 310.9 DLLs); Default/Automatic lets the DLL decide, which is "
+               "the small model on 310.9 DLLs. 310.8 DLLs have only the main model, so the preset changes nothing "
+               "there.\n"
+               "Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one: 4-bit models for RTX 50 series GPUs "
+               "(D3D12 path; files in OptiScaler\\nvfp4). They carry all their own weights and use none of the "
+               "runtime's, so any NR runtime that offers the original model (preset 1) works, such as 310.8.0 or "
+               "310.9.16.0.\n"
+               "There is no fallback: if they cannot run, NR is not applied and the reason is shown here in red.\n"
+               "FP8 2xPass-in-one, FP8 3xPass-in-one: the same two looks as FP8 models for RTX 40 and 50 series GPUs "
+               "(NVIDIA's own FP8 kernels with weights of ours; files in OptiScaler\\nvfp4\\fp8). They too use none "
+               "of the runtime's weights, and are not applied if they cannot run.\n"
+               "FP8 2xPass-in-one v2, FP8 3xPass-in-one v2: the same two FP8 models with other weights.\n"
+               "2xPass-in-one and 3xPass-in-one give the look of two or three passes in one. Run either as ONE pass: "
+               "Cinematic, intensity, tone and structure at 1.\n"
+               "Changing the model rebuilds this pass and resets its history. Passes 4 and up use Pass 1's preset.");
+
+    if (!inherited && DlssNr::Nvfp4::IsNvfp4(preset))
+    {
+        if (const auto problem = DlssNr::Nvfp4::Problem(); !problem.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+            ImGui::TextWrapped("%s model is NOT running, NR is not applied: %s",
+                               DlssNr::Nvfp4::IsFp8(preset) ? "FP8" : "4-bit", problem.c_str());
+            ImGui::PopStyleColor();
+        }
+        else if (DlssNr::Nvfp4::Running())
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f),
+                               DlssNr::Nvfp4::IsFp8(preset) ? "FP8 model running" : "4-bit kernels running");
+        else
+            ImGui::TextDisabled(DlssNr::Nvfp4::IsFp8(preset) ? "FP8 model starting..." : "4-bit kernels starting...");
+    }
 }
 
 // This fork's starting point for the "Model passes" slider, one per pass count: the count, and NR on, on FP8 and with
@@ -1624,6 +1712,23 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
                                     "real cost.");
         if (finishedPicture)
             ImGui::TextDisabled("Includes time shared with other GPU work.");
+
+        // A pass asks for a 4-bit model: its state, from the same source as the Model passes page's red line.
+        const auto& cfg = *Config::Instance();
+        if (!vulkan && DlssNr::Profiles::WantsNvfp4(cfg, std::clamp(cfg.DlssNrPasses.value_or_default(), 1u,
+                                                                    DlssNr::MaxPassCount)))
+        {
+            if (const auto problem = DlssNr::Nvfp4::Problem(); !problem.empty())
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+                ImGui::TextWrapped("4-bit model is NOT running, NR is not applied: %s", problem.c_str());
+                ImGui::PopStyleColor();
+            }
+            else if (DlssNr::Nvfp4::Running())
+                ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "4-bit kernels running");
+            else
+                ImGui::TextDisabled("4-bit kernels starting...");
+        }
 
         if (!vulkan && DlssNr::BackendName()[0] != 0)
             ImGui::TextDisabled("Model backend: %s", DlssNr::BackendName());
@@ -5128,18 +5233,11 @@ static void RenderPassesPage(Config* config, float menuResScale)
     ImGui::TextWrapped("Settings apply when you release a slider.");
     static const char* styles[] = { "Standard", "Natural", "Cinematic" };
     static const char* inheritedStyles[] = { "Auto (inherit pass 1)", "Standard", "Natural", "Cinematic" };
-    // [DlssNr] Preset / Pass2Preset / Pass3Preset, the model's DLSSNR.Hint.Render.Preset: 1 and 2 named as NVIDIA names
-    // its presets (A = 1, B = 2). On 310.9 DLLs 1 selects the main model and 2 the small one, and any other value (0,
-    // Default, included) falls back to 2; 310.8 DLLs have only the main model. A saved 3 behaves as 2 and shows as B.
-    static const char* presets[] = { "Default", "Preset A (main model)", "Preset B (small model)" };
-    static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset A (main model)",
-                                              "Preset B (small model)" };
-    static const char* presetHelp =
-        "Which model NR runs on this pass. Preset A: the main model (more detail). Preset B: the small model (about "
-        "half "
-        "the cost, softer; only in 310.9 DLLs). Default: the DLL decides, which is the small model on 310.9 DLLs. "
-        "310.8 "
-        "DLLs have only the main model, so the preset changes nothing there. Passes 4 and up use Pass 1's preset.";
+    // [DlssNr] Preset / Pass2Preset / Pass3Preset, the model's DLSSNR.Hint.Render.Preset. The runtime's own presets are
+    // named as NVIDIA names them (A = 1, B = 2); values 4 and 15..20 are this fork's NVFP4/FP8 models (see NrModelCombo
+    // above), for which the runtime is given preset 1. On 310.9 DLLs 1 selects the main model and 2 the small one, and
+    // any other value (0, Default, included) falls back to 2; 310.8 DLLs have only the main model. A saved 3 behaves as
+    // 2 and shows as B.
 
     ModelWeightsCard(config, menuResScale);
 
@@ -5149,10 +5247,7 @@ static void RenderPassesPage(Config* config, float menuResScale)
         if (ImGui::Combo("Style", &style, styles, IM_ARRAYSIZE(styles)))
             config->DlssNrStyle = (uint32_t) style;
         HelpMarker("Look profile: Standard, Natural or Cinematic. Intensity sets its strength.");
-        int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 2u);
-        if (ImGui::Combo("Preset", &preset, presets, IM_ARRAYSIZE(presets)))
-            config->DlssNrPreset = (uint32_t) preset;
-        HelpMarker(presetHelp);
+        NrModelCombo("Preset", &config->DlssNrPreset, false);
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);
@@ -5168,8 +5263,7 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass2Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
-        InheritedProfileCombo("Preset", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        HelpMarker(presetHelp);
+        NrModelCombo("Preset", &config->DlssNrPass2Preset, true);
         DeferredSlider("Intensity", &config->DlssNrPass2Intensity, 0.0f, 2.0f,
                        config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass2LocalStructure, 0.0f, 2.0f,
@@ -5190,8 +5284,7 @@ static void RenderPassesPage(Config* config, float menuResScale)
     {
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
         InheritedProfileCombo("Style", &config->DlssNrPass3Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
-        InheritedProfileCombo("Preset", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        HelpMarker(presetHelp);
+        NrModelCombo("Preset", &config->DlssNrPass3Preset, true);
         DeferredSlider("Intensity", &config->DlssNrPass3Intensity, 0.0f, 2.0f,
                        config->DlssNrIntensity.value_or_default(), "%.2f", true);
         DeferredSlider("Local structure", &config->DlssNrPass3LocalStructure, 0.0f, 2.0f,

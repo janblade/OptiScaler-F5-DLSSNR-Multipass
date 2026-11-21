@@ -90,7 +90,8 @@ class VkPresentBridgeCore
     // overwrites `source` again). `source` rests in COMMON and the same size and format family as the back buffer. The
     // back buffer stays in PRESENT.
     bool CopyFrame(ID3D12Resource* source, ID3D12Fence* waitFence, uint64_t waitValue, ID3D12Fence* afterFence,
-                   uint64_t afterValue, ID3D12Fence* signalFence, uint64_t signalValue, std::string& why);
+                   uint64_t afterValue, ID3D12Fence* signalFence, uint64_t signalValue, std::string& why,
+                   const D3D12_PLACED_SUBRESOURCE_FOOTPRINT* bufferFootprint = nullptr);
 
     // The real window's client area is not the swapchain's size (the game has not resized yet): a present that tells the
     // game so (VK_ERROR_OUT_OF_DATE_KHR) makes it recreate the swapchain. False while the window is minimised.

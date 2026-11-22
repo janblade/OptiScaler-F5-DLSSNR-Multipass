@@ -8355,6 +8355,19 @@ void Shutdown()
 
     Late::nativeHdr = {};
     g_compose.reset();
+
+    // NR off frees the runtime's textures and its feature above. The 4-bit layers keep kernels, weights and buffers
+    // for the process, so this is the point to hand them back: queued on NrLifetime, so nothing is freed while a
+    // command list that refers to them is still running. If NR was switched on again by then, this stays as it is.
+    if (auto nvfp4Device = DlssNr::Nvfp4::LastDevice())
+        NrLifetime().Retire(
+            [nvfp4Device]
+            {
+                std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+                if (g_nr.feature == nullptr)
+                    DlssNr::Nvfp4::Release(nvfp4Device);
+                nvfp4Device->Release();
+            });
 }
 
 bool ReleaseFinishedIdle(ID3D12GraphicsCommandList* cmd, unsigned long long epoch)

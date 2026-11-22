@@ -83,6 +83,11 @@ unsigned long long Faults();
 // only once every command list recorded before RetireIdleSizes returned has finished on the GPU. Sizes set aside count
 // towards the limit of sizes held until they are freed. Without these calls, sizes stay until ReleaseDevice().
 uint64_t RetireIdleSizes(ID3D12Device* device, unsigned keep, unsigned recent);
+// The same ticket rule for a model's weights and its small kernels: RetireIdleModels sets aside the weights of every
+// model of `device` beyond the `keep` most recently used that no evaluation used among the last `recent` ones, and
+// returns a ticket. FreeRetired(device, ticket) frees the sizes and the models that its call and earlier ones set
+// aside. Weights are made again by LoadWeights() when a pass next asks for that model.
+uint64_t RetireIdleModels(ID3D12Device* device, unsigned keep, unsigned recent);
 void FreeRetired(ID3D12Device* device, uint64_t ticket);
 void SkipPair(ID3D12GraphicsCommandList* commands);
 }

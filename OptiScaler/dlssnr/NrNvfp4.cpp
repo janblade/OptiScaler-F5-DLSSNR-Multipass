@@ -11,9 +11,11 @@
 #include "../nvfp4/NrNet4.h"
 #include "../nvfp4/NrSwin4.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <mutex>
 
 namespace DlssNr::Nvfp4
@@ -38,6 +40,12 @@ std::filesystem::path gAssets;
 bool gAskedDestroy = false;
 std::string gEnableProblem; // a layer that could not be switched on: nothing can run
 std::string gRefused;       // a path that cannot run these models at all
+// The device the layers last recorded on. Held with one reference of our own, so a queued Release() after NR is
+// switched off still has the device it must free. Guarded by gMutex.
+ID3D12Device* gLastDevice = nullptr;
+// Frame tickets (ours) -> the tickets the layers set aside for that frame. Guarded by gMutex.
+uint64_t gTicket = 0;
+std::map<uint64_t, std::pair<uint64_t, uint64_t>> gTickets;
 bool gOurs = false;         // the evaluation in progress asked for a 4-bit model
 bool gPassInOne = false;
 std::string gSetMissing;     // the model asked for lacks a weight file: nothing else is run in its place
@@ -395,12 +403,45 @@ bool Running()
 
 unsigned long long RetireIdle(ID3D12Device* device, unsigned evaluations)
 {
+    // Every frame hands us the device, so remembering it costs nothing and keeps a queued Release() safe.
+    std::lock_guard guard(gMutex);
+    if (device != gLastDevice)
+    {
+        if (gLastDevice)
+            gLastDevice->Release();
+        if (device)
+            device->AddRef();
+        gLastDevice = device;
+    }
     // Three sizes stay ready (a game that steps its render resolution moves between a few), and every size a pass of
     // this frame used, so that a frame with more than three pass sizes does not allocate them again each frame.
-    return NrFfnV2::RetireIdleSizes(device, 3, evaluations);
+    // One model's weights stay ready, since switching between two models in the menu should not cost a reload.
+    const auto sizes = NrFfnV2::RetireIdleSizes(device, 3, evaluations);
+    const auto models = NrFfnV2::RetireIdleModels(device, 1, evaluations);
+    if (!sizes && !models)
+        return 0;
+    // F5 gives one ticket per frame back; the layers keep their own counters, so this pairs them up.
+    const auto combined = ++gTicket;
+    gTickets[combined] = {sizes, models};
+    return combined;
 }
 
-void FreeRetired(ID3D12Device* device, unsigned long long ticket) { NrFfnV2::FreeRetired(device, ticket); }
+void FreeRetired(ID3D12Device* device, unsigned long long ticket)
+{
+    std::lock_guard guard(gMutex);
+    // A frame's ticket completes later than all earlier ones, so everything set aside up to it can go.
+    unsigned long long freed = 0;
+    for (auto i = gTickets.begin(); i != gTickets.end();)
+        if (i->first <= ticket)
+        {
+            freed = std::max({freed, i->second.first, i->second.second});
+            i = gTickets.erase(i);
+        }
+        else
+            ++i;
+    if (freed)
+        NrFfnV2::FreeRetired(device, freed);
+}
 
 void Release(ID3D12Device* device)
 {
@@ -414,7 +455,19 @@ void Release(ID3D12Device* device)
     NrSwin4::ReleaseDevice(device);
     NrNet4::ReleaseDevice(device);
     NrFp8::ReleaseDevice(device);
+    std::lock_guard guard(gMutex);
+    if (device == gLastDevice)
+    {
+        gLastDevice->Release();
+        gLastDevice = nullptr;
+    }
     Say("released the 4-bit kernels, the FP8 records, weights and buffers of a device");
+}
+
+ID3D12Device* LastDevice()
+{
+    std::lock_guard guard(gMutex);
+    return gLastDevice;
 }
 
 std::string Status()

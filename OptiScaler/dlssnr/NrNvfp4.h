@@ -62,13 +62,17 @@ void Refuse(const char* reason);
 std::string Problem();
 // The last evaluation that asked for a 4-bit model ran our kernels.
 bool Running();
-// The feed-forward buffers are kept per picture size. After a frame's evaluations (`evaluations` of them): sets aside
-// those of sizes no longer in use and returns a ticket (0: nothing was set aside). Call FreeRetired(device, ticket) once
-// every command list recorded so far has finished on the GPU; until then they count towards the limit of sizes held.
+// The feed-forward buffers are kept per picture size, the model weights per model. After a frame's evaluations
+// (`evaluations` of them): sets aside what is no longer in use and returns a ticket (0: nothing was set aside). Call
+// FreeRetired(device, ticket) once every command list recorded so far has finished on the GPU; until then they count
+// towards what the device holds.
 unsigned long long RetireIdle(ID3D12Device* device, unsigned evaluations);
 void FreeRetired(ID3D12Device* device, unsigned long long ticket);
 // Destroys our kernels, weights and buffers on the device; they load again when a pass next asks. Only once the
 // device's queue has drained and every NR feature created on it is gone, or the device is lost.
 void Release(ID3D12Device* device);
+// The device the layers last recorded on, held with one reference of our own so it stays valid here. nullptr before the
+// first evaluation. The caller that releases a queued Release() also releases this reference.
+ID3D12Device* LastDevice();
 std::string Status();
 } // namespace DlssNr::Nvfp4

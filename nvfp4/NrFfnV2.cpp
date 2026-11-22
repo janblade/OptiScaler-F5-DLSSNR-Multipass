@@ -107,6 +107,7 @@ struct ModelWeights {
     bool ready = false;
     std::string failure;
     Buffer weights;
+    uint64_t used = 0;                              // State::evaluations when a pair last ran with these weights
     uint64_t trained = 0;                       // where the second set (ffn_v2_trained.bin) starts in `weights`; 0: there is none
     bool trainedIsFirst = false;                // ffn_v2.bin is not there: the buffer starts with ffn_v2_trained.bin
     std::array<uint64_t, 14> setAt{};            // the same for a numbered set (ffn_v2_set<n>.bin)
@@ -179,6 +180,10 @@ struct State {
     // Buffers of frame sizes no longer in use, kept until the host says the GPU has finished with them (RetireIdleSizes).
     struct Retired { ID3D12Device* device = nullptr; uint64_t ticket = 0; Session session; };
     std::vector<Retired> retired;
+    // A model's weights and small kernels, set aside the same way (RetireIdleModels): recorded command lists refer to
+    // them, so they free only once the host says the GPU has finished.
+    struct RetiredModel { ID3D12Device* device = nullptr; uint64_t ticket = 0; ModelWeights model; };
+    std::vector<RetiredModel> retiredModels;
     uint64_t retireTicket = 0;
     uint64_t faults = 0;                        // Faults(): replacements that failed, pairs run with other weights than asked for
     std::array<bool, 14> setFile{};             // ffn_v2_set<n>.bin of Model A is in the asset folder (SetComplete)
@@ -476,6 +481,7 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
     LoadKernels(d, device);
     auto& weights = d.models[model];
     LoadWeights(weights, device, s.options.modelFolders ? s.options.assets / kModelFolder[model] : s.options.assets);
+    weights.used = s.evaluations;
     const uint32_t tokens = o.dims[0] * o.dims[1], tiles = (tokens + 127) / 128;
     auto& session = SessionFor(device, tokens);
     auto& buffers = session.blocks[block];
@@ -863,6 +869,51 @@ void FreeRetired(ID3D12Device* device, uint64_t ticket) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     std::erase_if(s.retired, [&](const State::Retired& r) { return r.device == device && r.ticket <= ticket; });
+    // Set-aside model weights: the GPU has finished with everything that referred to them, so their kernels and the
+    // weight buffer go. They are made again by LoadWeights() when a pass next asks for that model.
+    std::erase_if(s.retiredModels, [&](const State::RetiredModel& r)
+    {
+        if (r.device != device || r.ticket > ticket)
+            return false;
+        // On a lost device these calls fail, which is fine: the objects die with it.
+        if (s.destroyFunction)
+            for (auto* f : {&r.model.partial, &r.model.reduce, &r.model.direct})
+                if (*f) s.destroyFunction(device, *f);
+        if (s.destroyModule && r.model.smallModule)
+            s.destroyModule(device, r.model.smallModule);
+        for (auto handle : {r.model.partial, r.model.reduce, r.model.direct, r.model.smallModule})
+            std::erase_if(s.targets, [&](const auto& t) { return t.first == handle && t.second.device == device; });
+        return true;
+    });
+}
+
+// Model weights that no pass has asked for in `recent` evaluations, beyond the `keep` most recently used, are set
+// aside. FreeRetired(device, ticket) frees them once every command list recorded before this call has finished on the
+// GPU; until then they count towards what the device holds. Returns 0 when nothing was set aside.
+uint64_t RetireIdleModels(ID3D12Device* device, unsigned keep, unsigned recent) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    const auto found = s.devices.find(device);
+    if (found == s.devices.end())
+        return 0;
+    std::vector<std::pair<uint64_t, unsigned>> used;   // (last used, model)
+    for (unsigned m = 0; m < found->second.models.size(); ++m)
+        if (found->second.models[m].used)
+            used.emplace_back(found->second.models[m].used, m);
+    if (used.size() <= keep)
+        return 0;
+    std::sort(used.rbegin(), used.rend());             // most recently used first
+    uint64_t ticket = 0;
+    for (size_t i = keep; i < used.size(); ++i) {
+        if (used[i].first + recent >= s.evaluations)
+            continue;
+        auto& model = found->second.models[used[i].second];
+        if (!ticket)
+            ticket = ++s.retireTicket;
+        s.retiredModels.push_back({device, ticket, std::move(model)});
+        model = ModelWeights{};
+    }
+    return ticket;
 }
 
 void SkipPair(ID3D12GraphicsCommandList* commands) {
@@ -892,6 +943,7 @@ void ReleaseDevice(ID3D12Device* device) {
     }
     for (auto i = s.sessions.begin(); i != s.sessions.end();) i = i->first.first == device ? s.sessions.erase(i) : std::next(i);
     std::erase_if(s.retired, [&](const State::Retired& r) { return r.device == device; });
+    std::erase_if(s.retiredModels, [&](const State::RetiredModel& r) { return r.device == device; });
     for (auto i = s.targets.begin(); i != s.targets.end();) i = i->second.device == device ? s.targets.erase(i) : std::next(i);
     s.lists.clear();                        // command lists of the device go with it; their addresses may be reused
 }

@@ -9,6 +9,7 @@ cbuffer Params : register(b0)
     float frames;
     uint width, height;
     float fade;
+    float skipContrast; // > 0.5 in Direct DLSS SR: skip dead Reference loads and ExpandedReference write
 };
 Texture2D<uint2> State : register(t0);
 #include "VkFormat.hlsli"
@@ -39,7 +40,11 @@ VK_FORMAT("rgba16f") RWTexture2D<float4> ExpandedReference : register(u1);
             int2 q = clamp(int2(id.xy) + int2(x, y), int2(0, 0), int2(w, h) - 1);
             uint candidate = State.Load(int3(q, 0)).x & 127u;
 #ifdef DLSSNR_GHOST_CONTRAST
-            [branch] if (candidate > age)
+            if (skipContrast > 0.5)
+            {
+                age = max(age, candidate);
+            }
+            else [branch] if (candidate > age)
             {
                 float4 reference = Reference.Load(int3(q, 0));
                 if (all(isfinite(reference)) && reference.a > 0)
@@ -61,6 +66,7 @@ VK_FORMAT("rgba16f") RWTexture2D<float4> ExpandedReference : register(u1);
         ++bits;
     Field[id.xy] = f16tof32(bits);
 #ifdef DLSSNR_GHOST_CONTRAST
-    ExpandedReference[id.xy] = chosenReference;
+    if (skipContrast <= 0.5)
+        ExpandedReference[id.xy] = chosenReference;
 #endif
 }

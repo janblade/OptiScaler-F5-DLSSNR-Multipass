@@ -67,10 +67,23 @@ struct State{std::recursive_mutex mutex;bool enabled=false,candidate=false,resta
  std::vector<Session>graveyard;
  DlssNrKernelProfile::Profiler prof;std::map<NVDX_ObjectHandle,DlssNrKernelProfile::Info>fnInfo; // kernel census and per-group GPU timing (ini KernelProfile)
  DlssNrVitReuse::Filter vit;std::map<NVDX_ObjectHandle,std::pair<DlssNrVitReuse::Role,DlssNrVitReuse::KernelSet>>vitRole; // ViT reuse: launches of the ViT run are dropped on reused frames; each kernel set has its own rate
- // ViT reuse copy mode (plain set): our copy of the run's 2-D output per device and feature, and the copy kernel per device (the device is held,
- // so its address is not reused; failed = its load failed, not retried). Replaced buffers are retired, never freed.
- struct VitCopy{Buffer buf;uint64_t dst=0,bytes=0;};std::map<std::pair<ID3D12Device*,const void*>,VitCopy>vitCopies;
- struct VitCopyKernel{ComPtr<ID3D12Device>device;NVDX_ObjectHandle fn=nullptr;bool failed=false;};std::map<ID3D12Device*,VitCopyKernel>vitCopyFn;std::vector<Buffer>vitRetired;
+ // ViT reuse copy mode (plain FP16 + FP8): our copy of the run's 2-D output per device and feature, and the copy/EMA
+ // kernels per device.
+ struct VitCopy
+ {
+     Buffer buf;
+     uint64_t dst = 0, bytes = 0;
+     bool hasPrev = false;
+ };
+ std::map<std::pair<ID3D12Device*, const void*>, VitCopy> vitCopies;
+ struct VitCopyKernel
+ {
+     ComPtr<ID3D12Device> device;
+     NVDX_ObjectHandle fn = nullptr, emaFn = nullptr;
+     bool failed = false, emaTried = false;
+ };
+ std::map<ID3D12Device*, VitCopyKernel> vitCopyFn;
+ std::vector<Buffer> vitRetired;
  decltype(&NvAPI_D3D12_CreateCuModule) createModule=nullptr;decltype(&NvAPI_D3D12_CreateCuFunction)createFunction=nullptr;decltype(&NvAPI_D3D12_LaunchCuKernelChain)launch=nullptr;
  decltype(&NvAPI_D3D12_DestroyCuModule)destroyModule=nullptr;decltype(&NvAPI_D3D12_DestroyCuFunction)destroyFunction=nullptr;};
 // Deliberately retain resources until process exit, never free under recorded GPU work.
@@ -159,10 +172,70 @@ const char* VitCopyRecord(State&s,ID3D12GraphicsCommandList*c,DlssNrVitReuse::Co
  try{ComPtr<ID3D12Device>dev;Check(c->GetDevice(IID_PPV_ARGS(&dev)));auto&k=s.vitCopyFn[dev.Get()];if(k.failed)return "the copy kernel could not be loaded";
   if(!k.fn){k.device=dev;NVDX_ObjectHandle m=nullptr;if(!s.createModule||!s.createFunction||s.createModule(dev.Get(),DlssNrVitCopyKernel::fatbin,(NvU32)sizeof DlssNrVitCopyKernel::fatbin,&m)!=NVAPI_OK||s.createFunction(dev.Get(),m,"nr_vit_copy16",&k.fn)!=NVAPI_OK){if(m&&s.destroyModule)s.destroyModule(dev.Get(),m);k.fn=nullptr;k.failed=true;return "the copy kernel could not be loaded";}s.fnInfo[k.fn]=DlssNrKernelProfile::Classify("nr_vit_copy16");}
   const NVDX_ObjectHandle fn=k.fn;auto&v=s.vitCopies[{dev.Get(),s.vit.Feature()}];
-  if(kind==DlssNrVitReuse::Copy::Save){if(v.buf.bytes<bytes){if(v.buf.gpu)s.vitRetired.push_back(v.buf);v.buf=Allocate(dev.Get(),bytes);}v.dst=e.dst;v.bytes=bytes;}
-  else if(!v.buf.gpu||v.dst!=e.dst||v.bytes!=bytes)return "the saved ViT output does not match the network";
-  const uint64_t n=bytes/16;struct Params{uint64_t dst,src,n;}p{kind==DlssNrVitReuse::Copy::Save?v.buf.address():e.dst,kind==DlssNrVitReuse::Copy::Save?e.dst:v.buf.address(),n};
-  LaunchBlob(c,fn,&p,sizeof p,{(unsigned)std::min<uint64_t>((n+255)/256,1024),1,1},{256,1,1});}
+  if (kind == DlssNrVitReuse::Copy::Save)
+  {
+      const bool canEma = s.vit.LastSet() == DlssNrVitReuse::KernelSet::Plain && v.hasPrev && v.buf.gpu &&
+                          v.dst == e.dst && v.bytes == bytes;
+      if (v.buf.bytes < bytes)
+      {
+          if (v.buf.gpu)
+              s.vitRetired.push_back(v.buf);
+          v.buf = Allocate(dev.Get(), bytes);
+      }
+      v.dst = e.dst;
+      v.bytes = bytes;
+      v.hasPrev = true;
+      if (canEma)
+      {
+          if (!k.emaTried)
+          {
+              k.emaTried = true;
+              NVDX_ObjectHandle em = nullptr;
+              if (s.createModule && s.createFunction &&
+                  s.createModule(dev.Get(), DlssNrVitCopyKernel::emaFp16Ptx,
+                                 (NvU32) sizeof DlssNrVitCopyKernel::emaFp16Ptx, &em) == NVAPI_OK &&
+                  s.createFunction(dev.Get(), em, "nr_vit_ema_fp16", &k.emaFn) == NVAPI_OK)
+              {
+                  s.fnInfo[k.emaFn] = DlssNrKernelProfile::Classify("nr_vit_copy_ema");
+              }
+              else
+              {
+                  if (em && s.destroyModule)
+                      s.destroyModule(dev.Get(), em);
+                  k.emaFn = nullptr;
+              }
+          }
+          if (k.emaFn)
+          {
+              const uint64_t nh = bytes / 2;
+              struct EmaParams
+              {
+                  uint64_t dst, buf, n;
+              } ep { e.dst, v.buf.address(), nh };
+              LaunchBlob(c, k.emaFn, &ep, sizeof ep, { (unsigned) std::min<uint64_t>((nh + 255) / 256, 1024), 1, 1 },
+                         { 256, 1, 1 });
+              return nullptr;
+          }
+      }
+      const uint64_t n = bytes / 16;
+      struct Params
+      {
+          uint64_t dst, src, n;
+      } p { v.buf.address(), e.dst, n };
+      LaunchBlob(c, fn, &p, sizeof p, { (unsigned) std::min<uint64_t>((n + 255) / 256, 1024), 1, 1 }, { 256, 1, 1 });
+  }
+  else
+  {
+      if (!v.buf.gpu || v.dst != e.dst || v.bytes != bytes)
+          return "the saved ViT output does not match the network";
+      const uint64_t n = bytes / 16;
+      struct Params
+      {
+          uint64_t dst, src, n;
+      } p { e.dst, v.buf.address(), n };
+      LaunchBlob(c, fn, &p, sizeof p, { (unsigned) std::min<uint64_t>((n + 255) / 256, 1024), 1, 1 }, { 256, 1, 1 });
+  }
+ }
  catch(const std::exception&){return "the copy could not be recorded";}
  return nullptr;}
 NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList*c,const NVAPI_CU_KERNEL_LAUNCH_PARAMS*k,NvU32 count){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
@@ -243,7 +316,20 @@ void SetPrecision(unsigned precision){auto&s=S();std::lock_guard<std::recursive_
 }
 void SetEnabled(bool on){SetPrecision(on?4u:0u);}
 bool IsActive(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.enabled&&s.active&&!s.restartRequired;}
-void BeginEvaluate(const void*feature,bool reset,unsigned every,unsigned everyPlain,long long slot,ID3D12GraphicsCommandList*cmd,bool profile,unsigned copySets){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.vit.Begin(feature,reset,every,slot,everyPlain,copySets);s.prof.Begin(cmd,profile);}
+void BeginEvaluate(const void* feature, bool reset, unsigned every, unsigned everyPlain, long long slot,
+                   ID3D12GraphicsCommandList* cmd, bool profile, unsigned copySets)
+{
+    auto& s = S();
+    std::lock_guard<std::recursive_mutex> g(s.mutex);
+    if (reset)
+    {
+        for (auto& kv : s.vitCopies)
+            if (kv.first.second == feature)
+                kv.second.hasPrev = false;
+    }
+    s.vit.Begin(feature, reset, every, slot, everyPlain, copySets);
+    s.prof.Begin(cmd, profile);
+}
 bool EndEvaluate(ID3D12GraphicsCommandList*cmd){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.prof.End(cmd);const bool wasOff=s.vit.Disabled();const bool wellFormed=s.vit.End();return (!wellFormed||s.vit.Disabled())&&!wasOff;}
 std::vector<std::string> TakeProfileReports(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.prof.TakeReports();}
 std::string VitStatus(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.vit.Status();}

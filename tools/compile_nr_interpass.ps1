@@ -80,6 +80,11 @@ try {
     }
     $private = Join-Path $shaders "superior"
     Build (Join-Path $private "PrivateCarrier.hlsl") "PrivateEncode" @() "private_encode"
+    Build (Join-Path $private "PrivateCarrier.hlsl") "PrivateEncode" @("-D", "SUPERIOR_PRIVATE_ENCODE_PACKED=1") "private_encode_packed"
+    Build (Join-Path $private "OracleDecomp.hlsl") "OracleDecompMain" @() "oracle_decomp"
+    Build (Join-Path $private "OracleDecomp.hlsl") "OracleDecompMain" @("-D", "ORACLE_DECOMP_PACKED=1") "oracle_decomp_packed"
+    Build (Join-Path $private "OracleTemporal.hlsl") "OracleTemporalMain" @() "oracle_temporal"
+    Build (Join-Path $private "OracleJbu.hlsl") "OracleJbuMain" @() "oracle_jbu"
     Build (Join-Path $private "PrivateCarrier.hlsl") "PrivateDecode" @() "private_fade"
     Build (Join-Path $private "PrivateCarrier.hlsl") "PrivateDecode" @("-D", "SUPERIOR_GHOST_DECODE=1") "private_ghost_decode"
     Build (Join-Path $private "PrivateCarrier.hlsl") "PrivateDecode" @("-D", "SUPERIOR_GHOST_DECODE=1", "-D", "SUPERIOR_GHOST_DECODE_SEED=1") "private_ghost_decode_seed" -asm

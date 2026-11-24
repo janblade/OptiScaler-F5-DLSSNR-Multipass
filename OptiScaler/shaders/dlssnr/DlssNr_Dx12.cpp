@@ -274,6 +274,7 @@ struct NrState
     bool isPort = false;
     void* feature = nullptr;
     bool superiorMainOnlyGains = false; // actual selected NR runtime, cached at feature creation
+    int8_t superiorAreaUsed = -1;       // -1 unset, 0 linear box downsample, 1 encoded superior area downsample
     bool featurePendingSubmission = false;
     unsigned long long featureCreateEpoch = 0;
 
@@ -644,6 +645,9 @@ std::unique_ptr<DlssNrGpuTime> g_gpuTime;
 // we can actually do something about.
 std::unique_ptr<DlssNrGpuTime> g_ngxTime;
 std::optional<double> g_lastNgxTime;
+std::unique_ptr<DlssNrGpuTime> g_superiorTime;
+std::optional<double> g_lastSuperiorTime;
+DlssNr::SuperiorScaling::LiveInfo g_superiorLive {};
 
 // A third, around the exposure scan's copies (DlssNr::ExposureScan::Tick), for what searching costs -- it runs by
 // itself on Auto, so its price is paid by everyone on Auto until it finds or gives up. Averaged over the log interval.
@@ -2502,6 +2506,7 @@ void SwapView(ViewState& v)
     NrState& b = v.nr;
 #define NR_VIEW_SWAP(member) swap(a.member, b.member)
     NR_VIEW_SWAP(superiorMainOnlyGains);
+    NR_VIEW_SWAP(superiorAreaUsed);
     NR_VIEW_SWAP(feature);
     NR_VIEW_SWAP(featurePendingSubmission);
     NR_VIEW_SWAP(featureCreateEpoch);
@@ -4117,12 +4122,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatialReset)
         g_nr.reset = true;
 
+    const bool superiorDirectSrWanted =
+        superior && workWidth <= width && workHeight <= height &&
+        DlssNr::SuperiorScaling::DirectSrWanted(cfg.DlssNrSuperiorMode.value_or_default(),
+                                                cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                                superiorState.srUnavailable, depth != nullptr && guides.depth.valid());
+    const bool superiorOracleWanted =
+        superior && workWidth <= width && workHeight <= height &&
+        DlssNr::SuperiorScaling::IntrinsicOracleSelected(cfg.DlssNrSuperiorMode.value_or_default());
     bool superiorPacked =
-        superior && spatial &&
+        superior && spatial && !superiorDirectSrWanted && !superiorOracleWanted &&
         DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, true,
                                                EdgeCompression::Layout().modelW, EdgeCompression::Layout().modelH);
-    // Exposure calibration alone still needs the original unpacked proxy. Normal Superior rendering bypasses it.
-    const bool spatialNeedsUnpack = !superiorPacked || CalibrationWanted() || CalibrationActive();
+    bool superiorSpatialDirectSr =
+        superior && spatial && superiorDirectSrWanted &&
+        DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, true,
+                                               EdgeCompression::Layout().modelW, EdgeCompression::Layout().modelH);
+    bool superiorSpatialOracle =
+        superior && spatial && superiorOracleWanted &&
+        DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, true,
+                                               EdgeCompression::Layout().modelW, EdgeCompression::Layout().modelH);
+    // Exposure calibration alone still needs the original unpacked proxy. Packed Residual DLAA (HostResolve unwarps),
+    // Spatial Direct DLSS SR (PrivateEncodePacked unwarps), and Spatial Intrinsic 4K-Oracle (OracleDecompPacked
+    // unwarps) bypass it.
+    const bool spatialNeedsUnpack = (!superiorPacked && !superiorSpatialDirectSr && !superiorSpatialOracle) ||
+                                    CalibrationWanted() || CalibrationActive();
     const DlssNr::GuideExtent renderGuideSize { frame.RenderSubrectWidth, frame.RenderSubrectHeight };
     const bool renderGuides = DlssNr::Spatial::UseRenderGuides(superior && workScale == 1.f, true, spatial, width,
                                                                height, workWidth, workHeight, renderGuideSize);
@@ -4137,6 +4161,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.reset = true;
         spatial = false;
         superiorPacked = false;
+        superiorSpatialDirectSr = false;
+        superiorSpatialOracle = false;
     }
     // [DlssNr] SuperiorAtNative: the private DLSS at 100% and above. Above 100% it works at native, on the pair after
     // the supersample down-leg, while NR itself keeps its supersampled raster and its ordinary guides.
@@ -4157,8 +4183,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // The Replace curves take the model's answer as the picture and never read the proxy, so the unpack's loss at the
     // edges would land on screen with nothing to cancel it. The unpack then adds it back, measured against the picture the
     // uncompressed path would have shown the model (mode 103), which is built below the way that path builds it.
-    const bool replaceCorrection =
-        spatial && !superiorPacked && DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
+    const bool replaceCorrection = spatial && !superiorPacked && !superiorSpatialDirectSr && !superiorSpatialOracle &&
+                                   DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
 
     // What would rebuild the model below: a stale surface format (ReleaseSurfacesIfFormatChanged), a new size or a new
     // placement. Tuning is left out, it is the user's doing.
@@ -4664,9 +4690,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                                                        modelWidth, modelHeight);
         const unsigned superiorW = superiorPacked ? modelWidth : superiorSupersample ? width : workWidth;
         const unsigned superiorH = superiorPacked ? modelHeight : superiorSupersample ? height : workHeight;
+        const bool passSpatialLayout = superiorPacked || superiorSpatialDirectSr || superiorSpatialOracle;
         if (SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height, superiorW, superiorH, workScale,
                                frame, temporal, depth && guides.depth.valid(),
-                               superiorPacked ? &EdgeCompression::Layout() : nullptr) != SuperiorRun::Began::Run)
+                               passSpatialLayout ? &EdgeCompression::Layout() : nullptr,
+                               superiorPacked) != SuperiorRun::Began::Run)
         {
             device->Release();
             return;
@@ -4769,6 +4797,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_ngxTime == nullptr)
         g_ngxTime = std::make_unique<DlssNrGpuTime>(device, "model");
+
+    if (g_superiorTime == nullptr)
+        g_superiorTime = std::make_unique<DlssNrGpuTime>(device, "superior");
 
     if (g_scanTime == nullptr)
         g_scanTime = std::make_unique<DlssNrGpuTime>(device, "exposure scan");
@@ -5562,6 +5593,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         modelInput = nativeProxy;
     }
 
+    auto* const superiorGenForJitter = superior ? superiorState.current.get() : nullptr;
+    const bool superiorDirectSrReady = superiorDirectSrWanted && (!spatial || superiorSpatialDirectSr) &&
+                                       superiorGenForJitter != nullptr && superiorGenForJitter->PrivateReady();
+    const bool superiorJitterEligible =
+        superior && !superiorSupersample && (superiorDirectSrReady || superiorOracleWanted);
+    const auto superiorJitter =
+        superiorJitterEligible
+            ? DlssNr::SuperiorScaling::DirectSrJitter(cfg.DlssNrSuperiorJitter.value_or_default(), frame.BeforeUpscale,
+                                                      g_nr.heldActive, workWidth, workHeight, width, height, g_frames)
+            : DlssNr::SuperiorScaling::JitterPair {};
+
     if (reduced && (!spatial || replaceCorrection) && g_nr.colorSmall != nullptr)
     {
         bool built = false;
@@ -5621,12 +5663,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // to be harmless only because the old box-average never branched on either field.
             down.Passthrough = isHdrBuffer ? 0u : 1u;
             down.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-            if (superior)
+            const bool hasSuperiorJitter = superiorJitter.x != 0.0f || superiorJitter.y != 0.0f;
+            const bool useSuperiorArea = superior && (!isHdrBuffer || hasSuperiorJitter);
+            if (g_nr.superiorAreaUsed >= 0 && (g_nr.superiorAreaUsed != 0) != useSuperiorArea)
+                g_nr.reset = true;
+            g_nr.superiorAreaUsed = useSuperiorArea ? 1 : 0;
+            if (useSuperiorArea)
             {
                 DlssNr::Superior::DlssNrConstants area {};
                 area.Mode = 2u;
                 area.Width = workWidth;
                 area.Height = workHeight;
+                if (hasSuperiorJitter)
+                {
+                    area.MvScaleX = superiorJitter.x;
+                    area.MvScaleY = superiorJitter.y;
+                    area.GuideWidth = 1u;
+                }
                 area.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
                 superiorInputReady = DispatchSuperiorPass(cmdList, area, modelInput, nullptr, nullptr, nullptr, nullptr,
                                                           nullptr, g_nr.colorSmall, nullptr);
@@ -5712,9 +5765,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             guideConstants.depthRect[2] = guideConstants.depthRect[3] = 1.0f;
         }
 
+        auto packConstants = MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f);
+        if ((superiorSpatialDirectSr || superiorSpatialOracle) &&
+            (superiorJitter.x != 0.0f || superiorJitter.y != 0.0f) && workWidth > 0 && workHeight > 0)
+        {
+            packConstants.padding[0] = superiorJitter.x * (float(width) / float(workWidth));
+            packConstants.padding[1] = superiorJitter.y * (float(height) / float(workHeight));
+        }
+
         const bool packedColor =
-            DispatchSpatial(cmdList, MakeConstants(spatialLayout, 100, guides, 1.0f, 1.0f), g_nr.colorCopy, nullptr,
-                            nullptr, EdgeCompression::color);
+            DispatchSpatial(cmdList, packConstants, g_nr.colorCopy, nullptr, nullptr, EdgeCompression::color);
         const bool packedGuides =
             packedColor && DispatchSpatial(cmdList, guideConstants, g_nr.colorCopy, depthIn, motionIn,
                                            EdgeCompression::depth, EdgeCompression::motion, superior ? 2u : 0u);
@@ -6127,9 +6187,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // reaching this through the D3D12 bridge (IFeature_VkwDx12) uses it for the fp8 set too: on the native Vulkan path
         // the kept result was overwritten between frames (dark scenes flashed), and the copy does not depend on it staying.
         const bool vitEveryFrame = reusePlan.active || cachePlan.runs;
-        const unsigned copySets =
-            DlssNrVitReuse::kCopyPlain | (State::Instance().api == Vulkan ? DlssNrVitReuse::kCopyFp8 : 0u);
-        DlssNrNative::BeginEvaluate(passFeature, passReset,
+        const unsigned copySets = DlssNrVitReuse::kCopyPlain | DlssNrVitReuse::kCopyFp8;
+        DlssNrNative::BeginEvaluate(passFeature, passReset || superiorReset,
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEvery.value_or_default(), 1u, 2u),
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_nr.successfulDispatches & 0x3FFFFFFFFFFFFFFFull), cmdList,
@@ -6332,8 +6391,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     bool spatialUnpacked = false;
     bool spatialFailed = false;
 
-    if (spatial && (!superiorPacked || CalibrationActive()) && result == NVSDK_NGX_Result_Success &&
-        finalAnswer != nullptr)
+    if (spatial && ((!superiorPacked && !superiorSpatialDirectSr && !superiorSpatialOracle) || CalibrationActive()) &&
+        result == NVSDK_NGX_Result_Success && finalAnswer != nullptr)
     {
         // Replace's edge-loss correction measures against the unstyled picture; while an input style is on it would put
         // the game's texture back in the compressed edge bands only, so it is left out (Replace shows the painting).
@@ -6696,44 +6755,164 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         else if (superiorGeneration && (!superiorSupersample || superDownOk) &&
                  (superiorGeneration->shaping || (spatial && superiorGainScales.low < 1.0f)))
         {
+            if (g_superiorTime != nullptr)
+                g_superiorTime->Start(cmdList);
             auto& g = *superiorGeneration;
             const bool modelPair = g.shaping && !superiorSupersample;
-            auto* shapingProxy = g.packed ? modelInput : modelPair ? ordinaryProxy : resolveProxy;
-            auto* answer = g.packed ? finalAnswer : modelPair ? ordinaryAnswer : resolveAnswer;
-            auto* residual = g.PrivateReady() && depth && guides.depth.valid()
-                                 ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, answer, motionIn, guides,
-                                                          frame, superiorReset, g_nr.heldActive,
-                                                          g.packed ? EdgeCompression::depth : nullptr,
-                                                          g.packed ? EdgeCompression::motion : nullptr,
-                                                          { spatialGuideLayout.modelW, spatialGuideLayout.modelH },
-                                                          SuperiorDepthPrecision(guideDesc.Format))
-                                 : nullptr;
-            const bool signedResidual = residual != nullptr;
-            if (!residual)
-                residual = answer;
-            const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
-                                                                   superiorGainScales, g_nr.superiorMainOnlyGains);
-            auto* low = residual && (gains.high != 1.0f || gains.low != 1.0f)
-                            ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, signedResidual)
-                            : nullptr;
-            DlssNr::Superior::Fields::SetBandGains(resolveParams, gains.high, gains.low);
-            DlssNr::SuperiorScaling::SetGuidedRange(resolveParams, workScale);
-            // A raw NR answer when temporal stabilization is inactive, else the decoded signed DLSS residual.
-            DlssNr::Superior::Fields::SetResolveFlags(resolveParams, low != nullptr, !signedResidual);
-            auto* pso = SuperiorResolvePipeline(resolveParams, !signedResidual, !signedResidual && g.shaping, g.packed,
-                                                g.warpCache.Get() != nullptr);
-            const bool lowReady = (gains.high == 1.0f && gains.low == 1.0f) || low != nullptr;
+            auto* shapingProxy = (g.packed || g.spatialInput) ? modelInput : modelPair ? ordinaryProxy : resolveProxy;
+            auto* answer = (g.packed || g.spatialInput) ? finalAnswer : modelPair ? ordinaryAnswer : resolveAnswer;
+            const bool haveDepthNow = depth != nullptr && guides.depth.valid();
+            ID3D12Resource* residual = nullptr;
+            ID3D12Resource* resolveSource = shapingProxy;
+            ID3D12Resource* auxT5 = nullptr;
+            ID3D12Resource* resolveT3 = motionIn;
+            bool oracleReady = false;
+            bool directSrReady = false;
+            bool signedResidual = false;
+            bool lowReady = true;
+            if (g.intrinsicOracle && !spatialFailed)
+            {
+                const auto oracleOut = SuperiorRun::RunIntrinsicOracle(
+                    g, *this, cmdList, shapingProxy, answer, nativeProxy, haveDepthNow ? depthIn : nullptr, motionIn,
+                    guides, frame, superiorReset, g_nr.heldActive, superiorJitter);
+                if (oracleOut.intrinsic && oracleOut.proxy)
+                {
+                    resolveSource = oracleOut.proxy;
+                    residual = oracleOut.intrinsic;
+                    auxT5 = (!oracleOut.preJbu && haveDepthNow) ? depthIn : nullptr;
+                    if (!oracleOut.preJbu && oracleOut.depth != nullptr)
+                        resolveT3 = oracleOut.depth;
+                    DlssNr::Superior::Fields::SetOracleResolve(
+                        resolveParams, haveDepthNow, frame.DepthInverted, guides.depth.x, guides.depth.y,
+                        guides.depth.width, guides.depth.height, cfg.DlssNrSuperiorDirectSrSharpness.value_or_default(),
+                        cfg.DlssNrSuperiorNativeDetail.value_or_default(), oracleOut.preJbu,
+                        !oracleOut.preJbu && oracleOut.depth != nullptr);
+                    oracleReady = true;
+                }
+            }
+            if (!oracleReady)
+            {
+                residual = !g.intrinsicOracle && g.PrivateReady() && !spatialFailed && haveDepthNow
+                               ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, answer, motionIn, guides,
+                                                        frame, superiorReset, g_nr.heldActive,
+                                                        g.packed ? EdgeCompression::depth : nullptr,
+                                                        g.packed ? EdgeCompression::motion : nullptr,
+                                                        { spatialGuideLayout.modelW, spatialGuideLayout.modelH },
+                                                        SuperiorDepthPrecision(guideDesc.Format), superiorJitter,
+                                                        cfg.DlssNrSuperiorDetailRecovery.value_or_default())
+                               : nullptr;
+                directSrReady = g.directSr && residual != nullptr;
+                signedResidual = !directSrReady && residual != nullptr;
+                if (!residual)
+                    residual = answer;
+                if (directSrReady)
+                {
+                    // When spatialInput is active, shapingProxy/answer live on the packed modelW x modelH grid:
+                    // disable Quality's work-res HUD guard (gGuideWidth=0) so SuperiorDirectSrEdit never reads
+                    // packed textures at rectilinear UVs (static HUD fast-early-out on cC still runs).
+                    const bool haveRectilinearWorkAnswer = answer != nullptr && !g.spatialInput;
+                    DlssNr::Superior::Fields::SetDirectSrResolve(
+                        resolveParams, haveRectilinearWorkAnswer, cfg.DlssNrSuperiorNativeDetail.value_or_default(),
+                        g.directSrPerf, cfg.DlssNrSuperiorDirectSrSharpness.value_or_default());
+                    auxT5 = (g.directSrPerf || !haveRectilinearWorkAnswer) ? nullptr : answer;
+                }
+                else
+                {
+                    const auto gains = DlssNr::SuperiorScaling::BlockGains(
+                        cfg, superiorCovered, superiorCompleted, superiorGainScales, g_nr.superiorMainOnlyGains);
+                    auxT5 = residual && (gains.high != 1.0f || gains.low != 1.0f)
+                                ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, signedResidual)
+                                : nullptr;
+                    DlssNr::Superior::Fields::SetBandGains(resolveParams, gains.high, gains.low);
+                    DlssNr::SuperiorScaling::SetGuidedRange(resolveParams, workScale);
+                    // A raw NR answer when temporal stabilization is inactive, else the decoded signed DLSS residual.
+                    DlssNr::Superior::Fields::SetResolveFlags(resolveParams, auxT5 != nullptr, !signedResidual);
+                    lowReady = (gains.high == 1.0f && gains.low == 1.0f) || auxT5 != nullptr;
+                }
+            }
+            const bool resolvePacked = g.packed || (g.spatialInput && !directSrReady && !oracleReady);
+            auto* pso = SuperiorResolvePipeline(resolveParams, !signedResidual && !directSrReady && !oracleReady,
+                                                !signedResidual && !directSrReady && !oracleReady && g.shaping,
+                                                resolvePacked, resolvePacked && g.warpCache.Get() != nullptr);
             composed = residual && lowReady && pso &&
-                       DispatchPass(cmdList, resolveParams, shapingProxy, residual, resolveOriginal,
-                                    g.packed ? (g.warpCache.Get() ? g.warpCache.Get() : g.warp.Get()) : motionIn,
-                                    exposureTex, resolveTarget, nullptr, low, pso);
+                       DispatchPass(cmdList, resolveParams, resolveSource, residual, resolveOriginal,
+                                    resolvePacked ? (g.warpCache.Get() ? g.warpCache.Get() : g.warp.Get()) : resolveT3,
+                                    exposureTex, resolveTarget, nullptr, auxT5, pso);
+            if (g_superiorTime != nullptr)
+                g_superiorTime->End(cmdList);
             if (!composed)
                 SuperiorRun::Fail("Superior reconstruction failed; keeping the game frame.", frame.SubmissionEpoch);
             else
                 SuperiorRun::Composed(frame.SubmissionEpoch);
+
+            // Update live Superior Scaling telemetry for the menu.
+            DlssNr::SuperiorScaling::LiveInfo live {};
+            live.active = composed;
+            live.directSr = directSrReady;
+            live.directSrPerf = directSrReady && g.directSrPerf;
+            live.intrinsicOracle = oracleReady;
+            live.privateReady = directSrReady || signedResidual || oracleReady;
+            live.haveDepth = haveDepthNow;
+            live.actualPreset = (directSrReady || signedResidual) ? g.actualPreset : 0u;
+            live.workW = g.workWidth;
+            live.workH = g.workHeight;
+            live.outW = (directSrReady || oracleReady) ? g.width : g.workWidth;
+            live.outH = (directSrReady || oracleReady) ? g.height : g.workHeight;
+            live.jitterActive =
+                (directSrReady || oracleReady) && (superiorJitter.x != 0.0f || superiorJitter.y != 0.0f);
+            if (!live.jitterActive && (directSrReady || oracleReady))
+            {
+                if (!cfg.DlssNrSuperiorJitter.value_or_default())
+                    live.jitterPauseReason = 1u;
+                else if (frame.BeforeUpscale)
+                    live.jitterPauseReason = 2u;
+                else if (spatial && !superiorSpatialDirectSr && !superiorSpatialOracle)
+                    live.jitterPauseReason = 3u;
+                else if (workWidth >= width && workHeight >= height)
+                    live.jitterPauseReason = 4u;
+                else if (g_nr.heldActive)
+                    live.jitterPauseReason = 5u;
+                else if (width && height &&
+                         std::min(float(workWidth) / float(width), float(workHeight) / float(height)) < 0.399f)
+                    live.jitterPauseReason = 6u;
+            }
+            if (g.intrinsicOracle && !oracleReady)
+                g.reset = true;
+            if (!live.privateReady)
+            {
+                if (g.intrinsicOracle)
+                    live.fallbackReason = 6u;
+                else if (!haveDepthNow)
+                    live.fallbackReason = 1u;
+                else if (superiorState.srUnavailable)
+                    live.fallbackReason = 2u;
+                else if (DlssNr::SuperiorScaling::Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) ==
+                         DlssNr::SuperiorScaling::NoPrivateDlss)
+                    live.fallbackReason = 3u;
+                else if (workWidth > width || workHeight > height)
+                    live.fallbackReason = 4u;
+                else if (g.privateFailed)
+                    live.fallbackReason = 6u;
+                else
+                    live.fallbackReason = 5u;
+            }
+            else if (DlssNr::SuperiorScaling::DirectSrSelected(cfg.DlssNrSuperiorMode.value_or_default()) &&
+                     !directSrReady)
+            {
+                if (spatial)
+                    live.fallbackReason = 7u;
+                else if (workWidth > width || workHeight > height)
+                    live.fallbackReason = 4u;
+                else if (!haveDepthNow)
+                    live.fallbackReason = 1u;
+            }
+            live.gpuMs = g_lastSuperiorTime.has_value() ? (float) g_lastSuperiorTime.value() : -1.0f;
+            g_superiorLive = live;
         }
         else
         {
+            g_superiorLive = {};
+            g_superiorLive.haveDepth = depth != nullptr && guides.depth.valid();
             // The game's depth rides in the sixth slot (t5, the resolve's depth fade); the stand-in is the source.
             const bool dispatched = DispatchPass(
                 cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal, motionIn, exposureTex,
@@ -7013,6 +7192,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     g_lastNgxTime = ngx;
             }
 
+            if (g_superiorTime != nullptr)
+            {
+                if (auto sup = g_superiorTime->ReadGpuTime(queue); sup.has_value())
+                {
+                    g_lastSuperiorTime = sup;
+                    g_superiorLive.gpuMs = (float) sup.value();
+                }
+            }
+
             if (g_scanTime != nullptr)
             {
                 g_scanTime->ReadGpuTime(queue);
@@ -7136,7 +7324,39 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // The virtual upscaler's backend pass under frame generation (ScopedNrInList) works in its own list: the
     // present-time Finished Picture pass would run on the presenting queue, which is not the game's when the library
     // presents itself.
-    const bool finishedPictureOn = FinishedPictureEffective();
+
+    // Feeder's explicit contract already gives us the finished native picture
+    // and owns its submission/return. Do not defer this private interop list to
+    // the game's unrelated present queue, or run a second deferred DLSS carrier.
+    unsigned int feederContract = 0;
+    const bool feederPicture =
+        params && params->Get("OptiScaler.Feeder.FinishedPicture", &feederContract) == NVSDK_NGX_Result_Success &&
+        feederContract == 1;
+    if (feederPicture)
+    {
+        void* producerQueue = nullptr;
+        unsigned long long producerEpoch = 0;
+        if (params->Get("OptiScaler.Feeder.Queue", &producerQueue) == NVSDK_NGX_Result_Success &&
+            params->Get("OptiScaler.Feeder.SubmissionEpoch", &producerEpoch) == NVSDK_NGX_Result_Success &&
+            producerQueue && producerEpoch)
+        {
+            // A Vulkan game without FG, or a headless Host64, need not advance
+            // the D3D12 overlay/present counter. Waiting on that counter leaves
+            // a newly created NR feature pending forever. The producer supplies
+            // its actual recording/submission epoch, shared by before/after and
+            // by repeated evaluates on that same command list.
+            timingQueue = static_cast<ID3D12CommandQueue*>(producerQueue);
+            submissionEpoch = producerEpoch;
+            static std::once_flag reported;
+            std::call_once(reported,
+                           []
+                           {
+                               LOG_INFO("Feeder NR uses the producer queue and submission clock; independent of the "
+                                        "menu and frame generation");
+                           });
+        }
+    }
+    const bool finishedPictureOn = !feederPicture && FinishedPictureEffective();
     static unsigned lastPrecision=0;
     const unsigned precision=cfg.DlssNrPrecision.value_or_default();
     if(lastPrecision!=precision)
@@ -7327,15 +7547,20 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // Scoped (ScopedNrInList) and unscoped calls in one frame would flip this on every call and reset NR's history each
     // time. They do not mix today: the virtual upscaler, the only scoped caller, stands aside while the game calls its
     // own upscaler.
+
     static unsigned lastFinishedMode = 0;
     if (lastFinishedMode != finishedMode)
     {
         g_nr.reset = true;
         if (g_gpuTime) g_gpuTime->ClearLast();
         if (g_ngxTime) g_ngxTime->ClearLast();
+        if (g_superiorTime)
+            g_superiorTime->ClearLast();
         if (g_scanTime) g_scanTime->ClearLast();
         g_lastGpuTime.reset();
         g_lastNgxTime.reset();
+        g_lastSuperiorTime.reset();
+        g_superiorLive = {};
         Late::Cancel();
         DeferredSr::Cancel();
         lastFinishedMode = finishedMode;
@@ -7379,7 +7604,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         return;
     }
     Late::Cancel();
-    if (!cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() || rayReconstruction)
+    if (feederPicture || !cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() ||
+        rayReconstruction)
     {
         DeferredSr::Cancel();
         if (rayReconstruction && cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrDeferredDlss.value_or_default())
@@ -8315,9 +8541,12 @@ void Shutdown()
     g_capture.release();
     g_gpuTime.reset();
     g_ngxTime.reset();
+    g_superiorTime.reset();
     g_scanTime.reset();
     g_lastNgxTime.reset();
+    g_lastSuperiorTime.reset();
     g_lastGpuTime.reset();
+    g_superiorLive = {};
 
     Late::nativeHdr = {};
     g_compose.reset();
@@ -8366,6 +8595,12 @@ bool DlssNr::SuperiorScaling::SrUnavailable()
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     return SuperiorRun::GetState().srUnavailable;
+}
+
+DlssNr::SuperiorScaling::LiveInfo DlssNr::SuperiorScaling::Live()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    return g_superiorLive;
 }
 
 void DlssNr::SuperiorScaling::NgxDx12Shutdown()

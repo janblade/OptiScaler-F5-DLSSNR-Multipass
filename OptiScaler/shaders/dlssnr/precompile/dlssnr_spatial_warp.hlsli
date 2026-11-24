@@ -7,6 +7,11 @@ float PwPackRadius(float radius, float center, float work, float compression, fl
     if (work >= 1.0 || center >= 1.0 || radius <= center) return radius;
     if (radius > 1.0) return work + (radius - 1.0) * edgeSlope;
     float t = (radius - center) / (1.0 - center);
+    if (gOptions.x == 3u)
+    {
+        float k2 = compression * compression;
+        return center + (work - center) * t * rsqrt(k2 + (1.0 - k2) * t * t);
+    }
     return center + (work - center) * t / (compression + (1.0 - compression) * t);
 }
 
@@ -16,6 +21,12 @@ float PwUnpackRadius(float radius, float center, float work, float compression, 
     if (work >= 1.0 || center >= 1.0 || radius <= center) return radius;
     if (radius > work) return 1.0 + (radius - work) / edgeSlope;
     float y = (radius - center) / (work - center);
+    if (gOptions.x == 3u)
+    {
+        float k2 = compression * compression;
+        float t = compression * y * rsqrt(max(1.0 - (1.0 - k2) * y * y, 1e-12));
+        return center + (1.0 - center) * t;
+    }
     float t = compression * y / (1.0 - (1.0 - compression) * y);
     return center + (1.0 - center) * t;
 }

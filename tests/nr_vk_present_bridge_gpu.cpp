@@ -447,7 +447,7 @@ struct Game
 
     // One frame through the bridge. Returns the bytes of the D3D12 swapchain's back buffer after the copy (rows packed),
     // or empty on a failure.
-    std::vector<uint8_t> Frame(uint32_t width, uint32_t height, uint32_t seed, std::string& why)
+    std::vector<uint8_t> Frame(uint32_t width, uint32_t height, uint32_t seed, std::string& why, bool linear = false)
     {
         std::vector<uint8_t> result;
         const uint32_t rowBytes = width * format.bytes;
@@ -553,7 +553,51 @@ struct Game
         // The bridge: the shared picture into the D3D12 swapchain's back buffer, on the D3D12 queue.
         const uint64_t done = fence.Next();
 
-        if (!bridge.CopyFrame(shared.Res12(), fence.Fence12(), copied, nullptr, 0, fence.Fence12(), done, why))
+        ComPtr<ID3D12Resource> finalBuffer, finalUpload;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT finalFootprint {};
+        if (linear)
+        {
+            const auto textureDesc = shared.Res12()->GetDesc();
+            UINT64 total = 0;
+            dx.device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &finalFootprint, nullptr, nullptr, &total);
+            D3D12_HEAP_PROPERTIES heap {}; heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC rd {}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = total;
+            rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            if (FAILED(dx.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&finalUpload)))) return result;
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            if (FAILED(dx.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&finalBuffer)))) return result;
+            void* mapped = nullptr;
+            finalUpload->Map(0, nullptr, &mapped);
+            for (uint32_t y = 0; y < height; ++y)
+                for (uint32_t x = 0; x < rowBytes; ++x)
+                    ((uint8_t*)mapped)[y * finalFootprint.Footprint.RowPitch + x] = Pattern(x, y, seed);
+            finalUpload->Unmap(0, nullptr);
+            dx.WaitIdle();
+            dx.allocator->Reset(); dx.list->Reset(dx.allocator.Get(), nullptr);
+            D3D12_RESOURCE_BARRIER transition {};
+            transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            transition.Transition.pResource = finalBuffer.Get();
+            transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            transition.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            dx.list->ResourceBarrier(1, &transition);
+            dx.list->CopyBufferRegion(finalBuffer.Get(), 0, finalUpload.Get(), 0, total);
+            std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
+            dx.list->ResourceBarrier(1, &transition);
+            dx.list->Close(); ID3D12CommandList* lists[] = { dx.list.Get() };
+            dx.queue->ExecuteCommandLists(1, lists); dx.WaitIdle();
+            auto invalid = finalFootprint; --invalid.Footprint.RowPitch;
+            std::string rejected;
+            if (bridge.CopyFrame(finalBuffer.Get(), fence.Fence12(), copied, nullptr, 0,
+                                 nullptr, 0, rejected, &invalid))
+            { why = "misaligned final-picture footprint was accepted"; return result; }
+            if (!bridge.CopyFrame(finalBuffer.Get(), fence.Fence12(), copied, nullptr, 0,
+                                  fence.Fence12(), done, why, &finalFootprint)) return result;
+        }
+        else if (!bridge.CopyFrame(shared.Res12(), fence.Fence12(), copied, nullptr, 0, fence.Fence12(), done, why))
             return result;
 
         lastDone = done;
@@ -908,6 +952,20 @@ bool RunFormat(Vk& vk, Dx& dx, native::VkInterop& interop, native::SharedFenceVk
             ok &= Check("a lost hidden surface is made again and carries the next swapchain bit for bit",
                         remade && frameError.empty() && game.Matches(got, w, h, 90));
         }
+    }
+
+    if (ok)
+    {
+        bool linearSame = true;
+        const uint32_t w = bridge.Width(), h = bridge.Height();
+        for (uint32_t i = 0; i < 4 && linearSame; ++i)
+        {
+            std::string frameError;
+            const auto got = game.Frame(w, h, 151 + i, frameError, true);
+            linearSame = frameError.empty() && game.Matches(got, w, h, 151 + i);
+            if (!frameError.empty()) printf("    %s\n", frameError.c_str());
+        }
+        ok &= Check("linear-buffer final picture is bit-exact; invalid row pitch rejected", linearSame);
     }
 
     game.Destroy();

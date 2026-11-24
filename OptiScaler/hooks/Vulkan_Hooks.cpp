@@ -1500,6 +1500,16 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
             native::lowlatency::OnPresentBegin(
                 const_cast<IUnknown*>(static_cast<const IUnknown*>(lowLatencyTarget.device)));
     };
+    const auto lowLatencyFinished = [&]
+    {
+        native::lowlatency::DxvkSiteLock siteLock(dxvkBridged);
+
+        if (lowLatencyTarget.api == native::lowlatency::Api::Vulkan)
+            native::lowlatency::OnPresentFinishedVulkan(presentDevice);
+        else
+            native::lowlatency::OnPresentFinished(
+                const_cast<IUnknown*>(static_cast<const IUnknown*>(lowLatencyTarget.device)));
+    };
     const auto lowLatencyEnd = [&]
     {
         native::lowlatency::DxvkSiteLock siteLock(dxvkBridged);
@@ -1540,17 +1550,19 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     _presentTiming.Record(Stage::Present, Util::MillisecondsNow() - presentStartMs);
 
-    if (lowLatency)
-    {
-        const auto begin = Util::MillisecondsNow();
-        lowLatencyEnd();
-        lowLatencyMs += Util::MillisecondsNow() - begin;
-    }
-
-    _presentTiming.Record(Stage::LowLatency, lowLatencyMs);
+    const bool vkPresentCompleted = result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 
     if (bridged)
     {
+        // Close PRESENT_START -> PRESENT_END before the D3D12 bridge present & its frame limiter run inside
+        // AfterPresent, then run Reflex/XeLL Sleep + SIMULATION_START/INPUT_SAMPLE right before returning.
+        if (lowLatency)
+        {
+            const auto begin = Util::MillisecondsNow();
+            lowLatencyFinished();
+            lowLatencyMs += Util::MillisecondsNow() - begin;
+        }
+
         // Paced by the D3D12 present (and frame generation's limiter inside it)
         const auto bridgeStartMs = Util::MillisecondsNow();
         NativeMotionVk::AfterPresent(pPresentInfo->pSwapchains[0]);
@@ -1560,12 +1572,30 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
         // swapchain's present, on this thread): a slow bridge present is then our work or the wait for the other present
         _presentTiming.Record(Stage::FrameGenerationMutexWait, native::presenttiming::TakeFrameGenerationMutexWait());
 
+        if (lowLatency && vkPresentCompleted)
+        {
+            const auto begin = Util::MillisecondsNow();
+            lowLatencyEnd();
+            lowLatencyMs += Util::MillisecondsNow() - begin;
+        }
+
+        _presentTiming.Record(Stage::LowLatency, lowLatencyMs);
+
         // The window changed size and the hidden swapchain does not know: the game recreates when its present says so.
         if (result == VK_SUCCESS && VkPresentBridge::WindowResized())
             result = VK_ERROR_OUT_OF_DATE_KHR;
     }
     else
     {
+        // Close PRESENT_START -> PRESENT_END immediately, run the frame limiter before Reflex/XeLL Sleep,
+        // and emit SIMULATION_START/INPUT_SAMPLE right before returning to the game.
+        if (lowLatency)
+        {
+            const auto begin = Util::MillisecondsNow();
+            lowLatencyFinished();
+            lowLatencyMs += Util::MillisecondsNow() - begin;
+        }
+
         // "NR + frame generation" was switched on after the game made its swapchain: the bridge is only made
         // with a swapchain, so the game is told to make a new one (once).
         if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && pPresentInfo->swapchainCount == 1 &&
@@ -1573,11 +1603,20 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
             result = VK_ERROR_OUT_OF_DATE_KHR;
 
         // Unsure about Vulkan Reflex fps limit and if that could be causing an issue here
-        if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap())
+        if (vkPresentCompleted && !State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap())
             FrameLimit::sleep(nativeFgPresent
                                   ? native::lowlatency::ShownPerRendered(nativeFg->IsGenerating(),
                                                                          nativeFg->GetInterpolatedFrameCount())
                                   : 1);
+
+        if (lowLatency && vkPresentCompleted)
+        {
+            const auto begin = Util::MillisecondsNow();
+            lowLatencyEnd();
+            lowLatencyMs += Util::MillisecondsNow() - begin;
+        }
+
+        _presentTiming.Record(Stage::LowLatency, lowLatencyMs);
     }
 
     NotePresentTiming(hookStartMs);

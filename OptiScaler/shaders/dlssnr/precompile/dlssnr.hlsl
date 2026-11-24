@@ -105,8 +105,6 @@ cbuffer Params : register(b0)
 #define gTransfer 11u
 #if defined(DLSSNR_SUPERIOR_HOST_RAW)
 #define gGuideHeight 1u
-#else
-#define gGuideHeight 0u
 #endif
 #endif
 
@@ -1903,8 +1901,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
 
     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
-#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
-    // Packed Superior rebuilds both at native resolution below. Only diagnostics need these initial samples.
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+    // Superior rebuilds both proxy and model at native resolution below. Only diagnostics need these initial samples.
     float3 proxy = 0.0, model = 0.0;
     [branch] if (gDebugView != 0u)
     {
@@ -1918,11 +1916,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     float4 modelSample = gModel.SampleLevel(gLinear, modelUv, 0);
 #if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
     if (gGuideHeight == 0u)
-        modelSample.rgb += proxySample.rgb; // decoded signed DLSS residual, otherwise an ordinary NR answer
+        modelSample.rgb += proxySample.rgb; // decoded signed DLSS residual
+    else if (gGuideHeight == 2u)
+        modelSample.rgb = proxySample.rgb + SuperiorDecodeCarrier(modelSample.rgb); // Direct DLSS SR C1 carrier
 #endif
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
-#if defined(DLSSNR_SUPERIOR_HOST_PACKED)
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
     proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
     model = gPassthrough != 0 ? modelSample.rgb : SrgbToLinear(modelSample.rgb);
     }
@@ -1968,6 +1968,19 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         gTarget[id.xy] = float4(EncodeGameColour(proxy * DebugViewScale()), originalSample.a);
         return;
     }
+
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+    if (gGuideHeight == 3u && (gDebugView == 2 || gDebugView == 3))
+    {
+        const float3 nativeLinear = gPassthrough != 0 ? saturate(original)
+            : (ProxyCurve(gReversibleMode) == kCurveKnee ? saturate(SoftKnee(original)) : ProxyEncode(original));
+        const float3 nativeRaw = gPassthrough != 0 ? nativeLinear : LinearToSrgb(nativeLinear);
+        const float3 oracleEdit = SuperiorGuidedEdit(cmpUv, nativeRaw, normScale, originalLuma);
+        const float3 oracleModelRaw = saturate(nativeRaw + oracleEdit);
+        proxy = nativeLinear;
+        model = gPassthrough != 0 ? oracleModelRaw : SrgbToLinear(oracleModelRaw);
+    }
+#endif
 
     if (gDebugView == 2)
     {
@@ -2045,9 +2058,23 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         const float3 nativeLinear = gPassthrough != 0 ? saturate(original)
             : (ProxyCurve(gReversibleMode) == kCurveKnee ? saturate(SoftKnee(original)) : ProxyEncode(original));
         const float3 nativeRaw = gPassthrough != 0 ? nativeLinear : LinearToSrgb(nativeLinear);
-        const float3 rawEdit = SuperiorGuidedEdit(cmpUv, nativeRaw);
+        const float3 rawEdit = SuperiorGuidedEdit(cmpUv, nativeRaw, normScale, originalLuma);
+        // Luminance-preserving [0, 1] gamut compression toward y when any channel exits [0, 1]:
+        // preserves 100% of SDR shadow/specular contrast (unlike CubeScaleResidual's shrink toward nativeRaw)
+        // while preventing per-channel hue distortion in deep shadows (< 0) and bright warm highlights (> 1).
+        const float3 tRaw = nativeRaw + rawEdit;
+        const float tY = clamp(dot(tRaw, kLuma), 0.0, 1.0);
+        float gamutScale = 1.0;
+        [unroll] for (int ch = 0; ch < 3; ++ch)
+        {
+            if (tRaw[ch] < 0.0 && tY > tRaw[ch])
+                gamutScale = min(gamutScale, tY / (tY - tRaw[ch]));
+            if (tRaw[ch] > 1.0 && tRaw[ch] > tY)
+                gamutScale = min(gamutScale, (1.0 - tY) / (tRaw[ch] - tY));
+        }
+        const float3 targetRaw = saturate(lerp(tY.xxx, tRaw, saturate(gamutScale)));
         proxy = nativeLinear;
-        model = gPassthrough != 0 ? nativeRaw + rawEdit : SrgbToLinear(nativeRaw + rawEdit);
+        model = gPassthrough != 0 ? targetRaw : SrgbToLinear(targetRaw);
         modelDirect = model;
         proxyLuma = dot(proxy, kLuma);
     }
@@ -2150,7 +2177,19 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
         //
         // Strength above 1 is carried below instead, as an amplification of the luminance ratio,
         // which the guard does bound.
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+        // Exact identity fast-path: when ratio == 1 (100% of SDR passthrough pixels and ~85% of HDR pixels
+        // below the knee) and model is non-negative, HueOkLab(model, model) == model, skipping 6x pow(),
+        // 2x sqrt(), 6x 3x3 matrices and ClampAp1 on millions of native 4K pixels.
+        float3 hued;
+        [branch] if (abs(ratio - 1.0) <= 1e-5 && all(model >= 0.0))
+            hued = model;
+        else
+            hued = HueOkLab(model * ratio, model);
+        upgraded = lerp(original, hued, saturate(gTransferStrength));
+#else
         upgraded = lerp(original, HueOkLab(model * ratio, model), saturate(gTransferStrength));
+#endif
     }
 
     // Detail strength decides how much of the model's picture is reached at all; colour strength
@@ -2182,7 +2221,12 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // The correction further down divides by the unamplified ratio, so the composed picture ends up
     // at the original's luminance times the bounded ratio either way. Strength 1 leaves this the
     // identity and the pass bit-identical to before.
+#if defined(DLSSNR_SUPERIOR_HOST_RESOLVE)
+    const float safeLumaRatio = max(lumaRatio, 1e-6);
+    const float amplified = gTransferStrength > 1.0 ? pow(safeLumaRatio, gTransferStrength) : safeLumaRatio;
+#else
     const float amplified = pow(max(lumaRatio, 1e-6), 1.0 + max(gTransferStrength - 1.0, 0.0));
+#endif
 
     // The guard binds the composed picture, not only the luminance-only end of the blend below.
     //

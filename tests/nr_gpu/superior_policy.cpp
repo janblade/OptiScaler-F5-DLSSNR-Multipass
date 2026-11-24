@@ -174,38 +174,113 @@ int main() {
         for (unsigned i = 0; i < 30; ++i)
             require(Preset(i) == (i == 0 || i == 11 ? i : 1u));
         require(Preset(UINT32_MAX)==1u);
-        require(std::abs(GuidedRange(.25f) - .015f) < 1e-9f);
-        require(std::abs(GuidedRange(.5f) - .015f) < 1e-9f);
-        require(std::abs(GuidedRange(.7f) - .014232f) < 1e-9f);
-        require(std::abs(GuidedRange(1.f) - .003f) < 2e-9f);
+        require(std::abs(GuidedRange(.25f) - .042f) < 1e-6f);
+        require(std::abs(GuidedRange(.5f) - .042f) < 1e-6f);
+        require(std::abs(GuidedRange(.75f) - .039f) < 1e-6f);
+        require(std::abs(GuidedRange(1.f) - .036f) < 1e-6f);
         require(GuidedRange(1.5f) == GuidedRange(1.f));
-        require(GuidedRange(NAN) == .015f);
-        float previousSigma = .015f;
+        require(std::abs(GuidedRange(NAN) - .042f) < 1e-6f);
+        float previousSigma = .042f;
         for (unsigned percent = 25; percent <= 200; ++percent)
         {
-            const float sigma = GuidedRange(percent / 100.f);
-            require(sigma <= previousSigma && sigma > 0.f);
+            const float scale = percent / 100.f;
+            const float sigma = GuidedRange(scale);
+            require(sigma <= previousSigma + 1e-7f && sigma > 0.f);
             previousSigma = sigma;
-            require(PrivatePreset(1, sigma) == (sigma < .01f ? 5u : 4u));
-            require(PrivatePreset(11, sigma) == 11u);
+            require(PrivatePreset(1, scale, false) == (scale >= .85f ? CnnE : CnnD));
+            require(PrivatePreset(1, scale, true) == CnnE);
+            require(PrivatePreset(11, scale, false) == TransformerK);
+            require(PrivatePreset(11, scale, true) == TransformerK);
             for (unsigned mode : { 0u, 1u, 2u, 11u })
-                require(CanSelectUpscaleMode(mode, percent / 100.f) == (mode == 11u || mode == 0u || percent < 100));
+                require(CanSelectUpscaleMode(mode, scale) == (mode == 11u || mode == 0u || percent < 100));
             DlssNrConstants resolve {};
-            SetGuidedRange(resolve, percent / 100.f);
+            SetGuidedRange(resolve, scale);
             float inverse;
             std::memcpy(&inverse, &resolve.ExposureSourceWidth, 4);
             require(inverse == 1.f / (sigma * sigma));
         }
-        require(PrivatePreset(1, .01f) == CnnD && PrivatePreset(1, std::nextafter(.01f, 0.f)) == CnnE);
-        require(PrivatePreset(0, .003f) == NoPrivateDlss);
+        require(PrivatePreset(1, std::nextafter(.85f, 0.f), false) == CnnD && PrivatePreset(1, .85f, false) == CnnE);
+        require(PrivatePreset(1, .45f, true) == CnnE);
+        require(PrivatePreset(0, 1.f, false) == NoPrivateDlss && PrivatePreset(0, .5f, true) == NoPrivateDlss);
+        // Direct DLSS SR policy coverage: full-native PerfQuality mapping, Performance mode preset/ghost-skip, Halton jitter.
+        {
+            require(DirectSrPerfQuality(1536, 864, 3413, 1920) == 0);   // MaxPerf (0.45)
+            require(DirectSrPerfQuality(1280, 720, 1920, 1080) == 2);   // MaxQuality (0.667)
+            require(DirectSrPerfQuality(3413, 1920, 3413, 1920) == 5);  // DLAA
+            require(DirectSrPerfQuality(1000, 562, 1920, 1080) == 0);   // MaxPerf (~0.52)
+            require(DirectSrPerfQuality(1100, 618, 1920, 1080) == 1);   // Balanced (~0.57)
+            require(DirectSrPerfQuality(640, 360, 1920, 1080) == 3);    // UltraPerformance (0.33)
+
+            require(PrivatePreset(TransformerK, .45f, true, false) == TransformerK);
+            require(PrivatePreset(TransformerK, .45f, true, true) == CnnD); // Performance mode forces fast CNN D
+            require(PrivatePreset(CnnPreference, .65f, true, true) == CnnD);
+            require(NeedsGhostField(TransformerK, false));
+            require(!NeedsGhostField(TransformerK, true)); // Performance mode skips ghost field
+            require(!NeedsGhostField(CnnD, false) && !NeedsGhostField(CnnE, true));
+
+            const auto jOff = DirectSrJitter(false, false, false, 2496, 1404, 3840, 2160, 1);
+            require(jOff.x == 0.f && jOff.y == 0.f);
+            const auto jBefore = DirectSrJitter(true, true, false, 2496, 1404, 3840, 2160, 1);
+            require(jBefore.x == 0.f && jBefore.y == 0.f);
+            const auto jHold = DirectSrJitter(true, false, true, 2496, 1404, 3840, 2160, 1);
+            require(jHold.x == 0.f && jHold.y == 0.f);
+            const auto jNative = DirectSrJitter(true, false, false, 3840, 2160, 3840, 2160, 1);
+            require(jNative.x == 0.f && jNative.y == 0.f);
+            // Scale-adaptive aperiodic R2 (plastic constant) jitter: 0 strictly below 40% (< 0.399), smooth ramp from
+            // 0.35 at 40% to 1.0 at >=65%, wrapping deterministically at 2^24 frames to prevent float drift.
+            bool anyNonZeroFull = false;
+            bool anyNonZero45 = false;
+            bool anyNonZero40 = false;
+            for (uint64_t f = 0; f < 16; ++f)
+            {
+                const auto jLow = DirectSrJitter(true, false, false, 1498, 842, 3840, 2160, f);   // 39% (< 0.399)
+                require(jLow.x == 0.f && jLow.y == 0.f);
+
+                const auto j40 = DirectSrJitter(true, false, false, 1365, 768, 3413, 1920, f);    // exact 40% (1365/3413, amp ~0.35)
+                const auto j45 = DirectSrJitter(true, false, false, 1536, 864, 3413, 1920, f);    // 45% (1536/3413, amp ~0.48)
+                const auto jFull = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f); // 65% exact (amp 1.0)
+                const auto jHigh = DirectSrJitter(true, false, false, 2688, 1512, 3840, 2160, f); // 70% (> 0.65, amp 1.0)
+                const auto jNext16 = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f + 16);
+                const auto jWrap = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f + 16777216ull);
+                require(jFull.x >= -0.5f && jFull.x < 0.5f && jFull.y >= -0.5f && jFull.y < 0.5f);
+                require(jFull.x != jNext16.x || jFull.y != jNext16.y); // aperiodic across 16-frame boundary
+                require(jFull.x == jWrap.x && jFull.y == jWrap.y);     // deterministic 2^24 wrap
+                require(jFull.x == jHigh.x && jFull.y == jHigh.y);
+                require(std::abs(j40.x - jFull.x * 0.35f) < 1e-3f && std::abs(j40.y - jFull.y * 0.35f) < 1e-3f);
+                const float amp45 = 0.35f + 0.65f * ((1536.f / 3413.f - 0.40f) / 0.25f);
+                require(std::abs(j45.x - jFull.x * amp45) < 1e-4f && std::abs(j45.y - jFull.y * amp45) < 1e-4f);
+                if (jFull.x != 0.f || jFull.y != 0.f)
+                    anyNonZeroFull = true;
+                if (j45.x != 0.f || j45.y != 0.f)
+                    anyNonZero45 = true;
+                if (j40.x != 0.f || j40.y != 0.f)
+                    anyNonZero40 = true;
+            }
+            require(anyNonZeroFull && anyNonZero45 && anyNonZero40);
+            // Zero long-run DC bias check over 1024 frames.
+            double sumX = 0.0, sumY = 0.0;
+            for (uint64_t f = 0; f < 1024; ++f)
+            {
+                const auto j = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f);
+                sumX += j.x;
+                sumY += j.y;
+            }
+            require(std::abs(sumX / 1024.0) < 0.005 && std::abs(sumY / 1024.0) < 0.005);
+
+            // Superior mode selectors: ModeDirectSr, ModeResidualDlaa, ModeIntrinsicOracle are mutually exclusive.
+            require(DirectSrSelected(ModeDirectSr) && !IntrinsicOracleSelected(ModeDirectSr));
+            require(!DirectSrSelected(ModeResidualDlaa) && !IntrinsicOracleSelected(ModeResidualDlaa));
+            require(IntrinsicOracleSelected(ModeIntrinsicOracle) && !DirectSrSelected(ModeIntrinsicOracle));
+        }
         PrivatePresetChoice latch;
-        require(latch.Select(CnnPreference, true, .65f, .65f) == CnnD);
-        require(latch.Select(CnnPreference, true, .65f, .98f) == CnnD);
-        require(latch.Select(TransformerK, true, .65f, .98f) == TransformerK);
-        require(latch.Select(CnnPreference, true, .65f, .98f) == CnnE);
-        require(latch.Select(NoPrivateDlss, true, .65f, .98f) == NoPrivateDlss);
+        require(latch.Select(CnnPreference, true, .65f, .65f, false) == CnnD);
+        require(latch.Select(CnnPreference, true, .65f, .98f, false) == CnnD);
+        require(latch.Select(CnnPreference, true, .65f, .65f, true) == CnnE); // switching to Direct SR selects CnnE
+        require(latch.Select(TransformerK, true, .65f, .98f, false) == TransformerK);
+        require(latch.Select(CnnPreference, true, .65f, .98f, false) == CnnE);
+        require(latch.Select(NoPrivateDlss, true, .65f, .98f, false) == NoPrivateDlss);
         latch = {};
-        require(latch.Select(CnnPreference, true, .65f, .65f) == CnnD);
+        require(latch.Select(CnnPreference, true, .65f, .65f, false) == CnnD);
 
         // Still below 288 / 576 moving samples, moving from 432; in between the last reading stands. A reading has to
         // hold 50 ms before the preset follows it (both ways), then a 0.3 s fade; only a switch resets the next one.

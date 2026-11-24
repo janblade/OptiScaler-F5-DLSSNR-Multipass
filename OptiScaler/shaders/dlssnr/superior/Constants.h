@@ -35,7 +35,12 @@ enum DlssNrMode : uint32_t
     DlssNrMode_PrivateGhostFeather = 49,   // outward feather of the repair into a second texture
     DlssNrMode_PrivateGhostFeatherInPlace = 50, // the same, in place (needs typed UAV loads on RGBA16F)
     DlssNrMode_PrivateGhostBias = 51, // quarter-size disocclusion field -> the private DLSS's bias-current-colour mask
-    DlssNrMode_PrivateGhostDecodeSeed = 52 // carrier decode plus exact 4x4 feather seed
+    DlssNrMode_PrivateGhostDecodeSeed = 52, // carrier decode plus exact 4x4 feather seed
+    DlssNrMode_PrivateEncodePacked = 53,    // fused spatial-unpack carrier encode + rectilinear private motion resize
+    DlssNrMode_OracleDecomp = 54,           // Intrinsic 4K-Oracle: work-res log-irradiance + micro-detail decomposition
+    DlssNrMode_OracleDecompPacked = 55,     // Intrinsic 4K-Oracle: fused spatial-unpack decomposition
+    DlssNrMode_OracleTemporal = 56,         // Intrinsic 4K-Oracle: MV-reprojected temporal intrinsic accumulation
+    DlssNrMode_OracleJbu = 57 // Intrinsic 4K-Oracle: intermediate-res (0.75x) plane-aware depth/albedo JBU
 };
 
 struct alignas(256) DlssNrConstants

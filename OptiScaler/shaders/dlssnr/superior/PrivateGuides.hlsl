@@ -44,6 +44,12 @@ float3 PrivateFinite(float3 value, float3 fallback)
     const float3 proxy = PrivateFinite(gSource0.Load(int3(id.xy, 0)).rgb, 0.0);
     const float3 model = PrivateFinite(gPrivateAnswer.Load(int3(id.xy, 0)).rgb, proxy);
     precise float3 residual = model - proxy;
-    precise float3 encoded = 0.5 + residual;
-    gPrivateCarrier[id.xy] = float4(clamp(encoded, 0.0, 65504.0), 1.0);
+    // Exact same C1 1.5x soft-shoulder carrier as PrivateCarrier.hlsl::Carrier so PrivateDecode matches 1:1.
+    const float3 a = abs(residual);
+    const float3 lin = 1.5 * a;
+    const float3 u = max(a - 0.20, 0.0);
+    const float3 ku = 1.5 * u;
+    const float3 shoulder = 0.30 + 0.20 * (ku / (0.20 + ku));
+    const float3 mag = lerp(lin, shoulder, step(0.20, a));
+    gPrivateCarrier[id.xy] = float4(clamp(0.5 + sign(residual) * mag, 0.0, 1.0), 1.0);
 }

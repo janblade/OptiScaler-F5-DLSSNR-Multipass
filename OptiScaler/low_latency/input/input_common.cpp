@@ -1254,6 +1254,30 @@ void reset_xefg_batches()
 
 // As DLSSG on its present thread: out of band present markers around each of XeFG's presents, with the game's frame id
 // of the batch XeFG marked (xefg_marker). They also give AntiLag 2 the frame type; FSR-FG tells AntiLag 2 itself.
+void InputCommon::seed_xefg_present_queue(ID3D12CommandQueue* queue)
+{
+    if (queue == nullptr)
+        return;
+
+    ID3D12CommandQueue* old = nullptr;
+    {
+        std::scoped_lock lock(create_tech_mutex);
+        if (xefg_xell.load() == nullptr)
+            return;
+
+        std::scoped_lock qLock(xefg_present_queue_mutex);
+        if (xefg_present_queue != queue)
+        {
+            queue->AddRef();
+            old = xefg_present_queue;
+            xefg_present_queue = queue;
+        }
+    }
+
+    if (old != nullptr)
+        old->Release();
+}
+
 void InputCommon::fg_output_present(ID3D12CommandQueue* presentQueue, bool presented)
 {
     // Only XeFG's presenter thread calls this
@@ -1265,11 +1289,18 @@ void InputCommon::fg_output_present(ID3D12CommandQueue* presentQueue, bool prese
     if (presentQueue == nullptr || own == nullptr || tech == nullptr || tech == own)
         return;
 
-    if (xefg_present_queue.load() != presentQueue)
     {
-        presentQueue->AddRef();
-
-        if (auto old = xefg_present_queue.exchange(presentQueue))
+        ID3D12CommandQueue* old = nullptr;
+        {
+            std::scoped_lock qLock(xefg_present_queue_mutex);
+            if (xefg_present_queue != presentQueue)
+            {
+                presentQueue->AddRef();
+                old = xefg_present_queue;
+                xefg_present_queue = presentQueue;
+            }
+        }
+        if (old != nullptr)
             old->Release();
     }
 
@@ -1381,11 +1412,22 @@ void InputCommon::xefg_marker(void* xellContext, uint32_t frame_id, uint32_t mar
         xefg_batches.push_back({ frame_id, fg->GetInterpolatedFrameCount() + 1 });
     }
 
-    // Known after XeFG's first present
-    auto queue = xefg_present_queue.load();
+    // Known from XeFG swapchain creation or its first present (AddRef'd under mutex so fg_output_present
+    // or release_xefg_xell cannot Release the queue concurrently while set_async_marker uses it)
+    ID3D12CommandQueue* queue = nullptr;
+    {
+        std::scoped_lock qLock(xefg_present_queue_mutex);
+        queue = xefg_present_queue;
+        if (queue != nullptr)
+            queue->AddRef();
+    }
 
-    if (auto tech = currently_active_tech.load(); tech != nullptr && queue != nullptr)
-        tech->set_async_marker(queue, { frame_id, type });
+    if (queue != nullptr)
+    {
+        if (auto tech = currently_active_tech.load(); tech != nullptr)
+            tech->set_async_marker(queue, { frame_id, type });
+        queue->Release();
+    }
 }
 
 // After the game's present: XeFG's own count for the batch it marked during it. The multiplier can be off, for a
@@ -1809,7 +1851,13 @@ void InputCommon::release_xefg_xell()
     antilag2_failed = false;
     reflex_failed = false;
 
-    if (auto queue = xefg_present_queue.exchange(nullptr))
+    ID3D12CommandQueue* queue = nullptr;
+    {
+        std::scoped_lock qLock(xefg_present_queue_mutex);
+        queue = xefg_present_queue;
+        xefg_present_queue = nullptr;
+    }
+    if (queue != nullptr)
         queue->Release();
 }
 

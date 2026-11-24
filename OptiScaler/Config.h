@@ -500,6 +500,26 @@ class Config
     CustomOptional<uint32_t> DlssNrTransfer { 1 }; // 11: Superior Scaling
     // Private SR preference: No DLSS=0, CNN=1 (D/E), Transformer=11 (K).
     CustomOptional<uint32_t> DlssNrSuperiorScalingPreset { 1 };
+    // Superior Scaling mode: 0 = Direct DLSS SR (true full-native super resolution on C1 residual carrier),
+    // 1 = Residual DLAA (old Superior Scaling, fixed).
+    CustomOptional<uint32_t> DlssNrSuperiorMode { 0 };
+    // Direct DLSS SR: Halton (2,3) 16-phase sub-pixel jitter (cancels out on stationary geometry in Carrier-SR
+    // while giving DLSS SR true sub-pixel residual samples to super-resolve to full native resolution).
+    CustomOptional<bool> DlssNrSuperiorJitter { true };
+    // Direct DLSS SR: Performance mode (uses fast CNN E SR, skips ghost-field passes, and uses single-load 4K resolve
+    // while keeping full native work->native resolution and Halton jitter).
+    CustomOptional<bool> DlssNrSuperiorDirectSrPerf { false };
+    // Direct DLSS SR: Option 5 hybrid sharpener (4K Guided Edge-Snap + 3x3 isotropic anti-ringing carrier
+    // deconvolution + AMD FidelityFX RCAS luma-only sharpening on composed output, 0..1, works in Normal &
+    // Performance).
+    CustomOptional<float> DlssNrSuperiorDirectSrSharpness { 0.65f };
+    // Direct DLSS SR: optional luma-guided 4K micro-contrast lift (0% default: Carrier-SR already keeps 100% native 4K
+    // sharpness).
+    CustomOptional<float> DlssNrSuperiorNativeDetail { 0.0f };
+    // Residual DLAA: legacy upstream frequency-band attenuation (0 = 100% NR strength, 1 = legacy cut).
+    CustomOptional<float> DlssNrSuperiorShaping { 0.0f };
+    // Residual DLAA: 5-tap high-frequency detail recovery in PrivateDecode (0..1.5).
+    CustomOptional<float> DlssNrSuperiorDetailRecovery { 0.85f };
     // Superior Scaling's private DLSS also steadies NR at 100% Model resolution and above (above: on the answer after
     // it is averaged back to native). Off = the private DLSS runs only below 100%, as before 0.1.39.
     CustomOptional<bool> DlssNrSuperiorAtNative { true };
@@ -635,6 +655,8 @@ class Config
     // frame on each axis (centre < work <= 100); offset moves the centre band and shift moves pixels between the two
     // edges, both in percent of the frame. Out-of-range values leave compression off (the menu says why).
     CustomOptional<bool> DlssNrSpatialCompression { false };
+    CustomOptional<bool> DlssNrSpatialSmoothCurve { false };
+    CustomOptional<bool> DlssNrSpatialAutoAdjustCenter { true };
     CustomOptional<float> DlssNrSpatialCenterX { 80.0f };
     CustomOptional<float> DlssNrSpatialCenterY { 80.0f };
     CustomOptional<float> DlssNrSpatialWorkX { 90.0f };

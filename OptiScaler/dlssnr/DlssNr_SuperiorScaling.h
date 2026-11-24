@@ -16,6 +16,26 @@ std::string Status();
 // then runs without its private DLSS (like No DLSS) until it is selected again.
 std::string Unavailable();
 bool SrUnavailable();
+// Live per-frame telemetry shown in the Superior Scaling menu (status, resolutions, jitter, fallback & GPU cost).
+struct LiveInfo
+{
+    bool active = false;
+    bool directSr = false;
+    bool directSrPerf = false;
+    bool intrinsicOracle = false;
+    bool privateReady = false;
+    bool haveDepth = false;
+    bool jitterActive = false;
+    uint32_t jitterPauseReason =
+        0; // 0=active, 1=user off, 2=Before SR, 3=Compress edges, 4=100% native, 5=Hold, 6=low scale <40%
+    uint32_t fallbackReason = 0; // 0=none, 1=No depth, 2=No DLSS SR, 3=Preset No DLSS, 4=Supersampling>100%,
+                                 // 5=Initializing, 6=Failed, 7=Compress edges ON
+    uint32_t actualPreset = 0;   // 0=default/none, 4=CNN D, 5=CNN E, 11=Transformer K
+    uint32_t workW = 0, workH = 0;
+    uint32_t outW = 0, outH = 0;
+    float gpuMs = -1.0f; // < 0 when unavailable (e.g. Vulkan or first frames)
+};
+LiveInfo Live();
 // The game's NGX D3D12 runtime is shutting down: every NGX handle is about to be destroyed by NGX itself.
 void NgxDx12Shutdown();
 constexpr uint32_t Transfer = 11u;
@@ -27,23 +47,93 @@ constexpr uint32_t LowGroupHeight = 16u;
 inline bool Enabled(uint32_t transfer) { return transfer == Transfer; }
 template <class C> inline bool Enabled(const C& cfg) { return Enabled(cfg.DlssNrTransfer.value_or_default()); }
 constexpr unsigned NoPrivateDlss = 0, CnnPreference = 1, CnnD = 4, CnnE = 5, TransformerK = 11;
-// Only the running K model builds the shared pre-DLSS bias/post-DLSS repair field.
-constexpr bool NeedsGhostField(unsigned actualPreset) { return actualPreset == TransformerK; }
 inline unsigned Preset(unsigned preset)
 {
     return preset == NoPrivateDlss || preset == TransformerK ? preset : CnnPreference;
 }
-// Preserve the saved CNN/Transformer preference. CNN switches from D to E only
-// below the range-sigma threshold; compression itself does not choose the model.
-inline unsigned PrivatePreset(unsigned saved, float rangeSigma)
+// Superior Scaling modes:
+//   0 = Direct DLSS SR: true DLSS Super Resolution (work -> native) on the real RGB NR answer, with optional
+//       Halton sub-pixel jitter and edge-safe native micro-detail / HUD preservation.
+//   1 = Residual DLAA (old Superior Scaling): lightweight DLAA on the signed NR residual carrier (upgraded with
+//       SDR C1 carrier, 5-tap detail recovery, 2x2 JBU + 1:1 bypass, and 0%-default band attenuation).
+//   2 = Intrinsic 4K-Oracle: work-res intrinsic log-irradiance + micro-detail decomposition with temporal
+//       reprojection and 4K plane-aware depth/albedo joint bilateral reconstruction.
+constexpr uint32_t ModeDirectSr = 0u, ModeResidualDlaa = 1u, ModeIntrinsicOracle = 2u;
+inline bool DirectSrSelected(uint32_t mode) { return mode == ModeDirectSr; }
+inline bool IntrinsicOracleSelected(uint32_t mode) { return mode == ModeIntrinsicOracle; }
+inline bool DirectSrWanted(uint32_t mode, unsigned savedPreset, bool srUnavailable, bool haveDepth)
+{
+    return DirectSrSelected(mode) && Preset(savedPreset) != NoPrivateDlss && !srUnavailable && haveDepth;
+}
+// Deterministic aperiodic R2 quasi-random sequence (Martin Roberts, plastic constant phi_2)
+// in [-0.5, +0.5) render-pixel jitter for Direct DLSS SR and Intrinsic 4K-Oracle.
+// Computed in double precision with periodic index wrap at 2^24 frames (~77h at 60 FPS) to prevent float drift.
+struct JitterPair
+{
+    float x = 0.0f, y = 0.0f;
+};
+inline JitterPair DirectSrJitter(bool enabled, bool beforeUpscale, bool hold, unsigned workW, unsigned workH,
+                                 unsigned nativeW, unsigned nativeH, uint64_t frameIndex)
+{
+    if (!enabled || beforeUpscale || hold || !workW || !workH || !nativeW || !nativeH ||
+        (workW >= nativeW && workH >= nativeH))
+        return {};
+    const float scale = std::min(float(workW) / float(nativeW), float(workH) / float(nativeH));
+    if (scale < 0.399f)
+        return {};
+    const float amp = scale >= 0.65f ? 1.0f : (0.35f + 0.65f * std::max(0.0f, (scale - 0.40f) / 0.25f));
+    constexpr double kPhi2 = 1.32471795724474602596;
+    constexpr double kAlpha1 = 1.0 / kPhi2;
+    constexpr double kAlpha2 = 1.0 / (kPhi2 * kPhi2);
+    const double n = static_cast<double>((frameIndex % 16777216ull) + 1ull);
+    const double rx = std::fmod(0.5 + n * kAlpha1, 1.0) - 0.5;
+    const double ry = std::fmod(0.5 + n * kAlpha2, 1.0) - 0.5;
+    return { static_cast<float>(rx) * amp, static_cast<float>(ry) * amp };
+}
+// NGX PerfQualityValue integer mapping matching NVSDK_NGX_PerfQuality_Value:
+// 0=MaxPerf, 1=Balanced, 2=MaxQuality, 3=UltraPerformance, 5=DLAA. (UltraQuality is mapped to MaxQuality for 310.x
+// safety.)
+inline int DirectSrPerfQuality(unsigned workW, unsigned workH, unsigned outW, unsigned outH)
+{
+    if (!workW || !workH || !outW || !outH || (workW >= outW && workH >= outH))
+        return 5; // DLAA
+    const float scale = std::min(float(workW) / float(outW), float(workH) / float(outH));
+    if (scale >= 0.62f)
+        return 2; // MaxQuality
+    if (scale >= 0.54f)
+        return 1; // Balanced
+    if (scale >= 0.40f)
+        return 0; // MaxPerf
+    return 3;     // UltraPerformance
+}
+// Transformer K uses the disocclusion ghost field for BiasCurrentColorMask (both Residual DLAA and Direct DLSS SR
+// Quality); Direct DLSS SR Performance mode skips the ghost field completely for maximum speed.
+constexpr bool NeedsGhostField(unsigned actualPreset, bool directSrPerf = false)
+{
+    return !directSrPerf && actualPreset == TransformerK;
+}
+// Preserve the saved CNN/Transformer preference. Direct DLSS SR Performance mode forces fast CNN D even when
+// Transformer is selected globally; Direct DLSS SR Quality uses CNN E directly for CNN preference (sharper SR,
+// zero second resident instance VRAM, zero motion-probe readbacks). Residual DLAA keeps D with resident E below 85%.
+inline unsigned PrivatePreset(unsigned saved, float effectiveScale, bool directSr = false, bool directSrPerf = false)
 {
     const auto preference = Preset(saved);
-    return preference == CnnPreference ? (rangeSigma < .01f ? CnnE : CnnD) : preference;
+    if (preference == NoPrivateDlss)
+        return NoPrivateDlss;
+    if (directSr && directSrPerf)
+        return CnnD;
+    if (preference != CnnPreference)
+        return preference;
+    return (directSr || effectiveScale >= 0.85f) ? CnnE : CnnD;
 }
 inline float GuidedRange(float scale)
 {
-    const float t = std::isfinite(scale) ? std::clamp((scale - .5f) * 2.f, 0.f, 1.f) : 0.f;
-    return .015f - .012f * t * t * t;
+    // Crisp edge-preserving sigma (0.042 at <=50%, gently tightening to 0.036 at 100%) for 2x2 JBU:
+    // stays silky smooth across facial skin/eye gradients (delta ~0.015 -> w=0.94, zero blotches)
+    // while snapping sharply to brick/armor/stone edges (visibly sharper than bilinear Matched Residual)
+    // and rejecting >99.9% of silhouette bleeding.
+    const float t = std::isfinite(scale) ? std::clamp((scale - 0.5f) * 2.0f, 0.0f, 1.0f) : 0.0f;
+    return 0.042f - 0.006f * t;
 }
 // CNN's D or E is picked once from the scale it starts at, also under Auto: following a moving render size would
 // recreate the private DLSS and reset history. A changed setting picks again, and so does NR or NGX shutdown (a new
@@ -52,17 +142,22 @@ struct PrivatePresetChoice
 {
     unsigned preference = 0, selected = CnnD;
     float manualScale = 0.f;
-    bool automatic = false, valid = false;
-    unsigned Select(unsigned saved, bool isAuto, float configuredScale, float effectiveScale)
+    bool automatic = false, directSrMode = false, directSrPerfMode = false, valid = false;
+    unsigned Select(unsigned saved, bool isAuto, float configuredScale, float effectiveScale, bool directSr = false,
+                    bool directSrPerf = false)
     {
         configuredScale = std::isfinite(configuredScale) ? configuredScale : 1.f;
         const unsigned wanted = Preset(saved);
-        if (!valid || preference != wanted || automatic != isAuto || manualScale != configuredScale)
+        if (!valid || preference != wanted || automatic != isAuto || manualScale != configuredScale ||
+            directSrMode != directSr || directSrPerfMode != directSrPerf)
         {
             preference = wanted;
             automatic = isAuto;
             manualScale = configuredScale;
-            selected = PrivatePreset(wanted, GuidedRange(effectiveScale));
+            directSrMode = directSr;
+            directSrPerfMode = directSrPerf;
+            selected =
+                PrivatePreset(wanted, std::isfinite(effectiveScale) ? effectiveScale : 1.f, directSr, directSrPerf);
             valid = true;
         }
         return selected;

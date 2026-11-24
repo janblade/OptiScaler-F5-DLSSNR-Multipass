@@ -56,14 +56,15 @@ inline uint32_t AlignedExtent(uint32_t size, uint32_t native)
 
 struct Settings {
     bool enabled = false;
+    bool smoothCurve = false;
     float centerX = 80, centerY = 80;
     float workX = 90, workY = 90;
     float offsetX = 0, offsetY = 0;
     float shiftX = 0, shiftY = 0;
     bool operator==(const Settings& o) const {
         const auto same = [](float a, float b) { return a == b || (std::isnan(a) && std::isnan(b)); };
-        return enabled == o.enabled && same(centerX, o.centerX) && same(centerY, o.centerY) &&
-               same(workX, o.workX) && same(workY, o.workY) && same(offsetX, o.offsetX) &&
+        return enabled == o.enabled && smoothCurve == o.smoothCurve && same(centerX, o.centerX) &&
+               same(centerY, o.centerY) && same(workX, o.workX) && same(workY, o.workY) && same(offsetX, o.offsetX) &&
                same(offsetY, o.offsetY) && same(shiftX, o.shiftX) && same(shiftY, o.shiftY);
     }
     bool operator!=(const Settings& o) const { return !(*this == o); }
@@ -72,6 +73,7 @@ struct Settings {
 template<class ConfigLike> Settings ReadSettings(const ConfigLike& cfg) {
     Settings s;
     s.enabled = cfg.DlssNrSpatialCompression.value_or_default();
+    s.smoothCurve = cfg.DlssNrSpatialSmoothCurve.value_or_default();
     s.centerX = cfg.DlssNrSpatialCenterX.value_or_default();
     s.centerY = cfg.DlssNrSpatialCenterY.value_or_default();
     s.workX = cfg.DlssNrSpatialWorkX.value_or_default();
@@ -84,28 +86,37 @@ template<class ConfigLike> Settings ReadSettings(const ConfigLike& cfg) {
 }
 
 // The named layouts the menu offers (centre / working size, both axes, no offset, no shift).
-struct NamedLayout { const char* name; float center, work; };
-inline constexpr NamedLayout kNamedLayouts[3] = { { "Light", 85.0f, 95.0f },
-                                                  { "Balanced", 80.0f, 90.0f },
-                                                  { "Strong", 70.0f, 80.0f } };
+// Each layout has a classic center (used when smooth curve is off) and a smooth center (used when
+// smooth curve is on and auto-adjust is enabled). The work percentage is the same in both modes.
+struct NamedLayout
+{
+    const char* name;
+    float center, work, smoothCenter;
+};
+inline constexpr NamedLayout kNamedLayouts[3] = { { "Light", 85.0f, 95.0f, 65.0f },
+                                                  { "Balanced", 80.0f, 90.0f, 50.0f },
+                                                  { "Strong", 70.0f, 80.0f, 40.0f } };
 inline constexpr int kDefaultLayout = 1;
 
-// Which named layout these settings are exactly, or -1 for a custom one.
-inline int MatchedLayout(const Settings& s)
+// Which named layout these settings match for the active mode. Returns -1 for custom.
+inline int MatchedLayout(const Settings& s, bool autoAdjustCenter = true)
 {
     for (int i = 0; i != 3; ++i) {
         const NamedLayout& n = kNamedLayouts[i];
-        if (s.centerX == n.center && s.centerY == n.center && s.workX == n.work && s.workY == n.work &&
+        const float activeCenter = (s.smoothCurve && autoAdjustCenter) ? n.smoothCenter : n.center;
+        if (s.centerX == activeCenter && s.centerY == activeCenter && s.workX == n.work && s.workY == n.work &&
             s.offsetX == 0 && s.offsetY == 0 && s.shiftX == 0 && s.shiftY == 0)
             return i;
     }
     return -1;
 }
 
-inline void ApplyNamedLayout(Settings& s, int index)
+// Apply a named layout. If autoAdjustCenter is true and smooth curve is on, uses the fog-safe
+// center value for that layout (wider transition zone, same work percentage).
+inline void ApplyNamedLayout(Settings& s, int index, bool autoAdjustCenter = true)
 {
     const NamedLayout& n = kNamedLayouts[std::clamp(index, 0, 2)];
-    s.centerX = s.centerY = n.center;
+    s.centerX = s.centerY = (s.smoothCurve && autoAdjustCenter) ? n.smoothCenter : n.center;
     s.workX = s.workY = n.work;
     s.offsetX = s.offsetY = 0;
     s.shiftX = s.shiftY = 0;
@@ -249,8 +260,11 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
         s.centerY * .01f * static_cast<float>(nativeH) >= static_cast<float>(rawH)) {
         result.status = Status::ThinEdge; return result;
     }
-    result.warp.x = pw::BuildAxis(nativeW, rawW, modelW, s.centerX * .01f, s.offsetX * .01f, s.shiftX * .01f);
-    result.warp.y = pw::BuildAxis(nativeH, rawH, modelH, s.centerY * .01f, s.offsetY * .01f, s.shiftY * .01f);
+    const uint32_t curveMode = s.smoothCurve ? 3u : 2u;
+    result.warp.x =
+        pw::BuildAxis(nativeW, rawW, modelW, s.centerX * .01f, s.offsetX * .01f, s.shiftX * .01f, curveMode);
+    result.warp.y =
+        pw::BuildAxis(nativeH, rawH, modelH, s.centerY * .01f, s.offsetY * .01f, s.shiftY * .01f, curveMode);
     const auto& x = result.warp.x; const auto& y = result.warp.y;
     const auto invertible = [](const pw::Axis& axis) {
         // A peripheral side needs at least one raw working texel. At a shift endpoint the reference split may assign
@@ -522,6 +536,7 @@ inline MinifiedMotionDispatch PrepareMinifiedMotion(Constants& c)
         a.compression[1] = y ? w.sideCompressionPosY : w.sideCompressionPosX;
         a.edgeSlope[0] = y ? w.sideEdgeSlopeNegY : w.sideEdgeSlopeNegX;
         a.edgeSlope[1] = y ? w.sideEdgeSlopePosY : w.sideEdgeSlopePosX;
+        a.curveMode = w.mode == 3u ? 3u : 2u;
         return a;
     };
     const auto bands = [&](bool y) -> std::pair<uint32_t, uint32_t>

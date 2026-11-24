@@ -169,7 +169,7 @@ void XeLL::set_marker(IUnknown* pDevice, const MarkerParams& marker_params)
     switch (marker_params.marker_type)
     {
     case MarkerType::SIMULATION_START:
-        simulation_start_last_id = marker_params.frame_id;
+        simulation_start_last_id = frame_id;
 
         // Call sleep just before simulation start if sleep isn't getting called
         if (sleep_last_id + 10 < simulation_start_last_id)
@@ -192,9 +192,9 @@ void XeLL::set_marker(IUnknown* pDevice, const MarkerParams& marker_params)
     case MarkerType::PRESENT_END:
         add_marker(frame_id, XELL_PRESENT_END);
         break;
-    // case MarkerType::INPUT_SAMPLE:
-    //     add_marker(marker_params.frame_id, XELL_INPUT_SAMPLE);
-    // break;
+    case MarkerType::INPUT_SAMPLE:
+        add_marker(frame_id, XELL_INPUT_SAMPLE);
+        break;
     default:
         break;
     }

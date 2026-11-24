@@ -7,27 +7,22 @@ cbuffer Params : register(b0)
     uint width, height;
 };
 Texture2D<float> Field : register(t0);
+SamplerState LinearClamp : register(s0);
 #include "VkFormat.hlsli"
 VK_FORMAT("r32f") RWTexture2D<float> Mask : register(u0);
 [numthreads(8, 8, 1)] void GhostBiasMask(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= width || id.y >= height)
         return;
-    uint w, h;
-    Field.GetDimensions(w, h);
-    if (w == 0 || h == 0)
+    uint qw, qh;
+    Field.GetDimensions(qw, qh);
+    if (qw == 0 || qh == 0)
     {
         Mask[id.xy] = 0;
         return;
     }
-    float2 pos = (float2(id.xy) + .5) * float2(w, h) / float2(width, height) - .5;
-    int2 base = int2(floor(pos));
-    float2 f = pos - float2(base);
-    int2 hi = int2(w, h) - 1;
-    float a = Field.Load(int3(clamp(base, int2(0, 0), hi), 0));
-    float b = Field.Load(int3(clamp(base + int2(1, 0), int2(0, 0), hi), 0));
-    float c = Field.Load(int3(clamp(base + int2(0, 1), int2(0, 0), hi), 0));
-    float d = Field.Load(int3(clamp(base + int2(1, 1), int2(0, 0), hi), 0));
-    float mask = lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y) * strength;
+    // Exact alignment with CompactGhost's 4x4 cells even when width/height are not multiples of 4.
+    const float2 uv = (float2(id.xy) + 0.5) / (4.0 * float2(qw, qh));
+    const float mask = Field.SampleLevel(LinearClamp, uv, 0) * strength;
     Mask[id.xy] = isfinite(mask) ? saturate(mask) : 0;
 }

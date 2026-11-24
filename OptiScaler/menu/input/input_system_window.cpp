@@ -577,6 +577,23 @@ void UpdateFocusState(HWND targetHwnd)
         return;
     }
 
+    // Paired external game window (e.g. 32-bit feeder host64 in True Exclusive Fullscreen, where host HWND stays
+    // hidden and receives forwarded mouse/keyboard messages while the 32-bit game window remains foreground).
+    if (_state.InputHwnd != nullptr)
+    {
+        HWND pairedHwnd = reinterpret_cast<HWND>(GetPropW(_state.InputHwnd, L"OptiScaler.PairedFocusHwnd"));
+        if (pairedHwnd != nullptr && IsWindow(pairedHwnd))
+        {
+            HWND pairedRoot = GetAncestor(pairedHwnd, GA_ROOT);
+            if (foregroundRoot != nullptr && pairedRoot != nullptr && foregroundRoot == pairedRoot)
+            {
+                SetFocusStateLocked(true, "foreground matches paired focus hwnd", foreground, foregroundProcessId,
+                                    foregroundThreadId);
+                return;
+            }
+        }
+    }
+
     HWND targetRoot = targetHwnd != nullptr ? GetAncestor(targetHwnd, GA_ROOT) : _state.TargetRootHwnd;
 
     if (foregroundRoot != nullptr && targetRoot != nullptr && foregroundRoot == targetRoot)

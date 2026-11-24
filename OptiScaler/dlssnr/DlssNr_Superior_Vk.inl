@@ -345,12 +345,19 @@ Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkP
 }
 
 // 1. The Area downsample of the encoded proxy (native size) to the model's raster, into proxySmall.
-bool Area(VkCommandBuffer cmd, OwnedImage& proxy, OwnedImage& proxySmall, unsigned int workW, unsigned int workH)
+bool Area(VkCommandBuffer cmd, OwnedImage& proxy, OwnedImage& proxySmall, unsigned int workW, unsigned int workH,
+          float jitterX = 0.f, float jitterY = 0.f)
 {
     DlssNr::Superior::DlssNrConstants c {};
     c.Mode = DlssNr::Superior::DlssNrMode_Downsample;
     c.Width = workW;
     c.Height = workH;
+    if (jitterX != 0.f || jitterY != 0.f)
+    {
+        c.MvScaleX = jitterX;
+        c.MvScaleY = jitterY;
+        c.GuideWidth = 1u;
+    }
     c.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
 
     Transition(cmd, proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -425,44 +432,61 @@ bool MatchGuides(VkCommandBuffer cmd, VkDevice device, const NVSDK_NGX_Resource_
 // constants, as the ordinary resolve would take them.
 bool Finish(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& resolveIn, float workScale,
             unsigned int width, unsigned int height, OwnedImage& proxy, OwnedImage& answer, bool signedResidual,
-            OwnedImage& keep, VkImageView exposureView, VkImageView target)
+            OwnedImage& keep, VkImageView exposureView, VkImageView target, bool directSr = false,
+            OwnedImage* workAnswer = nullptr, bool directSrPerf = false)
 {
     DlssNrConstants resolve = resolveIn; // the band gains and flags below are Superior's, not the ordinary resolve's
-    // The same gains D3D12 reads for one pass over the frame's native size: no pass has run before this one.
-    const auto scales = DlssNr::SuperiorScaling::MakeFrequencyScales(width, height, proxy.width, proxy.height,
-                                                                     proxy.width, proxy.height);
-    const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, 0u, 1u, scales, MainOnlyGains());
-    const bool wantLow = gains.high != 1.0f || gains.low != 1.0f;
-
-    if (wantLow)
+    VkImageView auxView = VK_NULL_HANDLE;
+    if (directSr)
     {
-        DlssNr::Superior::DlssNrConstants c {};
-        c.Mode = DlssNr::Superior::DlssNrMode_GuidedResidualLow;
-        c.Transfer = signedResidual ? 1u : 0u; // a raw model answer, or the decoded signed residual
-        c.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
-        c.Width = (proxy.width + 7) / 8;
-        c.Height = (proxy.height + 7) / 8;
-
-        Transition(cmd, proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        Transition(cmd, answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        Transition(cmd, low, VK_IMAGE_LAYOUT_GENERAL);
-
-        DlssNrSuperior_Vk::Reads reads {};
-        reads[0] = { proxy.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        reads[1] = { answer.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        if (!pass->Dispatch(cmd, signedResidual ? DlssNrSuperior_Vk::Blob::LowSigned : DlssNrSuperior_Vk::Blob::LowRaw,
-                            &c, sizeof(c), (c.Width + 7) / 8,
-                            (c.Height + DlssNr::SuperiorScaling::LowGroupHeight - 1) /
-                                DlssNr::SuperiorScaling::LowGroupHeight,
-                            reads, low.view))
-            return false;
-
-        Transition(cmd, low, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        DlssNr::Superior::Fields::SetDirectSrResolve(resolve, workAnswer != nullptr,
+                                                     cfg.DlssNrSuperiorNativeDetail.value_or_default(), directSrPerf,
+                                                     cfg.DlssNrSuperiorDirectSrSharpness.value_or_default());
+        if (workAnswer && !directSrPerf)
+        {
+            Transition(cmd, *workAnswer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            auxView = workAnswer->view;
+        }
     }
+    else
+    {
+        // The same gains D3D12 reads for one pass over the frame's native size: no pass has run before this one.
+        const auto scales = DlssNr::SuperiorScaling::MakeFrequencyScales(width, height, proxy.width, proxy.height,
+                                                                         proxy.width, proxy.height);
+        const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, 0u, 1u, scales, MainOnlyGains());
+        const bool wantLow = gains.high != 1.0f || gains.low != 1.0f;
 
-    DlssNr::Superior::Fields::SetBandGains(resolve, gains.high, gains.low);
-    DlssNr::SuperiorScaling::SetGuidedRange(resolve, workScale);
-    DlssNr::Superior::Fields::SetResolveFlags(resolve, wantLow, !signedResidual);
+        if (wantLow)
+        {
+            DlssNr::Superior::DlssNrConstants c {};
+            c.Mode = DlssNr::Superior::DlssNrMode_GuidedResidualLow;
+            c.Transfer = signedResidual ? 1u : 0u; // a raw model answer, or the decoded signed residual
+            c.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
+            c.Width = (proxy.width + 7) / 8;
+            c.Height = (proxy.height + 7) / 8;
+
+            Transition(cmd, proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmd, answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmd, low, VK_IMAGE_LAYOUT_GENERAL);
+
+            DlssNrSuperior_Vk::Reads reads {};
+            reads[0] = { proxy.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            reads[1] = { answer.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            if (!pass->Dispatch(cmd, signedResidual ? DlssNrSuperior_Vk::Blob::LowSigned : DlssNrSuperior_Vk::Blob::LowRaw,
+                                &c, sizeof(c), (c.Width + 7) / 8,
+                                (c.Height + DlssNr::SuperiorScaling::LowGroupHeight - 1) /
+                                    DlssNr::SuperiorScaling::LowGroupHeight,
+                                reads, low.view))
+                return false;
+
+            Transition(cmd, low, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            auxView = low.view;
+        }
+
+        DlssNr::Superior::Fields::SetBandGains(resolve, gains.high, gains.low);
+        DlssNr::SuperiorScaling::SetGuidedRange(resolve, workScale);
+        DlssNr::Superior::Fields::SetResolveFlags(resolve, wantLow, !signedResidual);
+    }
 
     Transition(cmd, proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmd, answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -473,11 +497,11 @@ bool Finish(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& resol
     reads[1] = { answer.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     reads[2] = { keep.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     reads[3] = { exposureView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-    reads[5] = { wantLow ? low.view : VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    reads[5] = { auxView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
     using B = DlssNrSuperior_Vk::Blob;
     B blob = B::ResolveGuidedRaw;
-    if (signedResidual)
+    if (signedResidual || directSr)
     {
         // The D3D12 choice (SuperiorResolvePipeline): the specialization for the colour mapping in force, else the generic
         // resolve for SDR or HDR.

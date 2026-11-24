@@ -19,6 +19,7 @@
 #include <nvapi/NvApiHooks.h>
 #include <nvapi/fakenvapi.h>
 #include <proxies/XeFG_Proxy.h>
+#include <resource_tracking/ResTrack_dx12.h>
 
 #include <magic_enum.hpp>
 
@@ -452,6 +453,37 @@ void PresentBegin(Api api, IUnknown* device, PresentSource source)
     g_presentStarted = true;
 }
 
+void PresentFinished(Api api, IUnknown* device, PresentSource source)
+{
+    if (device == nullptr || State::Instance().isShuttingDown || Ignored(source) || !g_presentStarted ||
+        ReflexHooks::gameCalledReflex())
+    {
+        return;
+    }
+
+    Marker(api, device, PRESENT_END);
+    g_presentStarted = false;
+}
+
+void EnsureD3D12SubmitHook(Api api, IUnknown* device)
+{
+    if (api != Api::D3D || device == nullptr)
+        return;
+
+    static std::atomic<const void*> lastCheckedDevice = nullptr;
+    if (lastCheckedDevice.load(std::memory_order_relaxed) == device)
+        return;
+
+    ID3D12Device* d3d12Device = nullptr;
+    if (SUCCEEDED(device->QueryInterface(__uuidof(ID3D12Device), reinterpret_cast<void**>(&d3d12Device))) &&
+        d3d12Device != nullptr)
+    {
+        (void) ResTrack_Dx12::HookToQueue(d3d12Device);
+        d3d12Device->Release();
+    }
+    lastCheckedDevice.store(device, std::memory_order_relaxed);
+}
+
 void PresentEnd(Api api, IUnknown* device, PresentSource source)
 {
     if (device == nullptr || State::Instance().isShuttingDown || Ignored(source))
@@ -586,6 +618,7 @@ void PresentEnd(Api api, IUnknown* device, PresentSource source)
 
     g_presentStarted = false;
     SetDevice(api, device);
+    EnsureD3D12SubmitHook(api, device);
     g_gameQueue = GameQueue();
 
     if (api != Api::Vulkan)
@@ -594,14 +627,18 @@ void PresentEnd(Api api, IUnknown* device, PresentSource source)
         ReflexHooks::preSleep(device, false, &ignored);
     }
 
-    InputCommon::sleep(OwnContext(api), device);
+    // Pass the exact upcoming frame ID so XeLL's sleep and SIMULATION_START/INPUT_SAMPLE markers
+    // stay strictly synchronized even after mid-session context switches (no +1 guess or double-sleep).
+    const uint64_t nextFrameId = g_frameId + 1;
+    InputCommon::sleep(OwnContext(api), device, static_cast<uint32_t>(nextFrameId));
 
     // XeFG takes this ID for the frame it tags next (FrameIdForFrameGeneration)
-    ++g_frameId;
+    g_frameId = nextFrameId;
     g_xellFrameIdForFrameGeneration = CarriesXefgFrameIds(method) ? (uint32_t) g_frameId : 0;
     g_submitSent = false;
     g_running = true;
     Marker(api, device, SIMULATION_START);
+    Marker(api, device, INPUT_SAMPLE);
 }
 } // namespace
 
@@ -609,6 +646,8 @@ void OnPresentBegin(IUnknown* device, PresentSource source)
 {
     PresentBegin(Api::D3D, device, source);
 }
+
+void OnPresentFinished(IUnknown* device, PresentSource source) { PresentFinished(Api::D3D, device, source); }
 
 void OnPresentEnd(IUnknown* device, PresentSource source)
 {
@@ -618,6 +657,11 @@ void OnPresentEnd(IUnknown* device, PresentSource source)
 void OnPresentBeginVulkan(VkDevice device)
 {
     PresentBegin(Api::Vulkan, reinterpret_cast<IUnknown*>(device), PresentSource::SwapChain);
+}
+
+void OnPresentFinishedVulkan(VkDevice device)
+{
+    PresentFinished(Api::Vulkan, reinterpret_cast<IUnknown*>(device), PresentSource::SwapChain);
 }
 
 void OnPresentEndVulkan(VkDevice device)

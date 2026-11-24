@@ -82,9 +82,10 @@ class InputCommon
     // The present each input last reported the game's own frame generation on (async markers), 0 = never
     inline static std::atomic_uint64_t present_count = 0;
     inline static std::array<std::atomic_uint64_t, static_cast<size_t>(LowLatencyInput::_)> last_fg_present {};
-    // OptiScaler's XeFG's present queue for its out of band markers (referenced), and the game frame id of the batch
-    // it last marked
-    inline static std::atomic<ID3D12CommandQueue*> xefg_present_queue = nullptr;
+    // OptiScaler's XeFG's present queue for its out of band markers (referenced, guarded by xefg_present_queue_mutex),
+    // and the game frame id of the batch it last marked
+    inline static std::mutex xefg_present_queue_mutex {};
+    inline static ID3D12CommandQueue* xefg_present_queue = nullptr;
     inline static std::atomic_uint64_t xefg_frame_id = 0;
     // Time the low latency output slept since XeFG's Dynamic MFG last asked (the frame time the game doesn't need)
     inline static std::atomic<double> slept_ms = 0.0;
@@ -219,6 +220,10 @@ class InputCommon
     // band present markers with the frame id of the batch XeFG marked, as DLSSG sends them; AntiLag 2 takes the frame
     // type from them
     static void fg_output_present(ID3D12CommandQueue* presentQueue, bool presented);
+
+    // Seed the XeFG present queue from XeFG swapchain creation so frame-1 OUT_OF_BAND_RENDERSUBMIT markers
+    // are not dropped in Reflex/Anti-Lag 2 split mode before the first fg_output_present runs.
+    static void seed_xefg_present_queue(ID3D12CommandQueue* queue);
 
     // XeFG's own XeLL markers (from the XeLL hook): 80860000 and 80860001 around the interpolation work it submits in
     // its proxy swapchain's Present, with the game's last present start frame id. DLSSG's out of band render submit

@@ -438,6 +438,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present, on the game's
     // own D3D11 device. This is the game's only present here; the bridge's D3D12 presents belong to frame generation.
+    // On early abort or failed/WAS_STILL_DRAWING present, close PRESENT_END cleanly without running Sleep or advancing
+    // frame ID.
     struct LowLatencyScope
     {
         explicit LowLatencyScope(IUnknown* device) : _device(device)
@@ -446,13 +448,21 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
                 native::lowlatency::OnPresentBegin(_device);
         }
 
+        void MarkPresented() { _presented = true; }
+
         ~LowLatencyScope()
         {
-            if (_device != nullptr)
+            if (_device == nullptr)
+                return;
+
+            if (_presented)
                 native::lowlatency::OnPresentEnd(_device);
+            else
+                native::lowlatency::OnPresentFinished(_device);
         }
 
         IUnknown* _device;
+        bool _presented = false;
     } lowLatencyScope(State::Instance().currentD3D11Device);
 
     if (!_InitInteropObjects())
@@ -509,6 +519,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     }
 
     auto result = _fgSwapChain->Present(SyncInterval, Flags);
+
+    if (result != DXGI_ERROR_WAS_STILL_DRAWING && result != DXGI_ERROR_DEVICE_REMOVED &&
+        result != DXGI_ERROR_DEVICE_RESET)
+    {
+        lowLatencyScope.MarkPresented();
+    }
 
     if (SUCCEEDED(result))
     {

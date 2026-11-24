@@ -7,12 +7,18 @@
 
 inline uint64_t FrameLimit::get_timestamp()
 {
-    FILETIME fileTime;
-    GetSystemTimePreciseAsFileTime(&fileTime);
+    static const int64_t freq = []()
+    {
+        LARGE_INTEGER f {};
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart > 0 ? f.QuadPart : 1LL;
+    }();
 
-    uint64_t time = (static_cast<uint64_t>(fileTime.dwHighDateTime) << 32) | fileTime.dwLowDateTime;
-
-    return time * 100;
+    LARGE_INTEGER counter {};
+    QueryPerformanceCounter(&counter);
+    const uint64_t ticks = static_cast<uint64_t>(counter.QuadPart);
+    const uint64_t f = static_cast<uint64_t>(freq);
+    return (ticks / f) * 1'000'000'000ULL + ((ticks % f) * 1'000'000'000ULL) / f;
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/sync/using-waitable-timer-objects
@@ -29,7 +35,8 @@ inline int FrameLimit::timer_sleep(int64_t hundred_ns)
     if (!SetWaitableTimerEx(timer, &due_time, 0, NULL, NULL, NULL, 0))
         return 2;
 
-    if (WaitForSingleObject(timer, 1000) != WAIT_OBJECT_0)
+    const DWORD waitMs = static_cast<DWORD>(std::clamp<int64_t>(hundred_ns / 10'000 + 2000, 1000, 120'000));
+    if (WaitForSingleObject(timer, waitMs) != WAIT_OBJECT_0)
         return 3;
 
     return 0;
@@ -41,6 +48,7 @@ inline int FrameLimit::busywait_sleep(int64_t ns)
     auto wait_until = current_time + ns;
     while (current_time < wait_until)
     {
+        YieldProcessor();
         current_time = get_timestamp();
     }
     return 0;
@@ -48,16 +56,20 @@ inline int FrameLimit::busywait_sleep(int64_t ns)
 
 inline int FrameLimit::combined_sleep(int64_t ns)
 {
+    if (ns <= 0)
+        return 0;
+
     constexpr int64_t busywait_threshold = 2'000'000; // 2ms
     int status {};
-    auto current_time = get_timestamp();
+    const uint64_t current_time = get_timestamp();
     if (ns <= busywait_threshold)
         status = busywait_sleep(ns);
     else
         status = timer_sleep((ns - busywait_threshold) / 100);
 
-    if (int64_t sleep_deviation = ns - (get_timestamp() - current_time); sleep_deviation > 0 && !status)
-        status = busywait_sleep(sleep_deviation);
+    const uint64_t elapsed = get_timestamp() - current_time;
+    if (!status && elapsed < static_cast<uint64_t>(ns))
+        status = busywait_sleep(ns - static_cast<int64_t>(elapsed));
 
     return status;
 }
@@ -91,22 +103,50 @@ double FrameLimit::TakeSleptMs() { return sleptMs.exchange(0.0); }
 
 void FrameLimit::sleep(uint32_t shownPerRendered)
 {
-    if (auto fpsCap = CapFps(); fpsCap != 0.0f)
+    static std::mutex s_limitMutex;
+    std::lock_guard<std::mutex> lock(s_limitMutex);
+    static uint64_t next_frame_time = 0;
+
+    if (auto fpsCap = CapFps(); fpsCap > 0.0f)
     {
-        uint64_t min_interval_us = std::clamp((uint64_t) (1'000'000 / fpsCap), 0ULL, 100'000'000ULL);
+        uint64_t min_interval_us = std::clamp((uint64_t) (1'000'000.0 / (double) fpsCap + 0.5), 0ULL, 100'000'000ULL);
 
         if (shownPerRendered > 1)
             min_interval_us *= shownPerRendered;
 
-        static uint64_t previous_frame_time = 0;
-        uint64_t current_time = get_timestamp();
-        uint64_t frame_time = current_time - previous_frame_time;
-        if (frame_time < 1000 * min_interval_us)
+        const uint64_t target_interval_ns = min_interval_us * 1000ULL;
+        const uint64_t current_time = get_timestamp();
+
+        // Advance a periodic deadline rather than re-anchoring after sleep returns so OS wakeup jitter
+        // never accumulates into steady FPS drift below the cap. Re-anchor on first frame or >1 interval hitch.
+        if (next_frame_time == 0 || current_time >= next_frame_time + target_interval_ns)
         {
-            if (auto res = combined_sleep(min_interval_us * 1000 - frame_time); res)
+            next_frame_time = current_time + target_interval_ns;
+            return;
+        }
+
+        // If the FPS cap rose or FG multiplier dropped, clamp stale deadline so we never sleep longer than
+        // one current target interval.
+        if (next_frame_time > current_time + target_interval_ns)
+            next_frame_time = current_time + target_interval_ns;
+
+        if (current_time < next_frame_time)
+        {
+            const uint64_t wait_ns = next_frame_time - current_time;
+            if (auto res = combined_sleep(static_cast<int64_t>(wait_ns)); res)
                 LOG_ERROR("Sleep command failed: {}", res);
         }
-        previous_frame_time = get_timestamp();
-        sleptMs.fetch_add((double) (previous_frame_time - current_time) / 1'000'000.0);
+
+        const uint64_t after_time = get_timestamp();
+        next_frame_time += target_interval_ns;
+        if (after_time > next_frame_time + target_interval_ns)
+            next_frame_time = after_time + target_interval_ns;
+
+        if (after_time > current_time)
+            sleptMs.fetch_add((double) (after_time - current_time) / 1'000'000.0);
+    }
+    else
+    {
+        next_frame_time = 0;
     }
 }

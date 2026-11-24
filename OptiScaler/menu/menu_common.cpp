@@ -10007,6 +10007,32 @@ void RenderExposureScanIndicator(float alpha)
     ImGui::End();
 }
 
+static HWND s_lastPublishedMenuHwnd = nullptr;
+static int s_lastPublishedMenuState = 0; // 0 = unset, 1 = initialized & hidden, 2 = visible
+
+static void PublishMenuVisibleProp(HWND hwnd, bool visible)
+{
+    if (hwnd == nullptr || !IsWindow(hwnd))
+        return;
+
+    const int state = visible ? 2 : 1;
+    if (hwnd != s_lastPublishedMenuHwnd || state != s_lastPublishedMenuState)
+    {
+        s_lastPublishedMenuHwnd = hwnd;
+        s_lastPublishedMenuState = state;
+        SetPropW(hwnd, L"OptiScaler.MenuVisible", reinterpret_cast<HANDLE>(static_cast<uintptr_t>(state)));
+    }
+}
+
+static void ClearMenuVisibleProp(HWND hwnd)
+{
+    if (hwnd != nullptr && IsWindow(hwnd))
+        RemovePropW(hwnd, L"OptiScaler.MenuVisible");
+
+    s_lastPublishedMenuHwnd = nullptr;
+    s_lastPublishedMenuState = 0;
+}
+
 bool MenuCommon::RenderMenu()
 {
     if (!_isInited)
@@ -10040,6 +10066,9 @@ bool MenuCommon::RenderMenu()
 
     // 4) Draw the full settings menu last so popups and child windows keep their existing behavior.
     RenderMainMenuWindow(ctx);
+
+    // Publish ground-truth menu visibility (1 = hidden, 2 = visible) for integrated 32-bit feeder host
+    PublishMenuVisibleProp(_handle, _isVisible);
 
     // The Optical F5Low debug view's enlarged or full screen picture, over the game whether the menu shows or not.
     if (ctx.newFrame)
@@ -10196,6 +10225,8 @@ void MenuCommon::Shutdown()
 
     ImGui::DestroyContext();
 
+    ClearMenuVisibleProp(_handle);
+
     _handle = nullptr;
     _isInited = false;
     _isVisible = false;
@@ -10207,6 +10238,7 @@ void MenuCommon::HideMenu()
         return;
 
     _isVisible = false;
+    PublishMenuVisibleProp(_handle, false);
 
     ImGuiIO& io = ImGui::GetIO();
     (void) io;

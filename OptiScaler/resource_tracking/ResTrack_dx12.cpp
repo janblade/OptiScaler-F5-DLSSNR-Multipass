@@ -177,7 +177,32 @@ static void DetachLateReset()
         LOG_ERROR("Failed to unhook the DLSS-NR command list Reset");
 }
 
-static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
+static constexpr size_t kMaxExecSlots = 4;
+static constexpr size_t kMaxVerifiedDeviceVtables = 8;
+
+static std::mutex s_queueHookMutex;
+static PFN_ExecuteCommandLists s_execOrigTarget[kMaxExecSlots] = {};
+static PFN_ExecuteCommandLists s_execTrampoline[kMaxExecSlots] = {};
+static std::atomic<size_t> s_execSlotCount { 0 };
+static const void* s_verifiedDeviceVtables[kMaxVerifiedDeviceVtables] = {};
+static std::atomic<size_t> s_verifiedDeviceVtableCount { 0 };
+
+static void HandleExecuteCommandLists(size_t slot, ID3D12CommandQueue* This, UINT NumCommandLists,
+                                      ID3D12CommandList* const* ppCommandLists);
+
+template <size_t Slot>
+static void STDMETHODCALLTYPE hkExecuteCommandListsSlot(ID3D12CommandQueue* This, UINT NumCommandLists,
+                                                        ID3D12CommandList* const* ppCommandLists)
+{
+    HandleExecuteCommandLists(Slot, This, NumCommandLists, ppCommandLists);
+}
+
+static constexpr PFN_ExecuteCommandLists kExecHookFns[kMaxExecSlots] = {
+    &hkExecuteCommandListsSlot<0>,
+    &hkExecuteCommandListsSlot<1>,
+    &hkExecuteCommandListsSlot<2>,
+    &hkExecuteCommandListsSlot<3>,
+};
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
 static PFN_SetGraphicsRootDescriptorTable o_SetGraphicsRootDescriptorTable = nullptr;
@@ -752,15 +777,105 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
 
 #pragma endregion
 
-// Only DLSS-NR's finished-picture path uses the queue hook now; frame generation no longer tracks command
-// lists through it (upstream e8c9834d).
-void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumCommandLists,
-                                          ID3D12CommandList* const* ppCommandLists)
+// Only DLSS-NR's finished-picture path and native low-latency submit markers use the queue hook now;
+// frame generation no longer tracks command lists through it (upstream e8c9834d).
+static void HandleExecuteCommandLists(size_t slot, ID3D12CommandQueue* This, UINT NumCommandLists,
+                                      ID3D12CommandList* const* ppCommandLists)
 {
+    struct ExecNestingState
+    {
+        uint32_t depth = 0;
+        ID3D12CommandList* const* outerLists = nullptr;
+        UINT outerCount = 0;
+    };
+
+    static thread_local ExecNestingState s_execNesting {};
+
+    struct ExecNestingGuard
+    {
+        ExecNestingState& state;
+        bool isOuter;
+
+        ExecNestingGuard(ExecNestingState& s, ID3D12CommandList* const* lists, UINT count)
+            : state(s), isOuter(s.depth == 0)
+        {
+            ++state.depth;
+            if (isOuter)
+            {
+                state.outerLists = lists;
+                state.outerCount = count;
+            }
+        }
+
+        ~ExecNestingGuard()
+        {
+            --state.depth;
+            if (isOuter)
+            {
+                state.outerLists = nullptr;
+                state.outerCount = 0;
+            }
+        }
+    };
+
+    ExecNestingGuard guard(s_execNesting, ppCommandLists, NumCommandLists);
+
     // Before the submit: the frame's first one is where the game's simulation ends and its render submit starts
     native::lowlatency::OnFirstSubmit(This);
-    o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
-    DlssNr::FinishedPictureSubmitted(This, NumCommandLists, ppCommandLists);
+    s_execTrampoline[slot](This, NumCommandLists, ppCommandLists);
+
+    if (guard.isOuter)
+    {
+        DlssNr::FinishedPictureSubmitted(This, NumCommandLists, ppCommandLists);
+        return;
+    }
+
+    // Nested wrapper -> raw forwarding (e.g. ReShade forwarding wrapped command lists to D3D12Core):
+    // skip any pointer identical to one in the outer call (the outer call will notify it once), while
+    // forwarding unwrapped/translated pointers so whichever identity is in DlssNrWatchedLists matches once.
+    if (NumCommandLists == 0 || ppCommandLists == nullptr)
+        return;
+
+    const auto* outerLists = s_execNesting.outerLists;
+    const UINT outerCount = s_execNesting.outerCount;
+
+    auto isInOuter = [outerLists, outerCount](ID3D12CommandList* cmd) -> bool
+    {
+        if (outerLists == nullptr)
+            return false;
+        for (UINT j = 0; j < outerCount; ++j)
+        {
+            if (outerLists[j] == cmd)
+                return true;
+        }
+        return false;
+    };
+
+    constexpr UINT kStackCap = 16;
+    if (NumCommandLists <= kStackCap)
+    {
+        ID3D12CommandList* uniqueLists[kStackCap];
+        UINT uniqueCount = 0;
+        for (UINT i = 0; i < NumCommandLists; ++i)
+        {
+            if (!isInOuter(ppCommandLists[i]))
+                uniqueLists[uniqueCount++] = ppCommandLists[i];
+        }
+        if (uniqueCount > 0)
+            DlssNr::FinishedPictureSubmitted(This, uniqueCount, uniqueLists);
+    }
+    else
+    {
+        std::vector<ID3D12CommandList*> uniqueLists;
+        uniqueLists.reserve(NumCommandLists);
+        for (UINT i = 0; i < NumCommandLists; ++i)
+        {
+            if (!isInOuter(ppCommandLists[i]))
+                uniqueLists.push_back(ppCommandLists[i]);
+        }
+        if (!uniqueLists.empty())
+            DlssNr::FinishedPictureSubmitted(This, static_cast<UINT>(uniqueLists.size()), uniqueLists.data());
+    }
 }
 
 #pragma region Heap hooks
@@ -2631,9 +2746,9 @@ bool ResTrack_Dx12::HookLateNrQueue(ID3D12Device* device)
 {
     static std::mutex hookMutex;
     std::lock_guard<std::mutex> lock(hookMutex);
-    HookToQueue(device);
+    const bool queueOk = HookToQueue(device);
     if (o_LateReset)
-        return o_ExecuteCommandLists != nullptr;
+        return queueOk;
     ID3D12CommandAllocator* allocator = nullptr;
     ID3D12GraphicsCommandList* cmd = nullptr;
     if (SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
@@ -2659,7 +2774,7 @@ bool ResTrack_Dx12::HookLateNrQueue(ID3D12Device* device)
         }
         allocator->Release();
     }
-    return o_ExecuteCommandLists != nullptr && o_LateReset != nullptr;
+    return queueOk && o_LateReset != nullptr;
 }
 
 bool ResTrack_Dx12::HookLateAllocatorReset(ID3D12Device* device)
@@ -2699,10 +2814,43 @@ bool ResTrack_Dx12::HookLateAllocatorReset(ID3D12Device* device)
     return true;
 }
 
-void ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
+bool ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
 {
-    if (o_ExecuteCommandLists != nullptr)
-        return;
+    if (InDevice == nullptr)
+        return false;
+
+    const void* const deviceVtable = *(void* const*) InDevice;
+    if (deviceVtable == nullptr)
+        return false;
+
+    auto isDeviceVtableVerified = [deviceVtable]() -> bool
+    {
+        const size_t count = s_verifiedDeviceVtableCount.load(std::memory_order_acquire);
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (s_verifiedDeviceVtables[i] == deviceVtable)
+                return true;
+        }
+        return false;
+    };
+
+    if (isDeviceVtableVerified())
+        return true;
+
+    std::lock_guard<std::mutex> lock(s_queueHookMutex);
+
+    if (isDeviceVtableVerified())
+        return true;
+
+    auto cacheDeviceVtable = [deviceVtable]()
+    {
+        const size_t count = s_verifiedDeviceVtableCount.load(std::memory_order_relaxed);
+        if (count < kMaxVerifiedDeviceVtables)
+        {
+            s_verifiedDeviceVtables[count] = deviceVtable;
+            s_verifiedDeviceVtableCount.store(count + 1, std::memory_order_release);
+        }
+    };
 
     ID3D12CommandQueue* queue = nullptr;
     D3D12_COMMAND_QUEUE_DESC queueDesc = {};
@@ -2711,34 +2859,80 @@ void ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
     queueDesc.NodeMask = 0;
     queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
 
-    auto hr = InDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue));
+    const HRESULT hr = InDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue));
+    if (FAILED(hr) || queue == nullptr)
+        return false;
 
-    if (hr == S_OK)
+    ID3D12CommandQueue* realQueue = nullptr;
+    if (!CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &realQueue))
+        realQueue = queue;
+
+    PVOID* pVTable = *(PVOID**) realQueue;
+    const auto target = (PFN_ExecuteCommandLists) (pVTable != nullptr ? pVTable[10] : nullptr);
+
+    bool hooked = false;
+    if (target != nullptr)
     {
-        ID3D12CommandQueue* realQueue = nullptr;
-        if (!CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &realQueue))
-            realQueue = queue;
-
-        // Get the vtable pointer
-        PVOID* pVTable = *(PVOID**) realQueue;
-
-        o_ExecuteCommandLists = (PFN_ExecuteCommandLists) pVTable[10];
-
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-
-        if (o_ExecuteCommandLists != nullptr)
-            DetourAttach(&(PVOID&) o_ExecuteCommandLists, hkExecuteCommandLists);
-
-        auto detourResult = DetourTransactionCommit();
-        if (detourResult != NO_ERROR)
+        const size_t slotCount = s_execSlotCount.load(std::memory_order_relaxed);
+        bool alreadyHooked = false;
+        for (size_t i = 0; i < slotCount; ++i)
         {
-            LOG_ERROR("Failed to hook CommandList methods: {:X}", detourResult);
-            o_ExecuteCommandLists = nullptr;
+            if (s_execOrigTarget[i] == target)
+            {
+                alreadyHooked = true;
+                break;
+            }
         }
 
-        queue->Release();
+        if (alreadyHooked)
+        {
+            cacheDeviceVtable();
+            hooked = true;
+        }
+        else if (slotCount < kMaxExecSlots)
+        {
+            const size_t slot = slotCount;
+            s_execTrampoline[slot] = target;
+
+            DetourTransactionBegin();
+            DetourUpdateThread(GetCurrentThread());
+            const LONG attachResult = DetourAttach(&(PVOID&) s_execTrampoline[slot], (PVOID) kExecHookFns[slot]);
+            LONG commitResult = NO_ERROR;
+            if (attachResult == NO_ERROR)
+            {
+                commitResult = DetourTransactionCommit();
+            }
+            else
+            {
+                DetourTransactionAbort();
+                commitResult = attachResult;
+            }
+
+            if (commitResult != NO_ERROR)
+            {
+                LOG_ERROR("Failed to hook ExecuteCommandLists slot {} (target {:X}): {:X}", slot,
+                          (size_t) target, commitResult);
+                s_execTrampoline[slot] = nullptr;
+            }
+            else
+            {
+                s_execOrigTarget[slot] = target;
+                s_execSlotCount.store(slot + 1, std::memory_order_release);
+                cacheDeviceVtable();
+                hooked = true;
+                LOG_INFO("Hooked ExecuteCommandLists slot {} (target {:X}, device vtable {:X})", slot,
+                         (size_t) target, (size_t) deviceVtable);
+            }
+        }
+        else
+        {
+            LOG_WARN("ExecuteCommandLists hook slot table full ({} slots), cannot hook target {:X}",
+                     kMaxExecSlots, (size_t) target);
+        }
     }
+
+    queue->Release();
+    return hooked;
 }
 
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)

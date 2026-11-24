@@ -697,7 +697,9 @@ void PollInputFallbackLocked()
     const DWORD time = GetTickCount();
 
     POINT screenPos {};
-    const bool haveCursor = RealGetCursorPosSafe(&screenPos) != FALSE;
+    const bool forwardedMouse =
+        _state.InputHwnd != nullptr && GetPropW(_state.InputHwnd, L"OptiScaler.ForwardedMouse") != nullptr;
+    const bool haveCursor = !forwardedMouse && RealGetCursorPosSafe(&screenPos) != FALSE;
     const HWND coordinateHwnd = GetPolledCoordinateHwndLocked();
 
     if (haveCursor && coordinateHwnd != nullptr)

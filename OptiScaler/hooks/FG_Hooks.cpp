@@ -1979,9 +1979,21 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (state.swapchainInteropApi == SwapchainInteropApi::None)
         Hudfix_Dx12::PresentEnd();
 
+    // Close PRESENT_START -> PRESENT_END before the frame limiter sleeps so Reflex/XeLL do not
+    // misattribute the limiter's wait as Present GPU/DWM time (also covers Dx11wDx12 where the
+    // outer Dx11wDx12SC::Present opened PRESENT_START on currentD3D11Device).
+    if (lowLatencyDevice != nullptr)
+        native::lowlatency::OnPresentFinished(lowLatencyDevice, native::lowlatency::PresentSource::FrameGeneration);
+    else if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
+             state.currentD3D11Device != nullptr)
+        native::lowlatency::OnPresentFinished(state.currentD3D11Device);
+
+    const bool presentCompleted = result != DXGI_ERROR_WAS_STILL_DRAWING && result != DXGI_ERROR_DEVICE_REMOVED &&
+                                  result != DXGI_ERROR_DEVICE_RESET;
+
     // A dxvk game's frame generation through the Vulkan present bridge (NativeDxvkVulkan) presents a real D3D12 swapchain
     // here, as a native Vulkan game's does: the limiter applies to it.
-    if (willPresent && !state.reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
+    if (willPresent && presentCompleted && !state.reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
         state.activeFgOutput != FGOutput::NoFG &&
         (!IdentifyGpu::getPrimaryGpu().usesDxvk || VkPresentBridge::DxvkThroughVulkan()) && !XellHooks::canLimit())
     {
@@ -2009,7 +2021,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         state.lastFGPresentMs = Util::MillisecondsNow() - presentStartMs;
 
     // After frame generation's lock is released: Sleep holds this thread until the next frame should start
-    if (lowLatencyDevice != nullptr)
+    if (lowLatencyDevice != nullptr && presentCompleted)
         native::lowlatency::OnPresentEnd(lowLatencyDevice, native::lowlatency::PresentSource::FrameGeneration);
 
     LOG_DEBUG("Present finished");

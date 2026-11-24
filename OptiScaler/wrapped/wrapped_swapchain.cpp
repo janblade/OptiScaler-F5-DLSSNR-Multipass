@@ -309,8 +309,11 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP,
                             SdrToHdr::ProxyChainBase* proxy = nullptr, const SdrToHdr::DisplayInfo* display = nullptr,
-                            bool upgraded = false)
+                            bool upgraded = false, IUnknown** outLowLatencyDevice = nullptr)
 {
+    if (outLowLatencyDevice != nullptr)
+        *outLowLatencyDevice = nullptr;
+
     if (State::Instance().isShuttingDown)
     {
         if (pPresentParameters == nullptr)
@@ -718,7 +721,17 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         InputCommon::fg_output_present(cq, true);
 
     if (lowLatencyDevice != nullptr)
-        native::lowlatency::OnPresentEnd(lowLatencyDevice);
+    {
+        if (outLowLatencyDevice != nullptr)
+        {
+            native::lowlatency::OnPresentFinished(lowLatencyDevice);
+            *outLowLatencyDevice = lowLatencyDevice;
+        }
+        else
+        {
+            native::lowlatency::OnPresentEnd(lowLatencyDevice);
+        }
+    }
 
     if (presentResult == S_OK)
     {
@@ -1254,14 +1267,26 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp, Proxy(), &_display, _upgraded);
+        IUnknown* lowLatencyDevice = nullptr;
+        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp, Proxy(), &_display,
+                              _upgraded, &lowLatencyDevice);
         RecoverFromExclusive(result);
 
-        // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
-        if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
-            State::Instance().activeFgOutput == FGOutput::NoFG &&
-            !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
-            FrameLimit::sleep();
+        // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep after
+        // PRESENT_END and before OnPresentEnd (Reflex/XeLL Sleep + SIMULATION_START) so the limiter wait is never
+        // misattributed to PRESENT or SIMULATION. Skip pacing/advance if Present did not queue a frame.
+        const bool presentCompleted = result != DXGI_ERROR_WAS_STILL_DRAWING && result != DXGI_ERROR_DEVICE_REMOVED &&
+                                      result != DXGI_ERROR_DEVICE_RESET;
+        if (presentCompleted)
+        {
+            if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
+                State::Instance().activeFgOutput == FGOutput::NoFG &&
+                !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+                FrameLimit::sleep();
+
+            if (lowLatencyDevice != nullptr)
+                native::lowlatency::OnPresentEnd(lowLatencyDevice);
+        }
     }
     else
     {
@@ -1694,15 +1719,26 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
+        IUnknown* lowLatencyDevice = nullptr;
         result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp, Proxy(),
-                              &_display, _upgraded);
+                              &_display, _upgraded, &lowLatencyDevice);
         RecoverFromExclusive(result);
 
-        // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep in present
-        if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
-            State::Instance().activeFgOutput == FGOutput::NoFG &&
-            !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
-            FrameLimit::sleep();
+        // When Reflex can't be used to limit (and Optical F5Low's low latency does not keep the cap), sleep after
+        // PRESENT_END and before OnPresentEnd (Reflex/XeLL Sleep + SIMULATION_START) so the limiter wait is never
+        // misattributed to PRESENT or SIMULATION. Skip pacing/advance if Present did not queue a frame.
+        const bool presentCompleted = result != DXGI_ERROR_WAS_STILL_DRAWING && result != DXGI_ERROR_DEVICE_REMOVED &&
+                                      result != DXGI_ERROR_DEVICE_RESET;
+        if (presentCompleted)
+        {
+            if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
+                State::Instance().activeFgOutput == FGOutput::NoFG &&
+                !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+                FrameLimit::sleep();
+
+            if (lowLatencyDevice != nullptr)
+                native::lowlatency::OnPresentEnd(lowLatencyDevice);
+        }
     }
     else
     {

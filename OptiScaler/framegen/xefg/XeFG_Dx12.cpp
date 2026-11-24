@@ -626,6 +626,7 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
     }
 
     _gameCommandQueue = realQueue;
+    InputCommon::seed_xefg_present_queue(realQueue);
     _swapChain = *swapChain;
     _hwnd = hwnd;
 
@@ -796,6 +797,7 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     }
 
     _gameCommandQueue = realQueue;
+    InputCommon::seed_xefg_present_queue(realQueue);
     _swapChain = *swapChain;
     _hwnd = hwnd;
 
@@ -2198,9 +2200,14 @@ bool XeFG_Dx12::ReleaseSwapchain(HWND hwnd)
             DestroySwapchainContext();
 
         // DestroySwapchainContext puts the context back when XeFG refuses (the swapchain still in use): keep it to
-        // destroy later instead of losing it with everything it holds
+        // destroy later instead of losing it with everything it holds, and mark XeLL release pending so
+        // RetryParkedContexts releases xefg_xell + xefg_present_queue once the last parked context destroys.
         if (_swapChainContext != nullptr)
+        {
             ParkSwapchainContext(_swapChainContext);
+            std::lock_guard<std::mutex> lock(_parkedMutex);
+            _xellReleasePending = true;
+        }
 
         _swapChainContext = nullptr;
 

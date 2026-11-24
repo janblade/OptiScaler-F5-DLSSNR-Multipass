@@ -734,11 +734,6 @@ class ResTrack_Dx12
         return (addr >> 4) % SHARD_COUNT;
     }
 
-    // The queue submit hook DLSS-NR's finished-picture path needs (installed by HookLateNrQueue).
-    static void HookToQueue(ID3D12Device* InDevice);
-    static void hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumCommandLists,
-                                      ID3D12CommandList* const* ppCommandLists);
-
   public:
     static void RegisterRootSignature(ID3D12RootSignature* rootSignature,
                                       const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc);
@@ -748,6 +743,8 @@ class ResTrack_Dx12
     static void OnSetComputeRootSignature(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature);
 
     static void HookDevice(ID3D12Device* device);
+    // Queue ExecuteCommandLists hook (drives native::lowlatency::OnFirstSubmit and DLSS-NR's finished-picture submit).
+    static bool HookToQueue(ID3D12Device* InDevice);
     // True when both are on: the queue submit hook and the command list Reset hook.
     static bool HookLateNrQueue(ID3D12Device* device);
     // ID3D12CommandAllocator::Reset, for DlssNr::AllocatorEpochs (Superior Scaling asks when it first needs it).

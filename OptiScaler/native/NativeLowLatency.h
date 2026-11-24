@@ -24,10 +24,12 @@
 
 namespace native::lowlatency
 {
-// The game's Present: before the real Present (RENDERSUBMIT_END, PRESENT_START) and after it returns (PRESENT_END,
-// Sleep, SIMULATION_START). `device` is the game's D3D12 or D3D11 device. SwapChain calls are ignored while
-// FrameGeneration calls come in.
+// The game's Present: before the real Present (RENDERSUBMIT_END, PRESENT_START), right after the real Present returns
+// (PRESENT_END, before any frame-limiter wait so limiter sleep is never counted inside PRESENT or SIMULATION), and
+// after the limiter wait (Sleep, SIMULATION_START, INPUT_SAMPLE). `device` is the game's D3D12 or D3D11 device.
+// SwapChain calls are ignored while FrameGeneration calls come in.
 void OnPresentBegin(IUnknown* device, PresentSource source = PresentSource::SwapChain);
+void OnPresentFinished(IUnknown* device, PresentSource source = PresentSource::SwapChain);
 void OnPresentEnd(IUnknown* device, PresentSource source = PresentSource::SwapChain);
 
 // Same pairing, for a native Vulkan game (native/NativeDriverVk.cpp, around the game's own vkQueuePresentKHR). There is
@@ -38,6 +40,7 @@ void OnPresentEnd(IUnknown* device, PresentSource source = PresentSource::SwapCh
 // is paced on the bridge's private D3D12 device through OnPresentBegin/OnPresentEnd instead (hooks/Vulkan_Hooks.cpp,
 // NativeLowLatencyRule.h PresentTarget), so XeFG's XeLL routing applies; each call carries its own API.
 void OnPresentBeginVulkan(VkDevice device);
+void OnPresentFinishedVulkan(VkDevice device);
 void OnPresentEndVulkan(VkDevice device);
 
 // A D3D11 game on dxvk with the Vulkan present bridge presents twice a frame: the game's D3D11 Present on its own thread,

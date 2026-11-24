@@ -455,8 +455,8 @@ void PresentBegin(Api api, IUnknown* device, PresentSource source)
 
 void PresentFinished(Api api, IUnknown* device, PresentSource source)
 {
-    if (device == nullptr || State::Instance().isShuttingDown || Ignored(source) ||
-        !g_presentStarted || ReflexHooks::gameCalledReflex())
+    if (device == nullptr || State::Instance().isShuttingDown || Ignored(source) || !g_presentStarted ||
+        ReflexHooks::gameCalledReflex())
     {
         return;
     }
@@ -647,10 +647,7 @@ void OnPresentBegin(IUnknown* device, PresentSource source)
     PresentBegin(Api::D3D, device, source);
 }
 
-void OnPresentFinished(IUnknown* device, PresentSource source)
-{
-    PresentFinished(Api::D3D, device, source);
-}
+void OnPresentFinished(IUnknown* device, PresentSource source) { PresentFinished(Api::D3D, device, source); }
 
 void OnPresentEnd(IUnknown* device, PresentSource source)
 {

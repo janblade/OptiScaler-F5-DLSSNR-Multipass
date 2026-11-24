@@ -93,7 +93,10 @@ std::string SuperiorStatusVk();
 // No usable NVIDIA DLSS SR for Superior's private DLSS on native Vulkan (latched until Superior is selected again).
 bool SuperiorSrUnavailableVk();
 // Live Superior Scaling status on native Vulkan (mode, resolutions, preset, jitter, fallback).
-namespace SuperiorScaling { struct LiveInfo; }
+namespace SuperiorScaling
+{
+struct LiveInfo;
+}
 SuperiorScaling::LiveInfo SuperiorLiveVk();
 
 // Whether the game offers an exposure texture on this path. Observed only: it is not read, because

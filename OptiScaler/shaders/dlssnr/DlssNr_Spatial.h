@@ -64,9 +64,8 @@ struct Settings {
     bool operator==(const Settings& o) const {
         const auto same = [](float a, float b) { return a == b || (std::isnan(a) && std::isnan(b)); };
         return enabled == o.enabled && smoothCurve == o.smoothCurve && same(centerX, o.centerX) &&
-               same(centerY, o.centerY) && same(workX, o.workX) && same(workY, o.workY) &&
-               same(offsetX, o.offsetX) && same(offsetY, o.offsetY) && same(shiftX, o.shiftX) &&
-               same(shiftY, o.shiftY);
+               same(centerY, o.centerY) && same(workX, o.workX) && same(workY, o.workY) && same(offsetX, o.offsetX) &&
+               same(offsetY, o.offsetY) && same(shiftX, o.shiftX) && same(shiftY, o.shiftY);
     }
     bool operator!=(const Settings& o) const { return !(*this == o); }
 };
@@ -89,10 +88,14 @@ template<class ConfigLike> Settings ReadSettings(const ConfigLike& cfg) {
 // The named layouts the menu offers (centre / working size, both axes, no offset, no shift).
 // Each layout has a classic center (used when smooth curve is off) and a smooth center (used when
 // smooth curve is on and auto-adjust is enabled). The work percentage is the same in both modes.
-struct NamedLayout { const char* name; float center, work, smoothCenter; };
-inline constexpr NamedLayout kNamedLayouts[3] = { { "Light",    85.0f, 95.0f, 65.0f },
+struct NamedLayout
+{
+    const char* name;
+    float center, work, smoothCenter;
+};
+inline constexpr NamedLayout kNamedLayouts[3] = { { "Light", 85.0f, 95.0f, 65.0f },
                                                   { "Balanced", 80.0f, 90.0f, 50.0f },
-                                                  { "Strong",   70.0f, 80.0f, 40.0f } };
+                                                  { "Strong", 70.0f, 80.0f, 40.0f } };
 inline constexpr int kDefaultLayout = 1;
 
 // Which named layout these settings match for the active mode. Returns -1 for custom.
@@ -101,8 +104,7 @@ inline int MatchedLayout(const Settings& s, bool autoAdjustCenter = true)
     for (int i = 0; i != 3; ++i) {
         const NamedLayout& n = kNamedLayouts[i];
         const float activeCenter = (s.smoothCurve && autoAdjustCenter) ? n.smoothCenter : n.center;
-        if (s.centerX == activeCenter && s.centerY == activeCenter &&
-            s.workX == n.work && s.workY == n.work &&
+        if (s.centerX == activeCenter && s.centerY == activeCenter && s.workX == n.work && s.workY == n.work &&
             s.offsetX == 0 && s.offsetY == 0 && s.shiftX == 0 && s.shiftY == 0)
             return i;
     }
@@ -259,8 +261,10 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
         result.status = Status::ThinEdge; return result;
     }
     const uint32_t curveMode = s.smoothCurve ? 3u : 2u;
-    result.warp.x = pw::BuildAxis(nativeW, rawW, modelW, s.centerX * .01f, s.offsetX * .01f, s.shiftX * .01f, curveMode);
-    result.warp.y = pw::BuildAxis(nativeH, rawH, modelH, s.centerY * .01f, s.offsetY * .01f, s.shiftY * .01f, curveMode);
+    result.warp.x =
+        pw::BuildAxis(nativeW, rawW, modelW, s.centerX * .01f, s.offsetX * .01f, s.shiftX * .01f, curveMode);
+    result.warp.y =
+        pw::BuildAxis(nativeH, rawH, modelH, s.centerY * .01f, s.offsetY * .01f, s.shiftY * .01f, curveMode);
     const auto& x = result.warp.x; const auto& y = result.warp.y;
     const auto invertible = [](const pw::Axis& axis) {
         // A peripheral side needs at least one raw working texel. At a shift endpoint the reference split may assign

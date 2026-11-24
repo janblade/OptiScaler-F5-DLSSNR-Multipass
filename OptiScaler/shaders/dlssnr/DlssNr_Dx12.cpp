@@ -4124,9 +4124,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const bool superiorDirectSrWanted =
         superior && workWidth <= width && workHeight <= height &&
-        DlssNr::SuperiorScaling::DirectSrWanted(
-            cfg.DlssNrSuperiorMode.value_or_default(), cfg.DlssNrSuperiorScalingPreset.value_or_default(),
-            superiorState.srUnavailable, depth != nullptr && guides.depth.valid());
+        DlssNr::SuperiorScaling::DirectSrWanted(cfg.DlssNrSuperiorMode.value_or_default(),
+                                                cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                                superiorState.srUnavailable, depth != nullptr && guides.depth.valid());
     const bool superiorOracleWanted =
         superior && workWidth <= width && workHeight <= height &&
         DlssNr::SuperiorScaling::IntrinsicOracleSelected(cfg.DlssNrSuperiorMode.value_or_default());
@@ -4143,10 +4143,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, true,
                                                EdgeCompression::Layout().modelW, EdgeCompression::Layout().modelH);
     // Exposure calibration alone still needs the original unpacked proxy. Packed Residual DLAA (HostResolve unwarps),
-    // Spatial Direct DLSS SR (PrivateEncodePacked unwarps), and Spatial Intrinsic 4K-Oracle (OracleDecompPacked unwarps) bypass it.
-    const bool spatialNeedsUnpack =
-        (!superiorPacked && !superiorSpatialDirectSr && !superiorSpatialOracle) || CalibrationWanted() ||
-        CalibrationActive();
+    // Spatial Direct DLSS SR (PrivateEncodePacked unwarps), and Spatial Intrinsic 4K-Oracle (OracleDecompPacked
+    // unwarps) bypass it.
+    const bool spatialNeedsUnpack = (!superiorPacked && !superiorSpatialDirectSr && !superiorSpatialOracle) ||
+                                    CalibrationWanted() || CalibrationActive();
     const DlssNr::GuideExtent renderGuideSize { frame.RenderSubrectWidth, frame.RenderSubrectHeight };
     const bool renderGuides = DlssNr::Spatial::UseRenderGuides(superior && workScale == 1.f, true, spatial, width,
                                                                height, workWidth, workHeight, renderGuideSize);
@@ -4183,9 +4183,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // The Replace curves take the model's answer as the picture and never read the proxy, so the unpack's loss at the
     // edges would land on screen with nothing to cancel it. The unpack then adds it back, measured against the picture the
     // uncompressed path would have shown the model (mode 103), which is built below the way that path builds it.
-    const bool replaceCorrection =
-        spatial && !superiorPacked && !superiorSpatialDirectSr && !superiorSpatialOracle &&
-        DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
+    const bool replaceCorrection = spatial && !superiorPacked && !superiorSpatialDirectSr && !superiorSpatialOracle &&
+                                   DlssNrProxyCurve::IsReplace(cfg.DlssNrReversibleMode.value_or_default());
 
     // What would rebuild the model below: a stale surface format (ReleaseSurfacesIfFormatChanged), a new size or a new
     // placement. Tuning is left out, it is the user's doing.
@@ -5595,9 +5594,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     auto* const superiorGenForJitter = superior ? superiorState.current.get() : nullptr;
-    const bool superiorDirectSrReady =
-        superiorDirectSrWanted && (!spatial || superiorSpatialDirectSr) &&
-        superiorGenForJitter != nullptr && superiorGenForJitter->PrivateReady();
+    const bool superiorDirectSrReady = superiorDirectSrWanted && (!spatial || superiorSpatialDirectSr) &&
+                                       superiorGenForJitter != nullptr && superiorGenForJitter->PrivateReady();
     const bool superiorJitterEligible =
         superior && !superiorSupersample && (superiorDirectSrReady || superiorOracleWanted);
     const auto superiorJitter =
@@ -6786,10 +6784,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                         resolveT3 = oracleOut.depth;
                     DlssNr::Superior::Fields::SetOracleResolve(
                         resolveParams, haveDepthNow, frame.DepthInverted, guides.depth.x, guides.depth.y,
-                        guides.depth.width, guides.depth.height,
-                        cfg.DlssNrSuperiorDirectSrSharpness.value_or_default(),
-                        cfg.DlssNrSuperiorNativeDetail.value_or_default(),
-                        oracleOut.preJbu, !oracleOut.preJbu && oracleOut.depth != nullptr);
+                        guides.depth.width, guides.depth.height, cfg.DlssNrSuperiorDirectSrSharpness.value_or_default(),
+                        cfg.DlssNrSuperiorNativeDetail.value_or_default(), oracleOut.preJbu,
+                        !oracleOut.preJbu && oracleOut.depth != nullptr);
                     oracleReady = true;
                 }
             }
@@ -6821,8 +6818,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 }
                 else
                 {
-                    const auto gains = DlssNr::SuperiorScaling::BlockGains(cfg, superiorCovered, superiorCompleted,
-                                                                           superiorGainScales, g_nr.superiorMainOnlyGains);
+                    const auto gains = DlssNr::SuperiorScaling::BlockGains(
+                        cfg, superiorCovered, superiorCompleted, superiorGainScales, g_nr.superiorMainOnlyGains);
                     auxT5 = residual && (gains.high != 1.0f || gains.low != 1.0f)
                                 ? SuperiorRun::FinalLow(g, *this, cmdList, shapingProxy, residual, signedResidual)
                                 : nullptr;
@@ -6861,14 +6858,20 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             live.workH = g.workHeight;
             live.outW = (directSrReady || oracleReady) ? g.width : g.workWidth;
             live.outH = (directSrReady || oracleReady) ? g.height : g.workHeight;
-            live.jitterActive = (directSrReady || oracleReady) && (superiorJitter.x != 0.0f || superiorJitter.y != 0.0f);
+            live.jitterActive =
+                (directSrReady || oracleReady) && (superiorJitter.x != 0.0f || superiorJitter.y != 0.0f);
             if (!live.jitterActive && (directSrReady || oracleReady))
             {
-                if (!cfg.DlssNrSuperiorJitter.value_or_default()) live.jitterPauseReason = 1u;
-                else if (frame.BeforeUpscale) live.jitterPauseReason = 2u;
-                else if (spatial && !superiorSpatialDirectSr && !superiorSpatialOracle) live.jitterPauseReason = 3u;
-                else if (workWidth >= width && workHeight >= height) live.jitterPauseReason = 4u;
-                else if (g_nr.heldActive) live.jitterPauseReason = 5u;
+                if (!cfg.DlssNrSuperiorJitter.value_or_default())
+                    live.jitterPauseReason = 1u;
+                else if (frame.BeforeUpscale)
+                    live.jitterPauseReason = 2u;
+                else if (spatial && !superiorSpatialDirectSr && !superiorSpatialOracle)
+                    live.jitterPauseReason = 3u;
+                else if (workWidth >= width && workHeight >= height)
+                    live.jitterPauseReason = 4u;
+                else if (g_nr.heldActive)
+                    live.jitterPauseReason = 5u;
                 else if (width && height &&
                          std::min(float(workWidth) / float(width), float(workHeight) / float(height)) < 0.399f)
                     live.jitterPauseReason = 6u;
@@ -6877,22 +6880,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 g.reset = true;
             if (!live.privateReady)
             {
-                if (g.intrinsicOracle) live.fallbackReason = 6u;
-                else if (!haveDepthNow) live.fallbackReason = 1u;
-                else if (superiorState.srUnavailable) live.fallbackReason = 2u;
+                if (g.intrinsicOracle)
+                    live.fallbackReason = 6u;
+                else if (!haveDepthNow)
+                    live.fallbackReason = 1u;
+                else if (superiorState.srUnavailable)
+                    live.fallbackReason = 2u;
                 else if (DlssNr::SuperiorScaling::Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) ==
                          DlssNr::SuperiorScaling::NoPrivateDlss)
                     live.fallbackReason = 3u;
-                else if (workWidth > width || workHeight > height) live.fallbackReason = 4u;
-                else if (g.privateFailed) live.fallbackReason = 6u;
-                else live.fallbackReason = 5u;
+                else if (workWidth > width || workHeight > height)
+                    live.fallbackReason = 4u;
+                else if (g.privateFailed)
+                    live.fallbackReason = 6u;
+                else
+                    live.fallbackReason = 5u;
             }
             else if (DlssNr::SuperiorScaling::DirectSrSelected(cfg.DlssNrSuperiorMode.value_or_default()) &&
                      !directSrReady)
             {
-                if (spatial) live.fallbackReason = 7u;
-                else if (workWidth > width || workHeight > height) live.fallbackReason = 4u;
-                else if (!haveDepthNow) live.fallbackReason = 1u;
+                if (spatial)
+                    live.fallbackReason = 7u;
+                else if (workWidth > width || workHeight > height)
+                    live.fallbackReason = 4u;
+                else if (!haveDepthNow)
+                    live.fallbackReason = 1u;
             }
             live.gpuMs = g_lastSuperiorTime.has_value() ? (float) g_lastSuperiorTime.value() : -1.0f;
             g_superiorLive = live;
@@ -7317,8 +7329,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     // and owns its submission/return. Do not defer this private interop list to
     // the game's unrelated present queue, or run a second deferred DLSS carrier.
     unsigned int feederContract = 0;
-    const bool feederPicture = params &&
-        params->Get("OptiScaler.Feeder.FinishedPicture", &feederContract) == NVSDK_NGX_Result_Success &&
+    const bool feederPicture =
+        params && params->Get("OptiScaler.Feeder.FinishedPicture", &feederContract) == NVSDK_NGX_Result_Success &&
         feederContract == 1;
     if (feederPicture)
     {
@@ -7336,9 +7348,12 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             timingQueue = static_cast<ID3D12CommandQueue*>(producerQueue);
             submissionEpoch = producerEpoch;
             static std::once_flag reported;
-            std::call_once(reported, [] {
-                LOG_INFO("Feeder NR uses the producer queue and submission clock; independent of the menu and frame generation");
-            });
+            std::call_once(reported,
+                           []
+                           {
+                               LOG_INFO("Feeder NR uses the producer queue and submission clock; independent of the "
+                                        "menu and frame generation");
+                           });
         }
     }
     const bool finishedPictureOn = !feederPicture && FinishedPictureEffective();
@@ -7539,7 +7554,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         g_nr.reset = true;
         if (g_gpuTime) g_gpuTime->ClearLast();
         if (g_ngxTime) g_ngxTime->ClearLast();
-        if (g_superiorTime) g_superiorTime->ClearLast();
+        if (g_superiorTime)
+            g_superiorTime->ClearLast();
         if (g_scanTime) g_scanTime->ClearLast();
         g_lastGpuTime.reset();
         g_lastNgxTime.reset();
@@ -7588,7 +7604,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         return;
     }
     Late::Cancel();
-    if (feederPicture || !cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() || rayReconstruction)
+    if (feederPicture || !cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() ||
+        rayReconstruction)
     {
         DeferredSr::Cancel();
         if (rayReconstruction && cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrDeferredDlss.value_or_default())

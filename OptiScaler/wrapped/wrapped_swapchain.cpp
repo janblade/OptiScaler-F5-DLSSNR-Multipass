@@ -1280,8 +1280,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
         if (presentCompleted)
         {
             if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
-                State::Instance().activeFgOutput == FGOutput::NoFG &&
-                !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+                State::Instance().activeFgOutput == FGOutput::NoFG && !IdentifyGpu::getPrimaryGpu().usesDxvk &&
+                !XellHooks::canLimit())
                 FrameLimit::sleep();
 
             if (lowLatencyDevice != nullptr)
@@ -1732,8 +1732,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
         if (presentCompleted)
         {
             if (!State::Instance().reflexLimitsFps && !native::lowlatency::OwnsFrameCap() &&
-                State::Instance().activeFgOutput == FGOutput::NoFG &&
-                !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+                State::Instance().activeFgOutput == FGOutput::NoFG && !IdentifyGpu::getPrimaryGpu().usesDxvk &&
+                !XellHooks::canLimit())
                 FrameLimit::sleep();
 
             if (lowLatencyDevice != nullptr)

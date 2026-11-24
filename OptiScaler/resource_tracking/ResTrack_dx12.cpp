@@ -2910,8 +2910,8 @@ bool ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
 
             if (commitResult != NO_ERROR)
             {
-                LOG_ERROR("Failed to hook ExecuteCommandLists slot {} (target {:X}): {:X}", slot,
-                          (size_t) target, commitResult);
+                LOG_ERROR("Failed to hook ExecuteCommandLists slot {} (target {:X}): {:X}", slot, (size_t) target,
+                          commitResult);
                 s_execTrampoline[slot] = nullptr;
             }
             else
@@ -2920,14 +2920,14 @@ bool ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
                 s_execSlotCount.store(slot + 1, std::memory_order_release);
                 cacheDeviceVtable();
                 hooked = true;
-                LOG_INFO("Hooked ExecuteCommandLists slot {} (target {:X}, device vtable {:X})", slot,
-                         (size_t) target, (size_t) deviceVtable);
+                LOG_INFO("Hooked ExecuteCommandLists slot {} (target {:X}, device vtable {:X})", slot, (size_t) target,
+                         (size_t) deviceVtable);
             }
         }
         else
         {
-            LOG_WARN("ExecuteCommandLists hook slot table full ({} slots), cannot hook target {:X}",
-                     kMaxExecSlots, (size_t) target);
+            LOG_WARN("ExecuteCommandLists hook slot table full ({} slots), cannot hook target {:X}", kMaxExecSlots,
+                     (size_t) target);
         }
     }
 

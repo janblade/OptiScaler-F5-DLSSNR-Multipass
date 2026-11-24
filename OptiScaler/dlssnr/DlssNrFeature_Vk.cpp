@@ -2422,13 +2422,13 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     const bool superiorDirectSrWanted =
         superiorRuns && !spatial && !superiorSupersample &&
-        DlssNr::SuperiorScaling::DirectSrWanted(cfg.DlssNrSuperiorMode.value_or_default(),
-                                                cfg.DlssNrSuperiorScalingPreset.value_or_default(),
-                                                SuperiorVk::Private::srUnavailable || SuperiorVk::Private::privateBroken,
-                                                depth != nullptr && guides.depth.valid());
-    const bool superiorDirectSrReady =
-        superiorDirectSrWanted && SuperiorVk::Private::phase == SuperiorVk::Private::Phase::Ready &&
-        SuperiorVk::Private::builtDirectSr;
+        DlssNr::SuperiorScaling::DirectSrWanted(
+            cfg.DlssNrSuperiorMode.value_or_default(), cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+            SuperiorVk::Private::srUnavailable || SuperiorVk::Private::privateBroken,
+            depth != nullptr && guides.depth.valid());
+    const bool superiorDirectSrReady = superiorDirectSrWanted &&
+                                       SuperiorVk::Private::phase == SuperiorVk::Private::Phase::Ready &&
+                                       SuperiorVk::Private::builtDirectSr;
     const auto superiorJitter =
         superiorDirectSrReady
             ? DlssNr::SuperiorScaling::DirectSrJitter(cfg.DlssNrSuperiorJitter.value_or_default(), beforeSr, false,
@@ -3240,31 +3240,42 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         live.jitterActive = live.directSr && (superiorJitter.x != 0.0f || superiorJitter.y != 0.0f);
         if (!live.jitterActive && live.directSr)
         {
-            if (!cfg.DlssNrSuperiorJitter.value_or_default()) live.jitterPauseReason = 1u;
-            else if (beforeSr) live.jitterPauseReason = 2u;
-            else if (spatial) live.jitterPauseReason = 3u;
-            else if (workWidth >= width && workHeight >= height) live.jitterPauseReason = 4u;
+            if (!cfg.DlssNrSuperiorJitter.value_or_default())
+                live.jitterPauseReason = 1u;
+            else if (beforeSr)
+                live.jitterPauseReason = 2u;
+            else if (spatial)
+                live.jitterPauseReason = 3u;
+            else if (workWidth >= width && workHeight >= height)
+                live.jitterPauseReason = 4u;
             else if (width && height &&
                      std::min(float(workWidth) / float(width), float(workHeight) / float(height)) < 0.399f)
                 live.jitterPauseReason = 6u;
         }
         if (!live.privateReady)
         {
-            if (!superiorFrame.haveDepth) live.fallbackReason = 1u;
-            else if (SuperiorVk::Private::srUnavailable.load()) live.fallbackReason = 2u;
+            if (!superiorFrame.haveDepth)
+                live.fallbackReason = 1u;
+            else if (SuperiorVk::Private::srUnavailable.load())
+                live.fallbackReason = 2u;
             else if (DlssNr::SuperiorScaling::Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) ==
                      DlssNr::SuperiorScaling::NoPrivateDlss)
                 live.fallbackReason = 3u;
-            else if (workWidth > width || workHeight > height) live.fallbackReason = 4u;
-            else if (SuperiorVk::Private::phase == SuperiorVk::Private::Phase::Failed) live.fallbackReason = 6u;
-            else live.fallbackReason = 5u;
+            else if (workWidth > width || workHeight > height)
+                live.fallbackReason = 4u;
+            else if (SuperiorVk::Private::phase == SuperiorVk::Private::Phase::Failed)
+                live.fallbackReason = 6u;
+            else
+                live.fallbackReason = 5u;
         }
-        else if (DlssNr::SuperiorScaling::DirectSrSelected(cfg.DlssNrSuperiorMode.value_or_default()) &&
-                 !live.directSr)
+        else if (DlssNr::SuperiorScaling::DirectSrSelected(cfg.DlssNrSuperiorMode.value_or_default()) && !live.directSr)
         {
-            if (spatial) live.fallbackReason = 7u;
-            else if (workWidth > width || workHeight > height) live.fallbackReason = 4u;
-            else if (!superiorFrame.haveDepth) live.fallbackReason = 1u;
+            if (spatial)
+                live.fallbackReason = 7u;
+            else if (workWidth > width || workHeight > height)
+                live.fallbackReason = 4u;
+            else if (!superiorFrame.haveDepth)
+                live.fallbackReason = 1u;
         }
         std::lock_guard<std::mutex> lock(g_superiorLiveVkMutex);
         g_superiorLiveVk = live;

@@ -21,7 +21,8 @@ template <class C> inline float HighGain(const C& c) { return c.MvScaleX; }
 template <class C> inline float LowGain(const C& c) { return c.MvScaleY; }
 
 // Host resolve flags (HostResolve.hlsli): GuideWidth != 0 binds the 1/8 low field (or answer_work in Direct SR) at t5;
-// GuideHeight: 0 = decoded signed DLSS residual, 1 = raw NR answer (non-temporal), 2 = Direct DLSS SR native C1 carrier.
+// GuideHeight: 0 = decoded signed DLSS residual, 1 = raw NR answer (non-temporal), 2 = Direct DLSS SR native C1
+// carrier.
 template <class C> inline void SetResolveFlags(C& c, bool lowField, bool rawAnswer)
 {
     c.GuideWidth = lowField ? 1u : 0u;
@@ -35,7 +36,8 @@ inline void SetDirectSrResolve(C& c, bool haveWorkAnswer, float nativeDetail, bo
     c.MvScaleY = fastResolve ? 0.0f : 1.0f;
     c.GuideWidth = (!fastResolve && haveWorkAnswer) ? 1u : 0u;
     c.GuideHeight = 2u;
-    const float clampedSharp = (nrSharpness > 0.0f && nrSharpness <= 1.0f) ? nrSharpness : (nrSharpness > 1.0f ? 1.0f : 0.0f);
+    const float clampedSharp =
+        (nrSharpness > 0.0f && nrSharpness <= 1.0f) ? nrSharpness : (nrSharpness > 1.0f ? 1.0f : 0.0f);
     std::memcpy(&c.ExposureSourceWidth, &clampedSharp, sizeof(clampedSharp));
 }
 inline void SetOracleDecomp(DlssNrConstants& c, bool packed, float jitterX, float jitterY)
@@ -64,8 +66,8 @@ inline void SetOracleJbu(DlssNrConstants& c, uint32_t midW, uint32_t midH, bool 
 }
 template <class C>
 inline void SetOracleResolve(C& c, bool haveDepth, bool depthInverted, uint32_t depthX, uint32_t depthY,
-                             uint32_t depthW, uint32_t depthH, float nrSharp, float nativeDetail,
-                             bool preJbu = false, bool haveWorkDepth = false)
+                             uint32_t depthW, uint32_t depthH, float nrSharp, float nativeDetail, bool preJbu = false,
+                             bool haveWorkDepth = false)
 {
     c.GuideHeight = 3u;
     c.GuideWidth = (haveDepth ? 1u : 0u) | (depthInverted ? 2u : 0u) | (preJbu ? 4u : 0u) | (haveWorkDepth ? 8u : 0u);
@@ -153,12 +155,13 @@ inline void SetPrivateRings(DlssNrConstants& c, unsigned w, unsigned h, bool inv
     static_assert(offsetof(Struct, DebugView) == 24 && offsetof(Struct, Passthrough) == 32);                           \
     static_assert(offsetof(Struct, MvScaleX) == 36 && offsetof(Struct, MvScaleY) == 40);                               \
     static_assert(offsetof(Struct, GuideWidth) == 44 && offsetof(Struct, GuideHeight) == 48);                          \
-    static_assert(offsetof(Struct, CompareMode) == 52 && offsetof(Struct, CompareSplit) == 56);                          \
+    static_assert(offsetof(Struct, CompareMode) == 52 && offsetof(Struct, CompareSplit) == 56);                        \
     static_assert(offsetof(Struct, CompareZoom) == 60 && offsetof(Struct, CompareSwap) == 64);                         \
     static_assert(offsetof(Struct, Transfer) == 68);
 DLSSNR_SUPERIOR_PIN(DlssNr::Superior::DlssNrConstants)
 DLSSNR_SUPERIOR_PIN(::DlssNrConstants)
-// Each cbuffer declares ExposureSourceWidth / ExposureSourceHeight at its own struct offset (matching superior/precompile/dlssnr.hlsl vs precompile/dlssnr.hlsl).
+// Each cbuffer declares ExposureSourceWidth / ExposureSourceHeight at its own struct offset (matching
+// superior/precompile/dlssnr.hlsl vs precompile/dlssnr.hlsl).
 static_assert(offsetof(DlssNr::Superior::DlssNrConstants, ExposureSourceWidth) == 164 &&
               offsetof(DlssNr::Superior::DlssNrConstants, ExposureSourceHeight) == 168);
 static_assert(offsetof(::DlssNrConstants, ExposureSourceWidth) == 128 &&

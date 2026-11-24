@@ -26,12 +26,14 @@ struct LiveInfo
     bool privateReady = false;
     bool haveDepth = false;
     bool jitterActive = false;
-    uint32_t jitterPauseReason = 0; // 0=active, 1=user off, 2=Before SR, 3=Compress edges, 4=100% native, 5=Hold, 6=low scale <40%
-    uint32_t fallbackReason = 0;    // 0=none, 1=No depth, 2=No DLSS SR, 3=Preset No DLSS, 4=Supersampling>100%, 5=Initializing, 6=Failed, 7=Compress edges ON
-    uint32_t actualPreset = 0;      // 0=default/none, 4=CNN D, 5=CNN E, 11=Transformer K
+    uint32_t jitterPauseReason =
+        0; // 0=active, 1=user off, 2=Before SR, 3=Compress edges, 4=100% native, 5=Hold, 6=low scale <40%
+    uint32_t fallbackReason = 0; // 0=none, 1=No depth, 2=No DLSS SR, 3=Preset No DLSS, 4=Supersampling>100%,
+                                 // 5=Initializing, 6=Failed, 7=Compress edges ON
+    uint32_t actualPreset = 0;   // 0=default/none, 4=CNN D, 5=CNN E, 11=Transformer K
     uint32_t workW = 0, workH = 0;
     uint32_t outW = 0, outH = 0;
-    float gpuMs = -1.0f;            // < 0 when unavailable (e.g. Vulkan or first frames)
+    float gpuMs = -1.0f; // < 0 when unavailable (e.g. Vulkan or first frames)
 };
 LiveInfo Live();
 // The game's NGX D3D12 runtime is shutting down: every NGX handle is about to be destroyed by NGX itself.
@@ -89,7 +91,8 @@ inline JitterPair DirectSrJitter(bool enabled, bool beforeUpscale, bool hold, un
     return { static_cast<float>(rx) * amp, static_cast<float>(ry) * amp };
 }
 // NGX PerfQualityValue integer mapping matching NVSDK_NGX_PerfQuality_Value:
-// 0=MaxPerf, 1=Balanced, 2=MaxQuality, 3=UltraPerformance, 5=DLAA. (UltraQuality is mapped to MaxQuality for 310.x safety.)
+// 0=MaxPerf, 1=Balanced, 2=MaxQuality, 3=UltraPerformance, 5=DLAA. (UltraQuality is mapped to MaxQuality for 310.x
+// safety.)
 inline int DirectSrPerfQuality(unsigned workW, unsigned workH, unsigned outW, unsigned outH)
 {
     if (!workW || !workH || !outW || !outH || (workW >= outW && workH >= outH))
@@ -153,8 +156,8 @@ struct PrivatePresetChoice
             manualScale = configuredScale;
             directSrMode = directSr;
             directSrPerfMode = directSrPerf;
-            selected = PrivatePreset(wanted, std::isfinite(effectiveScale) ? effectiveScale : 1.f, directSr,
-                                     directSrPerf);
+            selected =
+                PrivatePreset(wanted, std::isfinite(effectiveScale) ? effectiveScale : 1.f, directSr, directSrPerf);
             valid = true;
         }
         return selected;

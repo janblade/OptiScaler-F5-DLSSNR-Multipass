@@ -510,9 +510,11 @@ class Config
     // while keeping full native work->native resolution and Halton jitter).
     CustomOptional<bool> DlssNrSuperiorDirectSrPerf { false };
     // Direct DLSS SR: Option 5 hybrid sharpener (4K Guided Edge-Snap + 3x3 isotropic anti-ringing carrier
-    // deconvolution + AMD FidelityFX RCAS luma-only sharpening on composed output, 0..1, works in Normal & Performance).
+    // deconvolution + AMD FidelityFX RCAS luma-only sharpening on composed output, 0..1, works in Normal &
+    // Performance).
     CustomOptional<float> DlssNrSuperiorDirectSrSharpness { 0.65f };
-    // Direct DLSS SR: optional luma-guided 4K micro-contrast lift (0% default: Carrier-SR already keeps 100% native 4K sharpness).
+    // Direct DLSS SR: optional luma-guided 4K micro-contrast lift (0% default: Carrier-SR already keeps 100% native 4K
+    // sharpness).
     CustomOptional<float> DlssNrSuperiorNativeDetail { 0.0f };
     // Residual DLAA: legacy upstream frequency-band attenuation (0 = 100% NR strength, 1 = legacy cut).
     CustomOptional<float> DlssNrSuperiorShaping { 0.0f };

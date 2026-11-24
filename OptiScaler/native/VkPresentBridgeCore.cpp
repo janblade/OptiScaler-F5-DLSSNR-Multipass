@@ -519,12 +519,10 @@ bool VkPresentBridgeCore::CopyFrame(ID3D12Resource* source, ID3D12Fence* waitFen
         const uint32_t bytes = f.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
         if (from.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || f.Width != to.Width || f.Height != to.Height ||
             f.Format != to.Format || f.Depth != 1 || f.Width == 0 || f.Height == 0 ||
-            f.RowPitch < uint64_t(f.Width) * bytes ||
-            f.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 ||
+            f.RowPitch < uint64_t(f.Width) * bytes || f.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT != 0 ||
             bufferFootprint->Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT != 0 ||
             bufferFootprint->Offset > from.Width ||
-            uint64_t(f.RowPitch) * (f.Height - 1) + uint64_t(f.Width) * bytes >
-                from.Width - bufferFootprint->Offset)
+            uint64_t(f.RowPitch) * (f.Height - 1) + uint64_t(f.Width) * bytes > from.Width - bufferFootprint->Offset)
         {
             why = "the final-picture buffer does not match the D3D12 back buffer";
             return false;
@@ -557,9 +555,11 @@ bool VkPresentBridgeCore::CopyFrame(ID3D12Resource* source, ID3D12Fence* waitFen
     if (bufferFootprint != nullptr)
     {
         D3D12_TEXTURE_COPY_LOCATION input = {}, output = {};
-        input.pResource = source; input.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        input.pResource = source;
+        input.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         input.PlacedFootprint = *bufferFootprint;
-        output.pResource = back.Get(); output.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        output.pResource = back.Get();
+        output.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         _list->CopyTextureRegion(&output, 0, 0, 0, &input, nullptr);
     }
     else

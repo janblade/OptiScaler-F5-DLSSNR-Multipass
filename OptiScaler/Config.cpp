@@ -1592,8 +1592,7 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     }
     out.SetValue("DlssNr", "SpatialCompression",
                  GetBoolValue(c.DlssNrSpatialCompression.value_for_config()).c_str());
-    out.SetValue("DlssNr", "SpatialSmoothCurve",
-                 GetBoolValue(c.DlssNrSpatialSmoothCurve.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SpatialSmoothCurve", GetBoolValue(c.DlssNrSpatialSmoothCurve.value_for_config()).c_str());
     out.SetValue("DlssNr", "SpatialAutoAdjustCenter",
                  GetBoolValue(c.DlssNrSpatialAutoAdjustCenter.value_for_config()).c_str());
     out.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(c.DlssNrSpatialCenterX.value_for_config()).c_str());

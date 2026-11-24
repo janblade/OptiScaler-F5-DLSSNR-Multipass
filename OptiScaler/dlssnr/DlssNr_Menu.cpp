@@ -1203,7 +1203,8 @@ static bool NativeNrOnlyRunning(NativeApi api)
 // API::DX12: its upscaler type is what says so.)
 static bool VulkanFeatureIsOn12()
 {
-    if (VkPresentBridge::FeederInputsLive()) return true;
+    if (VkPresentBridge::FeederInputsLive())
+        return true;
     const auto feature = State::Instance().currentFeature;
     return feature != nullptr && FeatureProvider_Vk::IsOn12(feature->GetUpscalerType());
 }
@@ -1225,7 +1226,8 @@ static void SwitchVulkanBackend(Config* config, Upscaler backend)
 static void EnterGameUpscalerRoute(Config* config)
 {
     // Feeder already supplies a D3D12 NGX feature; rebuilding it as a Vulkan game backend is incorrect.
-    if (VkPresentBridge::FeederInputsLive()) return;
+    if (VkPresentBridge::FeederInputsLive())
+        return;
     const Upscaler current = config->VulkanUpscaler.value_or_default();
 
     // The same DLSS on D3D12 where the game's DLSS could run, FSR otherwise (FeatureProvider_Vk::On12For). Already a
@@ -4315,9 +4317,11 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
         StoreSpatialSettings(config, settings);
         matched = Sp::MatchedLayout(settings, autoAdjust);
     }
-    HelpMarker("Uses a C2-continuous warp with a gentler transition and lower edge squeeze (~2x instead of 4x at Balanced). "
-               "Prevents rectangular lighting boxes and brightness shifts in foggy games like Silent Hill 3. Zero extra Resolve cost. "
-               "When Auto-adjust center is on, switching this automatically widens or narrows the sharp middle to match.");
+    HelpMarker(
+        "Uses a C2-continuous warp with a gentler transition and lower edge squeeze (~2x instead of 4x at Balanced). "
+        "Prevents rectangular lighting boxes and brightness shifts in foggy games like Silent Hill 3. Zero extra "
+        "Resolve cost. "
+        "When Auto-adjust center is on, switching this automatically widens or narrows the sharp middle to match.");
 
     bool autoAdjustVal = autoAdjust;
     if (ImGui::Checkbox("Auto-adjust center for smooth curve##edgecompression", &autoAdjustVal))
@@ -4338,11 +4342,14 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
 
     // Build the preview label: show the active center value (smooth or classic) and the work %.
     char preview[64];
-    if (matched >= 0) {
+    if (matched >= 0)
+    {
         const Sp::NamedLayout& n = Sp::kNamedLayouts[matched];
         const float activeCenter = (settings.smoothCurve && autoAdjust) ? n.smoothCenter : n.center;
         std::snprintf(preview, sizeof(preview), "%s (%.0f / %.0f)", n.name, activeCenter, n.work);
-    } else {
+    }
+    else
+    {
         std::snprintf(preview, sizeof(preview), "Custom");
     }
 
@@ -4418,17 +4425,17 @@ static void RenderEdgeCompression(Config* config, float menuResScale, const NrCo
         {
             const auto r = range(1.0f, settings.workX - 0.5f);
             const float defCenter = (settings.smoothCurve && autoAdjust)
-                ? Sp::kNamedLayouts[Sp::kDefaultLayout].smoothCenter
-                : Sp::kNamedLayouts[Sp::kDefaultLayout].center;
-            changed |= DeferredSlider("Sharp middle width", &config->DlssNrSpatialCenterX, r.first, r.second,
-                                      defCenter, "%.1f%%");
+                                        ? Sp::kNamedLayouts[Sp::kDefaultLayout].smoothCenter
+                                        : Sp::kNamedLayouts[Sp::kDefaultLayout].center;
+            changed |= DeferredSlider("Sharp middle width", &config->DlssNrSpatialCenterX, r.first, r.second, defCenter,
+                                      "%.1f%%");
             HelpMarker("Width of the full-sharpness middle. Higher: more stays sharp, saves less. Lower: saves more.");
         }
         {
             const auto r = range(1.0f, settings.workY - 0.5f);
             const float defCenter = (settings.smoothCurve && autoAdjust)
-                ? Sp::kNamedLayouts[Sp::kDefaultLayout].smoothCenter
-                : Sp::kNamedLayouts[Sp::kDefaultLayout].center;
+                                        ? Sp::kNamedLayouts[Sp::kDefaultLayout].smoothCenter
+                                        : Sp::kNamedLayouts[Sp::kDefaultLayout].center;
             changed |= DeferredSlider("Sharp middle height", &config->DlssNrSpatialCenterY, r.first, r.second,
                                       defCenter, "%.1f%%");
             HelpMarker("Height of the full-sharpness middle. Higher: more stays sharp, saves less. Lower: saves "
@@ -4955,9 +4962,12 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             {
                 auto presetLabel = [](uint32_t p) -> const char*
                 {
-                    if (p == DlssNr::SuperiorScaling::TransformerK) return "Transformer K";
-                    if (p == DlssNr::SuperiorScaling::CnnD) return "CNN D";
-                    if (p == DlssNr::SuperiorScaling::CnnE) return "CNN E";
+                    if (p == DlssNr::SuperiorScaling::TransformerK)
+                        return "Transformer K";
+                    if (p == DlssNr::SuperiorScaling::CnnD)
+                        return "CNN D";
+                    if (p == DlssNr::SuperiorScaling::CnnE)
+                        return "CNN E";
                     return "Default DLSS";
                 };
                 if (supLive.active && (supLive.privateReady || supLive.intrinsicOracle))
@@ -4967,11 +4977,10 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                     {
                         if (supLive.gpuMs >= 0.0f)
                             ImGui::TextWrapped("Active: Intrinsic 4K-Oracle (%ux%u -> %ux%u) | Cost: %.2f ms",
-                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH,
-                                               supLive.gpuMs);
+                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH, supLive.gpuMs);
                         else
-                            ImGui::TextWrapped("Active: Intrinsic 4K-Oracle (%ux%u -> %ux%u)",
-                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH);
+                            ImGui::TextWrapped("Active: Intrinsic 4K-Oracle (%ux%u -> %ux%u)", supLive.workW,
+                                               supLive.workH, supLive.outW, supLive.outH);
                     }
                     else if (supLive.directSr)
                     {
@@ -4981,19 +4990,18 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                                                supLive.workW, supLive.workH, supLive.outW, supLive.outH,
                                                presetLabel(supLive.actualPreset), perfTag, supLive.gpuMs);
                         else
-                            ImGui::TextWrapped("Active: Direct DLSS SR (%ux%u -> %ux%u, %s%s)",
-                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH,
+                            ImGui::TextWrapped("Active: Direct DLSS SR (%ux%u -> %ux%u, %s%s)", supLive.workW,
+                                               supLive.workH, supLive.outW, supLive.outH,
                                                presetLabel(supLive.actualPreset), perfTag);
                     }
                     else
                     {
                         if (supLive.gpuMs >= 0.0f)
-                            ImGui::TextWrapped("Active: Residual DLAA (%ux%u, %s) | Cost: %.2f ms",
-                                               supLive.workW, supLive.workH, presetLabel(supLive.actualPreset),
-                                               supLive.gpuMs);
+                            ImGui::TextWrapped("Active: Residual DLAA (%ux%u, %s) | Cost: %.2f ms", supLive.workW,
+                                               supLive.workH, presetLabel(supLive.actualPreset), supLive.gpuMs);
                         else
-                            ImGui::TextWrapped("Active: Residual DLAA (%ux%u, %s)",
-                                               supLive.workW, supLive.workH, presetLabel(supLive.actualPreset));
+                            ImGui::TextWrapped("Active: Residual DLAA (%ux%u, %s)", supLive.workW, supLive.workH,
+                                               presetLabel(supLive.actualPreset));
                     }
                     ImGui::PopStyleColor();
 
@@ -5008,18 +5016,25 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                         else
                         {
                             const char* why = "OFF";
-                            if (supLive.jitterPauseReason == 1u) why = "OFF (disabled by user)";
-                            else if (supLive.jitterPauseReason == 2u) why = "OFF (Before SR: game already jitters)";
-                            else if (supLive.jitterPauseReason == 3u) why = "OFF (paused by Compress screen edges)";
-                            else if (supLive.jitterPauseReason == 4u) why = "OFF (running at 100% native)";
-                            else if (supLive.jitterPauseReason == 5u) why = "OFF (frame held)";
-                            else if (supLive.jitterPauseReason == 6u) why = "OFF (auto-paused below 40% scale)";
+                            if (supLive.jitterPauseReason == 1u)
+                                why = "OFF (disabled by user)";
+                            else if (supLive.jitterPauseReason == 2u)
+                                why = "OFF (Before SR: game already jitters)";
+                            else if (supLive.jitterPauseReason == 3u)
+                                why = "OFF (paused by Compress screen edges)";
+                            else if (supLive.jitterPauseReason == 4u)
+                                why = "OFF (running at 100% native)";
+                            else if (supLive.jitterPauseReason == 5u)
+                                why = "OFF (frame held)";
+                            else if (supLive.jitterPauseReason == 6u)
+                                why = "OFF (auto-paused below 40% scale)";
                             ImGui::TextDisabled("  R2 Jitter: %s", why);
                         }
                     }
                     else if (supLive.fallbackReason == 7u)
                     {
-                        ImGui::TextDisabled("  Direct DLSS SR paused: Compress screen edges is ON (running Packed Residual DLAA)");
+                        ImGui::TextDisabled(
+                            "  Direct DLSS SR paused: Compress screen edges is ON (running Packed Residual DLAA)");
                     }
                     else if (supLive.fallbackReason == 4u)
                     {
@@ -5029,11 +5044,16 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 else if (supLive.active && supLive.fallbackReason != 0u)
                 {
                     const char* why = "initializing";
-                    if (supLive.fallbackReason == 1u) why = "no valid Depth buffer";
-                    else if (supLive.fallbackReason == 2u) why = "NVIDIA DLSS SR unavailable";
-                    else if (supLive.fallbackReason == 3u) why = "No DLSS selected";
-                    else if (supLive.fallbackReason == 4u) why = "supersampling > 100% (Direct SR requires <= 100%)";
-                    else if (supLive.fallbackReason == 6u) why = "private DLSS failed";
+                    if (supLive.fallbackReason == 1u)
+                        why = "no valid Depth buffer";
+                    else if (supLive.fallbackReason == 2u)
+                        why = "NVIDIA DLSS SR unavailable";
+                    else if (supLive.fallbackReason == 3u)
+                        why = "No DLSS selected";
+                    else if (supLive.fallbackReason == 4u)
+                        why = "supersampling > 100% (Direct SR requires <= 100%)";
+                    else if (supLive.fallbackReason == 6u)
+                        why = "private DLSS failed";
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.72f, 0.30f, 1.0f));
                     if (supLive.gpuMs >= 0.0f)
                         ImGui::TextWrapped("Fallback: 2x2 JBU residual (%s) | Cost: %.2f ms", why, supLive.gpuMs);
@@ -5060,21 +5080,22 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 bool jitter = config->DlssNrSuperiorJitter.value_or_default();
                 if (ImGui::Checkbox("Sub-pixel R2 jitter", &jitter))
                     config->DlssNrSuperiorJitter = jitter;
-                HelpMarker("Aperiodic R2 (plastic constant) sub-pixel sampling for Direct DLSS SR (works with or without "
-                           "Compress screen edges): stationary geometry jitter cancels in Carrier(answer - proxy), "
-                           "giving DLSS SR zero-bias sub-pixel residual samples to super-resolve to full native resolution "
-                           "with zero screen shake. Auto-pauses in Before SR, strictly below 40% scale, 100% native, "
-                           "and Hold.");
+                HelpMarker(
+                    "Aperiodic R2 (plastic constant) sub-pixel sampling for Direct DLSS SR (works with or without "
+                    "Compress screen edges): stationary geometry jitter cancels in Carrier(answer - proxy), "
+                    "giving DLSS SR zero-bias sub-pixel residual samples to super-resolve to full native resolution "
+                    "with zero screen shake. Auto-pauses in Before SR, strictly below 40% scale, 100% native, "
+                    "and Hold.");
 
                 const float rawSharpCfg = config->DlssNrSuperiorDirectSrSharpness.value_or_default();
-                float nrSharpPct =
-                    (std::isfinite(rawSharpCfg) ? std::clamp(rawSharpCfg, 0.0f, 1.0f) : 0.65f) * 100.0f;
+                float nrSharpPct = (std::isfinite(rawSharpCfg) ? std::clamp(rawSharpCfg, 0.0f, 1.0f) : 0.65f) * 100.0f;
                 if (ImGui::SliderFloat("NR sharpness (Edge-Snap + Deconv)", &nrSharpPct, 0.0f, 100.0f, "%.0f%%"))
                     config->DlssNrSuperiorDirectSrSharpness = std::clamp(nrSharpPct / 100.0f, 0.0f, 1.0f);
-                HelpMarker("Carrier-only sharpness for Direct DLSS SR (no RCAS grain amplification; works in Quality, "
-                           "Performance, CNN & Transformer):\n"
-                           "1. 4K Guided Edge-Snap locks NR edges to native 4K silhouettes without blurring smooth areas.\n"
-                           "2. 3x3 isotropic anti-ringing deconvolution sharpens new DLSS 5 micro-details from work->native.");
+                HelpMarker(
+                    "Carrier-only sharpness for Direct DLSS SR (no RCAS grain amplification; works in Quality, "
+                    "Performance, CNN & Transformer):\n"
+                    "1. 4K Guided Edge-Snap locks NR edges to native 4K silhouettes without blurring smooth areas.\n"
+                    "2. 3x3 isotropic anti-ringing deconvolution sharpens new DLSS 5 micro-details from work->native.");
 
                 const float rawNativeCfg = config->DlssNrSuperiorNativeDetail.value_or_default();
                 float nativeDetailPct =
@@ -5093,10 +5114,11 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 bool jitter = config->DlssNrSuperiorJitter.value_or_default();
                 if (ImGui::Checkbox("Sub-pixel R2 jitter", &jitter))
                     config->DlssNrSuperiorJitter = jitter;
-                HelpMarker("Aperiodic R2 (plastic constant) sub-pixel sampling for Intrinsic 4K-Oracle (works with or "
-                           "without Compress screen edges): unjittered via 5-tap clamped Catmull-Rom on the canonical "
-                           "work grid during temporal accumulation for cleaner irradiance & detail recovery. Auto-pauses "
-                           "in Before SR, strictly below 40% scale, 100% native, and Hold.");
+                HelpMarker(
+                    "Aperiodic R2 (plastic constant) sub-pixel sampling for Intrinsic 4K-Oracle (works with or "
+                    "without Compress screen edges): unjittered via 5-tap clamped Catmull-Rom on the canonical "
+                    "work grid during temporal accumulation for cleaner irradiance & detail recovery. Auto-pauses "
+                    "in Before SR, strictly below 40% scale, 100% native, and Hold.");
 
                 const float rawSharpCfg = config->DlssNrSuperiorDirectSrSharpness.value_or_default();
                 float detailModPct =
@@ -5117,12 +5139,14 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             {
                 if (hasPrivateDlss)
                 {
-                    float detailRecPct = std::clamp(config->DlssNrSuperiorDetailRecovery.value_or_default(), 0.0f, 1.5f) * 100.0f;
+                    float detailRecPct =
+                        std::clamp(config->DlssNrSuperiorDetailRecovery.value_or_default(), 0.0f, 1.5f) * 100.0f;
                     if (ImGui::SliderFloat("Detail recovery", &detailRecPct, 0.0f, 150.0f, "%.0f%%"))
                         config->DlssNrSuperiorDetailRecovery = std::clamp(detailRecPct / 100.0f, 0.0f, 1.5f);
-                    HelpMarker("3x3 isotropic Gaussian high-frequency detail recovery after DLSS DLAA: restores 360-deg "
-                               "luminance micro-detail (including 45-deg edges/hair/foliage) while suppressing chroma "
-                               "churn and clamping against halo ringing. Above 100% applies CAS-style texture boost.");
+                    HelpMarker(
+                        "3x3 isotropic Gaussian high-frequency detail recovery after DLSS DLAA: restores 360-deg "
+                        "luminance micro-detail (including 45-deg edges/hair/foliage) while suppressing chroma "
+                        "churn and clamping against halo ringing. Above 100% applies CAS-style texture boost.");
                 }
 
                 float shapingPct = std::clamp(config->DlssNrSuperiorShaping.value_or_default(), 0.0f, 1.0f) * 100.0f;
@@ -5998,8 +6022,8 @@ void RenderVulkanRoute(Config* config)
         return;
     }
 
-    const RouteWarning warning =
-        RouteWarningFor(NativeGameCallsUpscaler(api) || VkPresentBridge::FeederInputsLive(), VulkanFeatureIsOn12(), api == NativeApi::Vulkan && !bridgeUp);
+    const RouteWarning warning = RouteWarningFor(NativeGameCallsUpscaler(api) || VkPresentBridge::FeederInputsLive(),
+                                                 VulkanFeatureIsOn12(), api == NativeApi::Vulkan && !bridgeUp);
 
     ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
 

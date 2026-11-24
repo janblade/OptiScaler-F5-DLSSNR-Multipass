@@ -45,6 +45,13 @@ inline constexpr std::string_view kKeptKeys[] = {
     "Transfer",
     "SuperiorScalingPreset",
     "SuperiorAtNative",
+    "SuperiorMode",
+    "SuperiorJitter",
+    "SuperiorDirectSrPerf",
+    "SuperiorDirectSrSharpness",
+    "SuperiorNativeDetail",
+    "SuperiorShaping",
+    "SuperiorDetailRecovery",
     "ScalingDownscaler",
     // reuse
     "VitEvery",
@@ -174,6 +181,8 @@ inline constexpr std::string_view kKeptKeys[] = {
     "NativeLowLatencyDxvkGameThread",
     // the game's: edge compression, laid out for its picture
     "SpatialCompression",
+    "SpatialSmoothCurve",
+    "SpatialAutoAdjustCenter",
     "SpatialCenterX",
     "SpatialCenterY",
     "SpatialWorkX",

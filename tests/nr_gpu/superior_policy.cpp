@@ -226,7 +226,8 @@ int main() {
             require(jHold.x == 0.f && jHold.y == 0.f);
             const auto jNative = DirectSrJitter(true, false, false, 3840, 2160, 3840, 2160, 1);
             require(jNative.x == 0.f && jNative.y == 0.f);
-            // Scale-adaptive Halton (2, 3) jitter: 0 strictly below 40% (< 0.399), smooth ramp from 0.35 at 40% to 1.0 at >=65%.
+            // Scale-adaptive aperiodic R2 (plastic constant) jitter: 0 strictly below 40% (< 0.399), smooth ramp from
+            // 0.35 at 40% to 1.0 at >=65%, wrapping deterministically at 2^24 frames to prevent float drift.
             bool anyNonZeroFull = false;
             bool anyNonZero45 = false;
             bool anyNonZero40 = false;
@@ -239,9 +240,11 @@ int main() {
                 const auto j45 = DirectSrJitter(true, false, false, 1536, 864, 3413, 1920, f);    // 45% (1536/3413, amp ~0.48)
                 const auto jFull = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f); // 65% exact (amp 1.0)
                 const auto jHigh = DirectSrJitter(true, false, false, 2688, 1512, 3840, 2160, f); // 70% (> 0.65, amp 1.0)
-                const auto jWrap = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f + 16);
+                const auto jNext16 = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f + 16);
+                const auto jWrap = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f + 16777216ull);
                 require(jFull.x >= -0.5f && jFull.x < 0.5f && jFull.y >= -0.5f && jFull.y < 0.5f);
-                require(jFull.x == jWrap.x && jFull.y == jWrap.y);
+                require(jFull.x != jNext16.x || jFull.y != jNext16.y); // aperiodic across 16-frame boundary
+                require(jFull.x == jWrap.x && jFull.y == jWrap.y);     // deterministic 2^24 wrap
                 require(jFull.x == jHigh.x && jFull.y == jHigh.y);
                 require(std::abs(j40.x - jFull.x * 0.35f) < 1e-3f && std::abs(j40.y - jFull.y * 0.35f) < 1e-3f);
                 const float amp45 = 0.35f + 0.65f * ((1536.f / 3413.f - 0.40f) / 0.25f);
@@ -254,6 +257,15 @@ int main() {
                     anyNonZero40 = true;
             }
             require(anyNonZeroFull && anyNonZero45 && anyNonZero40);
+            // Zero long-run DC bias check over 1024 frames.
+            double sumX = 0.0, sumY = 0.0;
+            for (uint64_t f = 0; f < 1024; ++f)
+            {
+                const auto j = DirectSrJitter(true, false, false, 2496, 1404, 3840, 2160, f);
+                sumX += j.x;
+                sumY += j.y;
+            }
+            require(std::abs(sumX / 1024.0) < 0.005 && std::abs(sumY / 1024.0) < 0.005);
 
             // Superior mode selectors: ModeDirectSr, ModeResidualDlaa, ModeIntrinsicOracle are mutually exclusive.
             require(DirectSrSelected(ModeDirectSr) && !IntrinsicOracleSelected(ModeDirectSr));

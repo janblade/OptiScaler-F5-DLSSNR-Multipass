@@ -2426,8 +2426,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                                 cfg.DlssNrSuperiorScalingPreset.value_or_default(),
                                                 SuperiorVk::Private::srUnavailable || SuperiorVk::Private::privateBroken,
                                                 depth != nullptr && guides.depth.valid());
+    const bool superiorDirectSrReady =
+        superiorDirectSrWanted && SuperiorVk::Private::phase == SuperiorVk::Private::Phase::Ready &&
+        SuperiorVk::Private::builtDirectSr;
     const auto superiorJitter =
-        superiorDirectSrWanted
+        superiorDirectSrReady
             ? DlssNr::SuperiorScaling::DirectSrJitter(cfg.DlssNrSuperiorJitter.value_or_default(), beforeSr, false,
                                                       workWidth, workHeight, width, height, g_vkSeamCalls)
             : DlssNr::SuperiorScaling::JitterPair {};

@@ -6873,9 +6873,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                          std::min(float(workWidth) / float(width), float(workHeight) / float(height)) < 0.399f)
                     live.jitterPauseReason = 6u;
             }
+            if (g.intrinsicOracle && !oracleReady)
+                g.reset = true;
             if (!live.privateReady)
             {
-                if (!haveDepthNow) live.fallbackReason = 1u;
+                if (g.intrinsicOracle) live.fallbackReason = 6u;
+                else if (!haveDepthNow) live.fallbackReason = 1u;
                 else if (superiorState.srUnavailable) live.fallbackReason = 2u;
                 else if (DlssNr::SuperiorScaling::Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) ==
                          DlssNr::SuperiorScaling::NoPrivateDlss)

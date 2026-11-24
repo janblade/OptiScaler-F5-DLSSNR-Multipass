@@ -5710,7 +5710,7 @@ static VulkanRouteState ReadVulkanRouteNow(Config* config)
     state.routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
     state.f5lowFg = !state.routeOn && shown == Shown::NrAndFrameGeneration;
     state.bridgeUp = VkPresentBridge::IsUp();
-    state.gameCallsUpscaler = NativeGameCallsUpscaler(api);
+    state.gameCallsUpscaler = NativeGameCallsUpscaler(api) || VkPresentBridge::FeederInputsLive();
     state.backend = config->VulkanUpscaler.value_or_default();
     state.leftover = DlssNrVulkanRoute::LeftoverD3D12Upscaler(true, state.routeOn, shown != Shown::Off,
                                                               state.backend == Upscaler::DLSS_on12);

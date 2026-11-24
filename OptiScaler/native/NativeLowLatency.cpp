@@ -478,15 +478,10 @@ void EnsureD3D12SubmitHook(Api api, IUnknown* device)
     if (SUCCEEDED(device->QueryInterface(__uuidof(ID3D12Device), reinterpret_cast<void**>(&d3d12Device))) &&
         d3d12Device != nullptr)
     {
-        const bool ok = ResTrack_Dx12::HookToQueue(d3d12Device);
+        (void) ResTrack_Dx12::HookToQueue(d3d12Device);
         d3d12Device->Release();
-        if (ok)
-            lastCheckedDevice.store(device, std::memory_order_relaxed);
     }
-    else
-    {
-        lastCheckedDevice.store(device, std::memory_order_relaxed);
-    }
+    lastCheckedDevice.store(device, std::memory_order_relaxed);
 }
 
 void PresentEnd(Api api, IUnknown* device, PresentSource source)

@@ -89,7 +89,8 @@ struct Generation
     unsigned width = 0, height = 0, workWidth = 0, workHeight = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool inverted = false, beforeSr = false, reset = true;
-    bool temporal = false, shaping = false, packed = false;
+    bool temporal = false, shaping = false, packed = false, spatialInput = false;
+    bool directSr = false, directSrPerf = false, directSrHdr = false, intrinsicOracle = false;
     bool privateFailed = false, residentAttempted = false;
     unsigned actualPreset = 0;
     Private::Fade presetFade;
@@ -112,6 +113,9 @@ struct Generation
     NVSDK_NGX_Handle* feature = nullptr;
     Texture depth, motion, interLow, interWorking, finalLow;
     Texture carrier, temporalOutput, temporalMotion, unit;
+    Texture oracleCur, oracleProxy, oracleHist[2], oracleDepth[2], oracleMid, oracleMidProxy;
+    unsigned oracleIndex = 0;
+    bool oracleHistoryValid = false;
     uint32_t expectedMask = 0, successfulMask = 0;
     unsigned previousPasses = 0, lastCompleted = 0, lastCovered = 0;
     bool haveSchedule = false;
@@ -404,7 +408,7 @@ Constants GuideConstants(unsigned w, unsigned h, const DlssNr::GuideRegions& reg
 // The generation owns its upload until all recorded command lists have retired. No per-frame copy/dispatch.
 bool CreateWarp(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd)
 {
-    if (!g.packed)
+    if (!g.packed && !g.spatialInput)
         return true;
     if (!Ensure(g.warp, g.device.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, 11, 1))
         return false;
@@ -470,15 +474,20 @@ NVSDK_NGX_Result CreateFeature(NVSDK_NGX_Parameter* p, NVSDK_NGX_Handle*& featur
 void SetCreationParameters(const Generation& g, NVSDK_NGX_Parameter* p)
 {
     const auto w = g.workWidth, h = g.workHeight;
+    const auto outW = g.directSr ? g.width : w;
+    const auto outH = g.directSr ? g.height : h;
     p->Set(NVSDK_NGX_Parameter_Width, w);
     p->Set(NVSDK_NGX_Parameter_Height, h);
-    p->Set(NVSDK_NGX_Parameter_OutWidth, w);
-    p->Set(NVSDK_NGX_Parameter_OutHeight, h);
+    p->Set(NVSDK_NGX_Parameter_OutWidth, outW);
+    p->Set(NVSDK_NGX_Parameter_OutHeight, outH);
     p->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
     p->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
-    p->Set(NVSDK_NGX_Parameter_PerfQualityValue, (int) NVSDK_NGX_PerfQuality_Value_DLAA);
-    const unsigned flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                           NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+    p->Set(NVSDK_NGX_Parameter_PerfQualityValue,
+           g.directSr ? DlssNr::SuperiorScaling::DirectSrPerfQuality(w, h, outW, outH)
+                      : (int) NVSDK_NGX_PerfQuality_Value_DLAA);
+    // SDR mode (IsHDR/AutoExposure OFF) matches the [0,1] C1 residual carrier in both Direct DLSS SR and Residual DLAA.
+    const unsigned flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                           (g.directSrHdr ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR : 0u) |
                            (g.inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0u);
     p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
 }
@@ -487,8 +496,10 @@ Created CreateTemporal(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommand
 {
     Record(cmd); // includes unit-exposure initialization even if NGX creation fails
     const auto w = g.workWidth, h = g.workHeight;
+    const auto outW = g.directSr ? g.width : w;
+    const auto outH = g.directSr ? g.height : h;
     if (!Ensure(g.carrier, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, w, h) ||
-        !Ensure(g.temporalOutput, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, w, h) ||
+        !Ensure(g.temporalOutput, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, outW, outH) ||
         !Ensure(g.temporalMotion, g.device.Get(), DXGI_FORMAT_R32G32_FLOAT, w, h) ||
         !Ensure(g.unit, g.device.Get(), DXGI_FORMAT_R32_FLOAT, 1, 1))
         return Created::ResourcesFailed;
@@ -636,12 +647,16 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
                           ID3D12Resource* answer, ID3D12Resource* originalMotion, const DlssNr::GuideRegions& regions,
                           const DlssNrFrameInfo& frame, bool reset, bool hold, ID3D12Resource* packedDepth,
                           ID3D12Resource* packedMotion, DlssNr::GuideExtent packedGuideExtent,
-                          float packedDepthPrecision)
+                          float packedDepthPrecision, DlssNr::SuperiorScaling::JitterPair jitter = {},
+                          float detailRecovery = 0.0f)
 {
     if (!g.feature || !g.parameters || !NgxAlive(g.ngxEpoch))
         return nullptr;
     auto encode = GuideConstants(g.workWidth, g.workHeight, regions, frame, true, hold);
-    encode.Mode = 39u; // v50: fixed carrier + motion; reuse this frame's exact NR depth.
+    // v50: fixed C1 residual carrier + motion (used by both Residual DLAA and Direct DLSS SR).
+    // When spatialInput is active (Direct DLSS SR + Compress screen edges), fuse PwPack unpack into PrivateEncode.
+    encode.Mode = g.spatialInput ? DlssNrMode_PrivateEncodePacked : DlssNrMode_SuperiorCarrierMotion;
+    encode.Passthrough = 0u;
     auto* motion = originalMotion;
     auto* temporalDepth = g.packed ? packedDepth : g.depth.Get();
     bool prepared = false;
@@ -706,7 +721,8 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
         Fields::SetMotionRegion(encode, 0, 0, g.workWidth, g.workHeight);
     }
     if (!prepared &&
-        !Dispatch(shader, cmd, encode, proxy, answer, motion, nullptr, nullptr, nullptr, g.carrier, &g.temporalMotion))
+        !Dispatch(shader, cmd, encode, proxy, answer, motion, g.spatialInput ? g.warp.Get() : nullptr, nullptr, nullptr,
+                  g.carrier, &g.temporalMotion))
         return nullptr;
     bool idle = false;
     float mix = g.presetFade.weight;
@@ -720,9 +736,9 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
         idle = probe.selection.idle;
         mix *= probe.selection.fade.weight;
     }
-    // Transformer reuses one disocclusion field for the bias before DLSS and the repair after it. CNN keeps its
-    // D/E route without allocating or dispatching the ghost field; its steady-state cost stays unchanged.
-    const bool repair = DlssNr::SuperiorScaling::NeedsGhostField(g.actualPreset);
+    // Transformer uses one disocclusion field for the bias before DLSS (and repair after it in Residual DLAA).
+    // Direct DLSS SR Performance mode skips the ghost field completely.
+    const bool repair = DlssNr::SuperiorScaling::NeedsGhostField(g.actualPreset, g.directSr && g.directSrPerf);
     ID3D12Resource* bias = repair ? GhostBiasMask(g, shader, cmd, temporalDepth, proxy, answer, frame,
                                                 reset || g.reset, packedDepthPrecision)
                                  : nullptr;
@@ -736,6 +752,7 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
         p->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_SubrectBase_Y, 0u);
     }
     auto* feature = idle ? g.resident->feature : g.feature;
+    // Both Direct DLSS SR (work -> full native) and Residual DLAA feed the C1 1.5x residual carrier.
     p->Set(NVSDK_NGX_Parameter_Color, g.carrier.Get());
     p->Set(NVSDK_NGX_Parameter_Output, g.temporalOutput.Get());
     p->Set(NVSDK_NGX_Parameter_Depth, temporalDepth);
@@ -744,8 +761,8 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
     p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, g.workWidth);
     p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, g.workHeight);
     p->Set(NVSDK_NGX_Parameter_Reset, (unsigned) (reset || g.reset));
-    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
-    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
+    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, g.directSr ? -jitter.x : 0.0f);
+    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, g.directSr ? -jitter.y : 0.0f);
     p->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
     p->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0f);
     p->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,
@@ -760,10 +777,16 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
         return nullptr;
     }
     g.temporalOutput.To(cmd, Srv);
+    if (g.directSr)
+    {
+        g.reset = false;
+        return g.temporalOutput.Get();
+    }
     Constants decode {};
     decode.Mode = 38u;
     decode.Width = g.workWidth;
     decode.Height = g.workHeight;
+    Fields::SetPrivateDetailRecovery(decode, detailRecovery);
     // The repair is tuned for K: it follows the model that runs, not the one asked for (a runtime without K runs its
     // default instead).
     if (repair)
@@ -774,11 +797,11 @@ ID3D12Resource* Stabilize(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComm
     }
     else
     {
-        // Stable CNN frames use the existing read-only decode. Only a fade needs the current edit.
-        if (mix < 1.f)
-            Fields::SetPrivateFade(decode, 1.f - mix);
-        if (!Dispatch(shader, cmd, decode, g.temporalOutput.Get(), nullptr, mix < 1.f ? proxy : nullptr, nullptr,
-                      mix < 1.f ? answer : nullptr, nullptr, g.carrier))
+        const bool needRaw = mix < 1.f || detailRecovery > 0.001f;
+        if (needRaw)
+            Fields::SetPrivateFade(decode, mix < 1.f ? (1.f - mix) : 0.f);
+        if (!Dispatch(shader, cmd, decode, g.temporalOutput.Get(), nullptr, needRaw ? proxy : nullptr, nullptr,
+                      needRaw ? answer : nullptr, nullptr, g.carrier))
             return nullptr;
     }
     g.reset = false;
@@ -803,7 +826,8 @@ enum class Began
 // Called before recording the normal input and exposure path.
 Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* device, DXGI_FORMAT format,
             unsigned width, unsigned height, unsigned workWidth, unsigned workHeight, float modelScale,
-            const DlssNrFrameInfo& frame, bool temporal, bool haveDepth, const DlssNr::Spatial::Layout* layout)
+            const DlssNrFrameInfo& frame, bool temporal, bool haveDepth, const DlssNr::Spatial::Layout* layout,
+            bool packed)
 {
     auto& state = GetState();
     g_used = true;
@@ -818,11 +842,25 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
     }
     const auto& cfg = *Config::Instance();
     using namespace DlssNr::SuperiorScaling;
-    const unsigned preset = PresetChoice().Select(cfg.DlssNrSuperiorScalingPreset.value_or_default(),
-                                                  cfg.DlssNrModelResolutionAuto.value_or_default(),
-                                                  cfg.DlssNrWorkingScale.value_or_default(), modelScale);
     const bool shaping = temporal;
-    temporal = shaping && preset != NoPrivateDlss;
+    const bool spatialInput = !packed && layout != nullptr;
+    const bool oracleMode =
+        shaping && IntrinsicOracleSelected(cfg.DlssNrSuperiorMode.value_or_default()) &&
+        workWidth <= width && workHeight <= height;
+    const bool directSrRequested =
+        !oracleMode && shaping && Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) != NoPrivateDlss &&
+        DirectSrSelected(cfg.DlssNrSuperiorMode.value_or_default()) && !packed &&
+        workWidth <= width && workHeight <= height;
+    const bool directSrPerf = directSrRequested && cfg.DlssNrSuperiorDirectSrPerf.value_or_default();
+    const unsigned preset = oracleMode
+                                ? NoPrivateDlss
+                                : PresetChoice().Select(cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                                        cfg.DlssNrModelResolutionAuto.value_or_default(),
+                                                        cfg.DlssNrWorkingScale.value_or_default(), modelScale,
+                                                        directSrRequested, directSrPerf);
+    temporal = !oracleMode && shaping && preset != NoPrivateDlss;
+    const bool directSr = !oracleMode && temporal && directSrRequested;
+    const bool directSrHdr = false; // Both Direct DLSS SR and Residual DLAA feed the [0,1] C1 residual carrier.
     if (auto* previous = state.current.get())
     {
         const bool ngxGone = (previous->feature || previous->parameters) && !NgxAlive(previous->ngxEpoch);
@@ -832,9 +870,15 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
             previous->device.Get() != device || previous->width != width || previous->height != height ||
             previous->workWidth != workWidth || previous->workHeight != workHeight || previous->format != format ||
             previous->inverted != frame.DepthInverted || previous->beforeSr != frame.BeforeUpscale ||
-            previous->packed != (layout != nullptr) || (layout && previous->layout != *layout);
-        const bool selectionChanged = previous->temporal != temporal || previous->preset != preset;
+            previous->packed != packed || previous->spatialInput != spatialInput ||
+            (layout && previous->layout != *layout);
+        const bool selectionChanged = previous->temporal != temporal || previous->preset != preset ||
+                                      previous->directSr != directSr || previous->directSrPerf != directSrPerf ||
+                                      previous->directSrHdr != directSrHdr ||
+                                      previous->intrinsicOracle != oracleMode;
         if (!ngxGone && !geometryChanged && haveDepth && previous->PrivateReady() &&
+            previous->directSr == directSr && previous->directSrPerf == directSrPerf &&
+            previous->directSrHdr == directSrHdr && previous->intrinsicOracle == oracleMode &&
             (previous->actualPreset == CnnD || previous->actualPreset == CnnE))
         {
             const auto now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -867,7 +911,12 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         g.beforeSr = frame.BeforeUpscale;
         g.temporal = temporal;
         g.shaping = shaping;
-        g.packed = layout != nullptr;
+        g.packed = packed;
+        g.spatialInput = spatialInput;
+        g.directSr = directSr;
+        g.directSrPerf = directSrPerf;
+        g.directSrHdr = directSrHdr;
+        g.intrinsicOracle = oracleMode;
         if (layout)
             g.layout = *layout;
         g.preset = preset;
@@ -885,7 +934,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
     DlssNr::AllocatorEpochs::SetWanted(track);
     Record(cmd);
     const auto identity = Util::RealObjectIdentity(cmd);
-    if (g.packed && !g.warp.Get())
+    if ((g.packed || g.spatialInput) && !g.warp.Get())
     {
         if (!CreateWarp(g, shader, cmd))
         {
@@ -895,7 +944,7 @@ Began Begin(DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd, ID3D12Device* d
         g.creation = identity;
         g.creationSubmitted = false;
     }
-    if (g.packed && !g.creationSubmitted && g.creation != identity)
+    if ((g.packed || g.spatialInput) && !g.creationSubmitted && g.creation != identity)
         return Began::Wait;
 
     // Compose the current edit while a private feature is unavailable or its creation is pending.
@@ -1038,6 +1087,86 @@ ID3D12Resource* FinalLow(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComma
     c.Height = lowH;
     return Dispatch(shader, cmd, c, proxy, residual, nullptr, nullptr, nullptr, nullptr, g.finalLow) ? g.finalLow.Get()
                                                                                                      : nullptr;
+}
+
+struct OracleResult
+{
+    ID3D12Resource* intrinsic = nullptr;
+    ID3D12Resource* proxy = nullptr;
+    ID3D12Resource* depth = nullptr;
+    bool preJbu = false;
+};
+
+OracleResult RunIntrinsicOracle(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsCommandList* cmd,
+                                ID3D12Resource* proxy, ID3D12Resource* answer, ID3D12Resource* nativeProxy,
+                                ID3D12Resource* depthIn, ID3D12Resource* motionIn,
+                                const DlssNr::GuideRegions& regions, const DlssNrFrameInfo& frame, bool reset,
+                                bool hold, DlssNr::SuperiorScaling::JitterPair jitter)
+{
+    if (!proxy || !answer || !g.workWidth || !g.workHeight)
+        return {};
+    if (!Ensure(g.oracleCur, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, g.workWidth, g.workHeight) ||
+        !Ensure(g.oracleProxy, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, g.workWidth, g.workHeight) ||
+        !Ensure(g.oracleHist[0], g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, g.workWidth, g.workHeight) ||
+        !Ensure(g.oracleHist[1], g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, g.workWidth, g.workHeight) ||
+        !Ensure(g.oracleDepth[0], g.device.Get(), DXGI_FORMAT_R32_FLOAT, g.workWidth, g.workHeight) ||
+        !Ensure(g.oracleDepth[1], g.device.Get(), DXGI_FORMAT_R32_FLOAT, g.workWidth, g.workHeight))
+        return {};
+    Record(cmd);
+
+    // Stage A: work-resolution proxy-bilateral intrinsic decomposition (+ fused spatial unpack if spatialInput).
+    Constants decomp {};
+    Fields::SetOracleDecomp(decomp, g.spatialInput, jitter.x, jitter.y);
+    decomp.Width = g.workWidth;
+    decomp.Height = g.workHeight;
+    if (!Dispatch(shader, cmd, decomp, proxy, answer, nullptr, g.spatialInput ? g.warp.Get() : nullptr, nullptr,
+                  nullptr, g.oracleCur, &g.oracleProxy))
+        return {};
+
+    // Stage B1: MV-reprojected temporal intrinsic accumulation on the canonical unjittered grid.
+    const unsigned prevIdx = g.oracleIndex & 1u;
+    const unsigned nextIdx = 1u - prevIdx;
+    const bool doReset = reset || g.reset || !g.oracleHistoryValid;
+    const bool haveDepth = depthIn != nullptr && regions.depth.valid();
+    Constants temp = GuideConstants(g.workWidth, g.workHeight, regions, frame, true, hold);
+    Fields::SetOracleTemporal(temp, doReset, haveDepth, frame.DepthInverted, jitter.x, jitter.y);
+    g.oracleHist[prevIdx].To(cmd, Srv);
+    g.oracleDepth[prevIdx].To(cmd, Srv);
+    if (!Dispatch(shader, cmd, temp, g.oracleCur.Get(), g.oracleHist[prevIdx].Get(),
+                  haveDepth ? depthIn : g.oracleCur.Get(), motionIn, g.oracleDepth[prevIdx].Get(), nullptr,
+                  g.oracleHist[nextIdx], &g.oracleDepth[nextIdx]))
+        return {};
+
+    g.oracleIndex = nextIdx;
+    g.oracleHistoryValid = true;
+    g.reset = false;
+
+    // Stage B2 (optional intermediate-resolution JBU between 4K and 2K, e.g. 2880x1620 at 4K / 2560x1440 at 3413p):
+    // Runs the heavy depth + plane + albedo 2x2 JBU at 0.75x native (56% of pixels), eliminating all 4K depth loads
+    // from HostResolve while keeping hard-edge 4K snapping via R11G11B10_FLOAT oracleMidProxy.
+    const unsigned midW = ((g.width * 3u + 2u) / 4u + 1u) & ~1u;
+    const unsigned midH = ((g.height * 3u + 2u) / 4u + 1u) & ~1u;
+    const bool wantMidJbu = nativeProxy != nullptr && g.height > 1440u &&
+                            midW > g.workWidth && midH > g.workHeight &&
+                            midW < g.width && midH < g.height;
+    if (wantMidJbu &&
+        Ensure(g.oracleMid, g.device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, midW, midH) &&
+        Ensure(g.oracleMidProxy, g.device.Get(), DXGI_FORMAT_R11G11B10_FLOAT, midW, midH))
+    {
+        Constants jbu {};
+        Fields::SetOracleJbu(jbu, midW, midH, haveDepth, frame.DepthInverted, regions.depth.x, regions.depth.y,
+                             regions.depth.width, regions.depth.height);
+        g.oracleDepth[nextIdx].To(cmd, Srv);
+        if (Dispatch(shader, cmd, jbu, g.oracleProxy.Get(), g.oracleHist[nextIdx].Get(), nativeProxy,
+                     g.oracleDepth[nextIdx].Get(), nullptr, haveDepth ? depthIn : nullptr,
+                     g.oracleMid, &g.oracleMidProxy))
+        {
+            return { g.oracleMid.Get(), g.oracleMidProxy.Get(), nullptr, true };
+        }
+    }
+
+    g.oracleDepth[nextIdx].To(cmd, Srv);
+    return { g.oracleHist[nextIdx].Get(), g.oracleProxy.Get(), g.oracleDepth[nextIdx].Get(), false };
 }
 } // namespace SuperiorRun
 } // namespace

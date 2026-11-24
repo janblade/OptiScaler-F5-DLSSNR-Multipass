@@ -20,6 +20,7 @@ namespace DlssNr::Superior::Bytecode
 #include "precompile/dlssnr_superior_resolve_Shader.h"
 #include "precompile/dlssnr_superior_sdr_Shader.h"
 #include "precompile/private_encode_Shader.h"
+#include "precompile/private_encode_packed_Shader.h"
 #include "precompile/private_fade_Shader.h"
 #include "precompile/private_cnn_motion_Shader.h"
 #include "precompile/private_ghost_clear_Shader.h"
@@ -33,6 +34,10 @@ namespace DlssNr::Superior::Bytecode
 #include "precompile/private_ghost_rings_apply_Shader.h"
 #include "precompile/private_ghost_rings_inplace_Shader.h"
 #include "precompile/private_ghost_bias_Shader.h"
+#include "precompile/oracle_decomp_Shader.h"
+#include "precompile/oracle_decomp_packed_Shader.h"
+#include "precompile/oracle_temporal_Shader.h"
+#include "precompile/oracle_jbu_Shader.h"
 } // namespace DlssNr::Superior::Bytecode
 
 bool DlssNr_Dx12::EnsureSuperiorRing()
@@ -137,7 +142,7 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
     using namespace DlssNr::Superior::Bytecode;
     using namespace DlssNr::Superior;
     const bool privatePass = InConstants.Mode >= DlssNrMode_SuperiorCarrierMotion &&
-                             InConstants.Mode <= DlssNrMode_PrivateGhostDecodeSeed;
+                             InConstants.Mode <= DlssNrMode_OracleJbu;
     ID3D12PipelineState* pipeline = privatePass ? nullptr : SuperiorPipeline(InConstants, InSource);
     const auto get = [&](unsigned index, const void* blob, size_t size)
     {
@@ -169,9 +174,14 @@ bool DlssNr_Dx12::DispatchSuperiorPass(ID3D12GraphicsCommandList* InCmdList,
             { private_ghost_rings_inplace_cso, sizeof(private_ghost_rings_inplace_cso) },
             { private_ghost_bias_cso, sizeof(private_ghost_bias_cso) },
             { private_ghost_decode_seed_cso, sizeof(private_ghost_decode_seed_cso) },
+            { private_encode_packed_cso, sizeof(private_encode_packed_cso) },
+            { oracle_decomp_cso, sizeof(oracle_decomp_cso) },
+            { oracle_decomp_packed_cso, sizeof(oracle_decomp_packed_cso) },
+            { oracle_temporal_cso, sizeof(oracle_temporal_cso) },
+            { oracle_jbu_cso, sizeof(oracle_jbu_cso) },
         };
         static_assert(std::size(privateBlobs) ==
-                      DlssNrMode_PrivateGhostDecodeSeed - DlssNrMode_SuperiorCarrierMotion + 1);
+                      DlssNrMode_OracleJbu - DlssNrMode_SuperiorCarrierMotion + 1);
         static_assert(sizeof(_superiorPipeline) / sizeof(_superiorPipeline[0]) >= 16u + std::size(privateBlobs));
         const unsigned index = InConstants.Mode - DlssNrMode_SuperiorCarrierMotion;
         pipeline = get(16u + index, privateBlobs[index].data, privateBlobs[index].bytes);

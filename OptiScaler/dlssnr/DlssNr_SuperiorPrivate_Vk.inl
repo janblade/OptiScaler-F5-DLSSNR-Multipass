@@ -48,6 +48,8 @@ struct Frame
     float gameMvX = 1.f, gameMvY = 1.f;
     DlssNr::GuideExtent reference {}; // the render (or output) extent the game's vectors are in
     unsigned outputWidth = 0, outputHeight = 0;
+    bool linearHdrCurve = false;
+    Sup::JitterPair jitter {};
 };
 
 // Frames to wait for the creation to have run before giving up on it.
@@ -69,8 +71,8 @@ NVSDK_NGX_Handle* feature = nullptr;
 VkEvent created = VK_NULL_HANDLE;
 unsigned waited = 0, failures = 0;
 unsigned wantedPreset = 0, actualPreset = 0;
-uint32_t builtW = 0, builtH = 0;
-bool builtInverted = false;
+uint32_t builtW = 0, builtH = 0, builtOutW = 0, builtOutH = 0;
+bool builtInverted = false, builtDirectSr = false, builtDirectSrPerf = false, builtDirectSrHdr = false;
 std::atomic<bool> srUnavailable { false }; // no usable NGX DLSS SR here: not tried again until Superior is selected again
 std::string privateBrokenSaid; // what the status line says for privateBroken, when it is not the passes (menu thread: statusLock)
 bool privateBroken = false; // the private DLSS's own passes would not build: No DLSS, until Superior is selected again
@@ -351,17 +353,19 @@ void ShutdownOwnCore(bool deviceAlive, VkDevice device)
 }
 
 // D3D12's creation parameters (Pipeline.inl SetCreationParameters + CreateFeature).
-void SetCreationParameters(NVSDK_NGX_Parameter* p, uint32_t w, uint32_t h, bool inverted)
+void SetCreationParameters(NVSDK_NGX_Parameter* p, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, bool inverted,
+                           bool directSr, bool directSrHdr)
 {
     p->Set(NVSDK_NGX_Parameter_Width, w);
     p->Set(NVSDK_NGX_Parameter_Height, h);
-    p->Set(NVSDK_NGX_Parameter_OutWidth, w);
-    p->Set(NVSDK_NGX_Parameter_OutHeight, h);
+    p->Set(NVSDK_NGX_Parameter_OutWidth, outW);
+    p->Set(NVSDK_NGX_Parameter_OutHeight, outH);
     p->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
     p->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
-    p->Set(NVSDK_NGX_Parameter_PerfQualityValue, (int) NVSDK_NGX_PerfQuality_Value_DLAA);
-    const unsigned flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                           NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+    p->Set(NVSDK_NGX_Parameter_PerfQualityValue,
+           directSr ? Sup::DirectSrPerfQuality(w, h, outW, outH) : (int) NVSDK_NGX_PerfQuality_Value_DLAA);
+    const unsigned flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                           (directSrHdr ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR : 0u) |
                            (inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0u);
     p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
 }
@@ -427,9 +431,11 @@ bool UnitExposure(VkCommandBuffer cmd)
 
 // Makes the images and the feature on this command buffer and sets the event behind them. False: this generation runs
 // without a private DLSS (the reason is said and logged); srUnavailable is set where no DLSS SR exists here at all.
-bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
+bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset, bool directSr, bool directSrPerf, bool directSrHdr)
 {
     const uint32_t w = depth.width, h = depth.height;
+    const uint32_t outW = (directSr && in.outputWidth) ? in.outputWidth : w;
+    const uint32_t outH = (directSr && in.outputHeight) ? in.outputHeight : h;
 
     if (!NVNGXProxy::IsVulkanInited())
     {
@@ -471,10 +477,10 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
     {
         std::vector<Blob> blobs { Blob::Generic,    Blob::CarrierDecode, Blob::LowSigned,
                                   Blob::ResolveHdr, Blob::ResolveSdr,    Blob::PrivateEncode };
-        if (!Sup::NeedsGhostField(preset))
+        if (!Sup::NeedsGhostField(preset, directSr && directSrPerf))
             for (const Blob b : { Blob::PrivateFade, Blob::CnnMotion })
                 blobs.push_back(b);
-        if (Sup::NeedsGhostField(preset))
+        if (Sup::NeedsGhostField(preset, directSr && directSrPerf))
             for (const Blob b : { Blob::GhostClear, Blob::GhostCoarse1, Blob::GhostCoarse2, Blob::GhostReference,
                                   Blob::GhostDilate, Blob::GhostBias, Blob::GhostDecodeSeed, Blob::GhostRingsInPlace })
                 blobs.push_back(b);
@@ -492,7 +498,7 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
     }
 
     if (!CreateImage(carrier, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, true) ||
-        !CreateImage(temporalOutput, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, true) ||
+        !CreateImage(temporalOutput, outW, outH, VK_FORMAT_R16G16B16A16_SFLOAT, true) ||
         !CreateImage(temporalMotion, w, h, VK_FORMAT_R32G32B32A32_SFLOAT, true) ||
         !CreateImage(unit, 1, 1, VK_FORMAT_R32_SFLOAT, true))
     {
@@ -503,6 +509,11 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
     }
     builtW = w;
     builtH = h;
+    builtOutW = outW;
+    builtOutH = outH;
+    builtDirectSr = directSr;
+    builtDirectSrPerf = directSrPerf;
+    builtDirectSrHdr = directSrHdr;
 
     if (created == VK_NULL_HANDLE)
     {
@@ -535,7 +546,7 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
         return false;
     }
 
-    SetCreationParameters(params, w, h, in.depthInverted);
+    SetCreationParameters(params, w, h, outW, outH, in.depthInverted, directSr, directSrHdr);
     result = CreateFeature(cmd, preset);
     actualPreset = preset;
 
@@ -591,15 +602,16 @@ bool EnsureGhost(unsigned workW, unsigned workH)
 
     DestroyGhost();
     const unsigned qw = (workW + 3) / 4, qh = (workH + 3) / 4;
+    const bool needContrast = !builtDirectSr;
     bool ok = CreateImage(ghost.reconstructed, qw, qh, VK_FORMAT_R32_UINT, true) &&
               CreateImage(ghost.field, qw, qh, VK_FORMAT_R32_SFLOAT, true) &&
               CreateImage(ghost.expanded, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, true) &&
-              CreateImage(ghost.rings, qw, qh, VK_FORMAT_R32G32B32A32_SFLOAT, true) &&
+              (!needContrast || CreateImage(ghost.rings, qw, qh, VK_FORMAT_R32G32B32A32_SFLOAT, true)) &&
               CreateImage(ghost.bias, workW, workH, VK_FORMAT_R32_SFLOAT, true);
     for (unsigned i = 0; i < 2 && ok; ++i)
         ok = CreateImage(ghost.state[i], qw, qh, VK_FORMAT_R32G32B32A32_UINT, true) &&
-             CreateImage(ghost.raw[i], qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, true) &&
-             CreateImage(ghost.reference[i], qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, true);
+             (!needContrast || (CreateImage(ghost.raw[i], qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, true) &&
+                                CreateImage(ghost.reference[i], qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, true)));
 
     if (!ok)
     {
@@ -628,9 +640,12 @@ bool UpdateGhost(VkCommandBuffer cmd, const Frame& in, OwnedImage& proxy, OwnedI
     const uint32_t qw = c.Width, qh = c.Height;
     const uint32_t gx = Groups(qw, 8), gy = Groups(qh, 8);
 
-    for (OwnedImage* img : { &ghost.reconstructed, &ghost.state[0], &ghost.state[1], &ghost.raw[0], &ghost.raw[1],
-                             &ghost.reference[0], &ghost.reference[1], &ghost.field, &ghost.expanded })
+    const bool needContrast = !builtDirectSr;
+    for (OwnedImage* img : { &ghost.reconstructed, &ghost.state[0], &ghost.state[1], &ghost.field, &ghost.expanded })
         Transition(cmd, *img, VK_IMAGE_LAYOUT_GENERAL);
+    if (needContrast)
+        for (OwnedImage* img : { &ghost.raw[0], &ghost.raw[1], &ghost.reference[0], &ghost.reference[1] })
+            Transition(cmd, *img, VK_IMAGE_LAYOUT_GENERAL);
 
     const unsigned next = previous ? ghost.index ^ 1u : 0u;
     OwnedImage& old = ghost.state[previous ? ghost.index : 1];
@@ -659,22 +674,26 @@ bool UpdateGhost(VkCommandBuffer cmd, const Frame& in, OwnedImage& proxy, OwnedI
                         ghost.state[next].view))
         return false;
 
-    c.Mode = DlssNr::Superior::DlssNrMode_PrivateGhostReference;
-    reads = {};
-    reads[0] = Rd(ghost.state[next]);
-    reads[1] = previous ? Rd(ghost.raw[ghost.index]) : Rd(proxy);
-    reads[2] = previous ? Rd(ghost.reference[ghost.index]) : Rd(proxy);
-    reads[3] = Rd(proxy);
-    reads[4] = Rd(answer);
-    reads[5] = Rd(ghost.field);
-    if (!pass->Dispatch(cmd, Blob::GhostReference, &c, sizeof(c), gx, gy, reads, ghost.raw[next].view,
-                        ghost.reference[next].view))
-        return false;
+    if (needContrast)
+    {
+        c.Mode = DlssNr::Superior::DlssNrMode_PrivateGhostReference;
+        reads = {};
+        reads[0] = Rd(ghost.state[next]);
+        reads[1] = previous ? Rd(ghost.raw[ghost.index]) : Rd(proxy);
+        reads[2] = previous ? Rd(ghost.reference[ghost.index]) : Rd(proxy);
+        reads[3] = Rd(proxy);
+        reads[4] = Rd(answer);
+        reads[5] = Rd(ghost.field);
+        if (!pass->Dispatch(cmd, Blob::GhostReference, &c, sizeof(c), gx, gy, reads, ghost.raw[next].view,
+                            ghost.reference[next].view))
+            return false;
+    }
 
     c.Mode = DlssNr::Superior::DlssNrMode_PrivateGhostDilate;
+    c.ColourStrength = needContrast ? 0.0f : 1.0f; // skipContrast > 0.5 in Direct DLSS SR
     reads = {};
     reads[0] = Rd(ghost.state[next]);
-    reads[1] = Rd(ghost.reference[next]);
+    reads[1] = needContrast ? Rd(ghost.reference[next]) : Rd(proxy);
     if (!pass->Dispatch(cmd, Blob::GhostDilate, &c, sizeof(c), gx, gy, reads, ghost.field.view, ghost.expanded.view))
         return false;
 
@@ -707,7 +726,7 @@ OwnedImage* BiasMask(VkCommandBuffer cmd, const Frame& in, OwnedImage& proxy, Ow
 // The Transformer decode: the raw edit where the output still shows the occluder, seeded rings, an outward feather in
 // place. Leaves the decoded residual in `carrier`.
 bool RepairTransformer(VkCommandBuffer cmd, const Frame& in, OwnedImage& proxy, OwnedImage& answer, unsigned workW,
-                       unsigned workH)
+                       unsigned workH, float detailRecovery)
 {
     Transition(cmd, carrier, VK_IMAGE_LAYOUT_GENERAL);
     Transition(cmd, ghost.rings, VK_IMAGE_LAYOUT_GENERAL);
@@ -718,6 +737,7 @@ bool RepairTransformer(VkCommandBuffer cmd, const Frame& in, OwnedImage& proxy, 
     decode.Width = workW;
     decode.Height = workH;
     decode.Passthrough = in.depthInverted;
+    Fields::SetPrivateDetailRecovery(decode, detailRecovery);
     Reads reads {};
     reads[0] = Rd(temporalOutput);
     reads[1] = Rd(ghost.expanded);
@@ -773,7 +793,8 @@ void UpdateResident(VkCommandBuffer cmd, const Frame& in)
             resident.params = nullptr;
             return;
         }
-        SetCreationParameters(resident.params, builtW, builtH, in.depthInverted);
+        SetCreationParameters(resident.params, builtW, builtH, builtOutW, builtOutH, in.depthInverted, builtDirectSr,
+                              builtDirectSrHdr);
         resident.params->Set(NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 1);
         const auto result = CreateFeatureOn(cmd, resident.params, resident.feature, Sup::CnnE);
         // An aliased handle still belongs to the primary instance.
@@ -944,9 +965,16 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
                  float workScale)
 {
     const unsigned workW = proxy.width, workH = proxy.height;
+    const bool directSrRequested =
+        Sup::Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) != Sup::NoPrivateDlss &&
+        Sup::DirectSrSelected(cfg.DlssNrSuperiorMode.value_or_default()) &&
+        (in.outputWidth == 0 || workW <= in.outputWidth) &&
+        (in.outputHeight == 0 || workH <= in.outputHeight);
+    const bool directSrPerf = directSrRequested && cfg.DlssNrSuperiorDirectSrPerf.value_or_default();
     const unsigned preset = choice.Select(cfg.DlssNrSuperiorScalingPreset.value_or_default(),
                                           cfg.DlssNrModelResolutionAuto.value_or_default(),
-                                          cfg.DlssNrWorkingScale.value_or_default(), workScale);
+                                          cfg.DlssNrWorkingScale.value_or_default(), workScale, directSrRequested,
+                                          directSrPerf);
 
     // The NGX core these objects were made under went (a shutdown from inside the NR pass, a restart, another device):
     // every handle, the resident E's and the parked ones too, is forgotten with no NGX call, the images and the probe go
@@ -964,6 +992,10 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     }
 
     const bool wantNone = preset == Sup::NoPrivateDlss;
+    const bool directSr = !wantNone && directSrRequested;
+    const bool directSrHdr = false; // Both Direct DLSS SR and Residual DLAA feed the [0,1] C1 residual carrier.
+    const uint32_t outW = (directSr && in.outputWidth) ? in.outputWidth : workW;
+    const uint32_t outH = (directSr && in.outputHeight) ? in.outputHeight : workH;
 
     if (srUnavailable && !wantNone)
     {
@@ -980,13 +1012,15 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
 
     // Another preset, raster or depth convention: a new feature (the D3D12 generation change). A running CNN whose preset
     // is only being changed keeps running while it fades to the current edit over 0.3 s (D3D12 does the same), then goes.
-    const bool geometryChanged = builtW != workW || builtH != workH || builtInverted != in.depthInverted ||
-                                 ownerDevice != in.device;
-    // Going to No DLSS counts as a change of selection (D3D12: previous->temporal != temporal), so a running CNN fades out
-    // to the current edit over 0.3 s instead of cutting.
-    const bool selectionChanged = phase != Phase::None && (wantNone || wantedPreset != preset);
+    const bool geometryChanged = builtW != workW || builtH != workH || builtOutW != outW || builtOutH != outH ||
+                                 builtInverted != in.depthInverted || ownerDevice != in.device;
+    // Going to No DLSS or switching Direct SR <-> Residual DLAA / Perf counts as a selection change.
+    const bool selectionChanged = phase != Phase::None &&
+                                  (wantNone || wantedPreset != preset || builtDirectSr != directSr ||
+                                   builtDirectSrPerf != directSrPerf || builtDirectSrHdr != directSrHdr);
     bool fading = false;
-    if (phase == Phase::Ready && !geometryChanged && in.haveDepth &&
+    if (phase == Phase::Ready && !geometryChanged && in.haveDepth && builtDirectSr == directSr &&
+        builtDirectSrPerf == directSrPerf && builtDirectSrHdr == directSrHdr &&
         (actualPreset == Sup::CnnD || actualPreset == Sup::CnnE))
         fading = presetFade.Advance(!selectionChanged, NowSeconds()) > 0.f && selectionChanged;
     if (((phase != Phase::None && geometryChanged) || (selectionChanged && !fading)) || ownerDevice != in.device)
@@ -1018,7 +1052,7 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     {
         builtInverted = in.depthInverted;
         wantedPreset = preset;
-        Create(cmd, in, preset);
+        Create(cmd, in, preset, directSr, directSrPerf, directSrHdr);
         return nullptr; // created or not, this frame composes the raw answer
     }
 
@@ -1045,7 +1079,7 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
 
     // ---- Ready: encode, (field), evaluate, decode ----
     bool reset = resetNext || in.reset;
-    const bool repair = Sup::NeedsGhostField(actualPreset);
+    const bool repair = Sup::NeedsGhostField(actualPreset, builtDirectSr && builtDirectSrPerf);
 
     // CNN D with its resident E: the probe says whether the picture is still, and E takes over (D back in motion); the
     // output fades between them, and the one that comes in starts its history over (Pipeline.inl Stabilize).
@@ -1074,11 +1108,12 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     Transition(cmd, carrier, VK_IMAGE_LAYOUT_GENERAL);
     Transition(cmd, temporalMotion, VK_IMAGE_LAYOUT_GENERAL);
 
-    // v50: fixed carrier + motion, from the matched guides (D3D12: encode, Mode 39, with guidesMatched).
+    // v50: fixed C1 carrier + motion, from the matched guides (used by both Residual DLAA and Direct DLSS SR).
     Constants encode {};
     encode.Mode = DlssNr::Superior::DlssNrMode_SuperiorCarrierMotion;
     encode.Width = workW;
     encode.Height = workH;
+    encode.Passthrough = 0u;
     Fields::SetDepthRegion(encode, in.guides->depth.x, in.guides->depth.y, in.guides->depth.width,
                            in.guides->depth.height);
     Fields::SetMotionRegion(encode, 0, 0, workW, workH);
@@ -1122,8 +1157,8 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, workW);
     p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, workH);
     p->Set(NVSDK_NGX_Parameter_Reset, (unsigned) reset);
-    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
-    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
+    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, builtDirectSr ? -in.jitter.x : 0.0f);
+    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, builtDirectSr ? -in.jitter.y : 0.0f);
     p->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
     p->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0f);
     p->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, std::isfinite(in.frameMs) && in.frameMs > 0 ? in.frameMs : 16.67f);
@@ -1141,29 +1176,36 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     }
 
     Transition(cmd, temporalOutput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (builtDirectSr)
+    {
+        failures = 0;
+        resetNext = false;
+        return &temporalOutput;
+    }
     Transition(cmd, carrier, VK_IMAGE_LAYOUT_GENERAL);
 
+    const float detailRecovery = cfg.DlssNrSuperiorDetailRecovery.value_or_default();
     bool decoded = false;
     if (haveField)
-        decoded = RepairTransformer(cmd, in, proxy, answer, workW, workH);
+        decoded = RepairTransformer(cmd, in, proxy, answer, workW, workH, detailRecovery);
     else
     {
-        // CNN (and a Transformer without a field): the stable decode, Mode 38; only a fade needs the current edit (Mode 40).
         Constants decode {};
         decode.Mode = DlssNr::Superior::DlssNrMode_SuperiorCarrierDecode;
         decode.Width = workW;
         decode.Height = workH;
-        const bool fade = mix < 1.f && !repair;
-        if (fade)
-            Fields::SetPrivateFade(decode, 1.f - mix);
+        Fields::SetPrivateDetailRecovery(decode, detailRecovery);
+        const bool needRaw = (mix < 1.f && !repair) || detailRecovery > 0.001f;
+        if (needRaw)
+            Fields::SetPrivateFade(decode, (mix < 1.f && !repair) ? (1.f - mix) : 0.f);
         reads = {};
         reads[0] = Rd(temporalOutput);
-        if (fade)
+        if (needRaw)
         {
             reads[2] = Rd(proxy);
             reads[4] = Rd(answer);
         }
-        decoded = pass->Dispatch(cmd, fade ? Blob::PrivateFade : Blob::CarrierDecode, &decode, sizeof(decode),
+        decoded = pass->Dispatch(cmd, needRaw ? Blob::PrivateFade : Blob::CarrierDecode, &decode, sizeof(decode),
                                  Groups(workW, 8), Groups(workH, 8), reads, carrier.view);
     }
 
@@ -1184,11 +1226,15 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
 // What EvaluateAtSeamVk calls where it used to call Finish alone: the private DLSS when it is wanted and ready, else
 // the raw answer through the No DLSS composition.
 bool Compose(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& resolve, float workScale,
-             unsigned int width, unsigned int height, OwnedImage& proxy, OwnedImage& answer, OwnedImage& keep,
-             VkImageView exposureView, VkImageView target, const Private::Frame& frame)
+             unsigned int width, unsigned int height, OwnedImage& nativeProxy, OwnedImage& proxy, OwnedImage& answer,
+             OwnedImage& keep, VkImageView exposureView, VkImageView target, const Private::Frame& frame)
 {
+    (void)nativeProxy;
     OwnedImage* residual = Private::Step(cmd, cfg, frame, proxy, answer, workScale);
-    return Finish(cmd, cfg, resolve, workScale, width, height, proxy, residual ? *residual : answer, residual != nullptr,
-                  keep, exposureView, target);
+    const bool directSr = residual != nullptr && Private::builtDirectSr;
+    const bool directSrPerf = directSr && Private::builtDirectSrPerf;
+    return Finish(cmd, cfg, resolve, workScale, width, height, proxy, residual ? *residual : answer,
+                  residual != nullptr && !directSr, keep, exposureView, target, directSr,
+                  directSrPerf ? nullptr : &answer, directSrPerf);
 }
 } // namespace SuperiorVk

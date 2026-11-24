@@ -187,6 +187,7 @@ bool UpdateGhostHistory(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComman
 
     Constants c {};
     const bool previous = h.initialized && h.submitted && !reset;
+    const bool needContrast = !g.directSr;
     Fields::SetPrivateGhost(c, g.workWidth, g.workHeight, g.inverted, previous, precision);
     const unsigned w = c.Width, ht = c.Height;
     auto ensure = [&](Texture& t, DXGI_FORMAT format) { return Ensure(t, g.device.Get(), format, w, ht); };
@@ -194,8 +195,9 @@ bool UpdateGhostHistory(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComman
         !ensure(h.expanded, DXGI_FORMAT_R16G16B16A16_FLOAT))
         return false;
     for (unsigned i = 0; i < 2; ++i)
-        if (!ensure(h.state[i], DXGI_FORMAT_R32G32_UINT) || !ensure(h.raw[i], DXGI_FORMAT_R16G16B16A16_FLOAT) ||
-            !ensure(h.reference[i], DXGI_FORMAT_R16G16B16A16_FLOAT))
+        if (!ensure(h.state[i], DXGI_FORMAT_R32G32_UINT) ||
+            (needContrast && (!ensure(h.raw[i], DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+                              !ensure(h.reference[i], DXGI_FORMAT_R16G16B16A16_FLOAT))))
             return false;
 
     h.commands = identity;
@@ -221,15 +223,19 @@ bool UpdateGhostHistory(Generation& g, DlssNr_Dx12& shader, ID3D12GraphicsComman
     if (!Dispatch(shader, cmd, c, depth, g.temporalMotion.Get(), old, h.reconstructed.Get(), nullptr, nullptr,
                   h.field, &h.state[next]))
         return false;
-    c.Mode = DlssNrMode_PrivateGhostReference;
-    if (!Dispatch(shader, cmd, c, h.state[next].Get(), previous ? h.raw[h.index].Get() : proxy,
-                  previous ? h.reference[h.index].Get() : proxy, proxy, answer, h.field.Get(), h.raw[next],
-                  &h.reference[next]))
-        return false;
+    if (needContrast)
+    {
+        c.Mode = DlssNrMode_PrivateGhostReference;
+        if (!Dispatch(shader, cmd, c, h.state[next].Get(), previous ? h.raw[h.index].Get() : proxy,
+                      previous ? h.reference[h.index].Get() : proxy, proxy, answer, h.field.Get(), h.raw[next],
+                      &h.reference[next]))
+            return false;
+    }
 
     c.Mode = DlssNrMode_PrivateGhostDilate;
-    if (!Dispatch(shader, cmd, c, h.state[next].Get(), h.reference[next].Get(), nullptr, nullptr, nullptr, nullptr,
-                  h.field, &h.expanded))
+    c.ColourStrength = needContrast ? 0.0f : 1.0f; // skipContrast > 0.5 in Direct DLSS SR
+    if (!Dispatch(shader, cmd, c, h.state[next].Get(), needContrast ? h.reference[next].Get() : proxy, nullptr,
+                  nullptr, nullptr, nullptr, h.field, &h.expanded))
         return false;
     h.index = next;
     h.epoch = frame.SubmissionEpoch;

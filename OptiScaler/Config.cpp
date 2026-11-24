@@ -1251,6 +1251,13 @@ void Config::ReadDlssNr()
     DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
     DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
     DlssNrSuperiorScalingPreset.set_from_config(readUInt("DlssNr", "SuperiorScalingPreset"));
+    DlssNrSuperiorMode.set_from_config(readUInt("DlssNr", "SuperiorMode"));
+    DlssNrSuperiorJitter.set_from_config(readBool("DlssNr", "SuperiorJitter"));
+    DlssNrSuperiorDirectSrPerf.set_from_config(readBool("DlssNr", "SuperiorDirectSrPerf"));
+    DlssNrSuperiorDirectSrSharpness.set_from_config(readFloat("DlssNr", "SuperiorDirectSrSharpness"));
+    DlssNrSuperiorNativeDetail.set_from_config(readFloat("DlssNr", "SuperiorNativeDetail"));
+    DlssNrSuperiorShaping.set_from_config(readFloat("DlssNr", "SuperiorShaping"));
+    DlssNrSuperiorDetailRecovery.set_from_config(readFloat("DlssNr", "SuperiorDetailRecovery"));
     DlssNrSuperiorAtNative.set_from_config(readBool("DlssNr", "SuperiorAtNative"));
 
     DlssNrWhitePointFromExposure.set_from_config(readBool("DlssNr", "WhitePointFromExposure"));
@@ -1528,6 +1535,17 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "Transfer", GetIntValue(c.DlssNrTransfer.value_for_config()).c_str());
     out.SetValue("DlssNr", "SuperiorScalingPreset",
                  GetIntValue(c.DlssNrSuperiorScalingPreset.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorMode", GetIntValue(c.DlssNrSuperiorMode.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorJitter", GetBoolValue(c.DlssNrSuperiorJitter.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorDirectSrPerf",
+                 GetBoolValue(c.DlssNrSuperiorDirectSrPerf.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorDirectSrSharpness",
+                 GetFloatValue(c.DlssNrSuperiorDirectSrSharpness.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorNativeDetail",
+                 GetFloatValue(c.DlssNrSuperiorNativeDetail.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorShaping", GetFloatValue(c.DlssNrSuperiorShaping.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorDetailRecovery",
+                 GetFloatValue(c.DlssNrSuperiorDetailRecovery.value_for_config()).c_str());
     out.SetValue("DlssNr", "SuperiorAtNative", GetBoolValue(c.DlssNrSuperiorAtNative.value_for_config()).c_str());
 
     out.SetValue("DlssNr", "ProbeD3D11",
@@ -1970,6 +1988,13 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("ReducedUpscaleMethod", DlssNrReducedUpscaleMethod),
         NR_PROFILE_FIELD("Transfer", DlssNrTransfer),
         NR_PROFILE_FIELD("SuperiorScalingPreset", DlssNrSuperiorScalingPreset),
+        NR_PROFILE_FIELD("SuperiorMode", DlssNrSuperiorMode),
+        NR_PROFILE_FIELD("SuperiorJitter", DlssNrSuperiorJitter),
+        NR_PROFILE_FIELD("SuperiorDirectSrPerf", DlssNrSuperiorDirectSrPerf),
+        NR_PROFILE_FIELD("SuperiorDirectSrSharpness", DlssNrSuperiorDirectSrSharpness),
+        NR_PROFILE_FIELD("SuperiorNativeDetail", DlssNrSuperiorNativeDetail),
+        NR_PROFILE_FIELD("SuperiorShaping", DlssNrSuperiorShaping),
+        NR_PROFILE_FIELD("SuperiorDetailRecovery", DlssNrSuperiorDetailRecovery),
         NR_PROFILE_FIELD("SuperiorAtNative", DlssNrSuperiorAtNative),
         NR_PROFILE_FIELD("ScalingDownscaler", DlssNrScalingDownscaler),
         NR_PROFILE_FIELD("VitEvery", DlssNrVitEvery),

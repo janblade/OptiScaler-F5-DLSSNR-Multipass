@@ -2404,8 +2404,13 @@ void SuperiorCarrierMain(uint3 id : SV_DispatchThreadID)
     }
     else
     {
-        const float3 filtered = SanitizeFinite3(gSource.Load(p).rgb, 0.5);
-        gTarget[id.xy] = float4(filtered - 0.5, 1.0);
+        const float3 s = SanitizeFinite3(gSource.Load(p).rgb, 0.5) - 0.5;
+        const float3 a = abs(s);
+        const float3 lin = a * (1.0 / 1.5);
+        const float3 t = min(max(a - 0.30, 0.0) * (1.0 / 0.20), 0.96);
+        const float3 shoulder = 0.20 + (0.20 / 1.5) * (t / (1.0 - t));
+        const float3 mag = lerp(lin, shoulder, step(0.30, a));
+        gTarget[id.xy] = float4(sign(s) * mag, 1.0);
     }
 }
 
@@ -3411,10 +3416,14 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
 
         // Exact area-weighted downsampling avoids the aliasing of a single bilinear tap.
         // Adapted from hhkbble's multi-pass contribution.
-        DLSSNR_AREA_COORD float x0 = ((float) id.x * (float) srcW) / (float) gWidth;
-        DLSSNR_AREA_COORD float x1 = ((float) (id.x + 1) * (float) srcW) / (float) gWidth;
-        DLSSNR_AREA_COORD float y0 = ((float) id.y * (float) srcH) / (float) gHeight;
-        DLSSNR_AREA_COORD float y1 = ((float) (id.y + 1) * (float) srcH) / (float) gHeight;
+        // Optional sub-pixel Halton jitter (gGuideWidth != 0, gMvScaleX/Y in destination pixels [-0.5, 0.5])
+        // shifts the exact Area box integration footprint cleanly with zero single-tap aliasing.
+        const float jx = (gGuideWidth != 0u && isfinite(gMvScaleX)) ? clamp(gMvScaleX, -0.5, 0.5) : 0.0;
+        const float jy = (gGuideWidth != 0u && isfinite(gMvScaleY)) ? clamp(gMvScaleY, -0.5, 0.5) : 0.0;
+        DLSSNR_AREA_COORD float x0 = (((float) id.x + jx) * (float) srcW) / (float) gWidth;
+        DLSSNR_AREA_COORD float x1 = (((float) (id.x + 1) + jx) * (float) srcW) / (float) gWidth;
+        DLSSNR_AREA_COORD float y0 = (((float) id.y + jy) * (float) srcH) / (float) gHeight;
+        DLSSNR_AREA_COORD float y1 = (((float) (id.y + 1) + jy) * (float) srcH) / (float) gHeight;
         DLSSNR_AREA_COORD float area = (x1 - x0) * (y1 - y0);
 
         const int i0 = (int) floor(x0);

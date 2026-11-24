@@ -72,13 +72,13 @@ RWTexture2D<float4> gTarget1 : register(u1); // RGBA16F unpacked model answer
 
 #include "dlssnr_spatial_warp.hlsli"
 
-float4 SamplePackedColour(float2 nativePixel, float2 workPixel)
+float4 SamplePackedColour(float2 nativePixel, float2 workPixel, float2 nativeJitter)
 {
-    float2 p0 = PwUnpack(workPixel - 0.5);
-    float2 p1 = PwUnpack(workPixel + 0.5);
+    float2 p0 = PwUnpack(workPixel - 0.5) + nativeJitter;
+    float2 p1 = PwUnpack(workPixel + 0.5) + nativeJitter;
     float2 span = max(abs(p1 - p0), 1.0.xx);
     if (all(span <= 1.02))
-        return gSource0.SampleLevel(gLinearClamp, nativePixel / gNativeWorkSize.xy, 0);
+        return gSource0.SampleLevel(gLinearClamp, (nativePixel + nativeJitter) / gNativeWorkSize.xy, 0);
 
     // Axis-independent adaptive bilinear box/area integration:
     // - 2x1 on 1D-compressed edges (zero cross-axis blur, fewer taps than 5-tap quincunx)
@@ -132,7 +132,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (gMode == 100)
     {
         float2 nativePixel = PwUnpack(pixel);
-        gTarget0[id.xy] = SamplePackedColour(nativePixel, pixel);
+        float2 nativeJitter = all(isfinite(gPadding0)) ? clamp(gPadding0, -4.0, 4.0) : float2(0.0, 0.0);
+        gTarget0[id.xy] = SamplePackedColour(nativePixel, pixel, nativeJitter);
     }
     else if (gMode == 102 || gMode == 103)
     {

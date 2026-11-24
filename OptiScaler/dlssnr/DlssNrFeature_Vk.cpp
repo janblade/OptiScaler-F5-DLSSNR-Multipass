@@ -894,6 +894,18 @@ std::string SuperiorStatusVk() { return SuperiorVk::Status(); }
 
 bool SuperiorSrUnavailableVk() { return SuperiorVk::Private::srUnavailable.load(); }
 
+namespace
+{
+std::mutex g_superiorLiveVkMutex;
+DlssNr::SuperiorScaling::LiveInfo g_superiorLiveVk {};
+} // namespace
+
+DlssNr::SuperiorScaling::LiveInfo SuperiorLiveVk()
+{
+    std::lock_guard<std::mutex> lock(g_superiorLiveVkMutex);
+    return g_superiorLiveVk;
+}
+
 unsigned long long VkFrameClock()
 {
     const unsigned long long presents = State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
@@ -2408,6 +2420,18 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // downsample makes the small one the model actually reads.
     OwnedImage* modelInput = &g_vk.proxy;
 
+    const bool superiorDirectSrWanted =
+        superiorRuns && !spatial && !superiorSupersample &&
+        DlssNr::SuperiorScaling::DirectSrWanted(cfg.DlssNrSuperiorMode.value_or_default(),
+                                                cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                                SuperiorVk::Private::srUnavailable || SuperiorVk::Private::privateBroken,
+                                                depth != nullptr && guides.depth.valid());
+    const auto superiorJitter =
+        superiorDirectSrWanted
+            ? DlssNr::SuperiorScaling::DirectSrJitter(cfg.DlssNrSuperiorJitter.value_or_default(), beforeSr, false,
+                                                      workWidth, workHeight, width, height, g_vkSeamCalls)
+            : DlssNr::SuperiorScaling::JitterPair {};
+
     if (reduced && (!spatial || replaceCorrection) && g_vk.proxySmall.Valid())
     {
         bool built = false;
@@ -2470,7 +2494,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             bool downsampled = false;
             if (superiorRuns && !superiorSupersample)
             {
-                downsampled = SuperiorVk::Area(cmdBuffer, g_vk.proxy, g_vk.proxySmall, workWidth, workHeight);
+                downsampled = SuperiorVk::Area(cmdBuffer, g_vk.proxy, g_vk.proxySmall, workWidth, workHeight,
+                                               superiorJitter.x, superiorJitter.y);
                 if (!downsampled)
                 {
                     SuperiorVk::GiveUp("its Area downsample failed");
@@ -3182,20 +3207,69 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         superiorFrame.reference = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0
                                       ? DlssNr::GuideExtent { renderWidth, renderHeight }
                                       : DlssNr::GuideExtent { outputWidth, outputHeight };
-        superiorFrame.outputWidth = outputWidth;
-        superiorFrame.outputHeight = outputHeight;
+        superiorFrame.outputWidth = width;
+        superiorFrame.outputHeight = height;
+        superiorFrame.linearHdrCurve = (resolve.Passthrough == 0u) && cfg.DlssNrReversibleMode.value_or_default() == 7u;
+        superiorFrame.jitter = superiorJitter;
     }
     bool resolved = false;
     if (superiorRuns)
     {
-        resolved = SuperiorVk::Compose(cmdBuffer, cfg, resolve, workScale, width, height, *resolveProxy, *resolveAnswer,
-                                       g_vk.keep, liveExposureView, resolveTarget, superiorFrame);
+        resolved = SuperiorVk::Compose(cmdBuffer, cfg, resolve, workScale, width, height, g_vk.proxy, *resolveProxy,
+                                       *resolveAnswer, g_vk.keep, liveExposureView, resolveTarget, superiorFrame);
         if (!resolved)
         {
             // The ordinary Matched residual resolve below takes this frame (the target is only written by a resolve).
             SuperiorVk::GiveUp("its composition failed");
             superiorRuns = false;
         }
+        DlssNr::SuperiorScaling::LiveInfo live {};
+        live.active = resolved;
+        live.haveDepth = superiorFrame.haveDepth;
+        live.privateReady = resolved && SuperiorVk::Private::phase == SuperiorVk::Private::Phase::Ready;
+        live.directSr = live.privateReady && SuperiorVk::Private::builtDirectSr;
+        live.directSrPerf = live.directSr && SuperiorVk::Private::builtDirectSrPerf;
+        live.actualPreset = live.privateReady ? SuperiorVk::Private::actualPreset : 0u;
+        live.workW = resolveProxy->width;
+        live.workH = resolveProxy->height;
+        live.outW = live.directSr ? width : resolveProxy->width;
+        live.outH = live.directSr ? height : resolveProxy->height;
+        live.jitterActive = live.directSr && (superiorJitter.x != 0.0f || superiorJitter.y != 0.0f);
+        if (!live.jitterActive && live.directSr)
+        {
+            if (!cfg.DlssNrSuperiorJitter.value_or_default()) live.jitterPauseReason = 1u;
+            else if (beforeSr) live.jitterPauseReason = 2u;
+            else if (spatial) live.jitterPauseReason = 3u;
+            else if (workWidth >= width && workHeight >= height) live.jitterPauseReason = 4u;
+            else if (width && height &&
+                     std::min(float(workWidth) / float(width), float(workHeight) / float(height)) < 0.399f)
+                live.jitterPauseReason = 6u;
+        }
+        if (!live.privateReady)
+        {
+            if (!superiorFrame.haveDepth) live.fallbackReason = 1u;
+            else if (SuperiorVk::Private::srUnavailable.load()) live.fallbackReason = 2u;
+            else if (DlssNr::SuperiorScaling::Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) ==
+                     DlssNr::SuperiorScaling::NoPrivateDlss)
+                live.fallbackReason = 3u;
+            else if (workWidth > width || workHeight > height) live.fallbackReason = 4u;
+            else if (SuperiorVk::Private::phase == SuperiorVk::Private::Phase::Failed) live.fallbackReason = 6u;
+            else live.fallbackReason = 5u;
+        }
+        else if (DlssNr::SuperiorScaling::DirectSrSelected(cfg.DlssNrSuperiorMode.value_or_default()) &&
+                 !live.directSr)
+        {
+            if (spatial) live.fallbackReason = 7u;
+            else if (workWidth > width || workHeight > height) live.fallbackReason = 4u;
+            else if (!superiorFrame.haveDepth) live.fallbackReason = 1u;
+        }
+        std::lock_guard<std::mutex> lock(g_superiorLiveVkMutex);
+        g_superiorLiveVk = live;
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lock(g_superiorLiveVkMutex);
+        g_superiorLiveVk = {};
     }
     if (!resolved &&
         !g_vk.pass->Dispatch(cmdBuffer, resolve, width, height, resolveProxy->view, resolveAnswer->view, g_vk.keep.view,

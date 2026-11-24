@@ -4897,6 +4897,37 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
 
         if (superior)
         {
+            static const char* superiorModes[] = { "Direct DLSS SR", "Residual DLAA (old Superior Scaling)",
+                                                   "Intrinsic 4K-Oracle" };
+            static const char* superiorModesVk[] = { "Direct DLSS SR", "Residual DLAA (old Superior Scaling)",
+                                                     "Intrinsic 4K-Oracle (D3D12 only)" };
+            const uint32_t savedSupMode = config->DlssNrSuperiorMode.value_or_default();
+            int supMode = DlssNr::SuperiorScaling::IntrinsicOracleSelected(savedSupMode) ? 2
+                          : DlssNr::SuperiorScaling::DirectSrSelected(savedSupMode)      ? 0
+                                                                                         : 1;
+            const char* const* modeLabels = nr.vulkan ? superiorModesVk : superiorModes;
+            if (ImGui::Combo("Superior Scaling Mode", &supMode, modeLabels, IM_ARRAYSIZE(superiorModes)))
+                config->DlssNrSuperiorMode = supMode == 0   ? DlssNr::SuperiorScaling::ModeDirectSr
+                                             : supMode == 2 ? DlssNr::SuperiorScaling::ModeIntrinsicOracle
+                                                            : DlssNr::SuperiorScaling::ModeResidualDlaa;
+            HelpMarker("Direct DLSS SR: work-res proxy-guided anti-speckle + full-native DLSS Super Resolution "
+                       "(work -> native) on the C1 residual carrier + 4K Guided Edge-Snap & carrier-only deconvolution "
+                       "(no RCAS grain amplification). Supports aperiodic R2 sub-pixel jitter (including with "
+                       "Compress screen edges; auto-pauses strictly below 40% scale).\n\n"
+                       "Residual DLAA (old Superior Scaling): work-res proxy-guided anti-speckle before lightweight "
+                       "DLAA + 3x3 isotropic detail recovery + crisp edge-guided 2x2 JBU upsampling.\n\n"
+                       "Intrinsic 4K-Oracle: 3-stage physical irradiance ratio (log2(I_ratio)) + local detail gain "
+                       "(G_detail) + MV-reprojected temporal accumulation (clamped Catmull-Rom R2 unjitter) + "
+                       "intermediate-res (0.75x) plane-aware depth/albedo JBU + edge-snapped 4K reconstruction "
+                       "(zero private DLSS SR in 4K).");
+
+            const bool directSrMode = supMode == 0;
+            const bool oracleMode = supMode == 2;
+            if (oracleMode && nr.vulkan)
+            {
+                ImGui::TextDisabled("Intrinsic 4K-Oracle is D3D12-only (using Residual DLAA on Vulkan).");
+            }
+
             static const char* presets[] = { "No DLSS", "CNN (recommended)", "Transformer" };
             static constexpr unsigned choices[] = { DlssNr::SuperiorScaling::NoPrivateDlss,
                                                     DlssNr::SuperiorScaling::CnnPreference,
@@ -4906,21 +4937,202 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             int preset = selected == choices[0] ? 0 : selected == choices[2] ? 2 : 1;
             const bool srUnavailable =
                 nr.vulkan ? DlssNr::SuperiorSrUnavailableVk() : DlssNr::SuperiorScaling::SrUnavailable();
-            ImGui::BeginDisabled(srUnavailable);
+            ImGui::BeginDisabled(srUnavailable || (oracleMode && !nr.vulkan));
             if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
                 config->DlssNrSuperiorScalingPreset = choices[preset];
             ImGui::EndDisabled();
-            HelpMarker("No DLSS - Best performance, lowest NR stability. Use when the current game and OptiScaler "
-                       "settings give a stable enough image that the cost of DLSS seems unwarranted, or when the other "
-                       "DLSS options produce visible artifacts.\n\n"
-                       "CNN - A good balance between performance and NR stability. Recommended in most cases.\n\n"
-                       "Transformer - Should provide greater stability than CNN at a performance cost. Use it when CNN "
-                       "is not stable enough or shows artifacts that Transformer avoids. Transformer can introduce "
-                       "different artifacts of its own.");
+            HelpMarker("Not used by Intrinsic 4K-Oracle (zero private DLSS SR; uses its own surface-space temporal "
+                       "reprojection).\n\n"
+                       "No DLSS - Best performance, lowest NR stability. Disables Direct DLSS SR and falls back to "
+                       "spatial 2x2 JBU residual reconstruction.\n\n"
+                       "CNN - Good balance between performance and NR stability.\n\n"
+                       "Transformer - Best sharpness and temporal stability (recommended for Direct DLSS SR).");
 
-            ImGui::BeginDisabled(srUnavailable || DlssNr::SuperiorScaling::Preset(
-                                                      config->DlssNrSuperiorScalingPreset.value_or_default()) ==
-                                                      DlssNr::SuperiorScaling::NoPrivateDlss);
+            const bool hasPrivateDlss = !srUnavailable && selected != DlssNr::SuperiorScaling::NoPrivateDlss;
+            const auto supLive = nr.vulkan ? DlssNr::SuperiorLiveVk() : DlssNr::SuperiorScaling::Live();
+
+            // Live status & GPU cost readout for Superior Scaling.
+            {
+                auto presetLabel = [](uint32_t p) -> const char*
+                {
+                    if (p == DlssNr::SuperiorScaling::TransformerK) return "Transformer K";
+                    if (p == DlssNr::SuperiorScaling::CnnD) return "CNN D";
+                    if (p == DlssNr::SuperiorScaling::CnnE) return "CNN E";
+                    return "Default DLSS";
+                };
+                if (supLive.active && (supLive.privateReady || supLive.intrinsicOracle))
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.92f, 0.55f, 1.0f));
+                    if (supLive.intrinsicOracle)
+                    {
+                        if (supLive.gpuMs >= 0.0f)
+                            ImGui::TextWrapped("Active: Intrinsic 4K-Oracle (%ux%u -> %ux%u) | Cost: %.2f ms",
+                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH,
+                                               supLive.gpuMs);
+                        else
+                            ImGui::TextWrapped("Active: Intrinsic 4K-Oracle (%ux%u -> %ux%u)",
+                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH);
+                    }
+                    else if (supLive.directSr)
+                    {
+                        const char* perfTag = supLive.directSrPerf ? ", Performance" : "";
+                        if (supLive.gpuMs >= 0.0f)
+                            ImGui::TextWrapped("Active: Direct DLSS SR (%ux%u -> %ux%u, %s%s) | Cost: %.2f ms",
+                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH,
+                                               presetLabel(supLive.actualPreset), perfTag, supLive.gpuMs);
+                        else
+                            ImGui::TextWrapped("Active: Direct DLSS SR (%ux%u -> %ux%u, %s%s)",
+                                               supLive.workW, supLive.workH, supLive.outW, supLive.outH,
+                                               presetLabel(supLive.actualPreset), perfTag);
+                    }
+                    else
+                    {
+                        if (supLive.gpuMs >= 0.0f)
+                            ImGui::TextWrapped("Active: Residual DLAA (%ux%u, %s) | Cost: %.2f ms",
+                                               supLive.workW, supLive.workH, presetLabel(supLive.actualPreset),
+                                               supLive.gpuMs);
+                        else
+                            ImGui::TextWrapped("Active: Residual DLAA (%ux%u, %s)",
+                                               supLive.workW, supLive.workH, presetLabel(supLive.actualPreset));
+                    }
+                    ImGui::PopStyleColor();
+
+                    if (supLive.directSr || supLive.intrinsicOracle)
+                    {
+                        if (supLive.jitterActive)
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.88f, 0.62f, 1.0f));
+                            ImGui::TextUnformatted("  R2 Jitter: ON (aperiodic sub-pixel)");
+                            ImGui::PopStyleColor();
+                        }
+                        else
+                        {
+                            const char* why = "OFF";
+                            if (supLive.jitterPauseReason == 1u) why = "OFF (disabled by user)";
+                            else if (supLive.jitterPauseReason == 2u) why = "OFF (Before SR: game already jitters)";
+                            else if (supLive.jitterPauseReason == 3u) why = "OFF (paused by Compress screen edges)";
+                            else if (supLive.jitterPauseReason == 4u) why = "OFF (running at 100% native)";
+                            else if (supLive.jitterPauseReason == 5u) why = "OFF (frame held)";
+                            else if (supLive.jitterPauseReason == 6u) why = "OFF (auto-paused below 40% scale)";
+                            ImGui::TextDisabled("  R2 Jitter: %s", why);
+                        }
+                    }
+                    else if (supLive.fallbackReason == 7u)
+                    {
+                        ImGui::TextDisabled("  Direct DLSS SR paused: Compress screen edges is ON (running Packed Residual DLAA)");
+                    }
+                    else if (supLive.fallbackReason == 4u)
+                    {
+                        ImGui::TextDisabled("  Direct DLSS SR paused: supersampling > 100%% (running Residual DLAA)");
+                    }
+                }
+                else if (supLive.active && supLive.fallbackReason != 0u)
+                {
+                    const char* why = "initializing";
+                    if (supLive.fallbackReason == 1u) why = "no valid Depth buffer";
+                    else if (supLive.fallbackReason == 2u) why = "NVIDIA DLSS SR unavailable";
+                    else if (supLive.fallbackReason == 3u) why = "No DLSS selected";
+                    else if (supLive.fallbackReason == 4u) why = "supersampling > 100% (Direct SR requires <= 100%)";
+                    else if (supLive.fallbackReason == 6u) why = "private DLSS failed";
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.72f, 0.30f, 1.0f));
+                    if (supLive.gpuMs >= 0.0f)
+                        ImGui::TextWrapped("Fallback: 2x2 JBU residual (%s) | Cost: %.2f ms", why, supLive.gpuMs);
+                    else
+                        ImGui::TextWrapped("Fallback: 2x2 JBU residual (%s)", why);
+                    ImGui::PopStyleColor();
+                }
+            }
+
+            if (directSrMode)
+            {
+                ImGui::TextDisabled("Requires Depth + NVIDIA DLSS SR (falls back automatically if Depth is missing).");
+
+                ImGui::BeginDisabled(!hasPrivateDlss);
+                bool perfMode = config->DlssNrSuperiorDirectSrPerf.value_or_default();
+                if (ImGui::Checkbox("Performance mode (faster)", &perfMode))
+                    config->DlssNrSuperiorDirectSrPerf = perfMode;
+                HelpMarker("Full-rate 4K Direct DLSS SR using fast CNN D, skipping ghost-field passes, and running a "
+                           "lightweight 5-tap carrier-only anti-speckle + deconvolution resolve (skipping 4K "
+                           "original-frame fetches), saving ~0.5-0.8 ms vs CNN Quality and ~3.2-3.5 ms vs "
+                           "Transformer K at 4K with zero intermediate resolution and full Frame Generation "
+                           "compatibility.");
+
+                bool jitter = config->DlssNrSuperiorJitter.value_or_default();
+                if (ImGui::Checkbox("Sub-pixel R2 jitter", &jitter))
+                    config->DlssNrSuperiorJitter = jitter;
+                HelpMarker("Aperiodic R2 (plastic constant) sub-pixel sampling for Direct DLSS SR (works with or without "
+                           "Compress screen edges): stationary geometry jitter cancels in Carrier(answer - proxy), "
+                           "giving DLSS SR zero-bias sub-pixel residual samples to super-resolve to full native resolution "
+                           "with zero screen shake. Auto-pauses in Before SR, strictly below 40% scale, 100% native, "
+                           "and Hold.");
+
+                const float rawSharpCfg = config->DlssNrSuperiorDirectSrSharpness.value_or_default();
+                float nrSharpPct =
+                    (std::isfinite(rawSharpCfg) ? std::clamp(rawSharpCfg, 0.0f, 1.0f) : 0.65f) * 100.0f;
+                if (ImGui::SliderFloat("NR sharpness (Edge-Snap + Deconv)", &nrSharpPct, 0.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrSuperiorDirectSrSharpness = std::clamp(nrSharpPct / 100.0f, 0.0f, 1.0f);
+                HelpMarker("Carrier-only sharpness for Direct DLSS SR (no RCAS grain amplification; works in Quality, "
+                           "Performance, CNN & Transformer):\n"
+                           "1. 4K Guided Edge-Snap locks NR edges to native 4K silhouettes without blurring smooth areas.\n"
+                           "2. 3x3 isotropic anti-ringing deconvolution sharpens new DLSS 5 micro-details from work->native.");
+
+                const float rawNativeCfg = config->DlssNrSuperiorNativeDetail.value_or_default();
+                float nativeDetailPct =
+                    (std::isfinite(rawNativeCfg) ? std::clamp(rawNativeCfg, 0.0f, 1.0f) : 0.0f) * 100.0f;
+                if (ImGui::SliderFloat("Native detail recovery", &nativeDetailPct, 0.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrSuperiorNativeDetail = std::clamp(nativeDetailPct / 100.0f, 0.0f, 1.0f);
+                HelpMarker("Optional edge-safe 4K micro-contrast lift on top of full-native Carrier-SR. At 0% "
+                           "(default & fastest), 100% of native 4K sharpness is already preserved and 4 extra 4K "
+                           "fetches are skipped.");
+                ImGui::EndDisabled();
+            }
+            else if (oracleMode)
+            {
+                ImGui::TextDisabled("Zero private DLSS SR (~0.4-0.6 ms). Uses Depth + Motion + 4K Color oracle.");
+
+                bool jitter = config->DlssNrSuperiorJitter.value_or_default();
+                if (ImGui::Checkbox("Sub-pixel R2 jitter", &jitter))
+                    config->DlssNrSuperiorJitter = jitter;
+                HelpMarker("Aperiodic R2 (plastic constant) sub-pixel sampling for Intrinsic 4K-Oracle (works with or "
+                           "without Compress screen edges): unjittered via 5-tap clamped Catmull-Rom on the canonical "
+                           "work grid during temporal accumulation for cleaner irradiance & detail recovery. Auto-pauses "
+                           "in Before SR, strictly below 40% scale, 100% native, and Hold.");
+
+                const float rawSharpCfg = config->DlssNrSuperiorDirectSrSharpness.value_or_default();
+                float detailModPct =
+                    (std::isfinite(rawSharpCfg) ? std::clamp(rawSharpCfg, 0.0f, 1.0f) : 0.65f) * 100.0f;
+                if (ImGui::SliderFloat("NR detail modulation", &detailModPct, 0.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrSuperiorDirectSrSharpness = std::clamp(detailModPct / 100.0f, 0.0f, 1.0f);
+                HelpMarker("Controls how strongly the work-res NR local detail gain (G_detail) modulates real 4K "
+                           "micro-details during Intrinsic 4K-Oracle reconstruction.");
+
+                const float rawNativeCfg = config->DlssNrSuperiorNativeDetail.value_or_default();
+                float nativeDetailPct =
+                    (std::isfinite(rawNativeCfg) ? std::clamp(rawNativeCfg, 0.0f, 1.0f) : 0.0f) * 100.0f;
+                if (ImGui::SliderFloat("Native detail recovery", &nativeDetailPct, 0.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrSuperiorNativeDetail = std::clamp(nativeDetailPct / 100.0f, 0.0f, 1.0f);
+                HelpMarker("Optional edge-safe 4K micro-contrast lift on top of Intrinsic 4K-Oracle reconstruction.");
+            }
+            else
+            {
+                if (hasPrivateDlss)
+                {
+                    float detailRecPct = std::clamp(config->DlssNrSuperiorDetailRecovery.value_or_default(), 0.0f, 1.5f) * 100.0f;
+                    if (ImGui::SliderFloat("Detail recovery", &detailRecPct, 0.0f, 150.0f, "%.0f%%"))
+                        config->DlssNrSuperiorDetailRecovery = std::clamp(detailRecPct / 100.0f, 0.0f, 1.5f);
+                    HelpMarker("3x3 isotropic Gaussian high-frequency detail recovery after DLSS DLAA: restores 360-deg "
+                               "luminance micro-detail (including 45-deg edges/hair/foliage) while suppressing chroma "
+                               "churn and clamping against halo ringing. Above 100% applies CAS-style texture boost.");
+                }
+
+                float shapingPct = std::clamp(config->DlssNrSuperiorShaping.value_or_default(), 0.0f, 1.0f) * 100.0f;
+                if (ImGui::SliderFloat("Band attenuation (legacy)", &shapingPct, 0.0f, 100.0f, "%.0f%%"))
+                    config->DlssNrSuperiorShaping = std::clamp(shapingPct / 100.0f, 0.0f, 1.0f);
+                HelpMarker("0% (default): preserves 100% of NR strength and skips the Low64/InterPass passes.\n"
+                           "100%: legacy upstream frequency-band attenuation (cuts 20%-56% of NR effect below 100%).");
+            }
+
+            ImGui::BeginDisabled(!hasPrivateDlss);
             bool atNative = config->DlssNrSuperiorAtNative.value_or_default();
             if (ImGui::Checkbox("Also at 100% and above", &atNative))
                 config->DlssNrSuperiorAtNative = atNative;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "pch.h"
+#include "SysUtils.h"
 #include <State.h>
 #include <misc/IdentifyGpu.h>
 #include <nvapi/NvApiTypes.h>
@@ -577,7 +577,7 @@ struct State
     PFN_NvAPI_GPU_ThermalGetSensors getThermalSensors = nullptr;
     PFN_NvAPI_GPU_GetDynamicPstatesInfoEx getPstates = nullptr;
     NvU32 thermalSensorMask = 0; // The sensors the GPU has, found on the first query
-    bool isBlackwell = false; // Blackwell removed the hot spot from the private sensor channel
+    bool isBlackwell = false;    // Blackwell removed the hot spot from the private sensor channel
 };
 
 inline void Query(const GpuInformation& gpuInfo, GpuMetrics& out)

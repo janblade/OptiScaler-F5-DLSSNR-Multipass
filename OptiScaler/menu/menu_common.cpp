@@ -2697,9 +2697,9 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             // Warm colors close to the throttling temperatures
             auto tempColor = [](double t) -> ImVec4
             {
-                return t >= 90.0 ? toneMapColor(ImVec4(1.0f, 0.35f, 0.35f, 1.0f))
-                     : t >= 82.0 ? toneMapColor(ImVec4(1.0f, 0.67f, 0.24f, 1.0f))
-                                 : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+                return t >= 90.0   ? toneMapColor(ImVec4(1.0f, 0.35f, 0.35f, 1.0f))
+                       : t >= 82.0 ? toneMapColor(ImVec4(1.0f, 0.67f, 0.24f, 1.0f))
+                                   : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
             };
 
             if (needGpu)

@@ -3746,7 +3746,11 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         }
 
         // DLSS -----------------
-        if ((config->DLSSEnabled.value_or_default() && currentBackend == Upscaler::DLSS &&
+        // DLSS on the D3D11->D3D12 bridge runs the same NGX feature as native DLSS: the bridge forwards
+        // the game's parameter block to DLSSFeatureDx12, which applies these overrides before
+        // CreateFeature. Without DLSS_on12 here the settings would be ini-only for dx11on12 games.
+        if ((config->DLSSEnabled.value_or_default() &&
+             (currentBackend == Upscaler::DLSS || currentBackend == Upscaler::DLSS_on12) &&
              currentFeature->Version().major > 2) ||
             usesDlssd)
         {
@@ -3805,16 +3809,16 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                 ShowHelpMarker("Each render preset has it strengths and weaknesses\n"
                                "Override to potentially improve image quality\n"
-                               "Press Apply after enable/disable");
+                               "Press Apply after enable/disable\n"
+                               "With DLSS w/Dx12 the preset is baked into the NGX feature,\n"
+                               "so Apply Changes recreates it to take effect");
 
-                /*
                 auto currentPresetIndex = GetPresetIndex(currentFeature, false);
 
                 if (currentPresetIndex == 0)
                     ImGui::Text("Current Preset: Default");
                 else
                     ImGui::Text("Current Preset: %c", 64 + currentPresetIndex);
-                */
 
                 ImGui::BeginDisabled(!config->RenderPresetOverride.value_or_default() /*|| overridden*/);
 

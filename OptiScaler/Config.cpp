@@ -665,6 +665,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             FpsCycleShortcutKey.set_from_config(readInt("Menu", "FpsCycleShortcutKey"));
             FpsOverlayHorizontal.set_from_config(readBool("Menu", "FpsOverlayHorizontal"));
             FpsOverlayShowRatio.set_from_config(readBool("Menu", "FpsOverlayShowRatio"));
+            FpsOverlayShowGpuTemp.set_from_config(readBool("Menu", "FpsOverlayShowGpuTemp"));
+            FpsOverlayShowCpuTemp.set_from_config(readBool("Menu", "FpsOverlayShowCpuTemp"));
+            FpsOverlayShowGpuHotspot.set_from_config(readBool("Menu", "FpsOverlayShowGpuHotspot"));
+            FpsOverlayShowCpuHotspot.set_from_config(readBool("Menu", "FpsOverlayShowCpuHotspot"));
 
             if (auto setting = readFloat("Menu", "FpsOverlayAlpha"); setting.has_value())
                 FpsOverlayAlpha.set_from_config(std::clamp(setting.value(), 0.0f, 1.0f));
@@ -2696,6 +2700,14 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FpsOverlayHorizontal.value_for_config()).c_str());
         ini.SetValue("Menu", "FpsOverlayShowRatio",
                      GetBoolValue(Instance()->FpsOverlayShowRatio.value_for_config()).c_str());
+        ini.SetValue("Menu", "FpsOverlayShowGpuTemp",
+                     GetBoolValue(Instance()->FpsOverlayShowGpuTemp.value_for_config()).c_str());
+        ini.SetValue("Menu", "FpsOverlayShowCpuTemp",
+                     GetBoolValue(Instance()->FpsOverlayShowCpuTemp.value_for_config()).c_str());
+        ini.SetValue("Menu", "FpsOverlayShowGpuHotspot",
+                     GetBoolValue(Instance()->FpsOverlayShowGpuHotspot.value_for_config()).c_str());
+        ini.SetValue("Menu", "FpsOverlayShowCpuHotspot",
+                     GetBoolValue(Instance()->FpsOverlayShowCpuHotspot.value_for_config()).c_str());
         ini.SetValue("Menu", "FpsOverlayAlpha", GetFloatValue(Instance()->FpsOverlayAlpha.value_for_config()).c_str());
         ini.SetValue("Menu", "FpsScale", GetFloatValue(Instance()->FpsScale.value_for_config()).c_str());
         ini.SetValue("Menu", "FontSize", GetFloatValue(Instance()->FontSize.value_for_config()).c_str());

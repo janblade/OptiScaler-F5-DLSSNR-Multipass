@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "menu_common.h"
 #include "PresentRateMeter.h"
+#include "overlay_telemetry.h"
 #include "MenuPages.h"
 #include "NotificationsPage.h"
 #include "StatusPage.h"
@@ -2613,6 +2614,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 const char* graphId = nullptr;
                 RingBuffer<float, plotWidth>* graphData = nullptr;
                 float graphMax = 0.0f;
+                ImVec4 color { 0.0f, 0.0f, 0.0f, 0.0f }; // w == 0 keeps the theme's text color
             };
 
             std::vector<OverlayLine> lines;
@@ -2663,6 +2665,65 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 lines.push_back(std::move(line));
             }
 
+            // Extra hardware rows, using the telemetry layer ported from Optiscaler Venom
+            const bool showGpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
+            const bool showCpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
+            const bool showGpuHotspot = config->FpsOverlayShowGpuHotspot.value_or_default();
+            const bool showCpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
+            const bool needGpu = overlayType >= FpsOverlay_Simple && (showGpuTemp || showGpuHotspot);
+            const bool needCpu = overlayType >= FpsOverlay_Simple && (showCpuTemp || showCpuHotspot);
+
+            static OverlayTelemetry::GpuMetrics gpuMetrics {};
+            static OverlayTelemetry::CpuMetrics cpuMetrics {};
+            static double previousTelemetryPoll = 0.0;
+
+            if (needGpu || needCpu)
+            {
+                // The worker already polls at 500 ms; the overlay only refreshes its cached
+                // values at that cadence, so no driver or shared-memory query runs on the
+                // game's present thread.
+                constexpr auto delayBetweenPollsMs = 500;
+                if (previousTelemetryPoll <= 0.001 || previousTelemetryPoll + delayBetweenPollsMs < now)
+                {
+                    previousTelemetryPoll = now;
+
+                    if (needGpu)
+                        gpuMetrics = OverlayTelemetry::QueryGpu(state);
+                    if (needCpu)
+                        cpuMetrics = OverlayTelemetry::QueryCpu(state);
+                }
+            }
+
+            // Warm colors close to the throttling temperatures
+            auto tempColor = [](double t) -> ImVec4
+            {
+                return t >= 90.0 ? toneMapColor(ImVec4(1.0f, 0.35f, 0.35f, 1.0f))
+                     : t >= 82.0 ? toneMapColor(ImVec4(1.0f, 0.67f, 0.24f, 1.0f))
+                                 : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+            };
+
+            if (needGpu)
+            {
+                if (showGpuTemp && gpuMetrics.tempC.has_value())
+                    lines.push_back({ StrFmt("GPU: %.0f C", gpuMetrics.tempC.value()), nullptr, nullptr, 0.0f,
+                                      tempColor(gpuMetrics.tempC.value()) });
+
+                if (showGpuHotspot && gpuMetrics.hotspotC.has_value())
+                    lines.push_back({ StrFmt("GPU Hotspot: %.0f C", gpuMetrics.hotspotC.value()), nullptr, nullptr,
+                                      0.0f, tempColor(gpuMetrics.hotspotC.value()) });
+            }
+
+            if (needCpu)
+            {
+                if (showCpuTemp && cpuMetrics.tempC.has_value())
+                    lines.push_back({ StrFmt("CPU: %.0f C", cpuMetrics.tempC.value()), nullptr, nullptr, 0.0f,
+                                      tempColor(cpuMetrics.tempC.value()) });
+
+                if (showCpuHotspot && cpuMetrics.hotspotC.has_value())
+                    lines.push_back({ StrFmt("CPU Hotspot: %.0f C", cpuMetrics.hotspotC.value()), nullptr, nullptr,
+                                      0.0f, tempColor(cpuMetrics.hotspotC.value()) });
+            }
+
             const bool horizontal = config->FpsOverlayHorizontal.value_or_default();
 
             ImVec2 plotSize;
@@ -2699,7 +2760,10 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                     }
                 }
 
-                ImGui::TextUnformatted(line.text.c_str());
+                if (line.color.w != 0.0f)
+                    ImGui::TextColored(line.color, "%s", line.text.c_str());
+                else
+                    ImGui::TextUnformatted(line.text.c_str());
 
                 if (line.graphData != nullptr)
                 {
@@ -8579,6 +8643,34 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("Upscale Ratio", &fpsShowRatio))
             config->FpsOverlayShowRatio = fpsShowRatio;
         ShowTooltip("Shows the current render -> output resolution and upscale ratio in the overlay");
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Hardware (Simple and above)");
+        MenuCommon::ShowHelpMarker(
+            "GPU sensors come from the driver (AMD ADL, NVIDIA NVML / NVAPI), with HWiNFO or MSI "
+            "Afterburner as a fallback. Windows has no CPU temperature sensor without a kernel driver, "
+            "so HWiNFO (Shared Memory Support), MSI Afterburner (with the CPU temperature monitored) or "
+            "Core Temp must be running. Under Proton / Wine the kernel's hwmon sensors are used.");
+
+        bool gpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
+        if (ImGui::Checkbox("GPU Temperature", &gpuTemp))
+            config->FpsOverlayShowGpuTemp = gpuTemp;
+        ShowTooltip("Adds the GPU temperature to the overlay, colored when close to throttling");
+
+        bool gpuHotspot = config->FpsOverlayShowGpuHotspot.value_or_default();
+        if (ImGui::Checkbox("GPU Hotspot", &gpuHotspot))
+            config->FpsOverlayShowGpuHotspot = gpuHotspot;
+        ShowTooltip("Adds the GPU's hottest sensor: AMD junction temperature or NVIDIA hot spot");
+
+        bool cpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
+        if (ImGui::Checkbox("CPU Temperature", &cpuTemp))
+            config->FpsOverlayShowCpuTemp = cpuTemp;
+        ShowTooltip("Adds the CPU temperature to the overlay, colored when close to throttling");
+
+        bool cpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
+        if (ImGui::Checkbox("CPU Hotspot", &cpuHotspot))
+            config->FpsOverlayShowCpuHotspot = cpuHotspot;
+        ShowTooltip("Adds the CPU's hottest core or CCD, from the same sources as the CPU temperature");
 
         const char* fpsPosition[] = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
         const char* selectedPosition = fpsPosition[config->FpsOverlayPosition.value_or_default()];

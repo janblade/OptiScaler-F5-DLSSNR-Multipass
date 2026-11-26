@@ -2667,10 +2667,11 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 
             // Extra hardware rows, using the telemetry layer ported from Optiscaler Venom
             const bool showGpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
-            const bool showCpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
             const bool showGpuHotspot = config->FpsOverlayShowGpuHotspot.value_or_default();
+            const bool showGpuPower = config->FpsOverlayShowGpuPower.value_or_default();
+            const bool showCpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
             const bool showCpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
-            const bool needGpu = overlayType >= FpsOverlay_Simple && (showGpuTemp || showGpuHotspot);
+            const bool needGpu = overlayType >= FpsOverlay_Simple && (showGpuTemp || showGpuHotspot || showGpuPower);
             const bool needCpu = overlayType >= FpsOverlay_Simple && (showCpuTemp || showCpuHotspot);
 
             static OverlayTelemetry::GpuMetrics gpuMetrics {};
@@ -2711,6 +2712,10 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 if (showGpuHotspot && gpuMetrics.hotspotC.has_value())
                     lines.push_back({ StrFmt("GPU Hotspot: %.0f C", gpuMetrics.hotspotC.value()), nullptr, nullptr,
                                       0.0f, tempColor(gpuMetrics.hotspotC.value()) });
+
+                if (showGpuPower && gpuMetrics.powerW.has_value())
+                    lines.push_back({ StrFmt("GPU Power: %.0f W", gpuMetrics.powerW.value()), nullptr, nullptr, 0.0f,
+                                      ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
             }
 
             if (needCpu)
@@ -8646,7 +8651,8 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
 
         ImGui::Spacing();
         ImGui::TextUnformatted("Hardware (Simple and above)");
-        MenuCommon::ShowHelpMarker("GPU: driver. CPU: AMD driver, HWiNFO, Afterburner or Core Temp. Proton: hwmon.");
+        MenuCommon::ShowHelpMarker(
+            "GPU: driver (temp, hotspot, power). CPU: AMD driver, HWiNFO, Afterburner or Core Temp. Proton: hwmon.");
 
         const auto cpuSensors = OverlayTelemetry::QueryCpuSensorAvailability(ctx.state);
 
@@ -8659,6 +8665,11 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("GPU Hotspot", &gpuHotspot))
             config->FpsOverlayShowGpuHotspot = gpuHotspot;
         ShowTooltip("AMD junction / NVIDIA hot spot (not on RTX 50)");
+
+        bool gpuPower = config->FpsOverlayShowGpuPower.value_or_default();
+        if (ImGui::Checkbox("GPU Power", &gpuPower))
+            config->FpsOverlayShowGpuPower = gpuPower;
+        ShowTooltip("GPU board power draw, when reported by the driver");
 
         bool cpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
         // Keep an already enabled option editable so it can be turned off from the menu.

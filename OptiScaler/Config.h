@@ -1064,8 +1064,9 @@ class Config
     CustomOptional<bool> FpsOverlayShowRatio { false };
     // Extra hardware rows in the FPS overlay (Simple and above)
     CustomOptional<bool> FpsOverlayShowGpuTemp { false };
-    CustomOptional<bool> FpsOverlayShowCpuTemp { false };
     CustomOptional<bool> FpsOverlayShowGpuHotspot { false };
+    CustomOptional<bool> FpsOverlayShowGpuPower { false };
+    CustomOptional<bool> FpsOverlayShowCpuTemp { false };
     CustomOptional<bool> FpsOverlayShowCpuHotspot { false };
     CustomOptional<float> FpsOverlayAlpha { 0.4f };
     CustomOptional<float, NoDefault> FpsScale; // No value means same as MenuScale

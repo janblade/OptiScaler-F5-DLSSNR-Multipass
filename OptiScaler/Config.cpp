@@ -666,8 +666,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             FpsOverlayHorizontal.set_from_config(readBool("Menu", "FpsOverlayHorizontal"));
             FpsOverlayShowRatio.set_from_config(readBool("Menu", "FpsOverlayShowRatio"));
             FpsOverlayShowGpuTemp.set_from_config(readBool("Menu", "FpsOverlayShowGpuTemp"));
-            FpsOverlayShowCpuTemp.set_from_config(readBool("Menu", "FpsOverlayShowCpuTemp"));
             FpsOverlayShowGpuHotspot.set_from_config(readBool("Menu", "FpsOverlayShowGpuHotspot"));
+            FpsOverlayShowGpuPower.set_from_config(readBool("Menu", "FpsOverlayShowGpuPower"));
+            FpsOverlayShowCpuTemp.set_from_config(readBool("Menu", "FpsOverlayShowCpuTemp"));
             FpsOverlayShowCpuHotspot.set_from_config(readBool("Menu", "FpsOverlayShowCpuHotspot"));
 
             if (auto setting = readFloat("Menu", "FpsOverlayAlpha"); setting.has_value())
@@ -2702,10 +2703,12 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FpsOverlayShowRatio.value_for_config()).c_str());
         ini.SetValue("Menu", "FpsOverlayShowGpuTemp",
                      GetBoolValue(Instance()->FpsOverlayShowGpuTemp.value_for_config()).c_str());
-        ini.SetValue("Menu", "FpsOverlayShowCpuTemp",
-                     GetBoolValue(Instance()->FpsOverlayShowCpuTemp.value_for_config()).c_str());
         ini.SetValue("Menu", "FpsOverlayShowGpuHotspot",
                      GetBoolValue(Instance()->FpsOverlayShowGpuHotspot.value_for_config()).c_str());
+        ini.SetValue("Menu", "FpsOverlayShowGpuPower",
+                     GetBoolValue(Instance()->FpsOverlayShowGpuPower.value_for_config()).c_str());
+        ini.SetValue("Menu", "FpsOverlayShowCpuTemp",
+                     GetBoolValue(Instance()->FpsOverlayShowCpuTemp.value_for_config()).c_str());
         ini.SetValue("Menu", "FpsOverlayShowCpuHotspot",
                      GetBoolValue(Instance()->FpsOverlayShowCpuHotspot.value_for_config()).c_str());
         ini.SetValue("Menu", "FpsOverlayAlpha", GetFloatValue(Instance()->FpsOverlayAlpha.value_for_config()).c_str());

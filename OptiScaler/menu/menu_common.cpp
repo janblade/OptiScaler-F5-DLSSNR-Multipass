@@ -2669,10 +2669,13 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             const bool showGpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
             const bool showGpuHotspot = config->FpsOverlayShowGpuHotspot.value_or_default();
             const bool showGpuPower = config->FpsOverlayShowGpuPower.value_or_default();
+            const bool showGpuUsage = config->FpsOverlayShowGpuUsage.value_or_default();
             const bool showCpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
             const bool showCpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
-            const bool needGpu = overlayType >= FpsOverlay_Simple && (showGpuTemp || showGpuHotspot || showGpuPower);
-            const bool needCpu = overlayType >= FpsOverlay_Simple && (showCpuTemp || showCpuHotspot);
+            const bool showCpuUsage = config->FpsOverlayShowCpuUsage.value_or_default();
+            const bool needGpu =
+                overlayType >= FpsOverlay_Simple && (showGpuTemp || showGpuHotspot || showGpuPower || showGpuUsage);
+            const bool needCpu = overlayType >= FpsOverlay_Simple && (showCpuTemp || showCpuHotspot || showCpuUsage);
 
             static OverlayTelemetry::GpuMetrics gpuMetrics {};
             static OverlayTelemetry::CpuMetrics cpuMetrics {};
@@ -2703,24 +2706,39 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                                    : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
             };
 
+            auto appendValue = [](std::string& values, int& count, const std::string& value)
+            {
+                if (count++ > 0)
+                    values += " / ";
+                values += value;
+            };
+
             if (needGpu)
             {
                 const bool hasGpuTemp = showGpuTemp && gpuMetrics.tempC.has_value();
                 const bool hasGpuPower = showGpuPower && gpuMetrics.powerW.has_value();
+                const bool hasGpuUsage = showGpuUsage && gpuMetrics.usagePercent.has_value();
 
+                std::string gpuValues;
+                int gpuValueCount = 0;
                 if (hasGpuTemp)
+                    appendValue(gpuValues, gpuValueCount, StrFmt("%.0f C", gpuMetrics.tempC.value()));
+                if (hasGpuPower)
+                    appendValue(gpuValues, gpuValueCount, StrFmt("%.0f W", gpuMetrics.powerW.value()));
+                if (hasGpuUsage)
+                    appendValue(gpuValues, gpuValueCount, StrFmt("%.0f%%", gpuMetrics.usagePercent.value()));
+
+                if (gpuValueCount > 0)
                 {
-                    auto gpuText = StrFmt("GPU: %.0f C", gpuMetrics.tempC.value());
-                    if (hasGpuPower)
-                        gpuText += StrFmt(" / %.0f W", gpuMetrics.powerW.value());
+                    std::string gpuText;
+                    if (gpuValueCount == 1 && !hasGpuTemp)
+                        gpuText = StrFmt(hasGpuPower ? "GPU Power: %s" : "GPU Usage: %s", gpuValues.c_str());
+                    else
+                        gpuText = "GPU: " + gpuValues;
 
                     lines.push_back(
-                        { std::move(gpuText), nullptr, nullptr, 0.0f, tempColor(gpuMetrics.tempC.value()) });
-                }
-                else if (hasGpuPower)
-                {
-                    lines.push_back({ StrFmt("GPU Power: %.0f W", gpuMetrics.powerW.value()), nullptr, nullptr, 0.0f,
-                                      ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
+                        { std::move(gpuText), nullptr, nullptr, 0.0f,
+                          hasGpuTemp ? tempColor(gpuMetrics.tempC.value()) : ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
                 }
 
                 if (showGpuHotspot && gpuMetrics.hotspotC.has_value())
@@ -2730,9 +2748,28 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 
             if (needCpu)
             {
-                if (showCpuTemp && cpuMetrics.tempC.has_value())
-                    lines.push_back({ StrFmt("CPU: %.0f C", cpuMetrics.tempC.value()), nullptr, nullptr, 0.0f,
-                                      tempColor(cpuMetrics.tempC.value()) });
+                const bool hasCpuTemp = showCpuTemp && cpuMetrics.tempC.has_value();
+                const bool hasCpuUsage = showCpuUsage && cpuMetrics.usagePercent.has_value();
+
+                std::string cpuValues;
+                int cpuValueCount = 0;
+                if (hasCpuTemp)
+                    appendValue(cpuValues, cpuValueCount, StrFmt("%.0f C", cpuMetrics.tempC.value()));
+                if (hasCpuUsage)
+                    appendValue(cpuValues, cpuValueCount, StrFmt("%.0f%%", cpuMetrics.usagePercent.value()));
+
+                if (cpuValueCount > 0)
+                {
+                    std::string cpuText;
+                    if (cpuValueCount == 1 && !hasCpuTemp)
+                        cpuText = StrFmt("CPU Usage: %s", cpuValues.c_str());
+                    else
+                        cpuText = "CPU: " + cpuValues;
+
+                    lines.push_back(
+                        { std::move(cpuText), nullptr, nullptr, 0.0f,
+                          hasCpuTemp ? tempColor(cpuMetrics.tempC.value()) : ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
+                }
 
                 if (showCpuHotspot && cpuMetrics.hotspotC.has_value())
                     lines.push_back({ StrFmt("CPU Hotspot: %.0f C", cpuMetrics.hotspotC.value()), nullptr, nullptr,
@@ -8661,8 +8698,8 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
 
         ImGui::Spacing();
         ImGui::TextUnformatted("Hardware (Simple and above)");
-        MenuCommon::ShowHelpMarker(
-            "GPU: driver (temp, hotspot, power). CPU: AMD driver, HWiNFO, Afterburner or Core Temp. Proton: hwmon.");
+        MenuCommon::ShowHelpMarker("GPU: driver (temp, hotspot, power, usage). CPU: AMD/HWiNFO/Afterburner/Core Temp "
+                                   "(temp), PDH/hwmon (usage).");
 
         const auto cpuSensors = OverlayTelemetry::QueryCpuSensorAvailability(ctx.state);
 
@@ -8680,6 +8717,11 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("GPU Power", &gpuPower))
             config->FpsOverlayShowGpuPower = gpuPower;
         ShowTooltip("GPU board power draw; appended to GPU temp when both are enabled");
+
+        bool gpuUsage = config->FpsOverlayShowGpuUsage.value_or_default();
+        if (ImGui::Checkbox("GPU Usage", &gpuUsage))
+            config->FpsOverlayShowGpuUsage = gpuUsage;
+        ShowTooltip("Busiest GPU engine utilization; appended to GPU temp/power when enabled");
 
         bool cpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
         // Keep an already enabled option editable so it can be turned off from the menu.
@@ -8705,6 +8747,11 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
             ImGui::SameLine();
             ImGui::TextDisabled("(no source)");
         }
+
+        bool cpuUsage = config->FpsOverlayShowCpuUsage.value_or_default();
+        if (ImGui::Checkbox("CPU Usage", &cpuUsage))
+            config->FpsOverlayShowCpuUsage = cpuUsage;
+        ShowTooltip("Total CPU utilization; appended to CPU temp when enabled");
 
         const char* fpsPosition[] = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
         const char* selectedPosition = fpsPosition[config->FpsOverlayPosition.value_or_default()];

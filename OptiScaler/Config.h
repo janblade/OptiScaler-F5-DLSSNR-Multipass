@@ -1066,8 +1066,10 @@ class Config
     CustomOptional<bool> FpsOverlayShowGpuTemp { false };
     CustomOptional<bool> FpsOverlayShowGpuHotspot { false };
     CustomOptional<bool> FpsOverlayShowGpuPower { false };
+    CustomOptional<bool> FpsOverlayShowGpuUsage { false };
     CustomOptional<bool> FpsOverlayShowCpuTemp { false };
     CustomOptional<bool> FpsOverlayShowCpuHotspot { false };
+    CustomOptional<bool> FpsOverlayShowCpuUsage { false };
     CustomOptional<float> FpsOverlayAlpha { 0.4f };
     CustomOptional<float, NoDefault> FpsScale; // No value means same as MenuScale
     CustomOptional<bool> UseHQFont { true };

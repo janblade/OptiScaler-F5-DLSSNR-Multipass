@@ -8646,31 +8646,27 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
 
         ImGui::Spacing();
         ImGui::TextUnformatted("Hardware (Simple and above)");
-        MenuCommon::ShowHelpMarker(
-            "GPU sensors come from the driver (AMD ADL, NVIDIA NVML / NVAPI), with HWiNFO or MSI "
-            "Afterburner as a fallback. Windows has no CPU temperature sensor without a kernel driver, "
-            "so HWiNFO (Shared Memory Support), MSI Afterburner (with the CPU temperature monitored) or "
-            "Core Temp must be running. Under Proton / Wine the kernel's hwmon sensors are used.");
+        MenuCommon::ShowHelpMarker("GPU: driver. CPU: AMD driver, HWiNFO, Afterburner or Core Temp. Proton: hwmon.");
 
         bool gpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
         if (ImGui::Checkbox("GPU Temperature", &gpuTemp))
             config->FpsOverlayShowGpuTemp = gpuTemp;
-        ShowTooltip("Adds the GPU temperature to the overlay, colored when close to throttling");
+        ShowTooltip("GPU temperature (orange at 82 C, red at 90 C)");
 
         bool gpuHotspot = config->FpsOverlayShowGpuHotspot.value_or_default();
         if (ImGui::Checkbox("GPU Hotspot", &gpuHotspot))
             config->FpsOverlayShowGpuHotspot = gpuHotspot;
-        ShowTooltip("Adds the GPU's hottest sensor: AMD junction temperature or NVIDIA hot spot");
+        ShowTooltip("AMD junction / NVIDIA hot spot (not on RTX 50)");
 
         bool cpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
         if (ImGui::Checkbox("CPU Temperature", &cpuTemp))
             config->FpsOverlayShowCpuTemp = cpuTemp;
-        ShowTooltip("Adds the CPU temperature to the overlay, colored when close to throttling");
+        ShowTooltip("CPU temperature, same colors as GPU");
 
         bool cpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
         if (ImGui::Checkbox("CPU Hotspot", &cpuHotspot))
             config->FpsOverlayShowCpuHotspot = cpuHotspot;
-        ShowTooltip("Adds the CPU's hottest core or CCD, from the same sources as the CPU temperature");
+        ShowTooltip("Hottest CPU core or CCD");
 
         const char* fpsPosition[] = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
         const char* selectedPosition = fpsPosition[config->FpsOverlayPosition.value_or_default()];

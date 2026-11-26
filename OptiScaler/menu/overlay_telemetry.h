@@ -547,7 +547,7 @@ struct NvGpuVoltageStatus
 using PFN_NvAPI_GPU_GetCurrentVoltage = NvAPI_Status(__cdecl*)(NvPhysicalGpuHandle, NvGpuVoltageStatus*);
 
 // NvAPI_GPU_ThermalGetSensors, not in the public NVAPI: the GPU's sensors in 1/256 C, the hot spot is the second.
-// RTX 50 GPUs don't report it anymore.
+// On RTX 50 (Blackwell) channel 1 is the edge temperature, so the hot spot must be skipped.
 struct NvThermalSensors
 {
     NvU32 version;
@@ -572,10 +572,12 @@ struct State
     NvPhysicalGpuHandle nvapiGpu = nullptr;
     decltype(&NvAPI_GPU_GetAllClockFrequencies) getAllClocks = nullptr;
     decltype(&NvAPI_GPU_GetThermalSettings) getThermal = nullptr;
+    decltype(&NvAPI_GPU_GetArchInfo) getArchInfo = nullptr;
     PFN_NvAPI_GPU_GetCurrentVoltage getCurrentVoltage = nullptr;
     PFN_NvAPI_GPU_ThermalGetSensors getThermalSensors = nullptr;
     PFN_NvAPI_GPU_GetDynamicPstatesInfoEx getPstates = nullptr;
     NvU32 thermalSensorMask = 0; // The sensors the GPU has, found on the first query
+    bool isBlackwell = false; // Blackwell removed the hot spot from the private sensor channel
 };
 
 inline void Query(const GpuInformation& gpuInfo, GpuMetrics& out)
@@ -585,6 +587,13 @@ inline void Query(const GpuInformation& gpuInfo, GpuMetrics& out)
     if (!s.initialized)
     {
         s.initialized = true;
+
+        // RTX 5050 (GB207) reports the edge temperature on the private hot spot channel.
+        if (gpuInfo.vendorId == VendorId::Nvidia && gpuInfo.deviceId == 0x2D83)
+        {
+            s.isBlackwell = true;
+            LOG_DEBUG("FPS overlay: RTX 5050 detected, skipping NVAPI hot spot");
+        }
 
         HMODULE nvml = KernelBaseProxy::GetModuleHandleW_()(L"nvml.dll");
         if (nvml == nullptr)
@@ -655,6 +664,20 @@ inline void Query(const GpuInformation& gpuInfo, GpuMetrics& out)
 
                     s.getAllClocks = GET_INTERFACE(NvAPI_GPU_GetAllClockFrequencies, queryInterface);
                     s.getThermal = GET_INTERFACE(NvAPI_GPU_GetThermalSettings, queryInterface);
+                    s.getArchInfo = GET_INTERFACE(NvAPI_GPU_GetArchInfo, queryInterface);
+
+                    if (s.getArchInfo != nullptr && s.nvapiGpu != nullptr)
+                    {
+                        NV_GPU_ARCH_INFO arch {};
+                        arch.version = NV_GPU_ARCH_INFO_VER;
+                        if (s.getArchInfo(s.nvapiGpu, &arch) == NVAPI_OK &&
+                            arch.architecture_id == NV_GPU_ARCHITECTURE_GB200)
+                        {
+                            s.isBlackwell = true;
+                            LOG_DEBUG("FPS overlay: NVIDIA Blackwell, skipping NVAPI hot spot");
+                        }
+                    }
+
                     s.getCurrentVoltage =
                         reinterpret_cast<PFN_NvAPI_GPU_GetCurrentVoltage>(queryInterface(0x465F9BCFu));
                     s.getThermalSensors =
@@ -733,7 +756,7 @@ inline void Query(const GpuInformation& gpuInfo, GpuMetrics& out)
             }
         }
 
-        if ((s.thermalSensorMask & (1u << NvHotspotSensor)) != 0)
+        if (!s.isBlackwell && (s.thermalSensorMask & (1u << NvHotspotSensor)) != 0)
         {
             NvThermalSensors sensors {};
             sensors.version = NvThermalSensorsVersion;

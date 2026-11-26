@@ -2705,17 +2705,27 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 
             if (needGpu)
             {
-                if (showGpuTemp && gpuMetrics.tempC.has_value())
-                    lines.push_back({ StrFmt("GPU: %.0f C", gpuMetrics.tempC.value()), nullptr, nullptr, 0.0f,
-                                      tempColor(gpuMetrics.tempC.value()) });
+                const bool hasGpuTemp = showGpuTemp && gpuMetrics.tempC.has_value();
+                const bool hasGpuPower = showGpuPower && gpuMetrics.powerW.has_value();
+
+                if (hasGpuTemp)
+                {
+                    auto gpuText = StrFmt("GPU: %.0f C", gpuMetrics.tempC.value());
+                    if (hasGpuPower)
+                        gpuText += StrFmt(" / %.0f W", gpuMetrics.powerW.value());
+
+                    lines.push_back(
+                        { std::move(gpuText), nullptr, nullptr, 0.0f, tempColor(gpuMetrics.tempC.value()) });
+                }
+                else if (hasGpuPower)
+                {
+                    lines.push_back({ StrFmt("GPU Power: %.0f W", gpuMetrics.powerW.value()), nullptr, nullptr, 0.0f,
+                                      ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
+                }
 
                 if (showGpuHotspot && gpuMetrics.hotspotC.has_value())
                     lines.push_back({ StrFmt("GPU Hotspot: %.0f C", gpuMetrics.hotspotC.value()), nullptr, nullptr,
                                       0.0f, tempColor(gpuMetrics.hotspotC.value()) });
-
-                if (showGpuPower && gpuMetrics.powerW.has_value())
-                    lines.push_back({ StrFmt("GPU Power: %.0f W", gpuMetrics.powerW.value()), nullptr, nullptr, 0.0f,
-                                      ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
             }
 
             if (needCpu)
@@ -8669,7 +8679,7 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
         bool gpuPower = config->FpsOverlayShowGpuPower.value_or_default();
         if (ImGui::Checkbox("GPU Power", &gpuPower))
             config->FpsOverlayShowGpuPower = gpuPower;
-        ShowTooltip("GPU board power draw, when reported by the driver");
+        ShowTooltip("GPU board power draw; appended to GPU temp when both are enabled");
 
         bool cpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
         // Keep an already enabled option editable so it can be turned off from the menu.

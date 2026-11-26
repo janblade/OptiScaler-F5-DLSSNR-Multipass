@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "menu_common.h"
 #include "PresentRateMeter.h"
+#include "overlay_telemetry.h"
 #include "MenuPages.h"
 #include "NotificationsPage.h"
 #include "StatusPage.h"
@@ -2613,6 +2614,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 const char* graphId = nullptr;
                 RingBuffer<float, plotWidth>* graphData = nullptr;
                 float graphMax = 0.0f;
+                ImVec4 color { 0.0f, 0.0f, 0.0f, 0.0f }; // w == 0 keeps the theme's text color
             };
 
             std::vector<OverlayLine> lines;
@@ -2663,6 +2665,117 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 lines.push_back(std::move(line));
             }
 
+            // Extra hardware rows, using the telemetry layer ported from Optiscaler Venom
+            const bool showGpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
+            const bool showGpuHotspot = config->FpsOverlayShowGpuHotspot.value_or_default();
+            const bool showGpuPower = config->FpsOverlayShowGpuPower.value_or_default();
+            const bool showGpuUsage = config->FpsOverlayShowGpuUsage.value_or_default();
+            const bool showCpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
+            const bool showCpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
+            const bool showCpuUsage = config->FpsOverlayShowCpuUsage.value_or_default();
+            const bool needGpu =
+                overlayType >= FpsOverlay_Simple && (showGpuTemp || showGpuHotspot || showGpuPower || showGpuUsage);
+            const bool needCpu = overlayType >= FpsOverlay_Simple && (showCpuTemp || showCpuHotspot || showCpuUsage);
+
+            static OverlayTelemetry::GpuMetrics gpuMetrics {};
+            static OverlayTelemetry::CpuMetrics cpuMetrics {};
+            static double previousTelemetryPoll = 0.0;
+
+            if (needGpu || needCpu)
+            {
+                // The worker already polls at 500 ms; the overlay only refreshes its cached
+                // values at that cadence, so no driver or shared-memory query runs on the
+                // game's present thread.
+                constexpr auto delayBetweenPollsMs = 500;
+                if (previousTelemetryPoll <= 0.001 || previousTelemetryPoll + delayBetweenPollsMs < now)
+                {
+                    previousTelemetryPoll = now;
+
+                    if (needGpu)
+                        gpuMetrics = OverlayTelemetry::QueryGpu(state);
+                    if (needCpu)
+                        cpuMetrics = OverlayTelemetry::QueryCpu(state);
+                }
+            }
+
+            // Warm colors close to the throttling temperatures
+            auto tempColor = [](double t) -> ImVec4
+            {
+                return t >= 90.0   ? toneMapColor(ImVec4(1.0f, 0.35f, 0.35f, 1.0f))
+                       : t >= 82.0 ? toneMapColor(ImVec4(1.0f, 0.67f, 0.24f, 1.0f))
+                                   : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+            };
+
+            auto appendValue = [](std::string& values, int& count, const std::string& value)
+            {
+                if (count++ > 0)
+                    values += " / ";
+                values += value;
+            };
+
+            if (needGpu)
+            {
+                const bool hasGpuTemp = showGpuTemp && gpuMetrics.tempC.has_value();
+                const bool hasGpuPower = showGpuPower && gpuMetrics.powerW.has_value();
+                const bool hasGpuUsage = showGpuUsage && gpuMetrics.usagePercent.has_value();
+
+                std::string gpuValues;
+                int gpuValueCount = 0;
+                if (hasGpuTemp)
+                    appendValue(gpuValues, gpuValueCount, StrFmt("%.0f C", gpuMetrics.tempC.value()));
+                if (hasGpuPower)
+                    appendValue(gpuValues, gpuValueCount, StrFmt("%.0f W", gpuMetrics.powerW.value()));
+                if (hasGpuUsage)
+                    appendValue(gpuValues, gpuValueCount, StrFmt("%.0f%%", gpuMetrics.usagePercent.value()));
+
+                if (gpuValueCount > 0)
+                {
+                    std::string gpuText;
+                    if (gpuValueCount == 1 && !hasGpuTemp)
+                        gpuText = StrFmt(hasGpuPower ? "GPU Power: %s" : "GPU Usage: %s", gpuValues.c_str());
+                    else
+                        gpuText = "GPU: " + gpuValues;
+
+                    lines.push_back(
+                        { std::move(gpuText), nullptr, nullptr, 0.0f,
+                          hasGpuTemp ? tempColor(gpuMetrics.tempC.value()) : ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
+                }
+
+                if (showGpuHotspot && gpuMetrics.hotspotC.has_value())
+                    lines.push_back({ StrFmt("GPU Hotspot: %.0f C", gpuMetrics.hotspotC.value()), nullptr, nullptr,
+                                      0.0f, tempColor(gpuMetrics.hotspotC.value()) });
+            }
+
+            if (needCpu)
+            {
+                const bool hasCpuTemp = showCpuTemp && cpuMetrics.tempC.has_value();
+                const bool hasCpuUsage = showCpuUsage && cpuMetrics.usagePercent.has_value();
+
+                std::string cpuValues;
+                int cpuValueCount = 0;
+                if (hasCpuTemp)
+                    appendValue(cpuValues, cpuValueCount, StrFmt("%.0f C", cpuMetrics.tempC.value()));
+                if (hasCpuUsage)
+                    appendValue(cpuValues, cpuValueCount, StrFmt("%.0f%%", cpuMetrics.usagePercent.value()));
+
+                if (cpuValueCount > 0)
+                {
+                    std::string cpuText;
+                    if (cpuValueCount == 1 && !hasCpuTemp)
+                        cpuText = StrFmt("CPU Usage: %s", cpuValues.c_str());
+                    else
+                        cpuText = "CPU: " + cpuValues;
+
+                    lines.push_back(
+                        { std::move(cpuText), nullptr, nullptr, 0.0f,
+                          hasCpuTemp ? tempColor(cpuMetrics.tempC.value()) : ImVec4(0.0f, 0.0f, 0.0f, 0.0f) });
+                }
+
+                if (showCpuHotspot && cpuMetrics.hotspotC.has_value())
+                    lines.push_back({ StrFmt("CPU Hotspot: %.0f C", cpuMetrics.hotspotC.value()), nullptr, nullptr,
+                                      0.0f, tempColor(cpuMetrics.hotspotC.value()) });
+            }
+
             const bool horizontal = config->FpsOverlayHorizontal.value_or_default();
 
             ImVec2 plotSize;
@@ -2699,7 +2812,10 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                     }
                 }
 
-                ImGui::TextUnformatted(line.text.c_str());
+                if (line.color.w != 0.0f)
+                    ImGui::TextColored(line.color, "%s", line.text.c_str());
+                else
+                    ImGui::TextUnformatted(line.text.c_str());
 
                 if (line.graphData != nullptr)
                 {
@@ -8579,6 +8695,63 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("Upscale Ratio", &fpsShowRatio))
             config->FpsOverlayShowRatio = fpsShowRatio;
         ShowTooltip("Shows the current render -> output resolution and upscale ratio in the overlay");
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Hardware (Simple and above)");
+        MenuCommon::ShowHelpMarker("GPU: driver (temp, hotspot, power, usage). CPU: AMD/HWiNFO/Afterburner/Core Temp "
+                                   "(temp), PDH/hwmon (usage).");
+
+        const auto cpuSensors = OverlayTelemetry::QueryCpuSensorAvailability(ctx.state);
+
+        bool gpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
+        if (ImGui::Checkbox("GPU Temperature", &gpuTemp))
+            config->FpsOverlayShowGpuTemp = gpuTemp;
+        ShowTooltip("GPU temperature (orange at 82 C, red at 90 C)");
+
+        bool gpuHotspot = config->FpsOverlayShowGpuHotspot.value_or_default();
+        if (ImGui::Checkbox("GPU Hotspot", &gpuHotspot))
+            config->FpsOverlayShowGpuHotspot = gpuHotspot;
+        ShowTooltip("AMD junction / NVIDIA hot spot (not on RTX 50)");
+
+        bool gpuPower = config->FpsOverlayShowGpuPower.value_or_default();
+        if (ImGui::Checkbox("GPU Power", &gpuPower))
+            config->FpsOverlayShowGpuPower = gpuPower;
+        ShowTooltip("GPU board power draw; appended to GPU temp when both are enabled");
+
+        bool gpuUsage = config->FpsOverlayShowGpuUsage.value_or_default();
+        if (ImGui::Checkbox("GPU Usage", &gpuUsage))
+            config->FpsOverlayShowGpuUsage = gpuUsage;
+        ShowTooltip("Busiest GPU engine utilization; appended to GPU temp/power when enabled");
+
+        bool cpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
+        // Keep an already enabled option editable so it can be turned off from the menu.
+        ImGui::BeginDisabled(!cpuSensors.temp && !cpuTemp);
+        if (ImGui::Checkbox("CPU Temperature", &cpuTemp))
+            config->FpsOverlayShowCpuTemp = cpuTemp;
+        ImGui::EndDisabled();
+        ShowTooltip(cpuSensors.temp ? "CPU temperature, same colors as GPU" : "No CPU temp source detected");
+        if (!cpuSensors.temp)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(no source)");
+        }
+
+        bool cpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
+        ImGui::BeginDisabled(!cpuSensors.hotspot && !cpuHotspot);
+        if (ImGui::Checkbox("CPU Hotspot", &cpuHotspot))
+            config->FpsOverlayShowCpuHotspot = cpuHotspot;
+        ImGui::EndDisabled();
+        ShowTooltip(cpuSensors.hotspot ? "Hottest CPU core or CCD" : "No CPU hotspot source detected");
+        if (!cpuSensors.hotspot)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(no source)");
+        }
+
+        bool cpuUsage = config->FpsOverlayShowCpuUsage.value_or_default();
+        if (ImGui::Checkbox("CPU Usage", &cpuUsage))
+            config->FpsOverlayShowCpuUsage = cpuUsage;
+        ShowTooltip("Total CPU utilization; appended to CPU temp when enabled");
 
         const char* fpsPosition[] = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
         const char* selectedPosition = fpsPosition[config->FpsOverlayPosition.value_or_default()];

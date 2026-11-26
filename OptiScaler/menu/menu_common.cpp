@@ -8648,6 +8648,8 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
         ImGui::TextUnformatted("Hardware (Simple and above)");
         MenuCommon::ShowHelpMarker("GPU: driver. CPU: AMD driver, HWiNFO, Afterburner or Core Temp. Proton: hwmon.");
 
+        const auto cpuSensors = OverlayTelemetry::QueryCpuSensorAvailability(ctx.state);
+
         bool gpuTemp = config->FpsOverlayShowGpuTemp.value_or_default();
         if (ImGui::Checkbox("GPU Temperature", &gpuTemp))
             config->FpsOverlayShowGpuTemp = gpuTemp;
@@ -8659,14 +8661,29 @@ void MenuCommon::RenderFpsOverlaySettings(RenderMenuContext& ctx)
         ShowTooltip("AMD junction / NVIDIA hot spot (not on RTX 50)");
 
         bool cpuTemp = config->FpsOverlayShowCpuTemp.value_or_default();
+        // Keep an already enabled option editable so it can be turned off from the menu.
+        ImGui::BeginDisabled(!cpuSensors.temp && !cpuTemp);
         if (ImGui::Checkbox("CPU Temperature", &cpuTemp))
             config->FpsOverlayShowCpuTemp = cpuTemp;
-        ShowTooltip("CPU temperature, same colors as GPU");
+        ImGui::EndDisabled();
+        ShowTooltip(cpuSensors.temp ? "CPU temperature, same colors as GPU" : "No CPU temp source detected");
+        if (!cpuSensors.temp)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(no source)");
+        }
 
         bool cpuHotspot = config->FpsOverlayShowCpuHotspot.value_or_default();
+        ImGui::BeginDisabled(!cpuSensors.hotspot && !cpuHotspot);
         if (ImGui::Checkbox("CPU Hotspot", &cpuHotspot))
             config->FpsOverlayShowCpuHotspot = cpuHotspot;
-        ShowTooltip("Hottest CPU core or CCD");
+        ImGui::EndDisabled();
+        ShowTooltip(cpuSensors.hotspot ? "Hottest CPU core or CCD" : "No CPU hotspot source detected");
+        if (!cpuSensors.hotspot)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(no source)");
+        }
 
         const char* fpsPosition[] = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
         const char* selectedPosition = fpsPosition[config->FpsOverlayPosition.value_or_default()];

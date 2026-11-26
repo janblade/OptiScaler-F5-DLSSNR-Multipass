@@ -2121,6 +2121,31 @@ inline CpuMetrics QueryCpu(State& state)
     return ctx.cpu;
 }
 
+struct CpuSensorAvailability
+{
+    bool temp = false;
+    bool hotspot = false;
+};
+
+// Cached so the menu can show CPU options as unavailable without polling on every frame.
+inline CpuSensorAvailability QueryCpuSensorAvailability(State& state)
+{
+    static constexpr uint64_t kTtlMs = 500;
+    static uint64_t lastCheckTick = 0;
+    static CpuSensorAvailability available {};
+
+    const uint64_t nowTick = GetTickCount64();
+    if (lastCheckTick == 0 || nowTick - lastCheckTick >= kTtlMs)
+    {
+        lastCheckTick = nowTick;
+        const auto cpu = QueryCpu(state);
+        available.temp = cpu.tempC.has_value();
+        available.hotspot = available.temp || cpu.hotspotC.has_value();
+    }
+
+    return available;
+}
+
 inline std::optional<RamMetrics> QueryRam()
 {
     auto& ctx = detail::AsyncWorker::Get();

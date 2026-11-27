@@ -559,8 +559,8 @@ static Fsr212::FfxErrorCode ffxFsr2ContextDispatch_Dx12(Fsr212::FfxFsr2Context* 
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -623,8 +623,8 @@ ffxFsr2ContextDispatch_Pattern_Dx12(Fsr212::FfxFsr2Context* context,
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -693,8 +693,8 @@ static Fsr212::FfxErrorCode ffxFsr20ContextDispatch_Dx12(Fsr212::FfxFsr2Context*
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext20(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext20(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -761,8 +761,8 @@ static Fsr212::FfxErrorCode ffxFsr20ContextDispatch_Pattern_Dx12(Fsr212::FfxFsr2
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext20(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext20(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -825,8 +825,8 @@ static Fsr212::FfxErrorCode ffxFsr2TinyContextDispatch_Dx12(Fsr212::FfxFsr2Conte
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContextTiny(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContextTiny(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];

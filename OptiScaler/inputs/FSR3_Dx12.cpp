@@ -316,8 +316,8 @@ static Fsr3::FfxErrorCode ffxFsr3ContextDispatch_Dx12(Fsr3::FfxFsr3UpscalerConte
         return Fsr3::FFX_ERROR_BACKEND_API_ERROR;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(pContext) && _initParams.contains(pContext) &&
-        !CreateDLSSContext(pContext, pDispatchDescription))
+    if (!_contexts.contains(pContext) &&
+        (!_initParams.contains(pContext) || !CreateDLSSContext(pContext, pDispatchDescription)))
         return Fsr3::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[pContext];
@@ -510,8 +510,8 @@ ffxFsr3ContextDispatch_Pattern_Dx12(Fsr3::FfxFsr3UpscalerContext* pContext,
         return Fsr3::FFX_ERROR_BACKEND_API_ERROR;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(pContext) && _initParams.contains(pContext) &&
-        !CreateDLSSContext(pContext, pDispatchDescription))
+    if (!_contexts.contains(pContext) &&
+        (!_initParams.contains(pContext) || !CreateDLSSContext(pContext, pDispatchDescription)))
         return Fsr3::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[pContext];

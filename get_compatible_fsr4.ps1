@@ -12,7 +12,9 @@ param(
     # Defaults to the folder containing this script, which is the extracted package root.
     [string]$Destination = $PSScriptRoot,
 
-    [ValidateSet('exact', 'lossy', 'lite', 'lite-lossy')]
+    # '-Variant exact-lossy' is accepted as an alias for upstream's 'lossy'.
+    # Omitting it opens an interactive chooser; pass it explicitly for unattended installs.
+    [ValidateSet('exact', 'lossy', 'exact-lossy', 'lite', 'lite-lossy')]
     [string]$Variant = 'exact',
 
     [ValidateSet('auto', 'rx7000', 'rx6000', 'igpu-rdna3', 'igpu-rdna2', 'rdna4')]
@@ -27,6 +29,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$variantSpecified = $PSBoundParameters.ContainsKey('Variant')
 
 $manifestPath = Join-Path $PSScriptRoot 'redist/fsr4/manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -70,6 +73,35 @@ function Get-VariantHash($Archive, [string]$Name) {
     $property = $Archive.variants.PSObject.Properties[$Name]
     if (-not $property) { throw "Archive $($Archive.file) has no hash for variant '$Name'." }
     return $property.Value
+}
+
+function Resolve-Variant([string]$Requested, [bool]$Specified) {
+    if ($Requested -eq 'exact-lossy') { $Requested = 'lossy' }
+    if ($Specified) { return $Requested }
+
+    Write-Host ''
+    Write-Host 'Choose the FSR 4 shader variant:' -ForegroundColor Yellow
+    Write-Host '  1) exact        - AMD picture, faster shaders (default)'
+    Write-Host '  2) lossy        - exact-lossy: close to AMD, faster still; changes the picture'
+    Write-Host '  3) lite         - AMD Lite picture, smaller model'
+    Write-Host '  4) lite-lossy   - Lite model, faster still; changes the picture'
+    Write-Host -NoNewline 'Variant [1/2/3/4] (Enter = 1): '
+    $answer = $null
+    try { $answer = [Console]::ReadLine() } catch { $answer = $null }
+    if ($null -eq $answer) { return 'exact' }  # no console: keep the old unattended default
+    switch ($answer.Trim().ToLowerInvariant()) {
+        '' { return 'exact' }
+        '1' { return 'exact' }
+        '2' { return 'lossy' }
+        '3' { return 'lite' }
+        '4' { return 'lite-lossy' }
+        'exact' { return 'exact' }
+        'lossy' { return 'lossy' }
+        'exact-lossy' { return 'lossy' }
+        'lite' { return 'lite' }
+        'lite-lossy' { return 'lite-lossy' }
+        default { throw "Unknown variant '$($answer.Trim())'. Choose 1-4 or exact/lossy/lite/lite-lossy." }
+    }
 }
 
 function Write-Risks {
@@ -258,7 +290,8 @@ if ($Restore) {
     return
 }
 
-# ---- Warnings and explicit consent -------------------------------------------------------------------------------------
+# ---- Variant choice, warnings and explicit consent ----------------------------------------------------------------------
+$Variant = Resolve-Variant $Variant $variantSpecified
 Write-Risks
 if (-not $AcceptThirdPartyDll) {
     Write-Host 'Type Y and press Enter to accept these risks and continue.' -ForegroundColor Yellow

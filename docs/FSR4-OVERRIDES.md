@@ -21,19 +21,19 @@ Manifest: [`redist/fsr4/manifest.json`](../redist/fsr4/manifest.json) — archiv
 Open PowerShell in the folder that contains `get_compatible_fsr4.ps1` (the package root, next to `OptiScaler.dll`):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\get_compatible_fsr4.ps1 -Variant exact
+powershell -ExecutionPolicy Bypass -File .\get_compatible_fsr4.ps1
 ```
 
 `-Destination` is optional: when omitted it defaults to the folder containing the script (`$PSScriptRoot`), i.e. the extracted package root next to `OptiScaler.dll`. If you run the script from somewhere else, pass the game folder explicitly. That folder must contain `OptiScaler.dll` and an `OptiScaler` folder. The script writes `OptiScaler\amd_fidelityfx_upscaler_dx12.dll`, keeps `OptiScaler\amd_fidelityfx_upscaler_dx12.dll.orig`, and records what it installed in `OptiScaler\.fsr4-override.json`.
 
-After printing the warnings, the script asks `Accept [y/N]:`. Type `Y` and press Enter to continue. Just pressing Enter, `N`, or anything else cancels with no changes. For unattended runs, pass `-AcceptThirdPartyDll` to skip the prompt.
+The script first asks `Variant [1/2/3/4] (Enter = 1):`; choose `1` for `exact`, `2` for `lossy`, `3` for `lite` or `4` for `lite-lossy`. Names are accepted too, including `exact-lossy` as an alias for `lossy`. Pressing Enter selects `exact`. It then prints the warnings and asks `Accept [y/N]:`. Type `Y` and press Enter to continue; just pressing Enter, `N`, or anything else cancels with no changes. Pass `-Variant` and `-AcceptThirdPartyDll` explicitly for unattended runs to skip both prompts.
 
 ### Variants
 
 | `-Variant` | ZIP folder | Picture |
 |---|---|---|
 | `exact` (default) | `exact/` | Matches AMD's picture, faster shaders |
-| `lossy` | `lossy/` | Faster still, changes the picture |
+| `lossy` / `exact-lossy` | `lossy/` | Faster still, changes the picture |
 | `lite` | `4.1.2l-exact/` | Lite model, AMD's Lite picture |
 | `lite-lossy` | `4.1.2l-lossy/` | Lite model, faster still, changes the picture |
 
@@ -55,6 +55,7 @@ Detection uses the PCI device ID first (`VEN_1002&DEV_xxxx`) and the adapter nam
 ### Other parameters
 
 - `-Destination <folder>`: game folder to patch. Defaults to the script's own folder (`$PSScriptRoot`), so it can be omitted when running from the extracted package root.
+- `-Variant <name>`: `exact` (default), `lossy`, `lite` or `lite-lossy`; `exact-lossy` is accepted as an alias for `lossy`. Omit it to get the interactive chooser; pass it explicitly to skip that prompt.
 - `-ArchivePath <file.zip>`: use a previously downloaded pinned ZIP instead of downloading; its SHA-256 is still checked. Downloads are cached under `.dependencies\fsr4\<version>\` next to the script.
 - `-Restore`: put the `.orig` backup back and remove the marker. No confirmation switch is needed for a restore.
 - `-AcceptThirdPartyDll`: optional shortcut for unattended installs. It acknowledges the warnings above without the `Accept [y/N]:` prompt; the warnings are still printed.

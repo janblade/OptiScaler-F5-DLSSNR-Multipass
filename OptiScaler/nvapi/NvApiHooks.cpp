@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "NvApiHooks.h"
 #include <dlssnr/DlssNrNative.h>
+#include <dlssnr/NrNvfp4.h>
 #include <NvApiDriverSettings.h>
 
 #include "State.h"
@@ -365,7 +366,10 @@ void* __stdcall NvApiHooks::hkNvAPI_QueryInterface(unsigned int InterfaceId)
 
     // LOG_DEBUG("counter: {} functionPointer: {:X}", qiCounter, (size_t)functionPointer);
 
-    return DlssNrNative::WrapNvapi(InterfaceId,functionPointer);
+    // The 4-bit kernels and pass-in-one weight sets sit above F5's native hybrid wrap of the NR runtime's CUDA
+    // kernel entry points; other ids come back unchanged. They change nothing until a pass asks for them
+    // (DlssNr::Nvfp4::Configure), and DlssNrNative::WrapNvapi passes launches through when its hybrid is off.
+    return DlssNr::Nvfp4::WrapNvapi(InterfaceId, DlssNrNative::WrapNvapi(InterfaceId, functionPointer));
 }
 
 // Requires HMODULE to make sure nvapi is loaded before calling this function
@@ -390,6 +394,8 @@ void NvApiHooks::Hook(HMODULE nvapiModule)
     if (o_NvAPI_QueryInterface != nullptr)
     {
         LOG_INFO("NvAPI_QueryInterface found, hooking!");
+
+        DlssNr::Nvfp4::SetLog([](const char* line) { LOG_INFO("DLSS-NR NVFP4: {}", line ? line : ""); });
 
         constexpr bool leanMode = true;
         if (fakenvapi::isUsingAsMainNvapi())

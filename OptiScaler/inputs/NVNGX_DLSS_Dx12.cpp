@@ -1151,6 +1151,9 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
 
         if (ctxData.changeBackendCounter != 0 || !successfulPhase)
         {
+            if (shouldRestoreSigs)
+                D3D12Hooks::RestoreRoot(InCmdList);
+
             D3D12Hooks::SetRootSignatureTracking(true);
             return NVSDK_NGX_Result_Success;
         }
@@ -1176,6 +1179,9 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
         }
 
         state.changeBackend[handleId] = true;
+
+        if (shouldRestoreSigs)
+            D3D12Hooks::RestoreRoot(InCmdList);
 
         D3D12Hooks::SetRootSignatureTracking(true);
 

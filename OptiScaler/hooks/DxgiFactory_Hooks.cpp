@@ -668,7 +668,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
             ScopedSkipFGSCCreation skipFGSCCreation {};
             FGSCResult = FGHooks::CreateSwapChain(realFactory, real, &localDesc, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 State::Instance().currentSwapchainDesc = localDesc;
                 return FGSCResult;
@@ -796,7 +796,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         // HDR output (output/SdrToHdr_*), on the final desc: a frame generation swap chain returned above, so this is the
         // plain chain (or a frame generation library's own inner one)
@@ -1126,7 +1126,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                                                          pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
                                                          pRestrictToOutput, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 ((IDXGISwapChain*) *ppSwapChain)->GetDesc(&State::Instance().currentSwapchainDesc);
                 return FGSCResult;
@@ -1179,7 +1179,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                     bool fgSwapChainIsRealFG = false;
                     const bool tearingSupported = IsTearingSupported(realFactory);
 
-                    if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc, tearingSupported))
+                    if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc1(fgDesc, tearingSupported))
                     {
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
@@ -1188,10 +1188,10 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                                 pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr, pRestrictToOutput,
                                 &fgSwapChain1);
 
-                            fgSwapChainIsRealFG = fgScResult == S_OK && fgSwapChain1 != nullptr;
+                            fgSwapChainIsRealFG = SUCCEEDED(fgScResult) && fgSwapChain1 != nullptr;
                         }
 
-                        if (fgScResult != S_OK || fgSwapChain1 == nullptr)
+                        if (FAILED(fgScResult) || fgSwapChain1 == nullptr)
                         {
                             fgSwapChainIsRealFG = false;
 
@@ -1205,11 +1205,11 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                                                          pRestrictToOutput, &fgSwapChain1);
                         }
 
-                        if (fgScResult == S_OK && fgSwapChain1 != nullptr)
+                        if (SUCCEEDED(fgScResult) && fgSwapChain1 != nullptr)
                             fgSwapChain1->QueryInterface(IID_PPV_ARGS(&fgSwapChain4));
                     }
 
-                    if (realScResult == S_OK && realDx11SwapChain1 != nullptr && fgSwapChain4 != nullptr)
+                    if (SUCCEEDED(realScResult) && realDx11SwapChain1 != nullptr && fgSwapChain4 != nullptr)
                     {
                         ((IDXGISwapChain*) fgSwapChain4)->GetDesc(&State::Instance().currentSwapchainDesc);
                         State::Instance().currentSwapchainDesc.OutputWindow = hWnd;
@@ -1267,7 +1267,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         // HDR output, as in CreateSwapChain
         SdrToHdr::CreateRequest hdrRequest;
@@ -1765,7 +1765,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChain(IDXGIFactory* realFactory, IUnkno
             ScopedSkipFGSCCreation skipFGSCCreation {};
             FGSCResult = FGHooks::CreateSwapChain(realFactory, real, &localDesc, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 State::Instance().currentSwapchainDesc = localDesc;
                 return FGSCResult;
@@ -1810,7 +1810,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChain(IDXGIFactory* realFactory, IUnkno
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         SdrToHdr::NoteTwinStandDown();
 
@@ -2082,7 +2082,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForHwnd(IDXGIFactory2* realFactory
                                                          pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
                                                          pRestrictToOutput, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 ((IDXGISwapChain*) *ppSwapChain)->GetDesc(&State::Instance().currentSwapchainDesc);
                 return FGSCResult;
@@ -2128,7 +2128,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForHwnd(IDXGIFactory2* realFactory
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         SdrToHdr::NoteTwinStandDown();
 

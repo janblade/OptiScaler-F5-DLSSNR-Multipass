@@ -243,6 +243,7 @@ $sourceFiles = @(
     "setup_windows.bat",
     "setup_linux.sh",
     "get_streamline.ps1",
+    "get_compatible_fsr4.ps1",
     "README.md",
     "INSTALL-DLSSNR.md",
     "TROUBLESHOOTING.md",
@@ -277,6 +278,29 @@ Copy-Item $forwarder "$stage\nvngx.dll_dlssnr.dll" -Force
 Copy-Item -LiteralPath "$root\docs" -Destination "$stage\docs" -Recurse -Force
 New-Item -ItemType Directory -Path "$stage\redist\streamline" -Force | Out-Null
 Copy-Item -LiteralPath "$root\redist\streamline\manifest.json" -Destination "$stage\redist\streamline\manifest.json"
+
+# The optional FSR 4 override downloader ships with a pinned manifest too: no patched DLL is embedded in
+# the package, and the script refuses anything whose SHA-256 is not listed here.
+$fsr4ManifestPath = "$stage\redist\fsr4\manifest.json"
+New-Item -ItemType Directory -Path "$stage\redist\fsr4" -Force | Out-Null
+Copy-Item -LiteralPath "$root\redist\fsr4\manifest.json" -Destination $fsr4ManifestPath
+$fsr4Manifest = Get-Content -LiteralPath $fsr4ManifestPath -Raw | ConvertFrom-Json
+if (@($fsr4Manifest.archives.PSObject.Properties).Count -ne 4) {
+    throw 'REFUSING: the FSR 4 manifest must pin exactly four GPU archives.'
+}
+foreach ($archive in $fsr4Manifest.archives.PSObject.Properties) {
+    if ($archive.Value.sha256 -notmatch '^[0-9A-Fa-f]{64}$' -or $archive.Value.url -notmatch '^https://github\.com/') {
+        throw "REFUSING: bad archive URL or SHA-256 in the FSR 4 manifest: $($archive.Name)"
+    }
+    if (@($archive.Value.variants.PSObject.Properties).Count -ne 4) {
+        throw "REFUSING: FSR 4 archive $($archive.Name) must pin all four variants."
+    }
+    foreach ($hash in $archive.Value.variants.PSObject.Properties) {
+        if ($hash.Value -notmatch '^[0-9A-Fa-f]{64}$') {
+            throw "REFUSING: bad DLL SHA-256 in the FSR 4 manifest: $($archive.Name)/$($hash.Name)"
+        }
+    }
+}
 
 # An old test stack in the build directory must not silently enter a normal release. The optional
 # full application package gets only the pinned official production files, with their own licences.

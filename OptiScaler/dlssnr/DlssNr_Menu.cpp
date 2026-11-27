@@ -4995,6 +4995,21 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                    "if it flickers.\n"
                    "Re-run Tune after changing.");
 
+        // The curve only acts on a linear HDR frame. On an already tone-mapped (SDR) one the encode copies the
+        // picture and the resolve does not decode through the curve, so every composed choice is the same image
+        // and the two Replace choices are the same image too. Keep the combo enabled: Composed vs Replace still
+        // changes the result. Say why the curve itself looks inert, as the Exposure card already does.
+        const auto finalImageEncoding = DlssNr::ReadColourEncodingStatus();
+        if (finalImageEncoding.seen &&
+            finalImageEncoding.exposureState == DlssNrExposureState::State::ToneMapped)
+        {
+            ImGui::TextColored(kWarnAmber, "This frame is already tone mapped: the curve is skipped here.");
+            HelpMarker("NR gets this picture as it is, so Soft knee / Reversible / Balanced / HLG / PQ / Linear all "
+                       "compose the same way. Only Composed vs Replace changes the result on an SDR frame; Reversible "
+                       "curve + replace and Balanced curve + replace are the same. Colour decoding shows the detected "
+                       "format.");
+        }
+
         if (DlssNrProxyCurve::IsReplace((uint32_t) reversible))
         {
             float replaceDetail = config->DlssNrReplaceDetailStrength.value_or_default();

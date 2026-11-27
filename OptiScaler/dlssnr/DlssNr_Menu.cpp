@@ -4973,7 +4973,23 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         static_assert(IM_ARRAYSIZE(reversibleNames) == DlssNrProxyCurve::kCount, "one name per proxy curve");
         const uint32_t reversibleValue = config->DlssNrReversibleMode.value_or_default();
         const int reversible = DlssNrProxyCurve::Valid(reversibleValue) ? (int) reversibleValue : 0;
-        if (ImGui::BeginCombo("Final Image Composition (experimental)", reversibleNames[reversible]))
+
+        // On a tone-mapped frame the eight curves collapse to two outcomes: the composed ones give the same
+        // picture and the two Replace ones give the same picture. Offer just those two so the control does what
+        // it says instead of offering choices that cannot change an SDR frame. The full list is back on a linear
+        // HDR frame.
+        const auto finalImageEncoding = DlssNr::ReadColourEncodingStatus();
+        const bool toneMapped = finalImageEncoding.seen &&
+                                finalImageEncoding.exposureState == DlssNrExposureState::State::ToneMapped;
+        if (toneMapped)
+        {
+            static const char* sdrNames[] = { "Composed (curve skipped)", "Replace (model answer as is)" };
+            int sdrChoice = DlssNrProxyCurve::IsReplace((uint32_t) reversible) ? 1 : 0;
+            if (ImGui::Combo("Final Image Composition (SDR)", &sdrChoice, sdrNames, IM_ARRAYSIZE(sdrNames)))
+                config->DlssNrReversibleMode = sdrChoice == 1 ? DlssNrProxyCurve::kNeutwoReplace
+                                                             : DlssNrProxyCurve::kSoftKnee;
+        }
+        else if (ImGui::BeginCombo("Final Image Composition (experimental)", reversibleNames[reversible]))
         {
             for (int i = 0; i < (int) DlssNrProxyCurve::kPickable; ++i)
             {
@@ -4997,17 +5013,15 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
 
         // The curve only acts on a linear HDR frame. On an already tone-mapped (SDR) one the encode copies the
         // picture and the resolve does not decode through the curve, so every composed choice is the same image
-        // and the two Replace choices are the same image too. Keep the combo enabled: Composed vs Replace still
-        // changes the result. Say why the curve itself looks inert, as the Exposure card already does.
-        const auto finalImageEncoding = DlssNr::ReadColourEncodingStatus();
-        if (finalImageEncoding.seen &&
-            finalImageEncoding.exposureState == DlssNrExposureState::State::ToneMapped)
+        // and the two Replace choices are the same image too. Say why the control is reduced here, as the Exposure
+        // card already does for its own settings.
+        if (toneMapped)
         {
             ImGui::TextColored(kWarnAmber, "This frame is already tone mapped: the curve is skipped here.");
             HelpMarker("NR gets this picture as it is, so Soft knee / Reversible / Balanced / HLG / PQ / Linear all "
                        "compose the same way. Only Composed vs Replace changes the result on an SDR frame; Reversible "
-                       "curve + replace and Balanced curve + replace are the same. Colour decoding shows the detected "
-                       "format.");
+                       "curve + replace and Balanced curve + replace are the same. The full curve list returns on a "
+                       "linear HDR frame. Colour decoding shows the detected format.");
         }
 
         if (DlssNrProxyCurve::IsReplace((uint32_t) reversible))

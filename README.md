@@ -38,6 +38,7 @@ See the [setup guide](INSTALL-DLSSNR.md) for game-specific steps and troubleshoo
 - Neural Rendering costs performance and can cause flicker or other visual problems. Using it before Ray Reconstruction is still experimental.
 - The optional **hybrid mode** is for RTX 50 GPUs. Its files are included. Loading may pause the game and look like a freeze; please wait.
 - Avoid anti-cheat-protected multiplayer games.
+- On Radeon, the package includes an optional [FSR 4 shader override installer](docs/FSR4-OVERRIDES.md). It downloads the GPU-appropriate prebuilt DLL (`exact`, `lossy`, `lite` or `lite-lossy`) with SHA-256 checking and a reversible backup. Single-player games only; not for RX 9000.
 
 For frame generation, see the [setup notes](docs/DLSS-FRAME-GENERATION.md). More setup guides: [ReShade](docs/SETUP-RESHADE.md) · [Vulkan games and emulators](docs/SETUP-VULKAN.md) · [dxvk](docs/SETUP-DXVK.md) · [DirectX 11 games without DLSS](docs/SETUP-DX11.md). For bugs, [open an issue](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/issues) with your game, GPU, settings and `OptiScaler.log`. For questions and help, join the [Discord server](https://discord.gg/xzkNNwxbZu).
 

@@ -1,0 +1,140 @@
+{
+  "version": "dll-2026-11-22",
+  "upstream": {
+    "name": "FSR 4 shader performance overrides (cyboman)",
+    "projectUrl": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides",
+    "releaseUrl": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides/releases/tag/dll-2026-11-22",
+    "licenseUrl": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides/blob/main/LICENSE",
+    "noticeUrl": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides/blob/main/windows/prebuilt/NOTICE.md",
+    "license": "GPL-2.0-or-later; the patched DLL is AMD's DLL under the FidelityFX MIT notice with modified shaders"
+  },
+  "target": {
+    "hostFileName": "OptiScaler.dll",
+    "relativeDirectory": "OptiScaler",
+    "fileName": "amd_fidelityfx_upscaler_dx12.dll",
+    "backupSuffix": ".orig",
+    "markerName": ".fsr4-override.json"
+  },
+  "variants": {
+    "exact": {
+      "entry": "exact/amd_fidelityfx_upscaler_dx12.dll",
+      "changesImage": false,
+      "description": "AMD's picture, faster shaders"
+    },
+    "lossy": {
+      "entry": "lossy/amd_fidelityfx_upscaler_dx12.dll",
+      "changesImage": true,
+      "description": "Faster still, changes the picture"
+    },
+    "lite": {
+      "entry": "4.1.2l-exact/amd_fidelityfx_upscaler_dx12.dll",
+      "changesImage": false,
+      "description": "Lite model, AMD's Lite picture"
+    },
+    "lite-lossy": {
+      "entry": "4.1.2l-lossy/amd_fidelityfx_upscaler_dx12.dll",
+      "changesImage": true,
+      "description": "Lite model, faster still, changes the picture"
+    }
+  },
+  "archives": {
+    "rx7000": {
+      "label": "Radeon RX 7000 (Navi 3x)",
+      "file": "fsr4.1.2-cyboman-rx7000-2026-11-22.zip",
+      "url": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides/releases/download/dll-2026-11-22/fsr4.1.2-cyboman-rx7000-2026-11-22.zip",
+      "sha256": "734AD03724776CD79E324E97BEE8B55BD645A79F8F79E57B580D6A5BB3F8E826",
+      "variants": {
+        "exact": "BC0D8DAFCEBC44F89B98FEBCD45442F02231F9A5D68F3265B364A04EFB96B067",
+        "lossy": "46786D7D55EAE02888D8B999774DE5C0A504CE643A492037CE22DC5B72EF5E15",
+        "lite": "07E549564506B74026CA5230B0AF70FC33E49E6E2CAED2D812A4EB8D1210AFFC",
+        "lite-lossy": "33C0C1C8BFC18D6C8CFCD9E2701EDB72E661FBEA096F93538D845616F305F6A4"
+      }
+    },
+    "rx6000": {
+      "label": "Radeon RX 6000 (Navi 2x)",
+      "file": "fsr4.1.2-cyboman-rx6000-2026-11-22.zip",
+      "url": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides/releases/download/dll-2026-11-22/fsr4.1.2-cyboman-rx6000-2026-11-22.zip",
+      "sha256": "2D81D93647E5C78C04401CF1437BD706E2C634AC72ED051817571C5C98BE7D15",
+      "variants": {
+        "exact": "08DFCA86C15BB1D4E8D12740E68DF6F054F12434F0D9D254A76387B86A621EA0",
+        "lossy": "8D462F462EFD681AA26B51D6D1217864D907679FA4E6FF4E9381AECDAE2AD4FB",
+        "lite": "90E0117837DAD1282AC4E788191A252314461E40B50F305648430028EB4D26F6",
+        "lite-lossy": "5F17B595B5ABD9FBE19178F21912A4046BBE560929383EF889A43F7109110A43"
+      }
+    },
+    "igpu-rdna3": {
+      "label": "RDNA 3 / 3.5 integrated graphics (also the fallback for other GPUs)",
+      "file": "fsr4.1.2-igpu-cyboman-rdna3-2026-11-22.zip",
+      "url": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides/releases/download/dll-2026-11-22/fsr4.1.2-igpu-cyboman-rdna3-2026-11-22.zip",
+      "sha256": "D56A5C473B33AD7197BEB52A09EE6A664ABE6D84C29044068564C27962912E7D",
+      "variants": {
+        "exact": "D4502C7FCE211F87D0121DF13372C1970D3339EC541497E22251B2A20F82FDF4",
+        "lossy": "4F96E82FA3334F958B7F9CD2AEC36C056C1B51664EBB80593E3326680DB966DD",
+        "lite": "23F6F431A31064F9E5F657216786F1148014B44B99BE1252169EB34D24AB1CA8",
+        "lite-lossy": "29785BBB18E2F32A5574138B635FF7ACE8DD3C4D1EEBE469036D9E6E3343B8DB"
+      }
+    },
+    "igpu-rdna2": {
+      "label": "Steam Deck and RDNA2 integrated graphics",
+      "file": "fsr4.1.2-igpu-cyboman-rdna2-2026-11-22.zip",
+      "url": "https://github.com/zgauthier2000/fsr4-shader-performance-overrides/releases/download/dll-2026-11-22/fsr4.1.2-igpu-cyboman-rdna2-2026-11-22.zip",
+      "sha256": "882E92490C46A37F4A63B60897F794B2016020E69D9A41A35CA8CF1238BF917A",
+      "variants": {
+        "exact": "D30397318CBD0652DC4737B6BE79242A5AE7EAC3995870B28CF75CFC7CB4C4B1",
+        "lossy": "D376CEBF14D055F906EA3B17296FA7D59D52E2FC8626C488E63FD4197AA06433",
+        "lite": "B0BCBCAC5B81B7B6CF1718F092BDA066E00E5A4BBA1F260C4C3931EFA25A7C07",
+        "lite-lossy": "851B95D11DD007691F3743999F634E5CE20816843D6C2B63F31BE0F65ED9F2A9"
+      }
+    }
+  },
+  "originals": [
+    {
+      "sha256": "AAD4FCCCCB29084A655F9A4F9F613BD22C8C03FB4A0F8840148CC6543B4CCACE",
+      "description": "OptiScaler F5 package DLL, FSR 4.1.2.4555"
+    },
+    {
+      "sha256": "D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46",
+      "description": "AMD FidelityFX upscaler DLL, FSR 4.1.1.2740"
+    }
+  ],
+  "gpuRules": {
+    "deviceIds": {
+      "rx7000": [
+        "73A8", "73C4", "73C5", "73C8", "7448", "7449", "744A", "744B", "744C", "745E",
+        "7460", "7461", "7470", "7478", "747E", "7480", "7481", "7483", "7487", "7499",
+        "73F0"
+      ],
+      "rx6000": [
+        "73A3", "73AF", "73BF", "73DF", "73E1", "73E3", "73EF", "73FF"
+      ],
+      "igpu-rdna3": [
+        "15BF", "1900", "150E"
+      ],
+      "igpu-rdna2": [
+        "163F", "164D", "164E", "1681", "1506", "13C0"
+      ],
+      "rdna4": []
+    },
+    "namePatterns": {
+      "rx7000": [
+        "Radeon RX 7\\d{3}",
+        "Steam Machine"
+      ],
+      "rx6000": [
+        "Radeon RX 6\\d{3}"
+      ],
+      "igpu-rdna3": [
+        "Radeon (?:\\(TM\\) )?(?:780M|760M|740M|880M|890M)",
+        "Radeon 8\\d{2}M"
+      ],
+      "igpu-rdna2": [
+        "680M",
+        "660M",
+        "Steam Deck"
+      ],
+      "rdna4": [
+        "Radeon RX 9\\d{3}"
+      ]
+    }
+  }
+}

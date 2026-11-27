@@ -4,6 +4,10 @@ This fork was itself forked from [wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass](htt
 
 Colour processing is derived from [RenoDX by clshortfuse](https://github.com/clshortfuse/renodx). See the [RenoDX attribution and licence](../Licenses/RenoDX_ATTRIBUTION.txt) for details.
 
+## Optional FSR 4 shader overrides
+
+The optional `get_compatible_fsr4.ps1` downloader fetches precompiled DLLs from [zgauthier2000/fsr4-shader-performance-overrides](https://github.com/zgauthier2000/fsr4-shader-performance-overrides) (GPL-2.0-or-later). That project patches AMD's FidelityFX upscaler DLL (AMD's notice, MIT) with its own shader rewrites. No patched DLL is redistributed in this package; see [FSR4-OVERRIDES.md](FSR4-OVERRIDES.md).
+
 ## DLSS-NR exposure controls
 
 Automatic exposure from the HDR frame, the wider exposure Trim range and the Trim Anchor points are @mattjaas's work, from [wilsjo2's PR #77](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/pull/77), adapted onto this fork's code.

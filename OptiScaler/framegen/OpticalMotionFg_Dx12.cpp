@@ -49,6 +49,10 @@ struct Offer
 {
     ComPtr<ID3D12Resource> motion;
     Present present; // identities only
+    // Published by this present's producer run and not tagged yet. The producer and the tag run in the same FGPresent,
+    // one after the other; State::frameCount alone moved between them on ~15% of presents (NBA 2K27, F5Low x5,
+    // 2026-11-28), so the present is matched by this token plus the queue, picture and size, not by the count.
+    bool fresh = false;
 };
 
 std::mutex g_mutex;
@@ -168,6 +172,7 @@ void Publish(ID3D12CommandQueue* queue, ID3D12Resource* picture, ID3D12Resource*
     std::lock_guard lock(g_mutex);
     g_offer.motion = motion;
     g_offer.present = { queue, picture, epoch, width, height };
+    g_offer.fresh = true;
 }
 
 void Clear()
@@ -281,7 +286,9 @@ void KeepGameMotion(IFGFeature_Dx12* fg, int index, bool optical, ID3D12Graphics
     frame.scaleY = scaleY;
     frame.jitterX = jitterX;
     frame.jitterY = jitterY;
-    frame.resets = FgFallbackResets(lowRes, jittered);
+    // "Render-size" by the game's flag but as large as the picture (DLAA, NBA 2K27): read right at display size
+    const bool smaller = width < pictureWidth || height < pictureHeight;
+    frame.resets = FgFallbackResets(lowRes && smaller, jittered);
 }
 
 void AtPresent(IFGFeature_Dx12* fg, IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, uint64_t epoch)
@@ -317,7 +324,9 @@ void AtPresent(IFGFeature_Dx12* fg, IDXGISwapChain* swapChain, ID3D12CommandQueu
         }
     }
 
-    const bool flowForThis = g_offer.motion && SamePresent(g_offer.present, now);
+    now.epoch = g_offer.present.epoch; // matched by the token instead (Offer::fresh)
+    const bool flowForThis = g_offer.motion && g_offer.fresh && SamePresent(g_offer.present, now);
+    g_offer.fresh = false;
     const bool fits = g_offer.present.width == frame.pictureWidth && g_offer.present.height == frame.pictureHeight;
     const bool latest = index == fg->GetIndex();
     const auto tag = FgTagAtPresent(frame.optical, latest, flowForThis, fits);

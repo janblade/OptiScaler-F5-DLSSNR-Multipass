@@ -33,50 +33,6 @@ static bool ShouldCreateDx11wDx12Swapchain()
            !VkPresentBridge::DxvkThroughVulkan();
 }
 
-static bool PrepareDx12InteropDesc(DXGI_SWAP_CHAIN_DESC& desc)
-{
-    // The D3D12 side's desc, forced to one sample below; the bridge resolves the game's multisampled back buffer.
-    if (desc.SampleDesc.Count > 1)
-    {
-        LOG_INFO("Dx11wDx12 interop: the game's swapchain is multisampled ({} samples); the D3D12 side is single-sample",
-                 desc.SampleDesc.Count);
-    }
-
-    if (desc.BufferCount < 2)
-        desc.BufferCount = 2;
-
-    if (desc.SwapEffect == DXGI_SWAP_EFFECT_DISCARD)
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    else if (desc.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL)
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Windowed = TRUE;
-    return true;
-}
-
-static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
-{
-    if (desc.SampleDesc.Count > 1)
-    {
-        LOG_INFO("Dx11wDx12 interop: the game's swapchain is multisampled ({} samples); the D3D12 side is single-sample",
-                 desc.SampleDesc.Count);
-    }
-
-    if (desc.BufferCount < 2)
-        desc.BufferCount = 2;
-
-    if (desc.SwapEffect == DXGI_SWAP_EFFECT_DISCARD)
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    else if (desc.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL)
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    return true;
-}
-
 HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, WrappedIDXGIFactory7* wrappedFactory,
                                                  IUnknown* pDevice, const DXGI_SWAP_CHAIN_DESC* pDesc,
                                                  IDXGISwapChain** ppSwapChain)
@@ -276,7 +232,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
                     IDXGISwapChain4* fgSwapChain4 = nullptr;
                     bool fgSwapChainIsRealFG = false;
 
-                    if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc(fgDesc))
+                    if (SUCCEEDED(realScResult) && DxgiFactoryHooks::PrepareDx12InteropDesc(
+                                                       fgDesc, DxgiFactoryHooks::IsTearingSupported(realFactory)))
                     {
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
@@ -397,6 +354,24 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
                 SdrToHdr::Unproxy(hdrPlan, localDesc.BufferDesc.Format, result);
                 localDesc.Windowed = hdrGameWindowed;
                 result = realFactory->CreateSwapChain(pDevice, &localDesc, ppSwapChain);
+            }
+
+            // DXGI can reject our desc changes, the game's own desc works as without Opti
+            if (FAILED(result) && memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0)
+            {
+                LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+                // The game's own desc is not an HDR one: nothing of the HDR plan is left to apply
+                SdrToHdr::ClearForRetry(hdrPlan);
+                localDesc = *pDesc;
+                result = realFactory->CreateSwapChain(pDevice, &localDesc, ppSwapChain);
+
+                if (SUCCEEDED(result) && !otherWindow)
+                {
+                    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                    State::Instance().SCLastFlags = localDesc.Flags;
+                    State::Instance().realExclusiveFullscreen = !localDesc.Windowed;
+                }
             }
         }
 
@@ -715,7 +690,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
                     IDXGISwapChain4* fgSwapChain4 = nullptr;
                     bool fgSwapChainIsRealFG = false;
 
-                    if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc1(fgDesc))
+                    if (SUCCEEDED(realScResult) && DxgiFactoryHooks::PrepareDx12InteropDesc1(
+                                                       fgDesc, DxgiFactoryHooks::IsTearingSupported(realFactory)))
                     {
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
@@ -848,6 +824,33 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
                     pDevice, hWnd, &localDesc,
                     SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
                     pRestrictToOutput, ppSwapChain);
+            }
+
+            // DXGI can reject our desc changes, the game's own desc works as without Opti
+            if (FAILED(result) && (memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0 ||
+                                   (pFullscreenDesc != nullptr &&
+                                    memcmp(&localFullscreenDesc, pFullscreenDesc, sizeof(localFullscreenDesc)) != 0)))
+            {
+                LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+                // The game's own desc is not an HDR one: nothing of the HDR plan is left to apply
+                SdrToHdr::ClearForRetry(hdrPlan);
+                localDesc = *pDesc;
+
+                if (pFullscreenDesc != nullptr)
+                    localFullscreenDesc = *pFullscreenDesc;
+
+                result = realFactory->CreateSwapChainForHwnd(
+                    pDevice, hWnd, &localDesc, pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
+                    pRestrictToOutput, ppSwapChain);
+
+                if (SUCCEEDED(result) && !otherWindow)
+                {
+                    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                    State::Instance().SCLastFlags = localDesc.Flags;
+                    State::Instance().realExclusiveFullscreen =
+                        pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed;
+                }
             }
         }
 
@@ -1014,6 +1017,10 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForCoreWindow(IDXGIFactory2* rea
             State::Instance().currentCommandQueue = realQ;
             D3D12Hooks::CaptureDevice(realQ);
         }
+
+        if (!otherWindow && State::Instance().currentD3D12Device != nullptr)
+            WithDx12::SetD3D12Objects(State::Instance().currentD3D12Device, State::Instance().currentCommandQueue,
+                                      D3D12_COMMAND_LIST_TYPE_DIRECT);
     }
 
     {
@@ -1028,10 +1035,28 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForCoreWindow(IDXGIFactory2* rea
         SdrToHdr::PrepareCreate(hdrRequest, hdrFormat);
     }
 
-    State::Instance().skipDxgiLoadChecks = true;
-    auto result =
-        realFactory->CreateSwapChainForCoreWindow(pDevice, pWindow, &localDesc, pRestrictToOutput, ppSwapChain);
-    State::Instance().skipDxgiLoadChecks = false;
+    HRESULT result = E_FAIL;
+    {
+        ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
+        result =
+            realFactory->CreateSwapChainForCoreWindow(pDevice, pWindow, &localDesc, pRestrictToOutput, ppSwapChain);
+
+        // DXGI can reject our desc changes, the game's own desc works as without Opti
+        if (FAILED(result) && memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0)
+        {
+            LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+            localDesc = *pDesc;
+            result =
+                realFactory->CreateSwapChainForCoreWindow(pDevice, pWindow, &localDesc, pRestrictToOutput, ppSwapChain);
+
+            if (SUCCEEDED(result) && !otherWindow)
+            {
+                State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                State::Instance().SCLastFlags = localDesc.Flags;
+            }
+        }
+    }
 
     if (SwapchainCreate::Created(result, ppSwapChain))
     {
@@ -1057,18 +1082,28 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForCoreWindow(IDXGIFactory2* rea
         }
 
         LOG_DEBUG("Created new swapchain: {0:X}, hWnd: {1:X}", (UINT64) *ppSwapChain, (UINT64) pWindow);
-        *ppSwapChain = new WrappedIDXGISwapChain4(realSC, readDevice, (HWND) pWindow, localDesc.Flags, true, false,
-                                                  nullptr, *ppSwapChain);
 
-        if (!otherWindow)
+        WrappedIDXGISwapChain4* wrapped;
+        if ((*ppSwapChain)->QueryInterface(IID_PPV_ARGS(&wrapped)) != S_OK)
         {
-            if (!_skipFGSwapChainCreation)
-                State::Instance().currentSwapchain = *ppSwapChain;
+            *ppSwapChain = new WrappedIDXGISwapChain4(realSC, readDevice, (HWND) pWindow, localDesc.Flags, true, false,
+                                                      nullptr, *ppSwapChain);
 
-            State::Instance().currentWrappedSwapchain = *ppSwapChain;
+            if (!otherWindow)
+            {
+                if (!_skipFGSwapChainCreation)
+                    State::Instance().currentSwapchain = *ppSwapChain;
+
+                State::Instance().currentWrappedSwapchain = *ppSwapChain;
+            }
+
+            LOG_DEBUG("Created new WrappedIDXGISwapChain4: {0:X}, pDevice: {1:X}", (UINT64) *ppSwapChain,
+                      (UINT64) pDevice);
         }
-
-        LOG_DEBUG("Created new WrappedIDXGISwapChain4: {0:X}, pDevice: {1:X}", (UINT64) *ppSwapChain, (UINT64) pDevice);
+        else
+        {
+            wrapped->Release();
+        }
     }
 
     // The game can release a failed swapchain's queue
@@ -1080,6 +1115,9 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForCoreWindow(IDXGIFactory2* rea
 
 HRESULT DxgiFactoryWrappedCalls::EnumAdapters(IDXGIFactory* realFactory, UINT Adapter, IDXGIAdapter** ppAdapter)
 {
+    if (State::Instance().skipDxgiLoadChecks)
+        return realFactory->EnumAdapters(Adapter, ppAdapter);
+
     HRESULT result = S_FALSE;
 
     if (Config::Instance()->PreferFirstDedicatedGpu.value_or_default() && Adapter > 0)
@@ -1136,6 +1174,9 @@ HRESULT DxgiFactoryWrappedCalls::EnumAdapters(IDXGIFactory* realFactory, UINT Ad
 
 HRESULT DxgiFactoryWrappedCalls::EnumAdapters1(IDXGIFactory1* realFactory, UINT Adapter, IDXGIAdapter1** ppAdapter)
 {
+    if (State::Instance().skipDxgiLoadChecks)
+        return realFactory->EnumAdapters1(Adapter, ppAdapter);
+
     HRESULT result = S_FALSE;
 
     if (Config::Instance()->PreferFirstDedicatedGpu.value_or_default() && Adapter > 0)

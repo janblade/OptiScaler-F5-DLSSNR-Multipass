@@ -175,6 +175,16 @@ bool Config::Reload(std::filesystem::path iniPath)
             }
 
             FGStreamlineIgnoreOTA.set_from_config(readBool("FrameGen", "StreamlineIgnoreOTA"));
+            FGMotionSourceOptical.set_from_config(readString("FrameGen", "MotionSource", true)
+                                                      .and_then(
+                                                          [](const std::string& text) -> std::optional<bool>
+                                                          {
+                                                              if (text == "optical")
+                                                                  return true;
+                                                              if (text == "game")
+                                                                  return false;
+                                                              return std::nullopt; // auto, or anything else: game
+                                                          }));
 
             const bool canUseNvngxReplacement =
                 FGInput.value_or_default() == FGInput::NvngxFG || FGOutput.value_or_default() == FGOutput::DLSSG;
@@ -2298,6 +2308,10 @@ bool Config::SaveIni()
 
         ini.SetValue("FrameGen", "StreamlineIgnoreOTA",
                      GetBoolValue(Instance()->FGStreamlineIgnoreOTA.value_for_config()).c_str());
+        {
+            const auto optical = Instance()->FGMotionSourceOptical.value_for_config();
+            ini.SetValue("FrameGen", "MotionSource", !optical.has_value() ? "auto" : *optical ? "optical" : "game");
+        }
 
         std::string FGNvngxReplacementString = "auto";
         if (auto FGNvngxReplacementHeld = Instance()->FGNvngxReplacement.value_for_config();

@@ -1,5 +1,5 @@
-// Host check of the MotionSource=optical rules (dlssnr/DlssNr_OpticalMotion.h) and of its place among Optical F5Low's
-// motion users (dlssnr/DlssNr_NativeMode.h).
+// Host check of the MotionSource=optical rules (dlssnr/DlssNr_OpticalMotion.h), Neural Rendering's and frame
+// generation's, and of its place among Optical F5Low's motion users (dlssnr/DlssNr_NativeMode.h).
 // cl /std:c++20 /EHsc /W4 tests/nr_optical_motion_smoke.cpp
 #include "../OptiScaler/dlssnr/DlssNr_NativeMode.h"
 #include "../OptiScaler/dlssnr/DlssNr_OpticalMotion.h"
@@ -59,6 +59,58 @@ int main()
     using DlssNrNativeMode::MotionUsed;
     CHECK(MotionUsed({ .opticalForGame = true }));
     CHECK(!MotionUsed({ .nrEnabled = true, .finishedPicture = true }));
+
+    // Frame generation's choice ([FrameGen] MotionSource), apart from Neural Rendering's
+    const FgKeys fgOn { .optical = true, .fgEnabled = true, .upscalerInput = true, .xefgApiOutput = true,
+                        .nativeDx12 = true };
+    CHECK(FgWanted(fgOn));
+    CHECK(FgRefused(fgOn) == FgRefusal::None);
+    {
+        auto k = fgOn;
+        k.optical = false; // the key off: not wanted, but nothing refuses it either
+        CHECK(!FgWanted(k) && FgRefused(k) == FgRefusal::None);
+        k = fgOn;
+        k.fgEnabled = false;
+        CHECK(!FgWanted(k));
+        k = fgOn;
+        k.nativeDx12 = false; // D3D11 or Vulkan bridge
+        CHECK(!FgWanted(k) && FgRefused(k) == FgRefusal::NotNativeDx12);
+        k = fgOn;
+        k.upscalerInput = false; // FSR FG / Streamline inputs give their own motion
+        CHECK(!FgWanted(k) && FgRefused(k) == FgRefusal::NotUpscalerInput);
+        k = fgOn;
+        k.xefgApiOutput = false; // FSR frame generation, DLSS-G
+        CHECK(!FgWanted(k) && FgRefused(k) == FgRefusal::Output);
+        k = fgOn;
+        k.resourceFlip = true;
+        CHECK(!FgWanted(k) && FgRefused(k) == FgRefusal::ResourceFlip);
+        k = fgOn;
+        k.contextFits = false; // XeFG made for render-size motion: a restart
+        CHECK(!FgWanted(k) && FgRefused(k) == FgRefusal::NeedsRestart);
+    }
+
+    // The two choices are independent: frame generation's alone runs the flow, Neural Rendering's stays the game's
+    CHECK(FgWanted(fgOn) && !Wanted({ .optical = false, .nrEnabled = true, .finishedPicture = true }));
+    // ... and Neural Rendering's alone leaves frame generation on the game's
+    CHECK(Wanted({ .optical = true, .nrEnabled = true, .finishedPicture = true }) && !FgWanted({}));
+
+    // At the call: never OptiScaler's own virtual upscaler call (full Optical F5Low mode), nor several views
+    CHECK(FgAtCall(true, false, false));
+    CHECK(!FgAtCall(false, false, false));
+    CHECK(!FgAtCall(true, true, false));
+    CHECK(!FgAtCall(true, false, true));
+
+    // At the present: the flow only for the latest frame, this present, the frame generation picture's size
+    CHECK(FgTagAtPresent(false, true, true, true) == FgTag::Nothing); // the call tagged the game's
+    CHECK(FgTagAtPresent(true, true, true, true) == FgTag::Flow);
+    CHECK(FgTagAtPresent(true, false, true, true) == FgTag::GameFallback); // frame generation runs behind
+    CHECK(FgTagAtPresent(true, true, false, true) == FgTag::GameFallback); // no flow for this present
+    CHECK(FgTagAtPresent(true, true, true, false) == FgTag::GameFallback); // game renders at another size
+
+    // The fallback interpolates across its frame only when the game's motion is the flow's kind
+    CHECK(!FgFallbackResets(false, false));
+    CHECK(FgFallbackResets(true, false));
+    CHECK(FgFallbackResets(false, true));
 
     printf(fails == 0 ? "nr optical motion: ok\n" : "nr optical motion: %d FAILED\n", fails);
     return fails == 0 ? 0 : 1;

@@ -1289,6 +1289,11 @@ class Config
     bool RemovedAdaMfgUnlockSet = false;
     bool RemovedAmpereMfgUnlockSet = false;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
+    // [FrameGen] MotionSource=auto|game|optical (auto = game): true feeds frame generation Optical F5Low's flow,
+    // measured on the finished picture, instead of the game's motion vectors while the game's own upscaler keeps
+    // running (native D3D12, FGInput=upscaler, XeFG or F5Low output; framegen/OpticalMotionFg_Dx12.h). Apart from
+    // [DlssNr] MotionSource.
+    CustomOptional<bool> FGMotionSourceOptical { false };
     // [F5Low] FrameGenerator: who makes the frames in FG Output F5Low
     CustomOptional<F5Low::Generator> F5LowGenerator { F5Low::kDefaultGenerator };
     // [F5Low] KeepGameDlssg: with the DLSS-G generator the game's own nvngx_dlssg.dll is kept from loading (two DLSS-G

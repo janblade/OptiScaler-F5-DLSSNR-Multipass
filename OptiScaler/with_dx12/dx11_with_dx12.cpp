@@ -965,7 +965,10 @@ bool Dx11WithDx12::CopyUpscalerOutputToDx11(UINT frameIndex)
         return false;
     }
 
-    Dx11DeviceContext->CopyResource(cache.ParamOutput[outputIndex], cache.Output[outputIndex].SharedTexture);
+    // An already shared output is written in place, copying a resource onto itself is invalid
+    if (cache.ParamOutput[outputIndex] != static_cast<ID3D11Resource*>(cache.Output[outputIndex].SharedTexture))
+        Dx11DeviceContext->CopyResource(cache.ParamOutput[outputIndex], cache.Output[outputIndex].SharedTexture);
+
     Dx11DeviceContext->Flush();
     return true;
 }

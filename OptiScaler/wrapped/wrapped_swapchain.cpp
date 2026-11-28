@@ -10,6 +10,7 @@
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
+#include <hooks/FG_Hooks.h>
 #include <with_dx12/dx11_with_dx12_sync.h>
 #include <with_dx12/with_dx12.h>
 
@@ -363,6 +364,13 @@ static bool IsCurrentSwapchain(IDXGISwapChain* swapchain)
     return state.currentSwapchain == swapchain || state.currentWrappedSwapchain == swapchain;
 }
 
+// Game's output, the FG library's swapchain on the FG window included
+static bool IsGameOutput(IDXGISwapChain* swapchain, HWND hwnd)
+{
+    return IsCurrentSwapchain(swapchain) ||
+           (State::Instance().currentFGSwapchain != nullptr && !FGHooks::IsOtherWindowThanFG(hwnd));
+}
+
 // `proxy` and `display` are HDR output's (output/SdrToHdr_*): null for a chain it is not on. `isCurrent`: this is the
 // game's current swapchain, only that one writes State
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
@@ -400,15 +408,16 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     {
         double ftDelta = 0.0;
 
-        auto now = Util::MillisecondsNow();
-
-        if (_lastFrameTime != 0)
-            ftDelta = now - _lastFrameTime;
-
-        _lastFrameTime = now;
-
+        // Other windows' presents would shorten the game's frame time
         if (isCurrent)
         {
+            auto now = Util::MillisecondsNow();
+
+            if (_lastFrameTime != 0)
+                ftDelta = now - _lastFrameTime;
+
+            _lastFrameTime = now;
+
             State::Instance().presentFrameTime = ftDelta;
 
             if (State::Instance().currentFG == nullptr)
@@ -632,13 +641,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         {
             // DXVK returns below before the native path advances the NR epoch.
             // Count a completed Present; retain the deferred NR evaluation guard.
-            if (willPresent)
-            {
-                _frameCounter++;
-
-                if (isCurrent)
-                    State::Instance().frameCount = _frameCounter;
-            }
+            if (willPresent && isCurrent)
+                State::Instance().frameCount = ++_frameCounter;
 
             LOG_TRACE("3 {}", (UINT) presentResult);
         }
@@ -762,10 +766,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
 #endif
 
-        _frameCounter++;
-
         if (isCurrent)
-            State::Instance().frameCount = _frameCounter;
+            State::Instance().frameCount = ++_frameCounter;
     }
 
     LOG_DEBUG("Calling original present");
@@ -1203,16 +1205,16 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::QueryInterface(REFIID riid, vo
 
 ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::AddRef()
 {
-    InterlockedIncrement(&_refcount);
-    LOG_TRACE("Count: {}, caller: {}", _refcount, Util::WhoIsTheCaller(_ReturnAddress()));
-    return _refcount;
+    ULONG count = InterlockedIncrement(&_refcount);
+    LOG_TRACE("Count: {}, caller: {}", count, Util::WhoIsTheCaller(_ReturnAddress()));
+    return count;
 }
 
 ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
 {
     ULONG ret = InterlockedDecrement(&_refcount);
 
-    LOG_TRACE("Count: {}, caller: {}", _refcount, Util::WhoIsTheCaller(_ReturnAddress()));
+    LOG_TRACE("Count: {}, caller: {}", ret, Util::WhoIsTheCaller(_ReturnAddress()));
 
     if (ret == 0)
     {
@@ -1965,13 +1967,17 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetColorSpace1(DXGI_COLOR_SPAC
     if (SUCCEEDED(result))
     {
         _gameColourSpace = ColorSpace;
-        UpdateOutputColorSpace(ColorSpace);
+
+        // Not another window's swapchain, the menu's colour handling follows the game's output
+        if (IsGameOutput(this, _handle))
+            UpdateOutputColorSpace(ColorSpace);
 
         CheckForHdrOutput();
 
         LOG_INFO("Output HDR Active: {}", State::Instance().hdrOutputActive);
 
-        MenuOverlayDx::ApplyThemeStyle();
+        if (IsGameOutput(this, _handle))
+            MenuOverlayDx::ApplyThemeStyle();
     }
 
     // What one unit of the buffer means, which is the question the white point is really asking.

@@ -87,7 +87,7 @@ class IFGFeature_Vk : public virtual IFGFeature
     std::optional<VkFGResource> GetResource(FG_ResourceType type, int index = -1);
 
     static void ImageBarrier(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageLayout oldLayout,
-                             VkImageLayout newLayout);
+                             VkImageLayout newLayout, bool firstSubresourceOnly = false);
 
     // Copies the resource into target in the given format, then points the resource to the copy.
     // Formats only differing in sRGB keep the stored values, others get blitted.

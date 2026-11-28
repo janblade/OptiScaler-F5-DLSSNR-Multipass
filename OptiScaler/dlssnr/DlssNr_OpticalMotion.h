@@ -56,8 +56,9 @@ struct Choice
 // `lastWanted` is the setting the last picture was made under (kept by the caller, updated here). Only a switch of the
 // setting restarts NR's history. A present without a flow (the game skipped its upscaler for a frame, a frame
 // generation pause; NBA 2K27's menus, 2026-11-28) takes the game's motion for that one picture and keeps the history:
-// both describe the same movement, and a restart out and back again blinked the detail. A longer gap restarts anyway,
-// through the producer's own reset when the flow comes back (PublishOpticalMotion's `reset`).
+// both describe the same movement, and a restart out and back again blinked the detail. A scene cut or queue change the
+// producer saw is carried to the next picture that takes the flow (PublishOpticalMotion's `reset`); a gap without
+// Neural Rendering is FinishedHistoryGap's.
 inline Choice Choose(bool wanted, bool flowForThisPresent, bool& lastWanted)
 {
     Choice choice;

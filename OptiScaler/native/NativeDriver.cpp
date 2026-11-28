@@ -169,7 +169,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
 
     ++_diagPresents;
     _diagReady += acquired == AcquireStatus::Ready || forGame ? 1 : 0;
-    _diagWaiting += acquired == AcquireStatus::WaitingForUpscaler || forGame ? 1 : 0;
+    _diagWaiting += acquired == AcquireStatus::WaitingForUpscaler ? 1 : 0;
 
     const bool gameTookOver =
         _takeover.Update(acquired == AcquireStatus::WaitingForUpscaler || forGame, Util::MillisecondsNow());
@@ -325,7 +325,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
                                          _producer->Trust()->Mask(), input.width, input.height, epoch,
                                          result.guidesReset);
             FGOpticalMotion::Publish(source.Queue(), input.picture, _producer->Trust()->GuideMotion(), input.width,
-                                     input.height, epoch);
+                                     input.height, epoch, result.guidesReset);
         }
         else
         {

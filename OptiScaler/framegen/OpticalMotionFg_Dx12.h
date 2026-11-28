@@ -36,7 +36,7 @@ const char* RefusalText(DlssNr::OpticalMotion::FgRefusal refusal);
 // The producer (present thread): this present's flow (RGBA16F at the picture's size, .xy in pixels, current to
 // previous, resting in NON_PIXEL_SHADER_RESOURCE) measured on `picture` in a list already submitted to `queue`.
 void Publish(ID3D12CommandQueue* queue, ID3D12Resource* picture, ID3D12Resource* motion, uint32_t width,
-             uint32_t height, uint64_t epoch);
+             uint32_t height, uint64_t epoch, bool reset);
 void Clear();
 
 // XeFG's swap chain creation (XeFG and F5Low outputs), before it reads [XeFG] JitteredMV / HighResMV: with the

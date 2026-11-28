@@ -41,7 +41,13 @@ struct OpticalOffer
 {
     ComPtr<ID3D12Resource> motion, mask;
     OpticalMotion::Present present; // identities only
+    // The flow's history broke (scene cut, queue change): kept until a picture takes the flow, so a fallback present
+    // in between does not lose it
     bool reset = false;
+    // Published by this present's producer run and not taken yet. With frame generation, F5Low's own present thread
+    // moves State::frameCount between the producer and this pass inside one FGPresent (NBA 2K27, 2026-11-28), so the
+    // present is matched by this token plus the queue, picture and size, not by the count; taken once.
+    bool fresh = false;
 };
 OpticalOffer optical;
 bool lastMotionWanted = false;
@@ -811,8 +817,11 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
         frame.SubmissionEpoch = epoch;
         // The flow in place of the game's motion (DlssNr_OpticalMotion.h): picture-sized, in picture pixels, measured on
         // this picture; the depth stays the game's (its own subrect and flags). A switch of the setting starts NR over.
-        const OpticalMotion::Present thisPresent { queue, picture, epoch, (uint32_t) desc.Width, desc.Height };
-        const bool flowMatches = Late::optical.motion && OpticalMotion::SamePresent(Late::optical.present, thisPresent);
+        const OpticalMotion::Present thisPresent { queue, picture, Late::optical.present.epoch, (uint32_t) desc.Width,
+                                                   desc.Height };
+        const bool flowMatches = Late::optical.motion && Late::optical.fresh &&
+                                 OpticalMotion::SamePresent(Late::optical.present, thisPresent);
+        Late::optical.fresh = false;
         if (opticalWanted && !flowMatches)
         {
             // Why this present took the game's motion (first few only): which part of the offer did not match
@@ -822,7 +831,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
                 const auto& o = Late::optical.present;
                 LOG_INFO("DLSS-NR finished picture: no Optical F5Low flow for this present ({}), the game's motion "
                          "for it (offer: present {} {}x{}, this: present {} {}x{}, queue {}, picture {})",
-                         !Late::optical.motion ? "none offered" : o.epoch != epoch ? "other present" : "other target",
+                         !Late::optical.motion ? "none offered" : !flowMatches && o.queue == queue && o.picture == picture ? "already taken" : "other target",
                          o.epoch, o.width, o.height, epoch, desc.Width, desc.Height,
                          o.queue == queue ? "same" : "other", o.picture == picture ? "same" : "other");
             }
@@ -842,6 +851,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
             frame.MotionMatchesPicture = true;
             frame.HistoryDistrust = slot.flowMask.Get();
             frame.Reset |= Late::optical.reset;
+            Late::optical.reset = false;
         }
         frame.Reset |= source.reset;
         if (slot.depth) Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1234,7 +1244,8 @@ void PublishOpticalMotion(ID3D12CommandQueue* queue, ID3D12Resource* picture, ID
     Late::optical.motion = motion;
     Late::optical.mask = mask;
     Late::optical.present = { queue, picture, epoch, width, height };
-    Late::optical.reset = reset;
+    Late::optical.reset = Late::optical.reset || reset;
+    Late::optical.fresh = true;
 }
 
 void ClearOpticalMotion()

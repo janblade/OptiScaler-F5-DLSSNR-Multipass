@@ -53,6 +53,9 @@ struct Offer
     // one after the other; State::frameCount alone moved between them on ~15% of presents (NBA 2K27, F5Low x5,
     // 2026-11-28), so the present is matched by this token plus the queue, picture and size, not by the count.
     bool fresh = false;
+    // The flow's history broke (scene cut): kept until a frame takes the flow, which then does not interpolate across
+    // it
+    bool reset = false;
 };
 
 std::mutex g_mutex;
@@ -167,12 +170,13 @@ const char* RefusalText(FgRefusal refusal)
 }
 
 void Publish(ID3D12CommandQueue* queue, ID3D12Resource* picture, ID3D12Resource* motion, uint32_t width,
-             uint32_t height, uint64_t epoch)
+             uint32_t height, uint64_t epoch, bool reset)
 {
     std::lock_guard lock(g_mutex);
     g_offer.motion = motion;
     g_offer.present = { queue, picture, epoch, width, height };
     g_offer.fresh = true;
+    g_offer.reset = g_offer.reset || reset;
 }
 
 void Clear()
@@ -185,8 +189,12 @@ void ApplyCreationFlags()
 {
     auto* config = Config::Instance();
     auto& state = State::Instance();
+    // Intel XeFG only: F5Low takes the motion's size from each tag and the flow's jitter is 0, so its chain needs no
+    // flags of the flow's (and a chain made for them would refuse to start again once the setting goes back to Game).
+    // Not on a refused setup (a D3D11 or Vulkan bridge, ResourceFlip): the calls would tag the game's motion there.
     const bool optical = config->FGMotionSourceOptical.value_or_default() && state.activeFgInput == FGInput::Upscaler &&
-                         UsesXeFGApi(state.activeFgOutput);
+                         state.activeFgOutput == FGOutput::XeFG && state.swapchainApi == API::DX12 &&
+                         !VkPresentBridge::OutputActive() && !config->FGResourceFlip.value_or_default();
 
     std::lock_guard lock(g_mutex);
 
@@ -234,7 +242,17 @@ bool AtUpscaleCall(IFGFeature_Dx12* fg, IFeature_Dx12* feature, bool severalView
     g_applied = optical;
 
     for (auto& frame : g_frames)
+    {
         frame.optical = false;
+
+        // Off: nothing is kept for a fallback any more
+        if (!optical)
+        {
+            frame.haveGame = false;
+            Drop(frame.gameCopy);
+            Drop(frame.flowHeld);
+        }
+    }
 
     if (optical)
     {
@@ -301,6 +319,11 @@ void AtPresent(IFGFeature_Dx12* fg, IDXGISwapChain* swapChain, ID3D12CommandQueu
     if (!g_applied.load())
         return;
 
+    // No new frame for frame generation on this present (the game skipped its upscaler call): nothing is dispatched,
+    // and the slot below would be an old one
+    if (fg->IsDispatched())
+        return;
+
     const int index = fg->GetIndexWillBeDispatched();
     auto& frame = g_frames[index];
 
@@ -358,6 +381,12 @@ void AtPresent(IFGFeature_Dx12* fg, IDXGISwapChain* swapChain, ID3D12CommandQueu
         resource.width = g_offer.present.width;
         resource.height = g_offer.present.height;
         ++g_counts.flow;
+
+        if (g_offer.reset)
+        {
+            g_offer.reset = false;
+            fg->SetReset(1, index);
+        }
     }
     else
     {

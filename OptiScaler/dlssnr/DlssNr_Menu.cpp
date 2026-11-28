@@ -3712,7 +3712,8 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
 
             // [DlssNr] MotionSource is chosen on the Optical F5Low page (RenderGameUpscalerMotion); only its state here
             if (config->DlssNrMotionSourceOptical.value_or_default())
-                ImGui::TextDisabled("Motion: Optical F5Low (set on the Optical F5Low page)");
+                ImGui::TextDisabled(beforeSr ? "Motion: the game's (Optical F5Low is not used before Super Resolution)"
+                                             : "Motion: Optical F5Low (set on the Optical F5Low page)");
         }
 
         bool deferredDlss = config->DlssNrDeferredDlss.value_or_default();

@@ -7,6 +7,7 @@
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <dlssnr/DlssNr_NativeMode.h>
 #include <dlssnr/DlssNr_OpticalMotion.h>
+#include <framegen/OpticalMotionFg_Dx12.h>
 
 #include <imgui/imgui.h>
 
@@ -41,13 +42,24 @@ bool NativeDriver::MotionUsed()
           cfg->DlssNrNativeDebugView.value_or_default() });
 }
 
-bool NativeDriver::OpticalForGameWanted()
+bool NativeDriver::OpticalForNrWanted()
 {
     auto* cfg = Config::Instance();
     return DlssNr::OpticalMotion::Wanted(
         { cfg->DlssNrMotionSourceOptical.value_or_default(), cfg->DlssNrEnabled.value_or_default(),
           cfg->DlssNrFinishedPicture.value_or_default(),
           cfg->DlssNrRunBeforeSr.value_or_default() || cfg->DlssNrDeferredDlss.value_or_default() });
+}
+
+bool NativeDriver::OpticalForFgWanted() { return FGOpticalMotion::Wanted(); }
+
+bool NativeDriver::OpticalForGameWanted() { return OpticalForNrWanted() || OpticalForFgWanted(); }
+
+// Who takes the flow beside the game's upscaler, for the log and the status line
+static const char* OpticalUsers()
+{
+    const bool nr = NativeDriver::OpticalForNrWanted(), fg = NativeDriver::OpticalForFgWanted();
+    return nr && fg ? "Neural Rendering and frame generation" : fg ? "frame generation" : "Neural Rendering";
 }
 
 bool NativeDriver::Enabled()
@@ -85,8 +97,9 @@ void NativeDriver::LogDiagnostics()
              _diagNative, _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
 
     if (_producer != nullptr && _producer->GpuStats().Frames() > 0)
-        LOG_INFO("{}: {}{}", _tag, _producer->GpuStats().Report(),
-                 _opticalRan ? " (motion only, no depth, for Neural Rendering beside the game's upscaler)" : "");
+        LOG_INFO("{}: {}{}{}{}", _tag, _producer->GpuStats().Report(),
+                 _opticalRan ? " (motion only, no depth, for " : "", _opticalRan ? OpticalUsers() : "",
+                 _opticalRan ? " beside the game's upscaler)" : "");
 }
 
 NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView)
@@ -109,6 +122,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
         {
             _opticalRan = false;
             DlssNr::ClearOpticalMotion();
+            FGOpticalMotion::Clear();
         }
 
         if (_status != Status::Idle)
@@ -147,6 +161,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     {
         _opticalRan = false;
         DlssNr::ClearOpticalMotion();
+        FGOpticalMotion::Clear();
 
         if (_producer)
             _producer->Reset();
@@ -299,15 +314,24 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     {
         _opticalRan = true;
 
+        const uint64_t epoch = PresentEpoch(source.GetApi(), State::Instance().frameCount,
+                                            State::Instance().vulkanPresentCount.load(std::memory_order_relaxed));
+
+        // Frame generation takes the same guides at this present (framegen/OpticalMotionFg_Dx12.h), when its own
+        // setting asks for them
         if (result.submitted && result.guidesBuilt)
-            DlssNr::PublishOpticalMotion(
-                source.Queue(), input.picture, _producer->Trust()->GuideMotion(), _producer->Trust()->Mask(),
-                input.width, input.height,
-                PresentEpoch(source.GetApi(), State::Instance().frameCount,
-                             State::Instance().vulkanPresentCount.load(std::memory_order_relaxed)),
-                result.guidesReset);
+        {
+            DlssNr::PublishOpticalMotion(source.Queue(), input.picture, _producer->Trust()->GuideMotion(),
+                                         _producer->Trust()->Mask(), input.width, input.height, epoch,
+                                         result.guidesReset);
+            FGOpticalMotion::Publish(source.Queue(), input.picture, _producer->Trust()->GuideMotion(), input.width,
+                                     input.height, epoch);
+        }
         else
+        {
             DlssNr::ClearOpticalMotion();
+            FGOpticalMotion::Clear();
+        }
     }
 
     // Nothing ran on native input this frame (no NR mode, or the producer was not ready): NR's history must not reach across
@@ -402,13 +426,14 @@ void NativeDriver::DrawStatus()
         ImGui::TextDisabled("Could not start: %s", _failure.c_str());
         return;
     case Status::OpticalForGame:
-        ImGui::TextDisabled(
-            "Optical F5Low motion goes to Neural Rendering on the finished picture; the game's upscaler "
-            "keeps running.");
+        ImGui::TextDisabled("Optical F5Low motion goes to %s, measured on the finished picture; the game's upscaler "
+                            "keeps running.",
+                            OpticalUsers());
         return;
     case Status::OpticalNoGameUpscaler:
-        ImGui::TextDisabled("Optical F5Low motion for Neural Rendering waits for the game's upscaler (DLSS, FSR or "
-                            "XeSS on in the game).");
+        ImGui::TextDisabled("Optical F5Low motion for %s waits for the game's upscaler (DLSS, FSR or XeSS on in the "
+                            "game).",
+                            OpticalUsers());
         return;
     case Status::Running:
         break;

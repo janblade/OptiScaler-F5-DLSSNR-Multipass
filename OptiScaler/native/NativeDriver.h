@@ -60,8 +60,11 @@ class NativeDriver
     // the flow (the virtual upscaler is released and the status goes back to Off).
     bool Enabled();
 
-    // [DlssNr] MotionSource=optical with Neural Rendering at the Finished Picture, the model on the finished picture
-    // (DlssNr::OpticalMotion::Wanted on the config).
+    // Whether the flow runs beside the game's upscaler: for Neural Rendering ([DlssNr] MotionSource=optical at the
+    // Finished Picture with the model on the finished picture, DlssNr::OpticalMotion::Wanted), for frame generation
+    // ([FrameGen] MotionSource=optical, FGOpticalMotion::Wanted), or either.
+    static bool OpticalForNrWanted();
+    static bool OpticalForFgWanted();
     static bool OpticalForGameWanted();
 
     // Whether anything reads the motion this frame (DlssNrNativeMode::MotionUsed on the config): without, RunFrame runs

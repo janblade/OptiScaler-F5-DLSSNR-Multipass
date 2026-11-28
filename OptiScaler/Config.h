@@ -297,6 +297,9 @@ class Config
     // post-SR placement regardless of this setting.
     CustomOptional<bool> DlssNrRunBeforeSr { false };
     CustomOptional<bool> DlssNrFinishedPicture { false };
+    // [DlssNr] MotionSource=auto|game|optical (auto = game): true takes Optical F5Low's flow as NR's motion at the
+    // Finished Picture while the game's own upscaler keeps running (native D3D12; dlssnr/DlssNr_OpticalMotion.h).
+    CustomOptional<bool> DlssNrMotionSourceOptical { false };
     // Finished Picture on a game that renders on another queue than it presents on: how the present waits for the
     // frame (DlssNr_CrossQueueGate.h). 0 never (skip frames still rendering, as 0.1.39), 1 always, 2 always except
     // for a short settle after frame generation or the upscaler changes, 3 only while OptiScaler's frame generation

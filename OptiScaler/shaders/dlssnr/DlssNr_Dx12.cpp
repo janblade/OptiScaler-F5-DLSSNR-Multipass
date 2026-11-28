@@ -53,6 +53,7 @@
 #include "DlssNr_ExposureFoundBlend.h"
 #include "DlssNr_ExposureMeter.h"
 #include "DlssNr_FinishedReady.h"
+#include <dlssnr/DlssNr_OpticalMotion.h>
 #include <native/NativeLowLatencyRule.h>
 #include <dlssnr/DlssNr_StreamlinePicture.h>
 #include <dlssnr/DlssNr_GameDefaults.h>

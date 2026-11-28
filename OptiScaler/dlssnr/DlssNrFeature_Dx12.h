@@ -196,6 +196,15 @@ bool ReleaseFinishedIdle(ID3D12GraphicsCommandList* cmd, unsigned long long epoc
 // starts its history over instead of blending with the picture from before the gap. The two entries above do this
 // themselves for a frame they did not run on.
 void NativeInputSkipped();
+// [DlssNr] MotionSource=optical on a native D3D12 game that calls its own upscaler (dlssnr/DlssNr_OpticalMotion.h):
+// Optical F5Low's guides for this present, measured on `picture` in a list already submitted to `queue`. The Finished
+// Picture pass of the same present on the same queue takes `motion` (RGBA16F at the picture's size, .xy in pixels,
+// current to previous, resting in NON_PIXEL_SHADER_RESOURCE) and `mask` (the trust mask) instead of the game's motion;
+// any other present keeps the game's. `reset`: the flow does not continue the last frame's. Clear drops what was
+// offered (the flow stopped).
+void PublishOpticalMotion(ID3D12CommandQueue* queue, ID3D12Resource* picture, ID3D12Resource* motion,
+                          ID3D12Resource* mask, uint32_t width, uint32_t height, unsigned long long epoch, bool reset);
+void ClearOpticalMotion();
 // The colour space of a swap chain's picture, from what the game set (SDR when it set nothing), for a native-input frame.
 DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);

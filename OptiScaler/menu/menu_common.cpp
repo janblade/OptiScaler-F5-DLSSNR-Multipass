@@ -70,6 +70,7 @@
 #include <low_latency/input/input_common.h>
 #include <menu/MenuCard.h>
 #include <menu/FgStatusRule.h>
+#include <framegen/OpticalMotionFg_Dx12.h>
 
 enum class UiTargetMode
 {
@@ -4290,6 +4291,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::EndTable();
         }
 
+        // [FrameGen] MotionSource is chosen on the Optical F5Low page; only its state here
+        if (setupCard.IsOpen() && config->FGMotionSourceOptical.value_or_default())
+            ImGui::TextDisabled("Motion: Optical F5Low (set on the Optical F5Low page)");
+
         // Should be on a new line
         if (setupCard.IsOpen() && showNvngxFgDowndown)
         {
@@ -4565,7 +4570,9 @@ MenuCommon::XeFGRunChecks MenuCommon::CheckXeFGRun(RenderMenuContext& ctx, IFGFe
     if (state.activeFgInput == FGInput::Upscaler && ctx.currentFeature != nullptr)
         nativeAA = ctx.currentFeature->RenderWidth() == ctx.currentFeature->DisplayWidth();
 
-    checks.correctMVs = fg->IsLowResMV() || nativeAA ||
+    // Optical F5Low's flow ([FrameGen] MotionSource=optical) is display-size and the picture's own, like native AA
+    const bool flowMotion = state.activeFgInput == FGInput::Upscaler && FGOpticalMotion::ContextTakesFlow();
+    checks.correctMVs = fg->IsLowResMV() || nativeAA || flowMotion ||
                         (State::Instance().gameQuirks & GameQuirk::ForceFGRenderSizeMVs) || checks.ignoreChecks;
 
     checks.restartNeeded = config->FGXeFGDepthInverted.value_or_default() != fg->IsInvertedDepth() ||

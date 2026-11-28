@@ -297,6 +297,9 @@ class Config
     // post-SR placement regardless of this setting.
     CustomOptional<bool> DlssNrRunBeforeSr { false };
     CustomOptional<bool> DlssNrFinishedPicture { false };
+    // [DlssNr] MotionSource=auto|game|optical (auto = game): true takes Optical F5Low's flow as NR's motion at the
+    // Finished Picture while the game's own upscaler keeps running (native D3D12; dlssnr/DlssNr_OpticalMotion.h).
+    CustomOptional<bool> DlssNrMotionSourceOptical { false };
     // Finished Picture on a game that renders on another queue than it presents on: how the present waits for the
     // frame (DlssNr_CrossQueueGate.h). 0 never (skip frames still rendering, as 0.1.39), 1 always, 2 always except
     // for a short settle after frame generation or the upscaler changes, 3 only while OptiScaler's frame generation
@@ -1286,6 +1289,11 @@ class Config
     bool RemovedAdaMfgUnlockSet = false;
     bool RemovedAmpereMfgUnlockSet = false;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
+    // [FrameGen] MotionSource=auto|game|optical (auto = game): true feeds frame generation Optical F5Low's flow,
+    // measured on the finished picture, instead of the game's motion vectors while the game's own upscaler keeps
+    // running (native D3D12, FGInput=upscaler, XeFG or F5Low output; framegen/OpticalMotionFg_Dx12.h). Apart from
+    // [DlssNr] MotionSource.
+    CustomOptional<bool> FGMotionSourceOptical { false };
     // [F5Low] FrameGenerator: who makes the frames in FG Output F5Low
     CustomOptional<F5Low::Generator> F5LowGenerator { F5Low::kDefaultGenerator };
     // [F5Low] KeepGameDlssg: with the DLSS-G generator the game's own nvngx_dlssg.dll is kept from loading (two DLSS-G

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Upscaler_Inputs_Dx12.h"
 #include <hudfix/Hudfix_Dx12.h>
+#include <framegen/OpticalMotionFg_Dx12.h>
 #include <resource_tracking/ResTrack_dx12.h>
 #include "shaders/depth_scale/DS_Dx12.h"
 #include "MathUtils.h"
@@ -195,6 +196,11 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
     const UINT pictureWidth = multi.active ? multi.outputWidth : feature->DisplayWidth();
     const UINT pictureHeight = multi.active ? multi.outputHeight : feature->DisplayHeight();
 
+    // [FrameGen] MotionSource=optical (framegen/OpticalMotionFg_Dx12.h): this frame's motion for frame generation is
+    // Optical F5Low's flow, tagged at the present. Described as the flow's (display-size, unjittered, scale 1, no
+    // jitter) every frame it is on, so nothing toggles.
+    const bool opticalMotion = FGOpticalMotion::AtUpscaleCall(fg, feature, multi.active);
+
     FG_Constants fgConstants {};
     fgConstants.displayWidth = pictureWidth;
     fgConstants.displayHeight = pictureHeight;
@@ -205,10 +211,10 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
     if (feature->DepthInverted())
         fgConstants.flags |= FG_Flags::InvertedDepth;
 
-    if (feature->JitteredMV())
+    if (feature->JitteredMV() && !opticalMotion)
         fgConstants.flags |= FG_Flags::JitteredMVs;
 
-    if (!feature->LowResMV())
+    if (!feature->LowResMV() || opticalMotion)
         fgConstants.flags |= FG_Flags::DisplayResolutionMVs;
 
     if (Config::Instance()->FGAsync.value_or_default())
@@ -237,8 +243,8 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
     auto aspectRatio = (float) pictureWidth / (float) pictureHeight;
     fg->SetCameraValues(cameraNear, cameraFar, cameraVFov, aspectRatio, meterFactor);
     fg->SetFrameTimeDelta(State::Instance().lastFGFrameTime);
-    fg->SetMVScale(mvScaleX, mvScaleY);
-    fg->SetJitter(jitterX, jitterY);
+    fg->SetMVScale(opticalMotion ? 1.0f : mvScaleX, opticalMotion ? 1.0f : mvScaleY);
+    fg->SetJitter(opticalMotion ? 0.0f : jitterX, opticalMotion ? 0.0f : jitterY);
     fg->SetReset(reset);
     fg->SetInterpolationRect(pictureWidth, pictureHeight);
 
@@ -269,7 +275,16 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
         if (InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramVelocity) != NVSDK_NGX_Result_Success)
             InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, (void**) &paramVelocity);
 
-        if (paramVelocity != nullptr)
+        // Optical: the flow is tagged at the present; the game's motion vectors are copied for a present without one
+        FGOpticalMotion::KeepGameMotion(
+            fg, fg->GetIndex(), opticalMotion, commandList, opticalMotion ? paramVelocity : nullptr,
+            (D3D12_RESOURCE_STATES) Config::Instance()->MVResourceBarrier.value_or(
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+            feature->LowResMV() ? feature->RenderWidth() : feature->TargetWidth(),
+            feature->LowResMV() ? feature->RenderHeight() : feature->TargetHeight(), mvScaleX, mvScaleY, jitterX,
+            jitterY, feature->LowResMV(), feature->JitteredMV(), pictureWidth, pictureHeight);
+
+        if (paramVelocity != nullptr && !opticalMotion)
         {
             Dx12Resource setResource {};
             setResource.type = FG_ResourceType::Velocity;

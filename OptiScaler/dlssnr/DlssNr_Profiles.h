@@ -35,6 +35,7 @@ inline constexpr std::string_view kKeptKeys[] = {
     "RunBeforeSR",
     "DeferredDLSS",
     "FinishedPicture",
+    "MotionSource",
     "Precision",
     "Preset",
     "WeightsSetA",

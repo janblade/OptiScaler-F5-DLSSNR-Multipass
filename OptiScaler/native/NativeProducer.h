@@ -76,6 +76,10 @@ class NativeProducer
     struct Options
     {
         bool apply = false;           // run the consumer (needs flow; depth is optional); off: flow and trust mask only
+        // No consumer, but the guides are built for someone who reads them after this list (MotionSource=optical: the
+        // Finished Picture pass on the same queue). Result::guidesBuilt says when they are this frame's; the consumer's
+        // reset request is handed over in Result::guidesReset instead.
+        bool guidesOnly = false;
         bool flowPreview = false;     // also draw the flow picture for the menu
         float previewMaxSpeed = 24.0f; // pixels per frame that show as full brightness
         int previewView = 0;           // which debug view (native/FlowDebugViews.h)
@@ -92,6 +96,8 @@ class NativeProducer
         bool sceneCut = false;   // the mask saw a hard cut: the histories were reset
         float distrustedShare = 0.0f;
         bool nativeRan = false;  // the consumer ran on the picture
+        bool guidesBuilt = false;        // Options::guidesOnly: Trust()->GuideMotion() and Mask() are this frame's
+        bool guidesReset = false;        // ... and they do not continue the last frame's (a cut, a reset)
         bool previewDrawn = false;       // the debug view was drawn this frame (Options::flowPreview)
         bool queueChanged = false;       // the caller's queue is not the last list's (for the log)
         const char* stoppedAt = nullptr; // when nothing was submitted: the step that gave up (for the log)

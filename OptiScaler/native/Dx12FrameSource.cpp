@@ -2,6 +2,8 @@
 
 #include "Dx12FrameSource.h"
 
+#include "NativeDriver.h"
+
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
 #include <output/SdrToHdr_ProxyDx12.h>
@@ -66,9 +68,11 @@ AcquireStatus Dx12FrameSource::Acquire(FrameInput& input)
     if (_swapChain == nullptr || _queue == nullptr)
         return AcquireStatus::Unavailable;
 
-    // The game has an upscaler of its own: this is not the case the producer is for, and the pictures before and after a
-    // change would be compared across it.
-    if (GenericDepthDx12::GameCallsUpscaler())
+    // The game has an upscaler of its own: this is not the case the producer is for, and the pictures before and after
+    // a change would be compared across it. Unless MotionSource=optical wants the flow on the finished picture anyway.
+    const bool gameUpscaler = GenericDepthDx12::GameCallsUpscaler();
+
+    if (gameUpscaler && !NativeDriver::OpticalForGameWanted())
         return AcquireStatus::WaitingForUpscaler;
 
     IDXGISwapChain3* chain3 = nullptr;
@@ -95,6 +99,10 @@ AcquireStatus Dx12FrameSource::Acquire(FrameInput& input)
     input.colorSpace = ToColorSpace(DlssNr::NativeInputColourSpace(_swapChain, desc.Format));
     input.width = (uint32_t) desc.Width;
     input.height = desc.Height;
+
+    // No depth: NR takes the game's own from its upscaler call, and the flow runs on the picture alone.
+    if (gameUpscaler)
+        return AcquireStatus::ReadyForGameUpscaler;
 
     // The scene's depth as the finder copied it this frame (none yet: the producer then runs the flow only), resolved
     // on the producer's queue when the game's buffer is multisampled.

@@ -5,6 +5,8 @@ using Microsoft::WRL::ComPtr;
 struct Slot
 {
     ComPtr<ID3D12Resource> depth, motion, linear, encoded, residual;
+    // Optical F5Low's guides the slot's list read in place of `motion` (MotionSource=optical): held until it records again
+    ComPtr<ID3D12Resource> flowMotion, flowMask;
     ComPtr<ID3D12Fence> fence;
     // Signalled to `ready` on the producer queue right after `fence`; a present on another queue waits on it on the GPU.
     // Apart from `fence` because the watchdog may signal it from the CPU (DlssNr_CrossQueueGate.h).
@@ -32,6 +34,23 @@ bool nativeReset = true;
 // Capture epoch of the last picture NR ran on with a Vulkan game's own guides (ApplyFinishedGameGuides); 0: none yet
 // (FinishedHistoryGap), and again after a frame NR did not run on.
 uint64_t gameGuidesApplied = 0;
+
+// What the native producer offered for one present (DlssNr::PublishOpticalMotion), and the source the last finished
+// picture was given (DlssNr_OpticalMotion.h). Held: the producer may replace its guides while a list still reads them.
+struct OpticalOffer
+{
+    ComPtr<ID3D12Resource> motion, mask;
+    OpticalMotion::Present present; // identities only
+    // The flow's history broke (scene cut, queue change): kept until a picture takes the flow, so a fallback present
+    // in between does not lose it
+    bool reset = false;
+    // Published by this present's producer run and not taken yet. With frame generation, F5Low's own present thread
+    // moves State::frameCount between the producer and this pass inside one FGPresent (NBA 2K27, 2026-11-28), so the
+    // present is matched by this token plus the queue, picture and size, not by the count; taken once.
+    bool fresh = false;
+};
+OpticalOffer optical;
+bool lastMotionWanted = false;
 
 // Native input's HDR10 scratch pair (no slot to keep it in): NR's linear scRGB picture and the PQ result in the picture's
 // own format. Recreated when the picture's size or format changes. A replaced buffer is kept until the frame number has
@@ -682,6 +701,9 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
     const auto epoch = State::Instance().frameCount;
     const bool residualOnly = Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
                               Config::Instance()->DlssNrDeferredDlss.value_or_default();
+    // MotionSource=optical: the motion Optical F5Low measured on this very picture, in this present, on this queue
+    const bool opticalWanted = OpticalMotion::Wanted({ Config::Instance()->DlssNrMotionSourceOptical.value_or_default(),
+                                                       true, true, residualOnly });
     std::array<FinishedInput, std::tuple_size_v<decltype(Late::slots)>> inputs {};
     size_t index = 0;
     const auto pick = SelectFinishedInput(queue, desc, residualOnly, gameFrameHandoff, snapshot, index, inputs);
@@ -793,6 +815,45 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
                                                                               slot.frame.SubmissionEpoch,
                                                                               Late::PresentsPerGameFrame()));
         frame.SubmissionEpoch = epoch;
+        // The flow in place of the game's motion (DlssNr_OpticalMotion.h): picture-sized, in picture pixels, measured on
+        // this picture; the depth stays the game's (its own subrect and flags). A switch of the setting starts NR over.
+        const OpticalMotion::Present thisPresent { queue, picture, Late::optical.present.epoch, (uint32_t) desc.Width,
+                                                   desc.Height };
+        const bool flowMatches = Late::optical.motion && Late::optical.fresh &&
+                                 OpticalMotion::SamePresent(Late::optical.present, thisPresent);
+        Late::optical.fresh = false;
+        if (opticalWanted && !flowMatches)
+        {
+            // Why this present took the game's motion (first few only): which part of the offer did not match
+            static uint32_t refused = 0;
+            if (refused++ < 16)
+            {
+                const auto& o = Late::optical.present;
+                LOG_INFO("DLSS-NR finished picture: no Optical F5Low flow for this present ({}), the game's motion "
+                         "for it (offer: present {} {}x{}, this: present {} {}x{}, queue {}, picture {})",
+                         !Late::optical.motion ? "none offered" : !flowMatches && o.queue == queue && o.picture == picture ? "already taken" : "other target",
+                         o.epoch, o.width, o.height, epoch, desc.Width, desc.Height,
+                         o.queue == queue ? "same" : "other", o.picture == picture ? "same" : "other");
+            }
+        }
+        const auto source = OpticalMotion::Choose(opticalWanted, flowMatches, Late::lastMotionWanted);
+        ID3D12Resource* motion = slot.motion.Get();
+        slot.flowMotion.Reset();
+        slot.flowMask.Reset();
+        if (source.optical)
+        {
+            slot.flowMotion = Late::optical.motion;
+            slot.flowMask = Late::optical.mask;
+            motion = slot.flowMotion.Get();
+            frame.MvScaleX = frame.MvScaleY = 1.0f;
+            frame.MotionVectorsLowResolution = false;
+            frame.MotionSubrectBaseX = frame.MotionSubrectBaseY = 0;
+            frame.MotionMatchesPicture = true;
+            frame.HistoryDistrust = slot.flowMask.Get();
+            frame.Reset |= Late::optical.reset;
+            Late::optical.reset = false;
+        }
+        frame.Reset |= source.reset;
         if (slot.depth) Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         DlssNrNative::SetPrecision(Config::Instance()->DlssNrPrecision.value_or_default());
@@ -819,7 +880,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
             }
         }
         if (colorReady)
-            g_compose->Dispatch(cmd, nrColor, slot.depth.Get(), slot.motion.Get(), nrColor, frame, queue);
+            g_compose->Dispatch(cmd, nrColor, slot.depth.Get(), motion, nrColor, frame, queue);
         if (pq && colorReady && g_nr.successfulDispatches > before && Config::Instance()->DlssNrApplyModel.value_or_default())
         {
             RecordPqEncode(cmd, slot.linear.Get(), color.Get(), D3D12_RESOURCE_STATE_PRESENT, slot.encoded.Get(),
@@ -852,6 +913,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
         Late::lastAppliedEpoch = slot.frame.SubmissionEpoch;
     Late::Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden."
               : ran ? (slot.residualOnly  ? "Applying the pre-SR changes to the finished picture."
+                       : slot.flowMotion  ? "Applying Neural Rendering to the finished picture (motion: Optical F5Low)."
                        : gameFrameHandoff ? "Applying NR before Streamline interpolation."
                                           : "Applying NR to the finished picture.")
                     : "Preparing NR for the finished picture.");
@@ -1173,6 +1235,23 @@ static bool ApplyFinishedPictureInput(ID3D12CommandQueue* queue, ID3D12GraphicsC
         LOG_INFO("DLSS-NR {}: {} frames, {}x{}", fromVirtualUpscaler ? "on the virtual upscaler's picture" : "native input",
                  Late::successes, desc.Width, desc.Height);
     return ran;
+}
+
+void PublishOpticalMotion(ID3D12CommandQueue* queue, ID3D12Resource* picture, ID3D12Resource* motion,
+                          ID3D12Resource* mask, uint32_t width, uint32_t height, unsigned long long epoch, bool reset)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    Late::optical.motion = motion;
+    Late::optical.mask = mask;
+    Late::optical.present = { queue, picture, epoch, width, height };
+    Late::optical.reset = Late::optical.reset || reset;
+    Late::optical.fresh = true;
+}
+
+void ClearOpticalMotion()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    Late::optical = Late::OpticalOffer {};
 }
 
 void NativeInputSkipped()

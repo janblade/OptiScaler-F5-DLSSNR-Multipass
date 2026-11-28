@@ -7,6 +7,8 @@
 //   - the picture is left exactly as it was (bit for bit) when NR does nothing, whatever state it came in,
 //   - the output's fence point completes, and a hard cut is reported and makes the next NR call a reset,
 //   - a cut hint from the adapter restarts the flow,
+//   - guides only (MotionSource=optical): the guides are built without a consumer, picture-sized, current to previous,
+//     with the reset handed over, and NR's guide regions for render-size depth + output-size motion (MVLowRes off),
 //   - the debug views (PR #232): nothing is made for them until one is asked for; each of the seven draws a picture;
 //     the depth view's look (multiplier, linearization) leaves the depth the consumer gets alone, and the depth
 //     alignment moves that depth the way the menu says (DepthAlign_Dx12.h).
@@ -32,6 +34,7 @@
 #include <vector>
 
 #include "../OptiScaler/native/NativeProducer.h"
+#include "../OptiScaler/shaders/dlssnr/DlssNr_Guides.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -851,6 +854,134 @@ int main()
             ok &= Check("... and NR's history restarts after the skipped frame", nr.count != resetsBefore && nr.reset);
             keep.clear();
         }
+    }
+
+    printf("guides only, for the Finished Picture beside the game's upscaler (MotionSource=optical)\n");
+    {
+        // A producer of its own, as NativeDriver keeps it while the game calls its upscaler: no depth (the finder
+        // stands down), no consumer; the guides are built for the Finished Picture pass that runs after the list.
+        native::NativeProducer optical;
+        ok &= Check("made", optical.Init(gpu.device.Get()));
+
+        native::NativeProducer::Options guidesOnly;
+        guidesOnly.guidesOnly = true;
+        const int calls = nr.count;
+        native::NativeProducer::Result r;
+        int built = 0;
+
+        for (int k = 0; k < 8; ++k)
+        {
+            auto picture = Colour(gpu, Scene { 7, 300.0f + 12.0f * k, 20.0f, 5.0f });
+            Change(gpu, picture.Get(), kRead, kPresent);
+            gpu.Submit();
+
+            native::FrameInput input;
+            input.picture = picture.Get();
+            input.pictureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            input.pictureState = kPresent;
+            input.width = kWidth;
+            input.height = kHeight;
+            r = optical.Run(gpu.queue.Get(), input, guidesOnly, applyNr, output);
+            built += r.guidesBuilt ? 1 : 0;
+
+            if (k == 0)
+                ok &= Check("first frame: no flow, no guides", r.submitted && !r.guidesBuilt);
+
+            output.done.fence->SetEventOnCompletion(output.done.value, gpu.event);
+            WaitForSingleObject(gpu.event, 5000);
+        }
+
+        ok &= Check("later frames: the guides are built and say so", r.submitted && r.guidesBuilt && built >= 5);
+        ok &= Check("the consumer is never called, nothing is processed", nr.count == calls && !output.processed);
+
+        ID3D12Resource* motion = optical.Trust()->GuideMotion();
+        const auto motionDesc = motion->GetDesc();
+        ok &= Check("the motion is RGBA16F at the picture's size", motionDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+                                                                   motionDesc.Width == kWidth &&
+                                                                   motionDesc.Height == kHeight);
+        ok &= Check("the trust mask is there for the history distrust", optical.Trust()->Mask() != nullptr);
+
+        // In picture pixels, current to previous (the game's motion vector direction): the square moved 12 px right,
+        // so a pixel inside it came from 12 px to its left
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+        UINT64 total = 0;
+        gpu.device->GetCopyableFootprints(&motionDesc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+        auto readback = gpu.Buffer(total, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        Change(gpu, motion, kRead, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
+        dst.pResource = readback.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = fp;
+        src.pResource = motion;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        Change(gpu, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, kRead);
+        gpu.Submit();
+
+        const auto half = [](uint16_t h)
+        {
+            const uint32_t sign = (h & 0x8000u) << 16, exponent = (h >> 10) & 0x1F, mantissa = h & 0x3FF;
+            uint32_t bits = exponent == 0 ? sign : sign | ((exponent - 15 + 127) << 23) | (mantissa << 13);
+            float f;
+            memcpy(&f, &bits, 4);
+            return f;
+        };
+        const float squareLeft = 300.0f + 12.0f * 7;
+        float sumX = 0, sumY = 0;
+        int samples = 0;
+        uint8_t* data = nullptr;
+        readback->Map(0, nullptr, (void**) &data);
+
+        for (uint32_t y = 300; y < 420; y += 8)
+            for (uint32_t x = (uint32_t) squareLeft + 40; x < (uint32_t) squareLeft + 160; x += 8)
+            {
+                const uint16_t* px = (const uint16_t*) (data + (size_t) y * fp.Footprint.RowPitch + (size_t) x * 8);
+                sumX += half(px[0]);
+                sumY += half(px[1]);
+                ++samples;
+            }
+
+        readback->Unmap(0, nullptr);
+        const float mvX = sumX / samples, mvY = sumY / samples;
+        printf("    guide motion inside the square: %.2f, %.2f px\n", mvX, mvY);
+        ok &= Check("the motion inside the moving square is -12, 0 picture pixels", std::fabs(mvX + 12.0f) < 1.5f &&
+                                                                                   std::fabs(mvY) < 1.0f);
+
+        // How the Finished Picture pass describes it to NR (DlssNr_Late.inl): the game's depth at its render size, this
+        // motion at the output (picture) size, MotionVectorsLowResolution false, no motion subrect base. The regions
+        // DlssNr_Dx12::Dispatch resolves from the real resources: the whole motion texture, the depth's render rect.
+        const auto regions = DlssNr::ResolveGuideRegions({ kWidth / 2, kHeight / 2 },
+                                                         { (unsigned) motionDesc.Width, motionDesc.Height },
+                                                         { kWidth / 2, kHeight / 2 }, { kWidth, kHeight }, false, 0,
+                                                         0, 0, 0);
+        ok &= Check("render-size depth + output-size motion: motion region is the whole picture",
+                    regions.motion.x == 0 && regions.motion.y == 0 && regions.motion.width == kWidth &&
+                        regions.motion.height == kHeight);
+        ok &= Check("... and the depth region the render size", regions.depth.width == kWidth / 2 &&
+                                                                regions.depth.height == kHeight / 2);
+
+        // A hard cut: the flow's reset reaches the reader of the guides once, as it would reach a consumer
+        int resets = 0;
+
+        for (int k = 0; k < 10; ++k)
+        {
+            Scene next { 91, -1, 4.0f, 4.0f };
+            next.darkTop = true;
+            auto picture = Colour(gpu, next);
+            native::FrameInput input;
+            input.picture = picture.Get();
+            input.pictureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            input.pictureState = kRead;
+            input.width = kWidth;
+            input.height = kHeight;
+            r = optical.Run(gpu.queue.Get(), input, guidesOnly, applyNr, output);
+            resets += r.guidesBuilt && r.guidesReset ? 1 : 0;
+            output.done.fence->SetEventOnCompletion(output.done.value, gpu.event);
+            WaitForSingleObject(gpu.event, 5000);
+        }
+
+        ok &= Check("a hard cut hands the reader one reset", resets == 1);
+        ok &= Check("the consumer was still never called", nr.count == calls);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

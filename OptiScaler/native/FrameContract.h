@@ -115,8 +115,13 @@ struct FrameOutput
 enum class AcquireStatus
 {
     Ready,              // a frame was filled in
-    WaitingForUpscaler, // the game calls an upscaler of its own: this is not the case the producer is for (the status line says so)
-    Unavailable         // nothing to process now: no picture could be had, a resource could not be shared
+    WaitingForUpscaler, // the game calls an upscaler of its own: this is not the case the producer is for (the status
+                        // line says so)
+    // The game calls an upscaler of its own and [DlssNr] MotionSource=optical asks for the flow anyway (D3D12): the
+    // picture is filled in, no depth (the finder stands down; NR takes the game's own), and the producer measures the
+    // motion only, for the Finished Picture pass (dlssnr/DlssNr_OpticalMotion.h)
+    ReadyForGameUpscaler,
+    Unavailable // nothing to process now: no picture could be had, a resource could not be shared
 };
 
 // An adapter for one game API. All calls come on the thread that presents unless the adapter's own API says otherwise.

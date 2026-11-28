@@ -33,7 +33,9 @@ class NativeDriver
         Waiting,           // the game calls an upscaler
         PausedForNativeFg, // lower display buffers may contain generated frames
         Failed,
-        Running
+        Running,
+        OpticalForGame, // MotionSource=optical: the flow goes to the Finished Picture pass, the game's upscaler runs
+        OpticalNoGameUpscaler // MotionSource=optical alone, and the game makes no upscaler call: nothing runs
     };
 
     struct RunResult
@@ -43,16 +45,27 @@ class NativeDriver
     };
 
     // `tag` starts every log line ("Native motion", "Native motion (D3D11)"); `readyNote` is added to the line that
-    // says the producer is ready.
-    NativeDriver(const char* tag, const char* readyNote) : _tag(tag), _readyNote(readyNote) {}
+    // says the producer is ready. `opticalForGame`: the adapter can run the flow for MotionSource=optical while the
+    // game calls its own upscaler (Dx12FrameSource's AcquireStatus::ReadyForGameUpscaler; D3D12 only).
+    NativeDriver(const char* tag, const char* readyNote, bool opticalForGame = false)
+        : _tag(tag), _readyNote(readyNote), _opticalForGame(opticalForGame)
+    {
+    }
 
     // Not copyable, and the virtual upscaler is never destroyed here (see _virtualUpscaler).
     NativeDriver(const NativeDriver&) = delete;
     NativeDriver& operator=(const NativeDriver&) = delete;
 
-    // The first thing a present does: false while [DlssNr] NativeMotion is off (the virtual upscaler is released and
-    // the status goes back to Off).
+    // The first thing a present does: false while [DlssNr] NativeMotion is off and MotionSource=optical does not want
+    // the flow (the virtual upscaler is released and the status goes back to Off).
     bool Enabled();
+
+    // Whether the flow runs beside the game's upscaler: for Neural Rendering ([DlssNr] MotionSource=optical at the
+    // Finished Picture with the model on the finished picture, DlssNr::OpticalMotion::Wanted), for frame generation
+    // ([FrameGen] MotionSource=optical, FGOpticalMotion::Wanted), or either.
+    static bool OpticalForNrWanted();
+    static bool OpticalForFgWanted();
+    static bool OpticalForGameWanted();
 
     // Whether anything reads the motion this frame (DlssNrNativeMode::MotionUsed on the config): without, RunFrame runs
     // none of it (Status::Idle).
@@ -99,6 +112,8 @@ class NativeDriver
 
     const char* _tag;
     const char* _readyNote;
+    const bool _opticalForGame;
+    bool _opticalRan = false; // the last frame measured the flow for the game's upscaler (MotionSource=optical)
 
     std::unique_ptr<NativeProducer> _producer;
 

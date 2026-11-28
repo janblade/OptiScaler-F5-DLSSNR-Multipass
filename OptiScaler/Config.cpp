@@ -175,6 +175,16 @@ bool Config::Reload(std::filesystem::path iniPath)
             }
 
             FGStreamlineIgnoreOTA.set_from_config(readBool("FrameGen", "StreamlineIgnoreOTA"));
+            FGMotionSourceOptical.set_from_config(readString("FrameGen", "MotionSource", true)
+                                                      .and_then(
+                                                          [](const std::string& text) -> std::optional<bool>
+                                                          {
+                                                              if (text == "optical")
+                                                                  return true;
+                                                              if (text == "game")
+                                                                  return false;
+                                                              return std::nullopt; // auto, or anything else: game
+                                                          }));
 
             const bool canUseNvngxReplacement =
                 FGInput.value_or_default() == FGInput::NvngxFG || FGOutput.value_or_default() == FGOutput::DLSSG;
@@ -1156,6 +1166,17 @@ void Config::ReadDlssNr()
     DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
     DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
     DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
+    DlssNrMotionSourceOptical.set_from_config(
+        readString("DlssNr", "MotionSource", true)
+            .and_then(
+                [](const std::string& text) -> std::optional<bool>
+                {
+                    if (text == "optical")
+                        return true;
+                    if (text == "game")
+                        return false;
+                    return std::nullopt; // auto, or anything else: the default (game)
+                }));
     DlssNrFinishedGpuWait.set_from_config(readUInt("DlssNr", "FinishedGpuWait"));
     DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
     DlssNrMultiViewScreens.set_from_config(readUInt("DlssNr", "MultiViewScreens"));
@@ -1492,6 +1513,10 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
     out.SetValue("DlssNr", "Enabled", GetBoolValue(c.DlssNrEnabled.value_for_config()).c_str());
     out.SetValue("DlssNr", "FinishedPicture", GetBoolValue(c.DlssNrFinishedPicture.value_for_config()).c_str());
+    {
+        const auto optical = c.DlssNrMotionSourceOptical.value_for_config();
+        out.SetValue("DlssNr", "MotionSource", !optical.has_value() ? "auto" : *optical ? "optical" : "game");
+    }
     out.SetValue("DlssNr", "FinishedGpuWait", GetIntValue(c.DlssNrFinishedGpuWait.value_for_config()).c_str());
     out.SetValue("DlssNr", "RunBeforeSR",
                  GetBoolValue(c.DlssNrRunBeforeSr.value_for_config()).c_str());
@@ -1972,6 +1997,7 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("RunBeforeSR", DlssNrRunBeforeSr),
         NR_PROFILE_FIELD("DeferredDLSS", DlssNrDeferredDlss),
         NR_PROFILE_FIELD("FinishedPicture", DlssNrFinishedPicture),
+        NR_PROFILE_FIELD("MotionSource", DlssNrMotionSourceOptical),
         NR_PROFILE_FIELD("Precision", DlssNrPrecision),
         NR_PROFILE_FIELD("Preset", DlssNrPreset),
         NR_PROFILE_FIELD("WeightsSetA", DlssNrWeightsSetA),
@@ -2282,6 +2308,10 @@ bool Config::SaveIni()
 
         ini.SetValue("FrameGen", "StreamlineIgnoreOTA",
                      GetBoolValue(Instance()->FGStreamlineIgnoreOTA.value_for_config()).c_str());
+        {
+            const auto optical = Instance()->FGMotionSourceOptical.value_for_config();
+            ini.SetValue("FrameGen", "MotionSource", !optical.has_value() ? "auto" : *optical ? "optical" : "game");
+        }
 
         std::string FGNvngxReplacementString = "auto";
         if (auto FGNvngxReplacementHeld = Instance()->FGNvngxReplacement.value_for_config();

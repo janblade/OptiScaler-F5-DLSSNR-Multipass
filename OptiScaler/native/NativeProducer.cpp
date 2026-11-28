@@ -466,8 +466,15 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     // consumer off too, so they show what it would get.
     GpuMarkers::Mark(list, L"F5Low: guides");
     const bool guideView = options.flowPreview && (options.previewView == 0 || options.previewView == 2);
-    const bool guidesBuilt = nativeReady && ((options.apply && apply) || guideView) &&
+    const bool guidesBuilt = nativeReady && ((options.apply && apply) || options.guidesOnly || guideView) &&
                              _trust->BuildGuides(list, nativeInputs, input.width, input.height);
+
+    // Handed to whoever reads the guides after this list: they take the reset the consumer would have.
+    if (options.guidesOnly && guidesBuilt)
+    {
+        result.guidesBuilt = true;
+        result.guidesReset = nativeReset || _consumerResetPending;
+    }
     stamp(2);
 
     // The menu's debug view, while the picture is still readable by a compute shader. The depth view shows the game's
@@ -561,6 +568,9 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         output.done = SyncPoint { _fence, _signalled };
         output.processed = result.nativeRan;
         result.submitted = true;
+
+        if (result.guidesBuilt)
+            _consumerResetPending = false;
     }
 
     if (!result.submitted && result.stoppedAt == nullptr)

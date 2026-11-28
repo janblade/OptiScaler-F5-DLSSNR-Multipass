@@ -253,10 +253,14 @@ struct MotionUsers
     bool nrEnabled = false;       // ... which runs only with Enable Neural Rendering...
     bool finishedPicture = false; // ... and Finished Picture on (DlssNr::ApplyNativeInput refuses it otherwise)
     bool debugView = false; // NativeDebugView: the menu's pictures, which need a warm flow history to show anything
+    // MotionSource=optical while the game calls its own upscaler (D3D12 only): NR at the Finished Picture takes the
+    // flow instead of the game's motion (DlssNr_OpticalMotion.h)
+    bool opticalForGame = false;
 };
 
 inline bool MotionUsed(const MotionUsers& users)
 {
-    return users.virtualUpscaler || (users.nativeInput && users.nrEnabled && users.finishedPicture) || users.debugView;
+    return users.virtualUpscaler || (users.nativeInput && users.nrEnabled && users.finishedPicture) ||
+           users.debugView || users.opticalForGame;
 }
 } // namespace DlssNrNativeMode

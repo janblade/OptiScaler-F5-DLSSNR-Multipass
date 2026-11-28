@@ -281,6 +281,8 @@ If you used Tune, run it again after changing the curve.
 
 Composed uses the strength control and the Highlight guard below (brightening only; darkening is not capped in Composed). Replace bypasses the strength control (the model's answer applies directly, uncomposited) but the same Highlight guard number still bounds it in both directions -- lower it if Replace flickers or shows banding near bright highlights.
 
+On an already tone-mapped / SDR frame, NR runs in passthrough: the encode copies the picture and the resolve does not map it through the curve. Every composed choice then gives the same image, and the two Replace choices are the same as each other; only Composed vs Replace changes the picture. The menu replaces the eight curves with a two-choice Composed / Replace control in that case and says why; the full list returns on a linear HDR frame. This is common on DX11-to-DX12 bridges, whose colour buffers are usually 8/10-bit UNORM. Linear HDR needs a float buffer: choosing it on an 8/10-bit one is refused and read as tone-mapped sRGB. Colour decoding shows the detected format.
+
 ## MFG unlockers
 
 OptiScaler has no built-in MFG unlock since 0.1.32. To use an external unlocker, tick **External frame generation /

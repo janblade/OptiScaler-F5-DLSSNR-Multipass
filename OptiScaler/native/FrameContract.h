@@ -95,6 +95,11 @@ struct FrameInput
     uint32_t depthWidth = 0;
     uint32_t depthHeight = 0;
     bool depthReversed = false; // near is 1.0
+    // The state the copies are in on entry and must be left in. The game's own depth handed over for
+    // MotionSource=optical rests in COPY_DEST (the Finished Picture pass's copy); the producer moves it for its list
+    // and back.
+    D3D12_RESOURCE_STATES depthState =
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     DepthReadability depthReadability = DepthReadability::Readable;
 
     // The game's own guides for this picture, when the adapter has them (and the depth copies above are then empty).
@@ -118,8 +123,9 @@ enum class AcquireStatus
     WaitingForUpscaler, // the game calls an upscaler of its own: this is not the case the producer is for (the status
                         // line says so)
     // The game calls an upscaler of its own and [DlssNr] MotionSource=optical asks for the flow anyway (D3D12): the
-    // picture is filled in, no depth (the finder stands down; NR takes the game's own), and the producer measures the
-    // motion only, for the Finished Picture pass (dlssnr/DlssNr_OpticalMotion.h)
+    // picture is filled in, no depth from the finder (it stands down; the driver hands the flow the game's own depth
+    // from the Finished Picture capture when there is one), and the producer measures the motion only, for the
+    // Finished Picture pass and frame generation (dlssnr/DlssNr_OpticalMotion.h)
     ReadyForGameUpscaler,
     Unavailable // nothing to process now: no picture could be had, a resource could not be shared
 };

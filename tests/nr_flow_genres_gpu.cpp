@@ -22,7 +22,8 @@
 //   OptiScaler\motion\SceneCut_Dx12.cpp OptiScaler\motion\TrustMask_Dx12.cpp d3d12.lib dxgi.lib d3dcompiler.lib
 //
 // Arguments: key=value settings of the flow and the trust mask (see main), scene=<name> to run one scene, depth=0/1 to
-// run only without / with depth, profile=<name> to start from a motion profile (before any key=value), dump=<dir> to
+// run only without / with depth, speed=<x> to multiply every motion per frame (a lower frame rate:
+// 2 = half), profile=<name> to start from a motion profile (before any key=value), dump=<dir> to
 // write each run's last frame there (picture, guide, truth, layer, mask). No arguments: every scene with and without
 // depth under the default settings.
 
@@ -54,6 +55,23 @@ namespace
 uint32_t kWidth = 1280;
 uint32_t kHeight = 720;
 std::string dumpDir; // dump=<dir>: the last frame of each run written there
+bool split = false;  // split=1: the edge band by side and the uncovered pixels as their own tallies
+float speed = 1.0f;
+// depthscale=<s>: the depth at s times the picture's size, as a game's upscaler gets it (0.667 = Quality); jitter=1: and
+// each frame's depth offset by the upscaler's sub-pixel jitter (Halton 2,3), as the game renders it
+float depthScale = 1.0f;
+bool depthJitter = false;
+
+float Halton(uint32_t i, uint32_t base)
+{
+    float f = 1.0f, r = 0.0f;
+    for (; i > 0; i /= base)
+    {
+        f /= (float) base;
+        r += f * (float) (i % base);
+    }
+    return r;
+}  // speed=<x>: every motion per frame times x (2 = the same scene at half the frame rate)
 
 float Hash(int x, int y, int seed)
 {
@@ -169,14 +187,16 @@ struct Gpu
     // state. The upload buffer is kept in `keep` until the list has run.
     ComPtr<ID3D12Resource> Upload(DXGI_FORMAT format, uint32_t bytesPerPixel,
                                   const std::function<void(uint32_t, uint32_t, uint8_t*)>& fill,
-                                  std::vector<ComPtr<ID3D12Resource>>& keep)
+                                  std::vector<ComPtr<ID3D12Resource>>& keep, uint32_t width = 0, uint32_t height = 0)
     {
+        width = width ? width : kWidth;
+        height = height ? height : kHeight;
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC desc {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = kWidth;
-        desc.Height = kHeight;
+        desc.Width = width;
+        desc.Height = height;
         desc.DepthOrArraySize = desc.MipLevels = 1;
         desc.Format = format;
         desc.SampleDesc.Count = 1;
@@ -191,8 +211,8 @@ struct Gpu
 
         uint8_t* data = nullptr;
         upload->Map(0, nullptr, (void**) &data);
-        for (uint32_t y = 0; y < kHeight; ++y)
-            for (uint32_t x = 0; x < kWidth; ++x)
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
                 fill(x, y, data + (size_t) y * fp.Footprint.RowPitch + (size_t) x * bytesPerPixel);
         upload->Unmap(0, nullptr);
 
@@ -366,6 +386,13 @@ Scene MakeScene(Genre g)
         break;
     default:
         break;
+    }
+    s.camX *= speed;
+    s.camY *= speed;
+    for (Object& o : s.objects)
+    {
+        o.mx *= speed;
+        o.my *= speed;
     }
     return s;
 }
@@ -581,6 +608,7 @@ const char* kBandNames[kBands] = { "objects", "edges", "back", "hud" };
 struct Result
 {
     Tally band[kBands];
+    Tally side[3]; // split=1: the edge band on the character's side, on the background's side, and every uncovered pixel
     uint64_t revealed = 0, revealedHit = 0, others = 0, othersHit = 0;
 
     double Score() const
@@ -640,7 +668,12 @@ Result Run(Gpu& gpu, const Scene& s, bool depthOn, const OpticalFlowDx12::Settin
                                  keep);
 
         ComPtr<ID3D12Resource> depth;
-        if (depthOn)
+        const bool renderDepth = depthScale != 1.0f || depthJitter;
+        const uint32_t depthWidth = renderDepth ? (uint32_t) std::lround(kWidth * depthScale) : kWidth;
+        const uint32_t depthHeight = renderDepth ? (uint32_t) std::lround(kHeight * depthScale) : kHeight;
+        const float jitterX = depthJitter ? Halton((uint32_t) frame % 8 + 1, 2) - 0.5f : 0.0f;
+        const float jitterY = depthJitter ? Halton((uint32_t) frame % 8 + 1, 3) - 0.5f : 0.0f;
+        if (depthOn && !renderDepth)
             depth = gpu.Upload(DXGI_FORMAT_R32_FLOAT, 4,
                                [&](uint32_t x, uint32_t y, uint8_t* out)
                                {
@@ -655,6 +688,20 @@ Result Run(Gpu& gpu, const Scene& s, bool depthOn, const OpticalFlowDx12::Settin
                                    memcpy(out, &p.nearness, 4);
                                },
                                keep);
+        else if (depthOn)
+        {
+            // A render-size depth: each render pixel the scene at its (jittered) centre, no overlay
+            Scene under = s;
+            under.hud = false;
+            depth = gpu.Upload(DXGI_FORMAT_R32_FLOAT, 4,
+                               [&](uint32_t x, uint32_t y, uint8_t* out)
+                               {
+                                   const Px p = Sample(under, frame, ((float) x + 0.5f + jitterX) * kWidth / depthWidth,
+                                                       ((float) y + 0.5f + jitterY) * kHeight / depthHeight);
+                                   memcpy(out, &p.nearness, 4);
+                               },
+                               keep, depthWidth, depthHeight);
+        }
 
         flow.Dispatch(gpu.list.Get(), colour.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, depth.Get(),
                       depthOn ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN, true);
@@ -676,8 +723,8 @@ Result Run(Gpu& gpu, const Scene& s, bool depthOn, const OpticalFlowDx12::Settin
                 in.depths[0] = depth.Get();
                 in.depthCount = 1;
                 in.depthFormat = DXGI_FORMAT_R32_FLOAT;
-                in.depthWidth = kWidth;
-                in.depthHeight = kHeight;
+                in.depthWidth = depthWidth;
+                in.depthHeight = depthHeight;
                 in.depthReversed = true;
             }
 
@@ -753,6 +800,8 @@ Result Run(Gpu& gpu, const Scene& s, bool depthOn, const OpticalFlowDx12::Settin
                 const size_t i = ((size_t) y * kWidth + x) * 2;
                 // The flow points from here to where the content was: minus its motion.
                 result.band[band].Add(guide[i] + p.mx, guide[i + 1] + p.my);
+                if (edge && p.layer != kHud)
+                    result.side[p.layer == 0 ? 1 : 0].Add(guide[i] + p.mx, guide[i + 1] + p.my);
 
                 // Uncovered: where this content was a frame ago, something else was on top.
                 const float sx = x + 0.5f - p.mx, sy = y + 0.5f - p.my;
@@ -762,6 +811,7 @@ Result Run(Gpu& gpu, const Scene& s, bool depthOn, const OpticalFlowDx12::Settin
                 const float m = mask[(size_t) (y * fh / kHeight) * fw + x * fw / kWidth];
                 if (revealed)
                 {
+                    result.side[2].Add(guide[i] + p.mx, guide[i + 1] + p.my);
                     ++result.revealed;
                     result.revealedHit += m >= 0.5f;
                 }
@@ -805,6 +855,23 @@ int main(int argc, char** argv)
             (value != 0 ? onlyDepth : onlyNoDepth) = true;
         else if (key == "dump")
             dumpDir = text;
+        else if (key == "depthscale")
+        {
+            depthScale = value > 0.1f && value <= 1.0f ? value : 1.0f;
+            knobs += " " + arg;
+        }
+        else if (key == "jitter")
+        {
+            depthJitter = value != 0;
+            knobs += " " + arg;
+        }
+        else if (key == "split")
+            split = value != 0;
+        else if (key == "speed")
+        {
+            speed = value > 0 ? value : 1.0f;
+            knobs += " " + arg;
+        }
         else if (key == "profile")
         {
             // A profile's settings (motion/MotionProfiles.h); key=value arguments after it change them further
@@ -847,7 +914,11 @@ int main(int argc, char** argv)
             for (int b = 0; b < kBands; ++b)
                 if (r.band[b].n)
                     printf(" %s %.3f/%.2f", kBandNames[b], r.band[b].Share(), r.band[b].Mean());
-            printf(" | mask reveal %.3f false %.3f\n", r.Reveal(), r.False());
+            printf(" | mask reveal %.3f false %.3f", r.Reveal(), r.False());
+            if (split)
+                printf(" | edgeChar %.3f/%.2f edgeBack %.3f/%.2f uncovered %.3f/%.2f", r.side[0].Share(), r.side[0].Mean(),
+                       r.side[1].Share(), r.side[1].Mean(), r.side[2].Share(), r.side[2].Mean());
+            printf("\n");
             total += r.Score();
             ++n;
         }

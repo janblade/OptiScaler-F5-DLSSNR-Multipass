@@ -7,6 +7,11 @@ struct Slot
     ComPtr<ID3D12Resource> depth, motion, linear, encoded, residual;
     // Optical F5Low's guides the slot's list read in place of `motion` (MotionSource=optical): held until it records again
     ComPtr<ID3D12Resource> flowMotion, flowMask;
+    // MotionSource=optical with a depth-stencil depth (NBA 2K27: D32_FLOAT_S8X24_UINT): `depth` keeps that format, which
+    // NR reads but a compute shader cannot view (only a typeless resource is cast), so the flow gets its own copy in the
+    // typeless family, read as `flowDepthView`. Null when the flow can read `depth` itself or nothing asks for it.
+    ComPtr<ID3D12Resource> flowDepth;
+    DXGI_FORMAT flowDepthView = DXGI_FORMAT_UNKNOWN;
     ComPtr<ID3D12Fence> fence;
     // Signalled to `ready` on the producer queue right after `fence`; a present on another queue waits on it on the GPU.
     // Apart from `fence` because the watchdog may signal it from the CPU (DlssNr_CrossQueueGate.h).
@@ -307,6 +312,62 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
     return next;
 }
 
+// The typeless family a depth-stencil format is copied into for a compute shader, and the view that reads its depth.
+// False: not a depth-stencil format (the guide clone's typed format is read directly).
+bool FlowDepthFormats(DXGI_FORMAT format, DXGI_FORMAT& typeless, DXGI_FORMAT& view)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_D32_FLOAT:
+        typeless = DXGI_FORMAT_R32_TYPELESS;
+        view = DXGI_FORMAT_R32_FLOAT;
+        return true;
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        typeless = DXGI_FORMAT_R32G8X24_TYPELESS;
+        view = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        return true;
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        typeless = DXGI_FORMAT_R24G8_TYPELESS;
+        view = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        return true;
+    case DXGI_FORMAT_D16_UNORM:
+        typeless = DXGI_FORMAT_R16_TYPELESS;
+        view = DXGI_FORMAT_R16_UNORM;
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The flow's copy of a depth-stencil depth (Slot::flowDepth): the game's size, top level only, resting in COPY_DEST.
+// Reused while the size and format stay (the caller checked the slot's previous GPU fence, as for Clone).
+bool EnsureFlowDepth(Slot& slot, const D3D12_RESOURCE_DESC& want, DXGI_FORMAT typeless, DXGI_FORMAT view)
+{
+    if (slot.flowDepth)
+    {
+        const auto have = slot.flowDepth->GetDesc();
+        if (have.Width != want.Width || have.Height != want.Height || have.Format != typeless)
+            slot.flowDepth.Reset(); // a list still reading the old one holds its own reference (NativeDriver)
+    }
+    if (!slot.flowDepth)
+    {
+        D3D12_RESOURCE_DESC desc = want;
+        desc.Format = typeless;
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        desc.MipLevels = 1;
+        desc.DepthOrArraySize = 1;
+        desc.Alignment = 0;
+        D3D12_HEAP_PROPERTIES heap {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                   nullptr, IID_PPV_ARGS(&slot.flowDepth))))
+            return false;
+        slot.flowDepth->SetName(L"DLSS-NR finished picture: depth for the Optical F5Low flow");
+    }
+    slot.flowDepthView = view;
+    return true;
+}
+
 void Arm(Slot& slot, ID3D12GraphicsCommandList* cmd)
 {
     slot.producer = cmd;
@@ -417,6 +478,18 @@ void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool r
         // The copy returns to COPY_DEST after the late dispatch.
     };
     copy(depth, slot.depth.Get(), depthDesc, regions.depth);
+    // MotionSource=optical (either user): a depth-stencil depth also goes into the flow's own typeless copy
+    DXGI_FORMAT flowTypeless = DXGI_FORMAT_UNKNOWN, flowView = DXGI_FORMAT_UNKNOWN;
+    const bool flowWants = Config::Instance()->DlssNrMotionSourceOptical.value_or_default() ||
+                           Config::Instance()->FGMotionSourceOptical.value_or_default();
+    if (depth && flowWants && FlowDepthFormats(depthDesc.Format, flowTypeless, flowView) &&
+        EnsureFlowDepth(slot, depthDesc, flowTypeless, flowView))
+        copy(depth, slot.flowDepth.Get(), depthDesc, regions.depth);
+    else
+    {
+        slot.flowDepth.Reset();
+        slot.flowDepthView = DXGI_FORMAT_UNKNOWN;
+    }
     copy(motion, slot.motion.Get(), motionDesc, regions.motion);
     Arm(slot, cmd);
 }
@@ -1252,6 +1325,95 @@ void ClearOpticalMotion()
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     Late::optical = Late::OpticalOffer {};
+}
+
+bool GameDepthForOpticalMotion(ID3D12CommandQueue* queue, uint32_t width, uint32_t height, OpticalGameDepth& out)
+{
+    out = OpticalGameDepth {};
+    if (!Late::tracking.load() || queue == nullptr) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    auto* presentQueue = Late::RealQueue(queue);
+    const auto epoch = State::Instance().frameCount;
+    const Late::Slot* newest = nullptr;
+    // Read only, and whether or not the Finished Picture pass has taken the capture yet: under frame generation it
+    // usually has by the time the producer runs (NBA 2K27, 2026-11-29: every capture "taken"). The copy stays valid
+    // until the game's next upscaler call writes the slot again, on the game's list on this queue, so after the
+    // producer's list on the GPU; the caller holds a reference against a re-created copy. Only a capture submitted on
+    // this queue (ordered before the producer's list without a wait across queues), and only the newest one: an older
+    // capture when the newest is elsewhere would be another frame's depth.
+    const uint32_t perGameFrame = Late::PresentsPerGameFrame();
+    // The present count moves between a capture and this call by more than the Finished Picture pass's window (2 at one
+    // present per game frame in NBA 2K27); a depth a few presents old is still this game frame's or the one before.
+    const uint64_t window = 2 * FinishedPresentWindow(perGameFrame) + 2;
+    const Late::Slot* newestAny = nullptr;
+    for (const auto& slot : Late::slots)
+        if (slot.submitted && !slot.expired && !slot.residualOnly &&
+            (newestAny == nullptr || slot.serial > newestAny->serial))
+            newestAny = &slot;
+    const char* reason = newestAny == nullptr                                            ? "no capture"
+                         : !newestAny->depth                                             ? "no depth in the call"
+                         : newestAny->producerQueue.Get() != presentQueue                ? "captured on another queue"
+                         : newestAny->frame.OutputWidth != width ||
+                                 newestAny->frame.OutputHeight != height                 ? "another size"
+                         : newestAny->frame.SubmissionEpoch > epoch + perGameFrame ||
+                                 epoch > newestAny->frame.SubmissionEpoch + window      ? "too old"
+                                                                                         : nullptr;
+    if (reason == nullptr)
+        newest = newestAny;
+    static uint64_t misses = 0;
+    if (newest == nullptr)
+    {
+        if (misses++ % 600 == 0)
+            LOG_INFO("DLSS-NR finished picture: no game depth for the Optical F5Low flow (present {}, {}x{}, {} presents "
+                     "per game frame): {} (capture {}, {}x{})",
+                     epoch, width, height, perGameFrame, reason,
+                     newestAny != nullptr ? newestAny->frame.SubmissionEpoch : 0,
+                     newestAny != nullptr ? newestAny->frame.OutputWidth : 0,
+                     newestAny != nullptr ? newestAny->frame.OutputHeight : 0);
+        return false;
+    }
+    misses = 0;
+    // The flow's own typeless copy of a depth-stencil depth, when the capture made one
+    if (newest->flowDepth && newest->flowDepthView != DXGI_FORMAT_UNKNOWN)
+    {
+        const auto flowDesc = newest->flowDepth->GetDesc();
+        out.depth = newest->flowDepth.Get();
+        out.depth->AddRef();
+        out.view = newest->flowDepthView;
+        out.rect = { (uint32_t) flowDesc.Width, flowDesc.Height, newest->frame.DepthSubrectBaseX,
+                     newest->frame.DepthSubrectBaseY, newest->frame.RenderSubrectWidth, newest->frame.RenderSubrectHeight };
+        out.reversed = newest->frame.DepthInverted;
+        return true;
+    }
+    // Else the guide clone, typed already (TypedGuideFormat); only the depth formats a compute shader reads as one channel
+    const auto desc = newest->depth->GetDesc();
+    switch (desc.Format)
+    {
+    case DXGI_FORMAT_R32_FLOAT:
+    case DXGI_FORMAT_R16_UNORM:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+    case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+        out.view = desc.Format;
+        break;
+    default:
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            LOG_INFO("DLSS-NR finished picture: the game's depth copy (format {}) cannot be read by the Optical F5Low "
+                     "flow; it runs without depth",
+                     (int) desc.Format);
+        }
+        return false;
+    }
+    }
+    out.depth = newest->depth.Get();
+    out.depth->AddRef();
+    out.rect = { (uint32_t) desc.Width, desc.Height, newest->frame.DepthSubrectBaseX, newest->frame.DepthSubrectBaseY,
+                 newest->frame.RenderSubrectWidth, newest->frame.RenderSubrectHeight };
+    out.reversed = newest->frame.DepthInverted;
+    return true;
 }
 
 void NativeInputSkipped()

@@ -68,6 +68,38 @@ inline Choice Choose(bool wanted, bool flowForThisPresent, bool& lastWanted)
     return choice;
 }
 
+// The flow measures with the game's depth from the same upscaler call the Finished Picture pass copied it from (the
+// copy keeps the game's allocation and its subrect where the game had it). The producer's depth alignment
+// (native/DepthAlign_Dx12.h: depth uv = picture uv / scale + (-offsetX / width, offsetY / height)) maps the picture
+// onto that subrect: scale = allocation / subrect, offsets = the subrect's corner in the picture's pixels. An empty
+// subrect (the call gave none) is the whole allocation: the identity.
+struct DepthRect
+{
+    uint32_t allocationWidth = 0, allocationHeight = 0; // the copy's size
+    uint32_t x = 0, y = 0, width = 0, height = 0;       // where the game's call drew in it (the render subrect)
+};
+
+inline void DepthTransformForRect(const DepthRect& rect, uint32_t pictureWidth, uint32_t pictureHeight,
+                                  float transform[4])
+{
+    transform[0] = 1.0f;
+    transform[1] = 1.0f;
+    transform[2] = 0.0f;
+    transform[3] = 0.0f;
+
+    // Inside the allocation only (a call may give a subrect that runs past its edge)
+    if (rect.x >= rect.allocationWidth || rect.y >= rect.allocationHeight || rect.width == 0 || rect.height == 0)
+        return;
+
+    const uint32_t width = rect.width < rect.allocationWidth - rect.x ? rect.width : rect.allocationWidth - rect.x;
+    const uint32_t height = rect.height < rect.allocationHeight - rect.y ? rect.height : rect.allocationHeight - rect.y;
+
+    transform[0] = (float) rect.allocationWidth / (float) width;
+    transform[1] = (float) rect.allocationHeight / (float) height;
+    transform[2] = -(float) rect.x / (float) rect.allocationWidth * (float) pictureWidth;
+    transform[3] = (float) rect.y / (float) rect.allocationHeight * (float) pictureHeight;
+}
+
 // [FrameGen] MotionSource=optical: frame generation takes the same flow instead of the game's motion vectors, a choice
 // of its own (NBA 2K27, 2026-11-28: with good game vectors the flow gave a halo around players in generated frames,
 // while Neural Rendering on it looked clean). Frame generation fed by OptiScaler's FG swap chain from the game's

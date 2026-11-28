@@ -214,7 +214,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
     {
         std::copy(std::begin(options.depthTransform), std::end(options.depthTransform), std::begin(_depthTransform));
 
-        if (_trust)
+        if (_trust && !options.gameDepth)
             _trust->Reset();
     }
 
@@ -341,6 +341,30 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
 
     if (needsBarrier)
         list->ResourceBarrier(1, &barrier);
+
+    // Copies in another state (the game's depth for MotionSource=optical) are read in the shader-resource state and
+    // left as they came, at the end of this list
+    constexpr D3D12_RESOURCE_STATES kDepthRead =
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    const int depthMoved =
+        input.depthState != kDepthRead ? (std::min) (input.depthCount, FrameInput::kMaxDepthCopies) : 0;
+    const auto moveDepth = [&](bool back)
+    {
+        for (int i = 0; i < depthMoved; ++i)
+        {
+            if (sourceInput.depth[i] == nullptr)
+                continue;
+
+            D3D12_RESOURCE_BARRIER b {};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource = sourceInput.depth[i];
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = back ? kDepthRead : input.depthState;
+            b.Transition.StateAfter = back ? input.depthState : kDepthRead;
+            list->ResourceBarrier(1, &b);
+        }
+    };
+    moveDepth(false);
 
     // The depth alignment, on the one copy of the whole scene (several copies each hold part of it): from here on the
     // frame's depth is the aligned one. Should it fail, the frame runs without depth rather than misaligned.
@@ -535,6 +559,7 @@ NativeProducer::Result NativeProducer::Run(ID3D12CommandQueue* queue, const Fram
         }
     }
 
+    moveDepth(true);
     stamp(3);
 
     if (timed)

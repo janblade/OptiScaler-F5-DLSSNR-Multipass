@@ -98,8 +98,10 @@ void NativeDriver::LogDiagnostics()
 
     if (_producer != nullptr && _producer->GpuStats().Frames() > 0)
         LOG_INFO("{}: {}{}{}{}", _tag, _producer->GpuStats().Report(),
-                 _opticalRan ? " (motion only, no depth, for " : "", _opticalRan ? OpticalUsers() : "",
-                 _opticalRan ? " beside the game's upscaler)" : "");
+                 _opticalRan
+                     ? (_opticalDepth ? " (motion only, with the game's depth, for " : " (motion only, no depth, for ")
+                     : "",
+                 _opticalRan ? OpticalUsers() : "", _opticalRan ? " beside the game's upscaler)" : "");
 }
 
 NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView)
@@ -278,6 +280,51 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     options.depthTransform[1] = finite(config->DlssNrNativeDepthScaleY.value_or_default(), 1.0f);
     options.depthTransform[2] = finite(config->DlssNrNativeDepthOffsetX.value_or_default(), 0.0f);
     options.depthTransform[3] = finite(config->DlssNrNativeDepthOffsetY.value_or_default(), 0.0f);
+    // MotionSource=optical: the game's own depth from its upscaler call (the Finished Picture pass's copy), so the flow
+    // and the trust mask see where a character ends. Without it, the pixels on either side of an outline take the other
+    // side's motion, and the error grows with the motion per frame (tests/nr_flow_genres_gpu.cpp speed=2.5: the
+    // background a player uncovers 29.8 px off without depth, 6.1 with). The menu's alignment is for the depth finder's
+    // buffer; the call's subrect places this one.
+    if (forGame)
+    {
+        options.gameDepth = true;
+        DlssNr::OpticalGameDepth gameDepth;
+
+        if (DlssNr::GameDepthForOpticalMotion(source.Queue(), input.width, input.height, gameDepth))
+        {
+            _gameDepthHeld[_gameDepthNext].Attach(gameDepth.depth);
+            _gameDepthNext = (_gameDepthNext + 1) % kGameDepthHeld;
+
+            input.depth[0] = gameDepth.depth;
+            input.depthCount = 1;
+            input.depthView = gameDepth.view;
+            input.depthWidth = gameDepth.rect.allocationWidth;
+            input.depthHeight = gameDepth.rect.allocationHeight;
+            input.depthReversed = gameDepth.reversed;
+            input.depthState = D3D12_RESOURCE_STATE_COPY_DEST;
+            DlssNr::OpticalMotion::DepthTransformForRect(gameDepth.rect, input.width, input.height,
+                                                         options.depthTransform);
+        }
+        else
+        {
+            options.depthTransform[0] = options.depthTransform[1] = 1.0f;
+            options.depthTransform[2] = options.depthTransform[3] = 0.0f;
+        }
+
+        if (input.depthCount > 0 && !_opticalDepth)
+            LOG_INFO(
+                "{}: the flow beside the game's upscaler now uses the game's depth ({}x{}, subrect {}x{} at {},{})",
+                _tag, input.depthWidth, input.depthHeight, gameDepth.rect.width, gameDepth.rect.height,
+                gameDepth.rect.x, gameDepth.rect.y);
+        else if (input.depthCount == 0 && _opticalDepth)
+            LOG_INFO(
+                "{}: the flow beside the game's upscaler runs without depth (no depth from the game's call on this "
+                "queue)",
+                _tag);
+
+        _opticalDepth = input.depthCount > 0;
+    }
+
     auto& look = _producer->Flow()->DebugTuning();
     look.depthLinearize = config->DlssNrNativeDepthLinearize.value_or_default();
     look.depthMultiplier = config->DlssNrNativeDepthMultiplier.value_or_default();

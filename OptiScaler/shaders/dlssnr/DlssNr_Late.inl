@@ -891,7 +891,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
         Late::lastAppliedEpoch = slot.frame.SubmissionEpoch;
     Late::Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden."
               : ran ? (slot.residualOnly  ? "Applying the pre-SR changes to the finished picture."
-                       : slot.flowMotion  ? "Applying NR to the finished picture (motion: Optical F5Low)."
+                       : slot.flowMotion  ? "Applying Neural Rendering to the finished picture (motion: Optical F5Low)."
                        : gameFrameHandoff ? "Applying NR before Streamline interpolation."
                                           : "Applying NR to the finished picture.")
                     : "Preparing NR for the finished picture.");

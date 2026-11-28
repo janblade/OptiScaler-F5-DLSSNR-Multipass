@@ -276,6 +276,9 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
     State::Instance().swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
 
+    // The DX12 swapchain presenting under this one isn't the current swapchain, its present doesn't set the api
+    State::Instance().swapchainApi = DX12;
+
     _RefreshCachedSwapchainDesc();
 
     LOG_INFO("Dx11wDx12SC {} created, real: {:X}, fg: {:X}, dx11: {:X}, dx12: {:X}, queue: {:X}", _id, (UINT64) _real,
@@ -660,7 +663,13 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
               (UINT) NewFormat, SwapChainFlags);
 
     const auto fgArgs = ResizeArgsForFg(_fgSwapChain, BufferCount, NewFormat, SwapChainFlags);
-    const bool skipFgResize = IsSame(_fgSwapChain, fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
+    // Flip model presents fail after a fullscreen change until the buffers are resized, DXGI can change it on its own
+    BOOL fgFullscreen = FALSE;
+    if (_fgSwapChain != nullptr)
+        _fgSwapChain->GetFullscreenState(&fgFullscreen, nullptr);
+
+    const bool skipFgResize = fgFullscreen == _fgResizedFullscreen &&
+                              IsSame(_fgSwapChain, fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
     const bool synchronizeXeFGPresent = skipFgResize && UsesXeFGApi(State::Instance().activeFgOutput) &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -722,6 +731,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
+        _fgResizedFullscreen = fgFullscreen;
         _RefreshCachedSwapchainDesc();
 
         if (Config::Instance()->IsFGEnabled())
@@ -936,7 +946,13 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
 
     const auto fgArgs = ResizeArgsForFg(_fgSwapChain, BufferCount, Format, SwapChainFlags);
-    const bool skipFgResize = IsSame(_fgSwapChain, fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
+    // Flip model presents fail after a fullscreen change until the buffers are resized, DXGI can change it on its own
+    BOOL fgFullscreen = FALSE;
+    if (_fgSwapChain != nullptr)
+        _fgSwapChain->GetFullscreenState(&fgFullscreen, nullptr);
+
+    const bool skipFgResize = fgFullscreen == _fgResizedFullscreen &&
+                              IsSame(_fgSwapChain, fgArgs.bufferCount, Width, Height, fgArgs.format, fgArgs.flags);
     const bool synchronizeXeFGPresent = skipFgResize && UsesXeFGApi(State::Instance().activeFgOutput) &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -991,6 +1007,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
 
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
+        _fgResizedFullscreen = fgFullscreen;
         _RefreshCachedSwapchainDesc();
 
         if (Config::Instance()->IsFGEnabled())

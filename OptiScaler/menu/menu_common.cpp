@@ -3809,16 +3809,21 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                 ShowHelpMarker("Each render preset has it strengths and weaknesses\n"
                                "Override to potentially improve image quality\n"
-                               "Press Apply after enable/disable\n"
-                               "With DLSS w/Dx12 the preset is baked into the NGX feature,\n"
-                               "so Apply Changes recreates it to take effect");
+                               "DLSS takes the preset when it starts: press Apply after changing it\n"
+                               "(also with DLSS w/Dx12)");
 
-                auto currentPresetIndex = GetPresetIndex(currentFeature, false);
+                // What OptiScaler or the game asked DLSS for at this quality tier (picked from the render ratio),
+                // not a value read back from DLSS: with none asked, DLSS picks its own
+                auto askedPresetIndex = GetPresetIndex(currentFeature, false);
 
-                if (currentPresetIndex == 0)
-                    ImGui::Text("Current Preset: Default");
+                if (askedPresetIndex == 0)
+                    ImGui::Text("Preset asked for: none (DLSS picks)");
                 else
-                    ImGui::Text("Current Preset: %c", 64 + currentPresetIndex);
+                    ImGui::Text("Preset asked for: %c", 64 + askedPresetIndex);
+
+                ShowHelpMarker("The preset OptiScaler or the game requested for this quality level.\n"
+                               "DLSS does not report the one it runs, and it may use another one\n"
+                               "if the requested preset is not in this DLSS version.");
 
                 ImGui::BeginDisabled(!config->RenderPresetOverride.value_or_default() /*|| overridden*/);
 

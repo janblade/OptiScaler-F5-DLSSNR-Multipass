@@ -1734,8 +1734,11 @@ static ULONG hkD3D12DeviceRelease(IUnknown* device)
             {
                 LOG_DEBUG("Set State::Instance().currentD3D12Device = nullptr, was: {:X}", (size_t) device);
                 State::Instance().currentD3D12Device = nullptr;
-                native::lowlatency::OnDeviceReleased(device);
             }
+
+            // Also for a tracked device that never became current: the kept Reflex/low latency devices must not
+            // point at a destroyed device
+            native::lowlatency::OnDeviceReleased(device);
         }
     }
 

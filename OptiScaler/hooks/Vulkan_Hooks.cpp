@@ -1815,6 +1815,10 @@ static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, c
             it->second = {};
     }
 
+    // The menu's image views and framebuffers of its images go before it (no-op for any other swapchain)
+    if (swapchain != VK_NULL_HANDLE)
+        MenuOverlayVk::DestroySwapchain(device, swapchain);
+
     if (auto fg = State::Instance().currentVkFG; fg != nullptr)
     {
         ScopedFGCall fgCall {};

@@ -2489,6 +2489,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
         }
 
+        // Asi plugins stay in DllMain, some expect to run before other dlls and the exe's TLS callbacks
         const bool loadAsi = Config::Instance()->LoadAsiPlugins.value_or_default();
         if (loadAsi)
             spdlog::info("");

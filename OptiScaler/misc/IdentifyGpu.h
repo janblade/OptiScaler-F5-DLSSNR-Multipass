@@ -94,6 +94,10 @@ class IdentifyGpu
     static FSR4Support getFsr4ModelForAsic(uint32_t family, uint32_t revision, uint32_t deviceId, bool asicInfoValid);
 
   public:
+    // D3D12 returns the same device for an adapter, probing counts its references to undo amdxc64's leak.
+    // Device creations wait on it so the probe never releases references taken by the game or other mods
+    inline static std::recursive_mutex probeDeviceMutex {};
+
     static void getHardwareAdapter(IDXGIFactory* InFactory, IDXGIAdapter** InAdapter,
                                    D3D_FEATURE_LEVEL requiredFeatureLevel);
 

@@ -14,7 +14,7 @@
 // FAIL_OutOfDate. Different answers to different ids means the dispatcher knows this one -- it found
 // the feature and failed to start it on the empty parameter block the probe deliberately passed.
 //
-// OptiScaler already tells the driver where to look. NVNGX_FeatureInfo_Paths carries the executable
+// OptiScaler already tells the driver where to look. The NGX feature path list carries the executable
 // folder and OptiScaler's own folder into Init_Ext, which is exactly the mechanism that finds
 // nvngx_dlss.dll and friends. Nothing new is needed to locate the model.
 //
@@ -26,8 +26,6 @@
 //   * No anti-tail-call trick, because there is no caller check to satisfy.
 //
 // Off by default until it has been shown to produce the same picture as the forwarder path.
-
-
 
 #include <d3d12.h>
 

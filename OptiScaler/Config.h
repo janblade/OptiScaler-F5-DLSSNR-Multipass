@@ -684,7 +684,7 @@ class Config
     // This is how DLSS itself is called. The forwarder exists only because driving the model
     // directly trips its caller check, and a probe showed the driver dispatches feature 18 already:
     // asking for 18 answers differently from asking for a feature that does not exist. OptiScaler
-    // also already tells the driver where to look, since NVNGX_FeatureInfo_Paths carries the game
+    // also already tells the driver where to look, since the NGX feature path list carries the game
     // and OptiScaler folders into Init_Ext.
     //
     // Off until it is shown to produce the same picture. If it does, the forwarder can go.

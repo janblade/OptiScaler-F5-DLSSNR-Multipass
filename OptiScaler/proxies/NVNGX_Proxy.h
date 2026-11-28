@@ -13,7 +13,10 @@
 
 #include "detours/detours.h"
 
+#include <algorithm>
 #include <filesystem>
+#include <list>
+#include <mutex>
 #include <vulkan/vulkan.hpp>
 
 inline const char* project_id_override = "24480451-f00d-face-1304-0308dabad187";
@@ -516,9 +519,19 @@ class NVNGXProxy
     inline static std::map<std::string, CustomNgxModule> _customModules;
     inline static std::mutex _customMutex;
 
-    inline static std::vector<const wchar_t*> _featurePaths;
+    struct FeaturePathList
+    {
+        std::vector<std::wstring> paths;
+        std::vector<const wchar_t*> pointers;
+    };
 
-    static void AddFeaturePath(const std::filesystem::path& path)
+    // NGX might keep the pointers after init, so lists given to it are never freed. A list is only added when it
+    // differs from every earlier one, so the memory stays bounded (a handful of lists per session).
+    inline static std::list<FeaturePathList> _featurePathLists;
+    inline static std::vector<std::wstring> _gamePaths;
+    inline static std::mutex _featurePathMutex;
+
+    static void AddFeaturePath(std::vector<std::wstring>& paths, const std::filesystem::path& path)
     {
         auto normalize = [](const std::filesystem::path& p)
         {
@@ -531,7 +544,6 @@ class NVNGXProxy
             return result;
         };
 
-        auto& paths = State::Instance().NVNGX_FeatureInfo_Paths;
         auto normalized = normalize(path);
 
         for (const auto& existing : paths)
@@ -858,33 +870,44 @@ class NVNGXProxy
 
     // The one place the NGX feature path list is built: DLSSFeaturePath, the NvngxDlssPath override's folder, Opti's
     // folder, the game's own list, the exe folder, then the folders the dlls were found in. Used by the NGX Init
-    // exports (the game's list is stored from them) and by every NGX start of ours (NR, Superior, DLSS, DLSS-D).
-    static void SetFeaturePaths(NVSDK_NGX_FeatureCommonInfo* fcInfo)
+    // exports (gamePaths = the game's list, stored for later) and by every NGX start of ours (NR, Superior, DLSS,
+    // DLSS-D), which pass no list and reuse the stored one.
+    static void SetFeaturePaths(NVSDK_NGX_FeatureCommonInfo* fcInfo, const NVSDK_NGX_PathListInfo* gamePaths = nullptr)
     {
         auto& state = State::Instance();
         auto config = Config::Instance();
         const bool dlssOverride = config->NVNGX_DLSS_Library.has_value();
 
-        auto addDllFolder = [](const std::optional<std::wstring>& dllPath)
+        std::scoped_lock lock(_featurePathMutex);
+
+        if (gamePaths != nullptr)
+        {
+            _gamePaths.clear();
+
+            for (size_t i = 0; i < gamePaths->Length; i++)
+                _gamePaths.push_back(gamePaths->Path[i]);
+        }
+
+        std::vector<std::wstring> paths;
+
+        auto addDllFolder = [&paths](const std::optional<std::wstring>& dllPath)
         {
             if (dllPath.has_value())
-                AddFeaturePath(std::filesystem::path(dllPath.value()).parent_path());
+                AddFeaturePath(paths, std::filesystem::path(dllPath.value()).parent_path());
         };
 
-        state.NVNGX_FeatureInfo_Paths.clear();
-
         if (config->DLSSFeaturePath.has_value())
-            AddFeaturePath(config->DLSSFeaturePath.value());
+            AddFeaturePath(paths, config->DLSSFeaturePath.value());
 
         if (dlssOverride)
             addDllFolder(state.NVNGX_DLSS_Path);
 
-        AddFeaturePath(config->MainDllPath.value());
+        AddFeaturePath(paths, config->MainDllPath.value());
 
-        for (const auto& path : state.NVNGX_Game_Paths)
-            AddFeaturePath(path);
+        for (const auto& path : _gamePaths)
+            AddFeaturePath(paths, path);
 
-        AddFeaturePath(Util::ExePath().remove_filename());
+        AddFeaturePath(paths, Util::ExePath().remove_filename());
 
         if (!dlssOverride)
             addDllFolder(state.NVNGX_DLSS_Path);
@@ -892,16 +915,22 @@ class NVNGXProxy
         addDllFolder(state.NVNGX_DLSSD_Path);
         addDllFolder(state.NVNGX_DLSSG_Path);
 
-        _featurePaths.clear();
+        auto list = std::find_if(_featurePathLists.begin(), _featurePathLists.end(),
+                                 [&paths](const FeaturePathList& existing) { return existing.paths == paths; });
 
-        for (size_t i = 0; i < state.NVNGX_FeatureInfo_Paths.size(); ++i)
+        if (list == _featurePathLists.end())
         {
-            _featurePaths.push_back(state.NVNGX_FeatureInfo_Paths[i].c_str());
-            LOG_DEBUG("Feature Path [{}]: {}", i, wstring_to_string(state.NVNGX_FeatureInfo_Paths[i]));
+            list = _featurePathLists.insert(_featurePathLists.end(), FeaturePathList { std::move(paths) });
+
+            for (const auto& path : list->paths)
+                list->pointers.push_back(path.c_str());
         }
 
-        fcInfo->PathListInfo.Path = _featurePaths.data();
-        fcInfo->PathListInfo.Length = static_cast<unsigned int>(_featurePaths.size());
+        for (size_t i = 0; i < list->paths.size(); ++i)
+            LOG_DEBUG("Feature Path [{}]: {}", i, wstring_to_string(list->paths[i]));
+
+        fcInfo->PathListInfo.Path = list->pointers.data();
+        fcInfo->PathListInfo.Length = static_cast<unsigned int>(list->pointers.size());
     }
 
     static void GetFeatureCommonInfo(NVSDK_NGX_FeatureCommonInfo* fcInfo)

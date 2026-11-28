@@ -53,7 +53,8 @@ static Microsoft::WRL::ComPtr<ID3D12CommandQueue> ReShadeRealQueue(IUnknown* pDe
     Microsoft::WRL::ComPtr<IUnknown> original;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
 
-    if (Config::Instance()->LoadReShade.value_or_default())
+    // ReShade loaded by Opti sits above us (reshadeModule is only set for that load, not for the one Special K does)
+    if (reshadeModule != nullptr)
         return queue;
 
     original.Attach(Util::GetReShadeOriginal(pDevice));

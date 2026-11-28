@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <initializer_list>
+#include <optional>
 
 using namespace DlssNrTierPlacement;
 
@@ -63,6 +64,30 @@ int main()
             const auto after = AfterTier({ finished, false, false }, beforeRow);
             CHECK(RowMatchesPlacement(after, beforeRow));
         }
+
+    // The "Runs NR:" choice: hidden with Finished Picture, shown otherwise
+    CHECK(!PickerShown({ true, false, false }));
+    CHECK(!PickerShown({ true, true, true }));
+    CHECK(PickerShown({ false, false, false }));
+    CHECK(PickerShown({ false, true, false }));
+
+    // It shows where NR runs while a tier is in effect, whatever was picked before
+    CHECK(PickedBeforeSr({ false, true, false }, true, false));
+    CHECK(!PickedBeforeSr({ false, false, false }, true, true));
+    // and before any pick this session
+    CHECK(PickedBeforeSr({ false, true, false }, false, std::nullopt));
+    CHECK(!PickedBeforeSr({ false, false, false }, false, std::nullopt));
+    // With no tier in effect, the player's pick stands (it only sets the next press)
+    CHECK(PickedBeforeSr({ false, false, false }, false, true));
+    CHECK(!PickedBeforeSr({ false, true, false }, false, false));
+
+    // A tier pressed on the picked side lands there and shows as in effect on that side
+    for (bool picked : { false, true })
+    {
+        const auto after = AfterTier({ false, !picked, false }, picked);
+        CHECK(RowMatchesPlacement(after, picked));
+        CHECK(PickedBeforeSr(after, true, picked) == picked);
+    }
 
     if (fails == 0)
         printf("PASS\n");

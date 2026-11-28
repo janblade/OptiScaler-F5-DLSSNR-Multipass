@@ -370,6 +370,19 @@ static bool IsGameOutput(IDXGISwapChain* swapchain, HWND hwnd)
            (State::Instance().currentFGSwapchain != nullptr && !FGHooks::IsOtherWindowThanFG(hwnd));
 }
 
+// Presents of the current chain, real and generated: fakenvapi's interpolated-frame test steps on each of them
+static UINT64 _currentChainPresents = 0;
+
+// State::frameCount counts the game's frames. On the D3D11 bridge the FG library's chain presents here for every
+// shown frame and counts as current, so there Dx11wDx12SC::Present counts instead (once per game present)
+static void CountCurrentChainPresent()
+{
+    _currentChainPresents++;
+
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+        State::Instance().frameCount++;
+}
+
 // `proxy` and `display` are HDR output's (output/SdrToHdr_*): null for a chain it is not on. `isCurrent`: this is the
 // game's current swapchain, only that one writes State
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
@@ -641,7 +654,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             // DXVK returns below before the native path advances the NR epoch.
             // Count a completed Present; retain the deferred NR evaluation guard.
             if (willPresent && isCurrent)
-                State::Instance().frameCount++;
+                CountCurrentChainPresent();
 
             LOG_TRACE("3 {}", (UINT) presentResult);
         }
@@ -756,17 +769,17 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (State::Instance().fgPresentIsCalled)
             {
                 State::Instance().fgPresentIsCalled = false;
-                fgPresentFrame = State::Instance().frameCount;
+                fgPresentFrame = _currentChainPresents;
             }
 
-            auto isInterpolated = fgIsActive && (State::Instance().frameCount - fgPresentFrame) > 0;
+            auto isInterpolated = fgIsActive && (_currentChainPresents - fgPresentFrame) > 0;
 
             fakenvapi::reportFGPresent(pSwapChain, fgIsActive, isInterpolated);
         }
 #endif
 
         if (isCurrent)
-            State::Instance().frameCount++;
+            CountCurrentChainPresent();
     }
 
     LOG_DEBUG("Calling original present");

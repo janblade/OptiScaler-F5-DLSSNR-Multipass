@@ -108,6 +108,66 @@ inline int NormalResolveVariant(bool rawAnswer, bool packed, unsigned passthroug
                                         : -1;
     return variant < 0 ? -1 : variant + (packed ? 5 : 0);
 }
+// How Superior Scaling resolved a composed frame. None: the ordinary resolve ran (Superior not selected, at 100%
+// without stabilization, or given up on); Raw: its own resolve on NR's answer (No DLSS, or the private DLSS still
+// building); NoDepth: the private DLSS is ready but the frame has no game depth, so the raw answer is resolved;
+// PrivateDlss: the private DLSS's steadied residual.
+enum class Resolve : unsigned char
+{
+    None,
+    Raw,
+    NoDepth,
+    PrivateDlss
+};
+
+// What the log and the menu report as the resolve: it moves only after `kFrames` frames in a row agree, so a path
+// whose depth comes and goes frame by frame does not write a log line (and flip the menu line) on every frame.
+struct ResolveHold
+{
+    static constexpr unsigned kFrames = 30;
+    Resolve shown = Resolve::None;
+    Resolve candidate = Resolve::None;
+    unsigned run = 0;
+
+    Resolve Update(Resolve now)
+    {
+        if (now == shown)
+        {
+            run = 0;
+            return shown;
+        }
+        run = now == candidate ? run + 1 : 1;
+        candidate = now;
+        if (run >= kFrames)
+        {
+            shown = now;
+            run = 0;
+        }
+        return shown;
+    }
+};
+
+// The composition log's "transfer" words. `transfer` is the setting ([DlssNr] Transfer), `resolve` and `preset` what
+// the last frame did. The shared resolve runs Matched residual whenever Superior does not resolve, which the log used
+// to print for every Superior frame.
+inline std::string TransferLogName(uint32_t transfer, Resolve resolve, unsigned preset)
+{
+    if (!Enabled(transfer))
+        return transfer == 2u ? "NVIDIA residual" : transfer == 1u ? "matched residual" : "classic";
+
+    switch (resolve)
+    {
+    case Resolve::PrivateDlss:
+        return "Superior Scaling (private DLSS preset " + std::to_string(preset) + ")";
+    case Resolve::NoDepth:
+        return "Superior Scaling without DLSS (no game depth for the private DLSS)";
+    case Resolve::Raw:
+        return "Superior Scaling without DLSS";
+    default:
+        return "matched residual (Superior Scaling selected, not resolving)";
+    }
+}
+
 // 310.8 has only Main. On 310.9, only A (1) selects Main; Default (0), B (2)
 // and the legacy saved value 3 select Small. This is independent of SR's A/K.
 inline bool MainOnlyRuntime(unsigned major, unsigned minor) { return major == 310u && minor < 9u; }

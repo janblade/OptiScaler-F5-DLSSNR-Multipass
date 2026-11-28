@@ -2216,6 +2216,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             }
         }
 
+        // Quirks can extend the DLSS search
+        spdlog::info("");
+        CheckQuirks(possibleNvidia);
+
         spdlog::info("");
         spdlog::info("Check for DLSS files");
 
@@ -2304,9 +2308,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         {
             Config::Instance()->DLSSEnabled.set_volatile_value(false);
         }
-
-        spdlog::info("");
-        CheckQuirks(possibleNvidia);
 
         // What the Plugins page lists: the built-in MFG unlock and the loaders, then the asi files below
         {

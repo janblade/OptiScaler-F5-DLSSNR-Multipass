@@ -3005,6 +3005,10 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
             }
 
             versionStatus.error.clear();
+
+            // The status is copied from State every frame
+            std::scoped_lock lock(state.versionCheckMutex);
+            state.versionCheckError.clear();
         }
         // Disabled error message
         // else if (!versionStatus.error.empty())

@@ -2834,21 +2834,10 @@ void D3D12Hooks::SetRootSignatureTracking(bool enable) { isUpscalerActive = !ena
 
 bool D3D12Hooks::CanRestoreRootSignature(ID3D12GraphicsCommandList* cmdList)
 {
-    // A list with only heaps or a pipeline recorded (no root signature yet) is restorable too
-    {
-        std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
-        if (signatures.contains(cmdList))
-            return true;
-    }
-    {
-        std::unique_lock<std::shared_mutex> lock(descriptorHeapsMutex);
-        if (descriptorHeaps.contains(cmdList))
-            return true;
-    }
-    {
-        std::unique_lock<std::shared_mutex> lock(pipelineStatesMutex);
-        return pipelineStates.contains(cmdList);
-    }
+    // Only a list with a root signature recorded is restorable: with heaps or a pipeline alone the upscaler would leave
+    // the list without the game's root signature bound
+    std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
+    return signatures.contains(cmdList);
 }
 
 bool D3D12Hooks::RestoreDescriptorHeaps(ID3D12GraphicsCommandList* cmdList)

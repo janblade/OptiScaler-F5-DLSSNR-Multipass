@@ -45,15 +45,24 @@ static HRESULT hkCreateSamplerState(ID3D11Device* This, const D3D11_SAMPLER_DESC
 VALIDATE_HOOK(hkD3D11DeviceRelease, PFN_Release)
 static ULONG hkD3D11DeviceRelease(IUnknown* device)
 {
-    if (State::Instance().currentD3D11Device == device)
+    // Any device we track, not only the game's current one: a probe device must leave the list too
+    const bool isCurrent = State::Instance().currentD3D11Device == device;
+
+    if (isCurrent || State::Instance().IsD3D11Device(device))
     {
         device->AddRef();
         auto refCount = o_D3D11DeviceRelease(device);
 
         if (refCount == 1)
         {
-            LOG_DEBUG("Set State::Instance().currentD3D11Device = nullptr, was: {:X}", (size_t) device);
-            State::Instance().currentD3D11Device = nullptr;
+            State::Instance().RemoveD3D11Device(device);
+
+            if (isCurrent)
+            {
+                LOG_DEBUG("Set State::Instance().currentD3D11Device = nullptr, was: {:X}", (size_t) device);
+                State::Instance().currentD3D11Device = nullptr;
+            }
+
             native::lowlatency::OnDeviceReleased(device);
         }
     }
@@ -161,7 +170,7 @@ static HRESULT hkD3D11On12CreateDevice(IUnknown* pDevice, UINT Flags, const D3D_
     }
 
     if (result == S_OK && ppDevice != nullptr && *ppDevice != nullptr)
-        State::Instance().d3d11Devices.push_back(*ppDevice);
+        State::Instance().AddD3D11Device(*ppDevice);
 
     LOG_FUNC_RESULT(result);
 
@@ -275,7 +284,7 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
     LOG_FUNC_RESULT(result);
 
     if (result == S_OK && ppDevice != nullptr && *ppDevice != nullptr)
-        State::Instance().d3d11Devices.push_back(*ppDevice);
+        State::Instance().AddD3D11Device(*ppDevice);
 
     return result;
 }
@@ -534,7 +543,7 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
     }
 
     if (SUCCEEDED(result) && ppDevice != nullptr && *ppDevice != nullptr)
-        State::Instance().d3d11Devices.push_back(*ppDevice);
+        State::Instance().AddD3D11Device(*ppDevice);
 
     LOG_FUNC_RESULT(result);
     return result;

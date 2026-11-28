@@ -20,6 +20,8 @@
 #include <proxies/IGDExt_Proxy.h>
 #include <proxies/Streamline_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
+#include <inputs/FSR2_Dx12.h>
+#include <inputs/FSR3_Dx12.h>
 
 #include <detours/detours.h>
 
@@ -1729,6 +1731,10 @@ static ULONG hkD3D12DeviceRelease(IUnknown* device)
         if (refCount == 1)
         {
             State::Instance().RemoveD3D12Device((ID3D12Device*) device);
+
+            // The FSR2/FSR3 inputs forget a cached device that is going away
+            FSR2Dx12DeviceDestroyed(device);
+            FSR3Dx12DeviceDestroyed(device);
 
             if (isCurrent)
             {

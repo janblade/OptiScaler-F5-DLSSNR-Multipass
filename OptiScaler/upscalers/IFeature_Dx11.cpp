@@ -52,6 +52,12 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
     // Frees deferred objects even when presents aren't hooked
     DeferredRelease::Collect();
 
+    if (!IsInited())
+    {
+        LOG_ERROR("Not inited!");
+        return false;
+    }
+
     auto result = true;
 
     ComPtr<ID3D11ShaderResourceView> restoreSRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
@@ -171,18 +177,21 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
               } });
     }
 
-    _actualSharpness = _sharpness;
+    _actualSharpness.reset();
     if (useRcas)
     {
         pipeline.push_back({ // Setup
                              [&](ID3D11Resource* nextOutput) -> ID3D11Resource*
                              {
-                                 // Disable any built-in sharpness shaders
-                                 InParameters->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
-                                 _sharpness = 0.0f;
-
-                                 if (RCAS->CreateBufferResource(Device, nextOutput))
+                                 // Same checks as Dispatch, a skipped pass must not take over the output
+                                 if (paramMotion && paramOutput && RCAS->CreateBufferResource(Device, nextOutput) &&
+                                     RCAS->CanRender())
                                  {
+                                     // Disable any built-in sharpness shaders
+                                     InParameters->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
+                                     _actualSharpness = _sharpness;
+                                     _sharpness = 0.0f;
+
                                      return RCAS->Buffer();
                                  }
                                  return nullptr;
@@ -279,7 +288,9 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
         pipeline.push_back({ // Setup
                              [&](ID3D11Resource* nextOutput) -> ID3D11Resource*
                              {
-                                 if (Magnifier->CreateBufferResource(Device, nextOutput))
+                                 // Same checks as Dispatch, a skipped pass must not take over the output
+                                 if (paramMotion && paramOutput &&
+                                     Magnifier->CreateBufferResource(Device, nextOutput) && Magnifier->CanRender())
                                      return Magnifier->Buffer();
 
                                  return nullptr;
@@ -295,6 +306,11 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
                                                             (ID3D11Texture2D*) output);
                              } });
     }
+
+    // RCAS setup and DLSS zero the game's sharpness, restored after EvaluateInternal
+    float originalSharpness = 0.0f;
+    bool hasSharpness =
+        InParameters->Get(NVSDK_NGX_Parameter_Sharpness, &originalSharpness) == NVSDK_NGX_Result_Success;
 
     // Iterate BACKWARDS to establish where each shader needs to pull its input from
     ID3D11Resource* currentTarget = paramOutput;
@@ -320,6 +336,9 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
 
     // The game's own output goes back on every exit
     InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
+
+    if (hasSharpness)
+        InParameters->Set(NVSDK_NGX_Parameter_Sharpness, originalSharpness);
 
     if (!evalResult)
         result = false;
@@ -394,6 +413,9 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
 
 std::optional<double> IFeature_Dx11::ReadUpscalerTime(void* deviceContextVoid)
 {
+    if (!UpscalerTime || !RCAS || !OutputScaler)
+        return std::nullopt;
+
     auto* deviceContext = (ID3D11DeviceContext*) deviceContextVoid;
 
     lastUpscalerTime = UpscalerTime->ReadGpuTime(deviceContext);

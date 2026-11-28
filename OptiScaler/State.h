@@ -222,6 +222,7 @@ class State
     bool gameFsrFgSeen = false;
 
     ankerl::unordered_dense::map<void*, CapturedHudlessInfo> capturedHudlesses;
+    std::mutex capturedHudlessesMutex; // Changes and the menu, lookups also rely on the hudfix check lock
     bool clearCapturedHudlesses = false;
 
     // NVNGX init parameters
@@ -498,11 +499,37 @@ class State
         return _d3d12Devices.empty() ? nullptr : _d3d12Devices.back();
     }
 
+    // The game's D3D11 devices: added at creation, removed when the last reference goes (hkD3D11DeviceRelease)
+    void AddD3D11Device(ID3D11Device* device)
+    {
+        std::lock_guard<std::mutex> lock(_d3d11DevicesMutex);
+        _d3d11Devices.push_back(device);
+    }
+
+    void RemoveD3D11Device(IUnknown* device)
+    {
+        std::lock_guard<std::mutex> lock(_d3d11DevicesMutex);
+        _d3d11Devices.erase(std::remove(_d3d11Devices.begin(), _d3d11Devices.end(), device), _d3d11Devices.end());
+    }
+
+    bool IsD3D11Device(IUnknown* device)
+    {
+        std::lock_guard<std::mutex> lock(_d3d11DevicesMutex);
+        return std::find(_d3d11Devices.begin(), _d3d11Devices.end(), device) != _d3d11Devices.end();
+    }
+
+    // The most recently created live device, or nullptr
+    ID3D11Device* LastD3D11Device()
+    {
+        std::lock_guard<std::mutex> lock(_d3d11DevicesMutex);
+        return _d3d11Devices.empty() ? nullptr : _d3d11Devices.back();
+    }
+
     // use the helpers above, not these
     std::mutex _d3d12DevicesMutex;
     std::vector<ID3D12Device*> _d3d12Devices;
-
-    std::vector<ID3D11Device*> d3d11Devices;
+    std::mutex _d3d11DevicesMutex;
+    std::vector<ID3D11Device*> _d3d11Devices;
 
     // The FG output of whichever API the game uses
     IFGFeature* CurrentFG() const

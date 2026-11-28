@@ -23,7 +23,14 @@ class Nvngx_FG
     static inline std::unique_ptr<IFGNvngx> _provider;
     static inline std::unique_ptr<HudCopy_Dx12> _hudCopy;
 
+    // Device the HUD copy was made on, not owned
+    static inline ID3D12Device* _hudCopyDevice = nullptr;
+
+    // Provider's callback, the game calls ours with the wrapped handle
+    static inline void* _providerGetCurrentSettings = nullptr;
+
     static IFGNvngx* getProvider();
+    static void WrapProviderCallbacks(NVSDK_NGX_Parameter* InParameters);
 
   public:
     static int getMaxFakeFramesCount();

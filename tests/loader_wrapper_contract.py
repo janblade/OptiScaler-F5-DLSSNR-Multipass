@@ -55,6 +55,13 @@ void operator delete(void* p, size_t) noexcept { free(p); }
 static bool noTls = false, skipChecks = false, allocateAfterOriginal = false;
 struct Config { struct Option { bool value_or_default() const { return false; } } UseNtdllHooks; static Config* Instance() { static Config c; return &c; } };
 static bool ThreadHasNoTls() { return noTls; }
+static thread_local const std::wstring* _checkedName = nullptr;
+struct CheckedLoadScope
+{
+    const std::wstring* _previous;
+    explicit CheckedLoadScope(const std::wstring& name) : _previous(_checkedName) { _checkedName = &name; }
+    ~CheckedLoadScope() { _checkedName = _previous; }
+};
 static HMODULE originalModule = reinterpret_cast<HMODULE>(0x20000);
 static int failures = 0;
 #define CHECK(x) do { if (!(x)) { printf("FAIL %d: %s\n", __LINE__, #x); ++failures; } } while (0)

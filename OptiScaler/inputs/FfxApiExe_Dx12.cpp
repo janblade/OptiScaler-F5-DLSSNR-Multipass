@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "FfxApi_Dx12.h"
+#include "NVNGX_DLSS.h"
 #include "Config.h"
 #include "Util.h"
 
@@ -27,8 +28,10 @@ inline static PfnFfxDispatch _D3D12_Dispatch = nullptr;
 static std::unordered_map<ffxContext, ffxCreateContextDescUpscale> _initParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Parameter*> _nvParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Handle*> _contexts;
-static ID3D12Device* _d3d12Device = nullptr;
-static bool _nvnxgInited = false;
+static std::atomic<ID3D12Device*> _d3d12Device { nullptr };
+// Device this input initialised NGX with
+static std::atomic<ID3D12Device*> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static float qualityRatios[] = { 1.0f, 1.5f, 1.7f, 2.0f, 3.0f };
 // The game's own FSR FG contexts (FGHooks::NoteGameFsrFg), as in FfxApi_Dx12.cpp
 static std::unordered_set<ffxContext> _gameFgContexts;
@@ -87,7 +90,7 @@ static bool CreateDLSSContext(ffxContext handle, const ffxDispatchDescUpscale* p
 
     LOG_INFO("renderWidth: {}, maxWidth: {}, ratio: {}", pExecParams->renderSize.width, width, ratio);
 
-    if (ratio <= 3.0 && ratio > 2.0)
+    if (ratio > 2.0)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_UltraPerformance);
     else if (ratio <= 2.0 && ratio > 1.7)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
@@ -224,19 +227,21 @@ static ffxReturnCode_t ffxCreateContext_Dx12(ffxContext* context, ffxCreateConte
     if (!upscaleContext)
         return ffxApiResult;
 
-    if (!State::Instance().nvngxDx12Inited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!State::Instance().nvngxDx12Inited || (_nvngxInited && _nvngxDevice.load() != _d3d12Device.load()))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
+        auto nvResult = NVNGXDx12InputInit(
             OPTI_GUID, State::Instance().NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d12Device, &fcInfo,
             State::Instance().NVNGX_Version == 0 ? NVSDK_NGX_Version_API : State::Instance().NVNGX_Version);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _d3d12Device.load();
+        _nvngxInited = true;
     }
 
     NVSDK_NGX_Parameter* params = nullptr;
@@ -498,4 +503,13 @@ void HookFfxExeInputs()
             State::Instance().fsrHooks = true;
         }
     }
+}
+
+void FfxApiExeDx12DeviceDestroyed(IUnknown* device)
+{
+    ID3D12Device* expected = (ID3D12Device*) device;
+    _d3d12Device.compare_exchange_strong(expected, nullptr);
+
+    expected = (ID3D12Device*) device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

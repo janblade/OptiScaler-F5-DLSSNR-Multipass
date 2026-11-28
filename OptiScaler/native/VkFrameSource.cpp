@@ -270,7 +270,7 @@ bool VkFrameSource::EnsureD3D12(VkPhysicalDevice physical, std::string& why)
     ComPtr<IDXGIFactory2> factory2;
     HRESULT hr = DxgiProxy::Module() == nullptr
                      ? CreateDXGIFactory2(0, IID_PPV_ARGS(&factory2))
-                     : DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(IDXGIFactory2), &factory2);
+                     : DxgiProxy::CreateDxgiFactory2_Hooked()(0, __uuidof(IDXGIFactory2), &factory2);
 
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter> adapter;

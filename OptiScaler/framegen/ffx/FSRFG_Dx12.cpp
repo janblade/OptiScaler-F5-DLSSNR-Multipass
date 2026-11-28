@@ -265,12 +265,17 @@ typedef struct FfxSwapchainFramePacingTuning
 
 void FSRFG_Dx12::ConfigureFramePaceTuning()
 {
-    State::Instance().fsrfgFramePaceTuningChanged = false;
+    const bool changed = std::exchange(State::Instance().fsrfgFramePaceTuningChanged, false);
 
     if (_swapChainContext == nullptr || Version() < feature_version { 3, 1, 3 })
         return;
 
-    FfxSwapchainFramePacingTuning fpt {};
+    // A new swapchain keeps the SDK's own pacing until tuning is used
+    if (!Config::Instance()->FGFramePacingTuning.value_or_default() && !changed)
+        return;
+
+    // SDK defaults, they restore the pacing when tuning gets turned off
+    FfxSwapchainFramePacingTuning fpt { 0.1f, 0.1f, false, 2, false };
     if (Config::Instance()->FGFramePacingTuning.value_or_default())
     {
         fpt.allowHybridSpin = Config::Instance()->FGFPTAllowHybridSpin.value_or_default();
@@ -279,15 +284,15 @@ void FSRFG_Dx12::ConfigureFramePaceTuning()
         fpt.hybridSpinTime = Config::Instance()->FGFPTHybridSpinTime.value_or_default();
         fpt.safetyMarginInMs = Config::Instance()->FGFPTSafetyMarginInMs.value_or_default();
         fpt.varianceFactor = Config::Instance()->FGFPTVarianceFactor.value_or_default();
-
-        ffxConfigureDescFrameGenerationSwapChainKeyValueDX12 cfgDesc {};
-        cfgDesc.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_KEYVALUE_DX12;
-        cfgDesc.key = 2; // FfxSwapchainFramePacingTuning
-        cfgDesc.ptr = &fpt;
-
-        auto result = FfxApiProxy::D3D12_Configure(&_swapChainContext, &cfgDesc.header);
-        LOG_DEBUG("HybridSpin D3D12_Configure result: {}", FfxApiProxy::ReturnCodeToString(result));
     }
+
+    ffxConfigureDescFrameGenerationSwapChainKeyValueDX12 cfgDesc {};
+    cfgDesc.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_KEYVALUE_DX12;
+    cfgDesc.key = 2; // FfxSwapchainFramePacingTuning
+    cfgDesc.ptr = &fpt;
+
+    auto result = FfxApiProxy::D3D12_Configure(&_swapChainContext, &cfgDesc.header);
+    LOG_DEBUG("HybridSpin D3D12_Configure result: {}", FfxApiProxy::ReturnCodeToString(result));
 }
 
 feature_version FSRFG_Dx12::Version()
@@ -520,6 +525,8 @@ bool FSRFG_Dx12::Dispatch()
 
         // Prepare command list
         auto allocator = _fgCommandAllocator[fIndex];
+        WaitForFenceValue(_scFence, _scFenceEvent, _fgAllocatorFenceValues[fIndex]);
+
         auto result = allocator->Reset();
         if (result != S_OK)
         {
@@ -1441,9 +1448,10 @@ void FSRFG_Dx12::ReleaseObjects()
 
         _uiCommandListResetted[i] = false;
         _uiAllocatorFenceValues[i] = 0;
+        _fgAllocatorFenceValues[i] = 0;
     }
 
-    ReleaseUIFence();
+    ReleaseFences();
 
     _renderUI.reset();
     _hudlessCompare.reset();
@@ -1477,6 +1485,7 @@ bool FSRFG_Dx12::ExecuteCommandList(int index)
     {
         LOG_DEBUG("Executing FG cmdList: {:X}", (size_t) _fgCommandList[index]);
         _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_fgCommandList[index]);
+        _fgAllocatorFenceValues[index] = SignalSCFence();
         SetExecuted(index);
     }
 
@@ -1860,18 +1869,7 @@ bool FSRFG_Dx12::Present()
             _uiCommandListResetted[fIndex] = false;
         }
 
-        if (_scCommandListResetted[fIndex])
-        {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
-            auto closeResult = _scCommandList[fIndex]->Close();
-
-            if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
-            else
-                LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
-
-            _scCommandListResetted[fIndex] = false;
-        }
+        SubmitSCCommandList(fIndex);
     }
 
     if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)

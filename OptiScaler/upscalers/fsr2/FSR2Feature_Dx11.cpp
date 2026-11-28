@@ -38,6 +38,10 @@ bool FSR2FeatureDx11::CopyTexture(ID3D11Resource* InResource, D3D11_TEXTURE2D_RE
 
     if (desc.BindFlags == bindFlags)
     {
+        // Our copy isn't needed anymore
+        if (!OutTextureRes->usingOriginal && OutTextureRes->Texture != nullptr)
+            OutTextureRes->Texture->Release();
+
         ASSIGN_DESC(OutTextureRes->Desc, desc);
         OutTextureRes->Texture = originalTexture;
         OutTextureRes->usingOriginal = true;
@@ -203,6 +207,10 @@ bool FSR2FeatureDx11::InitFSR2(const NVSDK_NGX_Parameter* InParameters)
         if (errorCode != FFX_OK)
         {
             LOG_ERROR("ffxFsr2ContextCreate error: {0}", ResultToString(errorCode));
+
+            // The destructor frees it only for inited features
+            free(_contextDesc.callbacks.scratchBuffer);
+            _contextDesc.callbacks.scratchBuffer = nullptr;
             return false;
         }
     }
@@ -234,7 +242,7 @@ bool FSR2FeatureDx11::EvaluateInternal(ID3D11DeviceContext* InContext, NVSDK_NGX
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &params.jitterOffset.x);
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &params.jitterOffset.y);
 
-    unsigned int reset;
+    unsigned int reset = 0;
     InParameters->Get(NVSDK_NGX_Parameter_Reset, &reset);
     params.reset = (reset == 1);
 

@@ -30,7 +30,7 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     params.enableSharpening = _sharpness > 0.0f;
     params.sharpness = _sharpness;
 
-    unsigned int reset;
+    unsigned int reset = 0;
     InParameters->Get(NVSDK_NGX_Parameter_Reset, &reset);
     params.reset = (reset == 1);
 
@@ -38,21 +38,6 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     LOG_DEBUG("Input Resolution: {0}x{1}", params.renderSize.width, params.renderSize.height);
 
     params.commandList = ffxGetCommandListDX12(InCommandList);
-
-    // Forward barriers on game resources, undone by restoreStates on every exit
-    std::vector<std::tuple<ID3D12Resource*, D3D12_RESOURCE_STATES, D3D12_RESOURCE_STATES>> transitions;
-
-    auto forwardBarrier = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-    {
-        ResourceBarrier(InCommandList, resource, before, after);
-        transitions.emplace_back(resource, before, after);
-    };
-
-    auto restoreStates = [&]()
-    {
-        for (const auto& [resource, before, after] : transitions | std::views::reverse)
-            ResourceBarrier(InCommandList, resource, after, before);
-    };
 
     ID3D12Resource* paramColor = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_Color, &paramColor) != NVSDK_NGX_Result_Success)
@@ -62,9 +47,9 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     {
         LOG_DEBUG("Color exist..");
 
-        if (Config::Instance()->ColorResourceBarrier.has_value())
+        if (std::optional<int32_t> barrier = Config::Instance()->ColorResourceBarrier; barrier.has_value())
         {
-            forwardBarrier(paramColor, (D3D12_RESOURCE_STATES) Config::Instance()->ColorResourceBarrier.value(),
+            ForwardBarrier(InCommandList, paramColor, (D3D12_RESOURCE_STATES) barrier.value(),
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
@@ -72,7 +57,7 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_RENDER_TARGET);
-            forwardBarrier(paramColor, D3D12_RESOURCE_STATE_RENDER_TARGET,
+            ForwardBarrier(InCommandList, paramColor, D3D12_RESOURCE_STATE_RENDER_TARGET,
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
@@ -93,9 +78,9 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     {
         LOG_DEBUG("MotionVectors exist..");
 
-        if (Config::Instance()->MVResourceBarrier.has_value())
+        if (std::optional<int32_t> barrier = Config::Instance()->MVResourceBarrier; barrier.has_value())
         {
-            forwardBarrier(paramVelocity, (D3D12_RESOURCE_STATES) Config::Instance()->MVResourceBarrier.value(),
+            ForwardBarrier(InCommandList, paramVelocity, (D3D12_RESOURCE_STATES) barrier.value(),
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
@@ -103,7 +88,7 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            forwardBarrier(paramVelocity, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            ForwardBarrier(InCommandList, paramVelocity, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
@@ -113,7 +98,6 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     else
     {
         LOG_ERROR("MotionVectors not exist!!");
-        restoreStates();
         return false;
     }
 
@@ -125,17 +109,12 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     {
         LOG_DEBUG("Output exist..");
 
-        if (Config::Instance()->OutputResourceBarrier.has_value())
-            forwardBarrier(paramOutput, (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value(),
-                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
         params.output =
             ffxGetResourceDX12(&_context, paramOutput, (wchar_t*) L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     else
     {
         LOG_ERROR("Output not exist!!");
-        restoreStates();
         return false;
     }
 
@@ -147,8 +126,8 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     {
         LOG_DEBUG("Depth exist..");
 
-        if (Config::Instance()->DepthResourceBarrier.has_value())
-            forwardBarrier(paramDepth, (D3D12_RESOURCE_STATES) Config::Instance()->DepthResourceBarrier.value(),
+        if (std::optional<int32_t> barrier = Config::Instance()->DepthResourceBarrier; barrier.has_value())
+            ForwardBarrier(InCommandList, paramDepth, (D3D12_RESOURCE_STATES) barrier.value(),
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         params.depth =
@@ -157,7 +136,6 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     else
     {
         LOG_ERROR("Depth not exist!!");
-        restoreStates();
         return false;
     }
 
@@ -175,8 +153,8 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
         {
             LOG_DEBUG("ExposureTexture exist..");
 
-            if (Config::Instance()->ExposureResourceBarrier.has_value())
-                forwardBarrier(paramExp, (D3D12_RESOURCE_STATES) Config::Instance()->ExposureResourceBarrier.value(),
+            if (std::optional<int32_t> barrier = Config::Instance()->ExposureResourceBarrier; barrier.has_value())
+                ForwardBarrier(InCommandList, paramExp, (D3D12_RESOURCE_STATES) barrier.value(),
                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             params.exposure =
@@ -187,7 +165,6 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
             LOG_DEBUG("AutoExposure disabled but ExposureTexture is not exist, it may cause problems!!");
             State::Instance().autoExposure = true;
             State::Instance().changeBackend[Handle()->Id] = true;
-            restoreStates();
             return true;
         }
     }
@@ -215,9 +192,8 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
         {
             LOG_DEBUG("Using FSR reactive mask..");
 
-            if (Config::Instance()->MaskResourceBarrier.has_value())
-                forwardBarrier(paramReactiveMask,
-                               (D3D12_RESOURCE_STATES) Config::Instance()->MaskResourceBarrier.value(),
+            if (std::optional<int32_t> barrier = Config::Instance()->MaskResourceBarrier; barrier.has_value())
+                ForwardBarrier(InCommandList, paramReactiveMask, (D3D12_RESOURCE_STATES) barrier.value(),
                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             params.reactive = ffxGetResourceDX12(&_context, paramReactiveMask, (wchar_t*) L"FSR2_Reactive",
@@ -230,9 +206,8 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
                 LOG_DEBUG("Input Bias mask exist..");
                 Config::Instance()->DisableReactiveMask.set_volatile_value(false);
 
-                if (Config::Instance()->MaskResourceBarrier.has_value())
-                    forwardBarrier(paramReactiveMask2,
-                                   (D3D12_RESOURCE_STATES) Config::Instance()->MaskResourceBarrier.value(),
+                if (std::optional<int32_t> barrier = Config::Instance()->MaskResourceBarrier; barrier.has_value())
+                    ForwardBarrier(InCommandList, paramReactiveMask2, (D3D12_RESOURCE_STATES) barrier.value(),
                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
                 if (paramTransparency == nullptr && Config::Instance()->FsrUseMaskForTransparency.value_or_default())
@@ -332,11 +307,8 @@ bool FSR2FeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     if (result != FFX_OK)
     {
         LOG_ERROR("ffxFsr2ContextDispatch error: {0}", ResultToString(result));
-        restoreStates();
         return false;
     }
-
-    restoreStates();
 
     _frameCount++;
 
@@ -463,6 +435,10 @@ bool FSR2FeatureDx12::InitFSR2(const NVSDK_NGX_Parameter* InParameters)
         if (ret != FFX_OK)
         {
             LOG_ERROR("ffxFsr2ContextCreate error: {0}", ResultToString(ret));
+
+            // The destructor frees it only for inited features
+            free(_contextDesc.callbacks.scratchBuffer);
+            _contextDesc.callbacks.scratchBuffer = nullptr;
             return false;
         }
     }

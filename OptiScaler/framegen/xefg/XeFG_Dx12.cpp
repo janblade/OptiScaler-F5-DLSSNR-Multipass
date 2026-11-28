@@ -294,6 +294,10 @@ bool XeFG_Dx12::DestroySwapchainContext()
             State::Instance().currentFGSwapchain = nullptr;
             _allowLowerFrameId = true;
 
+            // New context starts with its defaults, Dispatch sets them again
+            _framesToInterpolate = -1;
+            _uiComposition = false;
+
             // Its XeLL context isn't read anymore, unless a parked context (refused before) still links it: then it
             // goes once the last of those is destroyed (RetryParkedContexts)
             bool parked = false;
@@ -1599,7 +1603,7 @@ void XeFG_Dx12::ReleaseObjects()
         _uiAllocatorFenceValues[i] = 0;
     }
 
-    ReleaseUIFence();
+    ReleaseFences();
 
     _renderUI.reset();
     _hudlessCompare.reset();
@@ -1828,18 +1832,7 @@ bool XeFG_Dx12::Present()
             _uiCommandListResetted[fIndex] = false;
         }
 
-        if (_scCommandListResetted[fIndex])
-        {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
-            auto closeResult = _scCommandList[fIndex]->Close();
-
-            if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
-            else
-                LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
-
-            _scCommandListResetted[fIndex] = false;
-        }
+        SubmitSCCommandList(fIndex);
     }
 
     if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)
@@ -2027,6 +2020,10 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->height = inputResource->height;
     fResource->cmdList = inputResource->cmdList;
 
+    // A new resource for the slot, its old copy is stale. A re-tag passes the slot itself
+    if (inputResource != fResource)
+        fResource->copy = nullptr;
+
     auto willFlip = State::Instance().activeFgInput == FGInput::Upscaler &&
                     Config::Instance()->FGResourceFlip.value_or_default() &&
                     (type == FG_ResourceType::Velocity || type == FG_ResourceType::Depth);
@@ -2119,9 +2116,11 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
         fResource->validity != FG_ResourceValidity::UntilPresent)
     {
-        fResource->validity = (fResource->validity != FG_ResourceValidity::ValidNow || willFlip)
-                                  ? FG_ResourceValidity::UntilPresent
-                                  : FG_ResourceValidity::ValidNow;
+        // Flip only made a copy when the shader ran
+        fResource->validity =
+            (fResource->validity != FG_ResourceValidity::ValidNow || (willFlip && fResource->copy != nullptr))
+                ? FG_ResourceValidity::UntilPresent
+                : FG_ResourceValidity::ValidNow;
 
         if (type == FG_ResourceType::HudlessColor)
         {
@@ -2141,6 +2140,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         xefg_swapchain_d3d12_resource_data_t resourceParam = GetResourceData(type, fIndex);
         auto taggedState = resourceParam.incomingState;
         bool movedToCopyDest = false;
+        auto tagCmdList = fResource->cmdList;
 
         // SDK version 2.1.1 fixes those issues
         if (version < feature_version { 1, 2, 2 })
@@ -2148,8 +2148,9 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
             // HACK: XeFG docs lie and cmd list is technically required as it checks for it
             // But it doesn't seem to use it when the validity is UNTIL_NEXT_PRESENT
             // https://github.com/intel/xess/issues/45
-            if (fResource->cmdList == nullptr && resourceParam.validity == XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT)
-                fResource->cmdList = (ID3D12GraphicsCommandList*) 1;
+            // Not stored, a later re-tag would use it for a barrier
+            if (tagCmdList == nullptr && resourceParam.validity == XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT)
+                tagCmdList = (ID3D12GraphicsCommandList*) 1;
 
             // HACK: XeFG seems to crash if the resource is in COPY_SOURCE state
             // even though the docs say it's the preferred state
@@ -2176,7 +2177,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
             (XeFGProxy::SetUiCompositionState() != nullptr || Config::Instance()->FGDrawUIOverFG.value_or_default()))
         {
             auto frameId = FrameIdFor(_frameCount - indexDiff).id;
-            result = XeFGProxy::D3D12TagFrameResource()(_swapChainContext, fResource->cmdList, frameId, &resourceParam);
+            result = XeFGProxy::D3D12TagFrameResource()(_swapChainContext, tagCmdList, frameId, &resourceParam);
             LOG_DEBUG("D3D12TagFrameResource, frameId: {}, type: {} result: {} ({})", frameId,
                       magic_enum::enum_name(type), magic_enum::enum_name(result), (int32_t) result);
         }

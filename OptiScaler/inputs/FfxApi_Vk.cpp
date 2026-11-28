@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "FfxApi_Vk.h"
+#include "NVNGX_DLSS.h"
 
 #include <Util.h>
 #include <Config.h>
@@ -20,10 +21,12 @@
 static std::unordered_map<ffxContext, ffxCreateContextDescUpscale> _initParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Parameter*> _nvParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Handle*> _contexts;
-static VkDevice _vkDevice = nullptr;
+static std::atomic<VkDevice> _vkDevice { nullptr };
 static VkPhysicalDevice _vkPhysicalDevice = nullptr;
 static PFN_vkGetDeviceProcAddr _vkDeviceProcAddress = nullptr;
-static bool _nvnxgInited = false;
+// Device this input initialised NGX with
+static std::atomic<VkDevice> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static float qualityRatios[] = { 1.0f, 1.5f, 1.7f, 2.0f, 3.0f };
 static size_t _contextCounter = 0x00001ee7;
 
@@ -270,7 +273,7 @@ static bool CreateDLSSContext(ffxContext handle, const ffxDispatchDescUpscale* p
 
     LOG_INFO("renderWidth: {}, maxWidth: {}, ratio: {}", pExecParams->renderSize.width, width, ratio);
 
-    if (ratio <= 3.0 && ratio > 2.0)
+    if (ratio > 2.0)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_UltraPerformance);
     else if (ratio <= 2.0 && ratio > 1.7)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
@@ -402,20 +405,22 @@ ffxReturnCode_t ffxCreateContext_Vk(ffxContext* context, ffxCreateContextDescHea
             return ffxApiResult;
     }
 
-    if (!State::Instance().nvngxVkInited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!State::Instance().nvngxVkInited || (_nvngxInited && _nvngxDevice.load() != _vkDevice.load()))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_VULKAN_Init_ProjectID_Ext(
-            OPTI_GUID, State::Instance().NVNGX_Engine, OPTI_VERSION, exePath.c_str(), State::Instance().VulkanInstance,
-            _vkPhysicalDevice, _vkDevice, vkGetInstanceProcAddr, _vkDeviceProcAddress, State::Instance().NVNGX_Version,
-            &fcInfo);
+        auto nvResult =
+            NVNGXVkInputInit(OPTI_GUID, State::Instance().NVNGX_Engine, OPTI_VERSION, exePath.c_str(),
+                             State::Instance().VulkanInstance, _vkPhysicalDevice, _vkDevice, vkGetInstanceProcAddr,
+                             _vkDeviceProcAddress, State::Instance().NVNGX_Version, &fcInfo);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _vkDevice.load();
+        _nvngxInited = true;
     }
 
     if (!Config::Instance()->EnableHotSwapping.value_or_default())
@@ -730,7 +735,7 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
                                            mvImageView,    outputImageView, fsrReactiveView, fsrTransparencyView };
 
     DeferredRelease::Enqueue(
-        [device = _vkDevice, lastViews]()
+        [device = _vkDevice.load(), lastViews]()
         {
             for (auto view : lastViews)
             {
@@ -738,7 +743,7 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
                     vkDestroyImageView(device, view, nullptr);
             }
         },
-        (uint64_t) _vkDevice);
+        (uint64_t) _vkDevice.load());
 
     // Handed to the queue above: a view that isn't made again this frame must not be destroyed twice next frame
     depthImageView = VK_NULL_HANDLE;
@@ -853,4 +858,13 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
 
     LOG_ERROR("evalResult: {:X}", (UINT) evalResult);
     return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+}
+
+void FfxApiVkDeviceDestroyed(VkDevice device)
+{
+    VkDevice expected = device;
+    _vkDevice.compare_exchange_strong(expected, nullptr);
+
+    expected = device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

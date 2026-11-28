@@ -20,6 +20,12 @@
 #include <proxies/IGDExt_Proxy.h>
 #include <proxies/Streamline_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
+#include <inputs/FSR2_Dx12.h>
+#include <inputs/FSR3_Dx12.h>
+#include <inputs/NVNGX_DLSS.h>
+#include <inputs/FfxApi_Dx12.h>
+#include <inputs/FfxApiExe_Dx12.h>
+#include <inputs/XeSS_Dx12.h>
 
 #include <detours/detours.h>
 
@@ -77,7 +83,11 @@ static PFN_CreateDevice o_CreateDevice = nullptr;
 static D3d12Proxy::PFN_D3D12CreateDevice o_D3D12CreateDevice = nullptr;
 static D3d12Proxy::PFN_D3D12SerializeRootSignature o_D3D12SerializeRootSignature = nullptr;
 static D3d12Proxy::PFN_D3D12SerializeVersionedRootSignature o_D3D12SerializeVersionedRootSignature = nullptr;
-static PFN_Release o_D3D12DeviceRelease = nullptr;
+
+// One original per hooked Release, devices of other classes (debug layer, device factory runtimes) have their own
+static PVOID _d3d12DeviceReleaseTargets[4] {};
+static PFN_Release o_D3D12DeviceRelease[4] {};
+static std::mutex _d3d12DeviceReleaseMutex;
 
 static bool _creatingD3D12Device = false;
 static bool _d3d12Captured = false;
@@ -273,6 +283,9 @@ static void CALLBACK D3D12DebugCallback(D3D12_MESSAGE_CATEGORY Category, D3D12_M
 
 static void HookToDevice(ID3D12Device* InDevice);
 static void UnhookDevice();
+static void HookD3D12DeviceRelease(ID3D12Device* device);
+static PFN_Release OriginalD3D12DeviceRelease(IUnknown* device);
+static void UnhookD3D12DeviceRelease();
 
 // A new list can reuse a released list's address and starts recording without a Reset: closing a list drops what was
 // recorded for it, so the next list at that address never restores the old one's heaps, pipeline or root signature
@@ -1425,7 +1438,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
     bool nonPrimaryGpu = false;
     if (pAdapter != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+        ScopedSkipSpoofingThread skipSpoofingThread {};
 
         if (((IDXGIAdapter*) pAdapter)->GetDesc(&desc) == S_OK)
         {
@@ -1433,7 +1446,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
             LOG_INFO("Adapter Desc: {}", wstring_to_string(szName));
 
             auto primaryGpu = IdentifyGpu::getPrimaryGpu();
-            if (!IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
+            if (primaryGpu.vendorId != VendorId::Invalid && !IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
             {
                 LOG_WARN("D3D12Device created with non-primary GPU");
                 nonPrimaryGpu = true;
@@ -1462,21 +1475,31 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
 
     HRESULT result;
     _creatingD3D12Device = true;
-    if (desc.VendorId == VendorId::Intel)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
-        result = o_D3D12CreateDevice(pAdapter, minLevel, riid, ppDevice);
-    }
-    else
-    {
-        ScopedCreatingD3DDevice skipCreatingD3DDevice {};
-        result = o_D3D12CreateDevice(pAdapter, minLevel, riid, ppDevice);
+        std::scoped_lock probeLock(IdentifyGpu::probeDeviceMutex);
+
+        if (desc.VendorId == VendorId::Intel)
+        {
+            ScopedSkipSpoofingThread skipSpoofingThread {};
+            result = o_D3D12CreateDevice(pAdapter, minLevel, riid, ppDevice);
+        }
+        else
+        {
+            ScopedCreatingD3DDevice skipCreatingD3DDevice {};
+            result = o_D3D12CreateDevice(pAdapter, minLevel, riid, ppDevice);
+        }
     }
     _creatingD3D12Device = false;
 
     LOG_DEBUG("o_D3D12CreateDevice result: {:X}", (UINT) result);
 
-    if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE && !nonPrimaryGpu)
+    // Devices created while detecting GPUs are probes, not the game's
+    const bool detectingGpus = IdentifyGpu::isDetecting();
+    if (detectingGpus)
+        LOG_DEBUG("Device created during GPU detection, not tracking it");
+
+    if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE && !nonPrimaryGpu &&
+        !detectingGpus)
     {
         // Becomes current with the game's swapchain (D3D12Hooks::CaptureDevice), devices of mods are only hooked
         LOG_DEBUG("Device created: {0:X}", (size_t) *ppDevice);
@@ -1488,10 +1511,10 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
             _intelD3D12Device = createdDevice;
             _intelD3D12DeviceRefTarget = _intelD3D12Device->AddRef();
 
-            if (o_D3D12DeviceRelease == nullptr)
-                _intelD3D12Device->Release();
+            if (auto original = OriginalD3D12DeviceRelease(_intelD3D12Device))
+                original(_intelD3D12Device);
             else
-                o_D3D12DeviceRelease(_intelD3D12Device);
+                _intelD3D12Device->Release();
         }
 
         // if (Config::Instance()->UESpoofIntelAtomics64.value_or_default())
@@ -1519,6 +1542,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
         _d3d12Captured = true;
 
         State::Instance().AddD3D12Device((ID3D12Device*) *ppDevice);
+        HookD3D12DeviceRelease((ID3D12Device*) *ppDevice);
 
 #ifdef ENABLE_DEBUG_LAYER_DX12
         if (infoQueue != nullptr)
@@ -1585,7 +1609,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
     std::wstring szName;
     if (pAdapter != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+        ScopedSkipSpoofingThread skipSpoofingThread {};
 
         if (((IDXGIAdapter*) pAdapter)->GetDesc(&desc) == S_OK)
         {
@@ -1593,7 +1617,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
             LOG_INFO("Adapter Desc: {}", wstring_to_string(szName));
 
             auto primaryGpu = IdentifyGpu::getPrimaryGpu();
-            if (!IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
+            if (primaryGpu.vendorId != VendorId::Invalid && !IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
                 LOG_WARN("D3D12Device created with non-primary GPU");
         }
     }
@@ -1613,16 +1637,20 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
     }
 
     HRESULT result;
-    if (desc.VendorId == VendorId::Intel)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
-        ScopedCreatingD3DDevice skipCreatingD3DDevice {};
-        result = o_CreateDevice(pFactory, pAdapter, minLevel, riid, ppDevice);
-    }
-    else
-    {
-        ScopedCreatingD3DDevice skipCreatingD3DDevice {};
-        result = o_CreateDevice(pFactory, pAdapter, minLevel, riid, ppDevice);
+        std::scoped_lock probeLock(IdentifyGpu::probeDeviceMutex);
+
+        if (desc.VendorId == VendorId::Intel)
+        {
+            ScopedSkipSpoofingThread skipSpoofingThread {};
+            ScopedCreatingD3DDevice skipCreatingD3DDevice {};
+            result = o_CreateDevice(pFactory, pAdapter, minLevel, riid, ppDevice);
+        }
+        else
+        {
+            ScopedCreatingD3DDevice skipCreatingD3DDevice {};
+            result = o_CreateDevice(pFactory, pAdapter, minLevel, riid, ppDevice);
+        }
     }
 
     LOG_DEBUG("o_D3D12CreateDevice result: {:X}", (UINT) result);
@@ -1639,16 +1667,17 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
             _intelD3D12Device = createdDevice;
             _intelD3D12DeviceRefTarget = _intelD3D12Device->AddRef();
 
-            if (o_D3D12DeviceRelease == nullptr)
-                _intelD3D12Device->Release();
+            if (auto original = OriginalD3D12DeviceRelease(_intelD3D12Device))
+                original(_intelD3D12Device);
             else
-                o_D3D12DeviceRelease(_intelD3D12Device);
+                _intelD3D12Device->Release();
         }
 
         HookToDevice(createdDevice);
         _d3d12Captured = true;
 
         State::Instance().AddD3D12Device((ID3D12Device*) *ppDevice);
+        HookD3D12DeviceRelease((ID3D12Device*) *ppDevice);
 
 #ifdef ENABLE_DEBUG_LAYER_DX12
         if (infoQueue != nullptr)
@@ -1700,8 +1729,7 @@ static HRESULT hkD3D12SerializeVersionedRootSignature(const D3D12_VERSIONED_ROOT
     return o_D3D12SerializeVersionedRootSignature(pRootSignature, ppBlob, ppErrorBlob);
 }
 
-VALIDATE_HOOK(hkD3D12DeviceRelease, PFN_Release)
-static ULONG hkD3D12DeviceRelease(IUnknown* device)
+static ULONG D3D12DeviceRelease(IUnknown* device, PFN_Release original)
 {
     if (Config::Instance()->UESpoofIntelAtomics64.value_or_default() && device == _intelD3D12Device)
     {
@@ -1714,7 +1742,7 @@ static ULONG hkD3D12DeviceRelease(IUnknown* device)
             IGDExtProxy::DestroyContext();
         }
 
-        o_D3D12DeviceRelease(device);
+        original(device);
     }
 
     // Any device we track (not only the game's current one): a probe device made and dropped by a launcher must
@@ -1724,23 +1752,122 @@ static ULONG hkD3D12DeviceRelease(IUnknown* device)
     if (isCurrent || State::Instance().ContainsD3D12Device(device))
     {
         device->AddRef();
-        auto refCount = o_D3D12DeviceRelease(device);
+        auto refCount = original(device);
 
         if (refCount == 1)
         {
             State::Instance().RemoveD3D12Device((ID3D12Device*) device);
 
+            // The FSR2/FSR3 inputs forget a cached device that is going away
+            FSR2Dx12DeviceDestroyed(device);
+            FSR3Dx12DeviceDestroyed(device);
+            NVNGXDx12DeviceDestroyed(device);
+            FfxApiDx12DeviceDestroyed(device);
+            FfxApiExeDx12DeviceDestroyed(device);
+            XeSSDx12DeviceDestroyed(device);
+
             if (isCurrent)
             {
                 LOG_DEBUG("Set State::Instance().currentD3D12Device = nullptr, was: {:X}", (size_t) device);
                 State::Instance().currentD3D12Device = nullptr;
-                native::lowlatency::OnDeviceReleased(device);
             }
+
+            // Also for a tracked device that never became current: the kept Reflex/low latency devices must not
+            // point at a destroyed device
+            native::lowlatency::OnDeviceReleased(device);
         }
     }
 
-    auto result = o_D3D12DeviceRelease(device);
+    auto result = original(device);
     return result;
+}
+
+template <size_t I> static ULONG hkD3D12DeviceRelease(IUnknown* device)
+{
+    return D3D12DeviceRelease(device, o_D3D12DeviceRelease[I]);
+}
+VALIDATE_MEMBER_HOOK(hkD3D12DeviceRelease<0>, PFN_Release)
+
+static constexpr PFN_Release hkD3D12DeviceReleases[] = { hkD3D12DeviceRelease<0>, hkD3D12DeviceRelease<1>,
+                                                         hkD3D12DeviceRelease<2>, hkD3D12DeviceRelease<3> };
+
+// Hooks the Release of the device's class once
+static void HookD3D12DeviceRelease(ID3D12Device* device)
+{
+    auto target = (*(PVOID**) device)[2];
+
+    std::scoped_lock lock(_d3d12DeviceReleaseMutex);
+
+    for (size_t i = 0; i < std::size(_d3d12DeviceReleaseTargets); i++)
+    {
+        if (_d3d12DeviceReleaseTargets[i] == target)
+            return;
+
+        if (_d3d12DeviceReleaseTargets[i] != nullptr)
+            continue;
+
+        _d3d12DeviceReleaseTargets[i] = target;
+        o_D3D12DeviceRelease[i] = (PFN_Release) target;
+
+        DetourTransactionBegin();
+        DetourUpdateThread(GetCurrentThread());
+        DetourAttach(&(PVOID&) o_D3D12DeviceRelease[i], (PVOID) hkD3D12DeviceReleases[i]);
+
+        auto detourResult = DetourTransactionCommit();
+        if (detourResult != NO_ERROR)
+        {
+            LOG_ERROR("Failed to detour ID3D12Device::Release, error: {:X}", detourResult);
+            o_D3D12DeviceRelease[i] = nullptr;
+            _d3d12DeviceReleaseTargets[i] = nullptr;
+        }
+
+        return;
+    }
+
+    LOG_WARN("No free slot to hook ID3D12Device::Release of {:X}", (size_t) device);
+}
+
+// nullptr when the Release of the device's class is not hooked
+static PFN_Release OriginalD3D12DeviceRelease(IUnknown* device)
+{
+    auto target = (*(PVOID**) device)[2];
+
+    std::scoped_lock lock(_d3d12DeviceReleaseMutex);
+
+    for (size_t i = 0; i < std::size(_d3d12DeviceReleaseTargets); i++)
+    {
+        if (_d3d12DeviceReleaseTargets[i] == target)
+            return o_D3D12DeviceRelease[i];
+    }
+
+    return nullptr;
+}
+
+static void UnhookD3D12DeviceRelease()
+{
+    std::scoped_lock lock(_d3d12DeviceReleaseMutex);
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+
+    for (size_t i = 0; i < std::size(o_D3D12DeviceRelease); i++)
+    {
+        if (o_D3D12DeviceRelease[i] != nullptr)
+            DetourDetach(&(PVOID&) o_D3D12DeviceRelease[i], (PVOID) hkD3D12DeviceReleases[i]);
+    }
+
+    auto detourResult = DetourTransactionCommit();
+    if (detourResult != NO_ERROR)
+    {
+        LOG_ERROR("Failed to unhook ID3D12Device::Release, error: {:X}", detourResult);
+        return;
+    }
+
+    for (size_t i = 0; i < std::size(o_D3D12DeviceRelease); i++)
+    {
+        o_D3D12DeviceRelease[i] = nullptr;
+        _d3d12DeviceReleaseTargets[i] = nullptr;
+    }
 }
 
 VALIDATE_HOOK(hkCheckFeatureSupport, PFN_CheckFeatureSupport)
@@ -2322,7 +2449,21 @@ static HRESULT hkD3D12GetInterface(REFCLSID rclsid, REFIID riid, void** ppvDebug
 
 static void HookToDevice(ID3D12Device* InDevice)
 {
-    if (o_CreateSampler != nullptr || InDevice == nullptr)
+    if (InDevice == nullptr)
+        return;
+
+    // Later devices can have another Release, it tracks the current d3d12 device too
+    static ID3D12Device* lastReleaseDevice = nullptr;
+    if (InDevice != lastReleaseDevice)
+    {
+        lastReleaseDevice = InDevice;
+
+        ID3D12Device* realDevice = nullptr;
+        Util::CheckForRealObject(__FUNCTION__, InDevice, (IUnknown**) &realDevice);
+        HookD3D12DeviceRelease(realDevice != nullptr ? realDevice : InDevice);
+    }
+
+    if (o_CreateSampler != nullptr)
         return;
 
     LOG_DEBUG("Dx12");
@@ -2335,7 +2476,6 @@ static void HookToDevice(ID3D12Device* InDevice)
         pVTable = *(PVOID**) realDevice;
 
     // hudless
-    o_D3D12DeviceRelease = (PFN_Release) pVTable[2];
     o_CreateSampler = (PFN_CreateSampler) pVTable[22];
     o_CheckFeatureSupport = (PFN_CheckFeatureSupport) pVTable[13];
     o_CreateRootSignature = (PFN_CreateRootSignature) pVTable[16];
@@ -2410,10 +2550,6 @@ static void HookToDevice(ID3D12Device* InDevice)
         if (o_CreateRootSignature != nullptr)
             DetourAttach(&(PVOID&) o_CreateRootSignature, hkCreateRootSignature);
 
-        // Will be used for tracking current d3d12 device too
-        if (o_D3D12DeviceRelease != nullptr)
-            DetourAttach(&(PVOID&) o_D3D12DeviceRelease, hkD3D12DeviceRelease);
-
         // HACK: see reason in hkSetResidencyPriority
         if (o_SetResidencyPriority != nullptr)
             DetourAttach(&(PVOID&) o_SetResidencyPriority, hkSetResidencyPriority);
@@ -2461,7 +2597,6 @@ static void HookToDevice(ID3D12Device* InDevice)
             o_CreateRootSignature = nullptr;
             o_CreateCommittedResource = nullptr;
             o_CreatePlacedResource = nullptr;
-            o_D3D12DeviceRelease = nullptr;
             o_GetResourceAllocationInfo = nullptr;
         }
 
@@ -2559,9 +2694,6 @@ static void UnhookDevice()
     if (o_CreateCommittedResource3 != nullptr)
         DetourDetach(&(PVOID&) o_CreateCommittedResource3, hkCreateCommittedResource3);
 
-    if (o_D3D12DeviceRelease != nullptr)
-        DetourDetach(&(PVOID&) o_D3D12DeviceRelease, hkD3D12DeviceRelease);
-
     if (o_GetResourceAllocationInfo != nullptr)
         DetourDetach(&(PVOID&) o_GetResourceAllocationInfo, hkGetResourceAllocationInfo);
 
@@ -2582,10 +2714,10 @@ static void UnhookDevice()
         o_CreateHeap1 = nullptr;
         o_CreateCommittedResource2 = nullptr;
         o_CreateCommittedResource3 = nullptr;
-        o_D3D12DeviceRelease = nullptr;
         o_GetResourceAllocationInfo = nullptr;
     }
 
+    UnhookD3D12DeviceRelease();
     ResTrack_Dx12::ReleaseDeviceHooks();
 }
 
@@ -2675,9 +2807,6 @@ void D3D12Hooks::Unhook()
     if (o_GetResourceAllocationInfo != nullptr)
         DetourDetach(&(PVOID&) o_GetResourceAllocationInfo, hkGetResourceAllocationInfo);
 
-    if (o_D3D12DeviceRelease != nullptr)
-        DetourDetach(&(PVOID&) o_D3D12DeviceRelease, hkD3D12DeviceRelease);
-
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
@@ -2695,30 +2824,20 @@ void D3D12Hooks::Unhook()
         o_CreateHeap1 = nullptr;
         o_CreateCommittedResource2 = nullptr;
         o_CreateCommittedResource3 = nullptr;
-        o_D3D12DeviceRelease = nullptr;
         o_GetResourceAllocationInfo = nullptr;
     }
+
+    UnhookD3D12DeviceRelease();
 }
 
 void D3D12Hooks::SetRootSignatureTracking(bool enable) { isUpscalerActive = !enable; }
 
 bool D3D12Hooks::CanRestoreRootSignature(ID3D12GraphicsCommandList* cmdList)
 {
-    // A list with only heaps or a pipeline recorded (no root signature yet) is restorable too
-    {
-        std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
-        if (signatures.contains(cmdList))
-            return true;
-    }
-    {
-        std::unique_lock<std::shared_mutex> lock(descriptorHeapsMutex);
-        if (descriptorHeaps.contains(cmdList))
-            return true;
-    }
-    {
-        std::unique_lock<std::shared_mutex> lock(pipelineStatesMutex);
-        return pipelineStates.contains(cmdList);
-    }
+    // Only a list with a root signature recorded is restorable: with heaps or a pipeline alone the upscaler would leave
+    // the list without the game's root signature bound
+    std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
+    return signatures.contains(cmdList);
 }
 
 bool D3D12Hooks::RestoreDescriptorHeaps(ID3D12GraphicsCommandList* cmdList)

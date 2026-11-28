@@ -87,7 +87,7 @@ class IFGFeature_Vk : public virtual IFGFeature
     std::optional<VkFGResource> GetResource(FG_ResourceType type, int index = -1);
 
     static void ImageBarrier(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageLayout oldLayout,
-                             VkImageLayout newLayout);
+                             VkImageLayout newLayout, bool firstSubresourceOnly = false);
 
     // Copies the resource into target in the given format, then points the resource to the copy.
     // Formats only differing in sRGB keep the stored values, others get blitted.
@@ -135,6 +135,9 @@ class IFGFeature_Vk : public virtual IFGFeature
     // A failed CreateSwapchain of the output retired the game's old swapchain: the create that follows is made without
     // it
     virtual bool RetiredOldSwapchain() const { return false; }
+
+    // Old swapchain the FG already destroyed, the driver must not get it as oldSwapchain
+    virtual bool IsRetiredSwapchain(VkSwapchainKHR swapchain) const { return false; }
 
     // vkWaitForPresentKHR of the game on the output's swapchain (the driver's, with the output's locking)
     virtual VkResult WaitForPresent(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)

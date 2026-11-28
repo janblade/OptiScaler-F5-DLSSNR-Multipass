@@ -821,16 +821,23 @@ HRESULT ResTrack_Dx12::hkCreateDescriptorHeap(ID3D12Device* This, D3D12_DESCRIPT
 
         if (!o_HeapRelease)
         {
-            PVOID* vtbl = *(PVOID**) heap;
-            o_HeapRelease = (PFN_HeapRelease) vtbl[2];
-            DetourTransactionBegin();
-            DetourUpdateThread(GetCurrentThread());
-            DetourAttach(&(PVOID&) o_HeapRelease, hkHeapRelease);
-            auto detourResult = DetourTransactionCommit();
-            if (detourResult != NO_ERROR)
+            // Heaps can be created on several threads, only one may hook
+            static std::mutex heapReleaseHookMutex;
+            std::scoped_lock hookLock(heapReleaseHookMutex);
+
+            if (!o_HeapRelease)
             {
-                LOG_ERROR("Failed to hook Heap Release: {:X}", detourResult);
-                o_HeapRelease = nullptr;
+                PVOID* vtbl = *(PVOID**) heap;
+                o_HeapRelease = (PFN_HeapRelease) vtbl[2];
+                DetourTransactionBegin();
+                DetourUpdateThread(GetCurrentThread());
+                DetourAttach(&(PVOID&) o_HeapRelease, hkHeapRelease);
+                auto detourResult = DetourTransactionCommit();
+                if (detourResult != NO_ERROR)
+                {
+                    LOG_ERROR("Failed to hook Heap Release: {:X}", detourResult);
+                    o_HeapRelease = nullptr;
+                }
             }
         }
 
@@ -838,8 +845,15 @@ HRESULT ResTrack_Dx12::hkCreateDescriptorHeap(ID3D12Device* This, D3D12_DESCRIPT
         auto numDescriptors = pDescriptorHeapDesc->NumDescriptors;
         auto cpuStart = (SIZE_T) (heap->GetCPUDescriptorHandleForHeapStart().ptr);
         auto cpuEnd = cpuStart + (increment * numDescriptors);
-        auto gpuStart = (SIZE_T) (heap->GetGPUDescriptorHandleForHeapStart().ptr);
-        auto gpuEnd = gpuStart + (increment * numDescriptors);
+        // Only shader visible heaps have GPU handles
+        SIZE_T gpuStart = 0;
+        SIZE_T gpuEnd = 0;
+
+        if (pDescriptorHeapDesc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
+        {
+            gpuStart = (SIZE_T) (heap->GetGPUDescriptorHandleForHeapStart().ptr);
+            gpuEnd = gpuStart + (increment * numDescriptors);
+        }
         auto type = (UINT) pDescriptorHeapDesc->Type;
 
         LOG_TRACE("Heap: {:X}, Heap type: {}, Cpu: {}-{}, Gpu: {}-{}, Desc count: {}", (size_t) *ppvHeap, type,
@@ -882,8 +896,8 @@ HRESULT ResTrack_Dx12::hkCreateDescriptorHeap(ID3D12Device* This, D3D12_DESCRIPT
         if (ppvHeap != nullptr && *ppvHeap != nullptr)
         {
             auto heap = (ID3D12DescriptorHeap*) (*ppvHeap);
-            LOG_TRACE("Skipping, Heap type: {}, Cpu: {}, Gpu: {}", (UINT) pDescriptorHeapDesc->Type,
-                      heap->GetCPUDescriptorHandleForHeapStart().ptr, heap->GetGPUDescriptorHandleForHeapStart().ptr);
+            LOG_TRACE("Skipping, Heap type: {}, Cpu: {}", (UINT) pDescriptorHeapDesc->Type,
+                      heap->GetCPUDescriptorHandleForHeapStart().ptr);
         }
     }
 
@@ -1134,6 +1148,12 @@ void ResTrack_Dx12::ClearBindingStates()
         std::lock_guard<BindingStateMutex> lock(shard.mutex);
         shard.map.clear();
     }
+}
+
+// Table and render target binds skip the lock while Hudfix is off, heaps and root signatures are always recorded
+static bool RecordsBinds()
+{
+    return Config::Instance()->FGHUDFix.value_or_default() && Config::Instance()->IsFGEnabled();
 }
 
 CommandListBindingState* ResTrack_Dx12::GetOrCreateBindingState(ID3D12GraphicsCommandList* commandList)
@@ -1749,7 +1769,7 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
                                                      D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
     bool persistentBinding = false;
-    if (This != MenuOverlayDx::MenuCommandList() && !Hudfix_Dx12::SkipHudlessChecks())
+    if (This != MenuOverlayDx::MenuCommandList() && !Hudfix_Dx12::SkipHudlessChecks() && RecordsBinds())
     {
         if (auto* state = GetOrCreateBindingState(This);
             state != nullptr && RootParameterIndex < CommandListBindingState::MAX_ROOT_PARAMETERS)
@@ -1886,7 +1906,7 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
                                          D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
     bool persistentBinding = false;
-    if (This != MenuOverlayDx::MenuCommandList() && !Hudfix_Dx12::SkipHudlessChecks())
+    if (This != MenuOverlayDx::MenuCommandList() && !Hudfix_Dx12::SkipHudlessChecks() && RecordsBinds())
     {
         if (auto* state = GetOrCreateBindingState(This); state != nullptr)
         {
@@ -2036,7 +2056,7 @@ void ResTrack_Dx12::hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* T
                                                     D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
     bool persistentBinding = false;
-    if (This != MenuOverlayDx::MenuCommandList() && !Hudfix_Dx12::SkipHudlessChecks())
+    if (This != MenuOverlayDx::MenuCommandList() && !Hudfix_Dx12::SkipHudlessChecks() && RecordsBinds())
     {
         if (auto* state = GetOrCreateBindingState(This);
             state != nullptr && RootParameterIndex < CommandListBindingState::MAX_ROOT_PARAMETERS)
@@ -2524,6 +2544,12 @@ void ResTrack_Dx12::hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroup
 
 void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
 {
+    if (o_OMSetRenderTargets != nullptr)
+        return;
+
+    // Devices can be created on several threads, only one may hook
+    static std::mutex hookMutex;
+    std::scoped_lock hookLock(hookMutex);
 
     if (o_OMSetRenderTargets != nullptr)
         return;
@@ -2747,6 +2773,13 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
         return;
 
     if (device == nullptr)
+        return;
+
+    // Devices can be created on several threads, only one may hook
+    static std::mutex hookMutex;
+    std::scoped_lock hookLock(hookMutex);
+
+    if (o_CreateDescriptorHeap != nullptr)
         return;
 
     bool initializeTracking = false;

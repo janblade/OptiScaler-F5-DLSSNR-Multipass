@@ -88,7 +88,9 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
             xessParams.initFlags |= XESS_INIT_FLAG_HIGH_RES_MV;
 
         int responsiveMask = 0;
-        if (InParameters->Get("XeSS.ResponsivePixelMask", &responsiveMask) == NVSDK_NGX_Result_Success &&
+        // Evaluate disables the mask when none comes, the flag must stay off after its recreate
+        if (!Config::Instance()->DisableReactiveMask.value_or(false) &&
+            InParameters->Get("XeSS.ResponsivePixelMask", &responsiveMask) == NVSDK_NGX_Result_Success &&
             responsiveMask > 0)
             xessParams.initFlags |= XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK;
 
@@ -241,7 +243,7 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
                     }
                     else
                     {
-                        _localBufferHeap->Release();
+                        SAFE_RELEASE(_localBufferHeap);
                         LOG_ERROR("CreateHeap textureHeapDesc failed {0:x}!", (UINT) hr);
                     }
                 }
@@ -306,11 +308,9 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
 
         LOG_DEBUG("xessD3D12Init!");
 
-        if (Config::Instance()->NetworkModel.has_value() && Config::Instance()->NetworkModel.value() >= 0 &&
-            Config::Instance()->NetworkModel.value() <= 5)
+        if (auto networkModel = Config::Instance()->NetworkModel.value_or(-1); networkModel >= 0 && networkModel <= 5)
         {
-            ret = XeSSProxy::SelectNetworkModel()(_xessContext,
-                                                  (xess_network_model_t) Config::Instance()->NetworkModel.value());
+            ret = XeSSProxy::SelectNetworkModel()(_xessContext, (xess_network_model_t) networkModel);
             LOG_ERROR("xessSelectNetworkModel result: {0}", ResultToString(ret));
         }
 

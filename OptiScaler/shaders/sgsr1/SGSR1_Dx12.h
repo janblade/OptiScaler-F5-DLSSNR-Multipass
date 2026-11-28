@@ -5,7 +5,7 @@
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
 
-#define SGSR1_NUM_OF_HEAPS 2
+#define SGSR1_NUM_OF_HEAPS 3
 
 // DLSS-NR's dedicated enlarge pass for the "model resolution < 100%" case: Qualcomm's SGSR1
 // (single-pass, edge-directed 12-tap Lanczos-like upsample + adaptive sharpen), used instead

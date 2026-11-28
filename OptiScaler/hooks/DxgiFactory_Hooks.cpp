@@ -668,7 +668,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
             ScopedSkipFGSCCreation skipFGSCCreation {};
             FGSCResult = FGHooks::CreateSwapChain(realFactory, real, &localDesc, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 State::Instance().currentSwapchainDesc = localDesc;
                 return FGSCResult;
@@ -796,7 +796,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         // HDR output (output/SdrToHdr_*), on the final desc: a frame generation swap chain returned above, so this is the
         // plain chain (or a frame generation library's own inner one)
@@ -1126,7 +1126,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                                                          pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
                                                          pRestrictToOutput, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 ((IDXGISwapChain*) *ppSwapChain)->GetDesc(&State::Instance().currentSwapchainDesc);
                 return FGSCResult;
@@ -1179,7 +1179,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                     bool fgSwapChainIsRealFG = false;
                     const bool tearingSupported = IsTearingSupported(realFactory);
 
-                    if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc, tearingSupported))
+                    if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc1(fgDesc, tearingSupported))
                     {
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
@@ -1188,10 +1188,10 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                                 pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr, pRestrictToOutput,
                                 &fgSwapChain1);
 
-                            fgSwapChainIsRealFG = fgScResult == S_OK && fgSwapChain1 != nullptr;
+                            fgSwapChainIsRealFG = SUCCEEDED(fgScResult) && fgSwapChain1 != nullptr;
                         }
 
-                        if (fgScResult != S_OK || fgSwapChain1 == nullptr)
+                        if (FAILED(fgScResult) || fgSwapChain1 == nullptr)
                         {
                             fgSwapChainIsRealFG = false;
 
@@ -1205,11 +1205,11 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                                                          pRestrictToOutput, &fgSwapChain1);
                         }
 
-                        if (fgScResult == S_OK && fgSwapChain1 != nullptr)
+                        if (SUCCEEDED(fgScResult) && fgSwapChain1 != nullptr)
                             fgSwapChain1->QueryInterface(IID_PPV_ARGS(&fgSwapChain4));
                     }
 
-                    if (realScResult == S_OK && realDx11SwapChain1 != nullptr && fgSwapChain4 != nullptr)
+                    if (SUCCEEDED(realScResult) && realDx11SwapChain1 != nullptr && fgSwapChain4 != nullptr)
                     {
                         ((IDXGISwapChain*) fgSwapChain4)->GetDesc(&State::Instance().currentSwapchainDesc);
                         State::Instance().currentSwapchainDesc.OutputWindow = hWnd;
@@ -1267,7 +1267,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         // HDR output, as in CreateSwapChain
         SdrToHdr::CreateRequest hdrRequest;
@@ -1457,9 +1457,18 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
             localDesc.BufferCount = 2;
     }
 
-    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
-    State::Instance().SCLastFlags = localDesc.Flags;
-    State::Instance().realExclusiveFullscreen = false;
+    // No FG swapchain for CoreWindow, so this is another window if one exists
+    if (!_skipFGSwapChainCreation)
+        FGHooks::ReleaseUnusableFGSwapchain((HWND) pWindow, pDevice);
+
+    const bool otherWindow = FGHooks::IsOtherWindowThanFG((HWND) pWindow);
+
+    if (!otherWindow)
+    {
+        State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+        State::Instance().SCLastFlags = localDesc.Flags;
+        State::Instance().realExclusiveFullscreen = false;
+    }
 
     auto prevCommandQueue = State::Instance().currentCommandQueue;
     ID3D12CommandQueue* cq = nullptr;
@@ -1471,8 +1480,11 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
         if (!Util::CheckForRealObject(__FUNCTION__, cq, &real))
             real = cq;
 
-        State::Instance().currentCommandQueue = (ID3D12CommandQueue*) real;
-        D3D12Hooks::CaptureDevice((ID3D12CommandQueue*) real);
+        if (!otherWindow)
+        {
+            State::Instance().currentCommandQueue = (ID3D12CommandQueue*) real;
+            D3D12Hooks::CaptureDevice((ID3D12CommandQueue*) real);
+        }
 
         if (State::Instance().currentD3D12Device != nullptr)
             WithDx12::SetD3D12Objects(State::Instance().currentD3D12Device, State::Instance().currentCommandQueue,
@@ -1505,16 +1517,20 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
         if (!Util::CheckForRealObject(__FUNCTION__, *ppSwapChain, (IUnknown**) &realSC))
             realSC = *ppSwapChain;
 
-        State::Instance().currentRealSwapchain = realSC;
+        if (!otherWindow)
+            State::Instance().currentRealSwapchain = realSC;
 
         IUnknown* readDevice = nullptr;
         if (!Util::CheckForRealObject(__FUNCTION__, pDevice, (IUnknown**) &readDevice))
             readDevice = pDevice;
 
-        realSC->GetDesc(&State::Instance().currentSwapchainDesc);
+        if (!otherWindow)
+        {
+            realSC->GetDesc(&State::Instance().currentSwapchainDesc);
 
-        State::Instance().screenWidth = static_cast<float>(localDesc.Width);
-        State::Instance().screenHeight = static_cast<float>(localDesc.Height);
+            State::Instance().screenWidth = static_cast<float>(localDesc.Width);
+            State::Instance().screenHeight = static_cast<float>(localDesc.Height);
+        }
 
         LOG_DEBUG("Created new swapchain: {0:X}, hWnd: {1:X}", (UINT64) *ppSwapChain, (UINT64) pWindow);
 
@@ -1524,10 +1540,13 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
             *ppSwapChain = new WrappedIDXGISwapChain4(realSC, readDevice, (HWND) pWindow, localDesc.Flags, true, false,
                                                       nullptr, *ppSwapChain);
 
-            if (!_skipFGSwapChainCreation)
-                State::Instance().currentSwapchain = *ppSwapChain;
+            if (!otherWindow)
+            {
+                if (!_skipFGSwapChainCreation)
+                    State::Instance().currentSwapchain = *ppSwapChain;
 
-            State::Instance().currentWrappedSwapchain = *ppSwapChain;
+                State::Instance().currentWrappedSwapchain = *ppSwapChain;
+            }
 
             LOG_DEBUG("Created new WrappedIDXGISwapChain4: {0:X}, pDevice: {1:X}", (UINT64) *ppSwapChain,
                       (UINT64) pDevice);
@@ -1765,7 +1784,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChain(IDXGIFactory* realFactory, IUnkno
             ScopedSkipFGSCCreation skipFGSCCreation {};
             FGSCResult = FGHooks::CreateSwapChain(realFactory, real, &localDesc, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 State::Instance().currentSwapchainDesc = localDesc;
                 return FGSCResult;
@@ -1810,7 +1829,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChain(IDXGIFactory* realFactory, IUnkno
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         SdrToHdr::NoteTwinStandDown();
 
@@ -2082,7 +2101,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForHwnd(IDXGIFactory2* realFactory
                                                          pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
                                                          pRestrictToOutput, ppSwapChain);
 
-            if (FGSCResult == S_OK)
+            if (SUCCEEDED(FGSCResult))
             {
                 ((IDXGISwapChain*) *ppSwapChain)->GetDesc(&State::Instance().currentSwapchainDesc);
                 return FGSCResult;
@@ -2128,7 +2147,7 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForHwnd(IDXGIFactory2* realFactory
 
     // If FG is disabled or call is coming from FG library
     // Create the DXGI SwapChain and wrap it
-    if (_skipFGSwapChainCreation || FGSCResult != S_OK)
+    if (_skipFGSwapChainCreation || FAILED(FGSCResult))
     {
         SdrToHdr::NoteTwinStandDown();
 
@@ -2279,9 +2298,18 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForCoreWindow(IDXGIFactory2* realF
             localDesc.BufferCount = 2;
     }
 
-    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
-    State::Instance().SCLastFlags = localDesc.Flags;
-    State::Instance().realExclusiveFullscreen = false;
+    // No FG swapchain for CoreWindow, so this is another window if one exists
+    if (!_skipFGSwapChainCreation)
+        FGHooks::ReleaseUnusableFGSwapchain((HWND) pWindow, pDevice);
+
+    const bool otherWindow = FGHooks::IsOtherWindowThanFG((HWND) pWindow);
+
+    if (!otherWindow)
+    {
+        State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+        State::Instance().SCLastFlags = localDesc.Flags;
+        State::Instance().realExclusiveFullscreen = false;
+    }
 
     auto prevCommandQueue = State::Instance().currentCommandQueue;
     ID3D12CommandQueue* cq = nullptr;
@@ -2293,8 +2321,11 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForCoreWindow(IDXGIFactory2* realF
         if (!Util::CheckForRealObject(__FUNCTION__, cq, &real))
             real = cq;
 
-        State::Instance().currentCommandQueue = (ID3D12CommandQueue*) real;
-        D3D12Hooks::CaptureDevice((ID3D12CommandQueue*) real);
+        if (!otherWindow)
+        {
+            State::Instance().currentCommandQueue = (ID3D12CommandQueue*) real;
+            D3D12Hooks::CaptureDevice((ID3D12CommandQueue*) real);
+        }
 
         if (State::Instance().currentD3D12Device != nullptr)
             WithDx12::SetD3D12Objects(State::Instance().currentD3D12Device, State::Instance().currentCommandQueue,
@@ -2317,16 +2348,20 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForCoreWindow(IDXGIFactory2* realF
         if (!Util::CheckForRealObject(__FUNCTION__, *ppSwapChain, (IUnknown**) &realSC))
             realSC = *ppSwapChain;
 
-        State::Instance().currentRealSwapchain = realSC;
+        if (!otherWindow)
+            State::Instance().currentRealSwapchain = realSC;
 
         IUnknown* readDevice = nullptr;
         if (!Util::CheckForRealObject(__FUNCTION__, pDevice, (IUnknown**) &readDevice))
             readDevice = pDevice;
 
-        realSC->GetDesc(&State::Instance().currentSwapchainDesc);
+        if (!otherWindow)
+        {
+            realSC->GetDesc(&State::Instance().currentSwapchainDesc);
 
-        State::Instance().screenWidth = static_cast<float>(localDesc.Width);
-        State::Instance().screenHeight = static_cast<float>(localDesc.Height);
+            State::Instance().screenWidth = static_cast<float>(localDesc.Width);
+            State::Instance().screenHeight = static_cast<float>(localDesc.Height);
+        }
 
         LOG_DEBUG("Created new swapchain: {0:X}, hWnd: {1:X}", (UINT64) *ppSwapChain, (UINT64) pWindow);
 
@@ -2336,10 +2371,13 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForCoreWindow(IDXGIFactory2* realF
             *ppSwapChain = new WrappedIDXGISwapChain4(realSC, readDevice, (HWND) pWindow, localDesc.Flags, true, false,
                                                       nullptr, *ppSwapChain);
 
-            if (!_skipFGSwapChainCreation)
-                State::Instance().currentSwapchain = *ppSwapChain;
+            if (!otherWindow)
+            {
+                if (!_skipFGSwapChainCreation)
+                    State::Instance().currentSwapchain = *ppSwapChain;
 
-            State::Instance().currentWrappedSwapchain = *ppSwapChain;
+                State::Instance().currentWrappedSwapchain = *ppSwapChain;
+            }
 
             LOG_DEBUG("Created new WrappedIDXGISwapChain4: {0:X}, pDevice: {1:X}", (UINT64) *ppSwapChain,
                       (UINT64) pDevice);
@@ -2382,6 +2420,17 @@ HRESULT DxgiFactoryHooks::EnumAdapters(IDXGIFactory* realFactory, UINT Adapter, 
 
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
             result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+        }
+        // Empty while GPUs are being detected, other mods can enumerate from inside the detection
+        else if (allGpus.empty())
+        {
+            auto preference = Config::Instance()->PreferDedicatedGpu.value_or_default()
+                                  ? DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE
+                                  : DXGI_GPU_PREFERENCE_UNSPECIFIED;
+
+            ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
+            result =
+                o_EnumAdapterByGpuPreference(factory6, Adapter, preference, __uuidof(IDXGIAdapter), (void**) ppAdapter);
         }
         else
             result = DXGI_ERROR_NOT_FOUND;
@@ -2430,6 +2479,17 @@ HRESULT DxgiFactoryHooks::EnumAdapters1(IDXGIFactory1* realFactory, UINT Adapter
 
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
             result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+        }
+        // Empty while GPUs are being detected, other mods can enumerate from inside the detection
+        else if (allGpus.empty())
+        {
+            auto preference = Config::Instance()->PreferDedicatedGpu.value_or_default()
+                                  ? DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE
+                                  : DXGI_GPU_PREFERENCE_UNSPECIFIED;
+
+            ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
+            result = o_EnumAdapterByGpuPreference(factory6, Adapter, preference, __uuidof(IDXGIAdapter1),
+                                                  (void**) ppAdapter);
         }
         else
             result = DXGI_ERROR_NOT_FOUND;

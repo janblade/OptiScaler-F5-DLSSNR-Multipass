@@ -45,12 +45,30 @@ static void CollectRetiredDx12Features(bool all = false)
 }
 
 static ID3D12Device* D3D12Device = nullptr;
+
+static bool IsSoftwareDevice(ID3D12Device* device)
+{
+    if (device == nullptr)
+        return false;
+
+    const auto luid = device->GetAdapterLuid();
+    for (const auto& gpu : IdentifyGpu::getAllGpus())
+    {
+        if (IsEqualLUID(gpu.luid, luid))
+            return gpu.vendorId == VendorId::Microsoft;
+    }
+
+    return false;
+}
+// A new device can get the destroyed one's address, Init must not skip it as already inited
+static std::atomic<bool> _d3d12DeviceDestroyed { false };
 static int evalCounter = 0;
 // Read from ShutdownDx12's reentrancy guard, which can now be reached from another DLL's own
 // detach callback calling back in here -- same cross-thread-read reasoning as isShuttingDown.
 static std::atomic_bool shutdown { false };
-static bool _skipInit = false;
+static thread_local bool _skipInit = false;
 static wchar_t const** paths;
+static NVNGXClients _clients;
 
 class ScopedInitDx12
 {
@@ -171,6 +189,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
                                                         const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -214,9 +233,17 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
     if (InFeatureInfo != nullptr && InSDKVersion > 0x0000013)
         State::Instance().NVNGX_Logger = InFeatureInfo->LoggingInfo;
 
-    if (State::Instance().nvngxDx12Inited && InDevice == D3D12Device)
+    if (State::Instance().nvngxDx12Inited && InDevice == D3D12Device && !_d3d12DeviceDestroyed)
     {
         LOG_WARN("NVNGX already inited");
+        return NVSDK_NGX_Result_Success;
+    }
+
+    // Features run on the game's GPU, a software (WARP) device must not replace it
+    if (State::Instance().nvngxDx12Inited && D3D12Device != nullptr && !_d3d12DeviceDestroyed &&
+        IsSoftwareDevice(InDevice))
+    {
+        LOG_WARN("Ignoring init with software device {:X}, keeping {:X}", (size_t) InDevice, (size_t) D3D12Device);
         return NVSDK_NGX_Result_Success;
     }
 
@@ -229,11 +256,12 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
     if (auto customRR = Nvngx_RR::Selected(API::DX12); customRR != nullptr)
         customRR->InitDx12(InDevice);
 
-    LOG_INFO("AppId: {0}", InApplicationId);
+    LOG_INFO("AppId: {0}, Device: {1:X}", InApplicationId, (size_t) InDevice);
     LOG_INFO("SDK: {0:x}", (unsigned int) InSDKVersion);
     LOG_INFO(L"InApplicationDataPath {0}", std::wstring(InApplicationDataPath));
 
     D3D12Device = InDevice;
+    _d3d12DeviceDestroyed = false;
     State::Instance().currentD3D12Device = InDevice;
     D3D12Hooks::HookDevice(InDevice);
 
@@ -250,6 +278,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init(unsigned long long InApplica
                                                     NVSDK_NGX_Version InSDKVersion)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -281,7 +310,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init(unsigned long long InApplica
         }
     }
 
-    if (State::Instance().nvngxDx12Inited && InDevice == D3D12Device)
+    if (State::Instance().nvngxDx12Inited && InDevice == D3D12Device && !_d3d12DeviceDestroyed)
     {
         LOG_WARN("NVNGX already inited");
         return NVSDK_NGX_Result_Success;
@@ -308,6 +337,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_ProjectID(const char* InProj
                                                               const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -348,7 +378,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_ProjectID(const char* InProj
     State::Instance().NVNGX_Engine = InEngineType;
     State::Instance().NVNGX_EngineVersion = std::string(InEngineVersion);
 
-    if (State::Instance().nvngxDx12Inited && InDevice == D3D12Device)
+    if (State::Instance().nvngxDx12Inited && InDevice == D3D12Device && !_d3d12DeviceDestroyed)
     {
         LOG_WARN("NVNGX already inited");
         return NVSDK_NGX_Result_Success;
@@ -366,6 +396,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_with_ProjectID(
     NVSDK_NGX_Version InSDKVersion)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     LOG_INFO("InProjectId: {0}", InProjectId);
     LOG_INFO("InEngineType: {0}", (int) InEngineType);
@@ -375,7 +406,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_with_ProjectID(
     State::Instance().NVNGX_Engine = InEngineType;
     State::Instance().NVNGX_EngineVersion = std::string(InEngineVersion);
 
-    if (State::Instance().nvngxDx12Inited)
+    if (State::Instance().nvngxDx12Inited && InDevice == D3D12Device && !_d3d12DeviceDestroyed)
     {
         LOG_WARN("NVNGX already inited");
         return NVSDK_NGX_Result_Success;
@@ -386,7 +417,31 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_with_ProjectID(
     return result;
 }
 
+NVSDK_NGX_Result NVNGXDx12InputInit(const char* InProjectId, NVSDK_NGX_EngineType InEngineType,
+                                    const char* InEngineVersion, const wchar_t* InApplicationDataPath,
+                                    ID3D12Device* InDevice, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo,
+                                    NVSDK_NGX_Version InSDKVersion)
+{
+    // The inputs don't start NGX, but NR / Superior / DLSS may later, with these paths
+    NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
+
+    if (InFeatureInfo != nullptr)
+        std::memcpy(&localFeatureInfo, InFeatureInfo, sizeof(NVSDK_NGX_FeatureCommonInfo));
+
+    UpdateInitPaths(&localFeatureInfo);
+
+    ScopedInitDx12 scopedInit {};
+    return NVSDK_NGX_D3D12_Init_with_ProjectID(InProjectId, InEngineType, InEngineVersion, InApplicationDataPath,
+                                               InDevice, InFeatureInfo, InSDKVersion);
+}
+
 #pragma endregion
+
+void NVNGXDx12DeviceDestroyed(IUnknown* device)
+{
+    if (D3D12Device == device)
+        _d3d12DeviceDestroyed = true;
+}
 
 #pragma region DLSS Shutdown Calls
 
@@ -443,12 +498,15 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
 
         if (stop || stopDevice)
         {
+            // The runtime's Shutdown1 reports how many inits are still open on it
+            unsigned int remaining = 0;
+
             if (requestedDevice && stopDevice)
-                stopDevice(requestedDevice);
+                stopDevice(requestedDevice, &remaining);
             else if (stop)
                 stop();
             else
-                stopDevice(requestedDevice);
+                stopDevice(requestedDevice, &remaining);
 
             NVNGXProxy::SetDx12Inited(false);
         }
@@ -491,9 +549,25 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
     return NVSDK_NGX_Result_Success;
 }
 
-NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown(void) { return ShutdownDx12(nullptr); }
+// Only the last module using NGX (the game, Streamline, a mod) shuts it down. Opti's own calls (the nested ones and
+// the inputs) never count, see NVNGXClients. Neural Rendering and Superior Scaling start the runtime through
+// NVNGXProxy directly, they are no clients: after the last client's shutdown they find the runtime gone by the
+// epoch bump in ShutdownDx12 and start it again when they need it.
+NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown(void)
+{
+    if (!_clients.Remove(_ReturnAddress()))
+        return NVSDK_NGX_Result_Success;
 
-NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown1(ID3D12Device* InDevice) { return ShutdownDx12(InDevice); }
+    return ShutdownDx12(nullptr);
+}
+
+NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown1(ID3D12Device* InDevice)
+{
+    if (!_clients.Remove(_ReturnAddress()))
+        return NVSDK_NGX_Result_Success;
+
+    return ShutdownDx12(InDevice);
+}
 
 #pragma endregion
 
@@ -514,7 +588,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_GetParameters(NVSDK_NGX_Parameter
 
     // If DLSS is enabled and the real DLSS module is loaded, get native NGX table
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::NVNGXModule() != nullptr &&
-        NVNGXProxy::D3D12_GetParameters() != nullptr)
+        NVNGXProxy::IsDx12Inited() && NVNGXProxy::D3D12_GetParameters() != nullptr)
     {
         LOG_INFO("Calling NVNGXProxy::D3D12_GetParameters");
         auto result = NVNGXProxy::D3D12_GetParameters()(OutParameters);
@@ -588,8 +662,11 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_AllocateParameters(NVSDK_NGX_Para
 {
     LOG_FUNC();
 
+    if (OutParameters == nullptr)
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::NVNGXModule() != nullptr &&
-        NVNGXProxy::D3D12_AllocateParameters() != nullptr)
+        NVNGXProxy::IsDx12Inited() && NVNGXProxy::D3D12_AllocateParameters() != nullptr)
     {
         LOG_INFO("Calling NVNGXProxy::D3D12_AllocateParameters");
         auto result = NVNGXProxy::D3D12_AllocateParameters()(OutParameters);
@@ -652,33 +729,47 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_DestroyParameters(NVSDK_NGX_Param
 
 static Upscaler GetUpscalerBackend()
 {
-    Upscaler upscaler = Upscaler::XeSS; // Default
+    if (Config::Instance()->Dx12Upscaler.has_value())
+        return Config::Instance()->Dx12Upscaler.value();
 
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
 
-    if (NVNGXProxy::IsDx12Inited() && primaryGpu.dlssCapable)
-        upscaler = Upscaler::DLSS;
-
     if (primaryGpu.fsr4Support != FSR4Support::None)
-        upscaler = Upscaler::FFX;
+        return Upscaler::FFX;
 
-    if (Config::Instance()->Dx12Upscaler.has_value())
-        upscaler = Config::Instance()->Dx12Upscaler.value();
+    // Opti's own inputs don't start NVIDIA's runtime, DLSS is the default only when it starts
+    if (primaryGpu.dlssCapable && Config::Instance()->DLSSEnabled.value_or_default() && D3D12Device != nullptr &&
+        NVNGXProxy::InitDx12(D3D12Device))
+    {
+        return Upscaler::DLSS;
+    }
 
-    return upscaler;
+    return Upscaler::XeSS;
 }
 
 static bool EnsureD3D12Device(ID3D12GraphicsCommandList* cmdList)
 {
-    if (D3D12Device)
-        return true;
-
-    LOG_DEBUG("Get D3D12 device from InCmdList!");
-
-    if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&D3D12Device))) || !D3D12Device)
+    ID3D12Device* cmdListDevice = nullptr;
+    if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&cmdListDevice))) || !cmdListDevice)
     {
+        if (D3D12Device)
+            return true;
+
         LOG_ERROR("Can't get Dx12Device from InCmdList!");
         return false;
+    }
+
+    // Not owned, like the device from Init
+    cmdListDevice->Release();
+
+    // Features have to be created on the device of the command list they're evaluated with
+    if (D3D12Device != cmdListDevice)
+    {
+        if (D3D12Device != nullptr && !_d3d12DeviceDestroyed)
+            LOG_WARN("Init device {:X} isn't InCmdList's, using {:X}", (size_t) D3D12Device, (size_t) cmdListDevice);
+
+        D3D12Device = cmdListDevice;
+        _d3d12DeviceDestroyed = false;
     }
 
     return true;
@@ -989,6 +1080,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_GetFeatureRequirements(
     IDXGIAdapter* Adapter, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
     NVSDK_NGX_FeatureRequirement* OutSupported)
 {
+    if (FeatureDiscoveryInfo == nullptr || OutSupported == nullptr)
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+
     LOG_DEBUG("for ({0})", (int) FeatureDiscoveryInfo->FeatureID);
 
     if (FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_RayReconstruction)
@@ -1029,12 +1123,6 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_GetFeatureRequirements(
 
     if (isUpscaling || (isFG && (dlssgAdjacent || f5lowAsks)))
     {
-        if (OutSupported == nullptr)
-        {
-            static auto tmp = NVSDK_NGX_FeatureRequirement();
-            OutSupported = &tmp;
-        }
-
         OutSupported->FeatureSupported = NVSDK_NGX_FeatureSupportResult_Supported;
         OutSupported->MinHWArchitecture = 0;
 
@@ -1151,9 +1239,23 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
 
         if (ctxData.changeBackendCounter != 0 || !successfulPhase)
         {
+            if (shouldRestoreSigs)
+                D3D12Hooks::RestoreRoot(InCmdList);
+
             D3D12Hooks::SetRootSignatureTracking(true);
             return NVSDK_NGX_Result_Success;
         }
+    }
+
+    if (feature == nullptr)
+    {
+        LOG_DEBUG("trying to use released handle, returning NVSDK_NGX_Result_Success");
+
+        if (shouldRestoreSigs)
+            D3D12Hooks::RestoreRoot(InCmdList);
+
+        D3D12Hooks::SetRootSignatureTracking(true);
+        return NVSDK_NGX_Result_Success;
     }
 
     // Fallback to FSR 2.1.2 if feature failed to initialize and user didn't explicitly request it
@@ -1176,6 +1278,9 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
         }
 
         state.changeBackend[handleId] = true;
+
+        if (shouldRestoreSigs)
+            D3D12Hooks::RestoreRoot(InCmdList);
 
         D3D12Hooks::SetRootSignatureTracking(true);
 

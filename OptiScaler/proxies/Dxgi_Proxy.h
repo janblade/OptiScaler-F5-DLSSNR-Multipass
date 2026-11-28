@@ -146,7 +146,11 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_CreateDxgiFactory = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _CreateDxgiFactory = addr;
+
         return addr;
     }
 
@@ -164,7 +168,11 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_CreateDxgiFactory1 = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _CreateDxgiFactory1 = addr;
+
         return addr;
     }
 
@@ -182,7 +190,11 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_CreateDxgiFactory2 = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _CreateDxgiFactory2 = addr;
+
         return addr;
     }
 
@@ -200,7 +212,11 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_DeclareAdepterRemovalSupport = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _DeclareAdepterRemovalSupport = addr;
+
         return addr;
     }
 
@@ -218,7 +234,11 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_GetDebugInterface = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _GetDebugInterface = addr;
+
         return addr;
     }
 

@@ -14,10 +14,14 @@ bool QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo);
 // swapchain. Lets go of ImGui's Vulkan renderer backend too, if one was made: the D3D12 menu sets up its own only when no
 // renderer backend is there (menu_overlay_dx.cpp), and drawing under the Vulkan one crashed in the driver.
 void HandOverToBridge();
-void DestroyVulkanObjects(bool shutdown);
+// With a swapchain, only when the menu is still on it
+void DestroyVulkanObjects(bool shutdown, VkDevice device = VK_NULL_HANDLE, VkSwapchainKHR swapchain = VK_NULL_HANDLE);
 
 // Overlay objects of a device that is being destroyed
 void ReleaseDevice(VkDevice device);
+
+// The next swapchain gets the menu, also on another window
+void DestroySwapchain(VkDevice device, VkSwapchainKHR swapchain);
 
 // The menu stays on its window while that exists, games can have more than one
 bool OnOtherWindow(HWND hwnd);

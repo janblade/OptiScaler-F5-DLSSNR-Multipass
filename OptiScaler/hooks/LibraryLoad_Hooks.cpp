@@ -441,7 +441,7 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
                 IDXGIFactory1* factory1 = nullptr;
                 IDXGIFactory2* factory2 = nullptr;
 
-                auto ocResult = DxgiProxy::CreateDxgiFactory_()(__uuidof(factory), &factory);
+                auto ocResult = DxgiProxy::CreateDxgiFactory_Hooked()(__uuidof(factory), &factory);
                 LOG_DEBUG("CreateDxgiFactory result: {:X}", ocResult);
 
                 if (ocResult == S_OK && factory != nullptr)
@@ -451,7 +451,7 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
                     factory->Release();
                 }
 
-                ocResult = DxgiProxy::CreateDxgiFactory1_()(__uuidof(factory1), &factory1);
+                ocResult = DxgiProxy::CreateDxgiFactory1_Hooked()(__uuidof(factory1), &factory1);
                 LOG_DEBUG("CreateDxgiFactory1 result: {:X}", ocResult);
 
                 if (ocResult == S_OK && factory1 != nullptr)
@@ -460,7 +460,7 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
                     factory1->Release();
                 }
 
-                ocResult = DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(factory2), &factory2);
+                ocResult = DxgiProxy::CreateDxgiFactory2_Hooked()(0, __uuidof(factory2), &factory2);
                 LOG_DEBUG("CreateDxgiFactory2 result: {:X}", ocResult);
 
                 if (ocResult == S_OK && factory2 != nullptr)
@@ -958,9 +958,13 @@ HMODULE LibraryLoadHooks::LoadNvApi(LPCWSTR requestedName)
 
     HMODULE nvapi = nullptr;
 
-    // Opti exports a query function that nvapi would export
-    if (Config::Instance()->UseFakenvapi.value_or_default() &&
-        IdentifyGpu::getPrimaryGpu().vendorId != VendorId::Nvidia)
+    // Opti exports a query function that nvapi would export.
+    // Vendor is unknown when detection fails, then the real nvapi is used if it can be loaded.
+    // While detecting it's only unknown when the startup check found no Nvidia GPU.
+    const auto vendorId = IdentifyGpu::getPrimaryGpu().vendorId;
+    const bool vendorKnown = vendorId != VendorId::Invalid || IdentifyGpu::isDetecting();
+
+    if (Config::Instance()->UseFakenvapi.value_or_default() && vendorId != VendorId::Nvidia && vendorKnown)
     {
         nvapi = dllModule;
         fakenvapi::setUsingAsMainNvapi(true);
@@ -973,10 +977,10 @@ HMODULE LibraryLoadHooks::LoadNvApi(LPCWSTR requestedName)
     if (nvapi == nullptr)
         nvapi = NtdllProxy::LoadLibraryExW_Ldr(requestedName != nullptr ? requestedName : L"nvapi64.dll", NULL, 0);
 
-    // Fallback for Nvidia, doubt it's helpful
+    // Fallback for Nvidia and unknown vendors
     if (Config::Instance()->UseFakenvapi.value_or_default() && nvapi == nullptr)
     {
-        LOG_WARN("Using fakenvapi on Nvidia as the main nvapi");
+        LOG_WARN("Real nvapi can't be loaded, using fakenvapi as the main nvapi");
         nvapi = dllModule;
         fakenvapi::setUsingAsMainNvapi(true);
     }

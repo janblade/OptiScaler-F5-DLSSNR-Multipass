@@ -3353,6 +3353,14 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             }
         }
 
+        constexpr auto fsr3DebugViewTooltip = "Top left: Dilated Motion Vectors\n"
+                                              "Top middle: Protected Areas\n"
+                                              "Top right: Dilated Depth\n"
+                                              "Middle: Upscaled frame\n"
+                                              "Bottom left: Disocclusion mask\n"
+                                              "Bottom middle: Reactiveness\n"
+                                              "Bottom right: Detail Protection Takedown";
+
         // FFX -----------------
         if (!usesDlssd && (currentBackend == Upscaler::FFX || currentBackend == Upscaler::FFX_on12))
         {
@@ -3566,13 +3574,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     }
                     else
                     {
-                        ShowHelpMarker("Top left: Dilated Motion Vectors\n"
-                                       "Top middle: Protected Areas\n"
-                                       "Top right: Dilated Depth\n"
-                                       "Middle: Upscaled frame\n"
-                                       "Bottom left: Disocclusion mask\n"
-                                       "Bottom middle: Reactiveness\n"
-                                       "Bottom right: Detail Protection Takedown");
+                        ShowHelpMarker(fsr3DebugViewTooltip);
                     }
 
                     if (majorFsrVersion > 3)
@@ -3721,6 +3723,18 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     }
                 }
             }
+        }
+
+        // FSR 3.1 Dx11 -----------------
+        if (!usesDlssd && currentBackend == Upscaler::FSR31)
+        {
+            ImGui::Spacing();
+
+            bool debugView = config->FsrDebugView.value_or_default();
+            if (ImGui::Checkbox("Upscaler Debug View", &debugView))
+                config->FsrDebugView = debugView;
+
+            ShowHelpMarker(fsr3DebugViewTooltip);
         }
 
         // DLSS -----------------
@@ -7447,11 +7461,10 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
                 ImGui::BeginDisabled(!config->ContrastEnabled.value_or_default());
 
                 float contrast = config->Contrast.value_or_default();
-                if (ImGui::SliderFloat("Contrast", &contrast, -2.0f, 2.0f, "%.2f"))
+                if (ImGui::SliderFloat("Contrast", &contrast, 0.0f, 2.0f, "%.2f"))
                     config->Contrast = contrast;
 
-                ShowHelpMarker("Positive values decrease sharpness at high contrast areas.\n"
-                               "Negative values increase sharpness at high contrast areas.");
+                ShowHelpMarker("Lowers sharpness at high contrast areas.");
 
                 ImGui::EndDisabled();
             }
@@ -9732,6 +9745,9 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
                 ImGui::TableSetupColumn("##2", ImGuiTableColumnFlags_WidthFixed);
 
                 ankerl::unordered_dense::map<void*, CapturedHudlessInfo>::iterator it;
+
+                // Render threads add and remove entries
+                std::scoped_lock hudlessLock(state.capturedHudlessesMutex);
 
                 for (it = state.capturedHudlesses.begin(); it != state.capturedHudlesses.end(); it++)
                 {

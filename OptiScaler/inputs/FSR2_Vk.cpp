@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "FSR2_Vk.h"
+#include "NVNGX_DLSS.h"
 
 #include "Util.h"
 #include "Config.h"
@@ -54,7 +55,9 @@ static std::unordered_map<FfxFsr2Context*, NVSDK_NGX_Handle*> _contexts;
 static VkDevice _vkDevice = nullptr;
 static VkPhysicalDevice _vkPhysicalDevice = nullptr;
 static PFN_vkGetDeviceProcAddr _vkDeviceProcAddress = nullptr;
-static bool _nvnxgInited = false;
+// Device this input initialised NGX with
+static std::atomic<VkDevice> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static bool _skipCreate = false;
 static bool _skipDispatch = false;
 static bool _skipDestroy = false;
@@ -227,7 +230,7 @@ static bool CreateDLSSContext(FfxFsr2Context* handle, const FfxFsr2DispatchDescr
 
     LOG_INFO("renderWidth: {}, maxWidth: {}, ratio: {}", pExecParams->renderSize.width, width, ratio);
 
-    if (ratio <= 3.0 && ratio > 2.0)
+    if (ratio > 2.0)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_UltraPerformance);
     else if (ratio <= 2.0 && ratio > 1.7)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
@@ -335,18 +338,16 @@ static FfxErrorCode ffxFsr2ContextCreate_Vk(FfxFsr2Context* context, FfxFsr2Cont
     if (contextDescription->device == VK_NULL_HANDLE)
         return ccResult;
 
-    if (_vkDevice == VK_NULL_HANDLE)
-    {
-        _vkDevice = (VkDevice) contextDescription->device;
-        LOG_DEBUG("VkDevice: {:X}", (size_t) _vkDevice);
-    }
+    _vkDevice = (VkDevice) contextDescription->device;
+    LOG_DEBUG("VkDevice: {:X}", (size_t) _vkDevice);
 
-    if (!state.nvngxVkInited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!state.nvngxVkInited || (_nvngxInited && _nvngxDevice.load() != _vkDevice))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_VULKAN_Init_ProjectID_Ext(
+        auto nvResult = NVNGXVkInputInit(
             OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), State::Instance().VulkanInstance,
             _vkPhysicalDevice, _vkDevice, vkGetInstanceProcAddr, vkGetDeviceProcAddr,
             state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version, &fcInfo);
@@ -354,7 +355,8 @@ static FfxErrorCode ffxFsr2ContextCreate_Vk(FfxFsr2Context* context, FfxFsr2Cont
         if (nvResult != NVSDK_NGX_Result_Success)
             return FFX_ERROR_BACKEND_API_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _vkDevice;
+        _nvngxInited = true;
     }
 
     NVSDK_NGX_Parameter* params = nullptr;
@@ -395,8 +397,8 @@ static FfxErrorCode ffxFsr2ContextDispatch_Vk(FfxFsr2Context* context,
         return FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext(context, dispatchDescription)))
         return FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -762,4 +764,10 @@ void HookFSR2VkExeInputs()
         o_ffxFsr2GetScratchMemorySize_Vk = nullptr;
         o_ffxGetDevice_Vk = nullptr;
     }
+}
+
+void FSR2VkDeviceDestroyed(VkDevice device)
+{
+    VkDevice expected = device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

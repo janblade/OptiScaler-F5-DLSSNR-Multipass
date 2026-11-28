@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "XeSS_Dx12.h"
+#include "NVNGX_DLSS.h"
 
 #include "NVNGX_Parameter.h"
 
@@ -12,6 +13,9 @@ static UINT64 _handleCounter = 13370000;
 static UINT64 _frameCounter = 0;
 static xess_context_handle_t _currentContext = nullptr;
 static ID3D12Device* _d3d12Device = nullptr;
+// Device this input initialised NGX with
+static std::atomic<ID3D12Device*> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 
 // Motion vector resolution the feature was created with
 static std::unordered_map<xess_context_handle_t, bool> _lowResMVs;
@@ -21,7 +25,7 @@ static bool CreateDLSSContext(xess_context_handle_t handle, ID3D12GraphicsComman
 {
     LOG_DEBUG("");
 
-    if (!_nvParams.contains(handle))
+    if (!_nvParams.contains(handle) || !_d3d12InitParams.contains(handle))
         return false;
 
     NVSDK_NGX_Handle* nvHandle = nullptr;
@@ -114,18 +118,22 @@ xess_result_t hk_xessD3D12CreateContext(ID3D12Device* pDevice, xess_context_hand
     if (State::Instance().gameEngine == GameEngineType::Unreal)
         XeSSUnreal::Hook();
 
-    if (!State::Instance().nvngxDx12Inited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!State::Instance().nvngxDx12Inited || (_nvngxInited && _nvngxDevice.load() != pDevice))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
 
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
+        auto nvResult = NVNGXDx12InputInit(
             OPTI_GUID, NVSDK_NGX_ENGINE_TYPE_CUSTOM, OPTI_VERSION, exePath.c_str(), pDevice, &fcInfo,
             State::Instance().NVNGX_Version == 0 ? NVSDK_NGX_Version_API : State::Instance().NVNGX_Version);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return XESS_RESULT_ERROR_UNINITIALIZED;
+
+        _nvngxDevice = pDevice;
+        _nvngxInited = true;
     }
 
     _d3d12Device = pDevice;
@@ -344,4 +352,10 @@ xess_result_t hk_xessD3D12GetProfilingData(xess_context_handle_t hContext, xess_
         *pProfilingData = nullptr;
 
     return XESS_RESULT_SUCCESS;
+}
+
+void XeSSDx12DeviceDestroyed(IUnknown* device)
+{
+    ID3D12Device* expected = (ID3D12Device*) device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

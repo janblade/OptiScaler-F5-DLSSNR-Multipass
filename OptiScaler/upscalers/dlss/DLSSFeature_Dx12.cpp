@@ -92,6 +92,7 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
         if (nvResult != NVSDK_NGX_Result_Success)
         {
             LOG_ERROR("_CreateFeature result: {0:X}", (unsigned int) nvResult);
+            _p_dlssHandle = nullptr; // NGX never issued it
             return false;
         }
         else
@@ -154,12 +155,14 @@ void DLSSFeatureDx12::Shutdown(ID3D12Device* InDevice)
     {
         // Same choice as the inputs' shutdown (inputs/NVNGX_DLSS_Dx12.cpp): the device entry point when a device was
         // given and the runtime has it
+        unsigned int remaining = 0;
+
         if (InDevice != nullptr && NVNGXProxy::D3D12_Shutdown1() != nullptr)
-            NVNGXProxy::D3D12_Shutdown1()(InDevice);
+            NVNGXProxy::D3D12_Shutdown1()(InDevice, &remaining);
         else if (NVNGXProxy::D3D12_Shutdown() != nullptr)
             NVNGXProxy::D3D12_Shutdown()();
         else if (NVNGXProxy::D3D12_Shutdown1() != nullptr)
-            NVNGXProxy::D3D12_Shutdown1()(InDevice);
+            NVNGXProxy::D3D12_Shutdown1()(InDevice, &remaining);
 
         NVNGXProxy::SetDx12Inited(false);
     }

@@ -59,7 +59,7 @@ bool SGSR1_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* 
     constants.EdgeThreshold = edgeThreshold;
     constants.EdgeSharpness = edgeSharpness;
 
-    if (!CreateConstantsBuffer(_device, _constantBuffer, constants, currentHeap.GetCbvCPU(0)))
+    if (!CreateConstantsBuffer(_device, currentHeap, constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
         return false;
@@ -100,11 +100,6 @@ SGSR1_Dx12::SGSR1_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12
         LOG_ERROR("Failed to setup root signature");
         return;
     }
-
-    D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(Sgsr1Constants));
-    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-    InDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
-                                      nullptr, IID_PPV_ARGS(&_constantBuffer));
 
     // Precompiled only (matches FSR1's own EASU pass) -- no runtime-recompile fallback source,
     // since SGSR1 is not exposed as a user-selectable filter (nothing prompts a recompile

@@ -82,7 +82,6 @@ static bool HasStencil(VkFormat format)
 {
     switch (format)
     {
-    case VK_FORMAT_X8_D24_UNORM_PACK32:
     case VK_FORMAT_D16_UNORM_S8_UINT:
     case VK_FORMAT_D24_UNORM_S8_UINT:
     case VK_FORMAT_D32_SFLOAT_S8_UINT:
@@ -696,6 +695,23 @@ bool IFeature_VkwDx12::CopyTextureFromVkToDx12(VkCommandBuffer InCmdBuffer, NVSD
 
         OutResource->VkSharedImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         OutResource->VkSharedImageAccess = VK_ACCESS_NONE;
+
+        // Output is written by D3D12 first, a later transition from UNDEFINED could discard it
+        if (!InCopy)
+        {
+            VkImageMemoryBarrier imageBarrier {};
+            imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            imageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imageBarrier.image = OutResource->VkSharedImage;
+            imageBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdPipelineBarrier(InCmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+
+            OutResource->VkSharedImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        }
 
         // Verify the resource descriptor
         D3D12_RESOURCE_DESC actualDesc = OutResource->Dx12Resource->GetDesc();
@@ -1950,6 +1966,35 @@ bool IFeature_VkwDx12::FeedsFrameGeneration() const
            State::Instance().activeFgInput == FGInput::Upscaler && VkPresentBridge::OutputActiveOn(_bridgeDevice);
 }
 
+std::optional<LUID> IFeature_VkwDx12::VulkanDeviceLuid()
+{
+    auto gipa = VulkanGIPA != nullptr ? VulkanGIPA : vkGetInstanceProcAddr;
+
+    auto getProperties2 = (PFN_vkGetPhysicalDeviceProperties2) gipa(VulkanInstance, "vkGetPhysicalDeviceProperties2");
+
+    if (getProperties2 == nullptr)
+        getProperties2 = (PFN_vkGetPhysicalDeviceProperties2) gipa(VulkanInstance, "vkGetPhysicalDeviceProperties2KHR");
+
+    if (getProperties2 == nullptr)
+        return std::nullopt;
+
+    VkPhysicalDeviceIDProperties idProperties {};
+    idProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+
+    VkPhysicalDeviceProperties2 properties {};
+    properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties.pNext = &idProperties;
+
+    getProperties2(VulkanPhysicalDevice, &properties);
+
+    if (!idProperties.deviceLUIDValid)
+        return std::nullopt;
+
+    LUID luid {};
+    std::memcpy(&luid, idProperties.deviceLUID, sizeof(luid));
+    return luid;
+}
+
 HRESULT IFeature_VkwDx12::CreateDx12Device()
 {
     LOG_FUNC();
@@ -1959,6 +2004,12 @@ HRESULT IFeature_VkwDx12::CreateDx12Device()
 
     HRESULT result;
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
+
+    // Shared resources only work on the Vulkan device's GPU
+    const auto vkLuid = VulkanDeviceLuid();
+    auto gameDevice = State::Instance().currentD3D12Device;
+    const bool gameDeviceUsable =
+        gameDevice != nullptr && (!vkLuid.has_value() || IsEqualLUID(gameDevice->GetAdapterLuid(), vkLuid.value()));
 
     // Vulkan route: on the device the Vulkan present bridge presents with, whichever of the two is made first (the mode
     // is often picked mid-game: the game's next upscaler call remakes this feature before the bridge is up)
@@ -1982,15 +2033,15 @@ HRESULT IFeature_VkwDx12::CreateDx12Device()
     {
         _dx11on12Device = _bridgeDevice;
     }
-    else if (_localDx11on12Device == nullptr && (State::Instance().currentD3D12Device == nullptr ||
-                                                 (State::Instance().gameQuirks & GameQuirk::ForceCreateD3D12Device)))
+    else if (_localDx11on12Device == nullptr &&
+             (!gameDeviceUsable || (State::Instance().gameQuirks & GameQuirk::ForceCreateD3D12Device)))
     {
         IDXGIFactory2* factory = nullptr;
 
         if (DxgiProxy::Module() == nullptr)
             result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
         else
-            result = DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(factory), &factory);
+            result = DxgiProxy::CreateDxgiFactory2_Hooked()(0, __uuidof(factory), &factory);
 
         if (result != S_OK)
         {
@@ -1999,12 +2050,51 @@ HRESULT IFeature_VkwDx12::CreateDx12Device()
         }
 
         IDXGIAdapter* hwAdapter = nullptr;
-        IdentifyGpu::getHardwareAdapter(factory, &hwAdapter, featureLevel);
+        bool adapterByLuid = false;
+
+        if (vkLuid.has_value())
+        {
+            IDXGIFactory4* factory4 = nullptr;
+
+            if (factory->QueryInterface(IID_PPV_ARGS(&factory4)) == S_OK)
+            {
+                adapterByLuid = factory4->EnumAdapterByLuid(vkLuid.value(), IID_PPV_ARGS(&hwAdapter)) == S_OK;
+
+                if (!adapterByLuid)
+                    hwAdapter = nullptr;
+
+                factory4->Release();
+            }
+        }
+
+        if (hwAdapter == nullptr)
+        {
+            if (vkLuid.has_value())
+                LOG_WARN("Can't find the Vulkan device's adapter, using the hardware adapter");
+
+            IdentifyGpu::getHardwareAdapter(factory, &hwAdapter, featureLevel);
+        }
 
         if (hwAdapter == nullptr)
             LOG_WARN("Can't get hwAdapter, will try nullptr!");
 
-        _localDx11on12Device = WithDx12::RequestD3D12Device(featureLevel, hwAdapter);
+        // WithDx12 keeps or adopts an existing device without looking at the adapter
+        auto withDx12Device = WithDx12::GetD3D12Device() != nullptr ? WithDx12::GetD3D12Device() : gameDevice;
+        const bool forceCreate = static_cast<bool>(State::Instance().gameQuirks & GameQuirk::ForceCreateD3D12Device);
+
+        if (adapterByLuid && !forceCreate && withDx12Device != nullptr &&
+            !IsEqualLUID(withDx12Device->GetAdapterLuid(), vkLuid.value()))
+        {
+            ID3D12Device* device = nullptr;
+            if (CreateD3D12DeviceOnAdapter(hwAdapter, featureLevel, &device) == S_OK && device != nullptr)
+            {
+                LOG_INFO("Created a D3D12Device on the Vulkan device's GPU");
+                _localDx11on12Device = device;
+            }
+        }
+
+        if (_localDx11on12Device == nullptr)
+            _localDx11on12Device = WithDx12::RequestD3D12Device(featureLevel, hwAdapter);
 
         if (_localDx11on12Device == nullptr)
         {
@@ -2014,15 +2104,8 @@ HRESULT IFeature_VkwDx12::CreateDx12Device()
 
         _dx11on12Device = _localDx11on12Device;
 
-        if (hwAdapter != nullptr)
-        {
-            DXGI_ADAPTER_DESC desc {};
-            auto primaryGpu = IdentifyGpu::getPrimaryGpu();
-            if (hwAdapter->GetDesc(&desc) == S_OK && !IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
-            {
-                LOG_WARN("D3D12Device created with non-primary GPU");
-            }
-        }
+        if (vkLuid.has_value() && !IsEqualLUID(_localDx11on12Device->GetAdapterLuid(), vkLuid.value()))
+            LOG_WARN("D3D12Device is on a different GPU than the Vulkan device");
 
         if (hwAdapter != nullptr)
             hwAdapter->Release();
@@ -2145,6 +2228,15 @@ bool IFeature_VkwDx12::Init(VkInstance InInstance, VkPhysicalDevice InPD, VkDevi
 
     if (IsInited())
         return true;
+
+    // Shared resources are already in NPSR, the backends' UE barriers would declare wrong states
+    if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
+        State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
+    {
+        LOG_INFO("Vulkan detected, disabling UE resource barrier overrides");
+        Config::Instance()->ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Config::Instance()->MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
 
     VulkanInstance = InInstance;
     VulkanPhysicalDevice = InPD;
@@ -2299,6 +2391,12 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
     InParameters->Get(NVSDK_NGX_Parameter_ExposureTexture, &originalExposure);
     InParameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &originalReactiveMask);
 
+    // Vulkan structs, Dx12 backends would read them as Dx12 resources. Reactive mask is shared via the bias mask
+    void* originalFsrReactive = nullptr;
+    void* originalFsrTransparency = nullptr;
+    InParameters->Get("FSR.reactive", &originalFsrReactive);
+    InParameters->Get("FSR.transparencyAndComposition", &originalFsrTransparency);
+
     auto RestoreVulkanParameters = [&]()
     {
         InParameters->Set(NVSDK_NGX_Parameter_Color, originalColor);
@@ -2307,6 +2405,8 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
         InParameters->Set(NVSDK_NGX_Parameter_Depth, originalDepth);
         InParameters->Set(NVSDK_NGX_Parameter_ExposureTexture, originalExposure);
         InParameters->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, originalReactiveMask);
+        InParameters->Set("FSR.reactive", originalFsrReactive);
+        InParameters->Set("FSR.transparencyAndComposition", originalFsrTransparency);
     };
 
     bool dx12EvalResult = false;
@@ -2347,6 +2447,9 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
 
         SetOptionalDx12Inputs(InParameters, vkExp.Dx12Resource, vkReactive.Dx12Resource, AutoExposure(),
                               Config::Instance()->DisableReactiveMask.value_or(false));
+
+        InParameters->Set("FSR.reactive", (void*) nullptr);
+        InParameters->Set("FSR.transparencyAndComposition", (void*) nullptr);
 
         LOG_DEBUG("Dispatch!!");
         DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue, _frameCount,
@@ -2414,14 +2517,7 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
     if (feedFrameGeneration)
         VkPresentBridge::FrameGenerationInputsQueued(_lastCompleteFence, _lastCompleteValue);
 
-    // Not restoring the original values of NVSDK_NGX_Parameter_Color etc.
-    // Unsure if that's a potential problem but in theory the game should only be setting those
-    InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) nullptr);
-    InParameters->Set(NVSDK_NGX_Parameter_MotionVectors, (void*) nullptr);
-    InParameters->Set(NVSDK_NGX_Parameter_Output, (void*) nullptr);
-    InParameters->Set(NVSDK_NGX_Parameter_Depth, (void*) nullptr);
-    InParameters->Set(NVSDK_NGX_Parameter_ExposureTexture, (void*) nullptr);
-    InParameters->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) nullptr);
+    RestoreVulkanParameters();
 
     _frameCount++;
 

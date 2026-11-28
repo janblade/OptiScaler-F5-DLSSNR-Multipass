@@ -690,7 +690,7 @@ void DLSSG_Dx12::ReleaseObjects()
         _uiAllocatorFenceValues[i] = 0;
     }
 
-    ReleaseUIFence();
+    ReleaseFences();
 
     _renderUI.reset();
     _hudlessCompare.reset();
@@ -918,18 +918,7 @@ bool DLSSG_Dx12::Present()
             _uiCommandListResetted[fIndex] = false;
         }
 
-        if (_scCommandListResetted[fIndex])
-        {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
-            auto closeResult = _scCommandList[fIndex]->Close();
-
-            if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
-            else
-                LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
-
-            _scCommandListResetted[fIndex] = false;
-        }
+        SubmitSCCommandList(fIndex);
     }
 
     if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)
@@ -1038,6 +1027,10 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->height = inputResource->height;
     fResource->cmdList = inputResource->cmdList;
 
+    // A new resource for the slot, its old copy is stale. A re-tag passes the slot itself
+    if (inputResource != fResource)
+        fResource->copy = nullptr;
+
     auto willFlip = State::Instance().activeFgInput == FGInput::Upscaler &&
                     Config::Instance()->FGResourceFlip.value_or_default() &&
                     (type == FG_ResourceType::Velocity || type == FG_ResourceType::Depth);
@@ -1080,9 +1073,11 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
         fResource->validity != FG_ResourceValidity::UntilPresent)
     {
-        fResource->validity = (fResource->validity != FG_ResourceValidity::ValidNow || willFlip)
-                                  ? FG_ResourceValidity::UntilPresent
-                                  : FG_ResourceValidity::ValidNow;
+        // Flip only made a copy when the shader ran
+        fResource->validity =
+            (fResource->validity != FG_ResourceValidity::ValidNow || (willFlip && fResource->copy != nullptr))
+                ? FG_ResourceValidity::UntilPresent
+                : FG_ResourceValidity::ValidNow;
 
         if (type == FG_ResourceType::HudlessColor)
         {
@@ -1091,6 +1086,7 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
 
             if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != desc.Format)
             {
+                std::fill_n(lastFormat, BUFFER_COUNT, desc.Format);
                 State::Instance().fgChanged = true;
                 return false;
             }
@@ -1166,13 +1162,6 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
 
                 return false;
             }
-        }
-
-        // Potentially we don't need to restore but do it just to be safe
-        if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
-        {
-            ResourceBarrier(inputResource->cmdList, inputResource->resource, D3D12_RESOURCE_STATE_COPY_DEST,
-                            inputResource->state);
         }
 
         SetResourceReady(type, fIndex);

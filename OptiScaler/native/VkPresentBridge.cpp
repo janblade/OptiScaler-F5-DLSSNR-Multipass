@@ -249,7 +249,7 @@ bool MakeFactory(ComPtr<IDXGIFactory2>& factory, bool* system = nullptr)
 
     const HRESULT hr = DxgiProxy::Module() == nullptr
                            ? CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))
-                           : DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(IDXGIFactory2), &factory);
+                           : DxgiProxy::CreateDxgiFactory2_Hooked()(0, __uuidof(IDXGIFactory2), &factory);
     return SUCCEEDED(hr) && factory != nullptr;
 }
 

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "FSR2_Dx12.h"
+#include "NVNGX_DLSS.h"
 
 #include "Util.h"
 #include "Config.h"
@@ -114,8 +115,10 @@ static PFN_ffxFsr2GetInterfaceDX12 o_ffxFsr2GetInterfaceDX12 = nullptr;
 static std::unordered_map<Fsr212::FfxFsr2Context*, Fsr212::FfxFsr2ContextDescription> _initParams;
 static std::unordered_map<Fsr212::FfxFsr2Context*, NVSDK_NGX_Parameter*> _nvParams;
 static std::unordered_map<Fsr212::FfxFsr2Context*, NVSDK_NGX_Handle*> _contexts;
-static ID3D12Device* _d3d12Device = nullptr;
-static bool _nvnxgInited = false;
+static std::atomic<ID3D12Device*> _d3d12Device { nullptr };
+// Device this input initialised NGX with, cleared on destroy as a new device can get its address
+static std::atomic<ID3D12Device*> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static bool _skipCreate = false;
 static bool _skipDispatch = false;
 static bool _skipDestroy = false;
@@ -412,19 +415,21 @@ static Fsr212::FfxErrorCode ffxFsr2ContextCreate_Dx12(Fsr212::FfxFsr2Context* co
         return ccResult;
     }
 
-    if (!state.nvngxDx12Inited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!state.nvngxDx12Inited || (_nvngxInited && _nvngxDevice.load() != _d3d12Device))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
-            OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d12Device, &fcInfo,
-            state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
+        auto nvResult =
+            NVNGXDx12InputInit(OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d12Device, &fcInfo,
+                               state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return Fsr212::FFX_ERROR_BACKEND_API_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _d3d12Device.load();
+        _nvngxInited = true;
     }
 
     NVSDK_NGX_Parameter* params = nullptr;
@@ -495,20 +500,22 @@ static Fsr212::FfxErrorCode ffxFsr2ContextCreate_Pattern_Dx12(Fsr212::FfxFsr2Con
         return ccResult;
     }
 
-    if (!state.nvngxDx12Inited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!state.nvngxDx12Inited || (_nvngxInited && _nvngxDevice.load() != _d3d12Device))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
 
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
-            OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d12Device, &fcInfo,
-            state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
+        auto nvResult =
+            NVNGXDx12InputInit(OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d12Device, &fcInfo,
+                               state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return Fsr212::FFX_ERROR_BACKEND_API_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _d3d12Device.load();
+        _nvngxInited = true;
     }
 
     NVSDK_NGX_Parameter* params = nullptr;
@@ -540,7 +547,7 @@ static Fsr212::FfxErrorCode ffxFsr2ContextDispatch_Dx12(Fsr212::FfxFsr2Context* 
     LOG_DEBUG("");
 
     // HACK, try to detected when we hooked FSR 2.0 call as FSR2.1/2.2
-    if (std::labs(dispatchDescription->renderSize.width) > 20000)
+    if (dispatchDescription != nullptr && std::labs(dispatchDescription->renderSize.width) > 20000)
     {
         return ffxFsr20ContextDispatch_Dx12(context, (FfxFsr20DispatchDescription*) dispatchDescription);
     }
@@ -559,8 +566,8 @@ static Fsr212::FfxErrorCode ffxFsr2ContextDispatch_Dx12(Fsr212::FfxFsr2Context* 
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -623,8 +630,8 @@ ffxFsr2ContextDispatch_Pattern_Dx12(Fsr212::FfxFsr2Context* context,
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -693,8 +700,8 @@ static Fsr212::FfxErrorCode ffxFsr20ContextDispatch_Dx12(Fsr212::FfxFsr2Context*
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext20(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext20(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -761,8 +768,8 @@ static Fsr212::FfxErrorCode ffxFsr20ContextDispatch_Pattern_Dx12(Fsr212::FfxFsr2
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext20(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext20(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -825,8 +832,8 @@ static Fsr212::FfxErrorCode ffxFsr2TinyContextDispatch_Dx12(Fsr212::FfxFsr2Conte
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContextTiny(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContextTiny(context, dispatchDescription)))
         return Fsr212::FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -968,6 +975,15 @@ static Fsr212::FfxErrorCode hk_ffxFsr2GetInterfaceDX12(Fsr212::FfxFsr2Interface2
     LOG_DEBUG("");
     _d3d12Device = device;
     return o_ffxFsr2GetInterfaceDX12(fsr2Interface, device, scratchBuffer, scratchBufferSize);
+}
+
+void FSR2Dx12DeviceDestroyed(IUnknown* device)
+{
+    ID3D12Device* expected = (ID3D12Device*) device;
+    _d3d12Device.compare_exchange_strong(expected, nullptr);
+
+    expected = (ID3D12Device*) device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }
 
 void HookFSR2ExeInputs()

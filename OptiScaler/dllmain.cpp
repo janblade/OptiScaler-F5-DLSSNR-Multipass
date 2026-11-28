@@ -2177,6 +2177,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         bool possibleNvidia = isNvidiaViaNvapi();
         F5Low::SetStartupNvidia(possibleNvidia);
+        IdentifyGpu::setNvidiaHint(possibleNvidia);
 
         // F5Low that cannot run here is None from the start: the quirks below and the swap chain would otherwise
         // treat the session as XeFG while no frame generation runs

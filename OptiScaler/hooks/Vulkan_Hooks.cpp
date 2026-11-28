@@ -23,6 +23,10 @@
 
 #include <spoofing/Vulkan_Spoofing.h>
 #include <hudfix/Hudfix_Vk.h>
+#include <inputs/NVNGX_DLSS.h>
+#include <inputs/FfxApi_Vk.h>
+#include <inputs/FSR2_Vk.h>
+#include <inputs/XeSS_Vulkan.h>
 
 #include <vulkan/vulkan.hpp>
 
@@ -51,6 +55,7 @@
 #include <low_latency/low_latency_tech/ll_reflex_nvapi_vk.h>
 
 #include <intrin.h>
+#include <unordered_set>
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -60,10 +65,17 @@ static VkInstance _instance = VK_NULL_HANDLE;
 static VkPhysicalDevice _PD = VK_NULL_HANDLE;
 static HWND _hwnd = nullptr;
 
+// Devices created while hooked, their destroy goes through the hook too. Their deferred releases stay when another
+// device is created (a probe device must not take a live device's entries).
+static std::mutex _hookedDevicesMutex;
+static std::unordered_set<uint64_t> _hookedDevices;
+
 static std::mutex _surfaceWindowsMutex;
 static std::unordered_map<VkSurfaceKHR, HWND> _surfaceWindows;
 
-static std::mutex _vkPresentMutex;
+// Overlay and probe swapchains passed to the driver, swapchain handles are only unique per device
+static std::mutex _passThroughSwapchainsMutex;
+static std::vector<std::pair<VkDevice, VkSwapchainKHR>> _passThroughSwapchains;
 
 PFN_vkCreateDevice o_vkCreateDevice = nullptr;
 static PFN_vkDestroyDevice o_vkDestroyDevice = nullptr;
@@ -180,6 +192,45 @@ static VkResult FGOutputQueuePresent(VkQueue queue, const VkPresentInfoKHR* pPre
 {
     MenuCommon::FGOutputPresent();
     return o_QueuePresentKHR(queue, pPresentInfo);
+}
+
+// Every swapchain of the present is an overlay or probe one. The device is the queue's own when OptiScaler knows it
+// (matched by handle alone otherwise), and nothing of the game's own or of an FG output's presents ever matches.
+static bool IsPassThroughPresent(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
+{
+    if (pPresentInfo == nullptr || pPresentInfo->swapchainCount == 0)
+        return false;
+
+    VkDevice queueDevice = VK_NULL_HANDLE;
+    VkPhysicalDevice queuePhysical = VK_NULL_HANDLE;
+    const bool knownDevice = native::VkFrameSource::DeviceOfQueue(queue, &queueDevice, &queuePhysical);
+
+    std::scoped_lock lock(_passThroughSwapchainsMutex);
+
+    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
+    {
+        const auto swapchain = pPresentInfo->pSwapchains[i];
+        const bool found =
+            std::ranges::any_of(_passThroughSwapchains, [&](const auto& entry)
+                                { return entry.second == swapchain && (!knownDevice || entry.first == queueDevice); });
+
+        if (!found)
+            return false;
+    }
+
+    return true;
+}
+
+static bool IsPassThroughSwapchain(VkDevice device, VkSwapchainKHR swapchain)
+{
+    std::scoped_lock lock(_passThroughSwapchainsMutex);
+    return std::ranges::find(_passThroughSwapchains, std::pair(device, swapchain)) != _passThroughSwapchains.end();
+}
+
+static bool ForgetPassThroughSwapchain(VkDevice device, VkSwapchainKHR swapchain)
+{
+    std::scoped_lock lock(_passThroughSwapchainsMutex);
+    return std::erase(_passThroughSwapchains, std::pair(device, swapchain)) > 0;
 }
 
 // OptiScaler's Streamline calls the driver's swapchain functions directly. Overlays like RTSS hook the same ones on top
@@ -641,8 +692,6 @@ static VkResult hkvkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Surf
 
         if (!MenuOverlayVk::OnOtherWindow(pCreateInfo->hwnd))
         {
-            MenuOverlayVk::DestroyVulkanObjects(false);
-
             _hwnd = pCreateInfo->hwnd;
             LOG_DEBUG("_hwnd captured: {0:X}", (UINT64) _hwnd);
         }
@@ -1219,7 +1268,11 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
 
     if (result == VK_SUCCESS)
-        DeferredRelease::DropOwnersExcept((uint64_t) *pDevice);
+    {
+        std::scoped_lock lock(_hookedDevicesMutex);
+        DeferredRelease::DropOwnersExcept(_hookedDevices);
+        _hookedDevices.insert((uint64_t) *pDevice);
+    }
 
     if (result == VK_SUCCESS && nativeFg != nullptr)
     {
@@ -1372,6 +1425,10 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     // FFX presents the real swapchain from its own queue
     if (FromFGOutput(_ReturnAddress()) || (nativeFg != nullptr && nativeFg->OwnsQueue(queue)))
         return FGOutputQueuePresent(queue, pPresentInfo);
+
+    // Overlays' presents aren't frames of the game
+    if (IsPassThroughPresent(queue, pPresentInfo))
+        return o_QueuePresentKHR(queue, pPresentInfo);
 
     LOG_FUNC();
 
@@ -1609,6 +1666,27 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
     VkResult result = VK_SUCCESS;
 
+    // Overlays and probes use tiny swapchains, they get no menu, FG or tracking like on DXGI
+    // A recreate keeps its chain, oldSwapchain can be an FG handle
+    if (pCreateInfo != nullptr &&
+        (pCreateInfo->oldSwapchain == VK_NULL_HANDLE || IsPassThroughSwapchain(device, pCreateInfo->oldSwapchain)) &&
+        Util::IsOverlaySwapchain(VulkanHooks::SurfaceWindow(pCreateInfo->surface), pCreateInfo->imageExtent.width,
+                                 pCreateInfo->imageExtent.height))
+    {
+        LOG_WARN("Overlay swapchain {}x{}", pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height);
+
+        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+        auto passThroughResult = o_CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+
+        if (passThroughResult == VK_SUCCESS)
+        {
+            std::scoped_lock lock(_passThroughSwapchainsMutex);
+            _passThroughSwapchains.emplace_back(device, *pSwapchain);
+        }
+
+        return passThroughResult;
+    }
+
     // Optical F5Low copies the swapchain's images to and from its D3D12 device: TRANSFER usage is added when the surface
     // allows it (native/VkFrameSource.cpp).
     VkSwapchainCreateInfoKHR localCreateInfo {};
@@ -1679,7 +1757,7 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
             // retired the old swapchain, it is not passed again)
             if (!fgSwapchain)
             {
-                if (nativeFg->RetiredOldSwapchain())
+                if (nativeFg->RetiredOldSwapchain() || nativeFg->IsRetiredSwapchain(localCreateInfo.oldSwapchain))
                     localCreateInfo.oldSwapchain = VK_NULL_HANDLE;
 
                 latencyMode = ChainLatencyMode(device, localCreateInfo, latencyInfo);
@@ -1798,7 +1876,9 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 VALIDATE_HOOK(hkvkDestroySwapchainKHR, PFN_vkDestroySwapchainKHR)
 static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator)
 {
-    if (FromFGOutput(_ReturnAddress()))
+    // Forgotten first on every path, the game's swapchain can reuse the handle
+    if ((swapchain != VK_NULL_HANDLE && ForgetPassThroughSwapchain(device, swapchain)) ||
+        FromFGOutput(_ReturnAddress()))
     {
         o_DestroySwapchainKHR(device, swapchain, pAllocator);
         return;
@@ -1814,6 +1894,10 @@ static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, c
             it != _latencySwapchains.end() && it->second.swapchain == swapchain)
             it->second = {};
     }
+
+    // The menu's image views and framebuffers of its images go before it (no-op for any other swapchain)
+    if (swapchain != VK_NULL_HANDLE)
+        MenuOverlayVk::DestroySwapchain(device, swapchain);
 
     if (auto fg = State::Instance().currentVkFG; fg != nullptr)
     {
@@ -1946,6 +2030,12 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
 
     if (device != VK_NULL_HANDLE)
     {
+        std::scoped_lock lock(_passThroughSwapchainsMutex);
+        std::erase_if(_passThroughSwapchains, [device](const auto& entry) { return entry.first == device; });
+    }
+
+    if (device != VK_NULL_HANDLE)
+    {
         VkPresentBridge::OnDeviceDestroying(device);
 
         // The native FG output's work on it (F5Low's shared images and fences) goes while the device still lives
@@ -1956,6 +2046,12 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         GenericDepthVk::OnDeviceDestroyed(device);
         DlssNr::ExposureScanVk::OnDeviceDestroyed(device);
         native::lowlatency::OnDeviceReleasedVulkan(device);
+
+        // The upscaler inputs forget a device that is going away, so the next create re-initialises NGX
+        NVNGXVkDeviceDestroyed(device);
+        FfxApiVkDeviceDestroyed(device);
+        FSR2VkDeviceDestroyed(device);
+        XeSSVkDeviceDestroyed(device);
 
         // InputCommon's output on it stops while the device still lives (its semaphores are the device's), then the
         // NvAPI Reflex output's state and the game's own semaphore (InputReflex) go
@@ -1984,7 +2080,12 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
 
     // What is still waiting for its frames goes now, the device is idle and everything above that enqueues is done
     if (device != VK_NULL_HANDLE)
+    {
         DeferredRelease::ReleaseOwner((uint64_t) device);
+
+        std::scoped_lock lock(_hookedDevicesMutex);
+        _hookedDevices.erase((uint64_t) device);
+    }
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);

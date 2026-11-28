@@ -3353,6 +3353,14 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             }
         }
 
+        constexpr auto fsr3DebugViewTooltip = "Top left: Dilated Motion Vectors\n"
+                                              "Top middle: Protected Areas\n"
+                                              "Top right: Dilated Depth\n"
+                                              "Middle: Upscaled frame\n"
+                                              "Bottom left: Disocclusion mask\n"
+                                              "Bottom middle: Reactiveness\n"
+                                              "Bottom right: Detail Protection Takedown";
+
         // FFX -----------------
         if (!usesDlssd && (currentBackend == Upscaler::FFX || currentBackend == Upscaler::FFX_on12))
         {
@@ -3566,13 +3574,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     }
                     else
                     {
-                        ShowHelpMarker("Top left: Dilated Motion Vectors\n"
-                                       "Top middle: Protected Areas\n"
-                                       "Top right: Dilated Depth\n"
-                                       "Middle: Upscaled frame\n"
-                                       "Bottom left: Disocclusion mask\n"
-                                       "Bottom middle: Reactiveness\n"
-                                       "Bottom right: Detail Protection Takedown");
+                        ShowHelpMarker(fsr3DebugViewTooltip);
                     }
 
                     if (majorFsrVersion > 3)
@@ -3721,6 +3723,18 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                     }
                 }
             }
+        }
+
+        // FSR 3.1 Dx11 -----------------
+        if (!usesDlssd && currentBackend == Upscaler::FSR31)
+        {
+            ImGui::Spacing();
+
+            bool debugView = config->FsrDebugView.value_or_default();
+            if (ImGui::Checkbox("Upscaler Debug View", &debugView))
+                config->FsrDebugView = debugView;
+
+            ShowHelpMarker(fsr3DebugViewTooltip);
         }
 
         // DLSS -----------------

@@ -294,6 +294,10 @@ bool XeFG_Dx12::DestroySwapchainContext()
             State::Instance().currentFGSwapchain = nullptr;
             _allowLowerFrameId = true;
 
+            // New context starts with its defaults, Dispatch sets them again
+            _framesToInterpolate = -1;
+            _uiComposition = false;
+
             // Its XeLL context isn't read anymore, unless a parked context (refused before) still links it: then it
             // goes once the last of those is destroyed (RetryParkedContexts)
             bool parked = false;

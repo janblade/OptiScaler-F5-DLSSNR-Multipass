@@ -308,6 +308,14 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
     if (!Util::CheckForRealObject(__FUNCTION__, pFactory, (IUnknown**) &real))
         real = pFactory;
 
+    // ReShade 6.6+ returns a proxy factory, hooking the real one keeps ReShade above us in any load order.
+    // Special K hooks the real factory too.
+    if (auto original = Util::GetReShadeOriginal(real); original != nullptr)
+    {
+        real = (IDXGIFactory*) original;
+        original->Release();
+    }
+
     void** pFactoryVTable = *reinterpret_cast<void***>(real);
 
     LOG_DEBUG("CreateSwapChain: {}, CreateSwapChainForHwnd: {}", Util::WhoIsTheCaller(pFactoryVTable[10]),

@@ -85,6 +85,7 @@ class IdentifyGpu
     inline static bool hasD3d12Capabilities = false;
     inline static std::mutex mutex {};
     inline static std::vector<GpuInformation> cache {};
+    inline static thread_local bool isFetching = false;
 
     static std::vector<GpuInformation> checkGpuInfo();
     static void queryNvapi(GpuInformation& gpuInfo);
@@ -97,6 +98,8 @@ class IdentifyGpu
 
     // Sorted by priority, the first one should be treated as the primary one
     static std::vector<GpuInformation> getAllGpus();
+    // True on the thread that is detecting GPUs, devices created then aren't the game's
+    static bool isDetecting();
     static GpuInformation getPrimaryGpu();
     static void updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3D12CreateDevice = nullptr);
     static void updateInt8Support(bool sdkSupportsInt8, bool driverSupportsInt8);

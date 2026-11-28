@@ -1434,7 +1434,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
     bool nonPrimaryGpu = false;
     if (pAdapter != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+        ScopedSkipSpoofingThread skipSpoofingThread {};
 
         if (((IDXGIAdapter*) pAdapter)->GetDesc(&desc) == S_OK)
         {
@@ -1442,7 +1442,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
             LOG_INFO("Adapter Desc: {}", wstring_to_string(szName));
 
             auto primaryGpu = IdentifyGpu::getPrimaryGpu();
-            if (!IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
+            if (primaryGpu.vendorId != VendorId::Invalid && !IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
             {
                 LOG_WARN("D3D12Device created with non-primary GPU");
                 nonPrimaryGpu = true;
@@ -1473,7 +1473,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
     _creatingD3D12Device = true;
     if (desc.VendorId == VendorId::Intel)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+        ScopedSkipSpoofingThread skipSpoofingThread {};
         result = o_D3D12CreateDevice(pAdapter, minLevel, riid, ppDevice);
     }
     else
@@ -1485,7 +1485,13 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
 
     LOG_DEBUG("o_D3D12CreateDevice result: {:X}", (UINT) result);
 
-    if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE && !nonPrimaryGpu)
+    // Devices created while detecting GPUs are probes, not the game's
+    const bool detectingGpus = IdentifyGpu::isDetecting();
+    if (detectingGpus)
+        LOG_DEBUG("Device created during GPU detection, not tracking it");
+
+    if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE && !nonPrimaryGpu &&
+        !detectingGpus)
     {
         // Becomes current with the game's swapchain (D3D12Hooks::CaptureDevice), devices of mods are only hooked
         LOG_DEBUG("Device created: {0:X}", (size_t) *ppDevice);
@@ -1595,7 +1601,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
     std::wstring szName;
     if (pAdapter != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+        ScopedSkipSpoofingThread skipSpoofingThread {};
 
         if (((IDXGIAdapter*) pAdapter)->GetDesc(&desc) == S_OK)
         {
@@ -1603,7 +1609,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
             LOG_INFO("Adapter Desc: {}", wstring_to_string(szName));
 
             auto primaryGpu = IdentifyGpu::getPrimaryGpu();
-            if (!IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
+            if (primaryGpu.vendorId != VendorId::Invalid && !IsEqualLUID(desc.AdapterLuid, primaryGpu.luid))
                 LOG_WARN("D3D12Device created with non-primary GPU");
         }
     }
@@ -1625,7 +1631,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
     HRESULT result;
     if (desc.VendorId == VendorId::Intel)
     {
-        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+        ScopedSkipSpoofingThread skipSpoofingThread {};
         ScopedCreatingD3DDevice skipCreatingD3DDevice {};
         result = o_CreateDevice(pFactory, pAdapter, minLevel, riid, ppDevice);
     }

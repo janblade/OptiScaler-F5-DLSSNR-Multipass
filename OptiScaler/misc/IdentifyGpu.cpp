@@ -217,7 +217,7 @@ void IdentifyGpu::queryNvapi(GpuInformation& gpuInfo)
 {
     // Prevent recursion: NvAPI_Initialize (dxvk-nvapi) internally creates a DXGI factory
     // and enumerates adapters, which re-enters our hooked EnumAdapters/EnumAdapters1 and
-    // calls getAllGpus() again while is_fetching is already set (returns empty list).
+    // calls getAllGpus() again while isFetching is already set (returns empty list).
     // Skip the DXGI load checks so nvapi sees the real adapters, allowing init to succeed.
     ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
 
@@ -380,8 +380,7 @@ void IdentifyGpu::getHardwareAdapter(IDXGIFactory* InFactory, IDXGIAdapter** InA
 
 std::vector<GpuInformation> IdentifyGpu::getAllGpus()
 {
-    thread_local bool is_fetching = false;
-    if (is_fetching)
+    if (isFetching)
         return {};
 
     std::scoped_lock lock(mutex);
@@ -391,13 +390,15 @@ std::vector<GpuInformation> IdentifyGpu::getAllGpus()
         return cache;
     }
 
-    is_fetching = true;
+    isFetching = true;
     cache = checkGpuInfo();
-    is_fetching = false;
+    isFetching = false;
 
     // TODO: try to reactivate DxgiSpoofing if was auto on Nvidia cards without DLSS
     return cache;
 }
+
+bool IdentifyGpu::isDetecting() { return isFetching; }
 
 GpuInformation IdentifyGpu::getPrimaryGpu()
 {

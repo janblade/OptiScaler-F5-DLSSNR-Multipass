@@ -242,7 +242,7 @@ ID3D12Device* WithDx12::GetD3D12DeviceFromD3D11(ID3D11Device* dx11Device, D3D_FE
     if (dx11Device == nullptr)
         return nullptr;
 
-    ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+    ScopedSkipSpoofingThread skipSpoofingThread {};
     ScopedSkipVulkanHooks skipVulkanHooks {};
 
     IDXGIDevice* dxgiDevice = nullptr;
@@ -337,7 +337,7 @@ bool WithDx12::CreateDx12Device(D3D_FEATURE_LEVEL InFeatureLevel, IDXGIAdapter* 
 {
     LOG_FUNC();
 
-    ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+    ScopedSkipSpoofingThread skipSpoofingThread {};
     ScopedSkipVulkanHooks skipVulkanHooks {};
 
     HRESULT result = S_OK;
@@ -398,7 +398,7 @@ bool WithDx12::CreateDx12Device(D3D_FEATURE_LEVEL InFeatureLevel, IDXGIAdapter* 
 
         if (hwAdapter != nullptr)
         {
-            ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+            ScopedSkipSpoofingThread skipSpoofingThread {};
             DXGI_ADAPTER_DESC desc = {};
             if (hwAdapter->GetDesc(&desc) == S_OK)
             {

@@ -57,6 +57,7 @@ inline bool ThreadHasNoTls() { return false; }
 namespace F5Low { inline const HMODULE kBlockedLoad = reinterpret_cast<HMODULE>(static_cast<ULONG_PTR>(0x1339)); }
 inline HMODULE ObserveLoadedXeFG(std::wstring_view, HMODULE m) { return m; }
 inline HMODULE CheckLoad(const std::wstring&, bool* failed) { *failed=true; return nullptr; }
+struct CheckedLoadScope { explicit CheckedLoadScope(const std::wstring&) {} };
 static HMODULE dllModule = nullptr;
 struct LibraryLoadHooks {
     enum class RecoveryResult { Ready, Retry, Unsupported, NotApplicable };

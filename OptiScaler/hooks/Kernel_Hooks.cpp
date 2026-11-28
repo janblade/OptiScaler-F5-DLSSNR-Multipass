@@ -66,6 +66,18 @@ static inline bool IsInsideWindowsDirectory(const std::string& path)
     return false;
 }
 
+// The name a hooked load is already checked for on this thread, so the nested hooked call (Kernel32 into KernelBase)
+// does not check the same load again
+static thread_local const std::wstring* _checkedName = nullptr;
+
+struct CheckedLoadScope
+{
+    const std::wstring* _previous;
+
+    explicit CheckedLoadScope(const std::wstring& name) : _previous(_checkedName) { _checkedName = &name; }
+    ~CheckedLoadScope() { _checkedName = _previous; }
+};
+
 // nullptr: not handled, load as asked. F5Low::kBlockedLoad: the F5Low DLSS-G block, the callers fail the load.
 // Loads that only map the file as data, or skip its initialization, don't come here (loader_boundary::NonExecutable).
 // ownLoadFailed: see LibraryLoadHooks::LoadLibraryCheckW
@@ -74,6 +86,9 @@ static inline HMODULE CheckLoad(const std::wstring& name, bool* ownLoadFailed)
     do
     {
         if (State::Instance().isShuttingDown || LibraryLoadHooks::IsApiSetName(name))
+            break;
+
+        if (_checkedName != nullptr && *_checkedName == name)
             break;
 
         if (State::SkipDllChecks())
@@ -567,6 +582,8 @@ HMODULE KernelHooks::hk_K32_LoadLibraryW(LPCWSTR lpLibFileName)
     if (handled != nullptr)
         return ObserveLoadedXeFG(name, handled);
 
+    // Kernel32 loads end up in the hooked KernelBase ones, the same load is checked only once
+    CheckedLoadScope scope(name);
     const auto result = original();
     const DWORD originalError = GetLastError();
     if (ownLoadFailed && result != nullptr)
@@ -625,6 +642,8 @@ HMODULE KernelHooks::hk_K32_LoadLibraryA(LPCSTR lpLibFileName)
     if (handled != nullptr)
         return ObserveLoadedXeFG(name, handled);
 
+    // Kernel32 loads end up in the hooked KernelBase ones, the same load is checked only once
+    CheckedLoadScope scope(name);
     const auto result = original();
     const DWORD originalError = GetLastError();
     if (ownLoadFailed && result != nullptr)
@@ -696,6 +715,8 @@ HMODULE KernelHooks::hk_K32_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, 
     if (handled != nullptr)
         return ObserveLoadedXeFG(name, handled);
 
+    // Kernel32 loads end up in the hooked KernelBase ones, the same load is checked only once
+    CheckedLoadScope scope(name);
     const auto result = original();
     const DWORD originalError = GetLastError();
     if (ownLoadFailed && result != nullptr)
@@ -773,6 +794,8 @@ HMODULE KernelHooks::hk_K32_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, D
     if (handled != nullptr)
         return ObserveLoadedXeFG(name, handled);
 
+    // Kernel32 loads end up in the hooked KernelBase ones, the same load is checked only once
+    CheckedLoadScope scope(name);
     const auto result = original();
     const DWORD originalError = GetLastError();
     if (ownLoadFailed && result != nullptr)
@@ -844,6 +867,8 @@ HMODULE KernelHooks::hk_KB_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, D
     if (handled != nullptr)
         return ObserveLoadedXeFG(name, handled);
 
+    // Kernel32 loads end up in the hooked KernelBase ones, the same load is checked only once
+    CheckedLoadScope scope(name);
     const auto result = original();
     const DWORD originalError = GetLastError();
     if (ownLoadFailed && result != nullptr)

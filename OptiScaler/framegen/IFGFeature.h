@@ -92,6 +92,7 @@ class IFGFeature
 
     bool CheckForRealObject(std::string functionName, IUnknown* pObject, IUnknown** ppRealObject);
     int GetDispatchIndex(UINT64& willDispatchFrame);
+    UINT64 NextDispatchFrame();
     virtual void NewFrame() = 0;
 
   public:

@@ -125,15 +125,11 @@ FT_Dx12::FT_Dx12(std::string InName, ID3D12Device* InDevice, DXGI_FORMAT InForma
     _init = InitHeaps(InDevice, _frameHeaps, FT_NUM_OF_HEAPS);
 }
 
-bool FT_Dx12::IsFormatCompatible(DXGI_FORMAT InFormat)
-{
-    // Bold move: accept all formats
-    return true;
-}
+bool FT_Dx12::IsFormatCompatible(DXGI_FORMAT InFormat) { return InFormat == format; }
 
 FT_Dx12::~FT_Dx12()
 {
-    if (!_init || State::Instance().isShuttingDown)
+    if (State::Instance().isShuttingDown)
         return;
 
     for (int i = 0; i < FT_NUM_OF_HEAPS; i++)
@@ -141,5 +137,5 @@ FT_Dx12::~FT_Dx12()
         _frameHeaps[i].ReleaseHeaps();
     }
 
-    SAFE_RELEASE(_buffer);
+    DeferredRelease::Release(_buffer);
 }

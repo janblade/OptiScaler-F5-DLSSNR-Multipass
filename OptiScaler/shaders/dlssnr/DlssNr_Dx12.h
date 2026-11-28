@@ -31,6 +31,8 @@
 #include <shaders/Shader_Dx12.h>
 #include <shaders/Shader_Dx12Utils.h>
 
+class Config;
+
 // Three dispatches are recorded per frame and several frames can be in flight at once, more so with
 // frame generation. Each dispatch needs descriptors and constants the GPU is not still reading, so
 // there has to be enough for three passes times the deepest pipeline we might sit behind.
@@ -205,6 +207,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // Releases _lutTexture and forgets its source path, so the next EnsureLutTexture call re-uploads from
     // scratch rather than reading _lutTextureSourcePath against a texture that no longer exists.
     void ReleaseLutTexture();
+    bool EnsureLutState(ID3D12GraphicsCommandList* InCmdList, const Config* cfg);
 
   public:
     bool BuildSuperiorWarpCache(ID3D12GraphicsCommandList* cmd, unsigned width, unsigned height,

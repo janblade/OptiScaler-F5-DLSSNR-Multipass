@@ -89,11 +89,11 @@ using Microsoft::WRL::ComPtr;
 struct Slot
 {
     struct Frame { uint64_t SubmissionEpoch = 0; unsigned OutputWidth = 8, OutputHeight = 8; bool Reset = false; } frame;
-    bool pending = false, submitted = false, expired = false, residualOnly = false;
+    bool pending = false, submitted = false, expired = false, residualOnly = false, gated = false;
     uint64_t serial = 0, ready = 0;
     ID3D12CommandList* producer = nullptr;
     ComPtr<ID3D12CommandQueue> producerQueue;
-    ComPtr<ID3D12Fence> fence;
+    ComPtr<ID3D12Fence> fence, gate;
 };
 std::array<Slot, 4> slots;
 bool reset = false;
@@ -241,8 +241,15 @@ try
            "Unsubmitted expired capture lost its submission/fence tracking");
     slots[2].producer = reinterpret_cast<ID3D12CommandList*>(uintptr_t(1));
     ID3D12CommandList* lists[] = {slots[2].producer};
+    Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&slots[2].gate)));
     DlssNr::Late::Submitted(queue.Get(), 1, lists);
     Expect(slots[2].submitted && !slots[2].pending, "Expired recording lost submission/fence tracking");
+    // The cross-queue gate (DlssNr_CrossQueueGate.h) is signalled to the same value right after the slot fence.
+    Expect(slots[2].gated, "Submission did not signal the cross-queue gate");
+    HANDLE gated = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    Check(slots[2].gate->SetEventOnCompletion(slots[2].ready, gated));
+    Expect(WaitForSingleObject(gated, 5000) == WAIT_OBJECT_0, "Cross-queue gate was not signalled");
+    CloseHandle(gated);
     HANDLE done = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     Check(slots[2].fence->SetEventOnCompletion(slots[2].ready, done));
     Expect(WaitForSingleObject(done, 5000) == WAIT_OBJECT_0, "Expired submitted capture's fence was not signalled");

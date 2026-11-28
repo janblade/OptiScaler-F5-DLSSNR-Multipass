@@ -283,6 +283,11 @@ class Config
     // post-SR placement regardless of this setting.
     CustomOptional<bool> DlssNrRunBeforeSr { false };
     CustomOptional<bool> DlssNrFinishedPicture { false };
+    // Finished Picture on a game that renders on another queue than it presents on: how the present waits for the
+    // frame (DlssNr_CrossQueueGate.h). 0 never (skip frames still rendering, as 0.1.39), 1 always, 2 always except
+    // for a short settle after frame generation or the upscaler changes, 3 only while OptiScaler's frame generation
+    // is not attached.
+    CustomOptional<uint32_t> DlssNrFinishedGpuWait { 2 };
     // Generate NR before SR, upscale its signed contribution with a private DLSS feature,
     // and apply it after the game's upscaler. Takes precedence over RunBeforeSR; opt-in.
     CustomOptional<bool> DlssNrDeferredDlss { false };
@@ -462,6 +467,18 @@ class Config
     CustomOptional<std::string> DlssNrLutFile { std::string() };
     // How much of the LUT's grade reaches the image, 0..1. Default is fully graded once a LutFile is set.
     CustomOptional<float> DlssNrLutStrength { 1.0f };
+
+    // LUT source: 0 = LUT file, 1 = custom realtime adjustments. Custom adjustments generate a 3D LUT from sliders.
+    CustomOptional<uint32_t> DlssNrLutSource { 0u };
+    // Custom LUT adjustments. 0 is neutral for every control.
+    CustomOptional<float> DlssNrLutExposure { 0.0f };   // EV, -3..+3
+    CustomOptional<float> DlssNrLutBrightness { 0.0f }; // -1..+1
+    CustomOptional<float> DlssNrLutGamma { 0.0f };      // -1..+1, mapped to gamma curve
+    CustomOptional<float> DlssNrLutBlacks { 0.0f };     // -1..+1
+    CustomOptional<float> DlssNrLutWhites { 0.0f };     // -1..+1
+    CustomOptional<float> DlssNrLutContrast { 0.0f };   // -1..+1
+    CustomOptional<float> DlssNrLutTemperature { 0.0f }; // -1..+1, negative=cool, positive=warm
+    CustomOptional<float> DlssNrLutSaturation { 0.0f }; // -1..+1
 
     // Post-NR LUT stack (memory/plans/2026-10-31-nr-lut-chain.md): up to four .cube files graded onto the picture NR
     // returns, applied in order 1..4 with their own strength each. Unlike LutFile above the model never sees this

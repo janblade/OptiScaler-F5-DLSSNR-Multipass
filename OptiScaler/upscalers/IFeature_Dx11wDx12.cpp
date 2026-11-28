@@ -13,6 +13,7 @@
 #include <misc/IdentifyGpu.h>
 
 #include <with_dx12/with_dx12.h>
+#include <misc/DeferredRelease.h>
 
 void IFeature_Dx11wDx12::ResourceBarrier(ID3D12GraphicsCommandList* commandList, ID3D12Resource* resource,
                                          D3D12_RESOURCE_STATES beforeState, D3D12_RESOURCE_STATES afterState)
@@ -87,19 +88,30 @@ bool IFeature_Dx11wDx12::CreateD3D12Objects()
 
 void IFeature_Dx11wDx12::ReleaseSharedResources()
 {
+    // The last upscale can still be running on the GPU, only successful signals update the allocator values
+    const auto lastFenceValue =
+        *std::max_element(std::begin(Dx12CommandAllocatorFenceValue), std::end(Dx12CommandAllocatorFenceValue));
+
+    if (Dx12Fence != nullptr && Dx12FenceEvent != nullptr && Dx12Fence->GetCompletedValue() < lastFenceValue &&
+        Dx12Fence->SetEventOnCompletion(lastFenceValue, Dx12FenceEvent) == S_OK)
+    {
+        WaitForSingleObject(Dx12FenceEvent, 1000);
+    }
+
     for (size_t i = 0; i < DX11WDX12_COMMAND_BUFFER_COUNT; i++)
     {
-        SAFE_RELEASE(Dx12CommandList[i]);
-        SAFE_RELEASE(Dx12CommandAllocator[i]);
+        DeferredRelease::Release(Dx12CommandList[i]);
+        DeferredRelease::Release(Dx12CommandAllocator[i]);
         Dx12CommandAllocatorFenceValue[i] = 0;
     }
 
-    SAFE_RELEASE(Dx12Fence);
+    DeferredRelease::Release(Dx12Fence);
     Dx12FenceValue = 0;
 
+    // The fence can still signal it if the wait above timed out
     if (Dx12FenceEvent)
     {
-        CloseHandle(Dx12FenceEvent);
+        DeferredRelease::Enqueue([event = Dx12FenceEvent]() { CloseHandle(event); });
         Dx12FenceEvent = nullptr;
     }
 
@@ -316,6 +328,9 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
 
 bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Parameter* InParameters)
 {
+    // Frees deferred objects even when presents aren't hooked
+    DeferredRelease::Collect();
+
     LOG_FUNC();
 
     if (!IsInited())

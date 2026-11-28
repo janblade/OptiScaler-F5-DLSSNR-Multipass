@@ -22,6 +22,7 @@ enum class Page : unsigned char
     Notifications, // every toast shown so far; right after Plugins
     Status,        // what OptiScaler found and runs, for bug reports; last in the nav pane
     F5Lut,   // the LUT stack (after NR, or on the upscaler's output); shown right below the Neural Rendering group
+    PostProcessing, // custom post-processing adjustments on the final image
     NrF5Low, // first under Neural Rendering: NR for a game that makes no upscaler call
     NrStatus,
     NrOptions,
@@ -50,6 +51,7 @@ inline constexpr PageInfo kPages[] = {
     { "notifications", "Notifications" },
     { "status", "Status" },
     { "f5lut", "F5LUT" },
+    { "postprocessing", "Post-processing" },
     { "nr.f5low", "Optical F5Low" },
     { "nr.status", "Status & Presets" },
     { "nr.options", "NR Options" },

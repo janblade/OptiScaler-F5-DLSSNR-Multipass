@@ -4,6 +4,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_defs.h>
 
+#include <atomic>
 #include <unordered_set>
 #include <Util.h>
 
@@ -171,5 +172,14 @@ class IFeature
 
     IFeature(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters) { SetHandle(InHandleId); }
 
+    // Counts every upscaler object made: tells a rebuilt feature from the old one even when the allocator hands back
+    // the same address (Finished Picture's GPU-wait settle, DlssNr_Late.inl)
+    uint32_t CreatedSerial() const { return _createdSerial; }
+
+  private:
+    inline static std::atomic<uint32_t> _createdCount { 0 };
+    uint32_t _createdSerial = ++_createdCount;
+
+  public:
     virtual ~IFeature() {}
 };

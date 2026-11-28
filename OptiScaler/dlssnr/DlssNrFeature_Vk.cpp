@@ -16,6 +16,7 @@
 #include <dlssnr/DlssNr_Lut.h>
 #include <dlssnr/DlssNr_LutChain.h>
 #include <dlssnr/DlssNr_LutStatus.h>
+#include <dlssnr/DlssNr_LutCustom.h>
 #include <shaders/dlssnr/DlssNr_Guides.h>
 #include <shaders/dlssnr/DlssNr_GameScale.h>
 #include <shaders/dlssnr/DlssNr_TrimAnchors.h>
@@ -909,9 +910,25 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
                            uint32_t shaderConversion, bool linearHdr, const DlssNrConstants& encode,
                            VkImageView liveExposureView)
 {
+    const bool useCustom = cfg.DlssNrLutSource.value_or_default() == 1u;
+    DlssNr::CustomLutParams customParams {};
+    if (useCustom)
+    {
+        customParams.exposure = cfg.DlssNrLutExposure.value_or_default();
+        customParams.brightness = cfg.DlssNrLutBrightness.value_or_default();
+        customParams.gamma = cfg.DlssNrLutGamma.value_or_default();
+        customParams.blacks = cfg.DlssNrLutBlacks.value_or_default();
+        customParams.whites = cfg.DlssNrLutWhites.value_or_default();
+        customParams.contrast = cfg.DlssNrLutContrast.value_or_default();
+        customParams.temperature = cfg.DlssNrLutTemperature.value_or_default();
+        customParams.saturation = cfg.DlssNrLutSaturation.value_or_default();
+    }
+    const bool customWanted = useCustom && !DlssNr::IsNeutralCustomLut(customParams);
+
     const auto entries = DlssNr::PostLutEntries(cfg);
-    const bool wanted =
+    const bool chainWanted =
         std::any_of(entries.begin(), entries.end(), [](const DlssNr::ChainEntry& e) { return !e.path.empty(); });
+    const bool wanted = customWanted || chainWanted;
     DlssNr::PostLutStatus status;
     status.wanted = wanted;
 
@@ -919,7 +936,6 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     {
         if (g_vk.postLutPass && g_vk.postLutPass->HoldsImage())
         {
-            // Earlier frames may still read the image; one drain, then every frame without a stack costs nothing.
             vkDeviceWaitIdle(device);
             g_vk.postLutPass->ReleaseLutImage();
         }
@@ -930,70 +946,94 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     }
 
     bool graded = false;
-    const bool usable =
-        DlssNr_LutChainEnsure(&g_vk.postLut, entries, DlssNr::FrameDecodeFor(shaderConversion, linearHdr));
-
-    // The game's image after SR can be any format, so the pass writes it through a storage image declared without one,
-    // which the device must allow (the resolve that just wrote it needs the same). Our own pre-SR image is RGBA16F.
     const bool anyFormat = VkExt::WritesWithoutFormat(device);
-    if (usable && !ownTarget && !anyFormat)
+    if (!ownTarget && !anyFormat)
+    {
         status.note = "Not applied after Super Resolution: the game's Vulkan device was created without a feature it "
                       "needs (restart the game with NR on).";
-    else if (usable)
+        DlssNr::ReportPostLutStatus(status);
+        return;
+    }
+
+    if (!g_vk.postLutPass)
+        g_vk.postLutPass = std::make_unique<DlssNr_LutVk>(device, physicalDevice, anyFormat);
+
+    auto dispatchLut = [&](const DlssNr::Lut3D& lut, const std::string& key, float strength) -> bool
     {
-        if (!g_vk.postLutPass)
-            g_vk.postLutPass = std::make_unique<DlssNr_LutVk>(device, physicalDevice, anyFormat);
-
-        const DlssNr::Lut3D& lut = g_vk.postLut.baked;
-
-        if (g_vk.postLutPass->Ready() && g_vk.postLutPass->NeedsDrainFor(lut.size, g_vk.postLut.key))
+        if (!g_vk.postLutPass->Ready())
+            return false;
+        if (g_vk.postLutPass->NeedsDrainFor(lut.size, key))
             vkDeviceWaitIdle(device);
+        if (!g_vk.postLutPass->EnsureLutImage(cmdBuffer, lut.rgb.data(), lut.size, key))
+            return false;
 
-        if (g_vk.postLutPass->Ready() &&
-            g_vk.postLutPass->EnsureLutImage(cmdBuffer, lut.rgb.data(), lut.size, g_vk.postLut.key))
+        DlssNrLutConstants constants {};
+        constants.Width = width;
+        constants.Height = height;
+        constants.Strength = strength;
+        constants.DomainMinR = lut.domainMin[0];
+        constants.DomainMinG = lut.domainMin[1];
+        constants.DomainMinB = lut.domainMin[2];
+        constants.DomainMaxR = lut.domainMax[0];
+        constants.DomainMaxG = lut.domainMax[1];
+        constants.DomainMaxB = lut.domainMax[2];
+        constants.LutSize = (uint32_t) lut.size;
+        constants.LatticeCoord = (uint32_t) lut.latticeCoord;
+        constants.InputEncoding = shaderConversion;
+        constants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
+        CopyLiveWhitePoint(constants, encode);
+        if (liveExposureView == VK_NULL_HANDLE)
+            constants.UseGameExposure = constants.UseExposureWhitePoint = 0u;
+
+        VkMemoryBarrier barrier {};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             1, &barrier, 0, nullptr, 0, nullptr);
+
+        return g_vk.postLutPass->Dispatch(cmdBuffer, view, VK_IMAGE_LAYOUT_GENERAL, view, constants, liveExposureView,
+                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    };
+
+    if (customWanted)
+    {
+        DlssNr_LutEnsureCustom(&g_vk.lut, customParams);
+        if (g_vk.lut.Loaded())
         {
-            DlssNrLutConstants constants {};
-            constants.Width = width;
-            constants.Height = height;
-            constants.Strength = g_vk.postLut.strength; // a single layer's own; a baked stack holds its strengths
-            constants.DomainMinR = lut.domainMin[0];
-            constants.DomainMinG = lut.domainMin[1];
-            constants.DomainMinB = lut.domainMin[2];
-            constants.DomainMaxR = lut.domainMax[0];
-            constants.DomainMaxG = lut.domainMax[1];
-            constants.DomainMaxB = lut.domainMax[2];
-            constants.LutSize = (uint32_t) lut.size;
-            constants.LatticeCoord = (uint32_t) lut.latticeCoord;
-            constants.InputEncoding = shaderConversion;
-            constants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
-            CopyLiveWhitePoint(constants, encode);
-            if (liveExposureView == VK_NULL_HANDLE)
-                constants.UseGameExposure = constants.UseExposureWhitePoint = 0u;
+            graded = dispatchLut(g_vk.lut.lut, g_vk.lut.loadedPath, std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f));
+            if (graded)
+            {
+                status.loaded = true;
+                status.chain = "<custom adjustments>";
+            }
+        }
+        if (g_vk.lut.failed)
+        {
+            status.failedPath = "<custom>";
+            status.error = g_vk.lut.error;
+        }
+    }
+    else
+    {
+        const bool usable =
+            DlssNr_LutChainEnsure(&g_vk.postLut, entries, DlssNr::FrameDecodeFor(shaderConversion, linearHdr));
+        if (usable)
+            graded = dispatchLut(g_vk.postLut.baked, g_vk.postLut.key, g_vk.postLut.strength);
 
-            // The resolve's writes must be visible to this pass's reads.
-            VkMemoryBarrier barrier {};
-            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
-
-            graded = g_vk.postLutPass->Dispatch(cmdBuffer, view, VK_IMAGE_LAYOUT_GENERAL, view, constants,
-                                                liveExposureView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        const DlssNr_LutChainState& chain = g_vk.postLut;
+        status.loaded = graded && chain.Loaded();
+        status.chain = chain.description;
+        static_assert(std::size(decltype(status.inputs) {}) == DlssNr::kMaxLutChainLayers);
+        std::copy(std::begin(chain.inputs), std::end(chain.inputs), status.inputs);
+        status.endsIn = chain.endsIn;
+        if (!chain.error.empty())
+        {
+            status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();
+            status.error = chain.error;
         }
     }
 
-    const DlssNr_LutChainState& chain = g_vk.postLut;
-    status.loaded = graded && chain.Loaded();
-    status.chain = chain.description;
-    static_assert(std::size(decltype(status.inputs) {}) == DlssNr::kMaxLutChainLayers);
-    std::copy(std::begin(chain.inputs), std::end(chain.inputs), status.inputs);
-    status.endsIn = chain.endsIn;
-    if (!chain.error.empty())
-    {
-        status.failedPath = chain.failedLayer >= 0 ? chain.failedPath : std::string();
-        status.error = chain.error;
-    }
     DlssNr::ReportPostLutStatus(status);
 }
 
@@ -2232,18 +2272,29 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         encode.UseExposureWhitePoint = 0u;
     }
 
-    // The LUT-apply epic: grade the frame through a loaded .cube file before the model sees it. Placed after the
-    // Automatic meter above, which must keep reading the clean frame (a grade shifts apparent brightness by a
-    // content-dependent amount, so metering it made exposure drift on D3D12), and right before the encode, which is
-    // the only other reader of the game's colour ahead of the model. The encode writes `keep` from the same source it
-    // reads, so handing it the graded image makes `keep` carry the grade too, and the game's resource is never
-    // transitioned or written here -- only read, in the layout it arrived in. Skipped entirely without a LutFile.
+    // Input LUT (.cube file) graded before the model sees it. Custom realtime adjustments are applied as
+    // post-processing on the final image.
     VkImageView encodeSource = colour->Resource.ImageViewInfo.ImageView;
     VkImageLayout encodeSourceLayout = beforeSr ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
     {
-        const std::string lutPath = cfg.DlssNrLutFile.value_or_default();
+        const bool useCustom = cfg.DlssNrLutSource.value_or_default() == 1u;
+        DlssNr::CustomLutParams customParams {};
+        if (useCustom)
+        {
+            customParams.exposure = cfg.DlssNrLutExposure.value_or_default();
+            customParams.brightness = cfg.DlssNrLutBrightness.value_or_default();
+            customParams.gamma = cfg.DlssNrLutGamma.value_or_default();
+            customParams.blacks = cfg.DlssNrLutBlacks.value_or_default();
+            customParams.whites = cfg.DlssNrLutWhites.value_or_default();
+            customParams.contrast = cfg.DlssNrLutContrast.value_or_default();
+            customParams.temperature = cfg.DlssNrLutTemperature.value_or_default();
+            customParams.saturation = cfg.DlssNrLutSaturation.value_or_default();
+        }
+        const bool customNeutral = useCustom && DlssNr::IsNeutralCustomLut(customParams);
+        const std::string lutPath = useCustom ? std::string("<custom>") : cfg.DlssNrLutFile.value_or_default();
+        const bool lutWanted = !useCustom && !lutPath.empty();
 
-        if (!lutPath.empty())
+        if (lutWanted)
         {
             const float lutStrength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
 
@@ -2271,8 +2322,6 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                     if (!g_vk.lutPass)
                         g_vk.lutPass = std::make_unique<DlssNr_LutVk>(device, physicalDevice);
 
-                    // Replacing the 3D image (another file, or another size) while earlier frames still sample the
-                    // old one would free it under them; a rare, user-initiated change, so a drain is fine.
                     if (g_vk.lutPass->Ready() && g_vk.lutPass->NeedsDrainFor(g_vk.lut.lut.size, g_vk.lut.loadedPath))
                         vkDeviceWaitIdle(device);
 
@@ -2295,10 +2344,6 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                         lutConstants.LatticeCoord = (uint32_t) g_vk.lut.lut.latticeCoord;
                         lutConstants.InputEncoding = shaderConversion;
                         lutConstants.ColourIsLinearHdr = linearHdr ? 1u : 0u;
-                        // The white point the encode below uses (Tune's pinned value included), so linear HDR lands
-                        // in the LUT's 0-1 domain where the model's proxy puts it; the Trim alone would leave a game
-                        // whose frame is scaled by its exposure far above white. With the encode's live fields and
-                        // image, so where the encode recomputes it this frame the LUT does too.
                         CopyLiveWhitePoint(lutConstants, encode);
                         if (liveExposureView == VK_NULL_HANDLE)
                             lutConstants.UseGameExposure = lutConstants.UseExposureWhitePoint = 0u;
@@ -2310,10 +2355,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                 }
 
                 DlssNr::ReportLutStatus(true, g_vk.lut.loadedPath, g_vk.lut.lut.size, g_vk.lut.failed, g_vk.lut.error,
-                                        g_vk.lut.attemptedPath, lutStrength);
+                                        g_vk.lut.attemptedPath.empty() ? lutPath : g_vk.lut.attemptedPath, lutStrength);
 
-                // A file that did not parse, or a pass that did not build, leaves the frame ungraded -- never a failure
-                // of the whole pass.
                 if (graded)
                 {
                     encodeSource = g_vk.lutScratch.view;
@@ -2325,9 +2368,6 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             if (g_vk.lutScratch.Valid() || (g_vk.lutPass && g_vk.lutPass->HoldsImage()))
             {
-                // LutFile was cleared: neither the scratch nor the 3D image (up to ~16 MB for a 128^3 lattice) is
-                // wanted by anything else. Earlier frames may still read them, so drain once; one hitch, and every
-                // later frame without a LutFile costs nothing.
                 vkDeviceWaitIdle(device);
                 DestroyImage(g_vk.lutScratch);
 
@@ -2336,6 +2376,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             }
 
             g_vk.lutScratchFailed = false;
+            g_vk.lut = DlssNr_LutState();
             DlssNr::ReportLutStatus(false, "", 0, false, "", "", cfg.DlssNrLutStrength.value_or_default());
         }
     }
@@ -2367,7 +2408,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     const bool superiorAtNativeWanted = DlssNr::SuperiorScaling::Enabled(cfg) &&
                                         DlssNr::SuperiorScaling::StabilizeAtNative(
                                             cfg.DlssNrSuperiorAtNative.value_or_default(), workScale, spatial,
-                                            cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                            // Superior does not run with Compress screen edges on Vulkan yet
+                                            // (VkRule Packed), so not with it at native either
+                                            false, cfg.DlssNrSuperiorScalingPreset.value_or_default(),
                                             SuperiorVk::Private::srUnavailable || SuperiorVk::Private::privateBroken);
     // Above 100% Superior needs the ordinary down-leg to average the supersampled answer to native. Its scaler and the
     // native image are made here when they can be, so that where the down-leg cannot run this is known before anything

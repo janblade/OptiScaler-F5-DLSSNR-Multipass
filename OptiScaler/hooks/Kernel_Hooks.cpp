@@ -348,7 +348,14 @@ BOOL WINAPI KernelHooks::hk_K32_GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModu
     {
         LOG_TRACE("Suspected SpecialK call for nvapi64");
         *phModule = LibraryLoadHooks::LoadNvApi();
-        return true;
+
+        if (*phModule == nullptr)
+        {
+            SetLastError(ERROR_MOD_NOT_FOUND);
+            return FALSE;
+        }
+
+        return TRUE;
     }
 
     // Flags first: with GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS lpModuleName is an address, not a name to compare

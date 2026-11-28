@@ -6,6 +6,9 @@ struct Slot
 {
     ComPtr<ID3D12Resource> depth, motion, linear, encoded, residual;
     ComPtr<ID3D12Fence> fence;
+    // Signalled to `ready` on the producer queue right after `fence`; a present on another queue waits on it on the GPU.
+    // Apart from `fence` because the watchdog may signal it from the CPU (DlssNr_CrossQueueGate.h).
+    ComPtr<ID3D12Fence> gate;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> commands;
     ComPtr<ID3D12CommandQueue> producerQueue; // real queue that signals `ready`; held so its identity stays valid
@@ -13,6 +16,7 @@ struct Slot
     DlssNrFrameInfo frame {};
     uint64_t ready = 0, done = 0, serial = 0;
     bool pending = false, submitted = false, expired = false, residualOnly = false, sceneLinear = true;
+    bool gated = false; // the producer queue signalled `gate` for this capture
 };
 std::array<Slot, 4> slots;
 ComPtr<ID3D12Device> device;
@@ -59,6 +63,92 @@ void Say(const char* message)
         status = message;
         LOG_INFO("DLSS-NR finished picture: {}", message);
     }
+}
+
+// Never destroyed: its thread may still be watching at unload, and joining it there would hold the loader lock.
+CrossQueueGate::Watchdog& Gate()
+{
+    static auto* watchdog = new CrossQueueGate::Watchdog(std::chrono::milliseconds(1500));
+    return *watchdog;
+}
+
+// [DlssNr] FinishedGpuWait: may this present queue a GPU wait on the game's render queue? Called on every present
+// that reaches ApplyFinishedColor with Finished Picture on; `captured` = a capture of the game's frame is waiting.
+// Skyrim (v0.1.40-pre1 tester): the device was reset on the first frames of a DLSS-G context made again after the
+// upscaler was rebuilt, with the present waiting on the gate. Mode 2 keeps the wait off for a settle after frame
+// generation turns on/off/pauses or the upscaler changes; mode 3 keeps it off while OptiScaler's frame generation is
+// attached. Without the wait, frames still rendering at present are skipped, as before #362.
+bool GpuWaitAllowed(bool captured)
+{
+    const auto mode = Config::Instance()->DlssNrFinishedGpuWait.value_or_default();
+    if (mode == 0)
+        return false;
+    if (mode == 1)
+        return true;
+    auto& state = State::Instance();
+    auto* fg = state.currentFG;
+    if (mode == 3)
+        return fg == nullptr;
+    struct Seen
+    {
+        const void* fg = nullptr;
+        uint32_t upscaler = 0; // the upscaler object's serial, not its address (a rebuild can reuse the address)
+        bool generating = false;
+    };
+    static Seen seen {};
+    static uint32_t presentsSince = 0;
+    static uint32_t uncaptured = 0; // presents in a row with nothing captured (loading screen, upscaler gone)
+    static bool settleLogged = false;
+    static std::chrono::steady_clock::time_point changedAt {};
+    const Seen now { fg, state.currentFeature != nullptr ? state.currentFeature->CreatedSerial() : 0u,
+                     fg && fg->IsActive() && !fg->IsPaused() };
+    // A long stretch without captures counts as a change for as long as it lasts, so the settle starts when captures
+    // come back: frame generation and the upscaler can both be rebuilt inside it without this function seeing either
+    constexpr uint32_t kGapPresents = 30;
+    uncaptured = captured ? 0 : (uncaptured < UINT32_MAX ? uncaptured + 1 : uncaptured);
+    if (now.fg != seen.fg || now.upscaler != seen.upscaler || now.generating != seen.generating ||
+        uncaptured >= kGapPresents)
+    {
+        // Once per settle: a state that flips often keeps the wait off without a line each time
+        if (!settleLogged && (presentsSince != 0 || seen.fg || seen.upscaler))
+        {
+            settleLogged = true;
+            LOG_INFO("DLSS-NR finished picture: frame generation or the upscaler changed; the present stops waiting "
+                     "on the GPU for a moment (frames still rendering are skipped meanwhile)");
+        }
+        seen = now;
+        presentsSince = 0;
+        changedAt = std::chrono::steady_clock::now();
+    }
+    if (presentsSince < UINT32_MAX)
+        ++presentsSince;
+    constexpr uint32_t kSettlePresents = 120;
+    constexpr auto kSettleTime = std::chrono::seconds(2);
+    const bool settled = presentsSince > kSettlePresents && std::chrono::steady_clock::now() - changedAt >= kSettleTime;
+    if (settled)
+        settleLogged = false;
+    return settled;
+}
+
+// Slots whose gate the watchdog freed: their guide copy may still be pending and their fence now runs out of order, so
+// they are never used again (pending without a submission: Acquire, Cancel, the reset hook and the resize wait skip
+// them). Costs one of the four slots, once per session.
+void QuarantineAbandoned()
+{
+    for (const auto serial : Gate().TakeAbandoned())
+        for (auto& slot : slots)
+            if (slot.serial == serial)
+            {
+                slot.pending = true;
+                slot.submitted = false;
+                slot.expired = true;
+                slot.gated = false;
+                slot.producer = nullptr;
+                reset = true;
+                LOG_WARN("DLSS-NR finished picture: the game's render queue did not finish a frame within 1.5 s of its "
+                         "present; the present no longer waits for it this session (frames still rendering at present "
+                         "are skipped)");
+            }
 }
 
 bool Finished(const Slot& slot)
@@ -158,6 +248,7 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
     }
     device = currentDevice;
     tracking.store(true);
+    QuarantineAbandoned(); // before a slot whose gate the watchdog freed can look finished
     // Only the lightweight submission hook is needed, including when FG is disabled.
     ResTrack_Dx12::HookLateNrQueue(device.Get());
     Slot* next = nullptr;
@@ -183,11 +274,12 @@ Slot* Acquire(ID3D12GraphicsCommandList* cmd)
     if (!slot.commands)
     {
         if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&slot.fence))) ||
+            FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&slot.gate))) ||
             FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator))) ||
             FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, slot.allocator.Get(), nullptr,
                                             IID_PPV_ARGS(&slot.commands))) || FAILED(slot.commands->Close()))
         {
-            slot.commands.Reset(); slot.allocator.Reset(); slot.fence.Reset();
+            slot.commands.Reset(); slot.allocator.Reset(); slot.fence.Reset(); slot.gate.Reset();
             Say("Could not prepare the finished-picture option.");
             return nullptr;
         }
@@ -208,6 +300,7 @@ void Arm(Slot& slot, ID3D12GraphicsCommandList* cmd)
     slot.submitted = false;
     slot.expired = false;
     slot.pending = true;
+    slot.gated = false;
 }
 
 void Capture(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, bool rr)
@@ -351,6 +444,8 @@ void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* 
                         slot.pending = false;
                         Say("The graphics queue stopped. Restart the game to retry.");
                     }
+                    else
+                        slot.gated = slot.gate && SUCCEEDED(queue->Signal(slot.gate.Get(), slot.ready));
                     break;
                 }
 }
@@ -529,7 +624,7 @@ static FinishedPick SelectFinishedInput(ID3D12CommandQueue* queue, const D3D12_R
                       slot.serial, slot.submitted && slot.producerQueue.Get() == presentQueue,
                       slot.submitted ? slot.fence->GetCompletedValue() : 0, slot.ready };
     }
-    // Never queue a cross-queue wait here: the producer's signal can depend on this present.
+    // No wait is queued here: a present on another queue waits on the slot's gate, under the watchdog (ApplyFinishedColor).
     return PickFinishedInput(inputs.data(), inputs.size(), index);
 }
 
@@ -546,11 +641,15 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
     }
     if (!picture || !queue || State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         return;
+    Late::QuarantineAbandoned();
     // Nothing captured from the game's own upscaler is waiting: leave the history alone. With native input the
     // picture is owned by ApplyNativeInput, and rejecting a swapchain format here (B8G8R8A8 in World of Warcraft)
     // would Cancel() and reset the shared history on every present.
-    if (std::none_of(Late::slots.begin(), Late::slots.end(),
-                     [](const auto& slot) { return slot.pending && slot.submitted; }))
+    const bool captured =
+        std::any_of(Late::slots.begin(), Late::slots.end(), [](const auto& slot) { return slot.pending && slot.submitted; });
+    // Before the early returns, so the settle sees every present, also those with nothing captured
+    const bool gpuWaitAllowed = Late::GpuWaitAllowed(captured);
+    if (!captured)
         return;
     Late::ComPtr<ID3D12Resource> color = picture;
     Late::ComPtr<ID3D12Device> currentDevice;
@@ -588,7 +687,22 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
     const auto pick = SelectFinishedInput(queue, desc, residualOnly, gameFrameHandoff, snapshot, index, inputs);
     if (pick == FinishedPick::None)
         return; // loading screen, another swapchain, or this real frame was already consumed
-    if (pick == FinishedPick::NotReady)
+    // Rendered on another queue and not finished yet: the present queue waits for it on the GPU (DlssNr_CrossQueueGate.h)
+    // The wait is watched before it is queued (a wait the watchdog could not watch is never queued), and queued before
+    // anything is recorded: a later failure below leaves only a wait the gate's own signal ends.
+    auto& waiting = Late::slots[index];
+    if (pick == FinishedPick::NotReady && !inputs[index].sameQueue && inputs[index].completed != UINT64_MAX &&
+        waiting.gated && gpuWaitAllowed && Late::Gate().Enabled() && Late::Gate().Watch(waiting.gate.Get(), waiting.ready, waiting.serial) &&
+        SUCCEEDED(queue->Wait(waiting.gate.Get(), waiting.ready)))
+    {
+        if (!Late::loggedCrossQueue)
+        {
+            Late::loggedCrossQueue = true;
+            LOG_INFO("DLSS-NR finished picture: the game renders on a different queue than it presents on; "
+                     "the present waits on the GPU for the frame's render work");
+        }
+    }
+    else if (pick == FinishedPick::NotReady)
     {
         // Ordinary presents may retry within their epoch window. App handoffs expire at EndStreamlinePicture.
         // Sustained skips are the history gap rule's; a removed device resets as before
@@ -616,7 +730,7 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
                 Late::reset |= other.frame.Reset; // the game's reset flag outlives the capture it came with
             other.pending = false;
         }
-    // Same queue: orders after the producer's signal. Another queue: already complete, so this never blocks.
+    // Same queue: orders after the producer's signal. Another queue: already complete, or the GPU wait below.
     if (FAILED(slot.allocator->Reset()) ||
         FAILED(slot.commands->Reset(slot.allocator.Get(), nullptr)))
     {

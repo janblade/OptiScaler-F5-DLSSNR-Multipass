@@ -465,7 +465,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             else if (FsrNonLinearSRGB.has_value() && FsrNonLinearSRGB.value())
                 FsrNonLinearPQ.reset();
 
-            if (FsrNonLinearPQ.has_value() || FsrNonLinearSRGB.has_value())
+            if (FsrNonLinearPQ.value_or_default() || FsrNonLinearSRGB.value_or_default())
                 FsrNonLinearColorSpace.set_volatile_value(true);
         }
 
@@ -805,8 +805,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                 AnisotropyOverride.reset();
 
             AnisotropySkipPointFilter.set_from_config(readBool("Anisotropy", "SkipPointFilter"));
-            AnisotropyModifyComp.set_from_config(readBool("Anisotropy", "AFModifyComparison"));
-            AnisotropyModifyMinMax.set_from_config(readBool("Anisotropy", "AFModifyMinMax"));
+            AnisotropyModifyComp.set_from_config(readBool("Anisotropy", "ModifyComparison"));
+            AnisotropyModifyMinMax.set_from_config(readBool("Anisotropy", "ModifyMinMax"));
         }
 
         // Mipmap
@@ -840,7 +840,9 @@ bool Config::Reload(std::filesystem::path iniPath)
 
             SimulateWaitableObject.set_from_config(readBool("Hotfix", "SimulateWaitableObject"));
 
-            RoundInternalResolution.set_from_config(readInt("Hotfix", "RoundInternalResolution"));
+            // 0 or less would divide by zero where the resolution is rounded
+            if (auto setting = readInt("Hotfix", "RoundInternalResolution"); setting.has_value() && setting > 0)
+                RoundInternalResolution.set_from_config(setting);
 
             RestoreComputeSignature.set_from_config(readBool("Hotfix", "RestoreComputeSignature"));
             RestoreGraphicSignature.set_from_config(readBool("Hotfix", "RestoreGraphicSignature"));
@@ -860,7 +862,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // Dx11 with Dx12
         {
-            Dx11DelayedInit.set_from_config(readInt("Dx11withDx12", "UseDelayedInit"));
+            Dx11DelayedInit.set_from_config(readBool("Dx11withDx12", "UseDelayedInit"));
             DontUseNTShared.set_from_config(readBool("Dx11withDx12", "DontUseNTShared"));
         }
 
@@ -1141,6 +1143,7 @@ void Config::ReadDlssNr()
     DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
     DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
     DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
+    DlssNrFinishedGpuWait.set_from_config(readUInt("DlssNr", "FinishedGpuWait"));
     DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
     DlssNrMultiViewScreens.set_from_config(readUInt("DlssNr", "MultiViewScreens"));
     DlssNrSecondaryFeatures.set_from_config(readUInt("DlssNr", "SecondaryFeatures"));
@@ -1451,6 +1454,34 @@ void Config::ReadDlssNr()
                                           DlssNrLutStrength.value() < 0.0f || DlssNrLutStrength.value() > 1.0f))
         DlssNrLutStrength =
             std::isfinite(DlssNrLutStrength.value()) ? std::clamp(DlssNrLutStrength.value(), 0.0f, 1.0f) : 1.0f;
+    DlssNrLutSource.set_from_config(readUInt("DlssNr", "LutSource"));
+    if (DlssNrLutSource.value_or_default() > 1u)
+        DlssNrLutSource.reset();
+    DlssNrLutExposure.set_from_config(readFloat("DlssNr", "LutExposure"));
+    DlssNrLutBrightness.set_from_config(readFloat("DlssNr", "LutBrightness"));
+    DlssNrLutGamma.set_from_config(readFloat("DlssNr", "LutGamma"));
+    DlssNrLutBlacks.set_from_config(readFloat("DlssNr", "LutBlacks"));
+    DlssNrLutWhites.set_from_config(readFloat("DlssNr", "LutWhites"));
+    DlssNrLutContrast.set_from_config(readFloat("DlssNr", "LutContrast"));
+    DlssNrLutTemperature.set_from_config(readFloat("DlssNr", "LutTemperature"));
+    DlssNrLutSaturation.set_from_config(readFloat("DlssNr", "LutSaturation"));
+    {
+        auto clampCentered = [](CustomOptional<float>& opt, float minV, float maxV)
+        {
+            if (!opt.has_value())
+                return;
+            const float v = opt.value();
+            opt = std::isfinite(v) ? std::clamp(v, minV, maxV) : 0.0f;
+        };
+        clampCentered(DlssNrLutExposure, -3.0f, 3.0f);
+        clampCentered(DlssNrLutBrightness, -1.0f, 1.0f);
+        clampCentered(DlssNrLutGamma, -1.0f, 1.0f);
+        clampCentered(DlssNrLutBlacks, -1.0f, 1.0f);
+        clampCentered(DlssNrLutWhites, -1.0f, 1.0f);
+        clampCentered(DlssNrLutContrast, -1.0f, 1.0f);
+        clampCentered(DlssNrLutTemperature, -1.0f, 1.0f);
+        clampCentered(DlssNrLutSaturation, -1.0f, 1.0f);
+    }
     for (int i = 0; i < kPostLutLayers; ++i)
     {
         const std::string n = std::to_string(i + 1);
@@ -1476,6 +1507,7 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
     out.SetValue("DlssNr", "Enabled", GetBoolValue(c.DlssNrEnabled.value_for_config()).c_str());
     out.SetValue("DlssNr", "FinishedPicture", GetBoolValue(c.DlssNrFinishedPicture.value_for_config()).c_str());
+    out.SetValue("DlssNr", "FinishedGpuWait", GetIntValue(c.DlssNrFinishedGpuWait.value_for_config()).c_str());
     out.SetValue("DlssNr", "RunBeforeSR",
                  GetBoolValue(c.DlssNrRunBeforeSr.value_for_config()).c_str());
     out.SetValue("DlssNr", "DeferredDLSS",
@@ -1733,6 +1765,15 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
                  GetFloatValue(c.DlssNrDisplayPaperWhiteNits.value_for_config()).c_str());
     out.SetValue("DlssNr", "LutFile", c.DlssNrLutFile.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "LutStrength", GetFloatValue(c.DlssNrLutStrength.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutSource", GetIntValue(c.DlssNrLutSource.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutExposure", GetFloatValue(c.DlssNrLutExposure.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutBrightness", GetFloatValue(c.DlssNrLutBrightness.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutGamma", GetFloatValue(c.DlssNrLutGamma.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutBlacks", GetFloatValue(c.DlssNrLutBlacks.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutWhites", GetFloatValue(c.DlssNrLutWhites.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutContrast", GetFloatValue(c.DlssNrLutContrast.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutTemperature", GetFloatValue(c.DlssNrLutTemperature.value_for_config()).c_str());
+    out.SetValue("DlssNr", "LutSaturation", GetFloatValue(c.DlssNrLutSaturation.value_for_config()).c_str());
     // One literal line per key (not a loop): tests/nr_profiles_smoke.cpp finds the keys SaveIni writes by these names.
     out.SetValue("DlssNr", "PostLutFile1", c.DlssNrPostLutFile[0].value_for_config_or("").c_str());
     out.SetValue("DlssNr", "PostLutStrength1", GetFloatValue(c.DlssNrPostLutStrength[0].value_for_config()).c_str());
@@ -2033,6 +2074,15 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("InputStyleFacesOnly", DlssNrInputStyleFacesOnly),
         NR_PROFILE_FIELD("LutFile", DlssNrLutFile),
         NR_PROFILE_FIELD("LutStrength", DlssNrLutStrength),
+        NR_PROFILE_FIELD("LutSource", DlssNrLutSource),
+        NR_PROFILE_FIELD("LutExposure", DlssNrLutExposure),
+        NR_PROFILE_FIELD("LutBrightness", DlssNrLutBrightness),
+        NR_PROFILE_FIELD("LutGamma", DlssNrLutGamma),
+        NR_PROFILE_FIELD("LutBlacks", DlssNrLutBlacks),
+        NR_PROFILE_FIELD("LutWhites", DlssNrLutWhites),
+        NR_PROFILE_FIELD("LutContrast", DlssNrLutContrast),
+        NR_PROFILE_FIELD("LutTemperature", DlssNrLutTemperature),
+        NR_PROFILE_FIELD("LutSaturation", DlssNrLutSaturation),
         NR_PROFILE_FIELD("PostLutFile1", DlssNrPostLutFile[0]),
         NR_PROFILE_FIELD("PostLutStrength1", DlssNrPostLutStrength[0]),
         NR_PROFILE_FIELD("PostLutFile2", DlssNrPostLutFile[1]),

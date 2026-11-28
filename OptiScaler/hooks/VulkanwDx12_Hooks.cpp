@@ -6219,6 +6219,7 @@ bool Vulkan_wDx12::RegisterPendingSubmission(const PendingSubmission& submission
     }
 
     pendingSubmissions.emplace(submission.submitCommandBuffer, submission);
+    pendingSubmissionCount = pendingSubmissions.size();
     return true;
 }
 
@@ -6229,10 +6230,15 @@ void Vulkan_wDx12::CancelPendingSubmission(VkCommandBuffer commandBuffer)
 
     std::scoped_lock lock(pendingSubmissionMutex);
     pendingSubmissions.erase(commandBuffer);
+    pendingSubmissionCount = pendingSubmissions.size();
 }
 
 bool Vulkan_wDx12::TakePendingSubmission(VkCommandBuffer commandBuffer, PendingSubmission& submission)
 {
+    // Called for every submitted, begun and reset command buffer
+    if (pendingSubmissionCount == 0)
+        return false;
+
     std::scoped_lock lock(pendingSubmissionMutex);
     auto it = pendingSubmissions.find(commandBuffer);
     if (it == pendingSubmissions.end())
@@ -6240,11 +6246,16 @@ bool Vulkan_wDx12::TakePendingSubmission(VkCommandBuffer commandBuffer, PendingS
 
     submission = it->second;
     pendingSubmissions.erase(it);
+    pendingSubmissionCount = pendingSubmissions.size();
     return true;
 }
 
 static void AbortPendingD3D12Wait(const Vulkan_wDx12::PendingSubmission& pending, const char* reason)
 {
+    // Signaled already, signaling again can move the fence back
+    if (pending.aborted)
+        return;
+
     LOG_WARN("Aborting Vulkan w/Dx12 submit transaction: {}", reason ? reason : "unknown reason");
 
     if (pending.resourceCopyFence == nullptr)
@@ -6256,6 +6267,141 @@ static void AbortPendingD3D12Wait(const Vulkan_wDx12::PendingSubmission& pending
     if (result != S_OK)
         LOG_ERROR("Failed to release aborted Vulkan w/Dx12 D3D12 wait: {0:x}", result);
 }
+
+// The recorded upscale won't be submitted anymore
+void Vulkan_wDx12::DiscardPendingInterop(VkCommandBuffer commandBuffer)
+{
+    PendingSubmission pending {};
+    if (!TakePendingSubmission(commandBuffer, pending))
+        return;
+
+    AbortPendingD3D12Wait(pending, "command buffer discarded before submit");
+
+    // Redirect target is left recording, it's reset before its next use
+    RemoveVirtualCommandBuffer(commandBuffer);
+}
+
+size_t Vulkan_wDx12::AbortPendingSubmissions(ID3D12Fence* resourceCopyFence)
+{
+    if (resourceCopyFence == nullptr)
+        return 0;
+
+    std::vector<PendingSubmission> aborted;
+    {
+        std::scoped_lock lock(pendingSubmissionMutex);
+        for (auto& [commandBuffer, pending] : pendingSubmissions)
+        {
+            if (pending.resourceCopyFence != resourceCopyFence || pending.aborted)
+                continue;
+
+            aborted.push_back(pending);
+            pending.aborted = true;
+        }
+    }
+
+    for (const auto& pending : aborted)
+        AbortPendingD3D12Wait(pending, "upscale wasn't submitted");
+
+    return aborted.size();
+}
+
+void Vulkan_wDx12::DropPendingSubmissions(VkCommandBuffer barrierCommandBuffer)
+{
+    if (pendingSubmissionCount == 0)
+        return;
+
+    std::vector<PendingSubmission> dropped;
+    {
+        std::scoped_lock lock(pendingSubmissionMutex);
+        for (auto it = pendingSubmissions.begin(); it != pendingSubmissions.end();)
+        {
+            if (it->second.barrierCommandBuffer != barrierCommandBuffer)
+            {
+                ++it;
+                continue;
+            }
+
+            dropped.push_back(it->second);
+            it = pendingSubmissions.erase(it);
+        }
+
+        pendingSubmissionCount = pendingSubmissions.size();
+    }
+
+    for (const auto& pending : dropped)
+    {
+        AbortPendingD3D12Wait(pending, "redirect command buffer is reused");
+
+        if (GetVirtualCommandBuffer(pending.submitCommandBuffer) == pending.barrierCommandBuffer)
+            RemoveVirtualCommandBuffer(pending.submitCommandBuffer);
+    }
+
+    if (!dropped.empty())
+        LOG_WARN("Dropped {} unsubmitted upscales, their commands recorded after Evaluate are lost", dropped.size());
+}
+
+// Device group masks are per command buffer, only a leading device group can be replaced by a copy.
+// Protected submits only take protected command buffers
+static bool CanAddCommandBuffers(const VkSubmitInfo& submit)
+{
+    for (auto* node = reinterpret_cast<const VkBaseInStructure*>(submit.pNext); node != nullptr; node = node->pNext)
+    {
+        if (node->sType == VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO && node != submit.pNext)
+            return false;
+
+        if (node->sType == VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO &&
+            reinterpret_cast<const VkProtectedSubmitInfo*>(node)->protectedSubmit != VK_FALSE)
+            return false;
+    }
+
+    return true;
+}
+
+// Keeps the application's submit, only adds the commands recorded after Evaluate. Upscale output is dropped
+struct UnsplitLegacySubmit
+{
+    std::vector<VkCommandBuffer> commandBuffers;
+    std::vector<uint32_t> deviceMasks;
+    VkDeviceGroupSubmitInfo deviceGroup {};
+    VkSubmitInfo submit {};
+
+    void Build(const VkSubmitInfo& original, uint32_t commandBufferIndex, VkCommandBuffer barrierCommandBuffer)
+    {
+        auto group = reinterpret_cast<const VkDeviceGroupSubmitInfo*>(original.pNext);
+        if (group != nullptr && group->sType != VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO)
+            group = nullptr;
+
+        for (uint32_t i = 0; i < original.commandBufferCount; i++)
+        {
+            commandBuffers.push_back(original.pCommandBuffers[i]);
+
+            // Added command buffers run on the devices of the upscale's command buffer
+            uint32_t mask = 1;
+            if (group != nullptr && i < group->commandBufferCount && group->pCommandBufferDeviceMasks != nullptr)
+                mask = group->pCommandBufferDeviceMasks[i];
+
+            deviceMasks.push_back(mask);
+
+            if (i == commandBufferIndex)
+            {
+                commandBuffers.push_back(barrierCommandBuffer);
+                deviceMasks.push_back(mask);
+            }
+        }
+
+        submit = original;
+        submit.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
+        submit.pCommandBuffers = commandBuffers.data();
+
+        if (group != nullptr)
+        {
+            deviceGroup = *group;
+            deviceGroup.commandBufferCount = submit.commandBufferCount;
+            deviceGroup.pCommandBufferDeviceMasks = deviceMasks.data();
+            submit.pNext = &deviceGroup;
+        }
+    }
+};
 
 // A VkDeviceGroupSubmitInfo that names device 0 only, for every semaphore and command buffer: what a submit without one
 // does on a single-GPU device (an engine that always attaches it, RDR2). Leaving it out of the split submits changes
@@ -6415,6 +6561,21 @@ VkResult Vulkan_wDx12::QueueSubmitInner(VkQueue queue, uint32_t submitCount, con
 
     const auto& original = pSubmits[submitIndex];
 
+    // D3D12 doesn't wait for this upscale anymore (the next Evaluate gave up waiting): the application's submit goes
+    // out whole with the commands recorded after Evaluate added, no copies are synchronised
+    if (pending.aborted)
+    {
+        if (!CanAddCommandBuffers(original))
+            return o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
+
+        UnsplitLegacySubmit unsplit;
+        unsplit.Build(original, commandBufferIndex, pending.barrierCommandBuffer);
+
+        std::vector<VkSubmitInfo> submits(pSubmits, pSubmits + submitCount);
+        submits[submitIndex] = unsplit.submit;
+        return o_vkQueueSubmit(queue, submitCount, submits.data(), fence);
+    }
+
     // Splitting a legacy VkSubmitInfo changes command/signal counts. Submit-level extensions such as device-group or
     // protected-submit structures can carry count-coupled semantics, so only the plain submit, one
     // VkTimelineSemaphoreSubmitInfo and a device-0-only device group (single GPU) are rewritten. Everything else is passed
@@ -6568,6 +6729,23 @@ static VkResult Submit2WithDx12Interop(SubmitFn originalSubmit, VkQueue queue, u
                                        uint32_t commandBufferIndex)
 {
     const auto& original = pSubmits[submitIndex];
+
+    // D3D12 doesn't wait for this upscale anymore: the application's submit goes out whole with the commands recorded
+    // after Evaluate added (see QueueSubmitInner)
+    if (pending.aborted && original.flags == 0)
+    {
+        std::vector<VkCommandBufferSubmitInfo> commandBuffers(
+            original.pCommandBufferInfos, original.pCommandBufferInfos + original.commandBufferInfoCount);
+        VkCommandBufferSubmitInfo barrierCommand {};
+        barrierCommand.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        barrierCommand.commandBuffer = pending.barrierCommandBuffer;
+        commandBuffers.insert(commandBuffers.begin() + commandBufferIndex + 1, barrierCommand);
+
+        std::vector<VkSubmitInfo2> submits(pSubmits, pSubmits + submitCount);
+        submits[submitIndex].commandBufferInfoCount = static_cast<uint32_t>(commandBuffers.size());
+        submits[submitIndex].pCommandBufferInfos = commandBuffers.data();
+        return originalSubmit(queue, submitCount, submits.data(), fence);
+    }
 
     if (original.pNext != nullptr || original.flags != 0)
     {
@@ -6763,8 +6941,8 @@ VkResult Vulkan_wDx12::QueueSubmit2KHRInner(VkQueue queue, uint32_t submitCount,
 VkResult Vulkan_wDx12::hk_vkBeginCommandBuffer(VkCommandBuffer commandBuffer,
                                                const VkCommandBufferBeginInfo* pBeginInfo)
 {
-    if (GetVirtualCommandBuffer(commandBuffer) == VK_NULL_HANDLE)
-        cmdBufferStateTracker.OnBegin(commandBuffer, pBeginInfo);
+    DiscardPendingInterop(commandBuffer);
+    cmdBufferStateTracker.OnBegin(commandBuffer, pBeginInfo);
 
 #ifdef LOG_ALL_RECORDS
     LOG_DEBUG("commandBuffer: {:X}", (size_t) commandBuffer);
@@ -6803,8 +6981,8 @@ VkResult Vulkan_wDx12::hk_vkResetCommandBuffer(VkCommandBuffer commandBuffer, Vk
     LOG_DEBUG("commandBuffer: {:X}", (size_t) commandBuffer);
 #endif
 
-    if (GetVirtualCommandBuffer(commandBuffer) == VK_NULL_HANDLE)
-        cmdBufferStateTracker.OnReset(commandBuffer);
+    DiscardPendingInterop(commandBuffer);
+    cmdBufferStateTracker.OnReset(commandBuffer);
 
     GenericDepthVk::ForgetCommandBuffers(1, &commandBuffer);
     DlssNr::FinishedVk::ForgetCommandBuffers(1, &commandBuffer);
@@ -6818,6 +6996,9 @@ void Vulkan_wDx12::hk_vkFreeCommandBuffers(VkDevice device, VkCommandPool comman
     LOG_DEBUG("device: {:X}, commandPool: {:X}, commandBufferCount: {}", (size_t) device, (size_t) commandPool,
               commandBufferCount);
 #endif
+
+    for (uint32_t i = 0; i < commandBufferCount; i++)
+        DiscardPendingInterop(pCommandBuffers[i]);
 
     // Notify state tracker before freeing
     cmdBufferStateTracker.OnFreeCommandBuffers(commandPool, commandBufferCount, pCommandBuffers);
@@ -6870,6 +7051,12 @@ void Vulkan_wDx12::hk_vkDestroyCommandPool(VkDevice device, VkCommandPool comman
     LOG_DEBUG("device: {:X}, commandPool: {:X}", (size_t) device, (size_t) commandPool);
 #endif
 
+    if (pendingSubmissionCount > 0)
+    {
+        for (auto commandBuffer : cmdBufferStateTracker.GetPoolCommandBuffers(commandPool))
+            DiscardPendingInterop(commandBuffer);
+    }
+
     // Notify state tracker about pool destruction
     cmdBufferStateTracker.OnDestroyPool(commandPool);
 
@@ -6886,6 +7073,12 @@ VkResult Vulkan_wDx12::hk_vkResetCommandPool(VkDevice device, VkCommandPool comm
 #ifdef LOG_ALL_RECORDS
     LOG_DEBUG("device: {:X}, commandPool: {:X}, flags: {:X}", (size_t) device, (size_t) commandPool, (uint32_t) flags);
 #endif
+
+    if (pendingSubmissionCount > 0)
+    {
+        for (auto commandBuffer : cmdBufferStateTracker.GetPoolCommandBuffers(commandPool))
+            DiscardPendingInterop(commandBuffer);
+    }
 
     // Notify state tracker before reset
     cmdBufferStateTracker.OnResetPool(commandPool);
@@ -11068,12 +11261,12 @@ void Vulkan_wDx12::Unhook()
         DetourDetach(&(PVOID&) o_vkQueueSubmit2, hk_vkQueueSubmit2);
 
     if (o_vkQueueSubmit2KHR)
-        DetourDetach(&(PVOID&) o_vkQueueSubmit2KHR, hk_vkQueueSubmit2);
+        DetourDetach(&(PVOID&) o_vkQueueSubmit2KHR, hk_vkQueueSubmit2KHR);
 
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
-        LOG_ERROR("Failed to detach Vulkan hooks: %d", detourResult);
+        LOG_ERROR("Failed to detach Vulkan hooks: {}", detourResult);
     }
     else
     {

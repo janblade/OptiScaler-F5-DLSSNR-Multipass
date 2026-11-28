@@ -4,6 +4,7 @@
 #include "Config.h"
 #include "Util.h"
 #include "MathUtils.h"
+#include <misc/DeferredRelease.h>
 
 #include "resource.h"
 #include "NVNGX_Parameter.h"
@@ -314,8 +315,8 @@ static bool CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InResou
 
         if (bufDesc.Width != inDesc.Width || bufDesc.Height != inDesc.Height || bufDesc.Format != inDesc.Format)
         {
-            (*OutResource)->Release();
-            (*OutResource) = nullptr;
+            // FG can still be using it
+            DeferredRelease::Release(*OutResource);
             LOG_WARN("Release {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, inDesc.Width, inDesc.Height);
         }
         else
@@ -339,6 +340,16 @@ static bool CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InResou
 
     LOG_DEBUG("Created new one: {}x{}", inDesc.Width, inDesc.Height);
     return true;
+}
+
+// Game's FG context is gone, nothing uses these until it's recreated
+static void ReleaseBuffers()
+{
+    for (size_t i = 0; i < BUFFER_COUNT; i++)
+    {
+        DeferredRelease::Release(_hudless[i]);
+        DeferredRelease::Release(_interpolation[i]);
+    }
 }
 
 static void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
@@ -394,7 +405,7 @@ static Fsr3::FfxErrorCode hkffxCreateFrameinterpolationSwapchainDX12(DXGI_SWAP_C
 
     auto result = dxgiFactory->CreateSwapChain(queue, desc, (IDXGISwapChain**) &outGameSwapChain);
 
-    return result == S_OK ? Fsr3::FFX_OK : Fsr3::FFX_ERROR_BACKEND_API_ERROR;
+    return SUCCEEDED(result) ? Fsr3::FFX_OK : Fsr3::FFX_ERROR_BACKEND_API_ERROR;
 }
 
 static Fsr3::FfxErrorCode hkffxCreateFrameinterpolationSwapchainForHwndDX12(
@@ -425,7 +436,7 @@ static Fsr3::FfxErrorCode hkffxCreateFrameinterpolationSwapchainForHwndDX12(
                                             (IDXGISwapChain1**) &outGameSwapChain);
     }
 
-    return result == S_OK ? Fsr3::FFX_OK : Fsr3::FFX_ERROR_BACKEND_API_ERROR;
+    return SUCCEEDED(result) ? Fsr3::FFX_OK : Fsr3::FFX_ERROR_BACKEND_API_ERROR;
 }
 
 static Fsr3::FfxErrorCode hkffxWaitForPresents(Fsr3::FfxSwapchain gameSwapChain) { return Fsr3::FFX_OK; }
@@ -438,7 +449,7 @@ static Fsr3::FfxErrorCode hkffxRegisterFrameinterpolationUiResourceDX12(Fsr3::Ff
     auto& s = State::Instance();
     auto fg = s.currentFG;
 
-    if (fg->FrameGenerationContext() != nullptr && uiResource.resource != nullptr)
+    if (fg != nullptr && fg->FrameGenerationContext() != nullptr && uiResource.resource != nullptr)
     {
         auto fIndex = fg->GetIndexWillBeDispatched();
         if (fIndex < 0)
@@ -490,7 +501,8 @@ static Fsr3::FfxResource hkffxGetFrameinterpolationTextureDX12(Fsr3::FfxSwapchai
 
     auto fg = State::Instance().currentFG;
 
-    if (fg == nullptr)
+    // The game's FG context can outlive the FG swapchain
+    if (fg == nullptr || State::Instance().currentFGSwapchain == nullptr)
         return {};
 
     auto fIndex = fg->GetIndexWillBeDispatched();
@@ -557,7 +569,7 @@ hkffxFrameInterpolationContextCreate(FfxFrameInterpolationContext* context,
     if (uf != nullptr && !uf->LowResMV())
         _fgConst.flags |= FG_Flags::DisplayResolutionMVs;
 
-    if (uf != nullptr && !uf->JitteredMV())
+    if (uf != nullptr && uf->JitteredMV())
         _fgConst.flags |= FG_Flags::JitteredMVs;
 
     if ((contextDescription->flags & FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INVERTED) > 0)
@@ -578,6 +590,15 @@ hkffxFrameInterpolationContextCreate(FfxFrameInterpolationContext* context,
     Config::Instance()->SaveXeFG();
 
     _device = State::Instance().currentD3D12Device;
+
+    // No game swapchain yet, only trust the backend device if it is a known D3D12 device
+    if (_device == nullptr)
+    {
+        auto backendDevice = (ID3D12Device*) contextDescription->backendInterface.device;
+
+        if (State::Instance().ContainsD3D12Device(backendDevice))
+            _device = backendDevice;
+    }
 
     State::Instance().currentFG->CreateContext(_device, _fgConst);
 
@@ -681,6 +702,7 @@ static Fsr3::FfxErrorCode hkffxFrameInterpolationContextDestroy(FfxFrameInterpol
     {
         LOG_INFO("Destroying FG Context: {:X}", (size_t) State::Instance().currentFG);
         State::Instance().currentFG->DestroyFGContext();
+        ReleaseBuffers();
     }
 
     return Fsr3::FFX_OK;
@@ -716,7 +738,7 @@ static Fsr3::FfxErrorCode hkffxFsr3ConfigureFrameGeneration(void* context, Fsr3:
         }
         else if (!config->frameGenerationEnabled && fg->IsActive())
         {
-            fg->Deactivate();
+            fg->Disable();
             fg->ResetCounters();
         }
 
@@ -748,8 +770,6 @@ static Fsr3::FfxErrorCode hkffxFsr3ConfigureFrameGeneration(void* context, Fsr3:
             ui.width = width;
             ui.left = left;
             ui.top = top;
-
-            _uiRes[fg->GetIndex()] = ui;
 
             fg->SetResource(&ui);
         }
@@ -800,7 +820,7 @@ static Fsr3::FfxErrorCode hkffxSetFrameGenerationConfigToSwapchainDX12(Fsr3::Ffx
         }
         else if (!config->frameGenerationEnabled && fg->IsActive())
         {
-            fg->Deactivate();
+            fg->Disable();
             fg->ResetCounters();
         }
 
@@ -832,8 +852,6 @@ static Fsr3::FfxErrorCode hkffxSetFrameGenerationConfigToSwapchainDX12(Fsr3::Ffx
             ui.width = width;
             ui.left = left;
             ui.top = top;
-
-            _uiRes[fg->GetIndex()] = ui;
 
             fg->SetResource(&ui);
         }
@@ -1311,6 +1329,14 @@ void FSR3FG::SetUpscalerInputs(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_P
     }
 
     fg->EvaluateState(_device, _fgConst);
+
+    // Not needed while FG or the option is off, its destructor defers the buffer release
+    if (DepthScale != nullptr &&
+        (!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGEnableDepthScale.value_or_default()))
+    {
+        delete DepthScale;
+        DepthScale = nullptr;
+    }
 
     // FSR Camera values
     float cameraNear = 0.0f;

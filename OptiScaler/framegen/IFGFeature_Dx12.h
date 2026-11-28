@@ -104,8 +104,12 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     void NewFrame() override final;
     void FlipResource(Dx12Resource* resource);
 
+    // Frees per frame copies and helper buffers, they get recreated on demand
+    virtual void ReleaseResourceCopies();
+
   protected:
     virtual void ReleaseObjects() = 0;
+    void ReleaseUIFence();
     virtual void CreateObjects(ID3D12Device* InDevice) = 0;
 
   public:

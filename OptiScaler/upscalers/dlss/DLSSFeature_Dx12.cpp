@@ -149,12 +149,19 @@ void DLSSFeatureDx12::Shutdown(ID3D12Device* InDevice)
     // Custom NGX runtimes that were inited (custom\<name>\dlss)
     NVNGXProxy::ShutdownAllCustomDx12(InDevice);
 
-    if (_dlssInitedDx12)
+    // Inputs share the same NGX instance, it is shut down once. Skipped on exit like the inputs do
+    if (_dlssInitedDx12 && NVNGXProxy::IsDx12Inited() && !State::Instance().isShuttingDown)
     {
-        if (NVNGXProxy::D3D12_Shutdown() != nullptr)
+        // Same choice as the inputs' shutdown (inputs/NVNGX_DLSS_Dx12.cpp): the device entry point when a device was
+        // given and the runtime has it
+        if (InDevice != nullptr && NVNGXProxy::D3D12_Shutdown1() != nullptr)
+            NVNGXProxy::D3D12_Shutdown1()(InDevice);
+        else if (NVNGXProxy::D3D12_Shutdown() != nullptr)
             NVNGXProxy::D3D12_Shutdown()();
         else if (NVNGXProxy::D3D12_Shutdown1() != nullptr)
             NVNGXProxy::D3D12_Shutdown1()(InDevice);
+
+        NVNGXProxy::SetDx12Inited(false);
     }
 
     DLSSFeature::Shutdown();

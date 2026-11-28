@@ -19,9 +19,25 @@ static HRESULT hkGetParent(IDXGIAdapter* This, REFIID riid, void** ppParent)
     if (result != S_OK)
         return result;
 
-    auto f = reinterpret_cast<IDXGIFactory*>(*ppParent);
-    if (f == nullptr)
+    // The wrapper only has the factory vtable
+    if (riid != __uuidof(IUnknown) && riid != __uuidof(IDXGIObject) && riid != __uuidof(IDXGIFactory) &&
+        riid != __uuidof(IDXGIFactory1) && riid != __uuidof(IDXGIFactory2) && riid != __uuidof(IDXGIFactory3) &&
+        riid != __uuidof(IDXGIFactory4) && riid != __uuidof(IDXGIFactory5) && riid != __uuidof(IDXGIFactory6) &&
+        riid != __uuidof(IDXGIFactory7))
+    {
         return result;
+    }
+
+    auto parent = reinterpret_cast<IUnknown*>(*ppParent);
+    if (parent == nullptr)
+        return result;
+
+    // Parent of an output is an adapter
+    IDXGIFactory* f = nullptr;
+    if (parent->QueryInterface(IID_PPV_ARGS(&f)) != S_OK)
+        return result;
+
+    parent->Release();
 
     auto wf = new WrappedIDXGIFactory7(f);
     *ppParent = wf;
@@ -232,7 +248,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGIFactory7::CreateSwapChain(IUnknown* pDevic
 {
     auto result = DxgiFactoryWrappedCalls::CreateSwapChain(_real, this, pDevice, pDesc, ppSwapChain);
 
-    if (result == S_OK)
+    if (SUCCEEDED(result))
         return result;
 
     return _real->CreateSwapChain(pDevice, pDesc, ppSwapChain);
@@ -296,7 +312,7 @@ WrappedIDXGIFactory7::CreateSwapChainForHwnd(IUnknown* pDevice, HWND hWnd, const
                                                                  pRestrictToOutput, ppSwapChain);
     }
 
-    if (result == S_OK)
+    if (SUCCEEDED(result))
         return result;
 
     return _real2->CreateSwapChainForHwnd(pDevice, hWnd, pDesc, pFullscreenDesc, pRestrictToOutput, ppSwapChain);
@@ -315,7 +331,7 @@ HRESULT __stdcall WrappedIDXGIFactory7::CreateSwapChainForCoreWindow(IUnknown* p
     auto result = DxgiFactoryWrappedCalls::CreateSwapChainForCoreWindow(_real2, pDevice, pWindow, &localDesc,
                                                                         pRestrictToOutput, ppSwapChain);
 
-    if (result == S_OK)
+    if (SUCCEEDED(result))
         return result;
 
     return _real2->CreateSwapChainForCoreWindow(pDevice, pWindow, pDesc, pRestrictToOutput, ppSwapChain);

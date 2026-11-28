@@ -215,11 +215,15 @@ inline bool NeedsTemporal(unsigned nativeW, unsigned nativeH, unsigned ordinaryW
 }
 // [DlssNr] SuperiorAtNative: the private DLSS also runs at 100% and above. Above 100% the model still supersamples; its
 // answer is averaged back to native (the ordinary down-leg) and the private DLSS steadies that native pair, so its
-// raster is the frame's. Compress screen edges keeps its own rule (NeedsTemporal). Only while a private DLSS can run:
-// with No DLSS (or no NGX DLSS SR) 100% and above stay on the ordinary path, as the greyed-out checkbox says.
-inline bool StabilizeAtNative(bool wanted, float workScale, bool compressed, unsigned savedPreset, bool srUnavailable)
+// raster is the frame's. With Compress screen edges only while supersampling (the model raster really is larger than
+// the frame): compression unpacks the pair and its own down-leg averages it to native, which the private DLSS then
+// steadies the same way; at exactly 100% and below compression keeps its packed rule (NeedsTemporal). Only while a
+// private DLSS can run: with No DLSS (or no NGX DLSS SR) 100% and above stay on the ordinary path, as the greyed-out
+// checkbox says.
+inline bool StabilizeAtNative(bool wanted, float workScale, bool compressed, bool supersampled, unsigned savedPreset,
+                              bool srUnavailable)
 {
-    return wanted && !compressed && !srUnavailable && Preset(savedPreset) != NoPrivateDlss &&
+    return wanted && (!compressed || supersampled) && !srUnavailable && Preset(savedPreset) != NoPrivateDlss &&
            std::isfinite(workScale) && workScale >= 1.0f;
 }
 // Supersampling under StabilizeAtNative: the model raster really is larger than the frame (a scale just above 1 can

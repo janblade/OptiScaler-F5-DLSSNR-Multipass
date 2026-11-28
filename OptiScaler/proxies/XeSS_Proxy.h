@@ -54,6 +54,7 @@ typedef decltype(&xessD3D12GetProfilingData) PFN_xessD3D12GetProfilingData;
 
 typedef xess_result_t (*PFN_xessSetContextParameterF)(); // XeSS' headers don't export this
 typedef decltype(&xessGetPipelineBuildStatus) PFN_xessGetPipelineBuildStatus;
+typedef decltype(&xessGetProfilingData) PFN_xessGetProfilingData;
 
 // Vulkan
 typedef decltype(&xessVKGetRequiredInstanceExtensions) PFN_xessVKGetRequiredInstanceExtensions;
@@ -106,6 +107,7 @@ struct XeSSModule
     PFN_xessD3D12GetProfilingData xessD3D12GetProfilingData = nullptr;
     PFN_xessSetContextParameterF xessSetContextParameterF = nullptr;
     PFN_xessGetPipelineBuildStatus xessGetPipelineBuildStatus = nullptr;
+    PFN_xessGetProfilingData xessGetProfilingData = nullptr;
 
     PFN_xessVKGetRequiredInstanceExtensions xessVKGetRequiredInstanceExtensions = nullptr;
     PFN_xessVKGetRequiredDeviceExtensions xessVKGetRequiredDeviceExtensions = nullptr;
@@ -148,6 +150,7 @@ struct XeSSDx11Module
     PFN_xessSetJitterScale xessSetJitterScaleDx11 = nullptr;
     PFN_xessSetContextParameterF xessSetContextParameterFDx11 = nullptr;
     PFN_xessGetPipelineBuildStatus xessGetPipelineBuildStatusDx11 = nullptr;
+    PFN_xessGetProfilingData xessGetProfilingDataDx11 = nullptr;
 };
 
 class XeSSProxy
@@ -314,6 +317,8 @@ class XeSSProxy
                 _module.dll, "xessSetContextParameterF");
             _module.xessGetPipelineBuildStatus = (PFN_xessGetPipelineBuildStatus) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "xessGetPipelineBuildStatus");
+            _module.xessGetProfilingData =
+                (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(_module.dll, "xessGetProfilingData");
 
             _module.xessVKGetRequiredInstanceExtensions =
                 (PFN_xessVKGetRequiredInstanceExtensions) KernelBaseProxy::GetProcAddress_()(
@@ -333,6 +338,8 @@ class XeSSProxy
                 (PFN_xessVKGetInitParams) KernelBaseProxy::GetProcAddress_()(_module.dll, "xessVKGetInitParams");
             _module.xessVKExecute =
                 (PFN_xessVKExecute) KernelBaseProxy::GetProcAddress_()(_module.dll, "xessVKExecute");
+            _module.xessVKGetResourcesToDump = (PFN_xessVKGetResourcesToDump) KernelBaseProxy::GetProcAddress_()(
+                _module.dll, "xessVKGetResourcesToDump");
         }
 
         if (_module_hooked.dll != nullptr && _module_hooked.xessD3D12CreateContext == nullptr)
@@ -400,6 +407,8 @@ class XeSSProxy
             _module_hooked.xessGetPipelineBuildStatus =
                 (PFN_xessGetPipelineBuildStatus) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll,
                                                                                     "xessGetPipelineBuildStatus");
+            _module_hooked.xessGetProfilingData = (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(
+                _module_hooked.dll, "xessGetProfilingData");
 
             _module_hooked.xessVKGetRequiredInstanceExtensions =
                 (PFN_xessVKGetRequiredInstanceExtensions) KernelBaseProxy::GetProcAddress_()(
@@ -420,6 +429,8 @@ class XeSSProxy
                 (PFN_xessVKGetInitParams) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll, "xessVKGetInitParams");
             _module_hooked.xessVKExecute =
                 (PFN_xessVKExecute) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll, "xessVKExecute");
+            _module_hooked.xessVKGetResourcesToDump = (PFN_xessVKGetResourcesToDump) KernelBaseProxy::GetProcAddress_()(
+                _module_hooked.dll, "xessVKGetResourcesToDump");
         }
         else if (_module_hooked.xessD3D12CreateContext == nullptr)
         {
@@ -540,6 +551,9 @@ class XeSSProxy
             if (_module_hooked.xessGetPipelineBuildStatus != nullptr)
                 DetourAttach(&(PVOID&) _module_hooked.xessGetPipelineBuildStatus, hk_xessGetPipelineBuildStatus);
 
+            if (_module_hooked.xessGetProfilingData != nullptr)
+                DetourAttach(&(PVOID&) _module_hooked.xessGetProfilingData, hk_xessGetProfilingData);
+
             auto detourResult = DetourTransactionCommit();
             if (detourResult != NO_ERROR)
             {
@@ -578,6 +592,7 @@ class XeSSProxy
                 _module_hooked.xessVKGetRequiredDeviceFeatures = nullptr;
                 _module_hooked.xessVKGetRequiredInstanceExtensions = nullptr;
                 _module_hooked.xessGetPipelineBuildStatus = nullptr;
+                _module_hooked.xessGetProfilingData = nullptr;
             }
             else
             {
@@ -708,6 +723,8 @@ class XeSSProxy
                 (PFN_xessSetVelocityScale) KernelBaseProxy::GetProcAddress_()(_module11.dll, "xessSetVelocityScale");
             _module11.xessStartDumpDx11 =
                 (PFN_xessStartDump) KernelBaseProxy::GetProcAddress_()(_module11.dll, "xessStartDump");
+            _module11.xessGetProfilingDataDx11 =
+                (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(_module11.dll, "xessGetProfilingData");
         }
 
         if (_module11_hooked.dll != nullptr && _module11_hooked.xessD3D11CreateContext == nullptr)
@@ -770,6 +787,8 @@ class XeSSProxy
                 _module11_hooked.dll, "xessSetVelocityScale");
             _module11_hooked.xessStartDumpDx11 =
                 (PFN_xessStartDump) KernelBaseProxy::GetProcAddress_()(_module11_hooked.dll, "xessStartDump");
+            _module11_hooked.xessGetProfilingDataDx11 = (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(
+                _module11_hooked.dll, "xessGetProfilingData");
         }
         else if (_module11_hooked.xessD3D11CreateContext == nullptr)
         {
@@ -853,6 +872,9 @@ class XeSSProxy
             if (_module11_hooked.xessStartDumpDx11 != nullptr)
                 DetourAttach(&(PVOID&) _module11_hooked.xessStartDumpDx11, hk_xessStartDump);
 
+            if (_module11_hooked.xessGetProfilingDataDx11 != nullptr)
+                DetourAttach(&(PVOID&) _module11_hooked.xessGetProfilingDataDx11, hk_xessGetProfilingData);
+
             auto detourResult = DetourTransactionCommit();
             if (detourResult != NO_ERROR)
             {
@@ -880,6 +902,7 @@ class XeSSProxy
                 _module11_hooked.xessSetLoggingCallbackDx11 = nullptr;
                 _module11_hooked.xessSetVelocityScaleDx11 = nullptr;
                 _module11_hooked.xessStartDumpDx11 = nullptr;
+                _module11_hooked.xessGetProfilingDataDx11 = nullptr;
             }
             else
             {

@@ -5,6 +5,7 @@
 #include <Config.h>
 #include <resource.h>
 #include <NVNGX_Parameter.h>
+#include <proxies/NVNGX_Proxy.h>
 
 #include <proxies/FfxApi_Proxy.h>
 
@@ -13,6 +14,8 @@
 
 #include <nvsdk_ngx_vk.h>
 #include <nvsdk_ngx_helpers_vk.h>
+#include <misc/DeferredRelease.h>
+#include <array>
 
 static std::unordered_map<ffxContext, ffxCreateContextDescUpscale> _initParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Parameter*> _nvParams;
@@ -455,7 +458,11 @@ ffxReturnCode_t ffxDestroyContext_Vk(ffxContext* context, const ffxAllocationCal
         NVSDK_NGX_VULKAN_ReleaseFeature(_contexts[*context]);
 
     _contexts.erase(*context);
-    _nvParams.erase(*context);
+    if (auto it = _nvParams.find(*context); it != _nvParams.end())
+    {
+        TryDestroyNGXParameters(it->second, NVNGXProxy::VULKAN_DestroyParameters());
+        _nvParams.erase(it);
+    }
     _initParams.erase(*context);
 
     if (upscalerContext && !Config::Instance()->EnableHotSwapping.value_or_default())
@@ -718,29 +725,30 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
 
     // Clear last frames image views
     LOG_DEBUG("Clear last frames image views");
-    if (depthImageView != nullptr)
-        vkDestroyImageView(_vkDevice, depthImageView, nullptr);
+    // The GPU can still be using them
+    std::array<VkImageView, 8> lastViews { depthImageView, expImageView,    biasImageView,   colorImageView,
+                                           mvImageView,    outputImageView, fsrReactiveView, fsrTransparencyView };
 
-    if (expImageView != nullptr)
-        vkDestroyImageView(_vkDevice, expImageView, nullptr);
+    DeferredRelease::Enqueue(
+        [device = _vkDevice, lastViews]()
+        {
+            for (auto view : lastViews)
+            {
+                if (view != VK_NULL_HANDLE)
+                    vkDestroyImageView(device, view, nullptr);
+            }
+        },
+        (uint64_t) _vkDevice);
 
-    if (biasImageView != nullptr)
-        vkDestroyImageView(_vkDevice, biasImageView, nullptr);
-
-    if (colorImageView != nullptr)
-        vkDestroyImageView(_vkDevice, colorImageView, nullptr);
-
-    if (mvImageView != nullptr)
-        vkDestroyImageView(_vkDevice, mvImageView, nullptr);
-
-    if (outputImageView != nullptr)
-        vkDestroyImageView(_vkDevice, outputImageView, nullptr);
-
-    if (fsrReactiveView != nullptr)
-        vkDestroyImageView(_vkDevice, fsrReactiveView, nullptr);
-
-    if (fsrTransparencyView != nullptr)
-        vkDestroyImageView(_vkDevice, fsrTransparencyView, nullptr);
+    // Handed to the queue above: a view that isn't made again this frame must not be destroyed twice next frame
+    depthImageView = VK_NULL_HANDLE;
+    expImageView = VK_NULL_HANDLE;
+    biasImageView = VK_NULL_HANDLE;
+    colorImageView = VK_NULL_HANDLE;
+    mvImageView = VK_NULL_HANDLE;
+    outputImageView = VK_NULL_HANDLE;
+    fsrReactiveView = VK_NULL_HANDLE;
+    fsrTransparencyView = VK_NULL_HANDLE;
 
     // generate new ones with nvidia resource infos
     if (dispatchDesc->depth.resource == nullptr || !CreateIVandNVRes(dispatchDesc->depth, &depthImageView, &depthNVRes))
@@ -758,11 +766,19 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
     {
         params->Set(NVSDK_NGX_Parameter_ExposureTexture, &expNVRes);
     }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_ExposureTexture, (void*) nullptr);
+    }
 
     if (dispatchDesc->reactive.resource != nullptr &&
         CreateIVandNVRes(dispatchDesc->reactive, &biasImageView, &biasNVRes))
     {
         params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &biasNVRes);
+    }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) nullptr);
     }
 
     if (dispatchDesc->color.resource == nullptr || !CreateIVandNVRes(dispatchDesc->color, &colorImageView, &colorNVRes))
@@ -802,11 +818,19 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
     {
         params->Set("FSR.transparencyAndComposition", &fsrTransparencyNVRes);
     }
+    else
+    {
+        params->Set("FSR.transparencyAndComposition", (void*) nullptr);
+    }
 
     if (dispatchDesc->reactive.resource != nullptr &&
         CreateIVandNVRes(dispatchDesc->reactive, &fsrReactiveView, &fsrReactiveNVRes))
     {
         params->Set("FSR.reactive", &fsrReactiveNVRes);
+    }
+    else
+    {
+        params->Set("FSR.reactive", (void*) nullptr);
     }
 
     params->Set("FSR.cameraNear", dispatchDesc->cameraNear);

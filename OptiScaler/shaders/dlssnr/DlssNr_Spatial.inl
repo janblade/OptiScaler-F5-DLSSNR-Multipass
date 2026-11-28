@@ -64,8 +64,7 @@ void Release()
 
 void ReleaseDown()
 {
-    delete proxyDown;
-    proxyDown = nullptr;
+    ParkNrShader(proxyDown); // in-flight lists may still use it (freed with the retired textures)
     proxyDownScaler = Scaler::Count;
 }
 

@@ -8,6 +8,7 @@
 
 #include <Config.h>
 #include <dlssnr/DlssNr_LutChain.h>
+#include <dlssnr/DlssNr_LutCustom.h>
 #include <dlssnr/DlssNr_LutStatus.h>
 #include <shaders/dlssnr/DlssNr_LutConstants.h>
 
@@ -18,12 +19,28 @@ class F5Lut_Common
 {
     unsigned long long _lastReportMs = 0;
     bool _lastReportGraded = false;
+    bool _customActive = false;
+    DlssNr_LutState _customLut;
 
     // Whether NR's own stage is the one grading the stack: NR on and its model up on either backend (decided before NR
     // runs this frame, so a hitch or NR's own frame order cannot let both grade), or NR's stage graded in the last
     // quarter second (a D3D11 game's NR through the D3D12 bridge). NR switching on can still grade one frame twice: its
     // model comes up during that frame's NR call, after this step. F5Lut_Common.cpp.
     static bool NrGradesTheStack();
+
+    static DlssNr::CustomLutParams ReadCustomParams(const Config& cfg)
+    {
+        DlssNr::CustomLutParams p {};
+        p.exposure = cfg.DlssNrLutExposure.value_or_default();
+        p.brightness = cfg.DlssNrLutBrightness.value_or_default();
+        p.gamma = cfg.DlssNrLutGamma.value_or_default();
+        p.blacks = cfg.DlssNrLutBlacks.value_or_default();
+        p.whites = cfg.DlssNrLutWhites.value_or_default();
+        p.contrast = cfg.DlssNrLutContrast.value_or_default();
+        p.temperature = cfg.DlssNrLutTemperature.value_or_default();
+        p.saturation = cfg.DlssNrLutSaturation.value_or_default();
+        return p;
+    }
 
   protected:
     DlssNr_LutChainState _chain;
@@ -34,20 +51,58 @@ class F5Lut_Common
     bool PrepareChain(bool linearHdr)
     {
         const Config& cfg = *Config::Instance();
+
+        const bool useCustom = cfg.DlssNrLutSource.value_or_default() == 1u;
+        const auto customParams = ReadCustomParams(cfg);
+        const bool customWanted = useCustom && !DlssNr::IsNeutralCustomLut(customParams);
+        _customActive = false;
+
         const auto entries = DlssNr::PostLutEntries(cfg);
-        const bool wanted =
+        const bool chainWanted =
             std::any_of(entries.begin(), entries.end(), [](const DlssNr::ChainEntry& e) { return !e.path.empty(); });
+        const bool wanted = customWanted || chainWanted;
 
         if (!wanted)
         {
             if (_chain.wanted)
                 DlssNr_LutChainEnsure(&_chain, {});
+            _customLut = DlssNr_LutState();
             return false;
         }
 
         if (NrGradesTheStack())
             return false;
 
+        if (customWanted)
+        {
+            DlssNr_LutEnsureCustom(&_customLut, customParams);
+            if (_customLut.Loaded())
+            {
+                _chain.wanted = true;
+                _chain.baked = _customLut.lut;
+                _chain.key = _customLut.loadedPath;
+                _chain.strength = std::clamp(cfg.DlssNrLutStrength.value_or_default(), 0.0f, 1.0f);
+                _chain.description = "<custom adjustments>";
+                _chain.failedLayer = -1;
+                _chain.failedPath.clear();
+                _chain.error.clear();
+                std::fill(std::begin(_chain.inputs), std::end(_chain.inputs), DlssNr::LayerInput {});
+                _chain.endsIn = DlssNr::LutSpace::Display;
+                _customActive = true;
+                return true;
+            }
+
+            DlssNr::PostLutStatus status;
+            status.stage = DlssNr::PostLutStage::UpscalerOutput;
+            status.wanted = true;
+            status.loaded = false;
+            status.failedPath = "<custom>";
+            status.error = _customLut.error.empty() ? "could not build custom LUT" : _customLut.error;
+            DlssNr::ReportPostLutStatus(status);
+            return false;
+        }
+
+        _customLut = DlssNr_LutState();
         if (DlssNr_LutChainEnsure(&_chain, entries,
                                   linearHdr ? DlssNr::FrameDecode::LinearHdr : DlssNr::FrameDecode::Srgb))
             return true;
@@ -90,7 +145,7 @@ class F5Lut_Common
     void Report(bool graded, const std::string& error = {})
     {
         const unsigned long long now = GetTickCount64();
-        if (graded && _lastReportGraded && error.empty() && _chain.error.empty() && now - _lastReportMs < 200)
+        if (graded && _lastReportGraded && error.empty() && _chain.error.empty() && !_customActive && now - _lastReportMs < 200)
             return;
         _lastReportMs = now;
         _lastReportGraded = graded;

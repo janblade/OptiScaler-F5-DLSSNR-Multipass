@@ -31,8 +31,7 @@ static UpscaleShaderConstants fsr1Constants {};
 bool OS_Dx12::CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InSource, uint32_t InWidth,
                                    uint32_t InHeight, D3D12_RESOURCE_STATES InState)
 {
-    auto resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
-                         D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+    auto resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     auto result =
         Shader_Dx12::CreateBufferResource(InDevice, InSource, InState, &_buffer, resourceFlags, InWidth, InHeight);
@@ -79,6 +78,11 @@ bool OS_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InR
 
     FsrEasuCon(fsr1Constants.const0, fsr1Constants.const1, fsr1Constants.const2, fsr1Constants.const3, srcW, srcH,
                srcW, srcH, dstW, dstH);
+
+    // EASU only upscales, downscaling stays on the shader's bilinear path. Output Scaling and the Magnifier only: a
+    // Neural Rendering instance (_scalerOverride set) keeps the constants as zero, as before (the constants block is
+    // shared by every instance)
+    fsr1Constants.squaredRadius = (_scalerOverride == Scaler::Count && srcW < dstW) ? UINT32_MAX : 0;
 
     constants.srcWidth = srcW;
     constants.srcHeight = srcH;
@@ -250,7 +254,7 @@ OS_Dx12::OS_Dx12(std::string InName, ID3D12Device* InDevice, bool InUpsample, Sc
 
 OS_Dx12::~OS_Dx12()
 {
-    if (!_init || State::Instance().isShuttingDown)
+    if (State::Instance().isShuttingDown)
         return;
 
     for (int i = 0; i < OS_NUM_OF_HEAPS; i++)
@@ -258,5 +262,5 @@ OS_Dx12::~OS_Dx12()
         _frameHeaps[i].ReleaseHeaps();
     }
 
-    SAFE_RELEASE(_buffer);
+    DeferredRelease::Release(_buffer);
 }

@@ -44,7 +44,7 @@ class LibraryLoadHooks
     // static-TLS array (misc/ThreadTls.h), where FreeLibrary itself can't run.
     static bool IsKeptLoaded(PVOID library);
 
-    static HMODULE LoadNvApi();
+    static HMODULE LoadNvApi(LPCWSTR requestedName = L"nvapi64.dll");
     // static HMODULE LoadFfxapiVk(std::wstring originalPath);
     // static HMODULE LoadFfxapiDx12(std::wstring originalPath);
     // static HMODULE LoadLibxessDx11(std::wstring originalPath);

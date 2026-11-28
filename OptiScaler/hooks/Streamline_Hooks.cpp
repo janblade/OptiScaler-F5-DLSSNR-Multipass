@@ -780,7 +780,9 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
 
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
 
-    if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
+    // D3D11 resources aren't supported, same as the tag hooks
+    if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr &&
+        renderApi != sl::RenderAPI::eD3D11)
     {
         for (uint32_t i = 0; i < numInputs; i++)
         {
@@ -1745,6 +1747,7 @@ bool StreamlineHooks::hkreflex_slOnPluginLoad(sl::param::IParameters* params, co
 sl::Result StreamlineHooks::hkslReflexSetOptions(const sl::ReflexOptions& options)
 {
     reflexGamesLastMode = options.mode;
+    reflexGamesLastOptions = options;
 
     sl::ReflexOptions newOptions = options;
 
@@ -1979,10 +1982,14 @@ sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::Fra
             sl::FrameToken* newFramePointer {};
             auto result = o_slGetNewFrameToken(newFramePointer, &newFrameId);
 
-            LOG_WARN("Simulation start marker sent after end marker, offset: {}", correction_offset);
+            // On failure send the marker uncorrected
+            if (result == sl::Result::eOk && newFramePointer != nullptr)
+            {
+                LOG_WARN("Simulation start marker sent after end marker, offset: {}", correction_offset);
 
-            result = o_slPCLSetMarker(marker, *newFramePointer);
-            return result;
+                result = o_slPCLSetMarker(marker, *newFramePointer);
+                return result;
+            }
         }
     }
 
@@ -2136,7 +2143,9 @@ void StreamlineHooks::updateForceReflex()
     // Not needed for Streamline v1 as slSetConstants is sent every frame
     if (o_slReflexSetOptions)
     {
-        sl::ReflexOptions options;
+        // Game's chain can point to its stack
+        sl::ReflexOptions options = reflexGamesLastOptions;
+        options.next = nullptr;
 
         auto forceReflex = Config::Instance()->FN_ForceReflex.value_or_default();
 
@@ -2496,8 +2505,11 @@ static PluginHook g_commonPlugin { "sl.common", "Common" };
 static PluginHook g_dlssdPlugin { "sl.dlss_d", "DLSSD" };
 
 // Held around each plugin's record and its Detours transaction (taken before g_detoursTransactionMutex, never after).
-// Nothing under it loads a library, waits for the loader or frees a module: a module pinned for a check (PluginPin) is
-// released after it.
+// Nothing under it loads a library, waits for the loader or frees a module: the module a check needs is pinned BEFORE
+// the lock is taken (LockPlugin; GetModuleHandleExW adds a reference and can take the loader lock, always under Wine),
+// and the pin is released after it. A thread that already holds the loader lock (a library loaded from inside another
+// library's DllMain) can be waiting for this mutex, so the holder must never wait for the loader. (Hazard found by
+// upstream OptiScaler e4b0d5fb; this fix is our own.)
 static std::mutex g_pluginHookMutex;
 
 enum class PluginState
@@ -2520,21 +2532,50 @@ struct PluginPin
     }
 };
 
-// The record's function as it stands now (caller holds g_pluginHookMutex). `pin` keeps its module loaded until the
-// caller has released the lock.
-static PluginState StateOf(const PluginHook& plugin, PluginPin& pin)
+// Locks g_pluginHookMutex with `pin` holding the module that owns the record's target. The record is read under the
+// lock only for a copy of the address; the module lookup (which may wait for the loader) runs with no lock held. If the
+// record's target changed between the lookup and the lock (another thread hooked or let go the plugin meanwhile) the
+// pin is for the wrong address, so it is dropped and the lookup repeated. `pin` must outlive the returned lock.
+static std::unique_lock<std::mutex> LockPlugin(const PluginHook& plugin, PluginPin& pin)
 {
-    if (plugin.target == nullptr)
+    std::unique_lock<std::mutex> lock(g_pluginHookMutex, std::defer_lock);
+
+    for (;;)
+    {
+        void* target = nullptr;
+
+        {
+            std::lock_guard<std::mutex> peek(g_pluginHookMutex);
+            target = plugin.target;
+        }
+
+        if (pin.module != nullptr)
+        {
+            FreeLibrary(pin.module); // outside any lock of ours
+            pin.module = nullptr;
+        }
+
+        if (target != nullptr &&
+            !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, static_cast<LPCWSTR>(target), &pin.module))
+            pin.module = nullptr; // its module is gone: StateOf says Gone
+
+        lock.lock();
+
+        if (plugin.target == target)
+            return lock;
+
+        lock.unlock();
+    }
+}
+
+// The record's function as it stands now (caller got the lock from LockPlugin with the same `pin`, which keeps the
+// module loaded until the caller has released the lock). Takes no module reference itself.
+static PluginState StateOf(const PluginHook& plugin, const PluginPin& pin)
+{
+    if (plugin.target == nullptr || pin.module == nullptr)
         return PluginState::Gone;
 
-    HMODULE owner = nullptr;
-
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, static_cast<LPCWSTR>(plugin.target), &owner))
-        return PluginState::Gone;
-
-    pin.module = owner;
-
-    if (owner != plugin.module)
+    if (pin.module != plugin.module)
         return PluginState::Gone;
 
     if (std::memcmp(plugin.target, plugin.patch, 8) == 0)
@@ -2618,8 +2659,8 @@ static void HookPlugin(PluginHook& plugin, HMODULE module, T& original, void* ho
         return;
     }
 
-    PluginPin pin; // released after the lock below
-    std::lock_guard<std::mutex> lock(g_pluginHookMutex);
+    PluginPin pin; // taken before the lock, released after it
+    auto lock = LockPlugin(plugin, pin);
     const PluginState state = StateOf(plugin, pin);
 
     if (plugin.module == module)
@@ -2712,7 +2753,7 @@ static void HookPlugin(PluginHook& plugin, HMODULE module, T& original, void* ho
 static bool PluginHooked(PluginHook& plugin)
 {
     PluginPin pin;
-    std::lock_guard<std::mutex> lock(g_pluginHookMutex);
+    auto lock = LockPlugin(plugin, pin);
     return StateOf(plugin, pin) == PluginState::Ours;
 }
 

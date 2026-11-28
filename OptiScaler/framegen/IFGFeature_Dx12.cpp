@@ -3,6 +3,9 @@
 #include <State.h>
 #include <Config.h>
 
+#include <hudfix/Hudfix_Dx12.h>
+#include <misc/DeferredRelease.h>
+
 #include <magic_enum.hpp>
 
 bool IFGFeature_Dx12::GetResourceCopy(FG_ResourceType type, D3D12_RESOURCE_STATES bufferState, ID3D12Resource* output)
@@ -269,6 +272,35 @@ void IFGFeature_Dx12::NewFrame()
     _lastFGFramePresentId = _fgFramePresentId;
 }
 
+void IFGFeature_Dx12::ReleaseResourceCopies()
+{
+    for (size_t i = 0; i < BUFFER_COUNT; i++)
+    {
+        std::unique_lock<std::shared_mutex> lock(_resourceMutex[i]);
+
+        bool released = false;
+
+        // Entries are kept, callbacks without the lock index the map
+        for (auto& [type, copy] : _resourceCopy[i])
+        {
+            if (copy == nullptr)
+                continue;
+
+            DeferredRelease::Release(copy);
+            released = true;
+        }
+
+        // Frame resources can point at the released copies
+        if (released)
+            _frameResources[i].clear();
+    }
+
+    _mvFlip.reset();
+    _depthFlip.reset();
+
+    Hudfix_Dx12::ReleaseBuffers();
+}
+
 void IFGFeature_Dx12::FlipResource(Dx12Resource* resource)
 {
     auto type = resource->type;
@@ -356,8 +388,8 @@ bool IFGFeature_Dx12::CreateBufferResourceWithSize(ID3D12Device* device, ID3D12R
         if (bufDesc.Width != width || bufDesc.Height != height || bufDesc.Format != inDesc.Format ||
             bufDesc.Flags != inDesc.Flags)
         {
-            (*target)->Release();
-            (*target) = nullptr;
+            // Previous frames can still be using it
+            DeferredRelease::Release(*target);
         }
         else
         {
@@ -444,11 +476,27 @@ bool IFGFeature_Dx12::InitCopyCmdList()
 
 void IFGFeature_Dx12::DestroyCopyCmdList()
 {
+    // The GPU can still be executing them
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
-        SAFE_RELEASE(_copyCommandAllocator[i]);
-        SAFE_RELEASE(_copyCommandList[i]);
+        DeferredRelease::Release(_copyCommandAllocator[i]);
+        DeferredRelease::Release(_copyCommandList[i]);
     }
+}
+
+void IFGFeature_Dx12::ReleaseUIFence()
+{
+    // Recreated with the objects, so it is never signaled from another device's queue
+    DeferredRelease::Release(_uiFence);
+
+    if (_uiFenceEvent != nullptr)
+    {
+        DeferredRelease::Enqueue([event = _uiFenceEvent]() { CloseHandle(event); });
+        _uiFenceEvent = nullptr;
+    }
+
+    _uiFenceValue = 0;
+    memset(_uiAllocatorFenceValues, 0, sizeof(_uiAllocatorFenceValues));
 }
 
 bool IFGFeature_Dx12::CreateBufferResource(ID3D12Device* device, ID3D12Resource* source,
@@ -468,16 +516,13 @@ bool IFGFeature_Dx12::CreateBufferResource(ID3D12Device* device, ID3D12Resource*
 
     if (*target != nullptr)
     {
-        //(*target)->Release();
-        //(*target) = nullptr;
-
         auto bufDesc = (*target)->GetDesc();
 
         if (bufDesc.Width != inDesc.Width || bufDesc.Height != inDesc.Height || bufDesc.Format != inDesc.Format ||
             bufDesc.Flags != inDesc.Flags)
         {
-            (*target)->Release();
-            (*target) = nullptr;
+            // Previous frames can still be using it
+            DeferredRelease::Release(*target);
         }
         else
         {

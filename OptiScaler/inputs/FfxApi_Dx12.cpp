@@ -6,6 +6,7 @@
 
 #include "resource.h"
 #include "NVNGX_Parameter.h"
+#include <proxies/NVNGX_Proxy.h>
 #include "proxies/FfxApi_Proxy.h"
 
 #include "FG/FfxApi_Dx12_FG.h"
@@ -343,7 +344,11 @@ ffxReturnCode_t ffxDestroyContext_Dx12(ffxContext* context, const ffxAllocationC
         NVSDK_NGX_D3D12_ReleaseFeature(_contexts[*context]);
 
     _contexts.erase(*context);
-    _nvParams.erase(*context);
+    if (auto it = _nvParams.find(*context); it != _nvParams.end())
+    {
+        TryDestroyNGXParameters(it->second, NVNGXProxy::D3D12_DestroyParameters());
+        _nvParams.erase(it);
+    }
     _initParams.erase(*context);
 
     if (upscalerContext && !Config::Instance()->EnableHotSwapping.value_or_default())
@@ -652,9 +657,18 @@ ffxReturnCode_t ffxDispatch_Dx12(ffxContext* context, ffxDispatchDescHeader* des
     params->Set(NVSDK_NGX_Parameter_Depth, dispatchDesc->depth.resource);
     params->Set(NVSDK_NGX_Parameter_ExposureTexture, dispatchDesc->exposure.resource);
 
-    if (dispatchDesc->reactive.description.width >= dispatchDesc->renderSize.width &&
-        dispatchDesc->reactive.description.height >= dispatchDesc->renderSize.height)
-        params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, dispatchDesc->reactive.resource);
+    // Masks smaller than the render size are not used, params keep last frame's values otherwise
+    auto reactive = (dispatchDesc->reactive.description.width >= dispatchDesc->renderSize.width &&
+                     dispatchDesc->reactive.description.height >= dispatchDesc->renderSize.height)
+                        ? dispatchDesc->reactive.resource
+                        : nullptr;
+
+    auto transparency = (dispatchDesc->transparencyAndComposition.description.width >= dispatchDesc->renderSize.width &&
+                         dispatchDesc->transparencyAndComposition.description.height >= dispatchDesc->renderSize.height)
+                            ? dispatchDesc->transparencyAndComposition.resource
+                            : nullptr;
+
+    params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, reactive);
 
     params->Set(NVSDK_NGX_Parameter_Color, dispatchDesc->color.resource);
     params->Set(NVSDK_NGX_Parameter_MotionVectors, dispatchDesc->motionVectors.resource);
@@ -665,13 +679,8 @@ ffxReturnCode_t ffxDispatch_Dx12(ffxContext* context, ffxDispatchDescHeader* des
     params->Set("FSR.frameTimeDelta", dispatchDesc->frameTimeDelta);
     params->Set("FSR.viewSpaceToMetersFactor", dispatchDesc->viewSpaceToMetersFactor);
 
-    if (dispatchDesc->transparencyAndComposition.description.width >= dispatchDesc->renderSize.width &&
-        dispatchDesc->transparencyAndComposition.description.height >= dispatchDesc->renderSize.height)
-        params->Set("FSR.transparencyAndComposition", dispatchDesc->transparencyAndComposition.resource);
-
-    if (dispatchDesc->reactive.description.width >= dispatchDesc->renderSize.width &&
-        dispatchDesc->reactive.description.height >= dispatchDesc->renderSize.height)
-        params->Set("FSR.reactive", dispatchDesc->reactive.resource);
+    params->Set("FSR.transparencyAndComposition", transparency);
+    params->Set("FSR.reactive", reactive);
 
     params->Set(NVSDK_NGX_Parameter_Sharpness, dispatchDesc->sharpness);
     params->Set("FSR.upscaleSize.width", dispatchDesc->upscaleSize.width);

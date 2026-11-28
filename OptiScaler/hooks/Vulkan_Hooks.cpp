@@ -18,6 +18,7 @@
 #include <fsr4/FSR4DriverProviderVk.h>
 #include <proxies/FfxApi_Proxy.h>
 #include <misc/FrameLimit.h>
+#include <misc/DeferredRelease.h>
 #include "Reflex_Hooks.h"
 
 #include <spoofing/Vulkan_Spoofing.h>
@@ -756,8 +757,10 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     if (!ScopedSkipVulkanHooks::Active() && !D3DOnVulkanModule(Util::GetCallerModule(_ReturnAddress())) &&
         !VkPresentBridge::DxvkGame() && !VkPresentBridge::ModeWantsBridge() && !StreamlineProxy::IsInitializing() &&
-        State::Instance().currentD3D12Device == nullptr &&
-        (nativeFg = CreateFGFeature()) != nullptr)
+        // No live D3D12 device in the process: since 2db37a74 a device only becomes currentD3D12Device with the game's
+        // swapchain, so the list (added at device creation, removed when the device's last reference goes) keeps this
+        // decision as it was before that change
+        !State::Instance().HasD3D12Devices() && (nativeFg = CreateFGFeature()) != nullptr)
     {
         if (EnableTimelineSemaphores(physicalDevice, localCreteInfo, nativeFgTimeline))
         {
@@ -1215,6 +1218,9 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
 
+    if (result == VK_SUCCESS)
+        DeferredRelease::DropOwnersExcept((uint64_t) *pDevice);
+
     if (result == VK_SUCCESS && nativeFg != nullptr)
     {
         nativeFg->OnDeviceCreated(*pDevice);
@@ -1537,6 +1543,10 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
             result = o_QueuePresentKHR(queue, &localPresentInfo);
         }
     }
+
+    // dxvk's presents are counted by the DXGI swapchain it goes through
+    if (!VkPresentBridge::DxvkGame())
+        DeferredRelease::Process();
 
     _presentTiming.Record(Stage::Present, Util::MillisecondsNow() - presentStartMs);
 
@@ -1930,6 +1940,10 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
     if (device != VK_NULL_HANDLE)
         DlssNr::VkExt::ForgetDevice(device);
 
+    // Objects created on the device have to go before it
+    if (device != VK_NULL_HANDLE)
+        MenuOverlayVk::ReleaseDevice(device);
+
     if (device != VK_NULL_HANDLE)
     {
         VkPresentBridge::OnDeviceDestroying(device);
@@ -1967,6 +1981,10 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
     // never be a device that is gone (a probe device made and destroyed after the swapchain)
     if (device != VK_NULL_HANDLE && _device == device)
         _device = VK_NULL_HANDLE;
+
+    // What is still waiting for its frames goes now, the device is idle and everything above that enqueues is done
+    if (device != VK_NULL_HANDLE)
+        DeferredRelease::ReleaseOwner((uint64_t) device);
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);

@@ -70,7 +70,7 @@ static bool CreateDLSSContext(xess_context_handle_t handle, ID3D12GraphicsComman
         break;
 
     case XESS_QUALITY_SETTING_PERFORMANCE:
-        params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxQuality);
+        params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
         break;
 
     case XESS_QUALITY_SETTING_BALANCED:
@@ -329,11 +329,19 @@ xess_result_t hk_xessD3D12GetResourcesToDump(xess_context_handle_t hContext,
                                              xess_resources_to_dump_t** pResourcesToDump)
 {
     LOG_DEBUG("");
+
+    if (pResourcesToDump != nullptr)
+        *pResourcesToDump = nullptr;
+
     return XESS_RESULT_SUCCESS;
 }
 
 xess_result_t hk_xessD3D12GetProfilingData(xess_context_handle_t hContext, xess_profiling_data_t** pProfilingData)
 {
     LOG_DEBUG("");
+
+    if (pProfilingData != nullptr)
+        *pProfilingData = nullptr;
+
     return XESS_RESULT_SUCCESS;
 }

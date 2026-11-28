@@ -22,6 +22,7 @@
 #include "FG_Hooks.h"
 #include "DxgiFactory_Hooks.h"
 #include "SwapchainCreateRule.h"
+#include "Sampler_Overrides.h"
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -68,39 +69,6 @@ static bool ElevateD3D11FeatureLevel()
         return Config::Instance()->D3D11FeatureLevelElevation.value();
 
     return !(State::Instance().gameQuirks & GameQuirk::SkipD3D11FeatureLevelElevation);
-}
-
-static inline D3D11_FILTER UpgradeToAF(D3D11_FILTER f)
-{
-    if (Config::Instance()->AnisotropySkipPointFilter.value_or_default() &&
-        (f == D3D11_FILTER_MIN_MAG_MIP_POINT || f == D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT ||
-         f == D3D11_FILTER_MINIMUM_MIN_MAG_MIP_POINT || f == D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_POINT ||
-         f == D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT || f == D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT ||
-         f == D3D11_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT || f == D3D11_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT ||
-         f == D3D11_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT ||
-         f == D3D11_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT ||
-         f == D3D11_FILTER_MINIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT ||
-         f == D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT))
-    {
-        return f;
-    }
-
-    if (f >= D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT && f <= D3D11_FILTER_COMPARISON_ANISOTROPIC)
-    {
-        return Config::Instance()->AnisotropyModifyComp.value_or_default() ? D3D11_FILTER_COMPARISON_ANISOTROPIC : f;
-    }
-
-    if (f >= D3D11_FILTER_MINIMUM_MIN_MAG_MIP_POINT && f <= D3D11_FILTER_MINIMUM_ANISOTROPIC)
-    {
-        return Config::Instance()->AnisotropyModifyMinMax.value_or_default() ? D3D11_FILTER_MINIMUM_ANISOTROPIC : f;
-    }
-
-    if (f >= D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_POINT && f <= D3D11_FILTER_MAXIMUM_ANISOTROPIC)
-    {
-        return Config::Instance()->AnisotropyModifyMinMax.value_or_default() ? D3D11_FILTER_MAXIMUM_ANISOTROPIC : f;
-    }
-
-    return D3D11_FILTER_ANISOTROPIC;
 }
 
 static void HookToDeviceLocal(ID3D11Device* InDevice)
@@ -166,7 +134,7 @@ static HRESULT hkD3D11On12CreateDevice(IUnknown* pDevice, UINT Flags, const D3D_
     // Assuming RTSS is creating a D3D11on12 device, not sure why but sometimes RTSS tries to create
     // it's D3D11on12 device with old CommandQueue which results crash
     // I am changing it's CommandQueue with current swapchain's command queue
-    if (State::Instance().currentCommandQueue != nullptr &&
+    if (State::Instance().currentCommandQueue != nullptr && !copyCommandQueues.empty() &&
         copyCommandQueues[0] != State::Instance().currentCommandQueue &&
         GetModuleHandle(L"RTSSHooks64.dll") != nullptr && pDevice == State::Instance().currentD3D12Device)
     {
@@ -186,13 +154,13 @@ static HRESULT hkD3D11On12CreateDevice(IUnknown* pDevice, UINT Flags, const D3D_
                                          ppImmediateContext, pChosenFeatureLevel);
     }
 
-    if (result == S_OK && *ppDevice != nullptr && !rtss && State::Instance().currentD3D12Device == nullptr)
+    if (result == S_OK && ppDevice != nullptr && *ppDevice != nullptr && !rtss && !State::Instance().HasD3D12Devices())
     {
         LOG_INFO("Device captured, D3D11Device: {0:X}", (UINT64) *ppDevice);
         HookToDeviceLocal(*ppDevice);
     }
 
-    if (result == S_OK && *ppDevice != nullptr)
+    if (result == S_OK && ppDevice != nullptr && *ppDevice != nullptr)
         State::Instance().d3d11Devices.push_back(*ppDevice);
 
     LOG_FUNC_RESULT(result);
@@ -252,6 +220,9 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
         }
     }
 
+    auto gameFeatureLevels = pFeatureLevels;
+    auto gameFeatureLevelCount = FeatureLevels;
+
     if (ElevateD3D11FeatureLevel())
     {
         static const D3D_FEATURE_LEVEL levels[] = {
@@ -283,11 +254,19 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
         ScopedSkipParentWrapping skipParentWrapping {};
         result = o_D3D11CreateDevice(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels, SDKVersion,
                                      ppDevice, pFeatureLevel, ppImmediateContext);
+
+        if ((result == DXGI_ERROR_UNSUPPORTED || result == E_INVALIDARG) && pFeatureLevels != gameFeatureLevels)
+        {
+            LOG_WARN("D3D_FEATURE_LEVEL_11_1 failed, using game's feature levels");
+            result =
+                o_D3D11CreateDevice(pAdapter, DriverType, Software, Flags, gameFeatureLevels, gameFeatureLevelCount,
+                                    SDKVersion, ppDevice, pFeatureLevel, ppImmediateContext);
+        }
     }
 
     _skipDx11Create = false;
 
-    if (result == S_OK && *ppDevice != nullptr && State::Instance().currentD3D12Device == nullptr)
+    if (result == S_OK && ppDevice != nullptr && *ppDevice != nullptr && !State::Instance().HasD3D12Devices())
     {
         LOG_INFO("Device captured");
         HookToDeviceLocal(*ppDevice);
@@ -358,6 +337,8 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
     }
 
     static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1 };
+    auto gameFeatureLevels = pFeatureLevels;
+    auto gameFeatureLevelCount = FeatureLevels;
 
     if (ElevateD3D11FeatureLevel())
     {
@@ -379,7 +360,9 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         }
     }
 
-    if (pSwapChainDesc != nullptr && pSwapChainDesc->BufferDesc.Height == 2 && pSwapChainDesc->BufferDesc.Width == 2)
+    if (pSwapChainDesc != nullptr &&
+        Util::IsOverlaySwapchain(pSwapChainDesc->OutputWindow, pSwapChainDesc->BufferDesc.Width,
+                                 pSwapChainDesc->BufferDesc.Height))
     {
         LOG_WARN("Overlay call!");
 
@@ -409,7 +392,10 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
             Config::Instance()->OverrideVsync.set_volatile_value(false);
         }
 
-        if (Config::Instance()->OverrideVsync.value_or_default())
+        // Flip model doesn't support MSAA or sRGB buffers
+        if (Config::Instance()->OverrideVsync.value_or_default() && localDesc.SampleDesc.Count <= 1 &&
+            localDesc.BufferDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
+            localDesc.BufferDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
         {
             localDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
             localDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
@@ -468,10 +454,18 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
                                                  ppImmediateContext);
     }
 
+    if ((result == DXGI_ERROR_UNSUPPORTED || result == E_INVALIDARG) && pFeatureLevels != gameFeatureLevels)
+    {
+        LOG_WARN("D3D_FEATURE_LEVEL_11_1 failed, using game's feature levels");
+        result = o_D3D11CreateDeviceAndSwapChain(
+            pAdapter, DriverType, Software, Flags, gameFeatureLevels, gameFeatureLevelCount, SDKVersion,
+            pSwapChainDesc != nullptr ? &localDesc : nullptr, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+    }
+
     _skipDx11Create = false;
 
     if (SUCCEEDED(result) && !otherWindow && ppDevice != nullptr && *ppDevice != nullptr &&
-        State::Instance().currentD3D12Device == nullptr)
+        !State::Instance().HasD3D12Devices())
     {
         LOG_INFO("Device captured");
         HookToDeviceLocal(*ppDevice);
@@ -517,8 +511,8 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         }
         else
         {
-            *ppSwapChain = new WrappedIDXGISwapChain4(realSC, realDevice, pSwapChainDesc->OutputWindow,
-                                                      localDesc.Flags, false, false, &hdrPlan);
+            *ppSwapChain = new WrappedIDXGISwapChain4(realSC, realDevice, pSwapChainDesc->OutputWindow, localDesc.Flags,
+                                                      false, false, &hdrPlan, *ppSwapChain);
 
             if (otherWindow)
             {
@@ -528,6 +522,9 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
             {
                 State::Instance().currentSwapchain = *ppSwapChain;
                 State::Instance().currentWrappedSwapchain = *ppSwapChain;
+                State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                State::Instance().SCLastFlags = localDesc.Flags;
+                State::Instance().realExclusiveFullscreen = !localDesc.Windowed;
                 DxgiFactoryHooks::NoteCreateStatus(result, realSC);
             }
 
@@ -552,59 +549,8 @@ static HRESULT hkCreateSamplerState(ID3D11Device* This, const D3D11_SAMPLER_DESC
 
     LOG_FUNC();
 
-    D3D11_SAMPLER_DESC newDesc {};
-
-    newDesc.AddressU = pSamplerDesc->AddressU;
-    newDesc.AddressV = pSamplerDesc->AddressV;
-    newDesc.AddressW = pSamplerDesc->AddressW;
-    newDesc.ComparisonFunc = pSamplerDesc->ComparisonFunc;
-    newDesc.BorderColor[0] = pSamplerDesc->BorderColor[0];
-    newDesc.BorderColor[1] = pSamplerDesc->BorderColor[1];
-    newDesc.BorderColor[2] = pSamplerDesc->BorderColor[2];
-    newDesc.BorderColor[3] = pSamplerDesc->BorderColor[3];
-    newDesc.MinLOD = pSamplerDesc->MinLOD;
-    newDesc.MaxLOD = pSamplerDesc->MaxLOD;
-
-    if (Config::Instance()->AnisotropyOverride.has_value())
-    {
-        LOG_DEBUG("Overriding {2:X} to anisotropic filtering {0} -> {1}", pSamplerDesc->MaxAnisotropy,
-                  Config::Instance()->AnisotropyOverride.value(), (UINT) newDesc.Filter);
-
-        newDesc.Filter = UpgradeToAF(pSamplerDesc->Filter);
-        newDesc.MaxAnisotropy = Config::Instance()->AnisotropyOverride.value();
-    }
-    else
-    {
-        newDesc.Filter = pSamplerDesc->Filter;
-        newDesc.MaxAnisotropy = pSamplerDesc->MaxAnisotropy;
-    }
-
-    newDesc.MipLODBias = pSamplerDesc->MipLODBias;
-
-    if ((newDesc.MipLODBias < 0.0f && newDesc.MinLOD != newDesc.MaxLOD) ||
-        Config::Instance()->MipmapBiasOverrideAll.value_or_default())
-    {
-        if (Config::Instance()->MipmapBiasOverride.has_value())
-        {
-            LOG_DEBUG("Overriding mipmap bias {0} -> {1}", pSamplerDesc->MipLODBias,
-                      Config::Instance()->MipmapBiasOverride.value());
-
-            if (Config::Instance()->MipmapBiasFixedOverride.value_or_default())
-                newDesc.MipLODBias = Config::Instance()->MipmapBiasOverride.value();
-            else if (Config::Instance()->MipmapBiasScaleOverride.value_or_default())
-                newDesc.MipLODBias = newDesc.MipLODBias * Config::Instance()->MipmapBiasOverride.value();
-            else
-                newDesc.MipLODBias = newDesc.MipLODBias + Config::Instance()->MipmapBiasOverride.value();
-
-            newDesc.MipLODBias = std::clamp(newDesc.MipLODBias, -16.0f, 15.99f);
-        }
-
-        if (State::Instance().lastMipBiasMax < newDesc.MipLODBias)
-            State::Instance().lastMipBiasMax = newDesc.MipLODBias;
-
-        if (State::Instance().lastMipBias > newDesc.MipLODBias)
-            State::Instance().lastMipBias = newDesc.MipLODBias;
-    }
+    D3D11_SAMPLER_DESC newDesc = *pSamplerDesc;
+    SamplerOverrides::Apply(newDesc);
 
     return o_CreateSamplerState(This, &newDesc, ppSamplerState);
 }

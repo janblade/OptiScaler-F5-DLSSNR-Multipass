@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "D3D12_Hooks.h"
+#include "Sampler_Overrides.h"
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include <Util.h>
@@ -33,6 +34,7 @@
 
 using PFN_CheckFeatureSupport = rewrite_signature<decltype(&ID3D12Device::CheckFeatureSupport)>::type;
 using PFN_CreateSampler = rewrite_signature<decltype(&ID3D12Device::CreateSampler)>::type;
+using PFN_CreateSampler2 = rewrite_signature<decltype(&ID3D12Device11::CreateSampler2)>::type;
 using PFN_CreateCommittedResource = rewrite_signature<decltype(&ID3D12Device::CreateCommittedResource)>::type;
 using PFN_CreatePlacedResource = rewrite_signature<decltype(&ID3D12Device::CreatePlacedResource)>::type;
 using PFN_CreateHeap = rewrite_signature<decltype(&ID3D12Device::CreateHeap)>::type;
@@ -57,6 +59,7 @@ using PFN_CreateDevice = rewrite_signature<decltype(&ID3D12DeviceFactory::Create
 using PFN_Release = rewrite_signature<decltype(&IUnknown::Release)>::type;
 
 static PFN_CreateSampler o_CreateSampler = nullptr;
+static PFN_CreateSampler2 o_CreateSampler2 = nullptr;
 static PFN_CheckFeatureSupport o_CheckFeatureSupport = nullptr;
 static PFN_CreateCommittedResource o_CreateCommittedResource = nullptr;
 static PFN_CreatePlacedResource o_CreatePlacedResource = nullptr;
@@ -83,6 +86,7 @@ static LUID _lastAdapterLuid = {};
 // Common
 using PFN_SetDescriptorHeaps = rewrite_signature<decltype(&ID3D12GraphicsCommandList::SetDescriptorHeaps)>::type;
 using PFN_SetPipelineState = rewrite_signature<decltype(&ID3D12GraphicsCommandList::SetPipelineState)>::type;
+using PFN_Close = rewrite_signature<decltype(&ID3D12GraphicsCommandList::Close)>::type;
 
 // ComputeRoot
 using PFN_SetComputeRootSignature =
@@ -177,6 +181,7 @@ static RootRestoreHook<PFN_SetDescriptorHeaps> s_SetDescriptorHeaps {};
 static std::shared_mutex pipelineStatesMutex;
 static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*, ID3D12PipelineState*> pipelineStates;
 static RootRestoreHook<PFN_SetPipelineState> s_SetPipelineState {};
+static RootRestoreHook<PFN_Close> s_Close {};
 
 // Those use a common rootSignatureMutex mutex
 static std::shared_mutex rootSignatureMutex;
@@ -269,130 +274,40 @@ static void CALLBACK D3D12DebugCallback(D3D12_MESSAGE_CATEGORY Category, D3D12_M
 static void HookToDevice(ID3D12Device* InDevice);
 static void UnhookDevice();
 
-static inline D3D12_FILTER UpgradeToAF(D3D12_FILTER f)
+// A new list can reuse a released list's address and starts recording without a Reset: closing a list drops what was
+// recorded for it, so the next list at that address never restores the old one's heaps, pipeline or root signature
+static void ClearCmdListState(ID3D12GraphicsCommandList* commandList)
 {
-    // Skip point filter
-    const auto minF = D3D12_DECODE_MIN_FILTER(f);
-    const auto magF = D3D12_DECODE_MAG_FILTER(f);
-    const auto mipF = D3D12_DECODE_MIP_FILTER(f);
-    if (Config::Instance()->AnisotropySkipPointFilter.value_or_default() &&
-        ((mipF == D3D12_FILTER_TYPE_POINT) || (minF == D3D12_FILTER_TYPE_POINT && magF == D3D12_FILTER_TYPE_POINT)))
+    if (commandList == nullptr)
+        return;
+
     {
-        return f;
+        std::unique_lock<std::shared_mutex> lock(descriptorHeapsMutex);
+        descriptorHeaps.erase(commandList);
     }
-
-    const auto reduction = D3D12_DECODE_FILTER_REDUCTION(f);
-
-    if (reduction == D3D12_FILTER_REDUCTION_TYPE_COMPARISON)
     {
-        if (Config::Instance()->AnisotropyModifyComp.value_or_default())
-            return D3D12_ENCODE_ANISOTROPIC_FILTER(D3D12_FILTER_REDUCTION_TYPE_COMPARISON);
-
-        return f;
+        std::unique_lock<std::shared_mutex> lock(pipelineStatesMutex);
+        pipelineStates.erase(commandList);
     }
-
-    if (reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM)
     {
-        if (Config::Instance()->AnisotropyModifyMinMax.value_or_default())
-            return D3D12_ENCODE_ANISOTROPIC_FILTER(D3D12_FILTER_REDUCTION_TYPE_MINIMUM);
-
-        return f;
+        std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
+        signatures.erase(commandList);
     }
-
-    if (reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM)
     {
-        if (Config::Instance()->AnisotropyModifyMinMax.value_or_default())
-            return D3D12_ENCODE_ANISOTROPIC_FILTER(D3D12_FILTER_REDUCTION_TYPE_MAXIMUM);
-
-        return f;
-    }
-
-    return D3D12_ENCODE_ANISOTROPIC_FILTER(D3D12_FILTER_REDUCTION_TYPE_STANDARD);
-}
-
-static void ApplySamplerOverrides(D3D12_STATIC_SAMPLER_DESC& samplerDesc)
-{
-    if (Config::Instance()->MipmapBiasOverride.has_value())
-    {
-        auto isMipmapped = samplerDesc.MinLOD != samplerDesc.MaxLOD;
-        auto isAnisotropic = (samplerDesc.Filter == D3D12_FILTER_ANISOTROPIC) || (samplerDesc.MaxAnisotropy > 1);
-        auto isAlreadyBiased = samplerDesc.MipLODBias < 0.0f;
-
-        if ((isMipmapped && (isAnisotropic || isAlreadyBiased)) ||
-            Config::Instance()->MipmapBiasOverrideAll.value_or_default())
-        {
-            if (Config::Instance()->MipmapBiasOverride.has_value())
-            {
-                LOG_DEBUG("Overriding mipmap bias {0} -> {1}", samplerDesc.MipLODBias,
-                          Config::Instance()->MipmapBiasOverride.value());
-
-                if (Config::Instance()->MipmapBiasFixedOverride.value_or_default())
-                    samplerDesc.MipLODBias = Config::Instance()->MipmapBiasOverride.value();
-                else if (Config::Instance()->MipmapBiasScaleOverride.value_or_default())
-                    samplerDesc.MipLODBias = samplerDesc.MipLODBias * Config::Instance()->MipmapBiasOverride.value();
-                else
-                    samplerDesc.MipLODBias = samplerDesc.MipLODBias + Config::Instance()->MipmapBiasOverride.value();
-
-                samplerDesc.MipLODBias = std::clamp(samplerDesc.MipLODBias, -16.0f, 15.99f);
-            }
-
-            if (State::Instance().lastMipBiasMax < samplerDesc.MipLODBias)
-                State::Instance().lastMipBiasMax = samplerDesc.MipLODBias;
-
-            if (State::Instance().lastMipBias > samplerDesc.MipLODBias)
-                State::Instance().lastMipBias = samplerDesc.MipLODBias;
-        }
-    }
-
-    if (Config::Instance()->AnisotropyOverride.has_value())
-    {
-        LOG_DEBUG("Overriding {2:X} to anisotropic filtering {0} -> {1}", samplerDesc.MaxAnisotropy,
-                  Config::Instance()->AnisotropyOverride.value(), (UINT) samplerDesc.Filter);
-
-        samplerDesc.Filter = UpgradeToAF(samplerDesc.Filter);
-        samplerDesc.MaxAnisotropy = Config::Instance()->AnisotropyOverride.value();
-    }
-}
-
-static void ApplySamplerOverrides(D3D12_STATIC_SAMPLER_DESC1& samplerDesc)
-{
-    if (Config::Instance()->MipmapBiasOverride.has_value())
-    {
-        if ((samplerDesc.MipLODBias < 0.0f && samplerDesc.MinLOD != samplerDesc.MaxLOD) ||
-            Config::Instance()->MipmapBiasOverrideAll.value_or_default())
-        {
-            if (Config::Instance()->MipmapBiasOverride.has_value())
-            {
-                LOG_DEBUG("Overriding mipmap bias {0} -> {1}", samplerDesc.MipLODBias,
-                          Config::Instance()->MipmapBiasOverride.value());
-
-                if (Config::Instance()->MipmapBiasFixedOverride.value_or_default())
-                    samplerDesc.MipLODBias = Config::Instance()->MipmapBiasOverride.value();
-                else if (Config::Instance()->MipmapBiasScaleOverride.value_or_default())
-                    samplerDesc.MipLODBias = samplerDesc.MipLODBias * Config::Instance()->MipmapBiasOverride.value();
-                else
-                    samplerDesc.MipLODBias = samplerDesc.MipLODBias + Config::Instance()->MipmapBiasOverride.value();
-            }
-
-            if (State::Instance().lastMipBiasMax < samplerDesc.MipLODBias)
-                State::Instance().lastMipBiasMax = samplerDesc.MipLODBias;
-
-            if (State::Instance().lastMipBias > samplerDesc.MipLODBias)
-                State::Instance().lastMipBias = samplerDesc.MipLODBias;
-        }
-    }
-
-    if (Config::Instance()->AnisotropyOverride.has_value())
-    {
-        LOG_DEBUG("Overriding {2:X} to anisotropic filtering {0} -> {1}", samplerDesc.MaxAnisotropy,
-                  Config::Instance()->AnisotropyOverride.value(), (UINT) samplerDesc.Filter);
-
-        samplerDesc.Filter = UpgradeToAF(samplerDesc.Filter);
-        samplerDesc.MaxAnisotropy = Config::Instance()->AnisotropyOverride.value();
+        std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
+        rootStates.erase(commandList);
     }
 }
 
 // Early hooks, from Opti's own cmdlist
+VALIDATE_HOOK(hkClose, PFN_Close)
+static HRESULT hkClose(ID3D12GraphicsCommandList* commandList)
+{
+    auto result = s_Close.o_earlyHook(commandList);
+    ClearCmdListState(commandList);
+    return result;
+}
+
 VALIDATE_HOOK(hkSetPipelineState, PFN_SetPipelineState)
 static void hkSetPipelineState(ID3D12GraphicsCommandList* commandList, ID3D12PipelineState* pPipelineState)
 {
@@ -771,6 +686,14 @@ static void hkSetGraphicsRootUnorderedAccessView(ID3D12GraphicsCommandList* comm
 }
 
 // Late hooks, from upscaler eval
+VALIDATE_HOOK(hkCloseLate, PFN_Close)
+static HRESULT hkCloseLate(ID3D12GraphicsCommandList* commandList)
+{
+    auto result = s_Close.o_lateHook(commandList);
+    ClearCmdListState(commandList);
+    return result;
+}
+
 VALIDATE_HOOK(hkSetPipelineStateLate, PFN_SetPipelineState)
 static void hkSetPipelineStateLate(ID3D12GraphicsCommandList* commandList, ID3D12PipelineState* pPipelineState)
 {
@@ -1175,6 +1098,7 @@ void D3D12Hooks::HookToCommandListLate(ID3D12GraphicsCommandList* commandList)
     const bool extendedRestoreSignature = config->ExtendedStateRestore.value_or_default();
     const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default();
 
+    s_Close.o_lateHook = (PFN_Close) pVTable[9];
     s_SetPipelineState.o_lateHook = (PFN_SetPipelineState) pVTable[25];
     s_SetDescriptorHeaps.o_lateHook = (PFN_SetDescriptorHeaps) pVTable[28];
     s_SetComputeRootSignature.o_lateHook = (PFN_SetComputeRootSignature) pVTable[29];
@@ -1196,6 +1120,9 @@ void D3D12Hooks::HookToCommandListLate(ID3D12GraphicsCommandList* commandList)
         DetourUpdateThread(GetCurrentThread());
 
         // Common
+        if ((restoreComputeSignature || restoreGraphicSignature) && s_Close.o_lateHook != nullptr)
+            DetourAttach(&(PVOID&) s_Close.o_lateHook, hkCloseLate);
+
         if (extendedRestoreSignature && s_SetPipelineState.o_lateHook != nullptr)
             DetourAttach(&(PVOID&) s_SetPipelineState.o_lateHook, hkSetPipelineStateLate);
 
@@ -1302,6 +1229,7 @@ void D3D12Hooks::HookToCommandListLate(ID3D12GraphicsCommandList* commandList)
         }
         else
         {
+            s_Close.o_lateHook = nullptr;
             s_SetPipelineState.o_lateHook = nullptr;
             s_SetDescriptorHeaps.o_lateHook = nullptr;
             s_SetComputeRootSignature.o_lateHook = nullptr;
@@ -1342,6 +1270,7 @@ static void HookToCommandList(ID3D12Device* InDevice)
             const bool extendedRestoreSignature = config->ExtendedStateRestore.value_or_default();
             const bool persistentBindings = config->FGHudfixPersistentBindings.value_or_default();
 
+            s_Close.o_earlyHook = (PFN_Close) pVTable[9];
             s_SetPipelineState.o_earlyHook = (PFN_SetPipelineState) pVTable[25];
             s_SetDescriptorHeaps.o_earlyHook = (PFN_SetDescriptorHeaps) pVTable[28];
             s_SetComputeRootSignature.o_earlyHook = (PFN_SetComputeRootSignature) pVTable[29];
@@ -1361,6 +1290,9 @@ static void HookToCommandList(ID3D12Device* InDevice)
             {
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
+
+                if (s_Close.o_earlyHook != nullptr)
+                    DetourAttach(&(PVOID&) s_Close.o_earlyHook, hkClose);
 
                 if (s_SetPipelineState.o_earlyHook != nullptr && extendedRestoreSignature)
                     DetourAttach(&(PVOID&) s_SetPipelineState.o_earlyHook, hkSetPipelineState);
@@ -1412,6 +1344,7 @@ static void HookToCommandList(ID3D12Device* InDevice)
                 }
                 else
                 {
+                    s_Close.o_earlyHook = nullptr;
                     s_SetPipelineState.o_earlyHook = nullptr;
                     s_SetDescriptorHeaps.o_earlyHook = nullptr;
                     s_SetComputeRootSignature.o_earlyHook = nullptr;
@@ -1444,6 +1377,12 @@ static void UnhookAll()
 {
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
+
+    if (s_Close.o_earlyHook != nullptr)
+    {
+        DetourDetach(&(PVOID&) s_Close.o_earlyHook, hkClose);
+        s_Close.o_earlyHook = nullptr;
+    }
 
     if (s_SetComputeRootSignature.o_earlyHook != nullptr)
     {
@@ -1539,16 +1478,9 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
 
     if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE && !nonPrimaryGpu)
     {
-        LOG_DEBUG("Device captured: {0:X}", (size_t) *ppDevice);
+        // Becomes current with the game's swapchain (D3D12Hooks::CaptureDevice), devices of mods are only hooked
+        LOG_DEBUG("Device created: {0:X}", (size_t) *ppDevice);
         auto* const createdDevice = (ID3D12Device*) *ppDevice;
-
-        // The Vulkan bridge's D3D12 swapchain runs on its own device, which is what State holds while it is up. A device
-        // the game makes after that (a Vulkan or dxvk game probing feature levels) is not the one the D3D12 side works on.
-        if (native::AdoptNewD3D12Device(VkPresentBridge::OutputActive()))
-            State::Instance().currentD3D12Device = createdDevice;
-        else
-            LOG_INFO("D3D12 device {:X} made while the Vulkan bridge is up: the bridge's device stays the current one",
-                     (size_t) createdDevice);
 
         if (desc.VendorId == VendorId::Intel && Config::Instance()->UESpoofIntelAtomics64.value_or_default())
         {
@@ -1586,7 +1518,7 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
         HookToDevice(createdDevice);
         _d3d12Captured = true;
 
-        State::Instance().d3d12Devices.push_back((ID3D12Device*) *ppDevice);
+        State::Instance().AddD3D12Device((ID3D12Device*) *ppDevice);
 
 #ifdef ENABLE_DEBUG_LAYER_DX12
         if (infoQueue != nullptr)
@@ -1697,16 +1629,9 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
 
     if (result == S_OK && ppDevice != nullptr && MinimumFeatureLevel != D3D_FEATURE_LEVEL_1_0_CORE)
     {
-        LOG_DEBUG("Device captured: {0:X}", (size_t) *ppDevice);
+        // Becomes current with the game's swapchain (D3D12Hooks::CaptureDevice), devices of mods are only hooked
+        LOG_DEBUG("Device created: {0:X}", (size_t) *ppDevice);
         auto* const createdDevice = (ID3D12Device*) *ppDevice;
-
-        // The Vulkan bridge's D3D12 swapchain runs on its own device, which is what State holds while it is up. A device
-        // the game makes after that (a Vulkan or dxvk game probing feature levels) is not the one the D3D12 side works on.
-        if (native::AdoptNewD3D12Device(VkPresentBridge::OutputActive()))
-            State::Instance().currentD3D12Device = createdDevice;
-        else
-            LOG_INFO("D3D12 device {:X} made while the Vulkan bridge is up: the bridge's device stays the current one",
-                     (size_t) createdDevice);
 
         if (desc.VendorId == VendorId::Intel && Config::Instance()->UESpoofIntelAtomics64.value_or_default())
         {
@@ -1723,7 +1648,7 @@ static HRESULT hkCreateDevice(ID3D12DeviceFactory* pFactory, IUnknown* pAdapter,
         HookToDevice(createdDevice);
         _d3d12Captured = true;
 
-        State::Instance().d3d12Devices.push_back((ID3D12Device*) *ppDevice);
+        State::Instance().AddD3D12Device((ID3D12Device*) *ppDevice);
 
 #ifdef ENABLE_DEBUG_LAYER_DX12
         if (infoQueue != nullptr)
@@ -1763,89 +1688,16 @@ static HRESULT hkD3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC* pR
                                              D3D_ROOT_SIGNATURE_VERSION Version, ID3DBlob** ppBlob,
                                              ID3DBlob** ppErrorBlob)
 {
-    if (pRootSignature == nullptr)
-        return o_D3D12SerializeRootSignature(pRootSignature, Version, ppBlob, ppErrorBlob);
-
-    auto localRootSignature = *pRootSignature;
-    std::vector<D3D12_STATIC_SAMPLER_DESC> localSamplers;
-
-    if (pRootSignature->NumStaticSamplers > 0)
-    {
-        localSamplers.assign(pRootSignature->pStaticSamplers,
-                             pRootSignature->pStaticSamplers + pRootSignature->NumStaticSamplers);
-    }
-
-    for (auto& sampler : localSamplers)
-    {
-        ApplySamplerOverrides(sampler);
-    }
-
-    localRootSignature.pStaticSamplers = localSamplers.data();
-
-    return o_D3D12SerializeRootSignature(&localRootSignature, Version, ppBlob, ppErrorBlob);
+    // Sampler overrides are applied when the root signature is created, applying them here too doubles the bias
+    return o_D3D12SerializeRootSignature(pRootSignature, Version, ppBlob, ppErrorBlob);
 }
 
 VALIDATE_HOOK(hkD3D12SerializeVersionedRootSignature, D3d12Proxy::PFN_D3D12SerializeVersionedRootSignature)
 static HRESULT hkD3D12SerializeVersionedRootSignature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* pRootSignature,
                                                       ID3DBlob** ppBlob, ID3DBlob** ppErrorBlob)
 {
-    if (pRootSignature == nullptr)
-        return o_D3D12SerializeVersionedRootSignature(pRootSignature, ppBlob, ppErrorBlob);
-
-    auto localVersionedRootSignature = *pRootSignature;
-    std::vector<D3D12_STATIC_SAMPLER_DESC> localSamplers;
-    std::vector<D3D12_STATIC_SAMPLER_DESC1> localSamplers1;
-
-    if (pRootSignature->Version == D3D_ROOT_SIGNATURE_VERSION_1_0)
-    {
-        if (pRootSignature->Desc_1_0.NumStaticSamplers > 0)
-        {
-            localSamplers.assign(pRootSignature->Desc_1_0.pStaticSamplers,
-                                 pRootSignature->Desc_1_0.pStaticSamplers + pRootSignature->Desc_1_0.NumStaticSamplers);
-        }
-
-        for (auto& sampler : localSamplers)
-        {
-            ApplySamplerOverrides(sampler);
-        }
-
-        localVersionedRootSignature.Desc_1_0.pStaticSamplers = localSamplers.data();
-    }
-    else if (pRootSignature->Version == D3D_ROOT_SIGNATURE_VERSION_1_1)
-    {
-        if (pRootSignature->Desc_1_1.NumStaticSamplers > 0)
-        {
-            localSamplers.assign(pRootSignature->Desc_1_1.pStaticSamplers,
-                                 pRootSignature->Desc_1_1.pStaticSamplers + pRootSignature->Desc_1_1.NumStaticSamplers);
-        }
-
-        for (auto& sampler : localSamplers)
-        {
-            ApplySamplerOverrides(sampler);
-        }
-
-        localVersionedRootSignature.Desc_1_1.pStaticSamplers = localSamplers.data();
-    }
-    else if (pRootSignature->Version == D3D_ROOT_SIGNATURE_VERSION_1_2)
-    {
-        if (pRootSignature->Desc_1_2.NumStaticSamplers > 0)
-        {
-            localSamplers1.assign(pRootSignature->Desc_1_2.pStaticSamplers,
-                                  pRootSignature->Desc_1_2.pStaticSamplers +
-                                      pRootSignature->Desc_1_2.NumStaticSamplers);
-        }
-
-        for (auto& sampler : localSamplers1)
-        {
-            ApplySamplerOverrides(sampler);
-        }
-
-        localVersionedRootSignature.Desc_1_2.pStaticSamplers = localSamplers1.data();
-    }
-
-    auto result = o_D3D12SerializeVersionedRootSignature(&localVersionedRootSignature, ppBlob, ppErrorBlob);
-
-    return result;
+    // Sampler overrides are applied when the root signature is created, applying them here too doubles the bias
+    return o_D3D12SerializeVersionedRootSignature(pRootSignature, ppBlob, ppErrorBlob);
 }
 
 VALIDATE_HOOK(hkD3D12DeviceRelease, PFN_Release)
@@ -1864,16 +1716,26 @@ static ULONG hkD3D12DeviceRelease(IUnknown* device)
 
         o_D3D12DeviceRelease(device);
     }
-    else if (State::Instance().currentD3D12Device == device)
+
+    // Any device we track (not only the game's current one): a probe device made and dropped by a launcher must
+    // leave the list, or the "no D3D12 device in the process" decisions stay false for the whole session
+    const bool isCurrent = State::Instance().currentD3D12Device == device;
+
+    if (isCurrent || State::Instance().ContainsD3D12Device(device))
     {
         device->AddRef();
         auto refCount = o_D3D12DeviceRelease(device);
 
         if (refCount == 1)
         {
-            LOG_DEBUG("Set State::Instance().currentD3D12Device = nullptr, was: {:X}", (size_t) device);
-            State::Instance().currentD3D12Device = nullptr;
-            native::lowlatency::OnDeviceReleased(device);
+            State::Instance().RemoveD3D12Device((ID3D12Device*) device);
+
+            if (isCurrent)
+            {
+                LOG_DEBUG("Set State::Instance().currentD3D12Device = nullptr, was: {:X}", (size_t) device);
+                State::Instance().currentD3D12Device = nullptr;
+                native::lowlatency::OnDeviceReleased(device);
+            }
         }
     }
 
@@ -1888,7 +1750,7 @@ static HRESULT hkCheckFeatureSupport(ID3D12Device* device, D3D12_FEATURE Feature
     auto result = o_CheckFeatureSupport(device, Feature, pFeatureSupportData, FeatureSupportDataSize);
 
     if (Config::Instance()->UESpoofIntelAtomics64.value_or_default() && Feature == D3D12_FEATURE_D3D12_OPTIONS9 &&
-        device == State::Instance().currentD3D12Device)
+        device == _intelD3D12Device)
     {
         auto featureSupport = (D3D12_FEATURE_DATA_D3D12_OPTIONS9*) pFeatureSupportData;
         LOG_INFO("Spoofing AtomicInt64OnTypedResourceSupported {} -> 1",
@@ -2218,6 +2080,8 @@ hkGetResourceAllocationInfo(ID3D12Device* device, D3D12_RESOURCE_ALLOCATION_INFO
     return pResult;
 }
 
+static thread_local bool inCreateSampler = false;
+
 VALIDATE_HOOK(hkCreateSampler, PFN_CreateSampler)
 static void hkCreateSampler(ID3D12Device* device, const D3D12_SAMPLER_DESC* pDesc,
                             D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
@@ -2226,45 +2090,28 @@ static void hkCreateSampler(ID3D12Device* device, const D3D12_SAMPLER_DESC* pDes
         return;
 
     D3D12_SAMPLER_DESC newDesc = *pDesc;
+    SamplerOverrides::Apply(newDesc);
 
-    if (Config::Instance()->AnisotropyOverride.has_value())
-    {
-        LOG_DEBUG("Overriding {2:X} to anisotropic filtering {0} -> {1}", pDesc->MaxAnisotropy,
-                  Config::Instance()->AnisotropyOverride.value(), (UINT) newDesc.Filter);
+    inCreateSampler = true;
+    o_CreateSampler(device, &newDesc, DestDescriptor);
+    inCreateSampler = false;
+}
 
-        newDesc.Filter = UpgradeToAF(pDesc->Filter);
-        newDesc.MaxAnisotropy = Config::Instance()->AnisotropyOverride.value();
-    }
-    else
-    {
-        newDesc.Filter = pDesc->Filter;
-        newDesc.MaxAnisotropy = pDesc->MaxAnisotropy;
-    }
+VALIDATE_HOOK(hkCreateSampler2, PFN_CreateSampler2)
+static void hkCreateSampler2(ID3D12Device11* device, const D3D12_SAMPLER_DESC2* pDesc,
+                             D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+    if (pDesc == nullptr || device == nullptr)
+        return;
 
-    if ((newDesc.MipLODBias < 0.0f && newDesc.MinLOD != newDesc.MaxLOD) ||
-        Config::Instance()->MipmapBiasOverrideAll.value_or_default())
-    {
-        if (Config::Instance()->MipmapBiasOverride.has_value())
-        {
-            LOG_DEBUG("Overriding mipmap bias {0} -> {1}", pDesc->MipLODBias,
-                      Config::Instance()->MipmapBiasOverride.value());
+    // Called by the runtime's CreateSampler, overrides are already applied
+    if (inCreateSampler)
+        return o_CreateSampler2(device, pDesc, DestDescriptor);
 
-            if (Config::Instance()->MipmapBiasFixedOverride.value_or_default())
-                newDesc.MipLODBias = Config::Instance()->MipmapBiasOverride.value();
-            else if (Config::Instance()->MipmapBiasScaleOverride.value_or_default())
-                newDesc.MipLODBias = newDesc.MipLODBias * Config::Instance()->MipmapBiasOverride.value();
-            else
-                newDesc.MipLODBias = newDesc.MipLODBias + Config::Instance()->MipmapBiasOverride.value();
-        }
+    D3D12_SAMPLER_DESC2 newDesc = *pDesc;
+    SamplerOverrides::Apply(newDesc);
 
-        if (State::Instance().lastMipBiasMax < newDesc.MipLODBias)
-            State::Instance().lastMipBiasMax = newDesc.MipLODBias;
-
-        if (State::Instance().lastMipBias > newDesc.MipLODBias)
-            State::Instance().lastMipBias = newDesc.MipLODBias;
-    }
-
-    return o_CreateSampler(device, &newDesc, DestDescriptor);
+    return o_CreateSampler2(device, &newDesc, DestDescriptor);
 }
 
 VALIDATE_HOOK(hkCreateRootSignature, PFN_CreateRootSignature)
@@ -2364,7 +2211,7 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
                             descCopy.Desc_1_0.pStaticSamplers + descCopy.Desc_1_0.NumStaticSamplers);
 
             for (auto& s : samplers)
-                ApplySamplerOverrides(s);
+                SamplerOverrides::Apply(s, true);
 
             descCopy.Desc_1_0.pStaticSamplers = samplers.data();
         }
@@ -2377,7 +2224,7 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
                             descCopy.Desc_1_1.pStaticSamplers + descCopy.Desc_1_1.NumStaticSamplers);
 
             for (auto& s : samplers)
-                ApplySamplerOverrides(s);
+                SamplerOverrides::Apply(s, true);
 
             descCopy.Desc_1_1.pStaticSamplers = samplers.data();
         }
@@ -2390,7 +2237,7 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
                              descCopy.Desc_1_2.pStaticSamplers + descCopy.Desc_1_2.NumStaticSamplers);
 
             for (auto& s : samplers1)
-                ApplySamplerOverrides(s);
+                SamplerOverrides::Apply(s, true);
 
             descCopy.Desc_1_2.pStaticSamplers = samplers1.data();
         }
@@ -2445,7 +2292,8 @@ static HRESULT hkD3D12GetInterface(REFCLSID rclsid, REFIID riid, void** ppvDebug
 
     auto result = o_D3D12GetInterface(rclsid, riid, ppvDebug);
 
-    if (rclsid == CLSID_D3D12DeviceFactory && o_CreateDevice == nullptr)
+    if (SUCCEEDED(result) && ppvDebug != nullptr && *ppvDebug != nullptr && rclsid == CLSID_D3D12DeviceFactory &&
+        o_CreateDevice == nullptr)
     {
         auto deviceFactory = (ID3D12DeviceFactory*) *ppvDebug;
 
@@ -2539,6 +2387,14 @@ static void HookToDevice(ID3D12Device* InDevice)
         device12_1->Release();
     }
 
+    // Older runtimes don't have the slot
+    ID3D12Device11* device11 = nullptr;
+    if ((realDevice != nullptr ? realDevice : InDevice)->QueryInterface(IID_PPV_ARGS(&device11)) == S_OK)
+    {
+        o_CreateSampler2 = (PFN_CreateSampler2) (*(PVOID**) device11)[79];
+        device11->Release();
+    }
+
     // Apply the detour
     if (o_CreateSampler != nullptr)
     {
@@ -2547,6 +2403,9 @@ static void HookToDevice(ID3D12Device* InDevice)
 
         if (o_CreateSampler != nullptr)
             DetourAttach(&(PVOID&) o_CreateSampler, hkCreateSampler);
+
+        if (o_CreateSampler2 != nullptr)
+            DetourAttach(&(PVOID&) o_CreateSampler2, hkCreateSampler2);
 
         if (o_CreateRootSignature != nullptr)
             DetourAttach(&(PVOID&) o_CreateRootSignature, hkCreateRootSignature);
@@ -2597,6 +2456,7 @@ static void HookToDevice(ID3D12Device* InDevice)
         {
             LOG_ERROR("Failed to detour ID3D12Device methods, error: {:X}", detourResult);
             o_CreateSampler = nullptr;
+            o_CreateSampler2 = nullptr;
             o_CheckFeatureSupport = nullptr;
             o_CreateRootSignature = nullptr;
             o_CreateCommittedResource = nullptr;
@@ -2669,6 +2529,9 @@ static void UnhookDevice()
     if (o_CreateSampler != nullptr)
         DetourDetach(&(PVOID&) o_CreateSampler, hkCreateSampler);
 
+    if (o_CreateSampler2 != nullptr)
+        DetourDetach(&(PVOID&) o_CreateSampler2, hkCreateSampler2);
+
     if (o_CreateRootSignature != nullptr)
         DetourDetach(&(PVOID&) o_CreateRootSignature, hkCreateRootSignature);
 
@@ -2710,6 +2573,7 @@ static void UnhookDevice()
     else
     {
         o_CreateSampler = nullptr;
+        o_CreateSampler2 = nullptr;
         o_CheckFeatureSupport = nullptr;
         o_CreateCommittedResource = nullptr;
         o_CreatePlacedResource = nullptr;
@@ -2781,6 +2645,9 @@ void D3D12Hooks::Unhook()
     if (o_CreateSampler != nullptr)
         DetourDetach(&(PVOID&) o_CreateSampler, hkCreateSampler);
 
+    if (o_CreateSampler2 != nullptr)
+        DetourDetach(&(PVOID&) o_CreateSampler2, hkCreateSampler2);
+
     if (o_CheckFeatureSupport != nullptr)
         DetourDetach(&(PVOID&) o_CheckFeatureSupport, hkCheckFeatureSupport);
 
@@ -2819,6 +2686,7 @@ void D3D12Hooks::Unhook()
     else
     {
         o_CreateSampler = nullptr;
+        o_CreateSampler2 = nullptr;
         o_CheckFeatureSupport = nullptr;
         o_CreateCommittedResource = nullptr;
         o_CreatePlacedResource = nullptr;
@@ -2836,8 +2704,21 @@ void D3D12Hooks::SetRootSignatureTracking(bool enable) { isUpscalerActive = !ena
 
 bool D3D12Hooks::CanRestoreRootSignature(ID3D12GraphicsCommandList* cmdList)
 {
-    std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
-    return signatures.contains(cmdList);
+    // A list with only heaps or a pipeline recorded (no root signature yet) is restorable too
+    {
+        std::unique_lock<std::shared_mutex> lock(rootSignatureMutex);
+        if (signatures.contains(cmdList))
+            return true;
+    }
+    {
+        std::unique_lock<std::shared_mutex> lock(descriptorHeapsMutex);
+        if (descriptorHeaps.contains(cmdList))
+            return true;
+    }
+    {
+        std::unique_lock<std::shared_mutex> lock(pipelineStatesMutex);
+        return pipelineStates.contains(cmdList);
+    }
 }
 
 bool D3D12Hooks::RestoreDescriptorHeaps(ID3D12GraphicsCommandList* cmdList)
@@ -3043,7 +2924,7 @@ void D3D12Hooks::RestoreRoot(ID3D12GraphicsCommandList* cmdList)
                 if (RestoreDescriptorHeaps(cmdList))
                     LOG_TRACE("Restored DescriptorHeaps for CmdList: {:X}", (UINT64) cmdList);
                 else
-                    LOG_WARN("Can't restore DescriptorHeaps for CmdList: {:X}", (UINT64) cmdList);
+                    LOG_TRACE("Can't restore DescriptorHeaps for CmdList: {:X}", (UINT64) cmdList);
             }
 
             if (signature.type == SignatureEntryType::Compute)
@@ -3088,6 +2969,17 @@ void D3D12Hooks::RestoreRoot(ID3D12GraphicsCommandList* cmdList)
                     LOG_TRACE("Can't restore PipelineState for CmdList: {:X}", (UINT64) cmdList);
             }
         }
+        else if (Config::Instance()->ExtendedStateRestore.value_or_default())
+        {
+            // Heaps and PSO are restored even when no root signature was set
+            LOG_TRACE("No Root Signature recorded for CmdList: {:X}, restoring heaps and PSO only", (UINT64) cmdList);
+
+            if (RestoreDescriptorHeaps(cmdList))
+                LOG_TRACE("Restored DescriptorHeaps for CmdList: {:X}", (UINT64) cmdList);
+
+            if (RestorePipelineState(cmdList))
+                LOG_TRACE("Restored PipelineState for CmdList: {:X}", (UINT64) cmdList);
+        }
         else
         {
             LOG_TRACE("Can't restore Root Signature for CmdList: {:X}", (UINT64) cmdList);
@@ -3096,3 +2988,21 @@ void D3D12Hooks::RestoreRoot(ID3D12GraphicsCommandList* cmdList)
 }
 
 void D3D12Hooks::HookDevice(ID3D12Device* device) { HookToDevice(device); }
+
+// The game's swapchain is made on this queue: its device is the current one
+void D3D12Hooks::CaptureDevice(ID3D12CommandQueue* queue)
+{
+    ID3D12Device* device = nullptr;
+    if (queue == nullptr || queue->GetDevice(IID_PPV_ARGS(&device)) != S_OK || device == nullptr)
+        return;
+
+    // The Vulkan bridge's D3D12 swapchain runs on its own device, which is what State holds while it is up
+    if (State::Instance().currentD3D12Device != device && native::AdoptNewD3D12Device(VkPresentBridge::OutputActive()))
+    {
+        LOG_INFO("Captured D3D12 device from command queue: {:X}", (size_t) device);
+        State::Instance().currentD3D12Device = device;
+        HookToDevice(device);
+    }
+
+    device->Release();
+}

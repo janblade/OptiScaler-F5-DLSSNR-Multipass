@@ -70,7 +70,7 @@ static bool CreateDLSSContext(xess_context_handle_t handle, VkCommandBuffer comm
         break;
 
     case XESS_QUALITY_SETTING_PERFORMANCE:
-        params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxQuality);
+        params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
         break;
 
     case XESS_QUALITY_SETTING_BALANCED:
@@ -269,6 +269,10 @@ xess_result_t hk_xessVKExecute(xess_context_handle_t hContext, VkCommandBuffer c
         CreateNVRes(&pExecParams->exposureScaleTexture, &expNVRes[index]);
         params->Set(NVSDK_NGX_Parameter_ExposureTexture, &expNVRes[index]);
     }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_ExposureTexture, (void*) nullptr);
+    }
 
     if (pExecParams->responsivePixelMaskTexture.image != nullptr)
     {
@@ -279,6 +283,11 @@ xess_result_t hk_xessVKExecute(xess_context_handle_t hContext, VkCommandBuffer c
             params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &biasNVRes[index]);
         else
             params->Set("FSR.reactive", &biasNVRes[index]);
+    }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) nullptr);
+        params->Set("FSR.reactive", (void*) nullptr);
     }
 
     if (pExecParams->colorTexture.image == nullptr)
@@ -362,6 +371,10 @@ xess_result_t hk_xessVKGetResourcesToDump(xess_context_handle_t hContext,
                                           xess_vk_resources_to_dump_t** pResourcesToDump)
 {
     LOG_DEBUG("");
+
+    if (pResourcesToDump != nullptr)
+        *pResourcesToDump = nullptr;
+
     return XESS_RESULT_SUCCESS;
 }
 

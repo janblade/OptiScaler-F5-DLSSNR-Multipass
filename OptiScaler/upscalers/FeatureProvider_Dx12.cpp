@@ -157,6 +157,10 @@ bool FeatureProvider_Dx12::ChangeFeature(Upscaler upscaler, ID3D12Device* device
             // Use given params if using DLSS passthrough
             const bool isPassthrough = backend == Upscaler::DLSSD || backend == Upscaler::DLSS;
 
+            // A retry after a failed init still has the previous ones
+            if (!contextData->createParamsFromGame)
+                TryDestroyNGXParameters(contextData->createParams, NVNGXProxy::D3D12_DestroyParameters());
+
             contextData->createParams = isPassthrough ? parameters : GetNGXParameters(API::DX12, false);
             contextData->createParamsFromGame = isPassthrough;
             contextData->createParams->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, dc->GetFeatureFlags());

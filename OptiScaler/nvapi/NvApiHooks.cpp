@@ -13,6 +13,10 @@
 #include <misc/IdentifyGpu.h>
 #include <framegen/nvngx/DlssgPresetSupport.h>
 #include <low_latency/input/input_reflex.h>
+#include <nvapi/CallerModule.h>
+#include <nvapi/DrsCallerRule.h>
+
+#include <atomic>
 
 // #define LOG_ALL_DRS_GET_CALLS
 
@@ -149,6 +153,20 @@ NvAPI_Status __stdcall NvApiHooks::hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSe
             // result for this process only, not the saved NVIDIA driver profile.
             pSetting->u32CurrentValue = 0;
             LOG_INFO("KCD2: use installed Streamline instead of OTA override");
+        }
+
+        // f5low's private Streamline (Frame Generator DLSS-G) loads its own files, never the NVIDIA app's override
+        // plugins (DrsCallerRule.h). Only the caller's answer changes: the game's Streamline keeps the override.
+        if (settingId == drscaller::kStreamlineOtaOverrideId && pSetting->version == NVDRS_SETTING_VER &&
+            pSetting->settingType == NVDRS_DWORD_TYPE && pSetting->u32CurrentValue != 0 &&
+            drscaller::AnswerOtaOverrideOff(settingId, CallerModuleFileName(_ReturnAddress())))
+        {
+            pSetting->u32CurrentValue = 0;
+
+            static std::atomic<bool> logged { false };
+            if (!logged.exchange(true))
+                LOG_INFO("f5low's Streamline: the NVIDIA app's Streamline override is on; f5low's DLSS-G uses its own "
+                         "files instead of the override plugins (the game keeps the override)");
         }
 #ifdef LOG_ALL_DRS_GET_CALLS
         LOG_TRACE("settingId: {:X}, settingLocation: {}, isCurrentPredefined: {}", settingId,

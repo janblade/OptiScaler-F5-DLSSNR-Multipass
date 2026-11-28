@@ -4351,7 +4351,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                     {
                         config->FGUIPremultipliedAlpha = uiPremultipliedAlpha;
                     }
-                    ShowHelpMarker("Only with Draw UI over. If the UI looks too faint, turn this off");
+                    ShowHelpMarker("Only with Draw UI over. If the UI looks too bright, turn this off");
 
                     ImGui::EndDisabled();
                     ImGui::EndTable();
@@ -7139,6 +7139,11 @@ void MenuCommon::RenderFakenvapiSettings(RenderMenuContext& ctx)
 // The F5LUT page. Its code lives with NR's menu (it also grades after NR); it runs on any upscaler's output.
 void MenuCommon::RenderF5LutSettings(RenderMenuContext& ctx) { DlssNr::RenderF5LutCard(ctx.config, ctx.menuResScale); }
 
+void MenuCommon::RenderPostProcessingSettings(RenderMenuContext& ctx)
+{
+    DlssNr::RenderPostProcessingCard(ctx.config, ctx.menuResScale);
+}
+
 // HDR output for SDR games (output/SdrToHdr_*). Always shown, with or without an upscaler.
 void MenuCommon::RenderHdrOutputSettings(RenderMenuContext& ctx)
 {
@@ -8074,7 +8079,7 @@ void MenuCommon::RenderLoggingSettings(RenderMenuContext& ctx)
         }
 
         const char* logLevels[] = { "Trace", "Debug", "Information", "Warning", "Error" };
-        const char* selectedLevel = logLevels[config->LogLevel.value_or_default()];
+        const char* selectedLevel = logLevels[std::clamp(config->LogLevel.value_or_default(), 0, 4)];
 
         if (ImGui::BeginCombo("Log Level", selectedLevel))
         {
@@ -9146,6 +9151,7 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
         }
 
         navItem(Page::F5Lut);
+        navItem(Page::PostProcessing);
         navItem(Page::Image);
         navItem(Page::OverlayLook);
         navItem(Page::Input);
@@ -9196,6 +9202,9 @@ void MenuCommon::RenderMainMenuPages(RenderMenuContext& ctx)
             break;
         case Page::F5Lut:
             section(RenderF5LutSettings);
+            break;
+        case Page::PostProcessing:
+            section(RenderPostProcessingSettings);
             break;
         case Page::Framerate:
             section(RenderFramerateLowLatency);

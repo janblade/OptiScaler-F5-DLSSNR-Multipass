@@ -49,6 +49,10 @@ class FGHooks
     // the Vulkan bridge manages its windows itself.
     static bool IsOtherWindowThanFG(HWND hwnd);
 
+    // Releases a kept FG swapchain the game dropped (FGPreserveSwapChain), when a swapchain is created for another
+    // window or queue
+    static void ReleaseUnusableFGSwapchain(HWND hwnd, IUnknown* pDevice);
+
     // While the Vulkan bridge makes its chain (DxgiFactoryHooks::CreateDx12BridgeSwapChain), the frame generation
     // library's inner creates on this thread are never another window's: the bridge manages its windows itself (RDR2
     // moves to a new one after start)
@@ -94,7 +98,12 @@ class FGHooks
     inline static bool _skipPresent1 = false;
     inline static UINT _lastPresentFlags = 0;
     inline static double _lastFGFrameTime = -1.0;
-    inline static std::shared_mutex _resizeMutex;
+    inline static bool _skipReleaseChecks = false;
+
+    // The swapchain the game released while FGPreserveSwapChain keeps it (FSR FG and XeFG release it with their
+    // swapchain context), and the references the FG library itself holds on it
+    inline static IUnknown* _releasedFGSwapchain = nullptr;
+    inline static ULONG _fgSwapchainBaseRefs = 0;
 
     // The window style and size that stand in for exclusive fullscreen when FGXeFGForceBorderless is on. Applied from
     // the window thread's message loop instead of inside the game's SetFullscreenState / ResizeBuffers call: the window
@@ -138,6 +147,7 @@ class FGHooks
     static LRESULT CALLBACK RestyleMessageHook(int code, WPARAM wParam, LPARAM lParam);
 
     static void HookFGSwapchain(IDXGISwapChain* pSwapChain);
+    static void ReleaseFGSwapchain(IUnknown* swapchain, bool releaseReferences);
 
     static HRESULT hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDXGIOutput* pTarget);
     static HRESULT hkGetFullscreenDesc(IDXGISwapChain1* This, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc);

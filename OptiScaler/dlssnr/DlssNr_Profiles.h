@@ -116,6 +116,15 @@ inline constexpr std::string_view kKeptKeys[] = {
     "InputStyleFacesOnly",
     "LutFile",
     "LutStrength",
+    "LutSource",
+    "LutExposure",
+    "LutBrightness",
+    "LutGamma",
+    "LutBlacks",
+    "LutWhites",
+    "LutContrast",
+    "LutTemperature",
+    "LutSaturation",
     "PostLutFile1",
     "PostLutStrength1",
     "PostLutFile2",
@@ -193,6 +202,8 @@ inline constexpr std::string_view kLeftOutKeys[] = {
     // the rig's, not the look: which view of a multi-monitor layout NR works on
     "MultiViewScreens",
     "SecondaryFeatures",
+    // a crash workaround for this PC and driver (Finished Picture GPU wait), not part of the look
+    "FinishedGpuWait",
     // Native blend and what it replaced (DlssNr_NativeBlend.h): the player's own switch with its put-back
     // values. A profile loaded while it is on ends it (the profile's own placement, curve and skin settings no longer
     // match), so these must not travel with a profile.

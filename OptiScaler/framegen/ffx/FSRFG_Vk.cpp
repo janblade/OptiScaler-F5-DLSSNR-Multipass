@@ -614,7 +614,7 @@ bool FSRFG_Vk::UsesDriver() const { return _ffxSwapchain == FSR4DriverProviderVk
 
 void FSRFG_Vk::DestroyFGContext()
 {
-    Deactivate();
+    Disable();
 
     if (_fgContext == nullptr)
         return;
@@ -710,7 +710,7 @@ void FSRFG_Vk::EvaluateState(FG_Constants& fgConstants)
     else
     {
         if (IsActive())
-            Deactivate();
+            Disable();
 
         // The change flags are cleared below, so a pending recreation (e.g. FFX FG version) must happen now
         if (state.scChanged)
@@ -820,7 +820,18 @@ bool FSRFG_Vk::Dispatch()
         // The HUD shaders change and read our copy.
         if (hudless->format != _swapchainFormat || HudCutoffThreshold().has_value() || state.fgHudlessCompare)
         {
-            _hudlessInCopy[fIndex] = CopyImage(cmdBuffer, *hudless, _hudlessCopies[fIndex], _swapchainFormat);
+            // Already copied by SetResource in the right format, no need for another one
+            if (auto own = OwnCopy(*hudless, (int) fIndex); own != nullptr && hudless->format == _swapchainFormat)
+            {
+                DestroyCopy(_hudlessCopies[fIndex]);
+                _hudlessTarget[fIndex] = *own;
+                _hudlessInCopy[fIndex] = true;
+            }
+            else
+            {
+                _hudlessInCopy[fIndex] = CopyImage(cmdBuffer, *hudless, _hudlessCopies[fIndex], _swapchainFormat);
+                _hudlessTarget[fIndex] = _hudlessCopies[fIndex];
+            }
 
             if (!_hudlessInCopy[fIndex])
                 hudless.reset();
@@ -966,7 +977,7 @@ void FSRFG_Vk::DispatchHudShaders(ffxDispatchDescFrameGeneration* params)
         return;
     }
 
-    auto& copy = _hudlessCopies[fIndex];
+    auto& copy = _hudlessTarget[fIndex];
     auto hudlessInfo = GetImageInfo(copy.image, copy.view, copy.format, copy.width, copy.height);
     const auto hudlessLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 

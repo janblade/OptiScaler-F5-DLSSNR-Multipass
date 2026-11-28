@@ -26,7 +26,7 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
   public:
     // `plan` is HDR output's decision for this chain (output/SdrToHdr_Create.h); null: the chain is not touched by it.
     WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP,
-                          bool isComposition = false, const SdrToHdr::Plan* plan = nullptr);
+                           bool isComposition = false, const SdrToHdr::Plan* plan = nullptr, IUnknown* owner = nullptr);
     virtual ~WrappedIDXGISwapChain4();
 
     // Made on another window while frame generation's swapchain lived (FGHooks::IsOtherWindowThanFG): while that one
@@ -103,6 +103,9 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
 
   private:
     IDXGISwapChain* _real = nullptr;
+
+    // Object the game got from creation, a Streamline proxy owns the real swapchain
+    IUnknown* _owner = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
     IDXGISwapChain2* _real2 = nullptr;
     IDXGISwapChain3* _real3 = nullptr;

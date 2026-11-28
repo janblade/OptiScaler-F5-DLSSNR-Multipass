@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "IFeature_Dx11.h"
 #include <State.h>
+#include <misc/DeferredRelease.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 
 using Microsoft::WRL::ComPtr;
@@ -31,7 +32,9 @@ bool IFeature_Dx11::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InContext,
 
         OutputScaler = std::make_unique<OS_Dx11>("Output Scaling", InDevice, (TargetWidth() < DisplayWidth()));
         RCAS = std::make_unique<RCAS_Dx11>("RCAS", InDevice);
-        Bias = std::make_unique<Bias_Dx11>("Bias", InDevice); // TODO: not needed on DLSS/DLSSD
+        // DLSS/DLSSD take the bias mask as is
+        if (GetUpscalerType() != Upscaler::DLSS && GetUpscalerType() != Upscaler::DLSSD)
+            Bias = std::make_unique<Bias_Dx11>("Bias", InDevice);
         Magnifier = std::make_unique<Magnifier_Dx11>("Magnifier", InDevice);
         F5Lut = std::make_unique<F5Lut_Dx11>("F5LUT", InDevice);
 
@@ -45,6 +48,9 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
 {
     // The D3D11 depth finder only runs while the game is not calling an upscaler.
     GenericDepthDx11::NoteUpscalerCall();
+
+    // Frees deferred objects even when presents aren't hooked
+    DeferredRelease::Collect();
 
     auto result = true;
 
@@ -312,6 +318,9 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
 
     UpscalerTime->End(InDeviceContext);
 
+    // The game's own output goes back on every exit
+    InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
+
     if (!evalResult)
         result = false;
 
@@ -350,8 +359,6 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
                 Imgui = std::make_unique<Menu_Dx11>(GetForegroundWindow(), Device);
         }
     }
-
-    InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
 
     // Restore null bindings too, but batch the API calls rather than adding hundreds of
     // per-slot calls to the ordinary D3D11 path.

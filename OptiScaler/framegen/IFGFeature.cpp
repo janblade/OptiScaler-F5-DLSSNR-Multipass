@@ -167,6 +167,12 @@ int IFGFeature::GetDispatchIndex(UINT64& willDispatchFrame)
 
 bool IFGFeature::IsActive() { return _isActive || _waitingNewFrameData; }
 
+void IFGFeature::Disable()
+{
+    Deactivate();
+    _waitingNewFrameData = false;
+}
+
 bool IFGFeature::IsPaused() { return _targetFrame != 0 && _targetFrame >= _frameCount; }
 
 bool IFGFeature::IsGenerating() { return _isActive && !_waitingNewFrameData && !IsPaused() && !_generationOff; }
@@ -200,6 +206,14 @@ void IFGFeature::SetFrameCount(UINT64 frameId)
     //    LOG_TRACE("Prevented setting frame count! Old: {}, New: {}", _frameCount, frameId);
     //}
 
+    // XeFG's API (f5low too) needs increasing frame ids, so it's only moved forward until its context is destroyed
+    if (frameId < _frameCount && UsesXeFGApi(State::Instance().activeFgOutput) && !_allowLowerFrameId)
+    {
+        LOG_TRACE("Prevented setting frame count! Old: {}, New: {}", _frameCount, frameId);
+        return;
+    }
+
+    _allowLowerFrameId = false;
     _frameCount = frameId;
 }
 

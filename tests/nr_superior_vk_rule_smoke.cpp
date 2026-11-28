@@ -58,13 +58,13 @@ int main()
     atNative.detailReuse = true;
     check(Decide(atNative) == Outcome::DetailReuse, "at native with Reuse detail running: Matched residual");
     // StabilizeAtNative itself: which frames give atNative on (the same function D3D12 calls).
-    check(StabilizeAtNative(true, 1.0f, false, 1u, false), "100%, CNN: at native");
-    check(StabilizeAtNative(true, 1.2f, false, 11u, false), "120%, Transformer: at native");
-    check(!StabilizeAtNative(true, 1.0f, false, 0u, false), "No DLSS: Matched residual at 100%");
-    check(!StabilizeAtNative(false, 1.0f, false, 1u, false), "Also at 100% off: Matched residual");
-    check(!StabilizeAtNative(true, 1.0f, true, 1u, false), "Compress screen edges: its own rule");
-    check(!StabilizeAtNative(true, 1.0f, false, 1u, true), "no NGX DLSS: Matched residual");
-    check(!StabilizeAtNative(true, 0.8f, false, 1u, false), "below 100%: the reduced path, not at native");
+    check(StabilizeAtNative(true, 1.0f, false, false, 1u, false), "100%, CNN: at native");
+    check(StabilizeAtNative(true, 1.2f, false, false, 11u, false), "120%, Transformer: at native");
+    check(!StabilizeAtNative(true, 1.0f, false, false, 0u, false), "No DLSS: Matched residual at 100%");
+    check(!StabilizeAtNative(false, 1.0f, false, false, 1u, false), "Also at 100% off: Matched residual");
+    check(!StabilizeAtNative(true, 1.0f, true, false, 1u, false), "Compress screen edges: Vulkan passes not supersampled (VkRule Packed)");
+    check(!StabilizeAtNative(true, 1.0f, false, false, 1u, true), "no NGX DLSS: Matched residual");
+    check(!StabilizeAtNative(true, 0.8f, false, false, 1u, false), "below 100%: the reduced path, not at native");
     check(StabilizeSupersampled(true, 1920, 1080, 2304, 1296) && !StabilizeSupersampled(true, 1920, 1080, 1920, 1080) &&
               !StabilizeSupersampled(false, 1920, 1080, 2304, 1296),
           "supersampling only above native, under at native");

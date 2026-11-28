@@ -5,6 +5,7 @@
 #include "Config.h"
 #include "resource.h"
 #include "NVNGX_Parameter.h"
+#include <proxies/NVNGX_Proxy.h>
 
 #include <proxies/KernelBase_Proxy.h>
 
@@ -256,7 +257,7 @@ static FfxErrorCode ffxFsr2ContextDispatch_Dx11(FfxFsr2Context* context,
     LOG_DEBUG("");
 
     // Skip OptiScaler stuff
-    if (!Config::Instance()->UseFsr2Inputs.value_or_default())
+    if (!Config::Instance()->UseFsr2Inputs.value_or_default() || !_nvParams.contains(context))
     {
         _skipDispatch = true;
         LOG_DEBUG("UseFsr2Inputs not enabled, skipping");
@@ -327,7 +328,11 @@ static FfxErrorCode ffxFsr2ContextDestroy_Dx11(FfxFsr2Context* context)
         NVSDK_NGX_D3D11_ReleaseFeature(_contexts[context]);
 
     _contexts.erase(context);
-    _nvParams.erase(context);
+    if (auto it = _nvParams.find(context); it != _nvParams.end())
+    {
+        TryDestroyNGXParameters(it->second, NVNGXProxy::D3D11_DestroyParameters());
+        _nvParams.erase(it);
+    }
     _initParams.erase(context);
 
     _skipDestroy = true;

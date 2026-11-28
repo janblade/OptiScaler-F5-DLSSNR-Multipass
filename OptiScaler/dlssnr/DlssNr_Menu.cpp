@@ -54,6 +54,7 @@
 #include "DlssNr_TierPlacement.h"
 #include "DlssNr_LutStatus.h"
 #include "DlssNr_LutChain.h"
+#include "DlssNr_LutCustom.h"
 #include "DlssNrDetailReuseHost.h"
 
 #include <string>
@@ -4766,7 +4767,16 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     }
 
     // Open while a setting in them is on, so it is not hidden
-    const bool lutOn = !config->DlssNrLutFile.value_or_default().empty();
+    const bool lutOn = config->DlssNrLutSource.value_or_default() == 1u ||
+                       !config->DlssNrLutFile.value_or_default().empty() ||
+                       !DlssNr::IsNeutralCustomLut({ config->DlssNrLutExposure.value_or_default(),
+                                                     config->DlssNrLutBrightness.value_or_default(),
+                                                     config->DlssNrLutGamma.value_or_default(),
+                                                     config->DlssNrLutBlacks.value_or_default(),
+                                                     config->DlssNrLutWhites.value_or_default(),
+                                                     config->DlssNrLutContrast.value_or_default(),
+                                                     config->DlssNrLutTemperature.value_or_default(),
+                                                     config->DlssNrLutSaturation.value_or_default() });
 
     if (NrCard card("Input LUT##card", menuResScale, lutOn); card.IsOpen())
         RenderLutSection(config);
@@ -4881,8 +4891,10 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 "Off: the DLSS above steadies NR only while Model resolution is below 100%.\n"
                 "On: it also runs at 100% and above. Above 100% NR still works at the larger size; its result "
                 "is brought back to the screen's size first and the DLSS steadies that. Costs the DLSS's time at "
-                "full screen size. Not with Compress screen edges, which has its own rule. Like below 100%, "
-                "Superior's own composition then leaves out Depth fade. On native Vulkan too, in one NR pass.");
+                "full screen size. Above 100% this also works with Compress screen edges; at exactly 100% "
+                "compression keeps its own rule. Like below 100%, Superior's own composition then leaves out Depth "
+                "fade. On native "
+                "Vulkan too, in one NR pass and without Compress screen edges.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
             if (nr.vulkan)
@@ -5909,6 +5921,115 @@ void RenderF5LutCard(Config* config, float menuResScale)
     // Its own page, so the card starts open.
     if (NrCard card("LUT stack##f5lut", menuResScale); card.IsOpen())
         RenderPostLutSection(config);
+}
+
+void RenderPostProcessingCard(Config* config, float menuResScale)
+{
+    const bool customOn = config->DlssNrLutSource.value_or_default() == 1u &&
+                          !DlssNr::IsNeutralCustomLut({ config->DlssNrLutExposure.value_or_default(),
+                                                        config->DlssNrLutBrightness.value_or_default(),
+                                                        config->DlssNrLutGamma.value_or_default(),
+                                                        config->DlssNrLutBlacks.value_or_default(),
+                                                        config->DlssNrLutWhites.value_or_default(),
+                                                        config->DlssNrLutContrast.value_or_default(),
+                                                        config->DlssNrLutTemperature.value_or_default(),
+                                                        config->DlssNrLutSaturation.value_or_default() });
+
+    if (NrCard card("Custom adjustments##postprocessing", menuResScale, customOn); card.IsOpen())
+    {
+        bool enabled = config->DlssNrLutSource.value_or_default() == 1u;
+        if (ImGui::Checkbox("Enable custom post-processing adjustments##postprocessingenable", &enabled))
+            config->DlssNrLutSource = enabled ? 1u : 0u;
+        HelpMarker("Applies custom adjustments to the final image as post-processing. 0/middle is neutral.");
+
+        if (enabled)
+        {
+            float strength = config->DlssNrLutStrength.value_or_default();
+            if (ImGui::SliderFloat("Strength##poststrength", &strength, 0.0f, 1.0f, "%.2f"))
+                config->DlssNrLutStrength = strength;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##poststrength"))
+                config->DlssNrLutStrength = 1.0f;
+            HelpMarker("How much of the custom adjustments is applied to the final image.");
+
+            auto slider = [&](const char* label, const char* resetId, CustomOptional<float>& opt, float minV, float maxV,
+                              const char* fmt, const char* tip)
+            {
+                float v = opt.value_or_default();
+                if (ImGui::SliderFloat(label, &v, minV, maxV, fmt))
+                    opt = std::clamp(v, minV, maxV);
+                ImGui::SameLine();
+                if (ImGui::SmallButton(resetId))
+                    opt = 0.0f;
+                HelpMarker(tip);
+            };
+
+            slider("Exposure##postexp", "Reset##postexp", config->DlssNrLutExposure, -3.0f, 3.0f, "%.2f EV",
+                   "Exposure in EV. 0 = neutral.");
+            slider("Brightness##postbri", "Reset##postbri", config->DlssNrLutBrightness, -1.0f, 1.0f, "%.2f",
+                   "Brightness offset. 0 = neutral.");
+            slider("Gamma##postgamma", "Reset##postgamma", config->DlssNrLutGamma, -1.0f, 1.0f, "%.2f",
+                   "Gamma curve. Positive brightens midtones, negative darkens midtones. 0 = neutral.");
+            slider("Blacks##postblack", "Reset##postblack", config->DlssNrLutBlacks, -1.0f, 1.0f, "%.2f",
+                   "Black level. Positive lifts blacks, negative crushes blacks. 0 = neutral.");
+            slider("Whites##postwhite", "Reset##postwhite", config->DlssNrLutWhites, -1.0f, 1.0f, "%.2f",
+                   "White level. Positive lowers white point, negative raises it. 0 = neutral.");
+            slider("Contrast##postcontrast", "Reset##postcontrast", config->DlssNrLutContrast, -1.0f, 1.0f, "%.2f",
+                   "Contrast around mid gray. 0 = neutral.");
+            slider("Temperature##posttemp", "Reset##posttemp", config->DlssNrLutTemperature, -1.0f, 1.0f, "%.2f",
+                   "Color temperature. Negative = cooler, positive = warmer. 0 = neutral.");
+            slider("Saturation##postsat", "Reset##postsat", config->DlssNrLutSaturation, -1.0f, 1.0f, "%.2f",
+                   "Color saturation. -1 = grayscale, 0 = neutral, 1 = more saturated.");
+
+            if (ImGui::SmallButton("Reset all custom adjustments##postresetall"))
+            {
+                config->DlssNrLutExposure = 0.0f;
+                config->DlssNrLutBrightness = 0.0f;
+                config->DlssNrLutGamma = 0.0f;
+                config->DlssNrLutBlacks = 0.0f;
+                config->DlssNrLutWhites = 0.0f;
+                config->DlssNrLutContrast = 0.0f;
+                config->DlssNrLutTemperature = 0.0f;
+                config->DlssNrLutSaturation = 0.0f;
+            }
+
+            const auto postStatus = DlssNr::ReadPostLutStatus();
+            if (ImGui::TreeNode("Status##postlut"))
+            {
+                const float lutSlot = StatusSlotBegin();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                if (!postStatus.seen)
+                    ImGui::TextWrapped("Waiting for a frame.");
+                else if (!postStatus.wanted)
+                    ImGui::TextWrapped("Custom adjustments neutral (no effect).");
+                else if (postStatus.loaded)
+                    ImGui::TextWrapped("Active: %s", postStatus.chain.empty() ? "<custom adjustments>" : postStatus.chain.c_str());
+                else if (!postStatus.error.empty())
+                    ImGui::TextWrapped("Not applied.");
+                else
+                    ImGui::TextWrapped("Not applied.");
+                ImGui::PopStyleColor();
+
+                if (!postStatus.error.empty())
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
+                    ImGui::TextWrapped("%s%s%s",
+                                       postStatus.failedPath.empty() ? "" : postStatus.failedPath.c_str(),
+                                       postStatus.failedPath.empty() ? "" : ": ",
+                                       postStatus.error.c_str());
+                    ImGui::PopStyleColor();
+                }
+                if (!postStatus.note.empty())
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("%s", postStatus.note.c_str());
+                    ImGui::PopStyleColor();
+                }
+                StatusSlotEnd(lutSlot, 5);
+                ImGui::TreePop();
+            }
+        }
+    }
 }
 
 void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)

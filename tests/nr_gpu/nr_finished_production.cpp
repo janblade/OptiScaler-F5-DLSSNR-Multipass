@@ -24,6 +24,8 @@ struct Config
     static Config* Instance() { static Config value; return &value; }
 };
 #include "../../OptiScaler/shaders/Shader_Dx12Utils.h"
+// The present-counted queue is not linked here; the test waits for the GPU before it frees, so release at once
+namespace DeferredRelease { void Enqueue(std::function<void()> destroy, uint64_t) { destroy(); } }
 #include "../../OptiScaler/shaders/dlssnr/DlssNr_FinishedRaster.h"
 #include "../../OptiScaler/native/GpuMarker.h" // DispatchResidualPass names its dispatch for DRED (off here)
 #include <format>

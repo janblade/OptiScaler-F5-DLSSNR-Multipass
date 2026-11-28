@@ -13,6 +13,7 @@
 #include <hooks/Streamline_Hooks.h>
 #include <native/NativeLowLatency.h>
 #include <hooks/DxgiFactory_Hooks.h>
+#include <misc/DeferredRelease.h>
 
 #include <magic_enum.hpp>
 
@@ -46,8 +47,13 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
                               desc->BufferCount, desc->BufferDesc.Width, desc->BufferDesc.Height,
                               desc->BufferDesc.Format, desc->Flags) == S_OK;
 
+            if (!result)
+                return false;
+
             *swapChain = State::Instance().currentFGSwapchain;
-            return result;
+            (*swapChain)->AddRef();
+
+            return true;
         }
         // Game is creating new swapchain without releasing old one,
         // we need to release it to avoid errors
@@ -159,8 +165,13 @@ bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmd
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               desc->BufferCount, desc->Width, desc->Height, desc->Format, desc->Flags) == S_OK;
 
+            if (!result)
+                return false;
+
             *swapChain = (IDXGISwapChain1*) State::Instance().currentFGSwapchain;
-            return result;
+            (*swapChain)->AddRef();
+
+            return true;
         }
         // Game is creating new swapchain without releasing old one,
         // we need to release it to avoid errors
@@ -315,7 +326,7 @@ void DLSSG_Dx12::Deactivate()
 
 void DLSSG_Dx12::DestroyFGContext()
 {
-    Deactivate();
+    Disable();
     ReleaseObjects();
 }
 
@@ -634,7 +645,8 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
     else
     {
         LOG_DEBUG("!FGEnabled");
-        Deactivate();
+        Disable();
+        ReleaseResourceCopies();
 
         state.clearCapturedHudlesses = true;
         Hudfix_Dx12::ResetCounters();
@@ -663,11 +675,12 @@ void DLSSG_Dx12::ReleaseObjects()
 {
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
-        SAFE_RELEASE(_uiCommandAllocator[i]);
-        SAFE_RELEASE(_uiCommandList[i]);
-        SAFE_RELEASE(_scCommandAllocator[i]);
-        SAFE_RELEASE(_scCommandList[i]);
-        SAFE_RELEASE(dlssgFence[i]);
+        // The GPU can still be executing them
+        DeferredRelease::Release(_uiCommandAllocator[i]);
+        DeferredRelease::Release(_uiCommandList[i]);
+        DeferredRelease::Release(_scCommandAllocator[i]);
+        DeferredRelease::Release(_scCommandList[i]);
+        DeferredRelease::Release(dlssgFence[i]);
 
         // Reset command list state
         _scCommandListResetted[i] = false;
@@ -677,10 +690,14 @@ void DLSSG_Dx12::ReleaseObjects()
         _uiAllocatorFenceValues[i] = 0;
     }
 
+    ReleaseUIFence();
+
     _renderUI.reset();
     _hudlessCompare.reset();
     _mvFlip.reset();
     _depthFlip.reset();
+
+    ReleaseResourceCopies();
 }
 
 void DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)

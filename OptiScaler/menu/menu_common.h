@@ -275,6 +275,7 @@ class MenuCommon
     static void RenderFramerateSettings(RenderMenuContext& ctx);
     static void RenderFakenvapiSettings(RenderMenuContext& ctx);
     static void RenderActiveImageSettings(RenderMenuContext& ctx);
+    static void RenderPostProcessingSettings(RenderMenuContext& ctx);
     static void RenderF5LutSettings(RenderMenuContext& ctx);
     static void RenderHdrOutputSettings(RenderMenuContext& ctx);
     static void RenderMagnifierSettings(RenderMenuContext& ctx);

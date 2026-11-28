@@ -216,6 +216,14 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
 
     fg->EvaluateState(_device, fgConstants);
 
+    // Not needed while FG or the option is off, its destructor defers the buffer release
+    if (DepthScale != nullptr &&
+        (!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGEnableDepthScale.value_or_default()))
+    {
+        delete DepthScale;
+        DepthScale = nullptr;
+    }
+
     int reset = 0;
     InParameters->Get(NVSDK_NGX_Parameter_Reset, &reset);
 

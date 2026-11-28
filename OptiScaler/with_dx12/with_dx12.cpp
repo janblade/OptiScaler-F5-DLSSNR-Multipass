@@ -62,7 +62,7 @@ HRESULT CreateD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL feat
     if (D3d12Proxy::Module() == nullptr)
         return D3D12CreateDevice(adapter, featureLevel, IID_PPV_ARGS(device));
 
-    return D3d12Proxy::D3D12CreateDevice_()(adapter, featureLevel, IID_PPV_ARGS(device));
+    return D3d12Proxy::D3D12CreateDevice_Hooked()(adapter, featureLevel, IID_PPV_ARGS(device));
 }
 
 HRESULT TestD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL featureLevel)
@@ -70,7 +70,7 @@ HRESULT TestD3D12DeviceOnAdapter(IDXGIAdapter* adapter, D3D_FEATURE_LEVEL featur
     if (D3d12Proxy::Module() == nullptr)
         return D3D12CreateDevice(adapter, featureLevel, _uuidof(ID3D12Device), nullptr);
 
-    return D3d12Proxy::D3D12CreateDevice_()(adapter, featureLevel, _uuidof(ID3D12Device), nullptr);
+    return D3d12Proxy::D3D12CreateDevice_Hooked()(adapter, featureLevel, _uuidof(ID3D12Device), nullptr);
 }
 
 void WithDx12::UpdateStateObjects()
@@ -360,7 +360,7 @@ bool WithDx12::CreateDx12Device(D3D_FEATURE_LEVEL InFeatureLevel, IDXGIAdapter* 
             if (DxgiProxy::Module() == nullptr)
                 result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
             else
-                result = DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(factory), &factory);
+                result = DxgiProxy::CreateDxgiFactory2_Hooked()(0, __uuidof(factory), &factory);
 
             if (FAILED(result) || factory == nullptr)
             {

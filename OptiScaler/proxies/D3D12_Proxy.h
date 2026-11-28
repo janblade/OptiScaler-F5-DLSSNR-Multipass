@@ -186,12 +186,28 @@ class D3d12Proxy
     // Hook methods
     static bool Hook_D3D12CreateDevice(PVOID method, PFN_D3D12CreateDevice* original)
     {
-        return AttachExport(D3D12CreateDevice_ForHook(), method, original);
+        if (!AttachExport(D3D12CreateDevice_ForHook(), method, original))
+            return false;
+
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12CreateDevice = *original;
+
+        return true;
     }
 
     static bool Hook_D3D12SerializeRootSignature(PVOID method, PFN_D3D12SerializeRootSignature* original)
     {
-        return AttachExport(D3D12SerializeRootSignature_ForHook(), method, original);
+        if (!AttachExport(D3D12SerializeRootSignature_ForHook(), method, original))
+            return false;
+
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12SerializeRootSignature = *original;
+
+        return true;
     }
 
     static PFN_D3D12CreateRootSignatureDeserializer Hook_D3D12CreateRootSignatureDeserializer(PVOID method)
@@ -208,14 +224,25 @@ class D3d12Proxy
             return nullptr;
         }
 
-        //_D3D12CreateRootSignatureDeserializer = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12CreateRootSignatureDeserializer = addr;
         return addr;
     }
 
     static bool Hook_D3D12SerializeVersionedRootSignature(PVOID method,
                                                           PFN_D3D12SerializeVersionedRootSignature* original)
     {
-        return AttachExport(D3D12SerializeVersionedRootSignature_ForHook(), method, original);
+        if (!AttachExport(D3D12SerializeVersionedRootSignature_ForHook(), method, original))
+            return false;
+
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12SerializeVersionedRootSignature = *original;
+
+        return true;
     }
 
     static PFN_D3D12CreateVersionedRootSignatureDeserializer
@@ -233,7 +260,10 @@ class D3d12Proxy
             return nullptr;
         }
 
-        //_D3D12CreateVersionedRootSignatureDeserializer = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12CreateVersionedRootSignatureDeserializer = addr;
         return addr;
     }
 
@@ -251,7 +281,10 @@ class D3d12Proxy
             return nullptr;
         }
 
-        //_D3D12GetDebugInterface = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12GetDebugInterface = addr;
         return addr;
     }
 
@@ -269,7 +302,10 @@ class D3d12Proxy
             return nullptr;
         }
 
-        //_D3D12EnableExperimentalFeatures = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12EnableExperimentalFeatures = addr;
         return addr;
     }
 
@@ -287,7 +323,10 @@ class D3d12Proxy
             return nullptr;
         }
 
-        //_D3D12GetInterface = addr;
+        // The trampoline is the unhooked original (calls through here skip our hooks); as the proxy dll the hook is on
+        // our own export instead and its trampoline would call back into the proxy
+        if (HookModule() == Module())
+            _D3D12GetInterface = addr;
         return addr;
     }
 

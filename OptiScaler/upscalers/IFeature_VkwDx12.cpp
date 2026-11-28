@@ -2041,7 +2041,7 @@ HRESULT IFeature_VkwDx12::CreateDx12Device()
         if (DxgiProxy::Module() == nullptr)
             result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
         else
-            result = DxgiProxy::CreateDxgiFactory2_()(0, __uuidof(factory), &factory);
+            result = DxgiProxy::CreateDxgiFactory2_Hooked()(0, __uuidof(factory), &factory);
 
         if (result != S_OK)
         {

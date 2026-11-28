@@ -51,6 +51,7 @@
 #include <low_latency/low_latency_tech/ll_reflex_nvapi_vk.h>
 
 #include <intrin.h>
+#include <unordered_set>
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -59,6 +60,11 @@ static VkDevice _device = VK_NULL_HANDLE;
 static VkInstance _instance = VK_NULL_HANDLE;
 static VkPhysicalDevice _PD = VK_NULL_HANDLE;
 static HWND _hwnd = nullptr;
+
+// Devices created while hooked, their destroy goes through the hook too. Their deferred releases stay when another
+// device is created (a probe device must not take a live device's entries).
+static std::mutex _hookedDevicesMutex;
+static std::unordered_set<uint64_t> _hookedDevices;
 
 static std::mutex _surfaceWindowsMutex;
 static std::unordered_map<VkSurfaceKHR, HWND> _surfaceWindows;
@@ -1258,7 +1264,11 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
 
     if (result == VK_SUCCESS)
-        DeferredRelease::DropOwnersExcept((uint64_t) *pDevice);
+    {
+        std::scoped_lock lock(_hookedDevicesMutex);
+        DeferredRelease::DropOwnersExcept(_hookedDevices);
+        _hookedDevices.insert((uint64_t) *pDevice);
+    }
 
     if (result == VK_SUCCESS && nativeFg != nullptr)
     {
@@ -2060,7 +2070,12 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
 
     // What is still waiting for its frames goes now, the device is idle and everything above that enqueues is done
     if (device != VK_NULL_HANDLE)
+    {
         DeferredRelease::ReleaseOwner((uint64_t) device);
+
+        std::scoped_lock lock(_hookedDevicesMutex);
+        _hookedDevices.erase((uint64_t) device);
+    }
 
     if (o_vkDestroyDevice != nullptr)
         o_vkDestroyDevice(device, pAllocator);

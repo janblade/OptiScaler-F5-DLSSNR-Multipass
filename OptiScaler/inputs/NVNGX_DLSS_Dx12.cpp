@@ -1036,6 +1036,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_GetFeatureRequirements(
     IDXGIAdapter* Adapter, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
     NVSDK_NGX_FeatureRequirement* OutSupported)
 {
+    if (FeatureDiscoveryInfo == nullptr || OutSupported == nullptr)
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+
     LOG_DEBUG("for ({0})", (int) FeatureDiscoveryInfo->FeatureID);
 
     if (FeatureDiscoveryInfo->FeatureID == NVSDK_NGX_Feature_RayReconstruction)
@@ -1076,12 +1079,6 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_GetFeatureRequirements(
 
     if (isUpscaling || (isFG && (dlssgAdjacent || f5lowAsks)))
     {
-        if (OutSupported == nullptr)
-        {
-            static auto tmp = NVSDK_NGX_FeatureRequirement();
-            OutSupported = &tmp;
-        }
-
         OutSupported->FeatureSupported = NVSDK_NGX_FeatureSupportResult_Supported;
         OutSupported->MinHWArchitecture = 0;
 

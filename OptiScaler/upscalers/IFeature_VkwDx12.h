@@ -115,6 +115,7 @@ class IFeature_VkwDx12 : public virtual IFeature_Vk
     bool FeedsFrameGeneration() const;
 
     // Helper methods
+    std::optional<LUID> VulkanDeviceLuid();
     HRESULT CreateDx12Device();
 
     bool CreateSharedTexture(const VkImageCreateInfo& ImageInfo, VkImage& VulkanResource, VkDeviceMemory& VulkanMemory,

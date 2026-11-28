@@ -45,6 +45,21 @@ static void CollectRetiredDx12Features(bool all = false)
 }
 
 static ID3D12Device* D3D12Device = nullptr;
+
+static bool IsSoftwareDevice(ID3D12Device* device)
+{
+    if (device == nullptr)
+        return false;
+
+    const auto luid = device->GetAdapterLuid();
+    for (const auto& gpu : IdentifyGpu::getAllGpus())
+    {
+        if (IsEqualLUID(gpu.luid, luid))
+            return gpu.vendorId == VendorId::Microsoft;
+    }
+
+    return false;
+}
 // A new device can get the destroyed one's address, Init must not skip it as already inited
 static std::atomic<bool> _d3d12DeviceDestroyed { false };
 static int evalCounter = 0;
@@ -222,6 +237,14 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
         return NVSDK_NGX_Result_Success;
     }
 
+    // Features run on the game's GPU, a software (WARP) device must not replace it
+    if (State::Instance().nvngxDx12Inited && D3D12Device != nullptr && !_d3d12DeviceDestroyed &&
+        IsSoftwareDevice(InDevice))
+    {
+        LOG_WARN("Ignoring init with software device {:X}, keeping {:X}", (size_t) InDevice, (size_t) D3D12Device);
+        return NVSDK_NGX_Result_Success;
+    }
+
     if (State::Instance().activeFgNvngx != FGNvngxReplacement::None)
     {
         Nvngx_FG::D3D12_Init_Ext(InApplicationId, InApplicationDataPath, InDevice, InSDKVersion, &localFeatureInfo);
@@ -231,7 +254,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
     if (auto customRR = Nvngx_RR::Selected(API::DX12); customRR != nullptr)
         customRR->InitDx12(InDevice);
 
-    LOG_INFO("AppId: {0}", InApplicationId);
+    LOG_INFO("AppId: {0}, Device: {1:X}", InApplicationId, (size_t) InDevice);
     LOG_INFO("SDK: {0:x}", (unsigned int) InSDKVersion);
     LOG_INFO(L"InApplicationDataPath {0}", std::wstring(InApplicationDataPath));
 
@@ -682,19 +705,28 @@ static Upscaler GetUpscalerBackend()
 
 static bool EnsureD3D12Device(ID3D12GraphicsCommandList* cmdList)
 {
-    if (D3D12Device)
-        return true;
-
-    LOG_DEBUG("Get D3D12 device from InCmdList!");
-
-    if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&D3D12Device))) || !D3D12Device)
+    ID3D12Device* cmdListDevice = nullptr;
+    if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&cmdListDevice))) || !cmdListDevice)
     {
+        if (D3D12Device)
+            return true;
+
         LOG_ERROR("Can't get Dx12Device from InCmdList!");
         return false;
     }
 
     // Not owned, like the device from Init
-    D3D12Device->Release();
+    cmdListDevice->Release();
+
+    // Features have to be created on the device of the command list they're evaluated with
+    if (D3D12Device != cmdListDevice)
+    {
+        if (D3D12Device != nullptr && !_d3d12DeviceDestroyed)
+            LOG_WARN("Init device {:X} isn't InCmdList's, using {:X}", (size_t) D3D12Device, (size_t) cmdListDevice);
+
+        D3D12Device = cmdListDevice;
+        _d3d12DeviceDestroyed = false;
+    }
 
     return true;
 }

@@ -2378,7 +2378,7 @@ static void RenderProfilesSection(Config* config)
     StatusSlotEnd(unsavedSlot, 1);
 }
 
-static void RenderStatusPage(Config* config, float menuResScale, const NrCommon& nr)
+static void RenderStatusPage(Config* config, float /*menuResScale*/, const NrCommon& nr)
 {
     const auto shown = DlssNrNativeMode::FromKeys(
         { config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
@@ -2520,89 +2520,89 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                        "preset replaced (the pass count stays). Gone once you change one of them yourself.");
         }
 
-        // Directly under the pass presets, since those buttons set this slider's value. This page
-        // has no page-wide item width, so this block pushes its own to keep the slider's width.
-        ImGui::PushItemWidth(220.0f * menuResScale);
-
-        // The checkbox that sets this lives under "Apply the model" on the NR Options page; read from config.
-        bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
-        const unsigned int passLimit = unlockPasses ? MaxPassCount : DefaultMaxPassCount;
-
-        {
-            int passes = (int) std::clamp(config->DlssNrPasses.value_or_default(), 1u, passLimit);
-            const ImVec4 colour = passes <= 1   ? ImVec4(0.35f, 0.88f, 0.38f, 1.0f)
-                                  : passes == 2 ? ImVec4(0.95f, 0.70f, 0.20f, 1.0f)
-                                                : ImVec4(0.92f, 0.30f, 0.25f, 1.0f);
-
-            ImGui::PushStyleColor(ImGuiCol_Text, colour);
-            ImGui::PushStyleColor(ImGuiCol_SliderGrab, colour);
-
-            if (ImGui::SliderInt("Model passes", &passes, 1, (int) passLimit,
-                                 passes == 1 ? "%d (normal)" : "%dx model cost"))
-                config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, (int) passLimit);
-
-            ImGui::PopStyleColor(2);
-
-            // Reset's own label stays plain text -- placed after PopStyleColor so the
-            // passes-based warning colour above doesn't tint it too.
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset##modelpasses"))
-                config->DlssNrPasses = 1u;
-
-            HelpMarker("How often the model runs per frame. Higher: stronger effect, more GPU time. Default: 1.");
-        }
-
-        {
-            // Disabled rather than hidden at Passes == 1: the control exists, it just has nothing to
-            // do yet (there is no boundary between passes to damp), which is a clearer statement
-            // than making it vanish and reappear as Passes changes.
-            const bool noBoundary = config->DlssNrPasses.value_or_default() <= 1;
-            ImGui::BeginDisabled(noBoundary);
-            float feedback = config->DlssNrPassFeedback.value_or_default();
-            if (ImGui::SliderFloat("Pass feedback", &feedback, 0.0f, 1.0f,
-                                   feedback >= 1.0f ? "%.2f (full, current behaviour)" : "%.2f"))
-                config->DlssNrPassFeedback = std::clamp(feedback, 0.0f, 1.0f);
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset##passfeedback"))
-                config->DlssNrPassFeedback = 1.0f;
-            ImGui::EndDisabled();
-
-            HelpMarker("How much of each extra pass's change reaches the next. Higher (1.0): full effect. Lower: "
-                       "gentler, steadier extra passes. Default: 1.0. No effect with 1 pass.");
-        }
-
-        ImGui::PopItemWidth();
+        // The count the buttons set, with the way to the slider: it lives on Passes & Colour with the passes it
+        // adds, the feedback between them and the pass limit.
+        ImGui::TextDisabled("Model passes: %u", std::max(1u, config->DlssNrPasses.value_or_default()));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Set on Passes & Colour##passcount"))
+            MenuPages::RequestPage(MenuPages::Page::NrPasses);
     }
 
-    // Both rows share the same button labels, so each gets its own ImGui ID scope.
-    const auto tierRow = [&](const char* id, bool beforeSuperResolution)
+    // One row of tiers and where they put NR, as the Look card's "Built on:" does for the looks
+    // (DlssNr_TierPlacement.h). It was two cards, Pre-SR and Post-SR, with the same four buttons.
+    if (auto card = ScopedCollapsingHeader("Quality tiers", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
-        ImGui::PushID(id);
+        using namespace DlssNrTierPlacement;
+
+        const Placement now { config->DlssNrFinishedPicture.value_or_default(),
+                              config->DlssNrRunBeforeSr.value_or_default(),
+                              config->DlssNrDeferredDlss.value_or_default() };
+
+        // The tier in effect where NR runs now (at most one: their resolutions differ)
+        int inEffect = -1;
+        for (int i = 0; i < IM_ARRAYSIZE(ResolutionTiers); ++i)
+        {
+            if (ResolutionTierActive(config, ResolutionTiers[i], now.runBeforeSr))
+                inEffect = i;
+        }
+
+        // The player's last pick this session; while a tier is in effect the choice follows NR's placement
+        static std::optional<bool> sessionPick;
+        if (inEffect >= 0)
+            sessionPick.reset();
+
+        const bool pickedBefore = PickedBeforeSr(now, inEffect >= 0, sessionPick);
+
+        // Their own ID scope, as the two rows had: the labels are short words another card could also use
+        ImGui::PushID("tiers");
         for (int i = 0; i < IM_ARRAYSIZE(ResolutionTiers); ++i)
         {
             if (i > 0)
                 ImGui::SameLine();
-            if (PresetButton(ResolutionTiers[i].name,
-                             ResolutionTierActive(config, ResolutionTiers[i], beforeSuperResolution), presetWidth))
-                ApplyResolutionTier(config, pendingScale, ResolutionTiers[i], beforeSuperResolution);
+            if (PresetButton(ResolutionTiers[i].name, i == inEffect, presetWidth))
+            {
+                ApplyResolutionTier(config, pendingScale, ResolutionTiers[i], pickedBefore);
+                sessionPick.reset();
+            }
         }
         ImGui::PopID();
-    };
 
-    if (auto card = ScopedCollapsingHeader("Pre-SR Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
-    {
-        tierRow("pre", true);
-        HelpMarker("Quality tiers for NR before SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
-                   "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
-                   "Superior Scaling, if selected, is kept. Green and marked > = in effect; changing those clears it.");
-    }
+        HelpMarker("How much of the picture NR works on, from High (full resolution, best) to Potato (50%, cheapest). "
+                   "Sets Upscale Mode and Method and Model resolution, and runs composed; it also puts NR where Runs "
+                   "NR says. The look is the Look presets'. Superior Scaling, if selected, is kept. Green and marked "
+                   "> = in effect; changing those clears it.");
 
-    if (auto card = ScopedCollapsingHeader("Post-SR Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
-    {
-        tierRow("post", false);
-        HelpMarker("Quality tiers for NR after SR, from High (full resolution, best) to Potato (50%, cheapest). Sets "
-                   "Upscale Mode and Method and Model resolution, and runs composed. The look is the Look presets'. "
-                   "Superior Scaling, if selected, is kept. Green and marked > = in effect; changing those clears it.");
+        if (PickerShown(now))
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Runs NR:");
+
+            const auto pick = [&](const char* label, bool before)
+            {
+                ImGui::SameLine();
+                if (!ImGui::RadioButton(label, pickedBefore == before) || pickedBefore == before)
+                    return;
+
+                // A tier in effect moves with the choice; with none it only sets where the next press puts NR
+                if (inEffect >= 0)
+                    ApplyResolutionTier(config, pendingScale, ResolutionTiers[inEffect], before);
+                else
+                    sessionPick = before;
+            };
+
+            pick("Before Super Resolution##tierplacement", true);
+            pick("After Super Resolution##tierplacement", false);
+
+            ImGui::SameLine();
+            HelpMarker("Where a tier puts NR. Before Super Resolution: on the smaller picture, cheaper. After: on the "
+                       "upscaled picture. With a tier in effect, picking the other side moves NR there right away; "
+                       "with none, it only sets what the next tier press does. The same choice as NR Pass at on NR "
+                       "Options.");
+        }
+        else
+        {
+            ImGui::TextDisabled("NR runs on the finished picture: a tier sets the model's size only.");
+        }
     }
 
     // Native presets: Native blend (DlssNr_NativeBlend.h), NR's answer written as it is. Read when the card draws, so a
@@ -3507,9 +3507,6 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
 {
     const bool enabled = nr.enabled;
     bool finishedPicture = nr.finishedPicture;
-    // Edited by the "Lift model pass limit" checkbox below.
-    bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
-
     bool detailReuse = config->DlssNrDetailReuse.value_or_default();
     const auto detailReuseStatus = !detailReuse            ? DlssNr::DetailReuseInfo {}
                                    : DlssNr::IsRunningVk() ? DlssNr::DetailReuseStatusVk()
@@ -3651,7 +3648,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         lastHybridWarning.clear();
 
     // Everything that trades NR's GPU time against quality, in one card: Model precision, Reuse bottleneck, Reuse
-    // detail between frames, Compress screen edges and the pass limit.
+    // detail between frames and Compress screen edges.
     if (auto card = ScopedCollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         int precisionChoice = config->DlssNrPrecision.value_or_default() == 4 ? 1 : 0;
@@ -3825,12 +3822,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         ImGui::PushItemWidth(220.0f * menuResScale);
         RenderEdgeCompression(config, menuResScale, nr);
         ImGui::PopItemWidth();
-
-        ImGui::Spacing();
-        if (ImGui::Checkbox("Lift model pass limit (up to 30; expensive)", &unlockPasses))
-            config->DlssNrUnlockPasses = unlockPasses;
-        HelpMarker("Allow up to 30 passes instead of 3. More passes use more GPU time and VRAM; high values may crash "
-                   "the game.");
+        // Lift model pass limit is on Passes & Colour, with the Model passes slider it raises.
     }
 
     if (auto card = ScopedCollapsingHeader("Behaviour", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
@@ -5143,7 +5135,63 @@ static void RenderPassesPage(Config* config, float menuResScale)
         "310.8 "
         "DLLs have only the main model, so the preset changes nothing there. Passes 4 and up use Pass 1's preset.";
 
+    // How many passes, how much each passes on and the limit, above the passes they add (the pass presets on Status &
+    // Presets set the same count). This page's item width (pushed above) keeps the slider at its width.
+    if (NrCard card("Passes", menuResScale); card.IsOpen())
+    {
+        int passes = (int) std::clamp(config->DlssNrPasses.value_or_default(), 1u, passLimit);
+        const ImVec4 colour = passes <= 1   ? ImVec4(0.35f, 0.88f, 0.38f, 1.0f)
+                              : passes == 2 ? ImVec4(0.95f, 0.70f, 0.20f, 1.0f)
+                                            : ImVec4(0.92f, 0.30f, 0.25f, 1.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, colour);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, colour);
+
+        if (ImGui::SliderInt("Model passes", &passes, 1, (int) passLimit,
+                             passes == 1 ? "%d (normal)" : "%dx model cost"))
+            config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, (int) passLimit);
+
+        ImGui::PopStyleColor(2);
+
+        // Reset's own label stays plain text: placed after PopStyleColor so the passes colour above does not tint it.
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##modelpasses"))
+            config->DlssNrPasses = 1u;
+
+        HelpMarker("How often the model runs per frame. Higher: stronger effect, more GPU time. Default: 1. Up to 3, "
+                   "or 30 with Lift model pass limit below. The pass presets on Status & Presets set it too.");
+
+        {
+            // Disabled rather than hidden at one pass: the control exists, it just has nothing to do yet (there is no
+            // boundary between passes to damp), which is clearer than making it vanish and reappear as Passes changes.
+            ImGui::BeginDisabled(passes <= 1);
+            float feedback = config->DlssNrPassFeedback.value_or_default();
+            if (ImGui::SliderFloat("Pass feedback", &feedback, 0.0f, 1.0f,
+                                   feedback >= 1.0f ? "%.2f (full, current behaviour)" : "%.2f"))
+                config->DlssNrPassFeedback = std::clamp(feedback, 0.0f, 1.0f);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##passfeedback"))
+                config->DlssNrPassFeedback = 1.0f;
+            ImGui::EndDisabled();
+
+            HelpMarker("How much of each extra pass's change reaches the next. Higher (1.0): full effect. Lower: "
+                       "gentler, steadier extra passes. Default: 1.0. No effect with 1 pass.");
+        }
+
+        bool unlock = unlockPasses;
+        if (ImGui::Checkbox("Lift model pass limit (up to 30; expensive)", &unlock))
+            config->DlssNrUnlockPasses = unlock;
+        HelpMarker("Allow up to 30 passes instead of 3. More passes use more GPU time and VRAM; high values may crash "
+                   "the game.");
+    }
+
     ModelWeightsCard(config, menuResScale);
+
+    // Pass 2 and Pass 3 only while they run, as the passes after them; their settings are kept while hidden.
+    const unsigned int runningPasses = std::clamp(config->DlssNrPasses.value_or_default(), 1u, passLimit);
+
+    if (runningPasses < 2)
+        ImGui::TextDisabled("One pass: the settings for Pass 2 and up show when Model passes is 2 or more.");
 
     if (NrCard card("Pass 1", menuResScale); card.IsOpen())
     {
@@ -5166,52 +5214,43 @@ static void RenderPassesPage(Config* config, float menuResScale)
                    "colour mask below.");
     }
 
-    if (NrCard card("Pass 2", menuResScale); card.IsOpen())
+    // Pass 2 and Pass 3: the same controls on their own keys, each only while that pass runs
+    const auto laterPass = [&](const char* label, auto& style, auto& preset, auto& intensity, auto& structure,
+                               auto& tone, auto& skin, auto& autoMask)
     {
+        NrCard card(label, menuResScale);
+        if (!card.IsOpen())
+            return;
+
         ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
-        InheritedProfileCombo("Style", &config->DlssNrPass2Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
-        InheritedProfileCombo("Preset", &config->DlssNrPass2Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
+        InheritedProfileCombo("Style", &style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
+        InheritedProfileCombo("Preset", &preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
         HelpMarker(presetHelp);
-        DeferredSlider("Intensity", &config->DlssNrPass2Intensity, 0.0f, 2.0f,
-                       config->DlssNrIntensity.value_or_default(), "%.2f", true);
-        DeferredSlider("Local structure", &config->DlssNrPass2LocalStructure, 0.0f, 2.0f,
-                       config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
-        DeferredSlider("Local tone", &config->DlssNrPass2LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
-        DeferredSlider("Skin structure", &config->DlssNrPass2SkinStructure, -1.0f, 2.0f,
-                       config->DlssNrSkinStructure.value_or_default(), "%.2f", true);
-        bool mask = config->DlssNrPass2AutoMask.has_value() ? config->DlssNrPass2AutoMask.value()
-                                                            : config->DlssNrAutoMask.value_or_default();
+        DeferredSlider("Intensity", &intensity, 0.0f, 2.0f, config->DlssNrIntensity.value_or_default(), "%.2f", true);
+        DeferredSlider("Local structure", &structure, 0.0f, 2.0f, config->DlssNrLocalStructure.value_or_default(),
+                       "%.2f", true);
+        DeferredSlider("Local tone", &tone, 0.0f, 2.0f, 0.0f, "%.2f", true);
+        DeferredSlider("Skin structure", &skin, -1.0f, 2.0f, config->DlssNrSkinStructure.value_or_default(), "%.2f",
+                       true);
+        bool mask = autoMask.has_value() ? autoMask.value() : config->DlssNrAutoMask.value_or_default();
         if (ImGui::Checkbox("Auto skin mask", &mask))
-            config->DlssNrPass2AutoMask = mask;
+            autoMask = mask;
         ImGui::SameLine();
         if (ImGui::SmallButton("Reset##mask"))
-            config->DlssNrPass2AutoMask = std::optional<bool> {};
-    }
+            autoMask = std::optional<bool> {};
+    };
 
-    if (NrCard card("Pass 3", menuResScale); card.IsOpen())
-    {
-        ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
-        InheritedProfileCombo("Style", &config->DlssNrPass3Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
-        InheritedProfileCombo("Preset", &config->DlssNrPass3Preset, inheritedPresets, IM_ARRAYSIZE(inheritedPresets));
-        HelpMarker(presetHelp);
-        DeferredSlider("Intensity", &config->DlssNrPass3Intensity, 0.0f, 2.0f,
-                       config->DlssNrIntensity.value_or_default(), "%.2f", true);
-        DeferredSlider("Local structure", &config->DlssNrPass3LocalStructure, 0.0f, 2.0f,
-                       config->DlssNrLocalStructure.value_or_default(), "%.2f", true);
-        DeferredSlider("Local tone", &config->DlssNrPass3LocalTone, 0.0f, 2.0f, 0.0f, "%.2f", true);
-        DeferredSlider("Skin structure", &config->DlssNrPass3SkinStructure, -1.0f, 2.0f,
-                       config->DlssNrSkinStructure.value_or_default(), "%.2f", true);
-        bool mask = config->DlssNrPass3AutoMask.has_value() ? config->DlssNrPass3AutoMask.value()
-                                                            : config->DlssNrAutoMask.value_or_default();
-        if (ImGui::Checkbox("Auto skin mask", &mask))
-            config->DlssNrPass3AutoMask = mask;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Reset##mask"))
-            config->DlssNrPass3AutoMask = std::optional<bool> {};
-    }
+    if (runningPasses >= 2)
+        laterPass("Pass 2", config->DlssNrPass2Style, config->DlssNrPass2Preset, config->DlssNrPass2Intensity,
+                  config->DlssNrPass2LocalStructure, config->DlssNrPass2LocalTone, config->DlssNrPass2SkinStructure,
+                  config->DlssNrPass2AutoMask);
 
-    const unsigned int visiblePasses = std::clamp(config->DlssNrPasses.value_or_default(), 1u, passLimit);
-    for (unsigned int pass = 3; pass < visiblePasses; ++pass)
+    if (runningPasses >= 3)
+        laterPass("Pass 3", config->DlssNrPass3Style, config->DlssNrPass3Preset, config->DlssNrPass3Intensity,
+                  config->DlssNrPass3LocalStructure, config->DlssNrPass3LocalTone, config->DlssNrPass3SkinStructure,
+                  config->DlssNrPass3AutoMask);
+
+    for (unsigned int pass = 3; pass < runningPasses; ++pass)
     {
         auto& settings = config->DlssNrExtraPasses[pass - 3];
         const std::string passLabel = std::format("Pass {}", pass + 1);

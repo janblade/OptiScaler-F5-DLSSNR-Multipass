@@ -1,10 +1,12 @@
 ﻿#include "pch.h"
 #include "ll_xell.h"
 
+#include <Util.h>
 #include <magic_enum.hpp>
 #include <proxies/XeLL_Proxy.h>
 #include <native/NativeLowLatency.h>
 #include <nvapi/fakenvapi/log.h>
+#include <wrl/client.h>
 
 void XeLL::xell_sleep(uint32_t frame_id)
 {
@@ -55,10 +57,20 @@ bool XeLL::init(IUnknown* pDevice)
         return false;
     }
 
+    // Match the ReShade layer used by Streamline and the frame-generation queues.
+    Microsoft::WRL::ComPtr<IUnknown> originalDevice;
+    if (!ReShadeLoadedAfterOpti())
+        originalDevice.Attach(Util::GetReShadeOriginal(pDevice));
+
+    auto device = originalDevice != nullptr ? originalDevice.Get() : pDevice;
+
     ID3D12Device* dx12_pDevice = nullptr;
-    HRESULT hr = pDevice->QueryInterface(__uuidof(ID3D12Device), reinterpret_cast<void**>(&dx12_pDevice));
+    HRESULT hr = device->QueryInterface(__uuidof(ID3D12Device), reinterpret_cast<void**>(&dx12_pDevice));
     if (hr != S_OK)
         return false;
+
+    if (originalDevice != nullptr)
+        LOG_DEBUG("Unwrapped ReShade device: {:X} -> {:X}", (size_t) pDevice, (size_t) dx12_pDevice);
 
 #ifdef LOW_LATENCY_INPUTS
     // Created as OptiScaler's own, it goes straight to the real XeLL. Opti's XeFG gets it too.

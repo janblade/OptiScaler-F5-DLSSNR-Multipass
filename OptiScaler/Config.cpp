@@ -2,6 +2,7 @@
 
 #include "Config.h"
 #include <misc/GpuMemTally.h>
+#include <misc/RelativePathRule.h>
 
 #include "Util.h"
 
@@ -1021,6 +1022,18 @@ bool Config::Reload(std::filesystem::path iniPath)
             XeFGLibrary.set_from_config(readWString("Libraries", "XeFGPath"));
             XeLLLibrary.set_from_config(readWString("Libraries", "XeLLPath"));
             XeSSDx11Library.set_from_config(readWString("Libraries", "XeSSDx11Path"));
+        }
+
+        // Relative paths are based on Opti's folder (or the exe folder when only that has the file), see
+        // misc/RelativePathRule.h. PluginPath is [Plugins] Path, the plugins folder f5low.dll is loaded from.
+        for (auto path : { &MainDllPath, &NvngxPath, &NVNGX_DLSS_Library, &DLSSFeaturePath, &NvapiDllPath, &FfxDx12Path,
+                           &FfxDx12SRPath, &FfxDx12FGPath, &FfxDx12RRPath, &FfxDx12RCPath, &FfxVkPath, &FfxVkSRPath,
+                           &FfxVkFGPath, &XeSSLibrary, &XeFGLibrary, &XeLLLibrary, &XeSSDx11Library, &PluginPath })
+        {
+            if (path->has_value() && !path->value().empty() && std::filesystem::path(path->value()).is_relative())
+                path->set_volatile_value(RelativePathRule::Resolve(path->value(), Util::DllPath().parent_path(),
+                                                                   Util::ExePath().parent_path())
+                                             .wstring());
         }
 
         // Reading old configs for compatibility reasons

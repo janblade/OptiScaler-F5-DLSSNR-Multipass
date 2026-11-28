@@ -17,6 +17,8 @@
 #include <vulkan/vulkan.h>
 #include "sl_helpers_vk.h"
 
+#include <wrl/client.h>
+
 #pragma comment(lib, "Version.lib")
 
 class StreamlineProxy
@@ -310,6 +312,24 @@ class StreamlineProxy
         return true;
     }
 
+    // Streamline's NGX has to use the device the game gives NGX. With ReShade above Opti the game gives the real
+    // one, with ReShade loaded by Opti (or Special K) the game and Opti both get ReShade's proxy.
+    static sl::Result SetD3D12Device(void* device, bool bind)
+    {
+        Microsoft::WRL::ComPtr<IUnknown> original;
+
+        if (!ReShadeLoadedAfterOpti())
+            original.Attach(Util::GetReShadeOriginal((IUnknown*) device));
+
+        if (original != nullptr)
+        {
+            LOG_INFO("Using the real device behind ReShade's proxy");
+            device = original.Get();
+        }
+
+        return bind ? SetD3DDeviceAndBind(device) : _slSetD3DDevice(device);
+    }
+
     static sl::Result SetD3DDeviceAndBind(void* device)
     {
         auto result = _slSetD3DDevice(device);
@@ -378,9 +398,10 @@ class StreamlineProxy
             pref.flags |= sl::PreferenceFlags::eUseDXGIFactoryProxy;
 
         auto exePath = Util::ExePath().remove_filename();
-        auto nvngxDlssPath = Util::FindFilePath(exePath, "nvngx_dlss.dll");
-        auto nvngxDlssDPath = Util::FindFilePath(exePath, "nvngx_dlssd.dll");
-        auto nvngxDlssGPath = Util::FindFilePath(exePath, "nvngx_dlssg.dll");
+        // Found at startup (Opti's folder, NvngxFeaturePath, then the game folder)
+        std::optional<std::filesystem::path> nvngxDlssPath = State::Instance().NVNGX_DLSS_Path;
+        std::optional<std::filesystem::path> nvngxDlssDPath = State::Instance().NVNGX_DLSSD_Path;
+        std::optional<std::filesystem::path> nvngxDlssGPath = State::Instance().NVNGX_DLSSG_Path;
         auto nvngxDlssNrPath = Util::FindFilePath(exePath, "nvngx_dlssnr.dll");
 
         std::vector<std::wstring> pathStorage;
@@ -454,7 +475,7 @@ class StreamlineProxy
         if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
             _isD3D12Inited = true;
         else
-            _isD3D12Inited = SetD3DDeviceAndBind(device) == sl::Result::eOk && DisableReflex();
+            _isD3D12Inited = SetD3D12Device(device, true) == sl::Result::eOk && DisableReflex();
 
         return _isD3D12Inited;
     }

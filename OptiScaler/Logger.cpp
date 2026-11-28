@@ -13,6 +13,7 @@
 
 #include "Util.h"
 #include "LogAsyncRule.h"
+#include <misc/CrashDumps.h>
 
 // The logger in use and what its crash-path flush needs (LogAsyncRule.h). Left allocated at exit on purpose: destroying
 // a thread pool at process exit joins a worker that is already gone. A logger that was replaced (the menu's file/console
@@ -304,9 +305,21 @@ static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
             auto dumpPath = std::filesystem::path(Config::Instance()->LogFileName.value_or_default()).parent_path() /
                             L"OptiScaler_crash.dmp";
 
-            spdlog::critical("Unhandled exception {:X} at {:X}, writing {}",
-                             (unsigned long) exceptionInfo->ExceptionRecord->ExceptionCode,
-                             (size_t) exceptionInfo->ExceptionRecord->ExceptionAddress, dumpPath.string());
+            // CrashDumps caught it first (before the game's own handlers) and wrote its own file
+            const auto code = exceptionInfo->ExceptionRecord->ExceptionCode;
+            const auto address = exceptionInfo->ExceptionRecord->ExceptionAddress;
+            const bool dumpedFirst = CrashDumps::WasDumped(code, address);
+
+            if (dumpedFirst)
+            {
+                spdlog::critical("Unhandled exception {:X} at {:X}, the dump was written when it was raised",
+                                 (unsigned long) code, (size_t) address);
+            }
+            else
+            {
+                spdlog::critical("Unhandled exception {:X} at {:X}, writing {}", (unsigned long) code, (size_t) address,
+                                 dumpPath.string());
+            }
 
             // The worker writes what is queued, then the dump: a bounded wait, not a flush that could wait for a stuck
             // disk
@@ -315,8 +328,9 @@ static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
             else
                 spdlog::default_logger()->flush();
 
-            HANDLE file = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+            HANDLE file = dumpedFirst ? INVALID_HANDLE_VALUE
+                                      : CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                                    FILE_ATTRIBUTE_NORMAL, nullptr);
 
             if (file != INVALID_HANDLE_VALUE)
             {
@@ -331,6 +345,9 @@ static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
                                   &mdei, nullptr, nullptr);
 
                 CloseHandle(file);
+
+                // The exit after it is not dumped again
+                CrashDumps::NoteDumped(code, address);
             }
         }
         catch (...)

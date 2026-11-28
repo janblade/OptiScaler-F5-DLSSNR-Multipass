@@ -9,7 +9,8 @@
 class DxgiFactoryHooks
 {
   public:
-    static void HookToFactory(IDXGIFactory* pFactory);
+    // fromSpecialK: created through Special K's hooks, waits for them to be installed first
+    static void HookToFactory(IDXGIFactory* pFactory, bool fromSpecialK = false);
     static void HookToDLSSGFactory(IDXGIFactory* pFactory);
 
     // After a swapchain was made with a success status other than S_OK (hooks/SwapchainCreateRule.h): a full-screen
@@ -23,6 +24,14 @@ class DxgiFactoryHooks
     // is Windows' own (DxgiProxy::CreateSystemFactory2, a dxvk game), which is not hooked and is called directly.
     static HRESULT CreateDx12BridgeSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue, DXGI_SWAP_CHAIN_DESC* desc,
                                              IDXGISwapChain4** out, bool* realFG, bool systemFactory = false);
+
+    // Dx11wDx12 FG swapchain descs
+    static bool IsTearingSupported(IDXGIFactory* factory);
+    static bool PrepareDx12InteropDesc(DXGI_SWAP_CHAIN_DESC& desc, bool tearingSupported);
+    static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc, bool tearingSupported);
+
+    // Real Dx11 swapchain is on a hidden window, 0 must mean the game window's client size
+    static void ResolveInteropSize(HWND hWnd, UINT& width, UINT& height);
 
   private:
     using PFN_EnumAdapterByGpuPreference =

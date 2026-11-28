@@ -1210,6 +1210,10 @@ static UiTargetMode getUiTargetMode()
         return UiTargetMode::SDR;
     }
 
+    // sRGB target encodes on write, colors need to be linear
+    if (state.menuTargetSrgb)
+        return UiTargetMode::LinearHDR;
+
     const auto& output = state.outputColorSpace;
 
     // If SetColorSpace1 has not provided a known/valid color space,
@@ -3005,6 +3009,10 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
             }
 
             versionStatus.error.clear();
+
+            // The status is copied from State every frame
+            std::scoped_lock lock(state.versionCheckMutex);
+            state.versionCheckError.clear();
         }
         // Disabled error message
         // else if (!versionStatus.error.empty())

@@ -10,10 +10,12 @@
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
+#include <hooks/FG_Hooks.h>
 #include <with_dx12/dx11_with_dx12_sync.h>
 #include <with_dx12/with_dx12.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <wrapped/wrapped_factory.h>
 #include <menu/menu_overlay_base.h>
 #include <output/SdrToHdr_Dx11Present.h>
 #include <native/NativeDriverDx12.h>
@@ -54,7 +56,6 @@
 // https://github.com/baldurk/renderdoc/blob/v1.x/renderdoc/driver/dxgi/dxgi_wrapped.cpp
 
 static int scCount = 0;
-static UINT64 _frameCounter = 0;
 static double _lastFrameTime = 0;
 static bool _dx11Device = false;
 static bool _dx12Device = false;
@@ -362,6 +363,26 @@ static bool IsCurrentSwapchain(IDXGISwapChain* swapchain)
     return state.currentSwapchain == swapchain || state.currentWrappedSwapchain == swapchain;
 }
 
+// Game's output, the FG library's swapchain on the FG window included
+static bool IsGameOutput(IDXGISwapChain* swapchain, HWND hwnd)
+{
+    return IsCurrentSwapchain(swapchain) ||
+           (State::Instance().currentFGSwapchain != nullptr && !FGHooks::IsOtherWindowThanFG(hwnd));
+}
+
+// Presents of the current chain, real and generated: fakenvapi's interpolated-frame test steps on each of them
+static UINT64 _currentChainPresents = 0;
+
+// State::frameCount counts the game's frames. On the D3D11 bridge the FG library's chain presents here for every
+// shown frame and counts as current, so there Dx11wDx12SC::Present counts instead (once per game present)
+static void CountCurrentChainPresent()
+{
+    _currentChainPresents++;
+
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+        State::Instance().frameCount++;
+}
+
 // `proxy` and `display` are HDR output's (output/SdrToHdr_*): null for a chain it is not on. `isCurrent`: this is the
 // game's current swapchain, only that one writes State
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
@@ -388,7 +409,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         dx11wDx12PresentLock.lock();
     }
 
-    LOG_DEBUG("{}", _frameCounter);
+    LOG_DEBUG("{}", State::Instance().frameCount);
     NoteDroppedLogLinesOnPresent();
 
     HRESULT presentResult;
@@ -399,15 +420,16 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     {
         double ftDelta = 0.0;
 
-        auto now = Util::MillisecondsNow();
-
-        if (_lastFrameTime != 0)
-            ftDelta = now - _lastFrameTime;
-
-        _lastFrameTime = now;
-
+        // Other windows' presents would shorten the game's frame time
         if (isCurrent)
         {
+            auto now = Util::MillisecondsNow();
+
+            if (_lastFrameTime != 0)
+                ftDelta = now - _lastFrameTime;
+
+            _lastFrameTime = now;
+
             State::Instance().presentFrameTime = ftDelta;
 
             if (State::Instance().currentFG == nullptr)
@@ -573,7 +595,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             const bool allowTearing = pSwapChain->GetDesc(&scDesc) == S_OK &&
                                       (scDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0 && scDesc.Windowed;
 
-            if (allowTearing && !State::Instance().realExclusiveFullscreen)
+            if (allowTearing)
             {
                 LOG_DEBUG("Adding DXGI_PRESENT_ALLOW_TEARING");
                 Flags |= DXGI_PRESENT_ALLOW_TEARING;
@@ -631,13 +653,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         {
             // DXVK returns below before the native path advances the NR epoch.
             // Count a completed Present; retain the deferred NR evaluation guard.
-            if (willPresent)
-            {
-                _frameCounter++;
-
-                if (isCurrent)
-                    State::Instance().frameCount = _frameCounter;
-            }
+            if (willPresent && isCurrent)
+                CountCurrentChainPresent();
 
             LOG_TRACE("3 {}", (UINT) presentResult);
         }
@@ -752,19 +769,17 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (State::Instance().fgPresentIsCalled)
             {
                 State::Instance().fgPresentIsCalled = false;
-                fgPresentFrame = _frameCounter;
+                fgPresentFrame = _currentChainPresents;
             }
 
-            auto isInterpolated = fgIsActive && (_frameCounter - fgPresentFrame) > 0;
+            auto isInterpolated = fgIsActive && (_currentChainPresents - fgPresentFrame) > 0;
 
             fakenvapi::reportFGPresent(pSwapChain, fgIsActive, isInterpolated);
         }
 #endif
 
-        _frameCounter++;
-
         if (isCurrent)
-            State::Instance().frameCount = _frameCounter;
+            CountCurrentChainPresent();
     }
 
     LOG_DEBUG("Calling original present");
@@ -1202,16 +1217,16 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::QueryInterface(REFIID riid, vo
 
 ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::AddRef()
 {
-    InterlockedIncrement(&_refcount);
-    LOG_TRACE("Count: {}, caller: {}", _refcount, Util::WhoIsTheCaller(_ReturnAddress()));
-    return _refcount;
+    ULONG count = InterlockedIncrement(&_refcount);
+    LOG_TRACE("Count: {}, caller: {}", count, Util::WhoIsTheCaller(_ReturnAddress()));
+    return count;
 }
 
 ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
 {
     ULONG ret = InterlockedDecrement(&_refcount);
 
-    LOG_TRACE("Count: {}, caller: {}", _refcount, Util::WhoIsTheCaller(_ReturnAddress()));
+    LOG_TRACE("Count: {}, caller: {}", ret, Util::WhoIsTheCaller(_ReturnAddress()));
 
     if (ret == 0)
     {
@@ -1334,7 +1349,12 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetPrivateData(REFGUID Name, U
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetParent(REFIID riid, void** ppParent)
 {
-    return _real->GetParent(riid, ppParent);
+    auto result = _real->GetParent(riid, ppParent);
+
+    if (result == S_OK && Config::Instance()->DxgiFactoryWrapping.value_or_default())
+        WrappedIDXGIFactory7::WrapParent(riid, ppParent, _ReturnAddress());
+
+    return result;
 }
 
 //
@@ -1419,21 +1439,21 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
 
     HRESULT result = S_OK;
 
+    // Unlock the locked FG, currentFG can change meanwhile
+    auto lockedFG = State::Instance().currentFG;
     bool ffxLock = false;
 
     {
         if (Config::Instance()->FGUseMutexForSwapchain.value_or_default())
         {
 
-            if (State::Instance().currentFG != nullptr && State::Instance().currentFG->IsActive() &&
-                !State::Instance().currentFG->IsPaused() &&
-                !IsFgResizeOwner(State::Instance().currentFG->Mutex.getOwner()) &&
-                !State::Instance().currentFG->Mutex.isLockedByThisThread())
+            if (lockedFG != nullptr && lockedFG->IsActive() && !lockedFG->IsPaused() &&
+                !IsFgResizeOwner(lockedFG->Mutex.getOwner()) && !lockedFG->Mutex.isLockedByThisThread())
             {
-                LOG_TRACE("Waiting ffxMutex 7, current: {}", State::Instance().currentFG->Mutex.getOwner());
-                State::Instance().currentFG->Mutex.lock(7);
+                LOG_TRACE("Waiting ffxMutex 7, current: {}", lockedFG->Mutex.getOwner());
+                lockedFG->Mutex.lock(7);
                 ffxLock = true;
-                LOG_TRACE("Accuired ffxMutex: {}", State::Instance().currentFG->Mutex.getOwner());
+                LOG_TRACE("Accuired ffxMutex: {}", lockedFG->Mutex.getOwner());
             }
             else
             {
@@ -1454,8 +1474,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
 
     if (ffxLock)
     {
-        LOG_TRACE("Releasing ffxMutex: {}", State::Instance().currentFG->Mutex.getOwner());
-        State::Instance().currentFG->Mutex.unlockThis(7);
+        LOG_TRACE("Releasing ffxMutex: {}", lockedFG->Mutex.getOwner());
+        lockedFG->Mutex.unlockThis(7);
     }
 
     return result;
@@ -1575,22 +1595,25 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
     if (!VkPresentBridge::DxvkThroughVulkan())
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
-    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
-        State::Instance().currentFG == nullptr)
+    // V-Sync override creates flip model with ALLOW_TEARING, game's resize params must follow it
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default())
     {
-        LOG_DEBUG("Overriding flags");
-
-        // ALLOW_TEARING can't change on resize
         DXGI_SWAP_CHAIN_DESC scDesc {};
         if (_real->GetDesc(&scDesc) == S_OK)
         {
+            LOG_DEBUG("Overriding flags");
+
+            // ALLOW_TEARING can't change on resize
             SwapChainFlags = (SwapChainFlags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) |
                              (scDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
-        }
 
-        // 0 keeps the current count
-        if (BufferCount == 1)
-            BufferCount = 2;
+            // Flip model needs 2 buffers, 0 keeps the current count
+            if (BufferCount == 1 && (scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+                                     scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL))
+            {
+                BufferCount = 2;
+            }
+        }
     }
 
     if (IsCurrentSwapchain(this))
@@ -1956,13 +1979,17 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetColorSpace1(DXGI_COLOR_SPAC
     if (SUCCEEDED(result))
     {
         _gameColourSpace = ColorSpace;
-        UpdateOutputColorSpace(ColorSpace);
+
+        // Not another window's swapchain, the menu's colour handling follows the game's output
+        if (IsGameOutput(this, _handle))
+            UpdateOutputColorSpace(ColorSpace);
 
         CheckForHdrOutput();
 
         LOG_INFO("Output HDR Active: {}", State::Instance().hdrOutputActive);
 
-        MenuOverlayDx::ApplyThemeStyle();
+        if (IsGameOutput(this, _handle))
+            MenuOverlayDx::ApplyThemeStyle();
     }
 
     // What one unit of the buffer means, which is the question the white point is really asking.
@@ -2081,8 +2108,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     // currentFG can still be null here
     // Owner 7 is a mode switch waiting for the window to handle this resize
     IFGFeature_Dx12* lockedFg = nullptr;
-    if (State::Instance().activeFgOutput == FGOutput::FSRFG && State::Instance().currentFG != nullptr &&
-        Config::Instance()->FGUseMutexForSwapchain.value_or_default() &&
+    if (State::Instance().currentFG != nullptr && Config::Instance()->FGUseMutexForSwapchain.value_or_default() &&
         !(State::Instance().currentFG->Mutex.getOwner() == 7 && InSendMessage()) &&
         !State::Instance().currentFG->Mutex.isLockedByThisThread())
     {
@@ -2094,18 +2120,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
 
     // Menu's last command list can still be running
     WaitForGPUIdle(_device);
-
-    if (ppPresentQueue != nullptr && *ppPresentQueue != nullptr)
-    {
-        if (IsCurrentSwapchain(this))
-            State::Instance().currentCommandQueue = (ID3D12CommandQueue*) *ppPresentQueue;
-
-        if (_device != *ppPresentQueue)
-        {
-            _device = *ppPresentQueue;
-            WaitForGPUIdle(_device);
-        }
-    }
 
     HRESULT result = E_FAIL;
     DXGI_SWAP_CHAIN_DESC desc {};
@@ -2127,22 +2141,25 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     if (!VkPresentBridge::DxvkThroughVulkan())
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
-    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
-        State::Instance().currentFG == nullptr)
+    // V-Sync override creates flip model with ALLOW_TEARING, game's resize params must follow it
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default())
     {
-        LOG_DEBUG("Overriding flags");
-
-        // ALLOW_TEARING can't change on resize
         DXGI_SWAP_CHAIN_DESC scDesc {};
         if (_real->GetDesc(&scDesc) == S_OK)
         {
+            LOG_DEBUG("Overriding flags");
+
+            // ALLOW_TEARING can't change on resize
             SwapChainFlags = (SwapChainFlags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) |
                              (scDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
-        }
 
-        // 0 keeps the current count
-        if (BufferCount == 1)
-            BufferCount = 2;
+            // Flip model needs 2 buffers, 0 keeps the current count
+            if (BufferCount == 1 && (scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+                                     scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL))
+            {
+                BufferCount = 2;
+            }
+        }
     }
 
     if (IsCurrentSwapchain(this))
@@ -2265,6 +2282,20 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         _lastFlags = SwapChainFlags;
         result = _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask,
                                         ppPresentQueue);
+    }
+
+    // Present queue only changes with a successful ResizeBuffers1, SK path resizes without it
+    if (SUCCEEDED(result) && !skResized && ppPresentQueue != nullptr && *ppPresentQueue != nullptr)
+    {
+        // Unwrapped like on creation, Release matches currentCommandQueue with it
+        IUnknown* realQueue = nullptr;
+        if (!Util::CheckForRealObject(__FUNCTION__, *ppPresentQueue, &realQueue))
+            realQueue = *ppPresentQueue;
+
+        _device = realQueue;
+
+        if (IsCurrentSwapchain(this))
+            State::Instance().currentCommandQueue = (ID3D12CommandQueue*) realQueue;
     }
 
     if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)

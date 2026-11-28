@@ -57,6 +57,12 @@ bool CheckForRealObject(std::string functionName, IUnknown* pObject, IUnknown** 
 // The object Streamline wraps, or the object itself. Same lookup as CheckForRealObject, without its log line, for
 // per-frame identity checks. No reference is kept: the result is an identity, valid while the caller's object is.
 IUnknown* RealObjectIdentity(IUnknown* pObject);
+
+// Warns when the object is a ReShade or Special K proxy
+void WarnIfProxy(std::string functionName, IUnknown* pObject);
+
+// Original object behind a ReShade 6.7+ proxy with a reference, nullptr when it isn't one
+IUnknown* GetReShadeOriginal(IUnknown* pObject);
 void GetDeviceRemovedReason(ID3D11Device* pDevice);
 void GetDeviceRemovedReason(ID3D12Device* pDevice);
 void LoadProxyLibrary(const std::wstring& name, const std::wstring& optiPath, const std::wstring& overridePath,

@@ -1935,7 +1935,12 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         {
             SyncInterval = 0;
 
-            if (state.SCAllowTearing && !state.realExclusiveFullscreen)
+            // This swapchain's flags and live windowed state, the global ones can be stale or the game's
+            DXGI_SWAP_CHAIN_DESC scDesc {};
+            const bool allowTearing = This->GetDesc(&scDesc) == S_OK &&
+                                      (scDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0 && scDesc.Windowed;
+
+            if (allowTearing)
             {
                 LOG_DEBUG("Adding DXGI_PRESENT_ALLOW_TEARING");
                 Flags |= DXGI_PRESENT_ALLOW_TEARING;

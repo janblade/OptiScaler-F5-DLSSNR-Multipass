@@ -53,6 +53,20 @@ template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptio
         std::optional<T>::operator=(value);
     }
 
+    // Prevents the reset from being saved to ini
+    constexpr void reset_volatile()
+    {
+        if (!_volatile)
+        {
+            if (this->has_value())
+                _configIni = this->value();
+            else
+                _configIni = std::nullopt;
+        }
+        _volatile = true;
+        std::optional<T>::reset();
+    }
+
     // Use this when first setting a CustomOptional
     constexpr void set_from_config(const std::optional<T>& opt)
     {
@@ -255,7 +269,7 @@ class Config
     CustomOptional<bool, NoDefault>
         LogGpuMemory; // [Log] "GPU memory by module" lines; unset (auto) = on with LogToFile (read once)
     CustomOptional<bool> D3D12Dred { false }; // [Log] D3D12 device-removed breadcrumbs on the D3D11 bridge's device
-    CustomOptional<bool> CrashDump { false }; // [Log] write OptiScaler_crash.dmp when the game crashes (read once at start)
+    CustomOptional<bool> CrashDump { false }; // [Log] crash and error-exit dumps next to the log (read once at start)
     CustomOptional<bool> OpenConsole { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
     CustomOptional<int> LogLevel { 0 };
@@ -670,7 +684,7 @@ class Config
     // This is how DLSS itself is called. The forwarder exists only because driving the model
     // directly trips its caller check, and a probe showed the driver dispatches feature 18 already:
     // asking for 18 answers differently from asking for a feature that does not exist. OptiScaler
-    // also already tells the driver where to look, since NVNGX_FeatureInfo_Paths carries the game
+    // also already tells the driver where to look, since the NGX feature path list carries the game
     // and OptiScaler folders into Init_Ext.
     //
     // Off until it is shown to produce the same picture. If it does, the forwarder can go.

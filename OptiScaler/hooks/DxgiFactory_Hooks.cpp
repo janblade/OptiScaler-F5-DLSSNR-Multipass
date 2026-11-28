@@ -23,6 +23,7 @@
 #include <d3d11.h>
 #include <magic_enum.hpp>
 #include <detours/detours.h>
+#include <wrl/client.h>
 
 // #define DETAILED_SC_LOGS
 
@@ -45,7 +46,26 @@ static void SetPlainSwapchainInterop()
     State::Instance().swapchainInteropApi = SwapchainInteropApi::None;
 }
 
-static bool IsTearingSupported(IDXGIFactory* factory)
+// When ReShade hooks DXGI before Opti, FG libraries create their swapchain inside ReShade's hook,
+// which then passes its proxy queue on to DXGI. ReShade loaded by Opti hooks after, it needs its proxy.
+static Microsoft::WRL::ComPtr<ID3D12CommandQueue> ReShadeRealQueue(IUnknown* pDevice)
+{
+    Microsoft::WRL::ComPtr<IUnknown> original;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
+
+    // ReShade loaded by Opti, or by Special K that Opti loaded, sits above us
+    if (ReShadeLoadedAfterOpti())
+        return queue;
+
+    original.Attach(Util::GetReShadeOriginal(pDevice));
+
+    if (original != nullptr && SUCCEEDED(original.As(&queue)))
+        LOG_INFO("Using the real queue behind ReShade's proxy");
+
+    return queue;
+}
+
+bool DxgiFactoryHooks::IsTearingSupported(IDXGIFactory* factory)
 {
     if (factory == nullptr)
         return false;
@@ -62,6 +82,23 @@ static bool IsTearingSupported(IDXGIFactory* factory)
     factory5->Release();
 
     return SUCCEEDED(hr) && supported == TRUE;
+}
+
+// The real D3D11 swapchain of the bridge is made on a hidden window: a 0 size would be that window's, not the game's
+void DxgiFactoryHooks::ResolveInteropSize(HWND hWnd, UINT& width, UINT& height)
+{
+    if ((width != 0 && height != 0) || hWnd == nullptr)
+        return;
+
+    RECT rect {};
+    if (!GetClientRect(hWnd, &rect))
+        return;
+
+    if (width == 0 && rect.right > rect.left)
+        width = static_cast<UINT>(rect.right - rect.left);
+
+    if (height == 0 && rect.bottom > rect.top)
+        height = static_cast<UINT>(rect.bottom - rect.top);
 }
 
 static bool PrepareDx12FlipFormat(DXGI_FORMAT& format)
@@ -92,7 +129,7 @@ static bool PrepareDx12FlipFormat(DXGI_FORMAT& format)
     }
 }
 
-static bool PrepareDx12InteropDesc(DXGI_SWAP_CHAIN_DESC& desc, bool tearingSupported)
+bool DxgiFactoryHooks::PrepareDx12InteropDesc(DXGI_SWAP_CHAIN_DESC& desc, bool tearingSupported)
 {
     // D3D12 swapchain backbuffers cannot be multisampled: this desc is the D3D12 side's, forced to one sample below. The
     // game's own D3D11 swap chain keeps the samples it asked for, and the bridge resolves them into single-sample copies.
@@ -174,7 +211,7 @@ static bool PrepareDx12InteropDesc(DXGI_SWAP_CHAIN_DESC& desc, bool tearingSuppo
     return true;
 }
 
-static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc, bool tearingSupported)
+bool DxgiFactoryHooks::PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc, bool tearingSupported)
 {
     // D3D12 swapchain backbuffers cannot be multisampled: this desc is the D3D12 side's, forced to one sample below (see the
     // other overload).
@@ -256,8 +293,12 @@ static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc, bool tearingSup
     return true;
 }
 
-void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
+void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory, bool fromSpecialK)
 {
+    // Factories can be created from several threads
+    static std::mutex hookMutex;
+    std::lock_guard<std::mutex> lock(hookMutex);
+
     if (pFactory == nullptr || o_EnumAdapters != nullptr)
         return;
 
@@ -267,7 +308,63 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
     if (!Util::CheckForRealObject(__FUNCTION__, pFactory, (IUnknown**) &real))
         real = pFactory;
 
+    // ReShade 6.6+ returns a proxy factory, hooking the real one keeps ReShade above us in any load order.
+    // Special K hooks the real factory too.
+    if (auto original = Util::GetReShadeOriginal(real); original != nullptr)
+    {
+        real = (IDXGIFactory*) original;
+        original->Release();
+    }
+
     void** pFactoryVTable = *reinterpret_cast<void***>(real);
+
+    // Special K hooks the factory from its init thread and the game's factories wait for it in its export hooks.
+    // Hooking after it puts our swapchain wrapper above Special K's, 15s is Special K's own wait limit.
+    if (fromSpecialK)
+    {
+        static ULONGLONG skWaitStart = GetTickCount64();
+        auto code = (const uint8_t*) pFactoryVTable[10];
+        bool skHooked = code[0] == 0xE9 || code[0] == 0xEB || (code[0] == 0xFF && code[1] == 0x25);
+
+        if (!skHooked && GetTickCount64() - skWaitStart < 15000)
+        {
+            LOG_DEBUG("Waiting for Special K to hook the factory");
+
+            // A game that makes no more factories would never get our hooks: hook this one once Special K has (or
+            // after its 15 s), from a thread holding the factory. A later regular call returns on o_EnumAdapters.
+            static std::atomic<bool> retryStarted = false;
+
+            if (!retryStarted.exchange(true))
+            {
+                real->AddRef();
+
+                std::thread(
+                    [real]()
+                    {
+                        auto vtable = *reinterpret_cast<void***>(real);
+
+                        while (GetTickCount64() - skWaitStart < 15000)
+                        {
+                            auto entry = (const uint8_t*) vtable[10];
+
+                            if (entry[0] == 0xE9 || entry[0] == 0xEB || (entry[0] == 0xFF && entry[1] == 0x25))
+                                break;
+
+                            Sleep(50);
+                        }
+
+                        HookToFactory(real, false);
+                        real->Release();
+                    })
+                    .detach();
+            }
+
+            return;
+        }
+    }
+
+    LOG_DEBUG("CreateSwapChain: {}, CreateSwapChainForHwnd: {}", Util::WhoIsTheCaller(pFactoryVTable[10]),
+              Util::WhoIsTheCaller(pFactoryVTable[15]));
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -633,6 +730,16 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
     LOG_TRACE("localDesc.Windowed: {}", localDesc.Windowed);
 #endif //
 
+    Util::WarnIfProxy(__FUNCTION__, pDevice);
+
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> reShadeRealQueue;
+
+    if (_skipFGSwapChainCreation)
+        reShadeRealQueue = ReShadeRealQueue(pDevice);
+
+    if (reShadeRealQueue != nullptr)
+        pDevice = reShadeRealQueue.Get();
+
     // Check for SL proxy, get real queue
     auto prevCommandQueue = State::Instance().currentCommandQueue;
     ID3D12CommandQueue* cq = nullptr;
@@ -707,6 +814,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                     DXGI_SWAP_CHAIN_DESC realDesc = localDesc;
                     realDesc.OutputWindow = hiddenHwnd;
                     realDesc.Windowed = TRUE;
+                    ResolveInteropSize(localDesc.OutputWindow, realDesc.BufferDesc.Width, realDesc.BufferDesc.Height);
 
                     IDXGISwapChain* realDx11SwapChain = nullptr;
                     HRESULT realScResult = E_FAIL;
@@ -846,6 +954,24 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                 localDesc.Windowed = hdrGameWindowed;
                 result = o_CreateSwapChain(realFactory, pDevice, &localDesc, ppSwapChain);
             }
+
+            // DXGI can reject our desc changes, the game's own desc works as without Opti
+            if (FAILED(result) && memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0)
+            {
+                LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+                // The game's own desc is not an HDR one: nothing of the HDR plan is left to apply
+                SdrToHdr::ClearForRetry(hdrPlan);
+                localDesc = *pDesc;
+                result = o_CreateSwapChain(realFactory, pDevice, &localDesc, ppSwapChain);
+
+                if (SUCCEEDED(result) && !otherWindow)
+                {
+                    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                    State::Instance().SCLastFlags = localDesc.Flags;
+                    State::Instance().realExclusiveFullscreen = !localDesc.Windowed;
+                }
+            }
         }
 
         if (!_skipFGSwapChainCreation)
@@ -879,6 +1005,8 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
             if (!otherWindow)
                 SetPlainSwapchainInterop();
+
+            Util::WarnIfProxy(__FUNCTION__, *ppSwapChain);
 
             // Check for SL proxy
             IDXGISwapChain* realSC = nullptr;
@@ -1089,6 +1217,16 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
     }
 #endif
 
+    Util::WarnIfProxy(__FUNCTION__, pDevice);
+
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> reShadeRealQueue;
+
+    if (_skipFGSwapChainCreation)
+        reShadeRealQueue = ReShadeRealQueue(pDevice);
+
+    if (reShadeRealQueue != nullptr)
+        pDevice = reShadeRealQueue.Get();
+
     // Check for SL proxy, get real queue
     auto prevCommandQueue = State::Instance().currentCommandQueue;
     ID3D12CommandQueue* cq = nullptr;
@@ -1164,6 +1302,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                 if (hiddenHwnd != nullptr && dx12Device != nullptr && dx12Queue != nullptr)
                 {
                     DXGI_SWAP_CHAIN_DESC1 realDesc = localDesc;
+                    ResolveInteropSize(hWnd, realDesc.Width, realDesc.Height);
                     IDXGISwapChain1* realDx11SwapChain1 = nullptr;
                     HRESULT realScResult = E_FAIL;
                     {
@@ -1318,6 +1457,33 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                     SdrToHdr::KeepFullscreenDesc(hdrPlan, pFullscreenDesc != nullptr) ? &localFullscreenDesc : nullptr,
                     pRestrictToOutput, ppSwapChain);
             }
+
+            // DXGI can reject our desc changes, the game's own desc works as without Opti
+            if (FAILED(result) && (memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0 ||
+                                   (pFullscreenDesc != nullptr &&
+                                    memcmp(&localFullscreenDesc, pFullscreenDesc, sizeof(localFullscreenDesc)) != 0)))
+            {
+                LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+                // The game's own desc is not an HDR one: nothing of the HDR plan is left to apply
+                SdrToHdr::ClearForRetry(hdrPlan);
+                localDesc = *pDesc;
+
+                if (pFullscreenDesc != nullptr)
+                    localFullscreenDesc = *pFullscreenDesc;
+
+                result = o_CreateSwapChainForHwnd(realFactory, pDevice, hWnd, &localDesc,
+                                                  pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
+                                                  pRestrictToOutput, ppSwapChain);
+
+                if (SUCCEEDED(result) && !otherWindow)
+                {
+                    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                    State::Instance().SCLastFlags = localDesc.Flags;
+                    State::Instance().realExclusiveFullscreen =
+                        pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed;
+                }
+            }
         }
 
         if (!_skipFGSwapChainCreation)
@@ -1332,6 +1498,8 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
         {
             if (!otherWindow)
                 SetPlainSwapchainInterop();
+
+            Util::WarnIfProxy(__FUNCTION__, *ppSwapChain);
 
             // check for SL proxy
             IDXGISwapChain1* realSC = nullptr;
@@ -1470,6 +1638,16 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
         State::Instance().realExclusiveFullscreen = false;
     }
 
+    Util::WarnIfProxy(__FUNCTION__, pDevice);
+
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> reShadeRealQueue;
+
+    if (_skipFGSwapChainCreation)
+        reShadeRealQueue = ReShadeRealQueue(pDevice);
+
+    if (reShadeRealQueue != nullptr)
+        pDevice = reShadeRealQueue.Get();
+
     auto prevCommandQueue = State::Instance().currentCommandQueue;
     ID3D12CommandQueue* cq = nullptr;
     IUnknown* real = nullptr;
@@ -1508,10 +1686,28 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
         ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
         result =
             o_CreateSwapChainForCoreWindow(realFactory, pDevice, pWindow, &localDesc, pRestrictToOutput, ppSwapChain);
+
+        // DXGI can reject our desc changes, the game's own desc works as without Opti
+        if (FAILED(result) && memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0)
+        {
+            LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+            localDesc = *pDesc;
+            result = o_CreateSwapChainForCoreWindow(realFactory, pDevice, pWindow, &localDesc, pRestrictToOutput,
+                                                    ppSwapChain);
+
+            if (SUCCEEDED(result) && !otherWindow)
+            {
+                State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                State::Instance().SCLastFlags = localDesc.Flags;
+            }
+        }
     }
 
     if (SwapchainCreate::Created(result, ppSwapChain))
     {
+        Util::WarnIfProxy(__FUNCTION__, *ppSwapChain);
+
         // check for SL proxy
         IDXGISwapChain* realSC = nullptr;
         if (!Util::CheckForRealObject(__FUNCTION__, *ppSwapChain, (IUnknown**) &realSC))
@@ -1845,6 +2041,22 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChain(IDXGIFactory* realFactory, IUnkno
         {
             ScopedSkipParentWrapping skipParentWrapping {};
             result = o_DLSSGCreateSwapChain(realFactory, pDevice, &localDesc, ppSwapChain);
+
+            // DXGI can reject our desc changes, the game's own desc works as without Opti
+            if (FAILED(result) && memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0)
+            {
+                LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+                localDesc = *pDesc;
+                result = o_DLSSGCreateSwapChain(realFactory, pDevice, &localDesc, ppSwapChain);
+
+                if (SUCCEEDED(result) && !otherWindow)
+                {
+                    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                    State::Instance().SCLastFlags = localDesc.Flags;
+                    State::Instance().realExclusiveFullscreen = !localDesc.Windowed;
+                }
+            }
         }
 
         if (!_skipFGSwapChainCreation)
@@ -2165,6 +2377,31 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForHwnd(IDXGIFactory2* realFactory
             result = o_DLSSGCreateSwapChainForHwnd(realFactory, pDevice, hWnd, &localDesc,
                                                    pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
                                                    pRestrictToOutput, ppSwapChain);
+
+            // DXGI can reject our desc changes, the game's own desc works as without Opti
+            if (FAILED(result) && (memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0 ||
+                                   (pFullscreenDesc != nullptr &&
+                                    memcmp(&localFullscreenDesc, pFullscreenDesc, sizeof(localFullscreenDesc)) != 0)))
+            {
+                LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+                localDesc = *pDesc;
+
+                if (pFullscreenDesc != nullptr)
+                    localFullscreenDesc = *pFullscreenDesc;
+
+                result = o_DLSSGCreateSwapChainForHwnd(realFactory, pDevice, hWnd, &localDesc,
+                                                       pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
+                                                       pRestrictToOutput, ppSwapChain);
+
+                if (SUCCEEDED(result) && !otherWindow)
+                {
+                    State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                    State::Instance().SCLastFlags = localDesc.Flags;
+                    State::Instance().realExclusiveFullscreen =
+                        pFullscreenDesc != nullptr && !localFullscreenDesc.Windowed;
+                }
+            }
         }
 
         if (!_skipFGSwapChainCreation)
@@ -2339,6 +2576,22 @@ HRESULT DxgiFactoryHooks::DLSSGCreateSwapChainForCoreWindow(IDXGIFactory2* realF
         ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
         result = o_DLSSGCreateSwapChainForCoreWindow(realFactory, pDevice, pWindow, &localDesc, pRestrictToOutput,
                                                      ppSwapChain);
+
+        // DXGI can reject our desc changes, the game's own desc works as without Opti
+        if (FAILED(result) && memcmp(&localDesc, pDesc, sizeof(localDesc)) != 0)
+        {
+            LOG_WARN("Failed with modified desc: {:X}, retrying with game's desc", (UINT) result);
+
+            localDesc = *pDesc;
+            result = o_DLSSGCreateSwapChainForCoreWindow(realFactory, pDevice, pWindow, &localDesc, pRestrictToOutput,
+                                                         ppSwapChain);
+
+            if (SUCCEEDED(result) && !otherWindow)
+            {
+                State::Instance().SCAllowTearing = (localDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+                State::Instance().SCLastFlags = localDesc.Flags;
+            }
+        }
     }
 
     if (SwapchainCreate::Created(result, ppSwapChain))
@@ -2419,7 +2672,7 @@ HRESULT DxgiFactoryHooks::EnumAdapters(IDXGIFactory* realFactory, UINT Adapter, 
             auto gpuLuid = allGpus[Adapter].luid;
 
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
-            result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+            result = o_EnumAdapterByLuid(factory6, gpuLuid, IID_PPV_ARGS(ppAdapter));
         }
         // Empty while GPUs are being detected, other mods can enumerate from inside the detection
         else if (allGpus.empty())
@@ -2478,7 +2731,7 @@ HRESULT DxgiFactoryHooks::EnumAdapters1(IDXGIFactory1* realFactory, UINT Adapter
             auto gpuLuid = allGpus[Adapter].luid;
 
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
-            result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+            result = o_EnumAdapterByLuid(factory6, gpuLuid, IID_PPV_ARGS(ppAdapter));
         }
         // Empty while GPUs are being detected, other mods can enumerate from inside the detection
         else if (allGpus.empty())

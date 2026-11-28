@@ -241,6 +241,7 @@ bool FSRFG_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
 
     QueryVersions();
     _swapchainOutdated = false;
+    _driverFgRejected = false;
 
     // ML FG only works with the swapchain of the same module, the version can't be switched without recreating it
     _ffxSwapchain = _custom != nullptr ? &_custom->module : FfxApiProxy::VkFfxModule_FG();
@@ -248,9 +249,14 @@ bool FSRFG_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     if (_custom == nullptr && IsDriverVersionSelected())
     {
         if (FSR4DriverProviderVk::IsFgSupported(device, _physicalDevice, &VulkanHooks::GetDeviceProcAddr))
+        {
             _ffxSwapchain = FSR4DriverProviderVk::FgSwapchainModule();
+        }
         else
+        {
             LOG_WARN("Driver provided FG is not supported on this device, using the SDK one");
+            _driverFgRejected = true;
+        }
     }
 
     if (_ffxSwapchain->CreateContext == nullptr)
@@ -445,7 +451,8 @@ void FSRFG_Vk::CreateContext()
 
     const bool driver = UsesDriver();
 
-    if (driver != IsDriverVersionSelected() && !_swapchainOutdated)
+    // A rejected driver FG would need the same swapchain again
+    if (driver != IsDriverVersionSelected() && !_driverFgRejected && !_swapchainOutdated)
     {
         LOG_INFO("Selected FG version needs a {} swapchain, making the game recreate it", driver ? "SDK" : "driver");
         _swapchainOutdated = true;

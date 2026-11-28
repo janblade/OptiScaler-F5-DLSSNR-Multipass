@@ -1757,7 +1757,7 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
             // retired the old swapchain, it is not passed again)
             if (!fgSwapchain)
             {
-                if (nativeFg->RetiredOldSwapchain())
+                if (nativeFg->RetiredOldSwapchain() || nativeFg->IsRetiredSwapchain(localCreateInfo.oldSwapchain))
                     localCreateInfo.oldSwapchain = VK_NULL_HANDLE;
 
                 latencyMode = ChainLatencyMode(device, localCreateInfo, latencyInfo);

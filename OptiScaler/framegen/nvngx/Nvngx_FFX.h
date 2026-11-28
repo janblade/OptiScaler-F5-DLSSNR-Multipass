@@ -10,7 +10,8 @@ struct ffxContext_wrap
 
     ~ffxContext_wrap()
     {
-        if (!ctx)
+        // Delayed destroys can run while the process exits
+        if (!ctx || State::Instance().isShuttingDown)
             return;
 
         auto retCode = FfxApiProxy::D3D12_DestroyContext(&ctx, nullptr);
@@ -34,6 +35,15 @@ struct Nvngx_FFX_Handle
     bool hdrRangeSet = false;
     float hdrMinLuminance = 0.0001f;
     float hdrMaxLuminance = 1000.0f;
+
+    ~Nvngx_FFX_Handle()
+    {
+        // Context uses the device, it goes first
+        fgContext.reset();
+
+        if (device && !State::Instance().isShuttingDown)
+            device->Release();
+    }
 };
 
 class Nvngx_FFX : public IFGNvngx

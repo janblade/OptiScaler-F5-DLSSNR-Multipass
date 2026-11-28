@@ -136,6 +136,9 @@ class IFGFeature_Vk : public virtual IFGFeature
     // it
     virtual bool RetiredOldSwapchain() const { return false; }
 
+    // Old swapchain the FG already destroyed, the driver must not get it as oldSwapchain
+    virtual bool IsRetiredSwapchain(VkSwapchainKHR swapchain) const { return false; }
+
     // vkWaitForPresentKHR of the game on the output's swapchain (the driver's, with the output's locking)
     virtual VkResult WaitForPresent(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)
     {

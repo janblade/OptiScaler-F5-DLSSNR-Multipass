@@ -207,8 +207,7 @@ inline static void HookNgxApi(HMODULE nvngx)
 
 inline static void UnhookApis()
 {
-    NvApiHooks::Unhook();
-
+    // NvApi hook stays, it is only installed when nvapi gets loaded
     if (Original_D3D11_GetFeatureRequirements != nullptr || Original_D3D12_GetFeatureRequirements != nullptr)
     {
         DetourTransactionBegin();
@@ -1156,7 +1155,7 @@ class NVNGXProxy
         _vulkanDevice = _vulkanInited ? InDevice : VK_NULL_HANDLE;
         ++_vulkanEpoch;
 
-        return true;
+        return _vulkanInited;
     }
 
     // `device`: the one the core was started for, when known.

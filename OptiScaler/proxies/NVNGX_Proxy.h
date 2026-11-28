@@ -28,9 +28,9 @@ typedef NVSDK_NGX_Result (*PFN_NVSDK_NGX_VULKAN_GetFeatureRequirements)(
     const VkInstance Instance, const VkPhysicalDevice PhysicalDevice,
     const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo, NVSDK_NGX_FeatureRequirement* OutSupported);
 
-inline static PFN_NVSDK_NGX_D3D1X_GetFeatureRequirements Original_D3D11_GetFeatureRequirements = nullptr;
-inline static PFN_NVSDK_NGX_D3D1X_GetFeatureRequirements Original_D3D12_GetFeatureRequirements = nullptr;
-inline static PFN_NVSDK_NGX_VULKAN_GetFeatureRequirements Original_Vulkan_GetFeatureRequirements = nullptr;
+inline PFN_NVSDK_NGX_D3D1X_GetFeatureRequirements Original_D3D11_GetFeatureRequirements = nullptr;
+inline PFN_NVSDK_NGX_D3D1X_GetFeatureRequirements Original_D3D12_GetFeatureRequirements = nullptr;
+inline PFN_NVSDK_NGX_VULKAN_GetFeatureRequirements Original_Vulkan_GetFeatureRequirements = nullptr;
 
 typedef NVSDK_NGX_Result (*PFN_NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements)(
     const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo, uint32_t* OutExtensionCount,
@@ -39,15 +39,15 @@ typedef NVSDK_NGX_Result (*PFN_NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequire
     VkInstance Instance, VkPhysicalDevice PhysicalDevice, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
     uint32_t* OutExtensionCount, VkExtensionProperties** OutExtensionProperties);
 
-inline static PFN_NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements
+inline PFN_NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements
     Original_Vulkan_GetFeatureInstanceExtensionRequirements = nullptr;
-inline static PFN_NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements
+inline PFN_NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements
     Original_Vulkan_GetFeatureDeviceExtensionRequirements = nullptr;
 
 // NGX returns arrays it owns and frees them when its snippets get reloaded (Streamline's NGX init does that),
 // but games keep pointing at the names for vkCreateInstance/vkCreateDevice and their own checks afterwards
-inline static NVSDK_NGX_Result CopyNgxExtensionProperties(NVSDK_NGX_Result result, const uint32_t* count,
-                                                          VkExtensionProperties** properties)
+inline NVSDK_NGX_Result CopyNgxExtensionProperties(NVSDK_NGX_Result result, const uint32_t* count,
+                                                   VkExtensionProperties** properties)
 {
     if (result != NVSDK_NGX_Result_Success || count == nullptr || *count == 0 || properties == nullptr ||
         *properties == nullptr)
@@ -64,10 +64,9 @@ inline static NVSDK_NGX_Result CopyNgxExtensionProperties(NVSDK_NGX_Result resul
     return result;
 }
 
-inline static NVSDK_NGX_Result __stdcall
-Hooked_Vulkan_GetFeatureInstanceExtensionRequirements(const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
-                                                      uint32_t* OutExtensionCount,
-                                                      VkExtensionProperties** OutExtensionProperties)
+inline NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureInstanceExtensionRequirements(
+    const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo, uint32_t* OutExtensionCount,
+    VkExtensionProperties** OutExtensionProperties)
 {
     LOG_FUNC();
 
@@ -76,7 +75,7 @@ Hooked_Vulkan_GetFeatureInstanceExtensionRequirements(const NVSDK_NGX_FeatureDis
     return CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
 }
 
-inline static NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureDeviceExtensionRequirements(
+inline NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureDeviceExtensionRequirements(
     VkInstance Instance, VkPhysicalDevice PhysicalDevice, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
     uint32_t* OutExtensionCount, VkExtensionProperties** OutExtensionProperties)
 {
@@ -87,7 +86,7 @@ inline static NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureDeviceExtension
     return CopyNgxExtensionProperties(result, OutExtensionCount, OutExtensionProperties);
 }
 
-inline static NVSDK_NGX_Result __stdcall Hooked_Dx12_GetFeatureRequirements(
+inline NVSDK_NGX_Result __stdcall Hooked_Dx12_GetFeatureRequirements(
     IDXGIAdapter* Adapter, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
     NVSDK_NGX_FeatureRequirement* OutSupported)
 {
@@ -106,7 +105,7 @@ inline static NVSDK_NGX_Result __stdcall Hooked_Dx12_GetFeatureRequirements(
     return result;
 }
 
-inline static NVSDK_NGX_Result __stdcall Hooked_Dx11_GetFeatureRequirements(
+inline NVSDK_NGX_Result __stdcall Hooked_Dx11_GetFeatureRequirements(
     IDXGIAdapter* Adapter, const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo,
     NVSDK_NGX_FeatureRequirement* OutSupported)
 {
@@ -125,7 +124,7 @@ inline static NVSDK_NGX_Result __stdcall Hooked_Dx11_GetFeatureRequirements(
     return result;
 }
 
-inline static NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureRequirements(
+inline NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureRequirements(
     const VkInstance Instance, const VkPhysicalDevice PhysicalDevice,
     const NVSDK_NGX_FeatureDiscoveryInfo* FeatureDiscoveryInfo, NVSDK_NGX_FeatureRequirement* OutSupported)
 {
@@ -144,7 +143,7 @@ inline static NVSDK_NGX_Result __stdcall Hooked_Vulkan_GetFeatureRequirements(
     return result;
 }
 
-inline static void HookNgxApi(HMODULE nvngx)
+inline void HookNgxApi(HMODULE nvngx)
 {
     if (Original_D3D11_GetFeatureRequirements != nullptr || Original_D3D12_GetFeatureRequirements != nullptr)
         return;
@@ -205,7 +204,7 @@ inline static void HookNgxApi(HMODULE nvngx)
     }
 }
 
-inline static void UnhookApis()
+inline void UnhookApis()
 {
     // NvApi hook stays, it is only installed when nvapi gets loaded
     if (Original_D3D11_GetFeatureRequirements != nullptr || Original_D3D12_GetFeatureRequirements != nullptr)

@@ -499,8 +499,11 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         getOriginalNgxResource(InParameters, NVSDK_NGX_Parameter_ExposureTexture, &gameExposure);
         DlssNr::ExposureScanDx11::NoteHanded(gameExposure);
 
+        // Without a copy for this frame the param would hold the Dx11 texture or the cache's last copy
+        const bool reactiveReady = Dx11WithDx12::HasPreparedUpscalerResources(Dx11WithDx12::ResourceMask::Reactive);
+
         SetOptionalDx12Inputs(InParameters, dx11Exp.Dx12Resource, dx11Reactive.Dx12Resource, AutoExposure(),
-                              Config::Instance()->DisableReactiveMask.value_or(false));
+                              Config::Instance()->DisableReactiveMask.value_or(false) || !reactiveReady);
 
         InParameters->Set("FSR.reactive", (void*) nullptr);
         InParameters->Set("FSR.transparencyAndComposition", (void*) nullptr);

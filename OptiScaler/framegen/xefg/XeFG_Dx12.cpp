@@ -17,6 +17,7 @@
 #include <framegen/f5low/F5Low.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <framegen/GameFsrFgRule.h>
+#include <framegen/OpticalMotionFg_Dx12.h>
 
 #include <magic_enum.hpp>
 
@@ -567,6 +568,10 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
     if (Config::Instance()->ForceXeLL.value_or_default())
         params.maxInterpolatedFrames = 1;
 
+    // [FrameGen] MotionSource=optical: the swap chain is made for the flow's motion (display-size, unjittered), as
+    // volatile [XeFG] JitteredMV / HighResMV values read below (framegen/OpticalMotionFg_Dx12.h)
+    FGOpticalMotion::ApplyCreationFlags();
+
     params.initFlags = XEFG_SWAPCHAIN_INIT_FLAG_NONE;
 
     if (Config::Instance()->FGXeFGDepthInverted.value_or_default())
@@ -740,6 +745,10 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     if (Config::Instance()->ForceXeLL.value_or_default())
         params.maxInterpolatedFrames = 1;
 
+    // [FrameGen] MotionSource=optical: the swap chain is made for the flow's motion (display-size, unjittered), as
+    // volatile [XeFG] JitteredMV / HighResMV values read below (framegen/OpticalMotionFg_Dx12.h)
+    FGOpticalMotion::ApplyCreationFlags();
+
     params.initFlags = XEFG_SWAPCHAIN_INIT_FLAG_NONE;
 
     if (Config::Instance()->FGXeFGDepthInverted.value_or_default())
@@ -875,8 +884,12 @@ void XeFG_Dx12::Activate()
     if (State::Instance().activeFgInput == FGInput::Upscaler && currentFeature != nullptr)
         nativeAA = currentFeature->RenderWidth() == currentFeature->DisplayWidth();
 
+    // Display-size motion is refused unless it is the picture's own: native AA, or Optical F5Low's flow
+    // ([FrameGen] MotionSource=optical), which measures the finished picture itself
+    const bool flowMotion = State::Instance().activeFgInput == FGInput::Upscaler && FGOpticalMotion::ContextTakesFlow();
+
     if (_swapChainContext != nullptr && _fgContext != nullptr && !_isActive &&
-        (IsLowResMV() || nativeAA || (State::Instance().gameQuirks & GameQuirk::ForceFGRenderSizeMVs) ||
+        (IsLowResMV() || nativeAA || flowMotion || (State::Instance().gameQuirks & GameQuirk::ForceFGRenderSizeMVs) ||
          Config::Instance()->FGXeFGIgnoreInitChecks.value_or_default()))
     {
         auto result = XeFGProxy::SetEnabled()(_swapChainContext, true);

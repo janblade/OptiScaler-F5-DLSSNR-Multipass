@@ -31,6 +31,7 @@
 #include <imgui/ImGuiNotify.hpp>
 #include <framegen/GameFsrFgRule.h>
 #include <framegen/FgWindowRule.h>
+#include <framegen/OpticalMotionFg_Dx12.h>
 
 #include <magic_enum.hpp>
 
@@ -1905,6 +1906,12 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         // FG keeps replacement buffers of its own and composites them into the proxies. Either way this reads the
         // picture before the pass.)
         DlssNr::ApplyToFinishedPicture(This, gameQueue);
+
+        // [FrameGen] MotionSource=optical: the flow the producer measured above on this present goes to frame
+        // generation now, on its list on this queue, ahead of its dispatch (framegen/OpticalMotionFg_Dx12.h)
+        if (state.swapchainInteropApi == SwapchainInteropApi::None && gameQueue != nullptr)
+            FGOpticalMotion::AtPresent(state.currentFG, This, gameQueue, state.frameCount);
+
         fg->Present();
     }
     else if (willPresent && fg != nullptr)

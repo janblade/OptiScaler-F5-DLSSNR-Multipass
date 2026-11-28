@@ -3,6 +3,7 @@
 #include "plugins/PluginApi.h"
 #include "misc/CustomProviders.h"
 #include "misc/RelativePathRule.h"
+#include "misc/ExeTlsCallbacks.h"
 
 #include "Util.h"
 #include "Config.h"
@@ -566,6 +567,14 @@ static bool HookExeEntry()
 {
     if (o_ExeEntry != nullptr)
         return true;
+
+    // Protectors check the exe's code from TLS callbacks, loads then happen where they did before the entry hook
+    if (ExeTlsCallbacks::Has(
+            reinterpret_cast<const BYTE*>(exeModule != nullptr ? exeModule : GetModuleHandle(nullptr))))
+    {
+        LOG_INFO("Exe has TLS callbacks, not hooking the entry");
+        return false;
+    }
 
     o_ExeEntry = (PFN_ExeEntry) DetourGetEntryPoint(nullptr);
 

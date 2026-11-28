@@ -616,6 +616,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="misc\DeferredRelease.h" />
     <ClInclude Include="misc\PathUnder.h" />
     <ClInclude Include="misc\RelativePathRule.h" />
+    <ClInclude Include="misc\ExeTlsCallbacks.h" />
     <ClInclude Include="menu\MenuLifetimeRule.h" />
     <ClInclude Include="misc\Quirks.h" />
     <ClInclude Include="OwnedMutex.h" />

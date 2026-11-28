@@ -51,6 +51,7 @@
 #include <magic_enum.hpp>
 #include <version_check.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/CrashDumps.h>
 #include <misc/XeModuleInfo.h>
 #include <sha1/sha1.hpp>
 #include <plugins/PluginRegistry.h>
@@ -2127,7 +2128,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         // Off by default: a crash then leaves no file behind, and the game's own crash handling is untouched
         if (Config::Instance()->CrashDump.value_or_default())
+        {
             InstallCrashHandler();
+
+            // First chance fatal exceptions and exits with an error code
+            CrashDumps::Init();
+        }
 
         spdlog::warn("{0} loaded", VER_PRODUCT_NAME);
         spdlog::warn("---------------------------------");

@@ -269,7 +269,7 @@ class Config
     CustomOptional<bool, NoDefault>
         LogGpuMemory; // [Log] "GPU memory by module" lines; unset (auto) = on with LogToFile (read once)
     CustomOptional<bool> D3D12Dred { false }; // [Log] D3D12 device-removed breadcrumbs on the D3D11 bridge's device
-    CustomOptional<bool> CrashDump { false }; // [Log] write OptiScaler_crash.dmp when the game crashes (read once at start)
+    CustomOptional<bool> CrashDump { false }; // [Log] crash and error-exit dumps next to the log (read once at start)
     CustomOptional<bool> OpenConsole { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
     CustomOptional<int> LogLevel { 0 };

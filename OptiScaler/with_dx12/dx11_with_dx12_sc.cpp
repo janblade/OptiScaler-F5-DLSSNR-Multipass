@@ -464,31 +464,33 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         IUnknown* _device;
     } lowLatencyScope(State::Instance().currentD3D11Device);
 
-    if (!_InitInteropObjects())
-        return DXGI_ERROR_DEVICE_REMOVED;
+    // The device is fine when the interop copy fails, keep presenting the FG swapchain
+    bool frameCopied = _InitInteropObjects();
+    UINT dx11Index = 0;
 
-    auto dx11Index = _GetDx11BackBufferIndexForPresent();
+    if (frameCopied)
+    {
+        dx11Index = _GetDx11BackBufferIndexForPresent();
 
-    if (!_RequestSharedBackBuffer(dx11Index))
-        return DXGI_ERROR_DEVICE_REMOVED;
-
-    if (!_CopyDx11BackBufferToShared(dx11Index))
-        return DXGI_ERROR_DEVICE_REMOVED;
-
-    if (!_WaitDx11ThenDx12())
-        return DXGI_ERROR_DEVICE_REMOVED;
-
-    if (!_CopyDx11SharedToDx12FGBackBuffer(dx11Index))
-        return DXGI_ERROR_DEVICE_REMOVED;
+        frameCopied = _RequestSharedBackBuffer(dx11Index) && _CopyDx11BackBufferToShared(dx11Index) &&
+                      _WaitDx11ThenDx12() && _CopyDx11SharedToDx12FGBackBuffer(dx11Index);
+    }
 
     // Overwrites the raw copy just made above with native input's processed picture, when that option is on; a no-op
     // otherwise. Runs here, before FG takes the frame: this is the only present this game gets once Dx11wDx12SC
     // exists, so it is also where the D3D11 depth finder's own frame close has to happen (NativeMotionDx11::
-    // OnFGPresent does that), same placement rule Story F used on the D3D12 side.
-    _ApplyNativeInputToFGBackBuffer();
+    // OnFGPresent does that), same placement rule Story F used on the D3D12 side. Without a fresh copy the frame close
+    // still runs but its picture is dropped (the FG back buffer holds no new frame to overwrite).
+    if (frameCopied)
+        _ApplyNativeInputToFGBackBuffer();
+    else
+        NativeMotionDx11::OnFGPresent(_real, _dx11Device);
 
-    if (!_WaitForInteropCopyOnPresentQueue())
-        return DXGI_ERROR_DEVICE_REMOVED;
+    if (frameCopied)
+        frameCopied = _WaitForInteropCopyOnPresentQueue();
+
+    if (!frameCopied)
+        LOG_ERROR("Interop copy failed, presenting without the new frame");
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -521,7 +523,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (SUCCEEDED(result))
     {
-        _AdvanceFakeBackBufferIndex();
+        if (frameCopied)
+            _AdvanceFakeBackBufferIndex();
     }
     else
     {
@@ -1264,6 +1267,7 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         if (FAILED(result) || dxgiResource == nullptr)
         {
             LOG_ERROR("shadow IDXGIResource1 query {} failed: {:X}", _currentFakeIndex, (UINT) result);
+            SafeRelease(_sharedDx11BackBufferCopies[_currentFakeIndex]);
             sourceTexture->Release();
             return false;
         }
@@ -1275,6 +1279,8 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         if (FAILED(result) || _sharedBackBufferHandles[_currentFakeIndex] == nullptr)
         {
             LOG_ERROR("shadow CreateSharedHandle {} failed: {:X}", _currentFakeIndex, (UINT) result);
+            SafeRelease(_sharedDx11BackBufferCopies[_currentFakeIndex]);
+            _sharedBackBufferHandles[_currentFakeIndex] = nullptr;
             sourceTexture->Release();
             return false;
         }
@@ -1740,7 +1746,7 @@ void Dx11wDx12SC::_RefreshCachedSwapchainDesc()
 {
     _bufferCount = ResolveBufferCount(_real, _real1);
     _bufferFormat = ResolveBufferFormat(_real, _real1);
-    _currentFakeIndex = _bufferCount > 0 ? _currentFakeIndex : 0;
+    _currentFakeIndex = _bufferCount > 0 ? _currentFakeIndex % _bufferCount : 0;
 }
 
 UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const

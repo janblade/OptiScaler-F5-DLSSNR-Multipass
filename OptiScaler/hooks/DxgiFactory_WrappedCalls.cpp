@@ -218,6 +218,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
                     DXGI_SWAP_CHAIN_DESC realDesc = localDesc;
                     realDesc.OutputWindow = hiddenHwnd;
                     realDesc.Windowed = TRUE;
+                    DxgiFactoryHooks::ResolveInteropSize(localDesc.OutputWindow, realDesc.BufferDesc.Width,
+                                                         realDesc.BufferDesc.Height);
 
                     IDXGISwapChain* realDx11SwapChain = nullptr;
                     HRESULT realScResult = E_FAIL;
@@ -676,6 +678,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
                 if (hiddenHwnd != nullptr && dx12Device != nullptr && dx12Queue != nullptr)
                 {
                     DXGI_SWAP_CHAIN_DESC1 realDesc = localDesc;
+                    DxgiFactoryHooks::ResolveInteropSize(hWnd, realDesc.Width, realDesc.Height);
                     IDXGISwapChain1* realDx11SwapChain1 = nullptr;
                     HRESULT realScResult = E_FAIL;
                     {

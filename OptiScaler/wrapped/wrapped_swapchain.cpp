@@ -1425,21 +1425,21 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
 
     HRESULT result = S_OK;
 
+    // Unlock the locked FG, currentFG can change meanwhile
+    auto lockedFG = State::Instance().currentFG;
     bool ffxLock = false;
 
     {
         if (Config::Instance()->FGUseMutexForSwapchain.value_or_default())
         {
 
-            if (State::Instance().currentFG != nullptr && State::Instance().currentFG->IsActive() &&
-                !State::Instance().currentFG->IsPaused() &&
-                !IsFgResizeOwner(State::Instance().currentFG->Mutex.getOwner()) &&
-                !State::Instance().currentFG->Mutex.isLockedByThisThread())
+            if (lockedFG != nullptr && lockedFG->IsActive() && !lockedFG->IsPaused() &&
+                !IsFgResizeOwner(lockedFG->Mutex.getOwner()) && !lockedFG->Mutex.isLockedByThisThread())
             {
-                LOG_TRACE("Waiting ffxMutex 7, current: {}", State::Instance().currentFG->Mutex.getOwner());
-                State::Instance().currentFG->Mutex.lock(7);
+                LOG_TRACE("Waiting ffxMutex 7, current: {}", lockedFG->Mutex.getOwner());
+                lockedFG->Mutex.lock(7);
                 ffxLock = true;
-                LOG_TRACE("Accuired ffxMutex: {}", State::Instance().currentFG->Mutex.getOwner());
+                LOG_TRACE("Accuired ffxMutex: {}", lockedFG->Mutex.getOwner());
             }
             else
             {
@@ -1460,8 +1460,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullsc
 
     if (ffxLock)
     {
-        LOG_TRACE("Releasing ffxMutex: {}", State::Instance().currentFG->Mutex.getOwner());
-        State::Instance().currentFG->Mutex.unlockThis(7);
+        LOG_TRACE("Releasing ffxMutex: {}", lockedFG->Mutex.getOwner());
+        lockedFG->Mutex.unlockThis(7);
     }
 
     return result;
@@ -1581,22 +1581,25 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
     if (!VkPresentBridge::DxvkThroughVulkan())
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
-    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
-        State::Instance().currentFG == nullptr)
+    // V-Sync override creates flip model with ALLOW_TEARING, game's resize params must follow it
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default())
     {
-        LOG_DEBUG("Overriding flags");
-
-        // ALLOW_TEARING can't change on resize
         DXGI_SWAP_CHAIN_DESC scDesc {};
         if (_real->GetDesc(&scDesc) == S_OK)
         {
+            LOG_DEBUG("Overriding flags");
+
+            // ALLOW_TEARING can't change on resize
             SwapChainFlags = (SwapChainFlags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) |
                              (scDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
-        }
 
-        // 0 keeps the current count
-        if (BufferCount == 1)
-            BufferCount = 2;
+            // Flip model needs 2 buffers, 0 keeps the current count
+            if (BufferCount == 1 && (scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+                                     scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL))
+            {
+                BufferCount = 2;
+            }
+        }
     }
 
     if (IsCurrentSwapchain(this))
@@ -2133,22 +2136,25 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     if (!VkPresentBridge::DxvkThroughVulkan())
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
 
-    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
-        State::Instance().currentFG == nullptr)
+    // V-Sync override creates flip model with ALLOW_TEARING, game's resize params must follow it
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default())
     {
-        LOG_DEBUG("Overriding flags");
-
-        // ALLOW_TEARING can't change on resize
         DXGI_SWAP_CHAIN_DESC scDesc {};
         if (_real->GetDesc(&scDesc) == S_OK)
         {
+            LOG_DEBUG("Overriding flags");
+
+            // ALLOW_TEARING can't change on resize
             SwapChainFlags = (SwapChainFlags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) |
                              (scDesc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
-        }
 
-        // 0 keeps the current count
-        if (BufferCount == 1)
-            BufferCount = 2;
+            // Flip model needs 2 buffers, 0 keeps the current count
+            if (BufferCount == 1 && (scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+                                     scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL))
+            {
+                BufferCount = 2;
+            }
+        }
     }
 
     if (IsCurrentSwapchain(this))

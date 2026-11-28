@@ -64,6 +64,23 @@ bool DxgiFactoryHooks::IsTearingSupported(IDXGIFactory* factory)
     return SUCCEEDED(hr) && supported == TRUE;
 }
 
+// The real D3D11 swapchain of the bridge is made on a hidden window: a 0 size would be that window's, not the game's
+void DxgiFactoryHooks::ResolveInteropSize(HWND hWnd, UINT& width, UINT& height)
+{
+    if ((width != 0 && height != 0) || hWnd == nullptr)
+        return;
+
+    RECT rect {};
+    if (!GetClientRect(hWnd, &rect))
+        return;
+
+    if (width == 0 && rect.right > rect.left)
+        width = static_cast<UINT>(rect.right - rect.left);
+
+    if (height == 0 && rect.bottom > rect.top)
+        height = static_cast<UINT>(rect.bottom - rect.top);
+}
+
 static bool PrepareDx12FlipFormat(DXGI_FORMAT& format)
 {
     switch (format)
@@ -707,6 +724,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                     DXGI_SWAP_CHAIN_DESC realDesc = localDesc;
                     realDesc.OutputWindow = hiddenHwnd;
                     realDesc.Windowed = TRUE;
+                    ResolveInteropSize(localDesc.OutputWindow, realDesc.BufferDesc.Width, realDesc.BufferDesc.Height);
 
                     IDXGISwapChain* realDx11SwapChain = nullptr;
                     HRESULT realScResult = E_FAIL;
@@ -1182,6 +1200,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                 if (hiddenHwnd != nullptr && dx12Device != nullptr && dx12Queue != nullptr)
                 {
                     DXGI_SWAP_CHAIN_DESC1 realDesc = localDesc;
+                    ResolveInteropSize(hWnd, realDesc.Width, realDesc.Height);
                     IDXGISwapChain1* realDx11SwapChain1 = nullptr;
                     HRESULT realScResult = E_FAIL;
                     {

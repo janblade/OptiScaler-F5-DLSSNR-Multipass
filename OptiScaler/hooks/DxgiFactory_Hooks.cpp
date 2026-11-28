@@ -2421,6 +2421,17 @@ HRESULT DxgiFactoryHooks::EnumAdapters(IDXGIFactory* realFactory, UINT Adapter, 
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
             result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
         }
+        // Empty while GPUs are being detected, other mods can enumerate from inside the detection
+        else if (allGpus.empty())
+        {
+            auto preference = Config::Instance()->PreferDedicatedGpu.value_or_default()
+                                  ? DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE
+                                  : DXGI_GPU_PREFERENCE_UNSPECIFIED;
+
+            ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
+            result =
+                o_EnumAdapterByGpuPreference(factory6, Adapter, preference, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+        }
         else
             result = DXGI_ERROR_NOT_FOUND;
 
@@ -2468,6 +2479,17 @@ HRESULT DxgiFactoryHooks::EnumAdapters1(IDXGIFactory1* realFactory, UINT Adapter
 
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
             result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+        }
+        // Empty while GPUs are being detected, other mods can enumerate from inside the detection
+        else if (allGpus.empty())
+        {
+            auto preference = Config::Instance()->PreferDedicatedGpu.value_or_default()
+                                  ? DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE
+                                  : DXGI_GPU_PREFERENCE_UNSPECIFIED;
+
+            ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
+            result = o_EnumAdapterByGpuPreference(factory6, Adapter, preference, __uuidof(IDXGIAdapter1),
+                                                  (void**) ppAdapter);
         }
         else
             result = DXGI_ERROR_NOT_FOUND;

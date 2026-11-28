@@ -39,6 +39,7 @@ static int evalCounter = 0;
 static bool shutdown = false;
 static bool _skipInit = false;
 static wchar_t const** paths;
+static NVNGXClients _clients;
 
 class ScopedInitVk
 {
@@ -161,6 +162,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init_Ext2(
     NVSDK_NGX_Version InSDKVersion, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -278,6 +280,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init_Ext(unsigned long long InAp
                                                          const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -322,6 +325,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init_ProjectID_Ext(
     const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -372,6 +376,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init(unsigned long long InApplic
                                                      NVSDK_NGX_Version InSDKVersion)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -416,6 +421,7 @@ NVSDK_NGX_VULKAN_Init_ProjectID(const char* InProjectId, NVSDK_NGX_EngineType In
                                 NVSDK_NGX_Version InSDKVersion, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -1206,6 +1212,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown(void)
 {
+    if (!_clients.Remove(_ReturnAddress()))
+        return NVSDK_NGX_Result_Success;
+
     // Neural Rendering's parameter block may be the core's; it goes before the core does.
     DlssNr::ShutdownVkForDevice(VK_NULL_HANDLE, "the game is shutting its NGX down");
 
@@ -1246,6 +1255,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown(void)
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown1(VkDevice InDevice)
 {
+    if (!_clients.Remove(_ReturnAddress()))
+        return NVSDK_NGX_Result_Success;
+
     // Neural Rendering's parameter block may be the core's; it goes before the core does.
     DlssNr::ShutdownVkForDevice(InDevice, "the game is shutting its NGX down on the device NR runs on");
 

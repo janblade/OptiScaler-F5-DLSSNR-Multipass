@@ -68,6 +68,7 @@ static int evalCounter = 0;
 static std::atomic_bool shutdown { false };
 static bool _skipInit = false;
 static wchar_t const** paths;
+static NVNGXClients _clients;
 
 class ScopedInitDx12
 {
@@ -188,6 +189,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_Ext(unsigned long long InApp
                                                         const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -276,6 +278,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init(unsigned long long InApplica
                                                     NVSDK_NGX_Version InSDKVersion)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -334,6 +337,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_ProjectID(const char* InProj
                                                               const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
 
@@ -392,6 +396,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_with_ProjectID(
     NVSDK_NGX_Version InSDKVersion)
 {
     LOG_FUNC();
+    _clients.Add(_ReturnAddress());
 
     LOG_INFO("InProjectId: {0}", InProjectId);
     LOG_INFO("InEngineType: {0}", (int) InEngineType);
@@ -523,9 +528,25 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
     return NVSDK_NGX_Result_Success;
 }
 
-NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown(void) { return ShutdownDx12(nullptr); }
+// Only the last module using NGX (the game, Streamline, a mod) shuts it down. Opti's own calls (the nested ones and
+// the inputs) never count, see NVNGXClients. Neural Rendering and Superior Scaling start the runtime through
+// NVNGXProxy directly, they are no clients: after the last client's shutdown they find the runtime gone by the
+// epoch bump in ShutdownDx12 and start it again when they need it.
+NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown(void)
+{
+    if (!_clients.Remove(_ReturnAddress()))
+        return NVSDK_NGX_Result_Success;
 
-NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown1(ID3D12Device* InDevice) { return ShutdownDx12(InDevice); }
+    return ShutdownDx12(nullptr);
+}
+
+NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown1(ID3D12Device* InDevice)
+{
+    if (!_clients.Remove(_ReturnAddress()))
+        return NVSDK_NGX_Result_Success;
+
+    return ShutdownDx12(InDevice);
+}
 
 #pragma endregion
 

@@ -59,7 +59,7 @@ bool XeLL::init(IUnknown* pDevice)
 
     // Match the ReShade layer used by Streamline and the frame-generation queues.
     Microsoft::WRL::ComPtr<IUnknown> originalDevice;
-    if (reshadeModule == nullptr)
+    if (!ReShadeLoadedAfterOpti())
         originalDevice.Attach(Util::GetReShadeOriginal(pDevice));
 
     auto device = originalDevice != nullptr ? originalDevice.Get() : pDevice;

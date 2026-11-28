@@ -53,8 +53,8 @@ static Microsoft::WRL::ComPtr<ID3D12CommandQueue> ReShadeRealQueue(IUnknown* pDe
     Microsoft::WRL::ComPtr<IUnknown> original;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
 
-    // ReShade loaded by Opti sits above us (reshadeModule is only set for that load, not for the one Special K does)
-    if (reshadeModule != nullptr)
+    // ReShade loaded by Opti, or by Special K that Opti loaded, sits above us
+    if (ReShadeLoadedAfterOpti())
         return queue;
 
     original.Attach(Util::GetReShadeOriginal(pDevice));
@@ -329,6 +329,36 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory, bool fromSpecialK)
         if (!skHooked && GetTickCount64() - skWaitStart < 15000)
         {
             LOG_DEBUG("Waiting for Special K to hook the factory");
+
+            // A game that makes no more factories would never get our hooks: hook this one once Special K has (or
+            // after its 15 s), from a thread holding the factory. A later regular call returns on o_EnumAdapters.
+            static std::atomic<bool> retryStarted = false;
+
+            if (!retryStarted.exchange(true))
+            {
+                real->AddRef();
+
+                std::thread(
+                    [real]()
+                    {
+                        auto vtable = *reinterpret_cast<void***>(real);
+
+                        while (GetTickCount64() - skWaitStart < 15000)
+                        {
+                            auto entry = (const uint8_t*) vtable[10];
+
+                            if (entry[0] == 0xE9 || entry[0] == 0xEB || (entry[0] == 0xFF && entry[1] == 0x25))
+                                break;
+
+                            Sleep(50);
+                        }
+
+                        HookToFactory(real, false);
+                        real->Release();
+                    })
+                    .detach();
+            }
+
             return;
         }
     }

@@ -318,7 +318,7 @@ class StreamlineProxy
     {
         Microsoft::WRL::ComPtr<IUnknown> original;
 
-        if (reshadeModule == nullptr)
+        if (!ReShadeLoadedAfterOpti())
             original.Attach(Util::GetReShadeOriginal((IUnknown*) device));
 
         if (original != nullptr)

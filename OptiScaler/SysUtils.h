@@ -82,6 +82,10 @@ inline HMODULE exeModule = nullptr;
 inline HMODULE originalModule = nullptr;
 inline HMODULE skModule = nullptr;
 inline HMODULE reshadeModule = nullptr;
+
+// ReShade hooks after Opti when Opti loads it, or when Special K loaded by Opti does (we no longer load ReShade then):
+// the game and Opti both hold ReShade's proxy, so its proxies are kept. Without a ReShade proxy nothing is unwrapped.
+inline bool ReShadeLoadedAfterOpti() { return reshadeModule != nullptr || skModule != nullptr; }
 inline HMODULE vulkanModule = nullptr;
 inline HMODULE d3d11Module = nullptr;
 inline HMODULE d3d12AgilityModule = nullptr;

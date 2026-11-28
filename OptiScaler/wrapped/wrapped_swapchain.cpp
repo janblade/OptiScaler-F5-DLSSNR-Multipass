@@ -14,6 +14,7 @@
 #include <with_dx12/with_dx12.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <wrapped/wrapped_factory.h>
 #include <menu/menu_overlay_base.h>
 #include <output/SdrToHdr_Dx11Present.h>
 #include <native/NativeDriverDx12.h>
@@ -1334,7 +1335,12 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetPrivateData(REFGUID Name, U
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetParent(REFIID riid, void** ppParent)
 {
-    return _real->GetParent(riid, ppParent);
+    auto result = _real->GetParent(riid, ppParent);
+
+    if (result == S_OK && Config::Instance()->DxgiFactoryWrapping.value_or_default())
+        WrappedIDXGIFactory7::WrapParent(riid, ppParent, _ReturnAddress());
+
+    return result;
 }
 
 //

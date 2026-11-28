@@ -200,10 +200,11 @@ the background behind it. The two pull in opposite directions, so the fix for on
 
 ## Individual pass controls
 
-Under **DLSS Neural Rendering → Model passes**, expand Pass 1, Pass 2, or Pass 3. Each contains
+Under **Neural Rendering → Passes & Colour**, the **Passes** card sets the pass count (Model passes),
+Pass feedback and Lift model pass limit. Below it are Pass 1, Pass 2 and Pass 3. Each contains
 Style, Intensity, Local structure, Local tone, Skin structure, and Auto skin mask. Sliders commit
-when released to avoid rebuilding the model on every movement. Set the model pass count to 2 or 3
-to activate later passes; editing inactive passes prepares their settings without running them.
+when released to avoid rebuilding the model on every movement. Pass 2 shows from 2 passes and Pass 3
+from 3; a hidden pass keeps its settings.
 
 Later passes inherit pass 1 unless overridden, except Local tone, which defaults to 0 to preserve
 the earlier build's appearance. Reset on a later-pass slider clears its override. Intensity,

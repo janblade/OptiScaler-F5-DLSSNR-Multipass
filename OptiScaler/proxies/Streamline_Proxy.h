@@ -378,9 +378,10 @@ class StreamlineProxy
             pref.flags |= sl::PreferenceFlags::eUseDXGIFactoryProxy;
 
         auto exePath = Util::ExePath().remove_filename();
-        auto nvngxDlssPath = Util::FindFilePath(exePath, "nvngx_dlss.dll");
-        auto nvngxDlssDPath = Util::FindFilePath(exePath, "nvngx_dlssd.dll");
-        auto nvngxDlssGPath = Util::FindFilePath(exePath, "nvngx_dlssg.dll");
+        // Found at startup (Opti's folder, NvngxFeaturePath, then the game folder)
+        std::optional<std::filesystem::path> nvngxDlssPath = State::Instance().NVNGX_DLSS_Path;
+        std::optional<std::filesystem::path> nvngxDlssDPath = State::Instance().NVNGX_DLSSD_Path;
+        std::optional<std::filesystem::path> nvngxDlssGPath = State::Instance().NVNGX_DLSSG_Path;
         auto nvngxDlssNrPath = Util::FindFilePath(exePath, "nvngx_dlssnr.dll");
 
         std::vector<std::wstring> pathStorage;

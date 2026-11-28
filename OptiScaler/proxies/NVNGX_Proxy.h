@@ -516,6 +516,33 @@ class NVNGXProxy
     inline static std::map<std::string, CustomNgxModule> _customModules;
     inline static std::mutex _customMutex;
 
+    inline static std::vector<const wchar_t*> _featurePaths;
+
+    static void AddFeaturePath(const std::filesystem::path& path)
+    {
+        auto normalize = [](const std::filesystem::path& p)
+        {
+            auto result = p.lexically_normal().wstring();
+
+            if (result.size() > 1 && (result.back() == L'\\' || result.back() == L'/'))
+                result.pop_back();
+
+            to_lower_in_place(result);
+            return result;
+        };
+
+        auto& paths = State::Instance().NVNGX_FeatureInfo_Paths;
+        auto normalized = normalize(path);
+
+        for (const auto& existing : paths)
+        {
+            if (normalize(existing) == normalized)
+                return;
+        }
+
+        paths.push_back(path.wstring());
+    }
+
     // The custom module's export: from a plugin's resolver when it has one, else KernelBase's GetProcAddress
     static FARPROC Proc(const NvngxModule& module, const char* name)
     {
@@ -829,26 +856,57 @@ class NVNGXProxy
         }
     }
 
+    // The one place the NGX feature path list is built: DLSSFeaturePath, the NvngxDlssPath override's folder, Opti's
+    // folder, the game's own list, the exe folder, then the folders the dlls were found in. Used by the NGX Init
+    // exports (the game's list is stored from them) and by every NGX start of ours (NR, Superior, DLSS, DLSS-D).
+    static void SetFeaturePaths(NVSDK_NGX_FeatureCommonInfo* fcInfo)
+    {
+        auto& state = State::Instance();
+        auto config = Config::Instance();
+        const bool dlssOverride = config->NVNGX_DLSS_Library.has_value();
+
+        auto addDllFolder = [](const std::optional<std::wstring>& dllPath)
+        {
+            if (dllPath.has_value())
+                AddFeaturePath(std::filesystem::path(dllPath.value()).parent_path());
+        };
+
+        state.NVNGX_FeatureInfo_Paths.clear();
+
+        if (config->DLSSFeaturePath.has_value())
+            AddFeaturePath(config->DLSSFeaturePath.value());
+
+        if (dlssOverride)
+            addDllFolder(state.NVNGX_DLSS_Path);
+
+        AddFeaturePath(config->MainDllPath.value());
+
+        for (const auto& path : state.NVNGX_Game_Paths)
+            AddFeaturePath(path);
+
+        AddFeaturePath(Util::ExePath().remove_filename());
+
+        if (!dlssOverride)
+            addDllFolder(state.NVNGX_DLSS_Path);
+
+        addDllFolder(state.NVNGX_DLSSD_Path);
+        addDllFolder(state.NVNGX_DLSSG_Path);
+
+        _featurePaths.clear();
+
+        for (size_t i = 0; i < state.NVNGX_FeatureInfo_Paths.size(); ++i)
+        {
+            _featurePaths.push_back(state.NVNGX_FeatureInfo_Paths[i].c_str());
+            LOG_DEBUG("Feature Path [{}]: {}", i, wstring_to_string(state.NVNGX_FeatureInfo_Paths[i]));
+        }
+
+        fcInfo->PathListInfo.Path = _featurePaths.data();
+        fcInfo->PathListInfo.Length = static_cast<unsigned int>(_featurePaths.size());
+    }
+
     static void GetFeatureCommonInfo(NVSDK_NGX_FeatureCommonInfo* fcInfo)
     {
-        if (State::Instance().NVNGX_DLSS_Path.has_value())
-        {
-            std::filesystem::path dlssPath(State::Instance().NVNGX_DLSS_Path.value());
-            State::Instance().NVNGX_FeatureInfo_Paths.push_back(dlssPath.remove_filename().wstring());
-        }
-
-        // Allocate memory for the array of const wchar_t*
-        wchar_t const** paths = new const wchar_t*[State::Instance().NVNGX_FeatureInfo_Paths.size()];
-
-        // Copy the strings from the vector to the array
-        for (size_t i = 0; i < State::Instance().NVNGX_FeatureInfo_Paths.size(); ++i)
-        {
-            paths[i] = State::Instance().NVNGX_FeatureInfo_Paths[i].c_str();
-            LOG_DEBUG("paths[{0}]: {1}", i, wstring_to_string(State::Instance().NVNGX_FeatureInfo_Paths[i]));
-        }
-
-        fcInfo->PathListInfo.Path = paths;
-        fcInfo->PathListInfo.Length = static_cast<unsigned int>(State::Instance().NVNGX_FeatureInfo_Paths.size());
+        SetFeaturePaths(fcInfo);
 
         // Config logging
         fcInfo->LoggingInfo.MinimumLoggingLevel =

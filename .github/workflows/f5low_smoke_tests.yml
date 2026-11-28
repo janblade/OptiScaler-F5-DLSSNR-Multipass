@@ -48,7 +48,7 @@ jobs:
           New-Item -ItemType Directory -Force $out | Out-Null
           $tests = @(Get-ChildItem tests -Filter 'f5low_*_smoke.cpp' | ForEach-Object { $_.BaseName }) +
                    @('ll_output_rule_smoke', 'nr_native_low_latency_smoke', 'nr_status_steady_value_smoke',
-                     'xess_ue_decode_smoke', 'status_page_rules_smoke', 'vulkan_route_rule_smoke')
+                     'xess_ue_decode_smoke', 'status_page_rules_smoke', 'vulkan_route_rule_smoke', 'relative_path_rule_smoke')
           $failed = @()
           foreach ($name in $tests) {
             cmd /c "call `"$vcvars\VC\Auxiliary\Build\vcvars64.bat`" >nul && cl /nologo /std:c++20 /EHsc /W4 /Iexternal\vulkan\include tests\$name.cpp /Fe:$out\$name.exe /Fo:$out\"

@@ -365,6 +365,9 @@
     <ClInclude Include="misc\PathUnder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\RelativePathRule.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="menu\MenuLifetimeRule.h">
       <Filter>Header Files</Filter>
     </ClInclude>

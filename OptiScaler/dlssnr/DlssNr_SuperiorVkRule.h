@@ -27,9 +27,9 @@ struct Frame
 {
     bool selected = false;
     bool reduced = false; // the model works on fewer pixels than the frame (below 100%)
-    // [DlssNr] SuperiorAtNative applies (StabilizeAtNative: 100% and above, a private DLSS wanted and available, no
-    // Compress screen edges): the private DLSS steadies the native raster, above 100% the pair the supersample down-leg
-    // averaged to native.
+    // [DlssNr] SuperiorAtNative applies (StabilizeAtNative: 100% and above, a private DLSS wanted and available, on
+    // Vulkan no Compress screen edges): the private DLSS steadies the native raster, above 100% the pair the
+    // supersample down-leg averaged to native.
     bool atNative = false;
     bool packed = false; // Compress screen edges is packing this frame
     unsigned passes = 1;

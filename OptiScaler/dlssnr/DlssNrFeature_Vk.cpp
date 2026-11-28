@@ -2367,7 +2367,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     const bool superiorAtNativeWanted = DlssNr::SuperiorScaling::Enabled(cfg) &&
                                         DlssNr::SuperiorScaling::StabilizeAtNative(
                                             cfg.DlssNrSuperiorAtNative.value_or_default(), workScale, spatial,
-                                            cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                            // Superior does not run with Compress screen edges on Vulkan yet
+                                            // (VkRule Packed), so not with it at native either
+                                            false, cfg.DlssNrSuperiorScalingPreset.value_or_default(),
                                             SuperiorVk::Private::srUnavailable || SuperiorVk::Private::privateBroken);
     // Above 100% Superior needs the ordinary down-leg to average the supersampled answer to native. Its scaler and the
     // native image are made here when they can be, so that where the down-leg cannot run this is known before anything

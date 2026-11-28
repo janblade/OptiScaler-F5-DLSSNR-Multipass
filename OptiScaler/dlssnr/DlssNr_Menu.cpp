@@ -4881,8 +4881,10 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 "Off: the DLSS above steadies NR only while Model resolution is below 100%.\n"
                 "On: it also runs at 100% and above. Above 100% NR still works at the larger size; its result "
                 "is brought back to the screen's size first and the DLSS steadies that. Costs the DLSS's time at "
-                "full screen size. Not with Compress screen edges, which has its own rule. Like below 100%, "
-                "Superior's own composition then leaves out Depth fade. On native Vulkan too, in one NR pass.");
+                "full screen size. Above 100% this also works with Compress screen edges; at exactly 100% "
+                "compression keeps its own rule. Like below 100%, Superior's own composition then leaves out Depth "
+                "fade. On native "
+                "Vulkan too, in one NR pass and without Compress screen edges.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
             if (nr.vulkan)

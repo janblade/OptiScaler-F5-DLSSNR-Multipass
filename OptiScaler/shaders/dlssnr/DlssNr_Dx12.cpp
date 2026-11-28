@@ -4162,10 +4162,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         superiorPacked = false;
     }
     // [DlssNr] SuperiorAtNative: the private DLSS at 100% and above. Above 100% it works at native, on the pair after
-    // the supersample down-leg, while NR itself keeps its supersampled raster and its ordinary guides.
+    // the supersample down-leg, while NR itself keeps its supersampled raster and its ordinary guides. With Compress
+    // screen edges that pair is the unpacked one compression's own down-leg averages to native (pairDownOk below);
+    // the private DLSS's guides are then matched from the game's, as without compression.
     const bool superiorAtNative =
         superior && DlssNr::SuperiorScaling::StabilizeAtNative(
                         cfg.DlssNrSuperiorAtNative.value_or_default(), workScale, spatial,
+                        DlssNr::SuperiorScaling::StabilizeSupersampled(true, width, height, workWidth, workHeight),
                         cfg.DlssNrSuperiorScalingPreset.value_or_default(), superiorState.srUnavailable);
     const bool superiorSupersample =
         DlssNr::SuperiorScaling::StabilizeSupersampled(superiorAtNative, width, height, workWidth, workHeight);
@@ -6619,6 +6622,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             superDownOk = true;
         }
+        // Supersampling under SuperiorAtNative without the native pair: the private DLSS skips this frame, so its
+        // history starts over on the next one instead of bridging the gap.
+        if (superiorGeneration && superiorSupersample && !superDownOk)
+            superiorGeneration->reset = true;
 
         // Reduced up-leg (mirrors the down-leg above). DlssNrReducedUpscaleMethod: 0 = Bilinear
         // (not SGSR1-enlarged), 1 = SGSR1 answer. The proxy side used to be independently

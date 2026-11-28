@@ -27,7 +27,7 @@ static void LogMenuSubmitThread(const char* what, VkQueue queue)
 // https://gist.github.com/mem99/0ec31ca302927457f86b1d6756aaa8c4
 // Need to check resize & recreate fixes
 
-static bool _vulkanObjectsCreated = false;
+static std::atomic<bool> _vulkanObjectsCreated { false };
 static std::mutex _vkCleanMutex;
 
 // Family of every queue, games can present from queues the menu can't submit to
@@ -48,7 +48,7 @@ static VkSwapchainKHR _menuOldSwapchain = VK_NULL_HANDLE;
 static ULONG64 _frameCount;
 
 // Window of a destroyed menu swapchain, probe windows can stay alive
-static HWND _releasedHwnd = nullptr;
+static std::atomic<HWND> _releasedHwnd { nullptr };
 
 // ImGui's renderer backend is the Vulkan one. Not a given: with the frame-generation bridge (native/VkPresentBridge.h)
 // the menu moves to the D3D12 swapchain and its backend, and when the game then makes a swapchain the bridge does not
@@ -492,9 +492,15 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         }
     }
 
-    _vulkanObjectsCreated = true;
+    // Present reads both under the lock
+    {
+        std::lock_guard lock(_vkCleanMutex);
+        _menuSwapchain = *pSwapchain;
+        _vulkanObjectsCreated = true;
+    }
+
     State::Instance().menuOverlayIsVulkan = true;
-    LOG_FUNC_RESULT(_vulkanObjectsCreated);
+    LOG_FUNC_RESULT(true);
 }
 
 void MenuOverlayVk::DestroyVulkanObjects(bool shutdown, VkDevice device, VkSwapchainKHR swapchain)
@@ -627,7 +633,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     if (!_vulkanObjectsCreated)
         return true;
 
-    if (!MenuOverlayBase::IsInited() || _ImVulkan_Info.Device == VK_NULL_HANDLE)
+    if (!MenuOverlayBase::IsInited())
         return true;
 
     if (pPresentInfo->swapchainCount == 0)
@@ -859,7 +865,6 @@ void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInst
 
     if (_ImVulkan_Info.Device != VK_NULL_HANDLE)
     {
-        _menuSwapchain = *pSwapchain;
         _menuOldSwapchain = pCreateInfo->oldSwapchain;
         _releasedHwnd = nullptr;
         MenuOverlayBase::VulkanReady();

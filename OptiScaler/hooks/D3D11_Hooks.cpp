@@ -9,6 +9,7 @@
 #include <dlssnr/DlssNr_ExposureScan_Dx11.h>
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeLowLatency.h>
+#include <inputs/FSR2_Dx11.h>
 
 #include <wrapped/wrapped_swapchain.h>
 
@@ -59,6 +60,7 @@ static ULONG D3D11DeviceRelease(IUnknown* device, PFN_Release original)
         if (refCount == 1)
         {
             State::Instance().RemoveD3D11Device(device);
+            FSR2Dx11DeviceDestroyed(device);
 
             if (isCurrent)
             {

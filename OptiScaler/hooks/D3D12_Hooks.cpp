@@ -22,6 +22,7 @@
 #include <proxies/KernelBase_Proxy.h>
 #include <inputs/FSR2_Dx12.h>
 #include <inputs/FSR3_Dx12.h>
+#include <inputs/NVNGX_DLSS.h>
 
 #include <detours/detours.h>
 
@@ -1749,6 +1750,7 @@ static ULONG D3D12DeviceRelease(IUnknown* device, PFN_Release original)
             // The FSR2/FSR3 inputs forget a cached device that is going away
             FSR2Dx12DeviceDestroyed(device);
             FSR3Dx12DeviceDestroyed(device);
+            NVNGXDx12DeviceDestroyed(device);
 
             if (isCurrent)
             {

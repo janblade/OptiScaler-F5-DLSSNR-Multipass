@@ -442,8 +442,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (_fg == nullptr)
         _fg = State::Instance().currentFG;
 
+    // Occlusion test belongs to the game window's swapchain, the real one is on a hidden window
     if ((Flags & DXGI_PRESENT_TEST) != 0)
-        return _real->Present(SyncInterval, Flags);
+        return _fgSwapChain->Present(SyncInterval, Flags);
 
     // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present, on the game's
     // own D3D11 device. This is the game's only present here; the bridge's D3D12 presents belong to frame generation.
@@ -472,8 +473,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     {
         dx11Index = _GetDx11BackBufferIndexForPresent();
 
-        frameCopied = _RequestSharedBackBuffer(dx11Index) && _CopyDx11BackBufferToShared(dx11Index) &&
-                      _WaitDx11ThenDx12() && _CopyDx11SharedToDx12FGBackBuffer(dx11Index);
+        // The D3D12 copy of this slot's earlier frame can still be reading the shared texture the D3D11 copy overwrites
+        frameCopied = _RequestSharedBackBuffer(dx11Index) &&
+                      _WaitForCopyAllocator(_currentFakeIndex, _copyAllocatorFenceValues) &&
+                      _CopyDx11BackBufferToShared(dx11Index) && _WaitDx11ThenDx12() &&
+                      _CopyDx11SharedToDx12FGBackBuffer(dx11Index);
     }
 
     // Overwrites the raw copy just made above with native input's processed picture, when that option is on; a no-op
@@ -1020,6 +1024,9 @@ bool Dx11wDx12SC::_InitInteropObjects()
 
     HRESULT result = S_OK;
 
+    // A failed FG resize skips the refresh, the cached count can be stale
+    _RefreshCachedSwapchainDesc();
+
     const UINT copyAllocatorCount = std::max<UINT>(_bufferCount != 0 ? _bufferCount : 3, 3);
 
     if (_copyAllocators.size() != copyAllocatorCount)
@@ -1441,6 +1448,13 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     }
 
     const UINT copySlot = _currentFakeIndex;
+
+    if (copySlot >= _copyAllocators.size() || copySlot >= _copyCommandLists.size())
+    {
+        LOG_ERROR("copy slot {} out of range {}", copySlot, _copyAllocators.size());
+        return false;
+    }
+
     auto allocator = _copyAllocators[copySlot];
 
     if (allocator == nullptr)
@@ -1749,12 +1763,7 @@ void Dx11wDx12SC::_RefreshCachedSwapchainDesc()
     _currentFakeIndex = _bufferCount > 0 ? _currentFakeIndex % _bufferCount : 0;
 }
 
-UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const
-{
-    if (_real3 != nullptr)
-        return _real3->GetCurrentBackBufferIndex();
-
-    return _bufferCount > 0 ? _currentFakeIndex : 0;
-}
+// D3D11 always renders to buffer 0, the runtime rotates the buffers
+UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const { return 0; }
 
 void Dx11wDx12SC::_AdvanceFakeBackBufferIndex() { _currentFakeIndex = (_currentFakeIndex + 1) % _bufferCount; }

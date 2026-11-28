@@ -56,7 +56,6 @@
 // https://github.com/baldurk/renderdoc/blob/v1.x/renderdoc/driver/dxgi/dxgi_wrapped.cpp
 
 static int scCount = 0;
-static UINT64 _frameCounter = 0;
 static double _lastFrameTime = 0;
 static bool _dx11Device = false;
 static bool _dx12Device = false;
@@ -397,7 +396,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         dx11wDx12PresentLock.lock();
     }
 
-    LOG_DEBUG("{}", _frameCounter);
+    LOG_DEBUG("{}", State::Instance().frameCount);
     NoteDroppedLogLinesOnPresent();
 
     HRESULT presentResult;
@@ -642,7 +641,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             // DXVK returns below before the native path advances the NR epoch.
             // Count a completed Present; retain the deferred NR evaluation guard.
             if (willPresent && isCurrent)
-                State::Instance().frameCount = ++_frameCounter;
+                State::Instance().frameCount++;
 
             LOG_TRACE("3 {}", (UINT) presentResult);
         }
@@ -757,17 +756,17 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (State::Instance().fgPresentIsCalled)
             {
                 State::Instance().fgPresentIsCalled = false;
-                fgPresentFrame = _frameCounter;
+                fgPresentFrame = State::Instance().frameCount;
             }
 
-            auto isInterpolated = fgIsActive && (_frameCounter - fgPresentFrame) > 0;
+            auto isInterpolated = fgIsActive && (State::Instance().frameCount - fgPresentFrame) > 0;
 
             fakenvapi::reportFGPresent(pSwapChain, fgIsActive, isInterpolated);
         }
 #endif
 
         if (isCurrent)
-            State::Instance().frameCount = ++_frameCounter;
+            State::Instance().frameCount++;
     }
 
     LOG_DEBUG("Calling original present");

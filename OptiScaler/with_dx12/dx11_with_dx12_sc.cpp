@@ -463,6 +463,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _fgSwapChain->Present(SyncInterval, ValidPresentFlags(_fgSwapChain, SyncInterval, Flags));
 
+    // The FG library's swapchain isn't the current one, game's frames are counted here
+    if (State::Instance().currentSwapchain == this || State::Instance().currentWrappedSwapchain == this)
+        State::Instance().frameCount++;
+
     // Optical F5Low's low latency (native/NativeLowLatency.h): Reflex markers around the game's present, on the game's
     // own D3D11 device. This is the game's only present here; the bridge's D3D12 presents belong to frame generation.
     struct LowLatencyScope

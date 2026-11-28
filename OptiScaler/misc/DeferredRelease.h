@@ -1,6 +1,6 @@
 #pragma once
-#include "SysUtils.h"
-
+// Standard headers only: Shader_Dx12Utils.h brings this into the host tests, which have no NGX SDK on the include path
+#include <cstdint>
 #include <functional>
 #include <unordered_set>
 

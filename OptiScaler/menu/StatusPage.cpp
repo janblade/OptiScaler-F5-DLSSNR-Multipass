@@ -374,6 +374,10 @@ void RenderFork(Config* config, float menuResScale)
                 Row("  Pass at", NrPlacementText(config->DlssNrFinishedPicture.value_or_default(),
                                                  config->DlssNrRunBeforeSr.value_or_default(),
                                                  config->DlssNrDeferredDlss.value_or_default()));
+                // [DlssNr] MotionSource, which the Finished Picture reads (the line under Neural Rendering's placement
+                // says whether it runs)
+                if (config->DlssNrFinishedPicture.value_or_default())
+                    Row("  Motion", config->DlssNrMotionSourceOptical.value_or_default() ? "Optical F5Low" : "Game");
                 Row("  Detail reuse", NrDetailReuseText(config->DlssNrDetailReuse.value_or_default(),
                                                         config->DlssNrDetailReuseInterval.value_or_default()));
                 Row("  F5LUT", config->DlssNrPostLutStackEnabled.value_or_default() ? "On" : "Off");

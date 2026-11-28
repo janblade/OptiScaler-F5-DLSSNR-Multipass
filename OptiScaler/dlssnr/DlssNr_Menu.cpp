@@ -3614,6 +3614,37 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
             }
             HelpMarker("Runs the model on the smaller input, upscales its changes with DLSS and applies them to the "
                        "final picture. Experimental; colours may differ. Needs DLSS SR, not RR.");
+
+            // [DlssNr] MotionSource: the game's motion vectors or Optical F5Low's, measured on the finished picture
+            // (dlssnr/DlssNr_OpticalMotion.h). Greyed with the reason where it cannot run; a saved "Optical F5Low"
+            // can still be switched back.
+            const bool optical = config->DlssNrMotionSourceOptical.value_or_default();
+            const bool dx12 = IsNativeDx12Game() && State::Instance().swapchainApi == API::DX12;
+            const char* refusal = !dx12      ? "Optical F5Low motion needs a native DirectX 12 game."
+                                  : beforeSr ? "Optical F5Low motion does not work with \"Run the model before Super "
+                                               "Resolution\": the motion is measured on the finished picture."
+                                  : !GenericDepthDx12::GameCallsUpscaler()
+                                      ? "Optical F5Low motion is for a game that runs its own upscaler (DLSS, FSR or "
+                                        "XeSS on in the game). Without one, use the Optical F5Low page."
+                                      : nullptr;
+
+            if (dx12 || optical)
+            {
+                static const char* motionNames[] = { "Game", "Optical F5Low" };
+                int motionSource = optical ? 1 : 0;
+                ImGui::BeginDisabled(refusal != nullptr && !optical);
+                if (ImGui::Combo("Motion##nrmotionsource", &motionSource, motionNames, IM_ARRAYSIZE(motionNames)))
+                    config->DlssNrMotionSourceOptical = motionSource == 1;
+                ImGui::EndDisabled();
+                if (refusal != nullptr && !optical && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", refusal);
+                HelpMarker("The motion Neural Rendering follows from frame to frame.\n"
+                           "Game (default): the game's motion vectors.\n"
+                           "Optical F5Low: measured on the finished picture (about 1 ms of GPU time); the game's "
+                           "upscaler and depth stay. Try it when Neural Rendering smears or ghosts on moving things.");
+                if (refusal != nullptr && optical)
+                    ImGui::TextWrapped("%s", refusal);
+            }
         }
 
         bool deferredDlss = config->DlssNrDeferredDlss.value_or_default();

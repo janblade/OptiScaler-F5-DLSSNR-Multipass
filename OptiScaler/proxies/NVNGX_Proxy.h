@@ -582,6 +582,22 @@ class NVNGXProxy
         module.VULKAN_EvaluateFeature = (PFN_VULKAN_EvaluateFeature) Proc(module, "NVSDK_NGX_VULKAN_EvaluateFeature");
     }
 
+    // UseGenericAppIdWithDlss also applies to the NVIDIA runtime started here (the exports no longer start it for
+    // Opti's own inputs). Custom NGX runtimes keep the ids the game gave.
+    static const char* ProjectIdForDlss(const NvngxModule& module)
+    {
+        return &module == &_module && Config::Instance()->UseGenericAppIdWithDlss.value_or_default()
+                   ? project_id_override
+                   : State::Instance().NVNGX_ProjectId.c_str();
+    }
+
+    static unsigned long long AppIdForDlss(const NvngxModule& module)
+    {
+        return &module == &_module && Config::Instance()->UseGenericAppIdWithDlss.value_or_default()
+                   ? app_id_override
+                   : State::Instance().NVNGX_ApplicationId;
+    }
+
     static NVSDK_NGX_Result InitDx12Module(const NvngxModule& module, ID3D12Device* InDevice)
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
@@ -592,17 +608,16 @@ class NVNGXProxy
         {
             LOG_INFO("module.D3D12_Init_ProjectID!");
 
-            nvResult = module.D3D12_Init_ProjectID(
-                State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
-                State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InDevice, State::Instance().NVNGX_Version, &fcInfo);
+            nvResult = module.D3D12_Init_ProjectID(ProjectIdForDlss(module), State::Instance().NVNGX_Engine,
+                                                   State::Instance().NVNGX_EngineVersion.c_str(),
+                                                   State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
+                                                   State::Instance().NVNGX_Version, &fcInfo);
         }
         else if (module.D3D12_Init_Ext != nullptr)
         {
             LOG_INFO("module.D3D12_Init_Ext!");
-            nvResult = module.D3D12_Init_Ext(State::Instance().NVNGX_ApplicationId,
-                                             State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
-                                             State::Instance().NVNGX_Version, &fcInfo);
+            nvResult = module.D3D12_Init_Ext(AppIdForDlss(module), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                                             InDevice, State::Instance().NVNGX_Version, &fcInfo);
         }
 
         LOG_INFO("result: {0:X}", (UINT) nvResult);
@@ -622,16 +637,15 @@ class NVNGXProxy
         {
             LOG_DEBUG("module.VULKAN_Init_ProjectID!");
             nvResult = module.VULKAN_Init_ProjectID(
-                State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
-                State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InInstance, InPD, InDevice, InGIPA, InGDPA, State::Instance().NVNGX_Version, &fcInfo);
+                ProjectIdForDlss(module), State::Instance().NVNGX_Engine, State::Instance().NVNGX_EngineVersion.c_str(),
+                State::Instance().NVNGX_ApplicationDataPath.c_str(), InInstance, InPD, InDevice, InGIPA, InGDPA,
+                State::Instance().NVNGX_Version, &fcInfo);
         }
         else if (module.VULKAN_Init_Ext != nullptr)
         {
             LOG_DEBUG("module.VULKAN_Init_Ext!");
-            nvResult = module.VULKAN_Init_Ext(State::Instance().NVNGX_ApplicationId,
-                                              State::Instance().NVNGX_ApplicationDataPath.c_str(), InInstance, InPD,
-                                              InDevice, State::Instance().NVNGX_Version, &fcInfo);
+            nvResult = module.VULKAN_Init_Ext(AppIdForDlss(module), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                                              InInstance, InPD, InDevice, State::Instance().NVNGX_Version, &fcInfo);
         }
 
         LOG_DEBUG("result: {0:X}", (UINT) nvResult);
@@ -871,17 +885,17 @@ class NVNGXProxy
         {
             LOG_DEBUG("_module.D3D11_Init_ProjectID!");
 
-            nvResult = _module.D3D11_Init_ProjectID(
-                State::Instance().NVNGX_ProjectId.c_str(), State::Instance().NVNGX_Engine,
-                State::Instance().NVNGX_EngineVersion.c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                InDevice, State::Instance().NVNGX_Version, &fcInfo);
+            nvResult = _module.D3D11_Init_ProjectID(ProjectIdForDlss(_module), State::Instance().NVNGX_Engine,
+                                                    State::Instance().NVNGX_EngineVersion.c_str(),
+                                                    State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
+                                                    State::Instance().NVNGX_Version, &fcInfo);
         }
         else if (_module.D3D11_Init_Ext != nullptr)
         {
             LOG_DEBUG("_module.D3D11_Init_Ext!");
-            nvResult = _module.D3D11_Init_Ext(State::Instance().NVNGX_ApplicationId,
-                                              State::Instance().NVNGX_ApplicationDataPath.c_str(), InDevice,
-                                              State::Instance().NVNGX_Version, &fcInfo);
+            nvResult =
+                _module.D3D11_Init_Ext(AppIdForDlss(_module), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                                       InDevice, State::Instance().NVNGX_Version, &fcInfo);
         }
 
         LOG_DEBUG("result: {0:X}", (UINT) nvResult);

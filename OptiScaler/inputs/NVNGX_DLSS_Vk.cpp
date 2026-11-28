@@ -374,6 +374,14 @@ NVSDK_NGX_Result NVNGXVkInputInit(const char* InProjectId, NVSDK_NGX_EngineType 
                                   PFN_vkGetInstanceProcAddr InGIPA, PFN_vkGetDeviceProcAddr InGDPA,
                                   NVSDK_NGX_Version InSDKVersion, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
 {
+    // The inputs don't start NGX, but NR / Superior / DLSS may later, with these paths
+    NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
+
+    if (InFeatureInfo != nullptr)
+        std::memcpy(&localFeatureInfo, InFeatureInfo, sizeof(NVSDK_NGX_FeatureCommonInfo));
+
+    UpdateInitPaths(&localFeatureInfo);
+
     ScopedInitVk scopedInit {};
     return NVSDK_NGX_VULKAN_Init_ProjectID_Ext(InProjectId, InEngineType, InEngineVersion, InApplicationDataPath,
                                                InInstance, InPD, InDevice, InGIPA, InGDPA, InSDKVersion, InFeatureInfo);

@@ -422,6 +422,14 @@ NVSDK_NGX_Result NVNGXDx12InputInit(const char* InProjectId, NVSDK_NGX_EngineTyp
                                     ID3D12Device* InDevice, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo,
                                     NVSDK_NGX_Version InSDKVersion)
 {
+    // The inputs don't start NGX, but NR / Superior / DLSS may later, with these paths
+    NVSDK_NGX_FeatureCommonInfo localFeatureInfo = {};
+
+    if (InFeatureInfo != nullptr)
+        std::memcpy(&localFeatureInfo, InFeatureInfo, sizeof(NVSDK_NGX_FeatureCommonInfo));
+
+    UpdateInitPaths(&localFeatureInfo);
+
     ScopedInitDx12 scopedInit {};
     return NVSDK_NGX_D3D12_Init_with_ProjectID(InProjectId, InEngineType, InEngineVersion, InApplicationDataPath,
                                                InDevice, InFeatureInfo, InSDKVersion);

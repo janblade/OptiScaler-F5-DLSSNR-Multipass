@@ -9,7 +9,8 @@
 class DxgiFactoryHooks
 {
   public:
-    static void HookToFactory(IDXGIFactory* pFactory);
+    // fromSpecialK: created through Special K's hooks, waits for them to be installed first
+    static void HookToFactory(IDXGIFactory* pFactory, bool fromSpecialK = false);
     static void HookToDLSSGFactory(IDXGIFactory* pFactory);
 
     // After a swapchain was made with a success status other than S_OK (hooks/SwapchainCreateRule.h): a full-screen

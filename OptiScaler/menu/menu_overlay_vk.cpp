@@ -10,6 +10,10 @@
 #include <native/NativeDriverVk.h>
 #include <imgui/imgui_impl_win32.h>
 #include <misc/DeferredRelease.h>
+#include <framegen/IFGFeature_Vk.h>
+#include <State.h>
+
+#include <magic_enum.hpp>
 
 // Diagnostic: the menu submits on the game's queue from the present thread. Says which thread, once per change, to compare with
 // the thread ids in a Vulkan validation threading error.
@@ -100,6 +104,11 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     // sets, the backend goes with them (see DestroyVulkanObjects).
     MenuOverlayVk::DestroyVulkanObjects(false);
 
+    LOG_DEBUG("Swapchain format: {}", magic_enum::enum_name(pCreateInfo->imageFormat));
+
+    const bool srgbTarget = IFGFeature_Vk::WithoutSrgb(pCreateInfo->imageFormat) != pCreateInfo->imageFormat;
+    const bool srgbChanged = std::exchange(State::Instance().menuTargetSrgb, srgbTarget) != srgbTarget;
+
     // Initialize ImGui
     if (!MenuOverlayBase::IsInited() || MenuOverlayBase::Handle() != hwnd)
     {
@@ -108,6 +117,10 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
 
         LOG_DEBUG("MenuOverlayBase::Init");
         MenuOverlayBase::Init(hwnd, false);
+    }
+    else if (srgbChanged)
+    {
+        MenuOverlayBase::ApplyThemeStyle();
     }
 
     ImGuiIO& io = ImGui::GetIO();

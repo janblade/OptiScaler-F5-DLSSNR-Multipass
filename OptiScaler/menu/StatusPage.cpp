@@ -233,6 +233,9 @@ void RenderSystem(Config* config, IFeature* feature, const GpuInformation& gpu, 
             Pair("FG Output", FgOutputName((FgOutput) state.activeFgOutput), state.activeFgOutput == FGOutput::NoFG);
             Pair("FG Nvngx", FgNvngxName((FgNvngx) state.activeFgNvngx, state.activeFgNvngxCustom),
                  state.activeFgNvngx == FGNvngxReplacement::None);
+            // [FrameGen] MotionSource (framegen/OpticalMotionFg_Dx12.h), set on the Optical F5Low page
+            Pair("FG motion", config->FGMotionSourceOptical.value_or_default() ? "Optical F5Low" : "Game",
+                 !config->FGMotionSourceOptical.value_or_default());
 
             const auto ratio = RatioOverrideText(config->UpscaleRatioOverrideEnabled.value_or_default(),
                                                  config->UpscaleRatioOverrideValue.value_or_default(),

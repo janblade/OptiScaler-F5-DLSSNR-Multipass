@@ -480,12 +480,15 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
 
         if (stop || stopDevice)
         {
+            // The runtime's Shutdown1 reports how many inits are still open on it
+            unsigned int remaining = 0;
+
             if (requestedDevice && stopDevice)
-                stopDevice(requestedDevice);
+                stopDevice(requestedDevice, &remaining);
             else if (stop)
                 stop();
             else
-                stopDevice(requestedDevice);
+                stopDevice(requestedDevice, &remaining);
 
             NVNGXProxy::SetDx12Inited(false);
         }

@@ -339,7 +339,10 @@ void ShutdownOwnCore(bool deviceAlive, VkDevice device)
     if (deviceAlive && still)
     {
         if (NVNGXProxy::VULKAN_Shutdown1() != nullptr)
-            NVNGXProxy::VULKAN_Shutdown1()(device != VK_NULL_HANDLE ? device : coreOwnerDevice);
+        {
+            unsigned int remaining = 0;
+            NVNGXProxy::VULKAN_Shutdown1()(device != VK_NULL_HANDLE ? device : coreOwnerDevice, &remaining);
+        }
         else if (NVNGXProxy::VULKAN_Shutdown() != nullptr)
             NVNGXProxy::VULKAN_Shutdown()();
         LOG_INFO("DLSS-NR Vulkan Superior Scaling: its NGX runtime was shut down with the device");

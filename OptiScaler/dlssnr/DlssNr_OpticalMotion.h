@@ -1,9 +1,9 @@
 #pragma once
 
-// [DlssNr] MotionSource=optical on a native D3D12 game that calls its own upscaler: the game's upscaler keeps running and
-// Neural Rendering at the Finished Picture takes Optical F5Low's flow (measured on the finished picture by the native
-// producer, NativeDriver) instead of the game's motion vectors; the depth stays the game's. These are the rules the two
-// halves share, free of D3D12 so a host test can check them (tests/nr_optical_motion_smoke.cpp):
+// [DlssNr] MotionSource=optical on a native D3D12 game that calls its own upscaler: the game's upscaler keeps running
+// and Neural Rendering at the Finished Picture takes Optical F5Low's flow (measured on the finished picture by the
+// native producer, NativeDriver) instead of the game's motion vectors; the depth stays the game's. These are the rules
+// the two halves share, free of D3D12 so a host test can check them (tests/nr_optical_motion_smoke.cpp):
 //
 // - The producer runs before the Finished Picture pass of the same present, on the same queue
 //   (wrapped_swapchain.cpp, FG_Hooks.cpp): it offers its flow for that present (the picture, the queue, the present

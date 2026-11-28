@@ -1156,15 +1156,17 @@ void Config::ReadDlssNr()
     DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
     DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
     DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
-    DlssNrMotionSourceOptical.set_from_config(readString("DlssNr", "MotionSource", true).and_then(
-        [](const std::string& text) -> std::optional<bool>
-        {
-            if (text == "optical")
-                return true;
-            if (text == "game")
-                return false;
-            return std::nullopt; // auto, or anything else: the default (game)
-        }));
+    DlssNrMotionSourceOptical.set_from_config(
+        readString("DlssNr", "MotionSource", true)
+            .and_then(
+                [](const std::string& text) -> std::optional<bool>
+                {
+                    if (text == "optical")
+                        return true;
+                    if (text == "game")
+                        return false;
+                    return std::nullopt; // auto, or anything else: the default (game)
+                }));
     DlssNrFinishedGpuWait.set_from_config(readUInt("DlssNr", "FinishedGpuWait"));
     DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
     DlssNrMultiViewScreens.set_from_config(readUInt("DlssNr", "MultiViewScreens"));

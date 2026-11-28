@@ -366,6 +366,11 @@ void AtPresent(IFGFeature_Dx12* fg, IDXGISwapChain* swapChain, ID3D12CommandQueu
                      : !flowForThis  ? "the flow is another present's"
                                      : "the picture is another size than frame generation's",
                      g_counts.flow, g_counts.fallback);
+            LOG_INFO("Frame generation optical motion: flow {}x{} (present {}), frame generation picture {}x{}, "
+                     "this present {}x{} (present {}), game motion {}x{}{}",
+                     g_offer.present.width, g_offer.present.height, g_offer.present.epoch, frame.pictureWidth,
+                     frame.pictureHeight, now.width, now.height, epoch, frame.gameWidth, frame.gameHeight,
+                     frame.resets ? ", reset (the game's motion is render-size)" : "");
         }
 
         if (!frame.haveGame)

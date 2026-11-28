@@ -135,8 +135,14 @@ inline FgTag FgTagAtPresent(bool opticalAtCall, bool dispatchIsLatest, bool flow
     return dispatchIsLatest && flowForThisPresent && flowFitsPicture ? FgTag::Flow : FgTag::GameFallback;
 }
 
-// The fallback's own reset: the context was made for the flow's conventions (display-size, unjittered motion); game
-// motion vectors of another kind would be read wrongly, so frame generation does not interpolate across that frame.
-inline bool FgFallbackResets(bool gameLowResMv, bool gameJitteredMv) { return gameLowResMv || gameJitteredMv; }
+// The fallback's own reset: the context was made for the flow's conventions (display-size, unjittered motion).
+// Render-size game vectors would be read at the wrong scale, so frame generation does not interpolate across that
+// frame. Jittered ones are off by under a pixel: no reset (NBA 2K27, 2026-11-28: a reset on every fallback frame
+// stuttered badly).
+inline bool FgFallbackResets(bool gameLowResMv, bool gameJitteredMv)
+{
+    (void) gameJitteredMv;
+    return gameLowResMv;
+}
 
 } // namespace DlssNr::OpticalMotion

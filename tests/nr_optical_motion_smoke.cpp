@@ -110,7 +110,7 @@ int main()
     // The fallback interpolates across its frame only when the game's motion is the flow's kind
     CHECK(!FgFallbackResets(false, false));
     CHECK(FgFallbackResets(true, false));
-    CHECK(FgFallbackResets(false, true));
+    CHECK(!FgFallbackResets(false, true)); // jitter: under a pixel, no reset
 
     printf(fails == 0 ? "nr optical motion: ok\n" : "nr optical motion: %d FAILED\n", fails);
     return fails == 0 ? 0 : 1;

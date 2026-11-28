@@ -3746,7 +3746,11 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         }
 
         // DLSS -----------------
-        if ((config->DLSSEnabled.value_or_default() && currentBackend == Upscaler::DLSS &&
+        // DLSS on the D3D11->D3D12 bridge runs the same NGX feature as native DLSS: the bridge forwards
+        // the game's parameter block to DLSSFeatureDx12, which applies these overrides before
+        // CreateFeature. Without DLSS_on12 here the settings would be ini-only for dx11on12 games.
+        if ((config->DLSSEnabled.value_or_default() &&
+             (currentBackend == Upscaler::DLSS || currentBackend == Upscaler::DLSS_on12) &&
              currentFeature->Version().major > 2) ||
             usesDlssd)
         {
@@ -3805,16 +3809,21 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                 ShowHelpMarker("Each render preset has it strengths and weaknesses\n"
                                "Override to potentially improve image quality\n"
-                               "Press Apply after enable/disable");
+                               "DLSS takes the preset when it starts: press Apply after changing it\n"
+                               "(also with DLSS w/Dx12)");
 
-                /*
-                auto currentPresetIndex = GetPresetIndex(currentFeature, false);
+                // What OptiScaler or the game asked DLSS for at this quality tier (picked from the render ratio),
+                // not a value read back from DLSS: with none asked, DLSS picks its own
+                auto askedPresetIndex = GetPresetIndex(currentFeature, false);
 
-                if (currentPresetIndex == 0)
-                    ImGui::Text("Current Preset: Default");
+                if (askedPresetIndex == 0)
+                    ImGui::Text("Preset asked for: none (DLSS picks)");
                 else
-                    ImGui::Text("Current Preset: %c", 64 + currentPresetIndex);
-                */
+                    ImGui::Text("Preset asked for: %c", 64 + askedPresetIndex);
+
+                ShowHelpMarker("The preset OptiScaler or the game requested for this quality level.\n"
+                               "DLSS does not report the one it runs, and it may use another one\n"
+                               "if the requested preset is not in this DLSS version.");
 
                 ImGui::BeginDisabled(!config->RenderPresetOverride.value_or_default() /*|| overridden*/);
 

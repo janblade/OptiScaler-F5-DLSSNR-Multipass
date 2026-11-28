@@ -275,6 +275,12 @@ struct NrState
     bool isPort = false;
     void* feature = nullptr;
     bool superiorMainOnlyGains = false; // actual selected NR runtime, cached at feature creation
+    // How Superior Scaling resolves, for the composition log line and its menu line (DlssNr_Dx12::Dispatch), held
+    // over ResolveHold::kFrames frames; and the private DLSS preset that runs (the runtime's default when it lacks the
+    // chosen one)
+    DlssNr::SuperiorScaling::ResolveHold superiorResolveHold;
+    DlssNr::SuperiorScaling::Resolve superiorResolve = DlssNr::SuperiorScaling::Resolve::None;
+    unsigned superiorPreset = 0;
     bool featurePendingSubmission = false;
     unsigned long long featureCreateEpoch = 0;
 
@@ -6528,6 +6534,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             unsigned int workH;
             unsigned int passes;
             float passFeedback;
+            // The setting and, one frame late (the log runs before this frame's resolve), what Superior did
+            uint32_t transferSetting;
+            DlssNr::SuperiorScaling::Resolve superiorResolve;
+            unsigned superiorPreset;
         };
 
         static ComposeReport loggedCompose {};
@@ -6547,17 +6557,21 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                          g_nr.workWidth,
                                          g_nr.workHeight,
                                          effectivePasses,
-                                         std::clamp(cfg.DlssNrPassFeedback.value_or_default(), 0.0f, 1.0f) };
+                                         std::clamp(cfg.DlssNrPassFeedback.value_or_default(), 0.0f, 1.0f),
+                                         cfg.DlssNrTransfer.value_or_default(),
+                                         g_nr.superiorResolve,
+                                         g_nr.superiorPreset };
 
         if (!loggedCompose.valid || loggedCompose.whitePoint != composeNow.whitePoint ||
             loggedCompose.transfer != composeNow.transfer || loggedCompose.colour != composeNow.colour ||
-            loggedCompose.maxRatio != composeNow.maxRatio ||
-            loggedCompose.passthrough != composeNow.passthrough ||
-            loggedCompose.debugView != composeNow.debugView ||
-            loggedCompose.compareMode != composeNow.compareMode ||
+            loggedCompose.maxRatio != composeNow.maxRatio || loggedCompose.passthrough != composeNow.passthrough ||
+            loggedCompose.debugView != composeNow.debugView || loggedCompose.compareMode != composeNow.compareMode ||
             loggedCompose.residual != composeNow.residual || loggedCompose.workW != composeNow.workW ||
             loggedCompose.workH != composeNow.workH || loggedCompose.passes != composeNow.passes ||
-            loggedCompose.passFeedback != composeNow.passFeedback)
+            loggedCompose.passFeedback != composeNow.passFeedback ||
+            loggedCompose.transferSetting != composeNow.transferSetting ||
+            loggedCompose.superiorResolve != composeNow.superiorResolve ||
+            loggedCompose.superiorPreset != composeNow.superiorPreset)
         {
             loggedCompose = composeNow;
             LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
@@ -6565,9 +6579,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                      "debug view {}, compare {}",
                      composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
                      composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
-                     composeNow.residual == 1 ? "matched residual" : "classic", composeNow.workW,
-                     composeNow.workH, composeNow.passes, composeNow.passFeedback, composeNow.debugView,
-                     composeNow.compareMode);
+                     DlssNr::SuperiorScaling::TransferLogName(composeNow.transferSetting, composeNow.superiorResolve,
+                                                              composeNow.superiorPreset),
+                     composeNow.workW, composeNow.workH, composeNow.passes, composeNow.passFeedback,
+                     composeNow.debugView, composeNow.compareMode);
         }
 
         // Supersampling down-leg. Average the Nx model answer back to native with the chosen filter, so
@@ -6731,7 +6746,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             const bool modelPair = g.shaping && !superiorSupersample;
             auto* shapingProxy = g.packed ? modelInput : modelPair ? ordinaryProxy : resolveProxy;
             auto* answer = g.packed ? finalAnswer : modelPair ? ordinaryAnswer : resolveAnswer;
-            auto* residual = g.PrivateReady() && depth && guides.depth.valid()
+            // The private DLSS steadies NR only with the game's depth. Without it (Optical F5Low before its depth
+            // finder has a buffer, or a game that hands none) the raw answer is resolved, the same picture as No DLSS:
+            // the menu and the log say so instead of naming a DLSS model that does not run.
+            const bool stabilizable = depth && guides.depth.valid();
+            auto* residual = g.PrivateReady() && stabilizable
                                  ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, answer, motionIn, guides,
                                                           frame, superiorReset, g_nr.heldActive,
                                                           g.packed ? EdgeCompression::depth : nullptr,
@@ -6762,6 +6781,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 SuperiorRun::Fail("Superior reconstruction failed; keeping the game frame.", frame.SubmissionEpoch);
             else
                 SuperiorRun::Composed(frame.SubmissionEpoch);
+            using DlssNr::SuperiorScaling::Resolve;
+            const Resolve resolved = !composed                           ? Resolve::None
+                                     : signedResidual                    ? Resolve::PrivateDlss
+                                     : g.PrivateReady() && !stabilizable ? Resolve::NoDepth
+                                                                         : Resolve::Raw;
+            g_nr.superiorResolve = g_nr.superiorResolveHold.Update(resolved);
+            g_nr.superiorPreset = g.actualPreset;
+            constexpr const char* kNoDepth =
+                "Temporal stabilization is off: no depth from the game here, so Superior runs without DLSS.";
+            if (g_nr.superiorResolve == Resolve::NoDepth)
+                SuperiorRun::Say(kNoDepth);
+            else if (SuperiorRun::GetState().status == kNoDepth)
+                SuperiorRun::Say("");
         }
         else
         {
@@ -6771,6 +6803,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 resolveTarget, nullptr, (resolveParams.DepthFade.Flags & DlssNrDepthFade::kActive) ? depthIn : nullptr);
             // Without Superior the frame counts as composed whatever the dispatch says, exactly as before.
             composed = dispatched || !superior;
+            g_nr.superiorResolve = g_nr.superiorResolveHold.Update(DlssNr::SuperiorScaling::Resolve::None);
         }
         if (cached)
             composed = true;

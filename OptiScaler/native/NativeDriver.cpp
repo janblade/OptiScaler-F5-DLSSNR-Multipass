@@ -6,6 +6,7 @@
 #include <Config.h>
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <dlssnr/DlssNr_NativeMode.h>
+#include <dlssnr/DlssNr_OpticalMotion.h>
 
 #include <imgui/imgui.h>
 
@@ -40,9 +41,18 @@ bool NativeDriver::MotionUsed()
           cfg->DlssNrNativeDebugView.value_or_default() });
 }
 
+bool NativeDriver::OpticalForGameWanted()
+{
+    auto* cfg = Config::Instance();
+    return DlssNr::OpticalMotion::Wanted(
+        { cfg->DlssNrMotionSourceOptical.value_or_default(), cfg->DlssNrEnabled.value_or_default(),
+          cfg->DlssNrFinishedPicture.value_or_default(),
+          cfg->DlssNrRunBeforeSr.value_or_default() || cfg->DlssNrDeferredDlss.value_or_default() });
+}
+
 bool NativeDriver::Enabled()
 {
-    if (!Config::Instance()->DlssNrNativeMotion.value_or_default())
+    if (!Config::Instance()->DlssNrNativeMotion.value_or_default() && !(_opticalForGame && OpticalForGameWanted()))
     {
         ReleaseVirtualUpscaler();
         _status = Status::Off;
@@ -75,7 +85,8 @@ void NativeDriver::LogDiagnostics()
              _diagNative, _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
 
     if (_producer != nullptr && _producer->GpuStats().Frames() > 0)
-        LOG_INFO("{}: {}", _tag, _producer->GpuStats().Report());
+        LOG_INFO("{}: {}{}", _tag, _producer->GpuStats().Report(),
+                 _opticalRan ? " (motion only, no depth, for Neural Rendering beside the game's upscaler)" : "");
 }
 
 NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, int flowPreviewView)
@@ -85,10 +96,20 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     // Nothing reads the motion this frame (NR only with Neural Rendering or Finished Picture off, the motion-only
     // keys): none of it runs. The frame source still does its per-present part (Skip: the Vulkan bridge copies the
     // picture in, held back buffers are let go), the motion history is dropped once, so it starts clean when something
-    // wants it, and the hold on a game upscaler starts over.
-    if (!MotionUsed())
+    // wants it, and the hold on a game upscaler starts over. Optical F5Low's own modes need NativeMotion on;
+    // MotionSource=optical (this adapter's, beside the game's upscaler) is a user of its own.
+    const bool optical = _opticalForGame && OpticalForGameWanted();
+    const bool nativeModes = Config::Instance()->DlssNrNativeMotion.value_or_default() && MotionUsed();
+
+    if (!nativeModes && !optical)
     {
         source.Skip();
+
+        if (_opticalRan)
+        {
+            _opticalRan = false;
+            DlssNr::ClearOpticalMotion();
+        }
 
         if (_status != Status::Idle)
         {
@@ -118,11 +139,25 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     FrameInput input;
     const auto acquired = source.Acquire(input);
 
-    ++_diagPresents;
-    _diagReady += acquired == AcquireStatus::Ready ? 1 : 0;
-    _diagWaiting += acquired == AcquireStatus::WaitingForUpscaler ? 1 : 0;
+    // MotionSource=optical beside the game's upscaler: the picture, no depth, the flow only (Finished Picture takes it)
+    const bool forGame = acquired == AcquireStatus::ReadyForGameUpscaler;
 
-    const bool gameTookOver = _takeover.Update(acquired == AcquireStatus::WaitingForUpscaler, Util::MillisecondsNow());
+    // Back to the game's motion, or the game no longer calls its upscaler: the flow's history is that picture's
+    if (_opticalRan && !forGame)
+    {
+        _opticalRan = false;
+        DlssNr::ClearOpticalMotion();
+
+        if (_producer)
+            _producer->Reset();
+    }
+
+    ++_diagPresents;
+    _diagReady += acquired == AcquireStatus::Ready || forGame ? 1 : 0;
+    _diagWaiting += acquired == AcquireStatus::WaitingForUpscaler || forGame ? 1 : 0;
+
+    const bool gameTookOver =
+        _takeover.Update(acquired == AcquireStatus::WaitingForUpscaler || forGame, Util::MillisecondsNow());
 
     if (acquired == AcquireStatus::WaitingForUpscaler)
     {
@@ -143,10 +178,33 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
         return out;
     }
 
-    if (acquired != AcquireStatus::Ready)
+    // Only MotionSource=optical let this present through and the game makes no upscaler call: Optical F5Low's own
+    // modes are off, so nothing runs and the picture is left alone.
+    if (acquired == AcquireStatus::Ready && !nativeModes)
+    {
+        source.Return(input, FrameOutput {});
+        ReleaseVirtualUpscaler();
+        DlssNr::NativeInputSkipped();
+        _nativeRan = false;
+        _status = Status::OpticalNoGameUpscaler;
+        LogDiagnostics();
+        return out;
+    }
+
+    if (acquired != AcquireStatus::Ready && !forGame)
     {
         LogDiagnostics();
         return out;
+    }
+
+    // The game's upscaler runs: ours pauses, and goes once the game's calls have run for a while, as when standing
+    // aside
+    if (forGame)
+    {
+        if (gameTookOver)
+            ReleaseVirtualUpscaler();
+        else
+            PauseVirtualUpscaler();
     }
 
     ID3D12Device* device = source.Device();
@@ -182,15 +240,16 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     // Presents the picture to an upscaler backend as a synthetic call instead of running DLSS-NR on it. Takes priority
     // when both are on. Under a D3D11 game's frame generation swap chain (Dx11wDx12SC) it runs from OnFGPresent instead
     // of the menu's present.
-    const bool useVirtualUpscaler = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
+    const bool useVirtualUpscaler = !forGame && Config::Instance()->DlssNrNativeUpscaler.value_or_default();
 
     if (useVirtualUpscaler && _virtualUpscaler == nullptr)
         _virtualUpscaler = new VirtualUpscalerDriver();
-    else if (!useVirtualUpscaler)
+    else if (!useVirtualUpscaler && !forGame)
         ReleaseVirtualUpscaler();
 
     NativeProducer::Options options;
-    options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
+    options.apply = !forGame && (useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default());
+    options.guidesOnly = forGame;
     options.flowPreview = flowPreview;
     options.previewMaxSpeed = kPreviewMaxSpeed;
     options.previewView = flowPreviewView;
@@ -233,6 +292,23 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     FrameOutput output;
     const auto result = _producer->Run(source.Queue(), input, options, apply, output);
     source.Return(input, output);
+
+    // The flow for this present's Finished Picture pass, which runs after this list on the same queue and takes it
+    // only for this present (DlssNr_OpticalMotion.h). The guides stay the producer's; the pass holds them while read.
+    if (forGame)
+    {
+        _opticalRan = true;
+
+        if (result.submitted && result.guidesBuilt)
+            DlssNr::PublishOpticalMotion(
+                source.Queue(), input.picture, _producer->Trust()->GuideMotion(), _producer->Trust()->Mask(),
+                input.width, input.height,
+                PresentEpoch(source.GetApi(), State::Instance().frameCount,
+                             State::Instance().vulkanPresentCount.load(std::memory_order_relaxed)),
+                result.guidesReset);
+        else
+            DlssNr::ClearOpticalMotion();
+    }
 
     // Nothing ran on native input this frame (no NR mode, or the producer was not ready): NR's history must not reach across
     if (!result.nativeRan)
@@ -291,7 +367,7 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     if (result.submitted)
     {
         ++_frame;
-        _status = Status::Running;
+        _status = forGame ? Status::OpticalForGame : Status::Running;
     }
 
     out.ran = true;
@@ -324,6 +400,15 @@ void NativeDriver::DrawStatus()
         return;
     case Status::Failed:
         ImGui::TextDisabled("Could not start: %s", _failure.c_str());
+        return;
+    case Status::OpticalForGame:
+        ImGui::TextDisabled(
+            "Optical F5Low motion goes to Neural Rendering on the finished picture; the game's upscaler "
+            "keeps running.");
+        return;
+    case Status::OpticalNoGameUpscaler:
+        ImGui::TextDisabled("Optical F5Low motion for Neural Rendering waits for the game's upscaler (DLSS, FSR or "
+                            "XeSS on in the game).");
         return;
     case Status::Running:
         break;

@@ -27,7 +27,8 @@
 namespace
 {
 
-native::NativeDriver g_driver("Native motion", "");
+// The only adapter that runs the flow for MotionSource=optical while the game calls its own upscaler
+native::NativeDriver g_driver("Native motion", "", true);
 native::Dx12FrameSource g_source;
 native::fpslog::Tracker g_fps; // under g_runMutex
 

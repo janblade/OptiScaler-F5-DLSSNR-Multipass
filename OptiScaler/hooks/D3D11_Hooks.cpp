@@ -10,6 +10,8 @@
 #include <resource_tracking/GenericDepth_Dx11.h>
 #include <native/NativeLowLatency.h>
 #include <inputs/FSR2_Dx11.h>
+#include <inputs/XeSS_Dx11.h>
+#include <inputs/NVNGX_DLSS.h>
 
 #include <wrapped/wrapped_swapchain.h>
 
@@ -61,6 +63,8 @@ static ULONG D3D11DeviceRelease(IUnknown* device, PFN_Release original)
         {
             State::Instance().RemoveD3D11Device(device);
             FSR2Dx11DeviceDestroyed(device);
+            XeSSDx11DeviceDestroyed(device);
+            NVNGXDx11DeviceDestroyed(device);
 
             if (isCurrent)
             {

@@ -23,6 +23,10 @@
 
 #include <spoofing/Vulkan_Spoofing.h>
 #include <hudfix/Hudfix_Vk.h>
+#include <inputs/NVNGX_DLSS.h>
+#include <inputs/FfxApi_Vk.h>
+#include <inputs/FSR2_Vk.h>
+#include <inputs/XeSS_Vulkan.h>
 
 #include <vulkan/vulkan.hpp>
 
@@ -2042,6 +2046,12 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         GenericDepthVk::OnDeviceDestroyed(device);
         DlssNr::ExposureScanVk::OnDeviceDestroyed(device);
         native::lowlatency::OnDeviceReleasedVulkan(device);
+
+        // The upscaler inputs forget a device that is going away, so the next create re-initialises NGX
+        NVNGXVkDeviceDestroyed(device);
+        FfxApiVkDeviceDestroyed(device);
+        FSR2VkDeviceDestroyed(device);
+        XeSSVkDeviceDestroyed(device);
 
         // InputCommon's output on it stops while the device still lives (its semaphores are the device's), then the
         // NvAPI Reflex output's state and the game's own semaphore (InputReflex) go

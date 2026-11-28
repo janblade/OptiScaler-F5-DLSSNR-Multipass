@@ -12,6 +12,9 @@ static UINT64 _handleCounter = 13370000;
 static UINT64 _frameCounter = 0;
 static xess_context_handle_t _currentContext = nullptr;
 static ID3D12Device* _d3d12Device = nullptr;
+// Device this input initialised NGX with
+static std::atomic<ID3D12Device*> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 
 // Motion vector resolution the feature was created with
 static std::unordered_map<xess_context_handle_t, bool> _lowResMVs;
@@ -114,7 +117,8 @@ xess_result_t hk_xessD3D12CreateContext(ID3D12Device* pDevice, xess_context_hand
     if (State::Instance().gameEngine == GameEngineType::Unreal)
         XeSSUnreal::Hook();
 
-    if (!State::Instance().nvngxDx12Inited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!State::Instance().nvngxDx12Inited || (_nvngxInited && _nvngxDevice.load() != pDevice))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
 
@@ -126,6 +130,9 @@ xess_result_t hk_xessD3D12CreateContext(ID3D12Device* pDevice, xess_context_hand
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return XESS_RESULT_ERROR_UNINITIALIZED;
+
+        _nvngxDevice = pDevice;
+        _nvngxInited = true;
     }
 
     _d3d12Device = pDevice;
@@ -344,4 +351,10 @@ xess_result_t hk_xessD3D12GetProfilingData(xess_context_handle_t hContext, xess_
         *pProfilingData = nullptr;
 
     return XESS_RESULT_SUCCESS;
+}
+
+void XeSSDx12DeviceDestroyed(IUnknown* device)
+{
+    ID3D12Device* expected = (ID3D12Device*) device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

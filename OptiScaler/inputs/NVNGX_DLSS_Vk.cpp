@@ -28,6 +28,7 @@
 VkInstance vkInstance;
 VkPhysicalDevice vkPD;
 VkDevice vkDevice;
+static std::atomic<bool> _vkDeviceDestroyed { false };
 PFN_vkGetInstanceProcAddr vkGIPA;
 PFN_vkGetDeviceProcAddr vkGDPA;
 
@@ -205,7 +206,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init_Ext2(
                                    InSDKVersion, &localFeatureInfo);
     }
 
-    if (State::Instance().nvngxVkInited && InInstance == vkInstance && InDevice == vkDevice && InPD == vkPD)
+    if (State::Instance().nvngxVkInited && InInstance == vkInstance && InDevice == vkDevice && InPD == vkPD &&
+        !_vkDeviceDestroyed)
     {
         LOG_WARN("NVNGX already inited");
         return NVSDK_NGX_Result_Success;
@@ -235,6 +237,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Init_Ext2(
     {
         LOG_INFO("InDevice exist!");
         vkDevice = InDevice;
+        _vkDeviceDestroyed = false;
     }
 
     if (InGDPA)
@@ -1261,6 +1264,12 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_Shutdown1(VkDevice InDevice)
     shutdown = false;
 
     return NVSDK_NGX_VULKAN_Shutdown();
+}
+
+void NVNGXVkDeviceDestroyed(VkDevice device)
+{
+    if (vkDevice == device)
+        _vkDeviceDestroyed = true;
 }
 
 // Neural Rendering's device requirements (dlssnr/DlssNr_VkExtensions.h). Defined here, beside the rest of the NGX

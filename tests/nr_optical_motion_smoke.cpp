@@ -112,6 +112,46 @@ int main()
     CHECK(FgFallbackResets(true, false));
     CHECK(!FgFallbackResets(false, true)); // jitter: under a pixel, no reset
 
+    // The game's depth subrect onto the picture (DepthAlign_Dx12.h: depth uv = picture uv / scale + (-ox / w, oy / h))
+    {
+        float t[4];
+        const auto depthUv = [&](float u, float v, float& du, float& dv)
+        {
+            du = u / t[0] - t[2] / 2560.0f;
+            dv = v / t[1] + t[3] / 1440.0f;
+        };
+        const auto near = [](float a, float b) { return a - b < 1e-5f && b - a < 1e-5f; };
+        float du = 0, dv = 0;
+
+        DepthTransformForRect({ 1707, 960, 0, 0, 1707, 960 }, 2560, 1440, t); // the whole allocation
+        CHECK(t[0] == 1.0f && t[1] == 1.0f && t[2] == 0.0f && t[3] == 0.0f);
+        DepthTransformForRect({ 1707, 960, 0, 0, 0, 0 }, 2560, 1440, t); // no subrect given: the whole allocation
+        CHECK(t[0] == 1.0f && t[1] == 1.0f && t[2] == 0.0f && t[3] == 0.0f);
+        DepthTransformForRect({ 0, 0, 0, 0, 0, 0 }, 2560, 1440, t);
+        CHECK(t[0] == 1.0f && t[1] == 1.0f && t[2] == 0.0f && t[3] == 0.0f);
+
+        // Dynamic resolution: 1280x720 at (0, 0) of a 1707x960 allocation
+        DepthTransformForRect({ 1707, 960, 0, 0, 1280, 720 }, 2560, 1440, t);
+        depthUv(0, 0, du, dv);
+        CHECK(near(du, 0) && near(dv, 0));
+        depthUv(1, 1, du, dv);
+        CHECK(near(du, 1280.0f / 1707.0f) && near(dv, 720.0f / 960.0f));
+
+        // A subrect at an offset: the picture's corners land on the subrect's
+        DepthTransformForRect({ 2000, 1200, 100, 50, 1280, 720 }, 2560, 1440, t);
+        depthUv(0, 0, du, dv);
+        CHECK(near(du, 100.0f / 2000.0f) && near(dv, 50.0f / 1200.0f));
+        depthUv(1, 1, du, dv);
+        CHECK(near(du, 1380.0f / 2000.0f) && near(dv, 770.0f / 1200.0f));
+
+        // A subrect that runs past the allocation is cut at its edge; one outside it is the identity
+        DepthTransformForRect({ 1000, 600, 200, 100, 1000, 600 }, 2560, 1440, t);
+        depthUv(1, 1, du, dv);
+        CHECK(near(du, 1.0f) && near(dv, 1.0f));
+        DepthTransformForRect({ 1000, 600, 1000, 0, 100, 100 }, 2560, 1440, t);
+        CHECK(t[0] == 1.0f && t[1] == 1.0f && t[2] == 0.0f && t[3] == 0.0f);
+    }
+
     printf(fails == 0 ? "nr optical motion: ok\n" : "nr optical motion: %d FAILED\n", fails);
     return fails == 0 ? 0 : 1;
 }

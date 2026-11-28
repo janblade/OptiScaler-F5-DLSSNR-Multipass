@@ -18,6 +18,8 @@
 #include <memory>
 #include <string>
 
+#include <wrl/client.h>
+
 namespace native
 {
 
@@ -114,6 +116,14 @@ class NativeDriver
     const char* _readyNote;
     const bool _opticalForGame;
     bool _opticalRan = false; // the last frame measured the flow for the game's upscaler (MotionSource=optical)
+    bool _opticalDepth = false; // ... and with the game's own depth (for the log line)
+
+    // The game's depth copies handed to the producer (MotionSource=optical), held until its list has run: one is let go
+    // kGameDepthHeld hand-overs later, past the producer's ring (NativeProducer::kRing), which has waited for that
+    // list.
+    static constexpr uint32_t kGameDepthHeld = 4;
+    Microsoft::WRL::ComPtr<ID3D12Resource> _gameDepthHeld[kGameDepthHeld];
+    uint32_t _gameDepthNext = 0;
 
     std::unique_ptr<NativeProducer> _producer;
 

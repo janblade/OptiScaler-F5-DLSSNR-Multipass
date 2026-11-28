@@ -11,7 +11,11 @@
 //     with the reset handed over, and NR's guide regions for render-size depth + output-size motion (MVLowRes off),
 //   - the debug views (PR #232): nothing is made for them until one is asked for; each of the seven draws a picture;
 //     the depth view's look (multiplier, linearization) leaves the depth the consumer gets alone, and the depth
-//     alignment moves that depth the way the menu says (DepthAlign_Dx12.h).
+//     alignment moves that depth the way the menu says (DepthAlign_Dx12.h),
+//   - the game's own depth (MotionSource=optical): a render-size subrect inside a larger allocation, resting in
+//     COPY_DEST, placed by DlssNr::OpticalMotion::DepthTransformForRect, lines up with the picture, nothing outside the
+//     subrect is read, the copy is left in COPY_DEST, and a subrect change (dynamic resolution) keeps the trust mask.
+// Argument "debug": with the D3D12 debug layer (barrier states checked).
 //
 //   vcvars64, then from the repo root:
 //   cl /std:c++20 /EHsc /O2 tests\nr_native_producer_gpu.cpp OptiScaler\native\NativeProducer.cpp
@@ -29,10 +33,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
 
+#include "../OptiScaler/dlssnr/DlssNr_OpticalMotion.h"
 #include "../OptiScaler/native/NativeProducer.h"
 #include "../OptiScaler/shaders/dlssnr/DlssNr_Guides.h"
 
@@ -143,14 +149,15 @@ struct Gpu
 
     // A texture filled by fill(x, y, pixel), left in the non-pixel shader resource state.
     ComPtr<ID3D12Resource> Upload(DXGI_FORMAT format, uint32_t bytesPerPixel,
-                                  const std::function<void(uint32_t, uint32_t, uint8_t*)>& fill)
+                                  const std::function<void(uint32_t, uint32_t, uint8_t*)>& fill,
+                                  uint32_t width = kWidth, uint32_t height = kHeight)
     {
         D3D12_HEAP_PROPERTIES heap {};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC desc {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = kWidth;
-        desc.Height = kHeight;
+        desc.Width = width;
+        desc.Height = height;
         desc.DepthOrArraySize = desc.MipLevels = 1;
         desc.Format = format;
         desc.SampleDesc.Count = 1;
@@ -165,8 +172,8 @@ struct Gpu
 
         uint8_t* data = nullptr;
         upload->Map(0, nullptr, (void**) &data);
-        for (uint32_t y = 0; y < kHeight; ++y)
-            for (uint32_t x = 0; x < kWidth; ++x)
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
                 fill(x, y, data + (size_t) y * fp.Footprint.RowPitch + (size_t) x * bytesPerPixel);
         upload->Unmap(0, nullptr);
 
@@ -404,8 +411,20 @@ struct NrCalls
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc > 1 && strcmp(argv[1], "debug") == 0)
+    {
+        ComPtr<ID3D12Debug> debug;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
+        {
+            debug->EnableDebugLayer();
+            printf("D3D12 debug layer on\n");
+        }
+        else
+            printf("no D3D12 debug layer on this machine\n");
+    }
+
     Gpu gpu;
 
     if (!gpu.Init())
@@ -448,6 +467,7 @@ int main()
     ID3D12CommandQueue* runQueue = nullptr; // the queue a frame runs on (null: gpu.queue)
     bool waitDone = true;                   // wait for the frame's work before returning
     std::vector<ComPtr<ID3D12Resource>> keep; // a frame's textures, alive while its work may still run
+    std::function<void(native::FrameInput&)> changeInput; // set: changes the frame's input before it runs
 
     auto frame = [&](const Scene& s, D3D12_RESOURCE_STATES state, bool withDepth, bool applyOn, bool cutHint,
                      native::FrameOutput& output, std::vector<uint8_t>* before, std::vector<uint8_t>* after)
@@ -485,6 +505,9 @@ int main()
             input.depthHeight = kHeight;
             input.depthReversed = true;
         }
+
+        if (changeInput)
+            changeInput(input);
 
         native::NativeProducer::Options options = extra;
         options.apply = applyOn;
@@ -806,6 +829,109 @@ int main()
         readGuideDepth = false;
     }
 
+    // MotionSource=optical hands the flow the game's own depth: the Finished Picture pass's copy of the upscaler call's
+    // depth, the game's allocation with the render subrect where the game drew it, resting in COPY_DEST.
+    printf("the game's own depth: a render-size subrect, in COPY_DEST\n");
+    {
+        readGuideDepth = true;
+        const Scene scene { 7, 300, 20.0f, 5.0f };
+        frame(scene, kRead, true, true, false, output, nullptr, nullptr);
+        frame(scene, kRead, true, true, false, output, nullptr, nullptr);
+        const auto plain = guideDepth; // the picture-size depth's guide
+
+        constexpr float kOutside = 0.9f; // what the allocation holds outside the subrect: a near surface, never read
+        const auto gameDepth = [&](const DlssNr::OpticalMotion::DepthRect& rect)
+        {
+            auto tex = gpu.Upload(
+                DXGI_FORMAT_R32_FLOAT, 4,
+                [&](uint32_t x, uint32_t y, uint8_t* px)
+                {
+                    float d = kOutside;
+                    if (x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height)
+                    {
+                        // The render pixel's centre in the picture: the scene drawn at render size
+                        const float sx = ((float) (x - rect.x) + 0.5f) * kWidth / rect.width;
+                        const float sy = ((float) (y - rect.y) + 0.5f) * kHeight / rect.height;
+                        d = 0.1f / (InSquare(scene, (uint32_t) sx, (uint32_t) sy) ? scene.squareZ : scene.backgroundZ);
+                    }
+                    memcpy(px, &d, 4);
+                },
+                rect.allocationWidth, rect.allocationHeight);
+            Change(gpu, tex.Get(), kRead, D3D12_RESOURCE_STATE_COPY_DEST);
+            gpu.Submit();
+            return tex;
+        };
+
+        // The share of the picture whose depth guide differs from the picture-size depth's, and whether any pixel took
+        // the allocation's outside
+        const auto compare = [&](double& differs, bool& outside)
+        {
+            size_t n = 0;
+            outside = false;
+            for (size_t i = 0; i < guideDepth.size() && i < plain.size(); ++i)
+            {
+                n += std::fabs(guideDepth[i] - plain[i]) > 1e-6f;
+                outside |= std::fabs(guideDepth[i] - kOutside) < 1e-6f;
+            }
+            differs = plain.empty() || guideDepth.size() != plain.size() ? 1.0 : (double) n / plain.size();
+        };
+
+        const auto run = [&](ID3D12Resource* tex, const DlssNr::OpticalMotion::DepthRect& rect)
+        {
+            changeInput = [&](native::FrameInput& in)
+            {
+                in.depth[0] = tex;
+                in.depthCount = 1;
+                in.depthView = DXGI_FORMAT_R32_FLOAT;
+                in.depthWidth = rect.allocationWidth;
+                in.depthHeight = rect.allocationHeight;
+                in.depthReversed = true;
+                in.depthState = D3D12_RESOURCE_STATE_COPY_DEST;
+            };
+            extra.gameDepth = true;
+            DlssNr::OpticalMotion::DepthTransformForRect(rect, kWidth, kHeight, extra.depthTransform);
+            auto r = frame(scene, kRead, true, true, false, output, nullptr, nullptr);
+            changeInput = nullptr;
+            return r;
+        };
+
+        // 2/3 of the picture (a Quality upscale) at (40, 24) in an allocation larger than both
+        const DlssNr::OpticalMotion::DepthRect quality { 1100, 700, 40, 24, 853, 480 };
+        auto tex = gameDepth(quality);
+        auto r = run(tex.Get(), quality);
+        double differs = 1.0;
+        bool outside = true;
+        compare(differs, outside);
+        printf("  quality subrect: %.4f of the guide differs from the picture-size depth's\n", differs);
+        ok &= Check("the game's depth at its subrect lines up with the picture (under 1% differs: the square's rim)",
+                    r.submitted && differs < 0.01);
+        ok &= Check("... nothing outside the subrect is read", !outside);
+
+        // The copy is left in COPY_DEST: a barrier from COPY_DEST is valid (the debug layer checks it)
+        Change(gpu, tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, kRead);
+        gpu.Submit();
+        Change(gpu, tex.Get(), kRead, D3D12_RESOURCE_STATE_COPY_DEST);
+        gpu.Submit();
+
+        // Dynamic resolution: another subrect the next frame. The same scene: the trust mask carries on (no full
+        // distrust), unlike a change of the menu's alignment.
+        const DlssNr::OpticalMotion::DepthRect lower { 1100, 700, 0, 0, 640, 360 };
+        auto tex2 = gameDepth(lower);
+        r = run(tex2.Get(), lower);
+        compare(differs, outside);
+        printf("  half-size subrect: %.4f differs, distrusted %.3f\n", differs, r.distrustedShare);
+        ok &= Check("a subrect change lines up too and keeps the flow and the consumer",
+                    r.flowValid && r.nativeRan && differs < 0.015 && !outside);
+        ok &= Check("... and does not distrust the whole picture", r.distrustedShare < 0.5f);
+
+        extra.gameDepth = false;
+        extra.depthTransform[0] = extra.depthTransform[1] = 1.0f;
+        extra.depthTransform[2] = extra.depthTransform[3] = 0.0f;
+        keep.push_back(tex);
+        keep.push_back(tex2);
+        readGuideDepth = false;
+    }
+
     // The caller's queue changes between frames (NBA 2K27: frame generation's game queue comes and goes at a screen
     // change). Every list uses the same textures, so a list on another queue must not run while the last one still
     // does: the frame is skipped (a CPU check, no GPU wait across queues) until it has finished.
@@ -982,6 +1108,30 @@ int main()
 
         ok &= Check("a hard cut hands the reader one reset", resets == 1);
         ok &= Check("the consumer was still never called", nr.count == calls);
+    }
+
+    // With the debug layer: any error it stored (a barrier from the wrong state, a view of the wrong format) fails the run
+    if (ComPtr<ID3D12InfoQueue> info; argc > 1 && strcmp(argv[1], "debug") == 0 && SUCCEEDED(gpu.device.As(&info)))
+    {
+        UINT64 errors = 0;
+        for (UINT64 i = 0, n = info->GetNumStoredMessages(); i < n; ++i)
+        {
+            SIZE_T size = 0;
+            info->GetMessage(i, nullptr, &size);
+            std::vector<char> bytes(size);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+            if (SUCCEEDED(info->GetMessage(i, message, &size)) &&
+                (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                 message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION))
+            {
+                if (errors < 10)
+                    printf("  debug layer: %s\n", message->pDescription);
+                ++errors;
+            }
+        }
+        printf("  debug layer: %llu messages stored, %llu errors%s", (unsigned long long) info->GetNumStoredMessages(),
+               (unsigned long long) errors, "\n");
+        ok &= Check("the debug layer stored no error", errors == 0);
     }
 
     printf(ok ? "all passed\n" : "FAILED\n");

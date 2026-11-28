@@ -86,6 +86,9 @@ class NativeProducer
         // The depth alignment (DepthAlign_Dx12.h): XY scale, XY offset in the picture's pixels. Anything but the
         // identity changes the depth the flow, the trust mask and the consumer get; a change resets the histories.
         float depthTransform[4] = { 1.0f, 1.0f, 0.0f, 0.0f };
+        // The depth is the game's own and depthTransform comes from its call's subrect (MotionSource=optical): a change
+        // is the game's dynamic resolution, the same scene, so it resets nothing.
+        bool gameDepth = false;
     };
 
     struct Result

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "DlssNr_FinishedGameFrame.h"
+#include "DlssNr_OpticalMotion.h"
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <shaders/dlssnr/DlssNr_Views.h>
@@ -205,6 +206,19 @@ void NativeInputSkipped();
 void PublishOpticalMotion(ID3D12CommandQueue* queue, ID3D12Resource* picture, ID3D12Resource* motion,
                           ID3D12Resource* mask, uint32_t width, uint32_t height, unsigned long long epoch, bool reset);
 void ClearOpticalMotion();
+// MotionSource=optical: the game's depth for the flow, from the newest capture of its upscaler call that the Finished
+// Picture pass holds for a picture of width x height and that was submitted on `queue` (so it is ordered before any
+// list this queue runs next). The copy rests in COPY_DEST, typed (`view` reads it), with the game's subrect in `rect`;
+// `depth` carries a reference the caller releases once its list has run. False: none (Finished Picture off, nothing
+// captured yet, another queue or size, no depth in the call, a format the flow cannot read).
+struct OpticalGameDepth
+{
+    ID3D12Resource* depth = nullptr;
+    DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN;
+    OpticalMotion::DepthRect rect;
+    bool reversed = false;
+};
+bool GameDepthForOpticalMotion(ID3D12CommandQueue* queue, uint32_t width, uint32_t height, OpticalGameDepth& out);
 // The colour space of a swap chain's picture, from what the game set (SDR when it set nothing), for a native-input frame.
 DXGI_COLOR_SPACE_TYPE NativeInputColourSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);

@@ -100,7 +100,8 @@ AcquireStatus Dx12FrameSource::Acquire(FrameInput& input)
     input.width = (uint32_t) desc.Width;
     input.height = desc.Height;
 
-    // No depth: NR takes the game's own from its upscaler call, and the flow runs on the picture alone.
+    // No depth from the finder (it stands down): the driver hands the flow the game's own depth from its upscaler call
+    // when the Finished Picture pass copied one (NativeDriver::RunFrame, DlssNr::GameDepthForOpticalMotion).
     if (gameUpscaler)
         return AcquireStatus::ReadyForGameUpscaler;
 

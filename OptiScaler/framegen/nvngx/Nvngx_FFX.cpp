@@ -393,6 +393,12 @@ NVSDK_NGX_Result Nvngx_FFX::D3D12_EvaluateFeature(ID3D12GraphicsCommandList* InC
         // get number of versions for allocation
         FfxApiProxy::D3D12_Query(nullptr, &versionQuery.header);
 
+        if (versionCount == 0)
+        {
+            LOG_ERROR("No FFX FG version found");
+            return NVSDK_NGX_Result_Fail;
+        }
+
         State::Instance().ffxFGVersionIds.resize(versionCount);
         State::Instance().ffxFGVersionNames.resize(versionCount);
         versionQuery.versionIds = State::Instance().ffxFGVersionIds.data();

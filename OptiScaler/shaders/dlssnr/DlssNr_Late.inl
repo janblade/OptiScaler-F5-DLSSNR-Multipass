@@ -44,7 +44,7 @@ struct OpticalOffer
     bool reset = false;
 };
 OpticalOffer optical;
-bool lastMotionOptical = false;
+bool lastMotionWanted = false;
 
 // Native input's HDR10 scratch pair (no slot to keep it in): NR's linear scRGB picture and the PQ result in the picture's
 // own format. Recreated when the picture's size or format changes. A replaced buffer is kept until the frame number has
@@ -810,12 +810,24 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
                                                                               Late::PresentsPerGameFrame()));
         frame.SubmissionEpoch = epoch;
         // The flow in place of the game's motion (DlssNr_OpticalMotion.h): picture-sized, in picture pixels, measured on
-        // this picture; the depth stays the game's (its own subrect and flags). A change of source starts NR over.
-        const auto source = OpticalMotion::Choose(
-            opticalWanted,
-            Late::optical.motion && OpticalMotion::SamePresent(Late::optical.present,
-                                                              { queue, picture, epoch, (uint32_t) desc.Width, desc.Height }),
-            Late::lastMotionOptical);
+        // this picture; the depth stays the game's (its own subrect and flags). A switch of the setting starts NR over.
+        const OpticalMotion::Present thisPresent { queue, picture, epoch, (uint32_t) desc.Width, desc.Height };
+        const bool flowMatches = Late::optical.motion && OpticalMotion::SamePresent(Late::optical.present, thisPresent);
+        if (opticalWanted && !flowMatches)
+        {
+            // Why this present took the game's motion (first few only): which part of the offer did not match
+            static uint32_t refused = 0;
+            if (refused++ < 16)
+            {
+                const auto& o = Late::optical.present;
+                LOG_INFO("DLSS-NR finished picture: no Optical F5Low flow for this present ({}), the game's motion "
+                         "for it (offer: present {} {}x{}, this: present {} {}x{}, queue {}, picture {})",
+                         !Late::optical.motion ? "none offered" : o.epoch != epoch ? "other present" : "other target",
+                         o.epoch, o.width, o.height, epoch, desc.Width, desc.Height,
+                         o.queue == queue ? "same" : "other", o.picture == picture ? "same" : "other");
+            }
+        }
+        const auto source = OpticalMotion::Choose(opticalWanted, flowMatches, Late::lastMotionWanted);
         ID3D12Resource* motion = slot.motion.Get();
         slot.flowMotion.Reset();
         slot.flowMask.Reset();

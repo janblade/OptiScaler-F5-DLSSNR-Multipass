@@ -46,10 +46,10 @@ int main()
     CHECK(c.optical && c.reset && last);
     c = Choose(true, true, last); // optical continues
     CHECK(c.optical && !c.reset);
-    c = Choose(true, false, last); // no flow for this present: the game's motion, history starts over
-    CHECK(!c.optical && c.reset && !last);
-    c = Choose(true, true, last);
-    CHECK(c.optical && c.reset);
+    c = Choose(true, false, last); // no flow for this present: the game's motion for it, the history goes on
+    CHECK(!c.optical && !c.reset && last);
+    c = Choose(true, true, last); // the flow is back: no second restart
+    CHECK(c.optical && !c.reset);
     c = Choose(false, true, last); // switched back to game
     CHECK(!c.optical && c.reset);
     c = Choose(false, false, last);

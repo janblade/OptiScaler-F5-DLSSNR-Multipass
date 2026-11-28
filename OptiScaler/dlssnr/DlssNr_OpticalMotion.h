@@ -50,16 +50,20 @@ inline bool SamePresent(const Present& offered, const Present& wanted)
 struct Choice
 {
     bool optical = false; // this present's NR takes the flow
-    bool reset = false;   // the motion source changed since the last picture: NR's history starts over
+    bool reset = false;   // the player switched the motion source: NR's history starts over
 };
 
-// `lastOptical` is the source of the last picture NR was given (kept by the caller, updated here).
-inline Choice Choose(bool wanted, bool flowForThisPresent, bool& lastOptical)
+// `lastWanted` is the setting the last picture was made under (kept by the caller, updated here). Only a switch of the
+// setting restarts NR's history. A present without a flow (the game skipped its upscaler for a frame, a frame
+// generation pause; NBA 2K27's menus, 2026-11-28) takes the game's motion for that one picture and keeps the history:
+// both describe the same movement, and a restart out and back again blinked the detail. A longer gap restarts anyway,
+// through the producer's own reset when the flow comes back (PublishOpticalMotion's `reset`).
+inline Choice Choose(bool wanted, bool flowForThisPresent, bool& lastWanted)
 {
     Choice choice;
     choice.optical = wanted && flowForThisPresent;
-    choice.reset = choice.optical != lastOptical;
-    lastOptical = choice.optical;
+    choice.reset = wanted != lastWanted;
+    lastWanted = wanted;
     return choice;
 }
 

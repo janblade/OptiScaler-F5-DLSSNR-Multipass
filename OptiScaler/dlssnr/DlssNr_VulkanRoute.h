@@ -112,8 +112,8 @@ struct NrInputs
     bool finishedPictureRunsOnVulkan = kFinishedPictureRunsOnVulkan;
     bool finishedPictureRan = false; // it ran on the last present (NativeMotionVk::FinishedPictureRan): Neural
                                      // Rendering is its, not Optical F5Low's, whatever the Optical F5Low setting says
-    bool runningVk = false;    // DlssNr::IsRunningVk(): the native Vulkan seam is running Neural Rendering
-    bool runningD3D12 = false; // DlssNr::IsRunning(): the D3D12 side is
+    bool runningVk = false;          // DlssNr::IsRunningVk(): the native Vulkan seam is running Neural Rendering
+    bool runningD3D12 = false;       // DlssNr::IsRunning(): the D3D12 side is
 };
 
 inline RunsOn NrRunsOn(const NrInputs& in)

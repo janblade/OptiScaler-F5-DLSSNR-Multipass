@@ -40,12 +40,12 @@ enum class PostLutStage
 // The F5LUT stack's last frame, for its card. Same split as above.
 struct PostLutStatus
 {
-    bool seen = false;   // at least one frame has reported
+    bool seen = false; // at least one frame has reported
     PostLutStage stage = PostLutStage::AfterNr;
     unsigned long long reportedMs = 0; // GetTickCount64 at the report: a stage that stopped running goes stale
-    bool wanted = false; // the stack held at least one file
-    bool loaded = false; // a chain is active
-    std::string chain;   // DlssNr_DescribeChain
+    bool wanted = false;               // the stack held at least one file
+    bool loaded = false;               // a chain is active
+    std::string chain;                 // DlssNr_DescribeChain
     std::string failedPath;
     std::string error;
     std::string note;                    // why it is not applied when it is wanted (a mode that does not run it)

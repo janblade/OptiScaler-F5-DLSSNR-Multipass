@@ -35,9 +35,9 @@ namespace nrweights
 {
 
 std::mutex g_mutex;
-std::wstring g_dirA;   // Model A (WEIGHTS_HT or WEIGHTS_PL), empty = stock
-std::wstring g_dirB;   // Model B (WEIGHTS_CC_SMALL_FP8*), empty = stock
-std::string g_log;     // taken by the host (dlssnr_weights_take_log)
+std::wstring g_dirA; // Model A (WEIGHTS_HT or WEIGHTS_PL), empty = stock
+std::wstring g_dirB; // Model B (WEIGHTS_CC_SMALL_FP8*), empty = stock
+std::string g_log;   // taken by the host (dlssnr_weights_take_log)
 std::unordered_set<HMODULE> g_patched;
 std::map<std::pair<HMODULE, std::string>, unsigned> g_stockCrc;
 // Served copies stay alive for the process: the model may keep the pointer it locked (the stock one is in the

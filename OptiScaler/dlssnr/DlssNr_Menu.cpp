@@ -4979,15 +4979,28 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         // it says instead of offering choices that cannot change an SDR frame. The full list is back on a linear
         // HDR frame.
         const auto finalImageEncoding = DlssNr::ReadColourEncodingStatus();
-        const bool toneMapped = finalImageEncoding.seen &&
-                                finalImageEncoding.exposureState == DlssNrExposureState::State::ToneMapped;
+        const bool toneMapped =
+            finalImageEncoding.seen && finalImageEncoding.exposureState == DlssNrExposureState::State::ToneMapped;
         if (toneMapped)
         {
             static const char* sdrNames[] = { "Composed (curve skipped)", "Replace (model answer as is)" };
             int sdrChoice = DlssNrProxyCurve::IsReplace((uint32_t) reversible) ? 1 : 0;
             if (ImGui::Combo("Final Image Composition (SDR)", &sdrChoice, sdrNames, IM_ARRAYSIZE(sdrNames)))
-                config->DlssNrReversibleMode = sdrChoice == 1 ? DlssNrProxyCurve::kNeutwoReplace
-                                                             : DlssNrProxyCurve::kSoftKnee;
+            {
+                // Only the composed / replace half changes; the curve stays for when the game sends HDR frames
+                // (Reversible and Balanced keep their twin; a curve without a replace twin goes to Reversible replace)
+                using namespace DlssNrProxyCurve;
+                uint32_t mode = (uint32_t) reversible;
+
+                if (sdrChoice == 1)
+                    mode = mode == kBalancedComposed ? kBalancedReplace : kNeutwoReplace;
+                else if (mode == kNeutwoReplace)
+                    mode = kNeutwoComposed;
+                else if (mode == kBalancedReplace)
+                    mode = kBalancedComposed;
+
+                config->DlssNrReversibleMode = mode;
+            }
         }
         else if (ImGui::BeginCombo("Final Image Composition (experimental)", reversibleNames[reversible]))
         {
@@ -5018,10 +5031,11 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         if (toneMapped)
         {
             ImGui::TextColored(kWarnAmber, "This frame is already tone mapped: the curve is skipped here.");
-            HelpMarker("NR gets this picture as it is, so Soft knee / Reversible / Balanced / HLG / PQ / Linear all "
-                       "compose the same way. Only Composed vs Replace changes the result on an SDR frame; Reversible "
-                       "curve + replace and Balanced curve + replace are the same. The full curve list returns on a "
-                       "linear HDR frame. Colour decoding shows the detected format.");
+            HelpMarker("Neural Rendering gets this picture as it is, so every curve (soft knee, Reversible, Balanced, "
+                       "HLG, PQ, Linear) gives the same composed picture, and the two replace curves give the same "
+                       "replaced picture. Only Composed or Replace changes the result here. Your curve is kept for "
+                       "frames that are linear HDR, where the full list comes back. The Colour decoding card shows "
+                       "the detected format.");
         }
 
         if (DlssNrProxyCurve::IsReplace((uint32_t) reversible))
